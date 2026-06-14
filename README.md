@@ -201,10 +201,15 @@ JSON keyed by Java FQN (`serde`-serialized; see `src/symbol_map.rs`):
 ### Generating stubs for unresolved symbols (`--stubs`)
 The inverse of, and fallback for, linking: for every symbol the translation
 *can't* resolve (not a primitive, not stdlib-mapped, not `--link`ed, not defined
-elsewhere in the same tree), record a best-effort signature and write one
-aggregated `<output>/stubs.rs` — opaque structs + `impl` blocks (methods,
-constructors `-> Self`, statics) + free functions, each with `/// @java`
-provenance and an `unimplemented!()` body.
+elsewhere in the same tree), record a best-effort signature — opaque structs +
+`impl` blocks (methods, constructors `-> Self`, statics) + free functions, each
+with `/// @java` provenance and an `unimplemented!()` body.
+
+Output is split **one file per originating package** (a proxy for the dependency
+JAR), so each dependency can be filled in independently:
+`<output>/stub_<package>.rs` (e.g. `stub_org_json.rs`,
+`stub_org_apache_commons_jexl2.rs`), with free functions and package-less types
+in `<output>/stubs.rs`. Each file is self-contained.
 
 ```
 java2rust-rs -d <src> -o <out> --stubs            # stubs for everything missing

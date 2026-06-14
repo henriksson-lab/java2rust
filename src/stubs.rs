@@ -146,48 +146,11 @@ impl StubCollector {
         }
     }
 
-    /// Render the aggregated stubs as a Rust source file.
+    /// Render all stubs as a single Rust source file.
     pub fn render(&self) -> String {
-        let mut s = String::new();
-        s.push_str(
-            "//! Auto-generated stubs for unresolved external symbols.\n\
-             //! Signatures are best-effort (inferred from call sites); fill in the\n\
-             //! bodies and replace `Unknown` placeholders, or translate the real\n\
-             //! dependency, run `gen-symbols` on it, and `--link` its map instead.\n\
-             #![allow(dead_code, unused_variables, non_snake_case)]\n\n",
-        );
-        s.push_str("/// Placeholder for a type that could not be inferred.\n");
-        s.push_str("pub type Unknown = ();\n\n");
-
+        let mut s = file_header();
         for t in self.types.values() {
-            for fqn in &t.java_fqns {
-                s.push_str(&format!("/// @java {fqn}\n"));
-            }
-            s.push_str("#[derive(Clone, Default)]\n");
-            if t.fields.is_empty() {
-                s.push_str(&format!("pub struct {} {{}}\n", t.rust_name));
-            } else {
-                s.push_str(&format!("pub struct {} {{\n", t.rust_name));
-                for f in &t.fields {
-                    s.push_str(&format!("    pub {f}: Unknown,\n"));
-                }
-                s.push_str("}\n");
-            }
-            let has_impl = t.ctor.is_some() || !t.methods.is_empty() || !t.statics.is_empty();
-            if has_impl {
-                s.push_str(&format!("impl {} {{\n", t.rust_name));
-                if let Some(c) = &t.ctor {
-                    s.push_str(&format!("    {}\n", render_fn("new", c, Some(&t.rust_name))));
-                }
-                for (name, sig) in &t.statics {
-                    s.push_str(&format!("    {}\n", render_fn(name, sig, None)));
-                }
-                for (name, sig) in &t.methods {
-                    s.push_str(&format!("    {}\n", render_fn(name, sig, None)));
-                }
-                s.push_str("}\n");
-            }
-            s.push('\n');
+            s.push_str(&render_type(t));
         }
         for (name, sig) in &self.free_fns {
             s.push_str(&render_fn(name, sig, None));
@@ -195,6 +158,87 @@ impl StubCollector {
         }
         s
     }
+
+    /// Render stubs split by originating package (a proxy for the dependency
+    /// JAR), as a map of filename -> contents: `stub_<package>.rs` per package,
+    /// and `stubs.rs` for free functions and package-less types. Group a whole
+    /// translation's stubs so each dependency can be filled in independently.
+    pub fn render_grouped(&self) -> BTreeMap<String, String> {
+        // package -> rendered type blocks
+        let mut groups: BTreeMap<String, String> = BTreeMap::new();
+        for t in self.types.values() {
+            let pkg = t
+                .java_fqns
+                .iter()
+                .next()
+                .and_then(|f| f.rsplit_once('.').map(|(p, _)| p.to_string()))
+                .unwrap_or_default();
+            groups.entry(pkg).or_default().push_str(&render_type(t));
+        }
+        // Free functions have no package; put them in the base file.
+        if !self.free_fns.is_empty() {
+            let base = groups.entry(String::new()).or_default();
+            for (name, sig) in &self.free_fns {
+                base.push_str(&render_fn(name, sig, None));
+                base.push('\n');
+            }
+        }
+        groups
+            .into_iter()
+            .map(|(pkg, body)| {
+                let filename = if pkg.is_empty() {
+                    "stubs.rs".to_string()
+                } else {
+                    format!("stub_{}.rs", pkg.replace('.', "_"))
+                };
+                (filename, format!("{}{}", file_header(), body))
+            })
+            .collect()
+    }
+}
+
+fn file_header() -> String {
+    "//! Auto-generated stubs for unresolved external symbols.\n\
+     //! Signatures are best-effort (inferred from call sites); fill in the\n\
+     //! bodies and replace `Unknown` placeholders, or translate the real\n\
+     //! dependency, run `gen-symbols` on it, and `--link` its map instead.\n\
+     #![allow(dead_code, unused_variables, non_snake_case)]\n\n\
+     /// Placeholder for a type that could not be inferred.\n\
+     pub type Unknown = ();\n\n"
+        .to_string()
+}
+
+fn render_type(t: &StubType) -> String {
+    let mut s = String::new();
+    for fqn in &t.java_fqns {
+        s.push_str(&format!("/// @java {fqn}\n"));
+    }
+    s.push_str("#[derive(Clone, Default)]\n");
+    if t.fields.is_empty() {
+        s.push_str(&format!("pub struct {} {{}}\n", t.rust_name));
+    } else {
+        s.push_str(&format!("pub struct {} {{\n", t.rust_name));
+        for f in &t.fields {
+            s.push_str(&format!("    pub {f}: Unknown,\n"));
+        }
+        s.push_str("}\n");
+    }
+    let has_impl = t.ctor.is_some() || !t.methods.is_empty() || !t.statics.is_empty();
+    if has_impl {
+        s.push_str(&format!("impl {} {{\n", t.rust_name));
+        if let Some(c) = &t.ctor {
+            s.push_str(&format!("    {}\n", render_fn("new", c, Some(&t.rust_name))));
+        }
+        for (name, sig) in &t.statics {
+            s.push_str(&format!("    {}\n", render_fn(name, sig, None)));
+        }
+        for (name, sig) in &t.methods {
+            s.push_str(&format!("    {}\n", render_fn(name, sig, None)));
+        }
+        s.push_str("}\n");
+    }
+    s.push('\n');
+    s
 }
 
 /// Render a single function/method as one line. `ctor_ret` forces the return

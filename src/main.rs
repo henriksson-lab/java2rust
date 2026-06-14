@@ -209,13 +209,17 @@ fn main() {
             if opts.stubs {
                 let collected = ctx.stubs.into_inner();
                 if !collected.is_empty() {
-                    let path = format!("{}/stubs.rs", opts.output);
-                    if let Err(e) = fs::write(&path, collected.render()) {
-                        eprintln!("error writing stubs: {e}");
-                        std::process::exit(1);
-                    }
-                    if opts.verbosity > 0 {
-                        println!("- {path}");
+                    // One file per originating package (proxy for the dependency
+                    // JAR); free functions / package-less types go to stubs.rs.
+                    for (filename, content) in collected.render_grouped() {
+                        let path = format!("{}/{filename}", opts.output);
+                        if let Err(e) = fs::write(&path, content) {
+                            eprintln!("error writing stubs: {e}");
+                            std::process::exit(1);
+                        }
+                        if opts.verbosity > 0 {
+                            println!("- {path}");
+                        }
                     }
                 }
             }

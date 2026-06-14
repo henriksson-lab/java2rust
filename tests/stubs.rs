@@ -65,6 +65,20 @@ fn generated_stub_file_is_valid_rust_shape() {
 }
 
 #[test]
+fn grouped_by_package_into_separate_files() {
+    let (_, collector) = convert_full(SRC, &LinkIndex::default(), &HashSet::new(), true);
+    let files = collector.render_grouped();
+    // com.ext.Widget -> its own file; helper (free fn, no package) -> stubs.rs.
+    let ext = files.get("stub_com_ext.rs").expect("per-package file for com.ext");
+    assert!(ext.contains("pub struct Widget"), "Widget in its package file:\n{ext}");
+    assert!(!ext.contains("pub fn helper"), "free fn not in package file");
+    let base = files.get("stubs.rs").expect("base file for free fns");
+    assert!(base.contains("pub fn helper"), "free fn in stubs.rs:\n{base}");
+    // Each file is self-contained.
+    assert!(ext.contains("pub type Unknown = ();"), "self-contained header:\n{ext}");
+}
+
+#[test]
 fn no_stubs_when_disabled() {
     let (_, collector) = convert_full(SRC, &LinkIndex::default(), &HashSet::new(), false);
     assert!(collector.is_empty(), "no collection when emit_stubs is false");
