@@ -42,6 +42,25 @@ fn extracts_signatures_and_nullability() {
 }
 
 #[test]
+fn recovers_generics_from_signature_attribute() {
+    let (json, _) = run_jar_to_symbols();
+    // List<String> -> Vec<String> (not the erased Vec).
+    assert!(json.contains("Vec<String>"), "List<String> recovered:\n{json}");
+    // Map<String, Integer> field -> HashMap<String, i32>.
+    assert!(
+        json.contains("std::collections::HashMap<String, i32>"),
+        "Map<String,Integer> recovered:\n{json}"
+    );
+    // Map<String, Widget> return.
+    assert!(
+        json.contains("std::collections::HashMap<String, Widget>"),
+        "Map<String,Widget> recovered:\n{json}"
+    );
+    // Type variable preserved: `<T> T pick(List<T> xs)`.
+    assert!(json.contains("&Vec<T>"), "type variable param recovered:\n{json}");
+}
+
+#[test]
 fn warns_about_uncovered_types() {
     let (_, stderr) = run_jar_to_symbols();
     assert!(stderr.contains("WARNING"), "missing-type warning present:\n{stderr}");

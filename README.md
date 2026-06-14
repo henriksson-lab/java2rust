@@ -140,11 +140,14 @@ jar-to-symbols dep1.jar dep2.jar ... -o deps_map.json
 java2rust-rs -d src -o out --link deps_map.json [--stubs]
 ```
 `.class` bytecode carries **ground-truth signatures** (exact parameter/return
-types, static-ness → `receiver`, `throws`), and — when the library ships
-nullability annotations (`@Nullable`/`@CheckForNull`, which have CLASS retention
-and survive in the bytecode) — **real nullability**, so a `@Nullable` return
-becomes an `Option` and yields `.unwrap()` at the call site. This is strictly
-more precise than `--stubs`' call-site guessing; prefer a JAR when you have one.
+types, static-ness → `receiver`, `throws`), **generics** (read from the
+`Signature` attribute, not the erased descriptor — `List<String>` → `Vec<String>`,
+`Map<String,Integer>` → `HashMap<String, i32>`, type variables and `? extends`
+bounds preserved), and — when the library ships nullability annotations
+(`@Nullable`/`@CheckForNull`, which have CLASS retention and survive in the
+bytecode) — **real nullability**, so a `@Nullable` return becomes an `Option` and
+yields `.unwrap()` at the call site. This is strictly more precise than `--stubs`'
+call-site guessing; prefer a JAR when you have one.
 
 **Provide every JAR.** `jar-to-symbols` **warns** about each type referenced in a
 signature that none of the supplied JARs define (JDK types excepted), grouped by
@@ -152,9 +155,10 @@ package — add those JARs so the map (and the translation) is precise. Pass all
 a project's dependency JARs in one invocation.
 
 Limits: bytecode has no Rust ownership info, so `&`/`&mut` stay heuristic (`&` for
-non-primitive params, no `mut`); generics are erased in plain descriptors
-(`List<String>` → `Vec`); and overloads (same name, different params) collapse to
-one entry, since the map keys methods by bare Java name. An LLM resolves the rest.
+non-primitive params, no `mut`); unbounded wildcards (`?`) render as `_`; and
+overloads (same name, different params) collapse to one entry (the richer
+signature wins), since the map keys methods by bare Java name. An LLM resolves
+the rest.
 
 The three map sources are interchangeable (same JSON, same `--link`):
 `gen-symbols` (from translated Rust, tracks LLM edits) · `jar-to-symbols` (from a
