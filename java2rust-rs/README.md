@@ -5,20 +5,21 @@ to become idiomatic Rust, and due to the stricting ownership rules of Rust, migh
 not compile at all after a first pass. 
 
 The tool is derived from https://github.com/cguz/java-to-rust, which was used
-for inspiration. Due to differences in parsing, this code
-was not translated but the semantic mapping decisions where kept. Further
-mappings have been introduced since then
+for inspiration. Due to differences in parsing, this code was not translated
+but the semantic mapping decisions where kept. Further rules have been introduced
+by testing the tool on large codebases relevant for bioinformatics.
+
 
 ## License
 
-Java2rust is made using LLM. Be careful with reusing code as we cannot guarantee that code has not been copied from somwhere.
+This crate, Java2rust, is made using LLM. Be careful with reusing code as we cannot guarantee that code has not been copied from somewhere.
 
-Original code license is hard to understand:
-* The code is inspired by https://github.com/cguz/java-to-rust which is GPL. 
-* But cguz/java-to-rust is in turn derived from https://github.com/aschoerk/converter-page, which is under the Apache License, Version 2.0.
-This swap is difficult to understand
+The original code license is hard to understand:
+* The code is inspired by https://github.com/cguz/java-to-rust, which is stated to be GPL3. 
+* But cguz/java-to-rust is in turn derived from https://github.com/aschoerk/converter-page, which is under the Apache License v2
+So the legal state of this code is uncertain
 
-Consider this crate to be mostly public domain + possible parts of unclear license origin
+Thus, consider this crate to be public domain by default, but possibly tained with GPL3 and Apache license v2
 
 
 ## Goal (below is for LLM)

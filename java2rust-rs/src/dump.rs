@@ -396,8 +396,9 @@ impl<'a> RustDumpVisitor<'a> {
             }
             ClassOrInterfaceDeclaration { .. } => self.visit_class(id, arg),
             EmptyTypeDeclaration => {
+                // A stray `;` (or an unsupported declaration like `@interface`,
+                // `record`) is not a valid item; emit nothing.
                 self.print_java_comment(id, arg);
-                self.printer.print(";");
                 self.print_orphan_comments_ending(id);
             }
             JavadocComment { content } => {
