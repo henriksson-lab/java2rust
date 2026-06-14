@@ -105,8 +105,9 @@ pub struct RustDumpVisitor<'a> {
     /// Symbol maps of previously-translated dependencies; used to resolve
     /// referenced types to their real Rust paths.
     link: &'a crate::symbol_map::LinkIndex,
-    /// Names of the current method's parameters that are used as receivers of a
-    /// linked `&mut self` (refmut) call, so their type is emitted `&mut T`.
+    /// Java names of the current method's parameters/locals used as receivers of
+    /// a linked `&mut self` (refmut) call. Parameters get `&mut T`; locals get
+    /// `let mut`.
     mut_borrow_params: std::collections::HashSet<String>,
 }
 
@@ -1373,7 +1374,13 @@ impl<'a> RustDumpVisitor<'a> {
             is_constant = true;
         } else {
             self.printer.print("let ");
-            if self.id.is_changed(self.arena, &name, id) {
+            // A linked `&mut self` call on this local also requires `let mut`.
+            let java_name = match self.arena.kind(vid) {
+                Node::VariableDeclaratorId { name } => name.clone(),
+                _ => name.clone(),
+            };
+            if self.id.is_changed(self.arena, &name, id) || self.mut_borrow_params.contains(&java_name)
+            {
                 self.printer.print("mut ");
             }
         }

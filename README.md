@@ -115,16 +115,15 @@ With `--link`, two things happen:
    Example: `s.lookup(k)` against a dep whose `lookup` was edited to
    `fn find(&self, key: &String) -> Option<String>` becomes `s.find(&k).unwrap()`.
 
-3. **Caller parameter upgrade** — a method/constructor parameter used as the
-   receiver of a linked `&mut self` call is emitted `&mut T` instead of `&T`, so
-   the call type-checks. (Example: a `Store` parameter on which `add` — a
-   `&mut self` method — is called becomes `s: &mut store::Store`.)
+3. **Caller `&mut` upgrade** — a value used as the receiver of a linked
+   `&mut self` call is made mutable so the call type-checks: a *parameter*
+   becomes `&mut T` (e.g. `s: &mut store::Store`), and a *local* gets `let mut`.
 
-   Caveat (left for a later LLM pass): only *parameters* are upgraded this way.
-   Local variables that receive a linked `&mut self` call are not yet marked
-   `let mut`, and nullability is not propagated back into a caller's own
-   parameter types. The linker shapes calls and parameter borrows; deeper
-   cross-method signature inference is left to a follow-up edit.
+   Caveat (left for a later LLM pass): nullability is not propagated back into a
+   caller's own *parameter types* (a caller param passed only into nullable dep
+   slots stays `T`, not `Option<T>`). In practice the eager `.unwrap()` on
+   nullable returns and `Some(..)`-wrapping into nullable params keep the output
+   compiling; deeper cross-method signature inference is left to a follow-up.
 
 Key property: the map is generated **from** the translated crate, not frozen at
 translation time. Edit the Rust to make it idiomatic/performant, re-run

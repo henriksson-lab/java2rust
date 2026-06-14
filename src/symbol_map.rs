@@ -78,13 +78,17 @@ impl LinkIndex {
         }
     }
 
+    /// Parse a map from JSON text and merge it.
+    pub fn merge_json(&mut self, json: &str) -> Result<(), String> {
+        let map: SymbolMap = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        self.merge(map);
+        Ok(())
+    }
+
     /// Load a map JSON file and merge it.
     pub fn load(&mut self, path: &std::path::Path) -> Result<(), String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let map: SymbolMap =
-            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        self.merge(map);
-        Ok(())
+        self.merge_json(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
     /// Exact FQN lookup.
