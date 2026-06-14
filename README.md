@@ -43,9 +43,11 @@ This section is written for an LLM agent driving or post-editing this tool.
 ```
 cargo build --release
 ```
-Produces two binaries:
+Produces three binaries:
 - `java2rust-rs` — the translator (Java → Rust).
 - `gen-symbols` — extracts a Java→Rust **symbol map** from a translated crate.
+- `jar-to-symbols` — extracts the same symbol map from a dependency **`.jar`**
+  (ground-truth signatures + annotation nullability); warns about uncovered types.
 
 ### Translate
 ```
@@ -130,6 +132,35 @@ translation time. Edit the Rust to make it idiomatic/performant, re-run
 `gen-symbols`, and the map tracks your edits. The linker links to "whatever the
 code looks like now"; remaining mismatches are left for a later LLM pass.
 
+### Linking a dependency you do *not* translate — from its JAR
+For a third-party dependency you won't translate (or haven't yet), generate the
+same `--link` map directly from its compiled `.jar` with `jar-to-symbols`:
+```
+jar-to-symbols dep1.jar dep2.jar ... -o deps_map.json
+java2rust-rs -d src -o out --link deps_map.json [--stubs]
+```
+`.class` bytecode carries **ground-truth signatures** (exact parameter/return
+types, static-ness → `receiver`, `throws`), and — when the library ships
+nullability annotations (`@Nullable`/`@CheckForNull`, which have CLASS retention
+and survive in the bytecode) — **real nullability**, so a `@Nullable` return
+becomes an `Option` and yields `.unwrap()` at the call site. This is strictly
+more precise than `--stubs`' call-site guessing; prefer a JAR when you have one.
+
+**Provide every JAR.** `jar-to-symbols` **warns** about each type referenced in a
+signature that none of the supplied JARs define (JDK types excepted), grouped by
+package — add those JARs so the map (and the translation) is precise. Pass all of
+a project's dependency JARs in one invocation.
+
+Limits: bytecode has no Rust ownership info, so `&`/`&mut` stay heuristic (`&` for
+non-primitive params, no `mut`); generics are erased in plain descriptors
+(`List<String>` → `Vec`); and overloads (same name, different params) collapse to
+one entry, since the map keys methods by bare Java name. An LLM resolves the rest.
+
+The three map sources are interchangeable (same JSON, same `--link`):
+`gen-symbols` (from translated Rust, tracks LLM edits) · `jar-to-symbols` (from a
+dependency JAR, ground truth) · `--stubs` (last-resort guess for whatever neither
+covers).
+
 ### Symbol map schema (`A_map.json`)
 JSON keyed by Java FQN (`serde`-serialized; see `src/symbol_map.rs`):
 ```jsonc
@@ -157,10 +188,56 @@ JSON keyed by Java FQN (`serde`-serialized; see `src/symbol_map.rs`):
 
 ### Gotchas
 - Files are translated in **isolation**: references to other project classes or
-  external libraries won't resolve unless you `--link` a map that covers them.
+  external libraries won't resolve unless you `--link` a map that covers them, or
+  generate stubs for them (`--stubs`, below).
 - Swing/AWT and other external libraries are out of scope (see below).
 - `rust_path`s come from the dependency crate's module layout at `gen-symbols`
   time; if you restructure that crate's modules, regenerate the map.
+
+### Generating stubs for unresolved symbols (`--stubs`)
+The inverse of, and fallback for, linking: for every symbol the translation
+*can't* resolve (not a primitive, not stdlib-mapped, not `--link`ed, not defined
+elsewhere in the same tree), record a best-effort signature and write one
+aggregated `<output>/stubs.rs` — opaque structs + `impl` blocks (methods,
+constructors `-> Self`, statics) + free functions, each with `/// @java`
+provenance and an `unimplemented!()` body.
+
+```
+java2rust-rs -d <src> -o <out> --stubs            # stubs for everything missing
+java2rust-rs -d <src> -o <out> --link dep.json --stubs   # stubs for what dep.json doesn't cover
+```
+
+Signatures are inferred from call sites: parameter types from argument
+expressions (literals + typed locals/params), return types from the call's usage
+context (assigned into a typed local, or returned). Where a type can't be
+inferred it is the placeholder `Unknown` (`= ()`); the untranslatable
+`java.lang.Object` is also mapped to `Unknown`. An external type referenced from
+several packages without an import (e.g. `Map.Entry`) yields a single struct
+keyed by its Rust name, carrying every `@java` guess as provenance.
+
+This is a **scaffold for an LLM/human to fill in**, not a finished artifact: the
+stub *signatures* are the value (they record how each symbol is used). `stubs.rs`
+compiles standalone only when its signatures reference solely primitives/`String`
+/other stubs; in general it is meant to be dropped into the translated crate,
+where project and JDK types are in scope. Once you translate the real dependency
+and `gen-symbols` it, `--link` that map and the stub disappears.
+
+Example (`org.json:json` is an unmapped dependency):
+```rust
+/// @java org.json.JSONObject
+#[derive(Clone, Default)]
+pub struct JSONObject {}
+impl JSONObject {
+    pub fn new() -> JSONObject { unimplemented!() }
+    pub fn get_string(&self, a0: String) -> String { unimplemented!() }
+    pub fn put(&self, a0: String, a1: Unknown) { unimplemented!() }
+}
+```
+
+On real corpora the stub set is exactly the external libraries: e.g. htsjdk's
+`src/main` stubs resolve to `org.json`, `org.apache.commons.{jexl2,compress}`,
+`org.xerial.snappy`, `com.fulcrumgenomics.jlibdeflate`, plus unmapped JDK
+corners (`java.util.concurrent`, `javax.script`, `java.awt`, `Map.Entry`, …).
 
 ## Goal (below is for LLM)
 

@@ -520,7 +520,7 @@ impl<'a> IdVisitor<'a> {
 
 /// Collection/StringBuilder methods that mutate their receiver (so the
 /// receiver variable needs `let mut`).
-fn is_mutating_method(name: &str) -> bool {
+pub fn is_mutating_method(name: &str) -> bool {
     matches!(
         name,
         "add" | "addAll" | "set" | "put" | "putAll" | "remove" | "removeAll" | "removeIf"
@@ -625,6 +625,16 @@ fn wildcard_pkg_has(pkg: &str, name: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Is `name` a simple name of a JDK class the tool knows about (java.lang /
+/// java.util / java.io / java.nio.file)? Used to avoid stubbing stdlib types
+/// that map to themselves (e.g. `String`, `Exception`).
+pub fn is_known_jdk_type(name: &str) -> bool {
+    JAVA_LANG.contains(&name)
+        || JAVA_UTIL.contains(&name)
+        || JAVA_IO.contains(&name)
+        || JAVA_NIO_FILE.contains(&name)
 }
 
 const JAVA_UTIL: &[&str] = &[

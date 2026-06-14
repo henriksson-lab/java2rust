@@ -16,6 +16,10 @@ serde_json = "1"
 # crate to extract the Java->Rust symbol map.
 syn = { version = "2", features = ["full"] }
 quote = "1"
+# Used only by the `jar-to-symbols` binary, which reads a dependency JAR and
+# emits the Java->Rust symbol map. JARs are zips of deflate/stored entries.
+cafebabe = "0.9.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "java2rust-rs"
@@ -24,3 +28,7 @@ path = "src/main.rs"
 [[bin]]
 name = "gen-symbols"
 path = "src/bin/gen_symbols.rs"
+
+[[bin]]
+name = "jar-to-symbols"
+path = "src/bin/jar_to_symbols.rs"

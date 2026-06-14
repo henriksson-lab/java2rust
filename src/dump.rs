@@ -109,6 +109,13 @@ pub struct RustDumpVisitor<'a> {
     /// a linked `&mut self` (refmut) call. Parameters get `&mut T`; locals get
     /// `let mut`.
     mut_borrow_params: std::collections::HashSet<String>,
+    /// When true, unresolved external symbols are recorded into `stubs`.
+    emit_stubs: bool,
+    /// FQNs of types defined elsewhere in the same translated tree, so their
+    /// cross-file references are not recorded as missing externals.
+    known_types: Option<&'a std::collections::HashSet<String>>,
+    /// Collected stub signatures for unresolved external symbols.
+    stubs: std::cell::RefCell<crate::stubs::StubCollector>,
 }
 
 impl<'a> RustDumpVisitor<'a> {
@@ -131,7 +138,26 @@ impl<'a> RustDumpVisitor<'a> {
             raw_string: false,
             link,
             mut_borrow_params: std::collections::HashSet::new(),
+            emit_stubs: false,
+            known_types: None,
+            stubs: std::cell::RefCell::new(crate::stubs::StubCollector::default()),
         }
+    }
+
+    /// Enable recording of unresolved external symbols into the stub collector,
+    /// suppressing those defined elsewhere in the same tree (`known_types`).
+    pub fn set_stub_collection(
+        &mut self,
+        emit_stubs: bool,
+        known_types: &'a std::collections::HashSet<String>,
+    ) {
+        self.emit_stubs = emit_stubs;
+        self.known_types = Some(known_types);
+    }
+
+    /// Take the collected stubs (call after `visit`).
+    pub fn take_stubs(self) -> crate::stubs::StubCollector {
+        self.stubs.into_inner()
     }
 
     /// Scan a method body for parameters/locals used as the receiver of a linked
@@ -194,7 +220,201 @@ impl<'a> RustDumpVisitor<'a> {
         if let Some(t) = self.resolve_type_sym(name) {
             return t.rust_path.clone();
         }
-        map_type_name(name).replace('$', "_")
+        let mapped = map_type_name(name).replace('$', "_");
+        if let Some(key) = self.missing_type_key(name) {
+            self.stubs.borrow_mut().note_type(&key, &mapped);
+        }
+        mapped
+    }
+
+    // ---- stub collection (unresolved external symbols) ----
+
+    /// Candidate FQNs for a referenced simple type name, via this file's imports
+    /// and package (most-specific first).
+    fn type_candidates(&self, name: &str) -> Vec<String> {
+        let simple = name.rsplit('.').next().unwrap_or(name);
+        let (explicit, wildcard) = self.link_candidates();
+        let mut out = Vec::new();
+        let suffix = format!(".{simple}");
+        for imp in &explicit {
+            if imp.ends_with(&suffix) {
+                out.push(imp.clone());
+            }
+        }
+        if let Some(pkg) = self.id.package_name.as_deref() {
+            out.push(format!("{pkg}.{simple}"));
+        }
+        for pkg in &wildcard {
+            out.push(format!("{pkg}.{simple}"));
+        }
+        out.push(name.to_string());
+        out
+    }
+
+    fn is_known_project_type(&self, name: &str) -> bool {
+        match self.known_types {
+            Some(k) => {
+                let simple = name.rsplit('.').next().unwrap_or(name);
+                // The known set holds both FQNs and bare simple names, so a
+                // nested/same-package reference by simple name resolves too.
+                k.contains(simple) || self.type_candidates(name).iter().any(|c| k.contains(c))
+            }
+            None => false,
+        }
+    }
+
+    /// If `name` references a type that cannot be resolved (not stdlib-mapped,
+    /// not linked, not defined in this tree, not a primitive/type-parameter),
+    /// return a best-effort FQN key to record a stub under. Returns `None` when
+    /// stub collection is off or the type is resolvable.
+    fn missing_type_key(&self, name: &str) -> Option<String> {
+        if !self.emit_stubs {
+            return None;
+        }
+        let simple = name.rsplit('.').next().unwrap_or(name);
+        // Must look like a class name (CamelCase): excludes type parameters (`T`,
+        // `E`) and all-caps acronyms we can't distinguish from generics.
+        let first_upper = simple.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+        if !first_upper || !simple.chars().any(|c| c.is_lowercase()) {
+            return None;
+        }
+        if self.resolve_type_sym(simple).is_some() {
+            return None; // linked
+        }
+        if map_type_name(simple) != simple {
+            return None; // stdlib-mapped (List->Vec, Integer->i32, ...)
+        }
+        if crate::id_tracker::is_known_jdk_type(simple) {
+            return None; // identity-mapped JDK type (String, Object, Exception, ...)
+        }
+        if self.is_known_project_type(simple) {
+            return None; // defined elsewhere in this tree
+        }
+        let cands = self.type_candidates(simple);
+        Some(cands.into_iter().find(|c| c.contains('.')).unwrap_or_else(|| simple.to_string()))
+    }
+
+    /// Resolve a Java type name to a Rust type for use in a stub signature,
+    /// mapping the untranslatable `Object` to the `Unknown` placeholder.
+    fn stub_type_name(&self, java: &str) -> String {
+        let r = self.resolve_type_name(java);
+        if r == "Object" { crate::stubs::UNKNOWN.into() } else { r }
+    }
+
+    /// Best-effort Rust type of an expression, for stub parameter inference.
+    fn infer_expr_rust_type(&self, e: NodeId) -> String {
+        match self.arena.kind(e) {
+            Node::IntegerLiteralExpr { .. } => "i32".into(),
+            Node::LongLiteralExpr { .. } => "i64".into(),
+            Node::DoubleLiteralExpr { .. } => "f64".into(),
+            Node::BooleanLiteralExpr { .. } => "bool".into(),
+            Node::CharLiteralExpr { .. } => "char".into(),
+            Node::StringLiteralExpr { .. } => "String".into(),
+            Node::EnclosedExpr { inner: Some(i) } => self.infer_expr_rust_type(*i),
+            Node::NameExpr { name } => self
+                .decl_java_type_name(name, e)
+                .map(|t| self.stub_type_name(&t))
+                .unwrap_or_else(|| crate::stubs::UNKNOWN.into()),
+            _ => crate::stubs::UNKNOWN.into(),
+        }
+    }
+
+    /// Best-effort Rust return type of a call, inferred from its usage context
+    /// (assigned into a typed local, or returned from the enclosing method).
+    fn infer_call_ret_type(&self, call: NodeId) -> Option<String> {
+        let p = self.arena.parent(call)?;
+        match self.arena.kind(p) {
+            Node::VariableDeclarator { init: Some(i), .. } if *i == call => {
+                let gp = self.arena.parent(p)?;
+                if let Node::VariableDeclarationExpr { typ, .. } = self.arena.kind(gp) {
+                    return self.rust_type_of(*typ);
+                }
+                None
+            }
+            Node::ReturnStmt { expr: Some(e) } if *e == call => self.enclosing_method_ret_type(call),
+            _ => None,
+        }
+    }
+
+    fn enclosing_method_ret_type(&self, mut n: NodeId) -> Option<String> {
+        while let Some(p) = self.arena.parent(n) {
+            if let Node::MethodDeclaration { typ, .. } = self.arena.kind(p) {
+                return self.rust_type_of(*typ);
+            }
+            n = p;
+        }
+        None
+    }
+
+    /// The Rust type string for a type node (primitives, mapped/linked class
+    /// types, array element type), for stub return-type inference. `None` for
+    /// `void`/unknown.
+    fn rust_type_of(&self, typ: NodeId) -> Option<String> {
+        match self.arena.kind(typ) {
+            Node::PrimitiveType { kind } => Some(
+                match kind {
+                    PrimitiveKind::Boolean => "bool",
+                    PrimitiveKind::Byte => "i8",
+                    PrimitiveKind::Char => "char",
+                    PrimitiveKind::Double => "f64",
+                    PrimitiveKind::Float => "f32",
+                    PrimitiveKind::Int => "i32",
+                    PrimitiveKind::Long => "i64",
+                    PrimitiveKind::Short => "i16",
+                }
+                .to_string(),
+            ),
+            Node::ClassOrInterfaceType { name, .. } => Some(self.stub_type_name(name)),
+            Node::ReferenceType { typ, .. } => self.rust_type_of(*typ),
+            _ => None,
+        }
+    }
+
+    fn build_stub_sig(
+        &self,
+        args: &[NodeId],
+        call: NodeId,
+        receiver: crate::stubs::Receiver,
+    ) -> crate::stubs::StubSig {
+        crate::stubs::StubSig {
+            receiver,
+            params: args.iter().map(|&a| self.infer_expr_rust_type(a)).collect(),
+            ret: self.infer_call_ret_type(call),
+        }
+    }
+
+    /// Record an unresolved method / static / free-function call as a stub.
+    fn record_missing_call(&self, scope: Option<NodeId>, name: &str, args: &[NodeId], id: NodeId) {
+        if !self.emit_stubs {
+            return;
+        }
+        match scope {
+            Some(s) => {
+                let Some(tname) = self.callee_recv_type(s) else { return };
+                let Some(key) = self.missing_type_key(&tname) else { return };
+                let is_static = self.is_static_class_ref(s);
+                let rust_struct = map_type_name(&tname).replace('$', "_");
+                let recv = if is_static {
+                    crate::stubs::Receiver::None
+                } else if crate::id_tracker::is_mutating_method(name) {
+                    crate::stubs::Receiver::RefMut
+                } else {
+                    crate::stubs::Receiver::Ref
+                };
+                let sig = self.build_stub_sig(args, id, recv);
+                let m = self.to_snake_if_necessary(name);
+                self.stubs.borrow_mut().add_method(&key, &rust_struct, &m, sig, is_static);
+            }
+            None => {
+                // A free function (static import / unresolved): only when it is
+                // not a method of the current class.
+                if self.id.find_declaration_node_for(self.arena, name, id).is_none() {
+                    let sig = self.build_stub_sig(args, id, crate::stubs::Receiver::None);
+                    let m = self.to_snake_if_necessary(name);
+                    self.stubs.borrow_mut().add_free_fn(&m, sig);
+                }
+            }
+        }
     }
 
     /// The simple Java type name of a method-call receiver, if it can be tied to
@@ -1630,6 +1850,17 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
+        // Record an instance-field access on an unresolved external type as a
+        // stub struct field.
+        if self.emit_stubs && field != "length" && !self.is_static_class_ref(scope) {
+            if let Some(tname) = self.callee_recv_type(scope) {
+                if let Some(key) = self.missing_type_key(&tname) {
+                    let rust_struct = map_type_name(&tname).replace('$', "_");
+                    let f = self.to_snake_if_necessary(&field);
+                    self.stubs.borrow_mut().add_field(&key, &rust_struct, &f);
+                }
+            }
+        }
         self.visit(scope, arg);
         self.printer.print(if self.is_static_class_ref(scope) { "::" } else { "." });
         // `.length` -> `.len()`; otherwise snake-case + keyword-escape the field
@@ -1699,6 +1930,7 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
             None => {
+                self.record_missing_call(scope, &name, &args, id);
                 let s = self.to_snake_if_necessary(&name);
                 self.printer.print(&s);
                 self.print_arguments(&args, arg);
@@ -2207,6 +2439,20 @@ impl<'a> RustDumpVisitor<'a> {
             Node::ClassOrInterfaceType { name, .. } => self.resolve_type_name(name),
             _ => self.accept_and_cut(typ, arg).trim().to_string(),
         };
+        // Record a constructor stub for an unresolved external type.
+        if self.emit_stubs {
+            let tname = match self.arena.kind(typ) {
+                Node::ClassOrInterfaceType { name, .. } => Some(name.clone()),
+                _ => None,
+            };
+            if let Some(tname) = tname {
+                if let Some(key) = self.missing_type_key(&tname) {
+                    let rust_struct = map_type_name(&tname).replace('$', "_");
+                    let sig = self.build_stub_sig(&args, id, crate::stubs::Receiver::None);
+                    self.stubs.borrow_mut().add_ctor(&key, &rust_struct, sig);
+                }
+            }
+        }
         self.printer.print(&base);
         self.printer.print("::new");
         if is_rust_collection(&base) {
@@ -3041,7 +3287,7 @@ fn hex_float_to_decimal(s: &str) -> Option<String> {
 /// If `s` is a Rust keyword, escape it as a raw identifier (`r#s`). A few
 /// keywords (`self`/`super`/`crate`/`Self`) cannot be raw, but they are also
 /// reserved in Java so never appear as user identifiers.
-fn escape_rust_keyword(s: String) -> String {
+pub fn escape_rust_keyword(s: String) -> String {
     const KW: &[&str] = &[
         "as", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn",
         "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
@@ -3094,7 +3340,7 @@ fn java_format_to_rust(fmt: &str) -> String {
 
 /// Map a Java type simple name to its Rust equivalent (collections, boxed
 /// primitives). Returns the name unchanged if there is no mapping.
-fn map_type_name(name: &str) -> &str {
+pub fn map_type_name(name: &str) -> &str {
     // Use the simple name (drop any `pkg.` qualifier) for the mapping.
     let name = name.rsplit('.').next().unwrap_or(name);
     match name {
