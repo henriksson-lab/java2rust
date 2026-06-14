@@ -1,14 +1,14 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
     #[test]
-    fn  test_method(&self)   {
+    fn test_method(&self)   {
          let i: i32;
     }
 
-    ;
+
 }
 

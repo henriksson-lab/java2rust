@@ -78,8 +78,8 @@ impl SourcePrinter {
 /// Member filter used by `printMembers`.
 #[derive(Clone, Copy)]
 enum Filter {
-    NonField,
-    All,
+    /// Methods/constructors/initializers — excludes fields and nested types.
+    Method,
 }
 
 pub struct RustDumpVisitor<'a> {
@@ -99,6 +99,9 @@ pub struct RustDumpVisitor<'a> {
     /// When true, the value being emitted feeds an `Option<T>` slot, so a
     /// nullable read is kept as-is (no `.unwrap()`).
     expect_option: bool,
+    /// When true, string literals are emitted raw (`"x"`, not `"x".to_string()`)
+    /// — used for `match` patterns.
+    raw_string: bool,
 }
 
 impl<'a> RustDumpVisitor<'a> {
@@ -117,6 +120,7 @@ impl<'a> RustDumpVisitor<'a> {
             class_field_names: std::collections::HashSet::new(),
             nullable,
             expect_option: false,
+            raw_string: false,
         }
     }
 
@@ -232,11 +236,12 @@ impl<'a> RustDumpVisitor<'a> {
             other => other,
         };
         let first = n.chars().next().unwrap();
-        if first.is_lowercase() {
+        let s = if first.is_lowercase() {
             camel_to_snake_case(n)
         } else {
             n.to_string()
-        }
+        };
+        escape_rust_keyword(s)
     }
 
     fn remove_plus_and_suffix(&self, mut value: String, suffixes: &[&str]) -> String {
@@ -272,8 +277,12 @@ impl<'a> RustDumpVisitor<'a> {
     fn print_members(&mut self, members: &[NodeId], arg: Arg, filter: Filter) {
         for &member in members {
             let keep = match filter {
-                Filter::All => true,
-                Filter::NonField => !matches!(self.arena.kind(member), Node::FieldDeclaration { .. }),
+                Filter::Method => !matches!(
+                    self.arena.kind(member),
+                    Node::FieldDeclaration { .. }
+                        | Node::ClassOrInterfaceDeclaration { .. }
+                        | Node::EnumDeclaration { .. }
+                ),
             };
             if keep {
                 self.printer.print_ln();
@@ -392,7 +401,9 @@ impl<'a> RustDumpVisitor<'a> {
                 self.print_orphan_comments_ending(id);
             }
             JavadocComment { content } => {
-                self.printer.print("/**");
+                // Emit as a normal block comment, not `/**` — a Rust doc comment
+                // requires an item to follow, which isn't guaranteed here.
+                self.printer.print("/*");
                 self.printer.print(&content);
                 self.printer.print_ln_s("*/");
             }
@@ -401,11 +412,11 @@ impl<'a> RustDumpVisitor<'a> {
                 self.print_java_comment(id, arg);
                 self.printer.print(&name);
                 if !type_bound.is_empty() {
-                    self.printer.print(" extends ");
+                    self.printer.print(": ");
                     for (i, &c) in type_bound.iter().enumerate() {
                         self.visit(c, arg);
                         if i + 1 < type_bound.len() {
-                            self.printer.print(" & ");
+                            self.printer.print(" + ");
                         }
                     }
                 }
@@ -458,15 +469,11 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
             WildcardType { ext, sup } => {
+                // `? extends T` / `? super T` -> the bound type; bare `?` -> `_`.
                 self.print_java_comment(id, arg);
-                self.printer.print("?");
-                if let Some(e) = ext {
-                    self.printer.print(" extends ");
-                    self.visit(e, arg);
-                }
-                if let Some(s) = sup {
-                    self.printer.print(" super ");
-                    self.visit(s, arg);
+                match ext.or(sup) {
+                    Some(b) => self.visit(b, arg),
+                    None => self.printer.print("_"),
                 }
             }
             UnknownType => {}
@@ -555,12 +562,17 @@ impl<'a> RustDumpVisitor<'a> {
             }
             DoubleLiteralExpr { value } => {
                 self.print_java_comment(id, arg);
-                let mut value = value;
-                if !value.contains(['.', 'e', 'E', 'x', 'X']) {
-                    value = format!("{value}.0");
+                // Rust has no hex float literals; compute the value as decimal.
+                if let Some(dec) = hex_float_to_decimal(&value) {
+                    self.printer.print(&dec);
+                } else {
+                    let mut value = value;
+                    if !value.contains(['.', 'e', 'E', 'x', 'X']) {
+                        value = format!("{value}.0");
+                    }
+                    let s = self.remove_plus_and_suffix(value, &["D", "d"]);
+                    self.printer.print(&s);
                 }
-                let s = self.remove_plus_and_suffix(value, &["D", "d"]);
-                self.printer.print(&s);
             }
             IntegerLiteralExpr { value } => {
                 self.print_java_comment(id, arg);
@@ -582,12 +594,13 @@ impl<'a> RustDumpVisitor<'a> {
             }
             StringLiteralExpr { value } => {
                 self.print_java_comment(id, arg);
-                // Java String is an owned type; emit an owned Rust String so
-                // `String`-typed bindings/returns type-check. (String-concat goes
-                // through format! separately and never reaches here.)
+                // Java String is owned, so emit `"...".to_string()` so String-typed
+                // bindings type-check — except in a match pattern, where a raw
+                // `"..."` (str literal) is required. (Concatenation uses format!.)
                 self.printer.print("\"");
                 self.printer.print(&value);
-                self.printer.print("\".to_string()");
+                self.printer
+                    .print(if self.raw_string { "\"" } else { "\".to_string()" });
             }
             BooleanLiteralExpr { value } => {
                 self.print_java_comment(id, arg);
@@ -601,10 +614,11 @@ impl<'a> RustDumpVisitor<'a> {
                 self.print_java_comment(id, arg);
                 if let Some(ce) = class_expr {
                     self.visit(ce, arg);
-                } else if !self.id.is_in_constructor() {
-                    self.printer.print("self");
+                } else if self.id.is_in_constructor() {
+                    // The value being built (see visit_constructor).
+                    self.printer.print("__self");
                 } else {
-                    self.printer.print("let ");
+                    self.printer.print("self");
                 }
             }
             SuperExpr { class_expr } => {
@@ -627,35 +641,20 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(" ");
                 self.visit(vid, arg);
             }
-            ExplicitConstructorInvocationStmt {
-                is_this,
-                expr,
-                type_args,
-                args,
-            } => {
+            ExplicitConstructorInvocationStmt { .. } => {
+                // `this(...)` / `super(...)` — no Rust equivalent; drop it.
                 self.print_java_comment(id, arg);
-                if is_this {
-                    self.print_type_args(&type_args, arg);
-                    self.printer.print("this");
-                } else {
-                    if let Some(e) = expr {
-                        self.visit(e, arg);
-                        self.printer.print(".");
-                    }
-                    self.print_type_args(&type_args, arg);
-                    self.printer.print("super");
-                }
-                self.print_arguments(&args, arg);
-                self.printer.print(";");
+                self.printer.print("/* super/this constructor call omitted */");
             }
             VariableDeclarationExpr { modifiers: m, typ, vars } => {
                 self.print_java_comment(id, arg);
                 self.print_modifiers(m);
                 self.printer.print(" ");
+                // `int i = 0, j = 1;` -> separate `let` statements (`; `-joined).
                 for (i, &v) in vars.iter().enumerate() {
                     self.visit(v, Some(typ));
                     if i + 1 < vars.len() {
-                        self.printer.print(", ");
+                        self.printer.print("; ");
                     }
                 }
             }
@@ -692,7 +691,7 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(";");
             }
             SwitchStmt { .. } => self.visit_switch(id, arg),
-            SwitchEntryStmt { .. } => self.visit_switch_entry(id, arg),
+            SwitchEntryStmt { .. } => {} // handled inline by visit_switch
             BreakStmt { id: lbl } => {
                 self.print_java_comment(id, arg);
                 self.printer.print("break");
@@ -725,15 +724,13 @@ impl<'a> RustDumpVisitor<'a> {
             EnumDeclaration { .. } => self.visit_enum(id, arg),
             EnumConstantDeclaration { .. } => self.visit_enum_constant(id, arg),
             EmptyMemberDeclaration => {
+                // A stray `;` is not a valid Rust item; emit nothing.
                 self.print_java_comment(id, arg);
-                self.printer.print(";");
             }
-            InitializerDeclaration { is_static, block } => {
+            InitializerDeclaration { .. } => {
+                // Static/instance initializer blocks have no item-level Rust form.
                 self.print_java_comment(id, arg);
-                if is_static {
-                    self.printer.print("static ");
-                }
-                self.visit(block, arg);
+                self.printer.print("// initializer block omitted");
             }
             IfStmt { .. } => self.visit_if(id, arg),
             WhileStmt { condition, body } => {
@@ -741,7 +738,7 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print("while ");
                 self.visit(condition, arg);
                 self.printer.print(" ");
-                self.visit(body, arg);
+                self.encapsulate_if_not_block(body, arg);
             }
             ContinueStmt { id: lbl } => {
                 self.print_java_comment(id, arg);
@@ -763,10 +760,13 @@ impl<'a> RustDumpVisitor<'a> {
             ForeachStmt { variable, iterable, body } => {
                 self.print_java_comment(id, arg);
                 self.printer.print("for ");
-                self.visit(variable, arg);
+                // Bind the loop variable by value (clone the iterable) to match
+                // Java's value semantics and keep the body's uses simple.
+                let vname = self.foreach_var_name(variable);
+                self.printer.print(&vname);
                 self.printer.print(" in ");
                 self.visit(iterable, arg);
-                self.printer.print(" ");
+                self.printer.print(".clone() ");
                 self.encapsulate_if_not_block(body, arg);
             }
             ForStmt { .. } => self.visit_for(id, arg),
@@ -919,8 +919,9 @@ impl<'a> RustDumpVisitor<'a> {
         }
 
         // ---- struct ----
-        // Derive Clone so field values can be cloned out from behind `&self`.
-        self.printer.print_ln_s("#[derive(Clone)]");
+        // Clone: so field values can be cloned out from behind `&self`.
+        // Default: so generated `new(...) -> Self` can start from a default value.
+        self.printer.print_ln_s("#[derive(Clone, Default)]");
         self.print_modifiers(modifiers_v);
         self.printer.print("struct ");
         self.printer.print(&name);
@@ -955,11 +956,24 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
-        // methods / constructors / nested / initializers
-        self.print_members(&members, arg, Filter::NonField);
+        // methods / constructors / initializers (NOT nested types — Rust forbids
+        // `struct`/`enum`/`trait` items inside an `impl`).
+        self.print_members(&members, arg, Filter::Method);
         self.print_orphan_comments_ending(id);
         self.printer.unindent();
         self.printer.print_ln_s("}");
+
+        // Nested type declarations are hoisted to module level.
+        for &m in &members {
+            if matches!(
+                self.arena.kind(m),
+                Node::ClassOrInterfaceDeclaration { .. } | Node::EnumDeclaration { .. }
+            ) {
+                self.printer.print_ln();
+                self.visit(m, arg);
+                self.printer.print_ln();
+            }
+        }
         self.class_field_names = saved_fields;
     }
 
@@ -1026,9 +1040,21 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.print_ln_s(" {");
         self.printer.indent();
-        self.print_members(members, arg, Filter::NonField);
+        // Methods only; nested types (and fields) can't live in a trait body.
+        self.print_members(members, arg, Filter::Method);
         self.printer.unindent();
         self.printer.print_ln_s("}");
+        // Hoist nested type declarations to module level.
+        for &m in members {
+            if matches!(
+                self.arena.kind(m),
+                Node::ClassOrInterfaceDeclaration { .. } | Node::EnumDeclaration { .. }
+            ) {
+                self.printer.print_ln();
+                self.visit(m, arg);
+                self.printer.print_ln();
+            }
+        }
     }
 
     /// Emit a non-static field as a Rust struct field: `name: Type,` (one per
@@ -1051,6 +1077,16 @@ impl<'a> RustDumpVisitor<'a> {
             }
             self.printer.print_ln_s(",");
         }
+    }
+
+    /// The (snake-cased) loop variable name of a foreach's VariableDeclarationExpr.
+    fn foreach_var_name(&self, variable: NodeId) -> String {
+        if let Node::VariableDeclarationExpr { vars, .. } = self.arena.kind(variable) {
+            if let Some(&v) = vars.first() {
+                return self.field_var_name(v);
+            }
+        }
+        String::new()
     }
 
     fn var_decl_id(&self, var: NodeId) -> Option<NodeId> {
@@ -1107,11 +1143,11 @@ impl<'a> RustDumpVisitor<'a> {
         self.print_java_comment(id, arg);
         if let Some(s) = scope {
             self.visit(s, arg);
-            self.printer.print(".");
+            self.printer.print("::");
         }
-        self.printer.print(&name);
+        self.printer.print(map_type_name(&name));
         if using_diamond {
-            self.printer.print("<>");
+            // No empty turbofish in Rust; let the args be inferred.
         } else {
             self.print_type_args(&type_args, arg);
         }
@@ -1136,15 +1172,7 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.print(&name);
         let nullable = self.decl_nullable(vid);
-        let is_initialized_array = init
-            .map(|i| {
-                matches!(
-                    self.arena.kind(i),
-                    Node::ArrayInitializerExpr { .. } | Node::ArrayCreationExpr { .. }
-                )
-            })
-            .unwrap_or(false);
-        if self.is_type(arg) && !is_initialized_array {
+        if self.is_type(arg) {
             self.printer.print(": ");
             let tmp = self.accept_and_cut(arg.unwrap(), None);
             let tmp = tmp.trim().to_string();
@@ -1157,9 +1185,7 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         if let Some(i) = init {
-            if !is_initialized_array {
-                self.printer.print(" = ");
-            }
+            self.printer.print(" = ");
             // Java allows `char c = 65;` (int->char); Rust needs an explicit cast.
             let char_from_int = self.is_char_type(arg)
                 && matches!(self.arena.kind(i), Node::IntegerLiteralExpr { .. });
@@ -1181,78 +1207,19 @@ impl<'a> RustDumpVisitor<'a> {
         )
     }
 
-    fn get_dimensions(&self, n: NodeId) -> Vec<i32> {
-        // Mirrors RustDumpVisitor.getDimensions for ArrayInitializerExpr.
-        let mut dimensions = Vec::new();
-        let mut cur = Some(n);
-        let mut actsize = match self.arena.kind(n) {
-            Node::ArrayInitializerExpr { values } => Some(values.len() as i32),
-            _ => None,
-        };
-        while let Some(node) = cur {
-            if let Some(sz) = actsize {
-                dimensions.push(sz);
-            }
-            actsize = None;
-            let values = match self.arena.kind(node) {
-                Node::ArrayInitializerExpr { values } => values.clone(),
-                _ => break,
-            };
-            let first = values[0];
-            if matches!(self.arena.kind(first), Node::ArrayInitializerExpr { .. }) {
-                let mut size: Option<i32> = None;
-                let mut chosen = node;
-                for e in &values {
-                    if let Node::ArrayInitializerExpr { values: vs } = self.arena.kind(*e) {
-                        let l = vs.len() as i32;
-                        match size {
-                            None => {
-                                size = Some(l);
-                                chosen = *e;
-                            }
-                            Some(s) if s < l => {
-                                size = Some(l);
-                                chosen = *e;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                actsize = size;
-                cur = Some(chosen);
-            } else {
-                cur = None;
-            }
-        }
-        dimensions
-    }
-
     fn visit_array_initializer(&mut self, id: NodeId, arg: Arg) {
         let values = match self.kind(id) {
             Node::ArrayInitializerExpr { values } => values,
             _ => unreachable!(),
         };
-        let t = if self.is_type(arg) { arg } else { None };
         self.print_java_comment(id, arg);
-        if !values.is_empty() {
-            if let Some(tn) = t {
-                let mut dims = self.get_dimensions(id);
-                let mut sb = self.accept_and_cut(tn, arg);
-                dims.reverse();
-                for i in dims {
-                    sb = format!("vec![{sb}; {i}]");
-                }
-                self.printer.print(": ");
-                self.printer.print(&sb);
-                self.printer.print(" = ");
-            }
-            self.printer.print("vec![");
-            for &val in &values {
-                self.visit(val, None);
-                self.printer.print(", ");
-            }
-            self.printer.print_ln_s("]");
+        // A plain Vec literal; the binding's type is emitted by the declarator.
+        self.printer.print("vec![");
+        for &val in &values {
+            self.visit(val, None);
+            self.printer.print(", ");
         }
+        self.printer.print("]");
     }
 
     fn default_value(&self, ty: &str) -> String {
@@ -1263,16 +1230,6 @@ impl<'a> RustDumpVisitor<'a> {
             _ => "None",
         }
         .to_string()
-    }
-
-    fn get_array_declaration(&self, type_or_default: &str, dims: &[String]) -> String {
-        let mut sb = type_or_default.to_string();
-        let mut rev = dims.to_vec();
-        rev.reverse();
-        for s in rev {
-            sb = format!("[{sb}; {s}]");
-        }
-        sb
     }
 
     fn visit_array_creation(&mut self, id: NodeId, arg: Arg) {
@@ -1286,27 +1243,20 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
-        if !dimensions.is_empty() {
-            let mut ty = self.accept_and_cut(typ, arg);
+        if let Some(init) = initializer {
+            // `new T[]{a, b}` -> `vec![a, b]`.
+            self.visit(init, None);
+        } else if !dimensions.is_empty() {
+            // `new T[n]` -> `vec![<default>; (n) as usize]`, nested for `[a][b]`.
+            let ty = self.accept_and_cut(typ, arg);
+            let ty = ty.trim().to_string();
             let default = self.default_value(&ty);
-            if default == "None" {
-                ty = format!("Option<{ty}>");
+            let mut s = default;
+            for &d in dimensions.iter().rev() {
+                let dim = self.accept_and_cut(d, arg);
+                s = format!("vec![{s}; ({}) as usize]", dim.trim());
             }
-            let dims: Vec<String> = dimensions
-                .iter()
-                .map(|&e| self.accept_and_cut(e, arg))
-                .collect();
-            self.printer.print(": ");
-            let decl = self.get_array_declaration(&ty, &dims);
-            self.printer.print(&decl);
-            self.printer.print(" = ");
-            let decl2 = self.get_array_declaration(&default, &dims);
-            self.printer.print(&decl2);
-        } else {
-            self.printer.print(" ");
-            if let Some(init) = initializer {
-                self.visit(init, Some(typ));
-            }
+            self.printer.print(&s);
         }
     }
 
@@ -1445,11 +1395,16 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print(")");
     }
 
-    fn replace_length_at_end(&self, field_access: &str) -> String {
-        if field_access == "length" {
-            "len()".to_string()
-        } else {
-            field_access.to_string()
+    /// Is `s` a reference to a class/type (→ `::`), as opposed to a value
+    /// (variable/field, → `.`)? A class name is an uppercase `NameExpr` that does
+    /// not resolve to any declaration in scope.
+    fn is_static_class_ref(&self, s: NodeId) -> bool {
+        match self.arena.kind(s) {
+            Node::NameExpr { name } => {
+                name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    && self.id.find_declaration_node_for(self.arena, name, s).is_none()
+            }
+            _ => false,
         }
     }
 
@@ -1459,32 +1414,16 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
-        let mark = self.printer.push();
         self.visit(scope, arg);
-        let scope_str = self.printer.get_mark(mark);
-        self.printer.drop();
-        let stripped = scope_str.trim_end_matches(' ');
-        let i = stripped
-            .rfind(['\n', '\t', ' ', '.'])
-            .map(|x| x as i64)
-            .unwrap_or(-1);
-        let accessed: String = if i <= 0 {
-            scope_str.clone()
+        self.printer.print(if self.is_static_class_ref(scope) { "::" } else { "." });
+        // `.length` -> `.len()`; otherwise snake-case + keyword-escape the field
+        // to match how the field declaration is emitted.
+        if field == "length" {
+            self.printer.print("len()");
         } else {
-            scope_str[(i as usize + 1)..].to_string()
-        };
-        let chars: Vec<char> = accessed.chars().collect();
-        if !chars.is_empty()
-            && chars[0].is_uppercase()
-            && chars.len() > 1
-            && chars[1].is_lowercase()
-        {
-            self.printer.print("::");
-        } else {
-            self.printer.print(".");
+            let f = self.to_snake_if_necessary(&field);
+            self.printer.print(&f);
         }
-        let f = self.replace_length_at_end(&field);
-        self.printer.print(&f);
     }
 
     fn visit_method_call(&mut self, id: NodeId, arg: Arg) {
@@ -1495,16 +1434,29 @@ impl<'a> RustDumpVisitor<'a> {
         if self.try_emit_print_macro(scope, &name, &args, arg) {
             return;
         }
+        if self.try_emit_math(scope, &name, &args, arg) {
+            return;
+        }
+        if self.try_emit_int_range(scope, &name, &args, arg) {
+            return;
+        }
+        if self.try_emit_optional_static(scope, &name, &args, arg) {
+            return;
+        }
+        if self.try_emit_string_format(scope, &name, &args, arg) {
+            return;
+        }
+        if self.try_emit_known_method(scope, &name, &args, arg) {
+            return;
+        }
         self.print_java_comment(id, arg);
         if let Some(s) = scope {
             self.visit(s, arg);
-            if first_char_upper(self.first_char_java(s)) {
-                self.printer.print("::");
-            } else {
-                self.printer.print(".");
-            }
+            self.printer.print(if self.is_static_class_ref(s) { "::" } else { "." });
         }
-        self.print_type_args(&type_args, arg);
+        // Explicit method type arguments are dropped (Rust infers them; emitting
+        // `::<T>name` here would be invalid).
+        let _ = &type_args;
         if scope.is_none() {
             if let Some((_, right)) = self.id.find_declaration_node_for(self.arena, &name, id) {
                 match self.arena.kind(right) {
@@ -1556,6 +1508,455 @@ impl<'a> RustDumpVisitor<'a> {
         true
     }
 
+    /// `Optional.of(x)` -> `Some(x)`, `Optional.empty()` -> `None`.
+    fn try_emit_optional_static(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
+        let Some(s) = scope else { return false };
+        if !matches!(self.arena.kind(s), Node::NameExpr { name } if name == "Optional") {
+            return false;
+        }
+        match (name, args.len()) {
+            ("of", 1) | ("ofNullable", 1) => {
+                self.printer.print("Some(");
+                self.visit(args[0], arg);
+                self.printer.print(")");
+                true
+            }
+            ("empty", 0) => {
+                self.printer.print("None");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `IntStream.range(a, b)` -> `((a)..(b))`, `rangeClosed` -> `..=`.
+    fn try_emit_int_range(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
+        let Some(s) = scope else { return false };
+        let is_intstream = matches!(
+            self.arena.kind(s),
+            Node::NameExpr { name } if name == "IntStream" || name == "LongStream"
+        );
+        if !is_intstream || args.len() != 2 {
+            return false;
+        }
+        let sep = match name {
+            "range" => "..",
+            "rangeClosed" => "..=",
+            _ => return false,
+        };
+        self.printer.print("((");
+        self.visit(args[0], arg);
+        self.printer.print(")");
+        self.printer.print(sep);
+        self.printer.print("(");
+        self.visit(args[1], arg);
+        self.printer.print("))");
+        true
+    }
+
+    /// `String.format("%d ...", a, ...)` -> `format!("{} ...", a, ...)`.
+    fn try_emit_string_format(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
+        let Some(s) = scope else { return false };
+        if name != "format"
+            || !matches!(self.arena.kind(s), Node::NameExpr { name } if name == "String")
+        {
+            return false;
+        }
+        let Some(&fmt_node) = args.first() else { return false };
+        let Node::StringLiteralExpr { value } = self.arena.kind(fmt_node) else {
+            return false;
+        };
+        let converted = java_format_to_rust(value);
+        self.printer.print("format!(\"");
+        self.printer.print(&converted);
+        self.printer.print("\"");
+        for &a in &args[1..] {
+            self.printer.print(", ");
+            self.visit(a, arg);
+        }
+        self.printer.print(")");
+        true
+    }
+
+    /// The declared Java type's simple name for the variable `name` refers to.
+    fn decl_java_type_name(&self, name: &str, at: NodeId) -> Option<String> {
+        let (_, decl) = self.id.find_declaration_node_for(self.arena, name, at)?;
+        let parent = self.arena.parent(decl)?;
+        let grand = self.arena.parent(parent);
+        let typ = match self.arena.kind(parent) {
+            Node::Parameter { typ, .. } => *typ,
+            _ => match grand.map(|g| self.arena.kind(g)) {
+                Some(Node::FieldDeclaration { typ, .. })
+                | Some(Node::VariableDeclarationExpr { typ, .. }) => Some(*typ),
+                _ => None,
+            },
+        }?;
+        self.type_simple_name(typ)
+    }
+
+    fn type_simple_name(&self, typ: NodeId) -> Option<String> {
+        match self.arena.kind(typ) {
+            Node::ClassOrInterfaceType { name, .. } => Some(name.clone()),
+            Node::ReferenceType { typ, .. } => self.type_simple_name(*typ),
+            _ => None,
+        }
+    }
+
+    /// Map common collection / String methods to their Rust equivalents.
+    fn try_emit_known_method(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
+        let Some(recv) = scope else { return false };
+        match (name, args.len()) {
+            ("size", 0) | ("length", 0) => {
+                self.printer.print("(");
+                self.visit(recv, arg);
+                self.printer.print(".len() as i32)");
+                true
+            }
+            ("isEmpty", 0) => {
+                // Optional.isEmpty -> is_none; collection isEmpty -> is_empty.
+                let opt = matches!(self.recv_type_name(recv).as_deref(), Some("Optional"));
+                self.visit(recv, arg);
+                self.printer.print(if opt { ".is_none()" } else { ".is_empty()" });
+                true
+            }
+            // ---- Optional ----
+            ("isPresent", 0) => self.emit_recv_method(recv, "is_some", arg),
+            ("orElse", 1) => {
+                self.visit(recv, arg);
+                self.printer.print(".unwrap_or(");
+                self.visit(args[0], arg);
+                self.printer.print(")");
+                true
+            }
+            ("orElseGet", 1) => {
+                self.visit(recv, arg);
+                self.printer.print(".unwrap_or_else(");
+                self.visit(args[0], arg);
+                self.printer.print(")");
+                true
+            }
+            ("get", 0) => self.emit_recv_method(recv, "unwrap", arg),
+            // ---- reduce / sorted ----
+            ("reduce", 2) => {
+                self.visit(recv, arg);
+                self.printer.print(".fold(");
+                self.visit(args[0], arg);
+                self.printer.print(", ");
+                self.visit(args[1], arg);
+                self.printer.print(")");
+                true
+            }
+            ("sorted", 0) => {
+                self.printer.print("{ let mut __s = ");
+                self.visit(recv, arg);
+                self.printer.print(".collect::<Vec<_>>(); __s.sort(); __s.into_iter() }");
+                true
+            }
+            ("equals", 1) => {
+                self.printer.print("(");
+                self.visit(recv, arg);
+                self.printer.print(" == ");
+                self.visit(args[0], arg);
+                self.printer.print(")");
+                true
+            }
+            ("add", 1) => {
+                // Set.add -> insert; List/Collection.add -> push.
+                let is_set = matches!(
+                    self.recv_type_name(recv).as_deref(),
+                    Some("Set" | "HashSet" | "LinkedHashSet" | "TreeSet")
+                );
+                self.visit(recv, arg);
+                self.printer.print(if is_set { ".insert(" } else { ".push(" });
+                self.visit(args[0], arg);
+                self.printer.print(")");
+                true
+            }
+            ("get", 1) => {
+                let is_map = matches!(
+                    self.recv_type_name(recv).as_deref(),
+                    Some("Map" | "HashMap" | "LinkedHashMap" | "TreeMap")
+                );
+                if is_map {
+                    // Map.get(k) -> value by clone (panics if absent, ~ Java null deref).
+                    self.visit(recv, arg);
+                    self.printer.print(".get(&(");
+                    self.visit(args[0], arg);
+                    self.printer.print(")).cloned().unwrap()");
+                } else {
+                    // List.get(i) -> indexed element (cloned to own it).
+                    self.visit(recv, arg);
+                    self.printer.print("[(");
+                    self.visit(args[0], arg);
+                    self.printer.print(") as usize].clone()");
+                }
+                true
+            }
+            ("put", 2) => {
+                self.visit(recv, arg);
+                self.printer.print(".insert(");
+                self.visit(args[0], arg);
+                self.printer.print(", ");
+                self.visit(args[1], arg);
+                self.printer.print(")");
+                true
+            }
+            ("contains", 1) => {
+                let is_string = matches!(self.recv_type_name(recv).as_deref(), Some("String"));
+                self.visit(recv, arg);
+                if is_string {
+                    self.printer.print(".contains((");
+                    self.visit(args[0], arg);
+                    self.printer.print(").as_str())");
+                } else {
+                    self.printer.print(".contains(&(");
+                    self.visit(args[0], arg);
+                    self.printer.print("))");
+                }
+                true
+            }
+            // ---- more streams ----
+            ("findFirst", 0) | ("findAny", 0) => {
+                self.visit(recv, arg);
+                self.printer.print(".next()");
+                true
+            }
+            ("limit", 1) => self.emit_iter_count(recv, "take", args[0], arg),
+            ("skip", 1) => self.emit_iter_count(recv, "skip", args[0], arg),
+            ("sum", 0) => {
+                self.visit(recv, arg);
+                self.printer.print(".sum::<i32>()");
+                true
+            }
+            // ---- more String ops (arg is a String -> &str) ----
+            ("startsWith", 1) => self.emit_str_arg(recv, "starts_with", args[0], arg),
+            ("endsWith", 1) => self.emit_str_arg(recv, "ends_with", args[0], arg),
+            ("replace", 2) => {
+                self.visit(recv, arg);
+                self.printer.print(".replace((");
+                self.visit(args[0], arg);
+                self.printer.print(").as_str(), (");
+                self.visit(args[1], arg);
+                self.printer.print(").as_str())");
+                true
+            }
+            ("split", 1) => {
+                self.visit(recv, arg);
+                self.printer.print(".split((");
+                self.visit(args[0], arg);
+                self.printer.print(").as_str()).map(|x| x.to_string()).collect::<Vec<_>>()");
+                true
+            }
+            ("indexOf", 1) => {
+                self.visit(recv, arg);
+                self.printer.print(".find((");
+                self.visit(args[0], arg);
+                self.printer.print(").as_str()).map(|i| i as i32).unwrap_or(-1)");
+                true
+            }
+            ("containsKey", 1) => {
+                self.visit(recv, arg);
+                self.printer.print(".contains_key(&(");
+                self.visit(args[0], arg);
+                self.printer.print("))");
+                true
+            }
+            // ---- streams ----
+            ("stream", 0) => {
+                // Owned-value iterator so map/forEach closures see `T`, not `&T`.
+                self.visit(recv, arg);
+                self.printer.print(".iter().cloned()");
+                true
+            }
+            ("toArray", 0) => {
+                self.visit(recv, arg);
+                self.printer.print(".collect::<Vec<_>>()");
+                true
+            }
+            ("collect", _) => {
+                // Inspect the Collector: joining -> join, toSet -> HashSet.
+                let collector = args.first().and_then(|&a| match self.arena.kind(a) {
+                    Node::MethodCallExpr { scope: Some(s), name, args, .. }
+                        if matches!(self.arena.kind(*s), Node::NameExpr { name } if name == "Collectors") =>
+                    {
+                        Some((name.clone(), args.clone()))
+                    }
+                    _ => None,
+                });
+                match collector {
+                    Some((m, cargs)) if m == "joining" => {
+                        self.visit(recv, arg);
+                        self.printer
+                            .print(".map(|x| x.to_string()).collect::<Vec<_>>().join(");
+                        if let Some(&sep) = cargs.first() {
+                            self.printer.print("(");
+                            self.visit(sep, arg);
+                            self.printer.print(").as_str()");
+                        } else {
+                            self.printer.print("\"\"");
+                        }
+                        self.printer.print(")");
+                    }
+                    Some((m, _)) if m == "toSet" => {
+                        self.visit(recv, arg);
+                        self.printer.print(".collect::<std::collections::HashSet<_>>()");
+                    }
+                    _ => {
+                        self.visit(recv, arg);
+                        self.printer.print(".collect::<Vec<_>>()");
+                    }
+                }
+                true
+            }
+            ("mapToInt", 1) | ("mapToLong", 1) | ("mapToDouble", 1) | ("mapToObj", 1) => {
+                self.visit(recv, arg);
+                self.printer.print(".map(");
+                self.visit(args[0], arg);
+                self.printer.print(")");
+                true
+            }
+            // Predicate combinators borrow each item (`&T`), but the Java lambda
+            // treats it as `T` — clone-shadow inside the closure to bridge that.
+            ("filter", 1) => self.emit_predicate(recv, "filter", args[0], arg),
+            ("anyMatch", 1) => self.emit_predicate(recv, "any", args[0], arg),
+            ("allMatch", 1) => self.emit_predicate(recv, "all", args[0], arg),
+            ("count", 0) => {
+                self.printer.print("(");
+                self.visit(recv, arg);
+                self.printer.print(".count() as i32)");
+                true
+            }
+            ("toLowerCase", 0) => self.emit_recv_method(recv, "to_lowercase", arg),
+            ("toUpperCase", 0) => self.emit_recv_method(recv, "to_uppercase", arg),
+            ("trim", 0) => {
+                self.visit(recv, arg);
+                self.printer.print(".trim().to_string()");
+                true
+            }
+            ("charAt", 1) => {
+                self.visit(recv, arg);
+                self.printer.print(".chars().nth((");
+                self.visit(args[0], arg);
+                self.printer.print(") as usize).unwrap()");
+                true
+            }
+            ("substring", 1) => {
+                self.visit(recv, arg);
+                self.printer.print("[(");
+                self.visit(args[0], arg);
+                self.printer.print(") as usize..].to_string()");
+                true
+            }
+            ("substring", 2) => {
+                self.visit(recv, arg);
+                self.printer.print("[(");
+                self.visit(args[0], arg);
+                self.printer.print(") as usize..(");
+                self.visit(args[1], arg);
+                self.printer.print(") as usize].to_string()");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Emit `recv.<method>(|p| { let p = p.clone(); <body> })` for a borrowing
+    /// predicate combinator whose argument is a one-parameter lambda.
+    fn emit_predicate(&mut self, recv: NodeId, method: &str, pred: NodeId, arg: Arg) -> bool {
+        let (params, body) = match self.arena.kind(pred) {
+            Node::LambdaExpr { parameters, body, .. } if parameters.len() == 1 => {
+                (parameters.clone(), *body)
+            }
+            // Non-lambda predicate (e.g. method ref): fall back to a plain call.
+            _ => {
+                self.visit(recv, arg);
+                self.printer.print(".");
+                self.printer.print(method);
+                self.printer.print("(");
+                self.visit(pred, arg);
+                self.printer.print(")");
+                return true;
+            }
+        };
+        let p = self.param_name(params[0]);
+        self.visit(recv, arg);
+        self.printer.print(".");
+        self.printer.print(method);
+        self.printer
+            .print(&format!("(|{p}| {{ let {p} = {p}.clone(); "));
+        if let Node::ExpressionStmt { expression } = self.arena.kind(body) {
+            let e = *expression;
+            self.visit(e, arg);
+        } else {
+            self.visit(body, arg);
+        }
+        self.printer.print(" })");
+        true
+    }
+
+    /// `recv.<method>((arg) as usize)` — for iterator take/skip.
+    fn emit_iter_count(&mut self, recv: NodeId, method: &str, n: NodeId, arg: Arg) -> bool {
+        self.visit(recv, arg);
+        self.printer.print(&format!(".{method}(("));
+        self.visit(n, arg);
+        self.printer.print(") as usize)");
+        true
+    }
+
+    /// `recv.<method>((arg).as_str())` — for String methods taking a &str.
+    fn emit_str_arg(&mut self, recv: NodeId, method: &str, s: NodeId, arg: Arg) -> bool {
+        self.visit(recv, arg);
+        self.printer.print(&format!(".{method}(("));
+        self.visit(s, arg);
+        self.printer.print(").as_str())");
+        true
+    }
+
+    fn emit_recv_method(&mut self, recv: NodeId, method: &str, arg: Arg) -> bool {
+        self.visit(recv, arg);
+        self.printer.print(".");
+        self.printer.print(method);
+        self.printer.print("()");
+        true
+    }
+
+    fn recv_type_name(&self, recv: NodeId) -> Option<String> {
+        if let Node::NameExpr { name } = self.arena.kind(recv) {
+            self.decl_java_type_name(name, recv)
+        } else {
+            None
+        }
+    }
+
+    /// Map `Math.x(...)` to a Rust receiver method, e.g. `Math.max(a, b)` ->
+    /// `(a).max(b)`, `Math.sqrt(x)` -> `(x).sqrt()`. Returns true if handled.
+    fn try_emit_math(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
+        let Some(s) = scope else { return false };
+        if !matches!(self.arena.kind(s), Node::NameExpr { name } if name == "Math") {
+            return false;
+        }
+        // (receiver-method, arity)
+        let m = match name {
+            "abs" | "sqrt" | "floor" | "ceil" | "round" | "signum" => (name, 1),
+            "max" | "min" => (name, 2),
+            "pow" => ("powf", 2),
+            _ => return false,
+        };
+        if args.len() != m.1 {
+            return false;
+        }
+        self.printer.print("(");
+        self.visit(args[0], arg);
+        self.printer.print(").");
+        self.printer.print(m.0);
+        self.printer.print("(");
+        if m.1 == 2 {
+            self.visit(args[1], arg);
+        }
+        self.printer.print(")");
+        true
+    }
+
     fn visit_object_creation(&mut self, id: NodeId, arg: Arg) {
         let (scope, typ, type_args, args, anonymous_body) = match self.kind(id) {
             Node::ObjectCreationExpr { scope, typ, type_args, args, anonymous_body } => {
@@ -1568,19 +1969,23 @@ impl<'a> RustDumpVisitor<'a> {
             self.visit(s, arg);
             self.printer.print(".");
         }
-        self.print_type_args(&type_args, arg);
-        if !type_args.is_empty() {
-            self.printer.print(" ");
-        }
-        self.visit(typ, arg);
+        let _ = type_args;
+        // Emit `<MappedType>::new(...)`, dropping the diamond/type-args. Known
+        // collections are constructed with no arguments.
+        let base = match self.arena.kind(typ) {
+            Node::ClassOrInterfaceType { name, .. } => map_type_name(name).to_string(),
+            _ => self.accept_and_cut(typ, arg).trim().to_string(),
+        };
+        self.printer.print(&base);
         self.printer.print("::new");
-        self.print_arguments(&args, arg);
-        if let Some(body) = anonymous_body {
-            self.printer.print_ln_s(" {");
-            self.printer.indent();
-            self.print_members(&body, arg, Filter::All);
-            self.printer.unindent();
-            self.printer.print("}");
+        if is_rust_collection(&base) {
+            self.printer.print("()");
+        } else {
+            self.print_arguments(&args, arg);
+        }
+        // Anonymous class bodies have no inline Rust equivalent; drop them.
+        if anonymous_body.is_some() {
+            self.printer.print(" /* anonymous class body omitted */");
         }
     }
 
@@ -1600,7 +2005,7 @@ impl<'a> RustDumpVisitor<'a> {
         match op {
             UnaryOp::Positive => self.printer.print("+"),
             UnaryOp::Negative => self.printer.print("-"),
-            UnaryOp::Inverse => self.printer.print("~"),
+            UnaryOp::Inverse => self.printer.print("!"), // Java `~` is Rust `!` on ints
             UnaryOp::Not => self.printer.print("!"),
             UnaryOp::PreIncrement => self.printer.print("++"),
             UnaryOp::PreDecrement => self.printer.print("--"),
@@ -1677,6 +2082,7 @@ impl<'a> RustDumpVisitor<'a> {
         if !type_parameters.is_empty() {
             self.printer.print(" ");
         }
+        let _ = throws; // Java `throws` has no Rust equivalent here.
         self.printer.print("fn new");
         self.printer.print("(");
         for (i, &p) in parameters.iter().enumerate() {
@@ -1687,17 +2093,20 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.print(") -> ");
         self.printer.print(&name);
-        if !throws.is_empty() {
-            self.printer.print(" throws ");
-            for (i, &r) in throws.iter().enumerate() {
-                self.visit(r, arg);
-                if i + 1 < throws.len() {
-                    self.printer.print(", ");
-                }
+        // Build the value in `__self` (`this` maps to it), then return it.
+        self.printer.print_ln_s(" {");
+        self.printer.indent();
+        self.printer
+            .print_ln_s(&format!("let mut __self: {name} = Default::default();"));
+        if let Node::BlockStmt { stmts } = self.kind(block) {
+            for s in stmts {
+                self.visit(s, arg);
+                self.printer.print_ln();
             }
         }
-        self.printer.print(" ");
-        self.visit(block, arg);
+        self.printer.print_ln_s("return __self;");
+        self.printer.unindent();
+        self.printer.print_ln_s("}");
         self.id.set_in_constructor(false);
     }
 
@@ -1719,15 +2128,9 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
+        let _ = is_default; // Rust default methods are just methods.
         self.print_modifiers(modifiers_v);
         self.printer.print("fn ");
-        if is_default {
-            self.printer.print("default ");
-        }
-        self.print_type_parameters(&type_parameters, arg);
-        if !type_parameters.is_empty() {
-            self.printer.print(" ");
-        }
         let raw_type = self.accept_and_cut(typ, arg);
         let ret_nullable = self.decl_nullable(id) && raw_type.trim() != "void";
         let type_string = if ret_nullable {
@@ -1735,9 +2138,10 @@ impl<'a> RustDumpVisitor<'a> {
         } else {
             raw_type.clone()
         };
-        self.printer.print(" ");
         let snake = self.to_snake_if_necessary(&name);
         self.printer.print(&snake);
+        // Type parameters go after the name in Rust: `fn name<T>(...)`.
+        self.print_type_parameters(&type_parameters, arg);
         self.printer.print("(");
         if !modifiers::is_static(modifiers_v) {
             let needs_mut = body.map(|b| self.mutates_self(b)).unwrap_or(false);
@@ -1798,8 +2202,8 @@ impl<'a> RustDumpVisitor<'a> {
     }
 
     fn visit_parameter(&mut self, id: NodeId, arg: Arg) {
-        let (typ, vid) = match self.kind(id) {
-            Node::Parameter { typ, id: vid, .. } => (typ, vid),
+        let (typ, vid, is_var_args) = match self.kind(id) {
+            Node::Parameter { typ, id: vid, is_var_args, .. } => (typ, vid, is_var_args),
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
@@ -1807,6 +2211,15 @@ impl<'a> RustDumpVisitor<'a> {
         self.visit(vid, arg);
         self.printer.print(": ");
         let nullable = self.decl_nullable(vid);
+        if is_var_args {
+            // Java varargs `T... xs` -> `xs: Vec<T>`.
+            self.printer.print("Vec<");
+            if let Some(t) = typ {
+                self.visit(t, arg);
+            }
+            self.printer.print(">");
+            return;
+        }
         let is_primitive = typ
             .map(|t| matches!(self.arena.kind(t), Node::PrimitiveType { .. }))
             .unwrap_or(false);
@@ -1851,34 +2264,42 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
+        // Matching on Java String requires `match sel.as_str() { "a" => ... }`.
+        let string_switch = entries.iter().any(|&e| {
+            matches!(self.arena.kind(e),
+                Node::SwitchEntryStmt { label: Some(l), .. }
+                if matches!(self.arena.kind(*l), Node::StringLiteralExpr { .. }))
+        });
         self.printer.print("match ");
-        self.visit(selector, arg);
+        if string_switch {
+            self.printer.print("(");
+            self.visit(selector, arg);
+            self.printer.print(").as_str()");
+        } else {
+            self.visit(selector, arg);
+        }
         self.printer.print_ln_s(" {");
         self.printer.indent();
+        // Java case fall-through: consecutive labels with no body share the body
+        // of the next labelled case. In Rust that is an or-pattern
+        // `a | b | c => { ... }`. A `default` label becomes `_`.
+        let mut pending: Vec<NodeId> = Vec::new(); // accumulated case-label exprs
+        let mut pending_default = false;
         for &e in &entries {
-            self.visit(e, arg);
-        }
-        self.printer.unindent();
-        self.printer.print("}");
-    }
-
-    fn visit_switch_entry(&mut self, id: NodeId, arg: Arg) {
-        let (label, stmts) = match self.kind(id) {
-            Node::SwitchEntryStmt { label, stmts } => (label, stmts),
-            _ => unreachable!(),
-        };
-        self.print_java_comment(id, arg);
-        if let Some(l) = label {
-            self.printer.print("  ");
-            self.visit(l, arg);
-            self.printer.print(" => ");
-        } else {
-            self.printer.print("_ => ");
-        }
-        self.printer.print_ln();
-        self.printer.indent();
-        if !stmts.is_empty() {
-            self.printer.print_ln_s(" {");
+            let (label, stmts) = match self.arena.kind(e) {
+                Node::SwitchEntryStmt { label, stmts } => (*label, stmts.clone()),
+                _ => continue,
+            };
+            match label {
+                Some(l) => pending.push(l),
+                None => pending_default = true,
+            }
+            if stmts.is_empty() {
+                continue; // fall through to the next case
+            }
+            // Emit the accumulated pattern.
+            self.emit_switch_patterns(&pending, pending_default, arg);
+            self.printer.print_ln_s(" => {");
             self.printer.indent();
             for &s in &stmts {
                 self.visit(s, arg);
@@ -1886,8 +2307,34 @@ impl<'a> RustDumpVisitor<'a> {
             }
             self.printer.unindent();
             self.printer.print_ln_s("}");
+            pending.clear();
+            pending_default = false;
+        }
+        // Trailing labels with no body (e.g. an empty final case).
+        if pending_default || !pending.is_empty() {
+            self.emit_switch_patterns(&pending, pending_default, arg);
+            self.printer.print_ln_s(" => {}");
         }
         self.printer.unindent();
+        self.printer.print("}");
+    }
+
+    /// Emit a match pattern: `_` for default, else `p1 | p2 | …`. String labels
+    /// are emitted raw (no `.to_string()`).
+    fn emit_switch_patterns(&mut self, pending: &[NodeId], default: bool, arg: Arg) {
+        if default {
+            self.printer.print("_");
+            return;
+        }
+        let saved = self.raw_string;
+        self.raw_string = true;
+        for (i, &l) in pending.iter().enumerate() {
+            if i > 0 {
+                self.printer.print(" | ");
+            }
+            self.visit(l, arg);
+        }
+        self.raw_string = saved;
     }
 
     fn visit_enum(&mut self, id: NodeId, arg: Arg) {
@@ -1901,34 +2348,18 @@ impl<'a> RustDumpVisitor<'a> {
         self.print_modifiers(modifiers_v);
         self.printer.print("enum ");
         self.printer.print(&name);
-        if !implements.is_empty() {
-            self.printer.print(" implements ");
-            for (i, &c) in implements.iter().enumerate() {
-                self.visit(c, arg);
-                if i + 1 < implements.len() {
-                    self.printer.print(", ");
-                }
-            }
-        }
+        let _ = &implements; // `implements` has no Rust enum equivalent; dropped.
         self.printer.print_ln_s(" {");
         self.printer.indent();
-        if !entries.is_empty() {
-            self.printer.print_ln();
-            for (i, &e) in entries.iter().enumerate() {
-                self.visit(e, arg);
-                if i + 1 < entries.len() {
-                    self.printer.print(", ");
-                }
-            }
-        }
-        if !members.is_empty() {
-            self.printer.print_ln_s(";");
-            self.print_members(&members, arg, Filter::All);
-        } else if !entries.is_empty() {
-            self.printer.print_ln();
+        // Variants only. Java enum fields/constructors/methods have no direct
+        // Rust enum equivalent and are dropped.
+        let _ = &members;
+        for &e in &entries {
+            self.visit(e, arg);
+            self.printer.print_ln_s(",");
         }
         self.printer.unindent();
-        self.printer.print("}");
+        self.printer.print_ln_s("}");
     }
 
     fn visit_enum_constant(&mut self, id: NodeId, arg: Arg) {
@@ -1936,18 +2367,11 @@ impl<'a> RustDumpVisitor<'a> {
             Node::EnumConstantDeclaration { name, args, class_body } => (name, args, class_body),
             _ => unreachable!(),
         };
+        // A Rust enum variant is just a name; Java enum constructor args and
+        // per-constant class bodies have no equivalent and are dropped.
+        let _ = (&args, &class_body);
         self.print_java_comment(id, arg);
         self.printer.print(&name);
-        // JavaParser's EnumConstantDeclaration.getArgs() is always non-null, so
-        // printArguments is always invoked (yielding "()" with no arguments).
-        self.print_arguments(&args, arg);
-        if !class_body.is_empty() {
-            self.printer.print_ln_s(" {");
-            self.printer.indent();
-            self.print_members(&class_body, arg, Filter::All);
-            self.printer.unindent();
-            self.printer.print_ln_s("}");
-        }
     }
 
     fn visit_if(&mut self, id: NodeId, arg: Arg) {
@@ -2083,26 +2507,34 @@ impl<'a> RustDumpVisitor<'a> {
             }
             _ => unreachable!(),
         };
+        // Rust closure: |params| body  (parameter types are inferred).
         self.print_java_comment(id, arg);
-        if parameters_enclosed {
-            self.printer.print("(");
-        }
+        let _ = parameters_enclosed;
+        self.printer.print("|");
         for (i, &p) in parameters.iter().enumerate() {
-            self.visit(p, arg);
+            let name = self.param_name(p);
+            self.printer.print(&name);
             if i + 1 < parameters.len() {
                 self.printer.print(", ");
             }
         }
-        if parameters_enclosed {
-            self.printer.print(")");
-        }
-        self.printer.print(" -> ");
+        self.printer.print("| ");
         if let Node::ExpressionStmt { expression } = self.arena.kind(body) {
             let e = *expression;
             self.visit(e, arg);
         } else {
             self.visit(body, arg);
         }
+    }
+
+    /// The (snake-cased) name of a Parameter's declarator id.
+    fn param_name(&self, p: NodeId) -> String {
+        if let Node::Parameter { id, .. } = self.arena.kind(p) {
+            if let Node::VariableDeclaratorId { name } = self.arena.kind(*id) {
+                return self.to_snake_if_necessary(name);
+            }
+        }
+        String::new()
     }
 
     fn visit_method_ref(&mut self, id: NodeId, arg: Arg) {
@@ -2234,39 +2666,6 @@ impl<'a> RustDumpVisitor<'a> {
         }
     }
 
-    /// First character of the JavaParser `toString()` of a node (leftmost token).
-    fn first_char_java(&self, id: NodeId) -> char {
-        match self.arena.kind(id) {
-            Node::NameExpr { name } => name.chars().next().unwrap_or(' '),
-            Node::QualifiedNameExpr { qualifier, .. } => self.first_char_java(*qualifier),
-            Node::FieldAccessExpr { scope, .. } => self.first_char_java(*scope),
-            Node::MethodCallExpr { scope, name, .. } => match scope {
-                Some(s) => self.first_char_java(*s),
-                None => name.chars().next().unwrap_or(' '),
-            },
-            Node::ArrayAccessExpr { name, .. } => self.first_char_java(*name),
-            Node::ThisExpr { .. } => 't',
-            Node::SuperExpr { .. } => 's',
-            Node::EnclosedExpr { .. } => '(',
-            Node::CastExpr { .. } => '(',
-            Node::ObjectCreationExpr { .. } => 'n',
-            Node::ClassExpr { typ } => self.first_char_java(*typ),
-            Node::ClassOrInterfaceType { scope, name, .. } => match scope {
-                Some(s) => self.first_char_java(*s),
-                None => name.chars().next().unwrap_or(' '),
-            },
-            Node::ReferenceType { typ, .. } => self.first_char_java(*typ),
-            Node::StringLiteralExpr { .. } => '"',
-            Node::IntegerLiteralExpr { value }
-            | Node::LongLiteralExpr { value }
-            | Node::DoubleLiteralExpr { value } => value.chars().next().unwrap_or(' '),
-            _ => {
-                // Fallback: render and take first char.
-                ' '
-            }
-        }
-    }
-
     fn sort_children_by_begin(&self, parent: NodeId) -> Vec<NodeId> {
         let mut everything = self.arena.children(parent);
         everything.sort_by(|&a, &b| {
@@ -2340,8 +2739,111 @@ impl<'a> RustDumpVisitor<'a> {
     }
 }
 
-fn first_char_upper(c: char) -> bool {
-    c.is_uppercase()
+/// Convert a Java hex floating-point literal (`0x1.8p3`) to a decimal Rust
+/// literal. Returns None if `s` is not a hex float.
+fn hex_float_to_decimal(s: &str) -> Option<String> {
+    let s = s.trim_end_matches(['f', 'F', 'd', 'D']);
+    let lower = s.to_ascii_lowercase();
+    let body = lower.strip_prefix("0x")?;
+    let (mant, exp) = body.split_once('p')?;
+    let exp: i32 = exp.parse().ok()?;
+    let (ip, fp) = mant.split_once('.').unwrap_or((mant, ""));
+    let mut val = 0f64;
+    for c in ip.chars() {
+        val = val * 16.0 + c.to_digit(16)? as f64;
+    }
+    let mut scale = 1.0 / 16.0;
+    for c in fp.chars() {
+        val += c.to_digit(16)? as f64 * scale;
+        scale /= 16.0;
+    }
+    val *= 2f64.powi(exp);
+    Some(format!("{val:e}"))
+}
+
+/// If `s` is a Rust keyword, escape it as a raw identifier (`r#s`). A few
+/// keywords (`self`/`super`/`crate`/`Self`) cannot be raw, but they are also
+/// reserved in Java so never appear as user identifiers.
+fn escape_rust_keyword(s: String) -> String {
+    const KW: &[&str] = &[
+        "as", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+        "return", "static", "struct", "trait", "true", "type", "unsafe", "use", "where", "while",
+        "async", "await", "box", "do", "final", "macro", "override", "priv", "try", "typeof",
+        "unsized", "virtual", "yield", "abstract", "become", "gen",
+    ];
+    if KW.contains(&s.as_str()) {
+        format!("r#{s}")
+    } else {
+        s
+    }
+}
+
+/// Convert a Java `String.format`/`printf` format string to a Rust `format!`
+/// template: `%d`/`%s`/`%.2f`/… → `{}`, `%n` → newline, `%%` → `%`. Literal
+/// braces are escaped.
+fn java_format_to_rust(fmt: &str) -> String {
+    let mut out = String::new();
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => out.push_str("{{"),
+            '}' => out.push_str("}}"),
+            '%' => {
+                if chars.peek() == Some(&'%') {
+                    chars.next();
+                    out.push('%');
+                    continue;
+                }
+                // Skip flags / width / precision / argument-index.
+                while matches!(
+                    chars.peek(),
+                    Some('0'..='9') | Some('$') | Some('.') | Some(',') | Some('+')
+                        | Some('-') | Some(' ') | Some('#') | Some('(')
+                ) {
+                    chars.next();
+                }
+                // The conversion character.
+                match chars.next() {
+                    Some('n') => out.push_str("\\n"),
+                    _ => out.push_str("{}"),
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Map a Java type simple name to its Rust equivalent (collections, boxed
+/// primitives). Returns the name unchanged if there is no mapping.
+fn map_type_name(name: &str) -> &str {
+    // Use the simple name (drop any `pkg.` qualifier) for the mapping.
+    let name = name.rsplit('.').next().unwrap_or(name);
+    match name {
+        "List" | "ArrayList" | "LinkedList" | "Collection" | "AbstractList" | "Vector"
+        | "Stack" | "Queue" | "Deque" | "ArrayDeque" | "Iterable" => "Vec",
+        "Map" | "HashMap" | "LinkedHashMap" | "TreeMap" | "SortedMap" | "NavigableMap"
+        | "AbstractMap" => "std::collections::HashMap",
+        "Set" | "HashSet" | "LinkedHashSet" | "TreeSet" | "SortedSet" | "NavigableSet"
+        | "AbstractSet" => "std::collections::HashSet",
+        "Optional" => "Option",
+        "Integer" => "i32",
+        "Long" => "i64",
+        "Short" => "i16",
+        "Byte" => "i8",
+        "Double" => "f64",
+        "Float" => "f32",
+        "Boolean" => "bool",
+        "Character" => "char",
+        other => other,
+    }
+}
+
+/// Does this (already-mapped) Rust type name name a collection constructed with
+/// `::new()` (no arguments)?
+fn is_rust_collection(mapped: &str) -> bool {
+    matches!(mapped, "Vec" | "std::collections::HashMap" | "std::collections::HashSet")
 }
 
 /// Mirrors `StringUtils.endsWithAny` for a single non-null suffix.

@@ -1,15 +1,15 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
-    fn  m(&self)   {
+    fn m(&self)   {
          let mut test: f64 = 1;
         test = 10.0 * 1.5;
          let x: f32 = 10;
     }
 
-    ;
+
 }
 

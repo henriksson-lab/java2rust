@@ -1,15 +1,11 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
-    {
-         let j: i32 = 0;
-         let u: vec![Vec<f64>; 1] = vec![0.0, ]
-        ;
-    }
+    // initializer block omitted
 
-    ;
+
 }
 

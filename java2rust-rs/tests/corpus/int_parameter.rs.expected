@@ -1,13 +1,13 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
-    fn  m(&self,  x: f64)   {
+    fn m(&self,  x: f64)   {
         self.m(10);
     }
 
-    ;
+
 }
 

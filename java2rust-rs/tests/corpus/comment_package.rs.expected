@@ -1,13 +1,13 @@
-/**
+/*
  * Licence
  */
 // Comment
 // package y;
 
-/**
+/*
  * Class.
  */
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct C {
 }
 

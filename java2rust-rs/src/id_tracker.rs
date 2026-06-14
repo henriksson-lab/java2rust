@@ -375,8 +375,17 @@ impl<'a> IdVisitor<'a> {
                 self.visit_children(id, t);
                 t.pop_block();
             }
-            MethodCallExpr { name, .. } => {
+            MethodCallExpr { scope, name, .. } => {
                 t.add_usage(&name, id);
+                // A mutating method call on a variable means it needs `let mut`.
+                if let Some(s) = scope {
+                    if let Node::NameExpr { name: recv } = self.arena.kind(s) {
+                        if is_mutating_method(&name) {
+                            let recv = recv.clone();
+                            t.add_change(&recv, s);
+                        }
+                    }
+                }
                 self.visit_children(id, t);
             }
             MethodDeclaration { name, throws, .. } => {
@@ -507,6 +516,16 @@ impl<'a> IdVisitor<'a> {
         };
         typ.and_then(|t2| self.type_description(t, t2))
     }
+}
+
+/// Collection/StringBuilder methods that mutate their receiver (so the
+/// receiver variable needs `let mut`).
+fn is_mutating_method(name: &str) -> bool {
+    matches!(
+        name,
+        "add" | "addAll" | "set" | "put" | "putAll" | "remove" | "removeAll" | "removeIf"
+            | "clear" | "push" | "pop" | "insert" | "sort" | "append" | "addFirst" | "addLast"
+    )
 }
 
 /// Mirrors `IdTrackerVisitor.getPotentialPrimitiveType`.

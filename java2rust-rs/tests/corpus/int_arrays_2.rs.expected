@@ -1,15 +1,13 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
-    fn  m(&self)   {
-         let test_array: vec![vec![Vec<Vec<f64>>; 6]; 1] = vec![vec![0.0, 1.0, 2.0, 3.1, -4.0, 5.0, ]
-        , ]
-        ;
+    fn m(&self)   {
+         let test_array: Vec<Vec<f64>> = vec![vec![0.0, 1.0, 2.0, 3.1, -4.0, 5.0, ], ];
     }
 
-    ;
+
 }
 

@@ -1,9 +1,27 @@
-# java2rust-rs
+# java2rust
 
-A Rust reimplementation of [java2rust](../java-to-rust) — a command-line tool that
-ports Java source code to (somewhat "unrusty") Rust.
+This tool aims to translate Java code to Rust. The output code needs further work
+to become idiomatic Rust, and due to the stricting ownership rules of Rust, might
+not compile at all after a first pass. 
 
-## Goal (current)
+The tool is derived from https://github.com/cguz/java-to-rust, which was used
+for inspiration. Due to differences in parsing, this code
+was not translated but the semantic mapping decisions where kept. Further
+mappings have been introduced since then
+
+## License
+
+Java2rust is made using LLM. Be careful with reusing code as we cannot guarantee that code has not been copied from somwhere.
+
+Original code license is hard to understand:
+* The code is inspired by https://github.com/cguz/java-to-rust which is GPL. 
+* But cguz/java-to-rust is in turn derived from https://github.com/aschoerk/converter-page, which is under the Apache License, Version 2.0.
+This swap is difficult to understand
+
+Consider this crate to be mostly public domain + possible parts of unclear license origin
+
+
+## Goal (below is for LLM)
 
 The original tool is now treated as **inspiration, not a spec**: we use its
 Java→Rust mapping approach but aim to emit **Rust that actually compiles**, fixing
@@ -16,6 +34,34 @@ struct fields emit as `name: Type,` (not `let …;`), static fields → associat
 (AST-derived, not reflection), `do`/`while` lowering, and dropped the spurious
 `&` on method-call arguments. Java-isms are lowered: `println!`, `panic!` for
 `throw`, bare blocks for `synchronized`/`try`, `assert!`, proper `++`/`--`.
+
+**Stdlib mapping (partial):** collection/boxed types (`List`/`ArrayList`→`Vec`,
+`Map`→`std::collections::HashMap`, `Set`→`HashSet`, `Integer`→`i32`, …), their
+constructors (`new ArrayList<>()`→`Vec::new()`), `Math.*`→receiver methods
+(`Math.max(a,b)`→`(a).max(b)`, `Math.sqrt(x)`→`(x).sqrt()`), and Rust-keyword
+identifiers escaped as raw identifiers (`box`→`r#box`). Common collection/String
+methods: `.size()`/`.length()`→`(x.len() as i32)`, `.isEmpty()`→`.is_empty()`,
+`.equals(y)`→`(x == y)`, `.add(z)`→`.push(z)` (or `.insert` for a `Set`),
+`.get(i)`→`x[(i) as usize].clone()` for a list / `x.get(&(k)).cloned().unwrap()`
+for a map, `.put(k,v)`→`.insert(k,v)`, `.contains(x)`→`.contains(&(x))`,
+`.containsKey`→`.contains_key`, and `String` ops (`toLowerCase`/`toUpperCase`/
+`trim`/`charAt`/`substring`), and `String.format("%d…%s", …)`→`format!("{}…{}", …)`
+(`%`-specifiers converted). Enhanced-for `for (T x : coll)`→`for x in coll.clone()`
+(by-value, matching Java). **Streams + lambdas:** Java lambdas → Rust closures
+(`x -> e` → `|x| e`), `.stream()`→`.iter().cloned()`, `.collect(...)`→
+`.collect::<Vec<_>>()`, `.count()`→`(… as i32)`, `.forEach`→`.for_each`,
+`.toArray`→`collect`, `.mapToInt`/etc→`.map`. Borrowing predicate combinators
+(`.filter`/`.anyMatch`→`.any`/`.allMatch`→`.all`) clone-shadow the item so the
+lambda body sees `T` not `&T`: `.filter(|x| { let x = x.clone(); x > 0 })`. So
+`xs.stream().filter(x->x>0).map(x->x*2).collect(...)` →
+`xs.iter().cloned().filter(|x| { let x = x.clone(); x > 0 }).map(|x| x * 2).collect::<Vec<_>>()`.
+Also `.findFirst`/`.findAny`→`.next()`, `.limit`/`.skip`→`.take`/`.skip(… as usize)`,
+`.sum`→`.sum::<i32>()`, `IntStream.range(a,b)`→`((a)..(b))`. More `String` ops:
+`.split`→`split(...).map(to_string).collect`, `.replace`, `.indexOf`→`.find(...).map().unwrap_or(-1)`,
+`.startsWith`/`.endsWith`, receiver-aware `.contains`. Static calls on a class
+(`Collections.x`) use `::`; chained/instance calls use `.`.
+A variable gets `let mut` when a mutating method (`add`/`put`/`remove`/…) is
+called on it.
 
 **Ownership (partial):** structs `#[derive(Clone)]`; non-Copy values read in a
 move position (return / assignment RHS / var init) get `.clone()`; array indices
@@ -31,6 +77,25 @@ values into a nullable slot →`Some(v)`, reads →`.unwrap()`, `x != null`
 
 The golden fixtures are re-baselined to this tool's own output (regression lock),
 not the jar's. Earlier history (below) targeted byte-parity with the jar.
+
+## Out of scope
+
+**GUI frameworks — Swing/AWT (`javax.swing.*`, `java.awt.*`) — are permanently
+out of scope.** They have no Rust equivalent, so code using them will not
+translate to anything that resolves or compiles, and we do not attempt to map
+them. More broadly, any **external dependency** (other libraries, and a Java
+project's own other classes when files are converted in isolation) is out of
+scope for the per-file `rustc` check: such files emit syntactically valid Rust
+but fail to compile with `cannot find type/value` until those types exist.
+
+Two real codebases are used as tests (neither is expected to fully compile —
+both have heavy external dependencies):
+- **htsjdk** — byte-parity reference for the original mapping (see history).
+- **FastQC** (`s-andrews/FastQC`, 156 files) — compile-oriented test. 0 panics
+  and **0 syntax errors** — every file produces syntactically valid Rust. 15
+  compile standalone; the other 141 fail only on external/cross-file references
+  (much of it Swing) — i.e. the out-of-scope boundary, not translation bugs. Run
+  `tools/compilecheck.sh` for the self-contained corpus.
 
 ---
 
@@ -57,75 +122,10 @@ mirrors the JavaParser node types the original code is written against. This
 isolates every tree-sitter quirk in one adapter layer and lets the intricate
 codegen port mechanically — the lowest-risk route to matching output.
 
-## Real-world parity (htsjdk)
-
-Tested against [samtools/htsjdk](https://github.com/samtools/htsjdk) — 801 source
-files — converting each with both the original `java2rust.jar` and this port:
-
-| result | files |
-|--------|-------|
-| **byte-identical** | **545** |
-| differ in comments only | 113 |
-| differ in code | 143 |
-| panic / crash | 0 |
-
-Run it yourself: `tools/parity.sh ../htsjdk/src/main/java`.
-
-The remaining diffs are dominated by two effects intrinsic to the original tool:
-it uses **live JVM reflection over its classpath** to decide `&`-borrows and
-numeric `.0` promotion (we approximate this with a curated JDK class set, since
-the converter's classpath does not contain the project's own types), and a few
-files use modern Java (records, switch-expressions) that JavaParser 2.5.1 itself
-fails to parse (so the jar emits an error string with no meaningful parity).
-
-## Conformance strategy
-
-The original jar is a deterministic `String -> String` oracle. We build a
-**golden corpus**: every Java input from the original's JUnit tests (plus more),
-run through `java2rust.jar` to capture exact `.rs` output, then asserted
-byte-identical from this port. The original `containsString` JUnit assertions
-port over as a second, looser check.
-
-## Status: complete — 42/42 golden cases byte-identical to `java2rust.jar`
-
-All phases are done. `cargo test` passes; `cargo run --example check` reports
-`42/42 passing`. The corpus covers every input from the original JUnit tests plus
-generalization cases (switch, ternary, string concat, labeled loops,
-synchronized, casts, a multi-construct class, comments, ...).
-
-Modules:
-- `ast.rs` — arena AST, all ~90 JavaParser node kinds, `JClass` type model.
-- `adapter.rs` — tree-sitter CST → arena, PartParser tiered wrapping with
-  JavaParser-acceptance shape validation, and comment attribution.
-- `id_tracker.rs` — `IdTracker` + `Block` + `IdTrackerVisitor` + `java.lang` resolution.
-- `type_tracker.rs` — `TypeTrackerVisitor`.
-- `dump.rs` — `RustDumpVisitor` (all 81 visit methods) + `SourcePrinter`.
-- `modifiers.rs` — `ModifierSet`. `naming.rs` — `NamingHelper`.
-- `main.rs` — CLI (`-d -o -i -v -cp`, directory recursion).
-
-### Phases (all ✅)
-
-0. Scaffold — crate, tree-sitter deps, golden harness.
-1. Golden corpus — inputs + expected outputs from the jar (`tools/gen_golden.sh`).
-2. Typed AST — JavaParser node types, `ModifierSet`, positions, comments.
-3. Adapter — tree-sitter CST → typed AST.
-4. IdTracker + IdTrackerVisitor.
-5. TypeDescription + TypeTrackerVisitor.
-6. RustDumpVisitor + SourcePrinter + NamingHelper + helpers.
-7. CLI — `main`, directory recursion, options.
-8. Close gaps — golden corpus passes 100%.
-
-## Known risk areas (tree-sitter ≠ JavaParser)
-
-- **Comment attribution** — the dumper prints comments; tree-sitter treats
-  comments as "extras", so the adapter needs a JavaParser-like attach pass.
-- **Position ordering** — `sortByBeginPosition`, mapped from tree-sitter ranges.
-- **Special literals** — `IntegerLiteralMinValueExpr` / `LongLiteralMinValueExpr`
-  (how JavaParser models `MIN_VALUE`) have no tree-sitter equivalent.
-- **`ModifierSet`** bitmask semantics; identity-keyed `Map<Node,…>` → stable ids.
 
 ## Usage (target)
 
 ```
 java2rust-rs -d <path_file.java | path_directory> [-o output] [-i] [-v 2] [-cp]
 ```
+

@@ -1,11 +1,11 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
-    fn  method_m_is(&self) -> String ;
+    fn method_m_is(&self) -> String ;
 
-    ;
+
 }
 

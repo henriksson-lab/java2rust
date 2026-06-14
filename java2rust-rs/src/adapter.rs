@@ -589,35 +589,36 @@ impl<'a> Builder<'a> {
 
     fn formal_parameter(&mut self, n: TsNode<'a>, is_var_args: bool) -> NodeId {
         let (modifiers, _ann) = self.parse_modifiers(n);
-        let typ = self.field(n, "type").map(|t| self.typ(t));
-        // spread_parameter holds a variable_declarator; formal_parameter a `name` field.
-        let id = if let Some(name_node) = self.field(n, "name") {
-            self.alloc(
+        // formal_parameter has a `name` field; spread_parameter (varargs) holds a
+        // variable_declarator and its type as a plain child (no `type` field).
+        let (id, typ) = if let Some(name_node) = self.field(n, "name") {
+            let id = self.alloc(
                 Node::VariableDeclaratorId {
                     name: self.text(name_node),
                 },
                 name_node,
-            )
+            );
+            (id, self.field(n, "type").map(|t| self.typ(t)))
         } else {
-            // spread_parameter: find variable_declarator
             let vd = self
                 .named_children(n)
                 .into_iter()
                 .find(|c| c.kind() == "variable_declarator")
                 .unwrap();
             let nm = self.field(vd, "name").unwrap();
-            self.alloc(
+            let id = self.alloc(
                 Node::VariableDeclaratorId {
                     name: self.text(nm),
                 },
                 nm,
-            )
-        };
-        let typ = if typ.is_none() {
-            // spread_parameter type lives as a field on the node too
-            self.field(n, "type").map(|t| self.typ(t))
-        } else {
-            typ
+            );
+            // The type is the first child that isn't the declarator or modifiers.
+            let typ = self
+                .named_children(n)
+                .into_iter()
+                .find(|c| !matches!(c.kind(), "variable_declarator" | "modifiers"))
+                .map(|t| self.typ(t));
+            (id, typ)
         };
         self.alloc(
             Node::Parameter {

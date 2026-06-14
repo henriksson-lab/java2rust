@@ -1,10 +1,10 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
-    fn  m(&self)   {
+    fn m(&self)   {
          {
              let mut i: i32 = 0;
             while i < 10.0 {
@@ -16,6 +16,6 @@ impl A {
 
     }
 
-    ;
+
 }
 

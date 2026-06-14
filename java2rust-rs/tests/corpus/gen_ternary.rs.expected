@@ -1,10 +1,10 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct T {
 }
 
 impl T {
 
-    fn  m(&self,  a: i32) -> i32  {
+    fn m(&self,  a: i32) -> i32  {
         return  if a > 0 { a } else { -a };
     }
 }

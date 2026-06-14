@@ -1,10 +1,10 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct N {
 }
 
 impl N {
 
-    fn  m(&self)   {
+    fn m(&self)   {
         if a {
             if b {
                 c();

@@ -1,10 +1,10 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Y {
 }
 
 impl Y {
 
-    fn  m(&self,  o: &Object)   {
+    fn m(&self,  o: &Object)   {
         /* synchronized */ {
             x();
         }

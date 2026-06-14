@@ -1,19 +1,17 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Sw {
 }
 
 impl Sw {
 
-    fn  m(&self,  x: i32)   {
+    fn m(&self,  x: i32)   {
         match x {
-              1 => 
-                 {
-                    return;
-                }
-            _ => 
-                 {
-                    break;
-                }
+            1 => {
+                return;
+            }
+            _ => {
+                break;
+            }
         }
     }
 }

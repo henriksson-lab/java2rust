@@ -1,13 +1,13 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
-    fn  m(&self)   {
+    fn m(&self)   {
          let s: String = format!("5 choose {}gdgahdgs", i);
     }
 
-    ;
+
 }
 

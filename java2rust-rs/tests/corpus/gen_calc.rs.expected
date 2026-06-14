@@ -1,13 +1,13 @@
 // package com::example;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Calc {
     total: i32,
 }
 
 impl Calc {
 
-    pub fn  add_all(&mut self,  xs: &Vec<i32>) -> i32  {
+    pub fn add_all(&mut self,  xs: &Vec<i32>) -> i32  {
          {
              let mut i: i32 = 0;
             while i < xs.len() {
@@ -25,7 +25,7 @@ impl Calc {
         }
     }
 
-    fn  half( v: f64) -> f64  {
+    fn half( v: f64) -> f64  {
         return v / 2.0;
     }
 }

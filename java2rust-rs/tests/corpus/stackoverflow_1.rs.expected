@@ -1,24 +1,24 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
-    pub fn  to_string(&self) -> String  {
+    pub fn to_string(&self) -> String  {
         if !signal_detected() {
             return "IR Seeker: --% signal at ---.- degrees".to_string();
         }
-        return String::format("IR Seeker: %3.0f%% signal at %6.1f degrees".to_string(), get_strength() * 100.0, get_angle());
+        return format!("IR Seeker: {}% signal at {} degrees", get_strength() * 100.0, get_angle());
     }
 
-    pub fn  throw_if_modern_robotics_i2c_address_is_invalid( new_address: i32)   {
+    pub fn throw_if_modern_robotics_i2c_address_is_invalid( new_address: i32)   {
         if (new_address < MIN_NEW_I2C_ADDRESS) || (new_address > MAX_NEW_I2C_ADDRESS) {
-            panic!("{:?}", String::format("New I2C address %d is invalid;                      valid range is: %d..%d".to_string(), new_address, MIN_NEW_I2C_ADDRESS, MAX_NEW_I2C_ADDRESS));
+            panic!("{:?}", format!("New I2C address {} is invalid;                      valid range is: {}..{}", new_address, MIN_NEW_I2C_ADDRESS, MAX_NEW_I2C_ADDRESS));
         } else if (new_address % 2) != 0 {
-            panic!("{:?}", String::format("New I2C address %d is invalid; the address must be even.".to_string(), new_address));
+            panic!("{:?}", format!("New I2C address {} is invalid; the address must be even.", new_address));
         }
     }
 
-    ;
+
 }
 

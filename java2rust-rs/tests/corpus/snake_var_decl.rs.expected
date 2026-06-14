@@ -1,10 +1,10 @@
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct A {
     x_test_string: String,
 }
 
 impl A {
 
-    ;
+
 }
 
