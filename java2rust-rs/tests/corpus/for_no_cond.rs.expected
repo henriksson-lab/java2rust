@@ -8,7 +8,7 @@ impl A {
              let mut i: i32 = 10;
             loop  {
                 {
-                    System::out::println(format!("i: {}", i));
+                    println!("{}", format!("i: {}", i));
                     if i > 100 {
                         break;
                     }

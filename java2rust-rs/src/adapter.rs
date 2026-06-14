@@ -61,45 +61,46 @@ fn insert_comments(arena: &mut Arena, node: NodeId, mut comments: Vec<NodeId>, r
         }
     }
 
-    // 2. Attribute the closest preceding comment to each child as its comment.
+    // 2. Group each remaining comment by the child it IMMEDIATELY precedes (the
+    //    first child that begins after it). A comment only attaches to a child if
+    //    nothing else sits between them — JavaParser does not attribute a comment
+    //    across an intervening statement.
     let mut used = vec![false; comments.len()];
-    for &child in &children {
+    // next_child[i] = index of the first child beginning after comment i, or
+    // children.len() if the comment trails all children.
+    let next_child: Vec<usize> = comments
+        .iter()
+        .map(|&c| {
+            let cb = arena.begin(c);
+            children
+                .iter()
+                .position(|&ch| pos_lt(cb, arena.begin(ch)))
+                .unwrap_or(children.len())
+        })
+        .collect();
+
+    for (j, &child) in children.iter().enumerate() {
         if arena.comment(child).is_some() {
             continue;
         }
-        let cb = arena.begin(child);
-        let mut last: Option<usize> = None;
-        for (i, &c) in comments.iter().enumerate() {
-            if !used[i] && pos_lt(arena.begin(c), cb) {
-                last = Some(i);
-            }
-        }
-        if let Some(i) = last {
-            let c = comments[i];
+        // Comments in the gap immediately before this child, in order.
+        let group: Vec<usize> = (0..comments.len())
+            .filter(|&i| !used[i] && next_child[i] == j)
+            .collect();
+        if let Some(&last) = group.last() {
+            let c = comments[last];
             arena.data_mut(child).comment = Some(c);
             arena.data_mut(c).parent = Some(child);
-            used[i] = true;
+            used[last] = true;
         }
     }
 
     // 3. Only the root CompilationUnit claims a leftover leading comment as its
-    //    own (e.g. a file license header). For any other node the own-comment is
-    //    set by its parent; internal leftovers stay orphans.
+    //    own (e.g. a file license header).
     if node == root && arena.comment(node).is_none() {
-        let first_begin = children.first().map(|&c| arena.begin(c));
-        let mut chosen: Option<usize> = None;
-        for (i, &c) in comments.iter().enumerate() {
-            if used[i] {
-                continue;
-            }
-            let before = match first_begin {
-                Some(fb) => pos_lt(arena.begin(c), fb),
-                None => true,
-            };
-            if before {
-                chosen = Some(i);
-            }
-        }
+        let chosen = (0..comments.len())
+            .filter(|&i| !used[i] && next_child[i] == 0)
+            .last();
         if let Some(i) = chosen {
             let c = comments[i];
             arena.data_mut(node).comment = Some(c);
@@ -309,7 +310,9 @@ impl<'a> Builder<'a> {
             "interface_declaration" => self.class_declaration(n, true),
             "enum_declaration" => self.enum_declaration(n),
             ";" => self.alloc(Node::EmptyTypeDeclaration, n),
-            _ => self.unsupported("type declaration", n),
+            // Modern Java (records, annotation types) that JavaParser 2.5.1 itself
+            // cannot parse — degrade gracefully instead of crashing.
+            _ => self.alloc(Node::EmptyTypeDeclaration, n),
         }
     }
 
@@ -445,7 +448,7 @@ impl<'a> Builder<'a> {
 
     fn member(&mut self, n: TsNode<'a>) -> NodeId {
         match n.kind() {
-            "field_declaration" => self.field_declaration(n),
+            "field_declaration" | "constant_declaration" => self.field_declaration(n),
             "method_declaration" => self.method_declaration(n),
             "constructor_declaration" => self.constructor_declaration(n),
             "class_declaration" => self.class_declaration(n, false),
@@ -464,7 +467,7 @@ impl<'a> Builder<'a> {
                 let block = self.block(n);
                 self.alloc(Node::InitializerDeclaration { is_static: false, block }, n)
             }
-            _ => self.unsupported("member", n),
+            _ => self.alloc(Node::EmptyMemberDeclaration, n),
         }
     }
 
@@ -513,7 +516,13 @@ impl<'a> Builder<'a> {
             .field(n, "dimensions")
             .map(|d| self.count_dims(d))
             .unwrap_or(0);
-        let is_default = self.all_children(n).iter().any(|c| c.kind() == "default");
+        // `default` is lexed inside the `modifiers` node.
+        let is_default = self
+            .named_children(n)
+            .into_iter()
+            .find(|c| c.kind() == "modifiers")
+            .map(|m| self.all_children(m).iter().any(|c| c.kind() == "default"))
+            .unwrap_or(false);
         self.alloc(
             Node::MethodDeclaration {
                 modifiers,
@@ -661,10 +670,31 @@ impl<'a> Builder<'a> {
             "void_type" => self.alloc(Node::VoidType, n),
             "array_type" => self.reference_type(n),
             "type_identifier" | "scoped_type_identifier" | "generic_type" => {
-                let inner = self.class_or_interface_type(n);
-                inner
+                self.class_or_interface_type(n)
             }
-            _ => self.unsupported("type", n),
+            "wildcard" => {
+                let mut ext = None;
+                let mut sup = None;
+                let kids = self.all_children(n);
+                let mut mode = "";
+                for c in &kids {
+                    match c.kind() {
+                        "extends" => mode = "extends",
+                        "super" => mode = "super",
+                        "?" => {}
+                        _ => {
+                            let t = self.typ(*c);
+                            if mode == "extends" {
+                                ext = Some(t);
+                            } else if mode == "super" {
+                                sup = Some(t);
+                            }
+                        }
+                    }
+                }
+                self.alloc(Node::WildcardType { ext, sup }, n)
+            }
+            _ => self.class_or_interface_type(n),
         }
     }
 
@@ -839,9 +869,140 @@ impl<'a> Builder<'a> {
                 let message = kids.get(1).map(|&m| self.expr(m));
                 self.alloc(Node::AssertStmt { check, message }, n)
             }
+            "explicit_constructor_invocation" => self.explicit_ctor(n),
+            "try_statement" => self.try_statement(n, None),
+            "try_with_resources_statement" => {
+                let res = self.field(n, "resources");
+                self.try_statement(n, res)
+            }
             ";" => self.alloc(Node::EmptyStmt, n),
-            _ => self.unsupported("statement", n),
+            _ => self.alloc(Node::EmptyStmt, n),
         }
+    }
+
+    fn explicit_ctor(&mut self, n: TsNode<'a>) -> NodeId {
+        let ctor = self.field(n, "constructor").unwrap();
+        let is_this = self.text(ctor) == "this";
+        let expr = self.field(n, "object").map(|o| self.expr(o));
+        let args = match self.field(n, "arguments") {
+            Some(a) => self.argument_list(a),
+            None => Vec::new(),
+        };
+        self.alloc(
+            Node::ExplicitConstructorInvocationStmt {
+                is_this,
+                expr,
+                type_args: Vec::new(),
+                args,
+            },
+            n,
+        )
+    }
+
+    fn try_statement(&mut self, n: TsNode<'a>, resources_node: Option<TsNode<'a>>) -> NodeId {
+        let resources = match resources_node {
+            Some(rs) => self
+                .named_children(rs)
+                .into_iter()
+                .filter(|c| c.kind() == "resource")
+                .map(|r| self.resource(r))
+                .collect(),
+            None => Vec::new(),
+        };
+        let try_block = self.block(self.field(n, "body").unwrap());
+        let mut catchs = Vec::new();
+        let mut finally_block = None;
+        for c in self.all_children(n) {
+            match c.kind() {
+                "catch_clause" => catchs.push(self.catch_clause(c)),
+                "finally_clause" => {
+                    let blk = self
+                        .named_children(c)
+                        .into_iter()
+                        .find(|x| x.kind() == "block")
+                        .unwrap();
+                    finally_block = Some(self.block(blk));
+                }
+                _ => {}
+            }
+        }
+        self.alloc(
+            Node::TryStmt {
+                resources,
+                try_block,
+                catchs,
+                finally_block,
+            },
+            n,
+        )
+    }
+
+    fn resource(&mut self, n: TsNode<'a>) -> NodeId {
+        // `Type name = value` -> VariableDeclarationExpr (as JavaParser models try resources)
+        let typ = self.typ(self.field(n, "type").unwrap());
+        let name_node = self.field(n, "name").unwrap();
+        let vid = self.alloc(
+            Node::VariableDeclaratorId {
+                name: self.text(name_node),
+            },
+            name_node,
+        );
+        let init = self.field(n, "value").map(|v| self.expr(v));
+        let vd = self.alloc(Node::VariableDeclarator { id: vid, init }, n);
+        self.alloc(
+            Node::VariableDeclarationExpr {
+                modifiers: 0,
+                typ,
+                vars: vec![vd],
+            },
+            n,
+        )
+    }
+
+    fn catch_clause(&mut self, n: TsNode<'a>) -> NodeId {
+        let cfp = self
+            .named_children(n)
+            .into_iter()
+            .find(|c| c.kind() == "catch_formal_parameter")
+            .unwrap();
+        let (modifiers, _ann) = self.parse_modifiers(cfp);
+        let catch_type = self.field(cfp, "type").or_else(|| {
+            self.named_children(cfp).into_iter().find(|c| c.kind() == "catch_type")
+        });
+        let types: Vec<TsNode> = catch_type
+            .map(|ct| {
+                self.named_children(ct)
+                    .into_iter()
+                    .filter(|t| t.kind() != "|")
+                    .collect()
+            })
+            .unwrap_or_default();
+        let typ = if types.len() == 1 {
+            self.typ(types[0])
+        } else {
+            let elements = types.iter().map(|&t| self.reference_type(t)).collect();
+            let ct = catch_type.unwrap();
+            self.alloc(Node::UnionType { elements }, ct)
+        };
+        let name_node = self.field(cfp, "name").unwrap();
+        let id = self.alloc(
+            Node::VariableDeclaratorId {
+                name: self.text(name_node),
+            },
+            name_node,
+        );
+        // JavaParser dumps the catch parameter via Parameter (`id: &Type`).
+        let param = self.alloc(
+            Node::Parameter {
+                modifiers,
+                typ: Some(typ),
+                id,
+                is_var_args: false,
+            },
+            cfp,
+        );
+        let catch_block = self.block(self.field(n, "body").unwrap());
+        self.alloc(Node::CatchClause { param, catch_block }, n)
     }
 
     fn switch_statement(&mut self, n: TsNode<'a>) -> NodeId {
@@ -849,6 +1010,9 @@ impl<'a> Builder<'a> {
         let body = self.field(n, "body").unwrap();
         let mut entries = Vec::new();
         for grp in self.named_children(body) {
+            if matches!(grp.kind(), "line_comment" | "block_comment") {
+                continue;
+            }
             if grp.kind() != "switch_block_statement_group" {
                 self.unsupported("switch entry", grp);
             }
@@ -901,17 +1065,13 @@ impl<'a> Builder<'a> {
     }
 
     fn for_statement(&mut self, n: TsNode<'a>) -> NodeId {
-        // tree-sitter for_statement: optional init, condition, update, body
+        // tree-sitter for_statement: optional init(s), condition, update(s), body.
+        // `init` may repeat (`for (i = 0, j = n; ...)`) or be a local declaration.
         let mut init = Vec::new();
-        if let Some(i) = self.field(n, "init") {
+        for i in self.fields(n, "init") {
             if i.kind() == "local_variable_declaration" {
                 init.push(self.variable_declaration_expr(i));
             } else {
-                init.push(self.expr(i));
-            }
-        } else {
-            // multiple init expressions appear as `init` fields
-            for i in self.fields(n, "init") {
                 init.push(self.expr(i));
             }
         }
@@ -991,7 +1151,11 @@ impl<'a> Builder<'a> {
     // ---- expressions ----
 
     fn argument_list(&mut self, n: TsNode<'a>) -> Vec<NodeId> {
-        self.named_children(n).into_iter().map(|c| self.expr(c)).collect()
+        self.named_children(n)
+            .into_iter()
+            .filter(|c| !matches!(c.kind(), "line_comment" | "block_comment"))
+            .map(|c| self.expr(c))
+            .collect()
     }
 
     fn expr(&mut self, n: TsNode<'a>) -> NodeId {
@@ -1074,7 +1238,12 @@ impl<'a> Builder<'a> {
                 )
             }
             "array_initializer" => {
-                let values = self.named_children(n).into_iter().map(|c| self.expr(c)).collect();
+                let values = self
+                    .named_children(n)
+                    .into_iter()
+                    .filter(|c| !matches!(c.kind(), "line_comment" | "block_comment"))
+                    .map(|c| self.expr(c))
+                    .collect();
                 self.alloc(Node::ArrayInitializerExpr { values }, n)
             }
             "array_creation_expression" => self.array_creation(n),
@@ -1084,8 +1253,105 @@ impl<'a> Builder<'a> {
                 self.alloc(Node::InstanceOfExpr { expr, typ }, n)
             }
             "scoped_identifier" => self.name_expr_of(n),
-            _ => self.unsupported("expression", n),
+            "class_literal" => {
+                let typ = self.typ(self.named_children(n)[0]);
+                self.alloc(Node::ClassExpr { typ }, n)
+            }
+            "lambda_expression" => self.lambda(n),
+            "method_reference" => self.method_reference(n),
+            // Unknown / modern-Java expressions: degrade to the raw text rather
+            // than crash (the original jar errors on these too).
+            _ => {
+                let name = self.text(n);
+                self.alloc(Node::NameExpr { name }, n)
+            }
         }
+    }
+
+    fn lambda(&mut self, n: TsNode<'a>) -> NodeId {
+        let params_node = self.field(n, "parameters");
+        let mut parameters = Vec::new();
+        let mut parameters_enclosed = false;
+        if let Some(pn) = params_node {
+            match pn.kind() {
+                "formal_parameters" => {
+                    parameters_enclosed = true;
+                    parameters = self.formal_parameters(pn);
+                }
+                "inferred_parameters" => {
+                    parameters_enclosed = true;
+                    for c in self.named_children(pn) {
+                        parameters.push(self.lambda_ident_param(c));
+                    }
+                }
+                "identifier" => parameters.push(self.lambda_ident_param(pn)),
+                _ => {}
+            }
+        }
+        let body_node = self.field(n, "body").unwrap();
+        let body = if body_node.kind() == "block" {
+            self.block(body_node)
+        } else {
+            let expression = self.expr(body_node);
+            self.alloc(Node::ExpressionStmt { expression }, body_node)
+        };
+        self.alloc(
+            Node::LambdaExpr {
+                parameters,
+                body,
+                parameters_enclosed,
+            },
+            n,
+        )
+    }
+
+    fn lambda_ident_param(&mut self, ident: TsNode<'a>) -> NodeId {
+        let id = self.alloc(
+            Node::VariableDeclaratorId {
+                name: self.text(ident),
+            },
+            ident,
+        );
+        self.alloc(
+            Node::Parameter {
+                modifiers: 0,
+                typ: None,
+                id,
+                is_var_args: false,
+            },
+            ident,
+        )
+    }
+
+    fn method_reference(&mut self, n: TsNode<'a>) -> NodeId {
+        let named = self.named_children(n);
+        // JavaParser dumps the scope as a type (no snake-casing) unless it is
+        // `this`/`super`.
+        let scope = named.first().map(|&s| match s.kind() {
+            "this" | "super" => self.expr(s),
+            "array_type" => {
+                let typ = self.reference_type(s);
+                self.alloc(Node::TypeExpr { typ: Some(typ) }, s)
+            }
+            _ => {
+                let typ = self.class_or_interface_type(s);
+                self.alloc(Node::TypeExpr { typ: Some(typ) }, s)
+            }
+        });
+        // The member after `::` may be an identifier or the `new` keyword.
+        let identifier = self
+            .all_children(n)
+            .last()
+            .map(|&c| self.text(c))
+            .unwrap_or_default();
+        self.alloc(
+            Node::MethodReferenceExpr {
+                scope,
+                type_arguments: Vec::new(),
+                identifier,
+            },
+            n,
+        )
     }
 
     fn binary_expression(&mut self, n: TsNode<'a>) -> NodeId {
@@ -1108,19 +1374,19 @@ impl<'a> Builder<'a> {
     }
 
     fn update_expression(&mut self, n: TsNode<'a>) -> NodeId {
-        // ++x / x++ / --x / x--
+        // ++x / x++ / --x / x-- — no `operand` field; operand is the non-operator child.
         let children = self.all_children(n);
-        let operand_node = self.field(n, "operand").unwrap_or(children[0]);
+        let operand_node = *children
+            .iter()
+            .find(|c| !matches!(c.kind(), "++" | "--"))
+            .unwrap();
         let operand = self.expr(operand_node);
         let op_text = children
             .iter()
-            .find(|c| matches!(self.text(**c).as_str(), "++" | "--"))
-            .map(|c| self.text(*c))
+            .find(|c| matches!(c.kind(), "++" | "--"))
+            .map(|c| c.kind().to_string())
             .unwrap();
-        let prefix = children
-            .first()
-            .map(|c| matches!(self.text(*c).as_str(), "++" | "--"))
-            .unwrap_or(false);
+        let prefix = matches!(children.first().map(|c| c.kind()), Some("++") | Some("--"));
         let op = match (op_text.as_str(), prefix) {
             ("++", true) => UnaryOp::PreIncrement,
             ("++", false) => UnaryOp::PosIncrement,
@@ -1155,16 +1421,29 @@ impl<'a> Builder<'a> {
     fn method_invocation(&mut self, n: TsNode<'a>) -> NodeId {
         let scope = self.field(n, "object").map(|o| self.expr(o));
         let name = self.text(self.field(n, "name").unwrap());
+        let type_args = self.type_arguments(self.field(n, "type_arguments"));
         let args = self.argument_list(self.field(n, "arguments").unwrap());
         self.alloc(
             Node::MethodCallExpr {
                 scope,
-                type_args: Vec::new(),
+                type_args,
                 name,
                 args,
             },
             n,
         )
+    }
+
+    fn type_arguments(&mut self, n: Option<TsNode<'a>>) -> Vec<NodeId> {
+        match n {
+            Some(ta) => self
+                .named_children(ta)
+                .into_iter()
+                .filter(|c| !matches!(c.kind(), "line_comment" | "block_comment"))
+                .map(|t| self.typ(t))
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     fn object_creation(&mut self, n: TsNode<'a>) -> NodeId {

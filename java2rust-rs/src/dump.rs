@@ -78,7 +78,6 @@ impl SourcePrinter {
 /// Member filter used by `printMembers`.
 #[derive(Clone, Copy)]
 enum Filter {
-    StaticField(bool),
     NonField,
     All,
 }
@@ -92,6 +91,9 @@ pub struct RustDumpVisitor<'a> {
     #[allow(dead_code)]
     comment_out: bool,
     print_comments: bool,
+    /// Instance field names (Java spelling) of the enclosing class, used to
+    /// decide whether a method needs `&mut self`.
+    class_field_names: std::collections::HashSet<String>,
 }
 
 impl<'a> RustDumpVisitor<'a> {
@@ -102,6 +104,7 @@ impl<'a> RustDumpVisitor<'a> {
             id,
             comment_out: false,
             print_comments,
+            class_field_names: std::collections::HashSet::new(),
         }
     }
 
@@ -184,12 +187,6 @@ impl<'a> RustDumpVisitor<'a> {
             let keep = match filter {
                 Filter::All => true,
                 Filter::NonField => !matches!(self.arena.kind(member), Node::FieldDeclaration { .. }),
-                Filter::StaticField(want) => match self.arena.kind(member) {
-                    Node::FieldDeclaration { modifiers: fm, .. } => {
-                        modifiers::is_static(*fm) == want
-                    }
-                    _ => false,
-                },
             };
             if keep {
                 self.printer.print_ln();
@@ -233,12 +230,11 @@ impl<'a> RustDumpVisitor<'a> {
                     if let Some((Some(left), _)) =
                         self.id.find_declaration_node_for(self.arena, name, e)
                     {
-                        if !left.clazz.is_primitive() || left.array_count > 0 {
+                        if !left.is_primitive || left.array_count > 0 {
                             self.printer.print("&");
                         }
                     }
                 }
-                Node::MethodCallExpr { .. } => self.printer.print("&"),
                 _ => {}
             }
             self.visit(e, arg);
@@ -495,9 +491,12 @@ impl<'a> RustDumpVisitor<'a> {
             }
             StringLiteralExpr { value } => {
                 self.print_java_comment(id, arg);
+                // Java String is an owned type; emit an owned Rust String so
+                // `String`-typed bindings/returns type-check. (String-concat goes
+                // through format! separately and never reaches here.)
                 self.printer.print("\"");
                 self.printer.print(&value);
-                self.printer.print("\"");
+                self.printer.print("\".to_string()");
             }
             BooleanLiteralExpr { value } => {
                 self.print_java_comment(id, arg);
@@ -575,10 +574,10 @@ impl<'a> RustDumpVisitor<'a> {
             }
             AssertStmt { check, message } => {
                 self.print_java_comment(id, arg);
-                self.printer.print("assert!( ");
+                self.printer.print("assert!(");
                 self.visit(check, arg);
                 if let Some(msg) = message {
-                    self.printer.print(" : ");
+                    self.printer.print(", \"{}\", ");
                     self.visit(msg, arg);
                 }
                 self.printer.print(");");
@@ -661,10 +660,9 @@ impl<'a> RustDumpVisitor<'a> {
                 self.print_java_comment(id, arg);
                 self.printer.print("loop { ");
                 self.visit(body, arg);
-                self.printer.print("if !(");
+                self.printer.print(" if !(");
                 self.visit(condition, arg);
-                self.printer.print(") break;");
-                self.printer.print("}");
+                self.printer.print(") { break; } }");
             }
             ForeachStmt { variable, iterable, body } => {
                 self.print_java_comment(id, arg);
@@ -789,86 +787,187 @@ impl<'a> RustDumpVisitor<'a> {
             };
         self.print_java_comment(id, arg);
 
-        if !members.is_empty() {
-            self.print_members(&members, arg, Filter::StaticField(true));
+        if is_interface {
+            self.visit_trait(modifiers_v, &name, &type_parameters, &extends, &members, arg);
+            return;
         }
 
-        if !implements.is_empty() {
-            self.printer.print("#[derive(");
-            for (i, &c) in implements.iter().enumerate() {
-                self.visit(c, arg);
-                if i + 1 < implements.len() {
-                    self.printer.print(", ");
+        // Track this class's instance field names for `&mut self` decisions.
+        let saved_fields = std::mem::take(&mut self.class_field_names);
+        for &m in &members {
+            if let Node::FieldDeclaration { modifiers, variables, .. } = self.arena.kind(m) {
+                if !modifiers::is_static(*modifiers) {
+                    for &var in variables {
+                        if let Node::VariableDeclarator { id: vid, .. } = self.arena.kind(var) {
+                            if let Node::VariableDeclaratorId { name } = self.arena.kind(*vid) {
+                                self.class_field_names.insert(name.clone());
+                            }
+                        }
+                    }
                 }
             }
-            self.printer.print_ln_s(")]");
         }
 
+        // ---- struct ----
         self.print_modifiers(modifiers_v);
-
-        if is_interface {
-            self.printer.print("trait ");
-        } else {
-            self.printer.print("struct ");
-        }
+        self.printer.print("struct ");
         self.printer.print(&name);
         self.print_type_parameters(&type_parameters, arg);
-
-        if !extends.is_empty() {
-            if is_interface {
-                self.printer.print(" : ");
-                let mut first = true;
-                for &i in &extends {
-                    if first {
-                        first = false;
-                    } else {
-                        self.printer.print(" + ");
-                    }
-                    self.visit(i, arg);
-                }
-                self.printer.print_ln_s(" {");
-                self.printer.indent();
-            } else {
-                self.printer.print_ln_s(" {");
-                self.printer.indent();
-                let mut count: i32 = if extends.len() > 1 { 0 } else { -1 };
-                for &c in &extends {
-                    let suffix = if count >= 0 {
-                        count += 1;
-                        count.to_string()
-                    } else {
-                        String::new()
-                    };
-                    self.printer.print(&format!("super{suffix}: "));
-                    self.visit(c, arg);
-                    self.printer.print_ln_s(";");
+        // (Java `extends`/`implements` have no direct struct equivalent and are
+        // dropped — inheritance is not modelled.)
+        let _ = (&extends, &implements);
+        self.printer.print_ln_s(" {");
+        self.printer.indent();
+        for &m in &members {
+            if let Node::FieldDeclaration { modifiers, .. } = self.arena.kind(m) {
+                if !modifiers::is_static(*modifiers) {
+                    self.emit_struct_field(m, arg);
                 }
             }
-        } else {
-            self.printer.print_ln_s(" {");
-            self.printer.indent();
-        }
-
-        if !members.is_empty() {
-            self.print_members(&members, arg, Filter::StaticField(false));
-        }
-
-        self.print_orphan_comments_ending(id);
-
-        if !is_interface {
-            self.printer.unindent();
-            self.printer.print_ln_s("}");
-            self.printer.print_ln_s("");
-            self.printer.print("impl ");
-            self.printer.print(&name);
-            self.printer.print_ln_s(" {");
-            self.printer.indent();
-        }
-        if !members.is_empty() {
-            self.print_members(&members, arg, Filter::NonField);
         }
         self.printer.unindent();
         self.printer.print_ln_s("}");
+        self.printer.print_ln();
+
+        // ---- impl ----
+        self.printer.print("impl ");
+        self.printer.print(&name);
+        self.print_type_parameters(&type_parameters, arg);
+        self.printer.print_ln_s(" {");
+        self.printer.indent();
+        // static fields as associated constants
+        for &m in &members {
+            if let Node::FieldDeclaration { modifiers, .. } = self.arena.kind(m) {
+                if modifiers::is_static(*modifiers) {
+                    self.emit_const_field(m, arg);
+                }
+            }
+        }
+        // methods / constructors / nested / initializers
+        self.print_members(&members, arg, Filter::NonField);
+        self.print_orphan_comments_ending(id);
+        self.printer.unindent();
+        self.printer.print_ln_s("}");
+        self.class_field_names = saved_fields;
+    }
+
+    /// Does this subtree assign to an instance field (→ method needs `&mut self`)?
+    fn mutates_self(&self, node: NodeId) -> bool {
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            match self.arena.kind(n) {
+                Node::AssignExpr { target, .. } => {
+                    if self.is_self_target(*target) {
+                        return true;
+                    }
+                }
+                Node::UnaryExpr { expr, op } => {
+                    use crate::ast::UnaryOp::*;
+                    if matches!(op, PreIncrement | PreDecrement | PosIncrement | PosDecrement)
+                        && self.is_self_target(*expr)
+                    {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+            for c in self.arena.children(n) {
+                stack.push(c);
+            }
+        }
+        false
+    }
+
+    fn is_self_target(&self, t: NodeId) -> bool {
+        match self.arena.kind(t) {
+            Node::NameExpr { name } => self.class_field_names.contains(name),
+            Node::FieldAccessExpr { scope, field, .. } => {
+                matches!(self.arena.kind(*scope), Node::ThisExpr { .. })
+                    || self.class_field_names.contains(field)
+            }
+            Node::ArrayAccessExpr { name, .. } => self.is_self_target(*name),
+            _ => false,
+        }
+    }
+
+    fn visit_trait(
+        &mut self,
+        modifiers_v: i32,
+        name: &str,
+        type_parameters: &[NodeId],
+        extends: &[NodeId],
+        members: &[NodeId],
+        arg: Arg,
+    ) {
+        self.print_modifiers(modifiers_v);
+        self.printer.print("trait ");
+        self.printer.print(name);
+        self.print_type_parameters(type_parameters, arg);
+        if !extends.is_empty() {
+            self.printer.print(" : ");
+            for (i, &e) in extends.iter().enumerate() {
+                if i > 0 {
+                    self.printer.print(" + ");
+                }
+                self.visit(e, arg);
+            }
+        }
+        self.printer.print_ln_s(" {");
+        self.printer.indent();
+        self.print_members(members, arg, Filter::NonField);
+        self.printer.unindent();
+        self.printer.print_ln_s("}");
+    }
+
+    /// Emit a non-static field as a Rust struct field: `name: Type,` (one per
+    /// declared variable; Java field initializers are dropped here).
+    fn emit_struct_field(&mut self, field_id: NodeId, _arg: Arg) {
+        let (typ, variables) = match self.kind(field_id) {
+            Node::FieldDeclaration { typ, variables, .. } => (typ, variables),
+            _ => return,
+        };
+        for var in variables {
+            let name = self.field_var_name(var);
+            self.printer.print(&format!("{name}: "));
+            self.visit(typ, None);
+            self.printer.print_ln_s(",");
+        }
+    }
+
+    /// Emit a static field as an associated `const`.
+    fn emit_const_field(&mut self, field_id: NodeId, _arg: Arg) {
+        let (typ, variables) = match self.kind(field_id) {
+            Node::FieldDeclaration { typ, variables, .. } => (typ, variables),
+            _ => return,
+        };
+        let type_str = self.accept_and_cut(typ, None);
+        let type_str = type_str.trim().to_string();
+        for var in variables {
+            let name = self.field_var_name(var);
+            self.printer.print(&format!("const {name}: "));
+            self.visit(typ, None);
+            self.printer.print(" = ");
+            match self.arena.kind(var) {
+                Node::VariableDeclarator { init: Some(i), .. } => {
+                    let i = *i;
+                    self.visit(i, None);
+                }
+                _ => {
+                    let d = self.default_value(&type_str);
+                    self.printer.print(&d);
+                }
+            }
+            self.printer.print_ln_s(";");
+        }
+    }
+
+    fn field_var_name(&self, var: NodeId) -> String {
+        if let Node::VariableDeclarator { id, .. } = self.arena.kind(var) {
+            if let Node::VariableDeclaratorId { name } = self.arena.kind(*id) {
+                return self.to_snake_if_necessary(name);
+            }
+        }
+        String::new()
     }
 
     fn visit_class_type(&mut self, id: NodeId, arg: Arg) {
@@ -1214,6 +1313,9 @@ impl<'a> RustDumpVisitor<'a> {
             Node::MethodCallExpr { scope, type_args, name, args } => (scope, type_args, name, args),
             _ => unreachable!(),
         };
+        if self.try_emit_print_macro(scope, &name, &args, arg) {
+            return;
+        }
         self.print_java_comment(id, arg);
         if let Some(s) = scope {
             self.visit(s, arg);
@@ -1241,6 +1343,34 @@ impl<'a> RustDumpVisitor<'a> {
         let s = self.to_snake_if_necessary(&name);
         self.printer.print(&s);
         self.print_arguments(&args, arg);
+    }
+
+    /// Map `System.out.println(x)` / `System.err.print(x)` etc. to the Rust
+    /// print macros. Returns true if it handled the call.
+    fn try_emit_print_macro(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
+        let Some(s) = scope else { return false };
+        let Node::FieldAccessExpr { scope: inner, field, .. } = self.arena.kind(s) else {
+            return false;
+        };
+        let (inner, field) = (*inner, field.clone());
+        if !matches!(self.arena.kind(inner), Node::NameExpr { name } if name == "System") {
+            return false;
+        }
+        let mac = match (field.as_str(), name) {
+            ("out", "println") => "println",
+            ("err", "println") => "eprintln",
+            ("out", "print") => "print",
+            ("err", "print") => "eprint",
+            _ => return false,
+        };
+        self.printer.print(mac);
+        self.printer.print("!(");
+        if let Some(&first) = args.first() {
+            self.printer.print("\"{}\", ");
+            self.visit(first, arg);
+        }
+        self.printer.print(")");
+        true
     }
 
     fn visit_object_creation(&mut self, id: NodeId, arg: Arg) {
@@ -1306,36 +1436,47 @@ impl<'a> RustDumpVisitor<'a> {
             Node::UnaryExpr { expr, op } => (expr, op),
             _ => unreachable!(),
         };
-        // Mirrors the fall-through switch in RustDumpVisitor.visit(UnaryExpr).
-        let suffix = match op {
-            UnaryOp::PreIncrement => Some(" += 1".to_string()),
-            UnaryOp::PosIncrement => Some(format!(
-                " += 1{}",
-                if self.is_embedded_in_stmt(id) {
-                    " !!!check!!! post increment"
+        use UnaryOp::*;
+        match op {
+            PreIncrement | PreDecrement | PosIncrement | PosDecrement => {
+                self.print_java_comment(id, arg);
+                let opstr = if matches!(op, PreDecrement | PosDecrement) {
+                    " -= 1"
                 } else {
-                    ""
-                }
-            )),
-            UnaryOp::PreDecrement => Some(" -= 1".to_string()),
-            UnaryOp::PosDecrement => Some(format!(
-                " -= 1{}",
+                    " += 1"
+                };
+                let post = matches!(op, PosIncrement | PosDecrement);
                 if self.is_embedded_in_stmt(id) {
-                    " !!!check!!! post decrement"
+                    // Used as a value: lower to a block expression.
+                    if post {
+                        // x++ : yield old value
+                        self.printer.print("{ let __v = ");
+                        self.visit(expr, arg);
+                        self.printer.print("; ");
+                        self.visit(expr, arg);
+                        self.printer.print(opstr);
+                        self.printer.print("; __v }");
+                    } else {
+                        // ++x : increment then yield
+                        self.printer.print("{ ");
+                        self.visit(expr, arg);
+                        self.printer.print(opstr);
+                        self.printer.print("; ");
+                        self.visit(expr, arg);
+                        self.printer.print(" }");
+                    }
                 } else {
-                    ""
+                    // Statement context: a plain compound assignment.
+                    self.visit(expr, arg);
+                    self.printer.print(opstr);
                 }
-            )),
-            UnaryOp::Positive => Some(String::new()),
-            _ => None,
-        };
-        match suffix {
-            Some(s) => {
+            }
+            Positive => {
                 self.print_java_comment(id, arg);
                 self.visit(expr, arg);
-                self.printer.print(&s);
             }
-            None => self.org_visit_unary(id, arg),
+            // Negative / Not / Inverse: prefix operator.
+            _ => self.org_visit_unary(id, arg),
         }
     }
 
@@ -1410,7 +1551,8 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print(&snake);
         self.printer.print("(");
         if !modifiers::is_static(modifiers_v) {
-            self.printer.print("&self");
+            let needs_mut = body.map(|b| self.mutates_self(b)).unwrap_or(false);
+            self.printer.print(if needs_mut { "&mut self" } else { "&self" });
             if !parameters.is_empty() {
                 self.printer.print(", ");
             }
@@ -1927,6 +2069,12 @@ impl<'a> RustDumpVisitor<'a> {
             Node::EnclosedExpr { .. } => '(',
             Node::CastExpr { .. } => '(',
             Node::ObjectCreationExpr { .. } => 'n',
+            Node::ClassExpr { typ } => self.first_char_java(*typ),
+            Node::ClassOrInterfaceType { scope, name, .. } => match scope {
+                Some(s) => self.first_char_java(*s),
+                None => name.chars().next().unwrap_or(' '),
+            },
+            Node::ReferenceType { typ, .. } => self.first_char_java(*typ),
             Node::StringLiteralExpr { .. } => '"',
             Node::IntegerLiteralExpr { value }
             | Node::LongLiteralExpr { value }

@@ -1,6 +1,5 @@
 struct A {
-
-     let i: i32;
+    i: i32,
 }
 
 impl A {

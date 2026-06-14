@@ -3,9 +3,27 @@
 A Rust reimplementation of [java2rust](../java-to-rust) — a command-line tool that
 ports Java source code to (somewhat "unrusty") Rust.
 
-The goal is **behavioral equivalence**, not a source-level translation: given the
-same Java input, this tool should emit the **same Rust text** as the original
-`java2rust.jar`. Internals are idiomatic Rust and use tree-sitter for parsing.
+## Goal (current)
+
+The original tool is now treated as **inspiration, not a spec**: we use its
+Java→Rust mapping approach but aim to emit **Rust that actually compiles**, fixing
+the original's quirks (it deliberately produces "unrusty", non-compiling output).
+
+`tools/compilecheck.sh` runs a corpus of self-contained Java snippets through the
+converter and checks each with `rustc --crate-type lib`. Fixes landed so far:
+struct fields emit as `name: Type,` (not `let …;`), static fields → associated
+`const`, methods that mutate fields take `&mut self`, principled `&`-borrows
+(AST-derived, not reflection), `do`/`while` lowering, and dropped the spurious
+`&` on method-call arguments. Current corpus: **22/24 compiling** (the two
+failures are int→char literals and embedded post-increment).
+
+The golden fixtures are re-baselined to this tool's own output (regression lock),
+not the jar's. Earlier history (below) targeted byte-parity with the jar.
+
+---
+
+Earlier goal was **behavioral equivalence** with `java2rust.jar` (same output for
+same input). Internals are idiomatic Rust and use tree-sitter for parsing.
 
 ## Architecture
 
@@ -26,6 +44,27 @@ tree-sitter does the robust parsing; an adapter reconstructs a typed AST that
 mirrors the JavaParser node types the original code is written against. This
 isolates every tree-sitter quirk in one adapter layer and lets the intricate
 codegen port mechanically — the lowest-risk route to matching output.
+
+## Real-world parity (htsjdk)
+
+Tested against [samtools/htsjdk](https://github.com/samtools/htsjdk) — 801 source
+files — converting each with both the original `java2rust.jar` and this port:
+
+| result | files |
+|--------|-------|
+| **byte-identical** | **545** |
+| differ in comments only | 113 |
+| differ in code | 143 |
+| panic / crash | 0 |
+
+Run it yourself: `tools/parity.sh ../htsjdk/src/main/java`.
+
+The remaining diffs are dominated by two effects intrinsic to the original tool:
+it uses **live JVM reflection over its classpath** to decide `&`-borrows and
+numeric `.0` promotion (we approximate this with a curated JDK class set, since
+the converter's classpath does not contain the project's own types), and a few
+files use modern Java (records, switch-expressions) that JavaParser 2.5.1 itself
+fails to parse (so the jar emits an error string with no meaningful parity).
 
 ## Conformance strategy
 

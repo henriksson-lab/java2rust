@@ -4,6 +4,7 @@ use std::path::Path;
 
 fn main() {
     let focus = std::env::var("FOCUS").ok();
+    let rebaseline = std::env::var("REBASELINE").is_ok();
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
     let mut names: Vec<String> = fs::read_dir(&dir)
         .unwrap()
@@ -24,9 +25,14 @@ fn main() {
             }
         }
         let input = fs::read_to_string(dir.join(format!("{name}.java"))).unwrap();
-        let expected = fs::read_to_string(dir.join(format!("{name}.rs.expected"))).unwrap();
         let got = std::panic::catch_unwind(|| java2rust_rs::convert(&input))
             .unwrap_or_else(|_| "<PANIC>".to_string());
+        if rebaseline {
+            fs::write(dir.join(format!("{name}.rs.expected")), &got).unwrap();
+            println!("rebaselined {name}");
+            continue;
+        }
+        let expected = fs::read_to_string(dir.join(format!("{name}.rs.expected"))).unwrap();
         if got == expected {
             pass += 1;
             println!("PASS {name}");

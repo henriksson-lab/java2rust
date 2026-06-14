@@ -4,11 +4,14 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{Arena, JClass, Node, NodeId, Pos};
 
-/// Mirrors `de.aschoerk.java2rust.TypeDescription`.
+/// Inspired by `de.aschoerk.java2rust.TypeDescription`, but `is_primitive` is
+/// read directly from the AST type node rather than via JVM reflection — so the
+/// borrow decision is consistent and independent of the classpath.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeDescription {
     pub array_count: i32,
     pub clazz: JClass,
+    pub is_primitive: bool,
 }
 
 /// Mirrors `de.aschoerk.java2rust.Import`.
@@ -397,6 +400,16 @@ impl<'a> IdVisitor<'a> {
                     t.add_usage(&name, id);
                 }
             }
+            // JavaParser models the field of a FieldAccessExpr as a child NameExpr,
+            // so `this.x = ...` records a change to `x` (driving `let mut`).
+            FieldAccessExpr { scope, field, .. } => {
+                self.visit(scope, t);
+                if self.in_assign_target {
+                    t.add_change(&field, id);
+                } else {
+                    t.add_usage(&field, id);
+                }
+            }
             QualifiedNameExpr { name, .. } => {
                 if self.in_assign_target {
                     t.add_change(&name, id);
@@ -456,28 +469,29 @@ impl<'a> IdVisitor<'a> {
 
     fn type_description(&self, t: &IdTracker, typ: NodeId) -> Option<TypeDescription> {
         let name = self.name_of_type(typ);
-        let mut clazz = identify_class(t, name.as_deref());
+        let clazz = identify_class(t, name.as_deref());
         match self.arena.kind(typ) {
             Node::ReferenceType { typ: inner, array_count } => {
-                if clazz.is_none() {
-                    clazz = potential_primitive(self.arena.kind(*inner));
-                }
-                if let Some(c) = clazz {
-                    return Some(TypeDescription {
-                        array_count: *array_count,
-                        clazz: c,
-                    });
-                }
+                let inner_prim = potential_primitive(self.arena.kind(*inner));
+                Some(TypeDescription {
+                    array_count: *array_count,
+                    clazz: clazz.or(inner_prim).unwrap_or(JClass::Other),
+                    is_primitive: inner_prim.is_some(),
+                })
             }
-            _ => {}
+            Node::PrimitiveType { .. } => Some(TypeDescription {
+                array_count: 0,
+                clazz: potential_primitive(self.arena.kind(typ)).unwrap_or(JClass::Other),
+                is_primitive: true,
+            }),
+            Node::ClassOrInterfaceType { .. } => Some(TypeDescription {
+                array_count: 0,
+                clazz: clazz.unwrap_or(JClass::Other),
+                is_primitive: false,
+            }),
+            // VoidType / UnknownType / etc.: no useful description.
+            _ => None,
         }
-        if clazz.is_none() {
-            clazz = potential_primitive(self.arena.kind(typ));
-        }
-        clazz.map(|c| TypeDescription {
-            array_count: 0,
-            clazz: c,
-        })
     }
 
     fn type_of_var_id(&self, t: &IdTracker, id: NodeId) -> Option<TypeDescription> {
@@ -523,8 +537,12 @@ fn identify_class(t: &IdTracker, name: Option<&str>) -> Option<JClass> {
     for i in &t.imports {
         if !i.static_import {
             if i.wildcard_import {
-                if let Some(c) = for_name(&format!("{}.{}", i.import_string, name)) {
-                    return Some(c);
+                // A wildcard import only resolves a name if that class actually
+                // exists in the package. We cannot reflect, so we resolve only
+                // well-known JDK simple names — avoiding spuriously resolving
+                // project types under `import java.util.*` etc.
+                if wildcard_pkg_has(&i.import_string, name) {
+                    return Some(JClass::Other);
                 }
             } else if i.import_string.ends_with(&format!(".{name}")) {
                 if let Some(c) = for_name(&i.import_string) {
@@ -550,45 +568,104 @@ fn for_name(fqn: &str) -> Option<JClass> {
     let java_lang = fqn
         .strip_prefix("java.lang.")
         .map_or(false, |rest| !rest.contains('.'));
-    match (java_lang, simple) {
-        (true, "String") => Some(JClass::StringClass),
-        (true, "Double") => Some(JClass::DoubleClass),
-        (true, "Float") => Some(JClass::FloatClass),
-        (true, "Integer") => Some(JClass::IntegerClass),
-        (true, "Long") => Some(JClass::LongClass),
-        (true, "Short") => Some(JClass::ShortClass),
-        (true, "Byte") => Some(JClass::ByteClass),
-        (true, "Character") => Some(JClass::CharacterClass),
-        (true, "Boolean") => Some(JClass::BooleanClass),
-        (true, n) if JAVA_LANG.contains(&n) => Some(JClass::Other),
-        _ => None,
+    if java_lang {
+        return match simple {
+            "String" => Some(JClass::StringClass),
+            "Double" => Some(JClass::DoubleClass),
+            "Float" => Some(JClass::FloatClass),
+            "Integer" => Some(JClass::IntegerClass),
+            "Long" => Some(JClass::LongClass),
+            "Short" => Some(JClass::ShortClass),
+            "Byte" => Some(JClass::ByteClass),
+            "Character" => Some(JClass::CharacterClass),
+            "Boolean" => Some(JClass::BooleanClass),
+            // Only real java.lang classes resolve via Class.forName("java.lang."+name).
+            n if JAVA_LANG.contains(&n) => Some(JClass::Other),
+            _ => None,
+        };
+    }
+    // Other JDK packages are always on the classpath; approximate Class.forName
+    // success for them (project classes like htsjdk.* are NOT on the converter's
+    // classpath, so they fail to resolve — matching the jar).
+    if fqn.starts_with("java.") || fqn.starts_with("javax.") {
+        return Some(JClass::Other);
+    }
+    None
+}
+
+/// Does a wildcard import of `pkg` resolve the simple class `name`? We match the
+/// name against the known classes of that specific package (a `java.util.*`
+/// import must not resolve `Path`, which lives in `java.nio.file`).
+fn wildcard_pkg_has(pkg: &str, name: &str) -> bool {
+    match pkg {
+        "java.util" => JAVA_UTIL.contains(&name),
+        "java.io" => JAVA_IO.contains(&name),
+        "java.nio.file" => JAVA_NIO_FILE.contains(&name),
+        "java.nio" | "java.nio.channels" => {
+            matches!(name, "ByteBuffer" | "CharBuffer" | "IntBuffer" | "LongBuffer" | "Buffer")
+        }
+        _ => false,
     }
 }
 
+const JAVA_UTIL: &[&str] = &[
+    "List", "ArrayList", "LinkedList", "Map", "HashMap", "LinkedHashMap", "TreeMap", "SortedMap",
+    "NavigableMap", "AbstractMap", "Set", "HashSet", "LinkedHashSet", "TreeSet", "SortedSet",
+    "NavigableSet", "Collection", "AbstractCollection", "AbstractList", "Collections", "Arrays",
+    "Iterator", "ListIterator", "Comparator", "Optional", "OptionalInt", "OptionalLong",
+    "OptionalDouble", "Queue", "Deque", "ArrayDeque", "PriorityQueue", "Stack", "Vector",
+    "Enumeration", "Properties", "Date", "Calendar", "GregorianCalendar", "TimeZone", "Locale",
+    "Random", "UUID", "Objects", "Scanner", "StringTokenizer", "BitSet", "EnumSet", "EnumMap",
+    "NoSuchElementException", "ConcurrentModificationException", "Spliterator", "Formatter",
+    "IdentityHashMap", "WeakHashMap", "AbstractSet", "Map.Entry",
+];
+
+const JAVA_IO: &[&str] = &[
+    "InputStream", "OutputStream", "Reader", "Writer", "BufferedReader", "BufferedWriter",
+    "BufferedInputStream", "BufferedOutputStream", "ByteArrayInputStream", "ByteArrayOutputStream",
+    "DataInputStream", "DataOutputStream", "DataInput", "DataOutput", "File", "FileInputStream",
+    "FileOutputStream", "FileReader", "FileWriter", "InputStreamReader", "OutputStreamWriter",
+    "PrintStream", "PrintWriter", "IOException", "FileNotFoundException", "UncheckedIOException",
+    "Closeable", "Flushable", "Serializable", "Externalizable", "EOFException",
+    "RandomAccessFile", "StringWriter", "StringReader", "FilterInputStream", "FilterOutputStream",
+    "ObjectInputStream", "ObjectOutputStream", "InterruptedIOException", "PushbackInputStream",
+];
+
+const JAVA_NIO_FILE: &[&str] = &[
+    "Path", "Paths", "Files", "FileSystem", "FileSystems", "OpenOption", "StandardOpenOption",
+    "FileVisitor", "SimpleFileVisitor", "FileVisitResult", "DirectoryStream", "LinkOption",
+    "CopyOption", "StandardCopyOption", "PathMatcher", "WatchService", "FileStore",
+    "NoSuchFileException", "FileAlreadyExistsException",
+];
+
+/// Subset of public `java.lang` class simple names the corpus may reference.
+
 /// Subset of public `java.lang` class simple names the corpus may reference.
 const JAVA_LANG: &[&str] = &[
-    "Object",
-    "Class",
-    "System",
-    "Math",
-    "Number",
-    "Thread",
-    "Runnable",
-    "Comparable",
-    "Iterable",
-    "CharSequence",
-    "StringBuilder",
-    "StringBuffer",
-    "Exception",
-    "RuntimeException",
-    "Error",
-    "Throwable",
-    "IllegalArgumentException",
-    "IllegalStateException",
-    "NullPointerException",
-    "IndexOutOfBoundsException",
+    // core
+    "Object", "Class", "System", "Math", "StrictMath", "Number", "Enum", "Record", "Void",
+    "Runtime", "Process", "ProcessBuilder", "Thread", "ThreadGroup", "ThreadLocal", "Package",
+    "Compiler", "ClassLoader", "SecurityManager", "Runtime",
+    // wrappers handled specially above are excluded here
+    // char/string
+    "CharSequence", "String", "StringBuilder", "StringBuffer", "Character", "Boolean",
+    // interfaces
+    "Runnable", "Comparable", "Iterable", "Cloneable", "AutoCloseable", "Appendable", "Readable",
+    // throwables
+    "Throwable", "Error", "Exception", "RuntimeException",
+    "ArithmeticException", "ArrayIndexOutOfBoundsException", "ArrayStoreException",
+    "ClassCastException", "ClassNotFoundException", "CloneNotSupportedException",
+    "EnumConstantNotPresentException", "IllegalAccessException", "IllegalArgumentException",
+    "IllegalMonitorStateException", "IllegalStateException", "IllegalThreadStateException",
+    "IndexOutOfBoundsException", "InstantiationException", "InterruptedException",
+    "NegativeArraySizeException", "NoSuchFieldException", "NoSuchMethodException",
+    "NullPointerException", "NumberFormatException", "ReflectiveOperationException",
+    "SecurityException", "StringIndexOutOfBoundsException", "TypeNotPresentException",
     "UnsupportedOperationException",
-    "Void",
-    "Enum",
-    "Cloneable",
+    "AbstractMethodError", "AssertionError", "BootstrapMethodError", "ClassCircularityError",
+    "ClassFormatError", "ExceptionInInitializerError", "IllegalAccessError",
+    "IncompatibleClassChangeError", "InstantiationError", "InternalError", "LinkageError",
+    "NoClassDefFoundError", "NoSuchFieldError", "NoSuchMethodError", "OutOfMemoryError",
+    "StackOverflowError", "ThreadDeath", "UnknownError", "UnsatisfiedLinkError",
+    "UnsupportedClassVersionError", "VerifyError", "VirtualMachineError",
 ];

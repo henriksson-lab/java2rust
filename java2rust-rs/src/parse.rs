@@ -45,6 +45,7 @@ fn valid_for_tier(tier: usize, root: tree_sitter::Node, src: &str) -> bool {
                     | "interface_declaration"
                     | "enum_declaration"
                     | "annotation_type_declaration"
+                    | "record_declaration"
                     | "line_comment"
                     | "block_comment"
             ) {

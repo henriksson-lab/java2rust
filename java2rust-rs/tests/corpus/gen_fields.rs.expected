@@ -1,12 +1,9 @@
-
- const K: i32 = 5;
 struct F {
-
-     let name: String;
-
-     let flag: bool = true;
+    name: String,
+    flag: bool,
 }
 
 impl F {
+const K: i32 = 5;
 }
 

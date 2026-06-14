@@ -1,13 +1,12 @@
 // package com::example;
 
 pub struct Calc {
-
-     let mut total: i32 = 0;
+    total: i32,
 }
 
 impl Calc {
 
-    pub fn  add_all(&self,  xs: &Vec<i32>) -> i32  {
+    pub fn  add_all(&mut self,  xs: &Vec<i32>) -> i32  {
          {
              let mut i: i32 = 0;
             while i < xs.len() {
