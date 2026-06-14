@@ -1334,6 +1334,10 @@ impl<'a> Builder<'a> {
                 let typ = self.reference_type(s);
                 self.alloc(Node::TypeExpr { typ: Some(typ) }, s)
             }
+            // A value scope (a call/field/etc.) — keep it as an expression so the
+            // dumper can lower `expr::m` to a closure.
+            "method_invocation" | "field_access" | "array_access"
+            | "object_creation_expression" | "parenthesized_expression" => self.expr(s),
             _ => {
                 let typ = self.class_or_interface_type(s);
                 self.alloc(Node::TypeExpr { typ: Some(typ) }, s)

@@ -2546,22 +2546,27 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
-        if let Some(s) = scope {
-            self.visit(s, arg);
-        }
-        self.printer.print("::");
-        if !type_arguments.is_empty() {
-            self.printer.print("<");
-            for (i, &p) in type_arguments.iter().enumerate() {
-                self.visit(p, arg);
-                if i + 1 < type_arguments.len() {
-                    self.printer.print(", ");
-                }
+        let _ = &type_arguments;
+        let ident = self.to_snake_if_necessary(&identifier);
+        match scope {
+            // `Type::method` — a path (valid as a function value).
+            Some(s) if matches!(self.arena.kind(s), Node::TypeExpr { .. }) => {
+                self.visit(s, arg);
+                self.printer.print("::");
+                self.printer.print(&ident);
             }
-            self.printer.print(">");
-        }
-        if !identifier.is_empty() {
-            self.printer.print(&identifier);
+            // `expr::method` on a value — lower to a one-arg closure.
+            Some(s) => {
+                self.printer.print("|__mr| ");
+                self.visit(s, arg);
+                self.printer.print(".");
+                self.printer.print(&ident);
+                self.printer.print("(__mr)");
+            }
+            None => {
+                self.printer.print("::");
+                self.printer.print(&ident);
+            }
         }
     }
 
