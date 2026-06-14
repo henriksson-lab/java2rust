@@ -1878,27 +1878,32 @@ impl<'a> RustDumpVisitor<'a> {
             Node::MethodCallExpr { scope, type_args, name, args } => (scope, type_args, name, args),
             _ => unreachable!(),
         };
-        if self.try_emit_print_macro(scope, &name, &args, arg) {
-            return;
-        }
-        if self.try_emit_math(scope, &name, &args, arg) {
-            return;
-        }
-        if self.try_emit_int_range(scope, &name, &args, arg) {
-            return;
-        }
-        if self.try_emit_optional_static(scope, &name, &args, arg) {
-            return;
-        }
-        if self.try_emit_string_format(scope, &name, &args, arg) {
-            return;
-        }
-        if self.try_emit_known_method(scope, &name, &args, arg) {
-            return;
-        }
-        // If the callee resolves to a linked dependency method, shape the call to
-        // its recorded signature (exact Rust name, arg borrowing, nullable ret).
+        // A linked dependency method takes precedence over the built-in stdlib
+        // rewrites below — those assume Rust collection/String/Math receivers, so
+        // e.g. `jsonObj.put(k, v)` must not be rewritten to `.insert(...)` when
+        // `jsonObj` is a linked `JSONObject`. Resolve the callee first and, when
+        // it matches a linked type's method, skip the heuristic shortcuts.
         let callee = self.resolve_linked_callee(scope, &name);
+        if callee.is_none() {
+            if self.try_emit_print_macro(scope, &name, &args, arg) {
+                return;
+            }
+            if self.try_emit_math(scope, &name, &args, arg) {
+                return;
+            }
+            if self.try_emit_int_range(scope, &name, &args, arg) {
+                return;
+            }
+            if self.try_emit_optional_static(scope, &name, &args, arg) {
+                return;
+            }
+            if self.try_emit_string_format(scope, &name, &args, arg) {
+                return;
+            }
+            if self.try_emit_known_method(scope, &name, &args, arg) {
+                return;
+            }
+        }
         self.print_java_comment(id, arg);
         if let Some(s) = scope {
             self.visit(s, arg);

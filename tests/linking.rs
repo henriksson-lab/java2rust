@@ -91,6 +91,48 @@ fn with_link_upgrades_param_to_mut_borrow() {
     assert!(out.contains("s: &mut store::Store"), "param upgraded to &mut:\n{out}");
 }
 
+#[test]
+fn linked_method_wins_over_builtin_collection_rewrite() {
+    // A linked type with methods whose names collide with the built-in stdlib
+    // rewrites (`put` -> `.insert`, `size`/`length` -> `.len()`) must emit the
+    // linked names, not the heuristic rewrites.
+    let map = r#"
+    {
+      "types": {
+        "org.json.JSONObject": {
+          "rust_path": "json::JSONObject", "kind": "struct", "fields": {},
+          "methods": {
+            "put": { "rust": "put", "rust_path": "json::JSONObject::put",
+              "receiver": "ref", "ret": null, "ret_nullable": false,
+              "params": [
+                { "type": "&String", "by_ref": true, "mutable": false, "nullable": false },
+                { "type": "bool", "by_ref": false, "mutable": false, "nullable": false }] },
+            "length": { "rust": "length", "rust_path": "json::JSONObject::length",
+              "receiver": "ref", "ret": "i32", "ret_nullable": false, "params": [] }
+          }
+        }
+      }
+    }"#;
+    let mut link = LinkIndex::default();
+    link.merge_json(map).unwrap();
+
+    let java = r#"
+package org.app;
+import org.json.JSONObject;
+public class R {
+    public int f(JSONObject o, String k) {
+        o.put(k, true);
+        return o.length();
+    }
+}
+"#;
+    let out = convert_with_links(java, &link);
+    assert!(out.contains("o.put(&k, true)"), "linked put, not .insert:\n{out}");
+    assert!(out.contains("o.length()"), "linked length, not .len():\n{out}");
+    assert!(!out.contains(".insert("), "no collection rewrite:\n{out}");
+    assert!(!out.contains(".len()"), "no length->len rewrite:\n{out}");
+}
+
 const MAKER: &str = r#"
 package org.app;
 import org.lib.Store;
