@@ -1,5 +1,7 @@
+/// @java A
 #[derive(Clone, Default)]
 struct A {
+    /// @java A#xTestString
     x_test_string: String,
 }
 

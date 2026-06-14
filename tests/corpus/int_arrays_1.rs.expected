@@ -1,9 +1,11 @@
+/// @java A
 #[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
+    /// @java A#m
     fn m(&self)   {
          let test_array: Vec<f64> = vec![0.0, 1.0, 2.0, 3.1, -4.0, 5.0 * 10.0, ];
     }

@@ -1,9 +1,11 @@
+/// @java A
 #[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
+    /// @java A#toString
     pub fn to_string(&self) -> String  {
         if !signal_detected() {
             return "IR Seeker: --% signal at ---.- degrees".to_string();
@@ -11,6 +13,7 @@ impl A {
         return format!("IR Seeker: {}% signal at {} degrees", get_strength() * 100.0, get_angle());
     }
 
+    /// @java A#throwIfModernRoboticsI2cAddressIsInvalid
     pub fn throw_if_modern_robotics_i2c_address_is_invalid( new_address: i32)   {
         if (new_address < MIN_NEW_I2C_ADDRESS) || (new_address > MAX_NEW_I2C_ADDRESS) {
             panic!("{:?}", format!("New I2C address {} is invalid;                      valid range is: {}..{}", new_address, MIN_NEW_I2C_ADDRESS, MAX_NEW_I2C_ADDRESS));

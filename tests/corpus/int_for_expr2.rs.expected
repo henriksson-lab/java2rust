@@ -1,9 +1,11 @@
+/// @java A
 #[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
+    /// @java A#m
     fn m(&self)   {
          let from: i32 = 3;
          let to: i32 = source.len() + 14;

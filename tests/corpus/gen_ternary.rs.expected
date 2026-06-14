@@ -1,9 +1,11 @@
+/// @java T
 #[derive(Clone, Default)]
 struct T {
 }
 
 impl T {
 
+    /// @java T#m
     fn m(&self,  a: i32) -> i32  {
         return  if a > 0 { a } else { -a };
     }

@@ -1,9 +1,11 @@
+/// @java N
 #[derive(Clone, Default)]
 struct N {
 }
 
 impl N {
 
+    /// @java N#m
     fn m(&self)   {
         if a {
             if b {

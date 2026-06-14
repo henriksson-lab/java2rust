@@ -1,9 +1,11 @@
+/// @java L
 #[derive(Clone, Default)]
 struct L {
 }
 
 impl L {
 
+    /// @java L#m
     fn m(&self)   {
         'outer:  {
              let mut i: i32 = 0;

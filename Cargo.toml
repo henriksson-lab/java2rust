@@ -6,3 +6,21 @@ edition = "2024"
 [dependencies]
 tree-sitter = "0.26.9"
 tree-sitter-java = "0.23.5"
+
+# The symbol-map schema (src/symbol_map.rs) is shared between the `gen-symbols`
+# producer and the translator's consumer (`--link`), serialized with serde.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Used only by the `gen-symbols` binary, which introspects a translated Rust
+# crate to extract the Java->Rust symbol map.
+syn = { version = "2", features = ["full"] }
+quote = "1"
+
+[[bin]]
+name = "java2rust-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "gen-symbols"
+path = "src/bin/gen_symbols.rs"

@@ -1,9 +1,11 @@
+/// @java A
 #[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
+    /// @java A#m
     fn m(&self)   {
          let mut test: f64 = 1;
         test = 10.0 * 1.5;

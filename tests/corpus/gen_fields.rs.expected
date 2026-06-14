@@ -1,6 +1,9 @@
+/// @java F
 #[derive(Clone, Default)]
 struct F {
+    /// @java F#name
     name: String,
+    /// @java F#flag
     flag: bool,
 }
 

@@ -1,3 +1,4 @@
+/// @java A
 #[derive(Clone, Default)]
 struct A {
 }

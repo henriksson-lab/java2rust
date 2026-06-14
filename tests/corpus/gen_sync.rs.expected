@@ -1,9 +1,11 @@
+/// @java Y
 #[derive(Clone, Default)]
 struct Y {
 }
 
 impl Y {
 
+    /// @java Y#m
     fn m(&self,  o: &Object)   {
         /* synchronized */ {
             x();

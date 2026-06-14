@@ -11,12 +11,22 @@ pub mod modifiers;
 pub mod naming;
 pub mod nullability;
 pub mod parse;
+pub mod symbol_map;
 pub mod type_tracker;
+
+use symbol_map::LinkIndex;
 
 /// Convert a Java source string to the java2rust Rust output.
 ///
 /// Mirrors `JavaConverter.convert2Rust(String)`.
 pub fn convert(java: &str) -> String {
+    convert_with_links(java, &LinkIndex::default())
+}
+
+/// Like [`convert`], but resolves referenced types against one or more
+/// previously-translated dependency symbol maps (`link`), so references to those
+/// types emit their real Rust paths instead of bare names.
+pub fn convert_with_links(java: &str, link: &LinkIndex) -> String {
     let Some((arena, root)) = parse::create_compilation_unit(java) else {
         // PartParser would throw ParseException; JavaConverter.convert returns
         // e.toString(). We approximate by emitting nothing for now.
@@ -29,7 +39,8 @@ pub fn convert(java: &str) -> String {
 
     let nullable = nullability::analyze(&arena, root, &id_tracker);
 
-    let mut dumper = dump::RustDumpVisitor::new(true, &arena, &mut id_tracker, &nullable);
+    let mut dumper =
+        dump::RustDumpVisitor::new(true, &arena, &mut id_tracker, &nullable, link);
     dumper.visit(root, None);
     dumper.get_source()
 }

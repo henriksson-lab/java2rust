@@ -7,6 +7,7 @@
 /*
  * Class.
  */
+/// @java y.C
 #[derive(Clone, Default)]
 pub struct C {
 }

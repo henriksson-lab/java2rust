@@ -1,9 +1,11 @@
+/// @java Sw
 #[derive(Clone, Default)]
 struct Sw {
 }
 
 impl Sw {
 
+    /// @java Sw#m
     fn m(&self,  x: i32)   {
         match x {
             1 => {

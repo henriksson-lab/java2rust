@@ -3,8 +3,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use java2rust_rs::convert;
+use java2rust_rs::convert_with_links;
 use java2rust_rs::naming::camel_to_snake_case;
+use java2rust_rs::symbol_map::LinkIndex;
 
 struct Options {
     input: Option<String>,
@@ -12,6 +13,7 @@ struct Options {
     ignore_existing: bool,
     verbosity: i32,
     copy_other_files: bool,
+    link: Vec<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -21,6 +23,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         ignore_existing: false,
         verbosity: 2,
         copy_other_files: false,
+        link: Vec::new(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -43,6 +46,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     .map_err(|_| "invalid verbosity".to_string())?;
             }
             "-cp" | "--copy-other-files" => opts.copy_other_files = true,
+            "-l" | "--link" => {
+                i += 1;
+                opts.link.push(args.get(i).ok_or("missing value for -l")?.clone());
+            }
             other => return Err(format!("unknown option: {other}")),
         }
         i += 1;
@@ -59,6 +66,7 @@ fn convert_to_rust(
     ignore_existing: bool,
     verbosity: i32,
     copy_other_files: bool,
+    link: &LinkIndex,
 ) -> std::io::Result<()> {
     let file_dir = Path::new(output_dir);
     if !file_dir.exists() {
@@ -78,7 +86,7 @@ fn convert_to_rust(
         let mut entries: Vec<PathBuf> = fs::read_dir(file)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
         entries.sort();
         for entry in entries {
-            convert_to_rust(&entry, &output, ignore_existing, verbosity, copy_other_files)?;
+            convert_to_rust(&entry, &output, ignore_existing, verbosity, copy_other_files, link)?;
         }
         return Ok(());
     }
@@ -94,7 +102,7 @@ fn convert_to_rust(
             if verbosity > 0 {
                 println!("- {output}");
             }
-            let result = convert(&text);
+            let result = convert_with_links(&text, link);
             fs::write(out_path, result)?;
         } else if verbosity > 1 {
             println!("- {output} (ignored) because it already exists");
@@ -121,6 +129,7 @@ fn print_help() {
     eprintln!("  -i,  --ignore-existing    skip files already present in output");
     eprintln!("  -v,  --verbosity <n>      verbosity level (default: 2)");
     eprintln!("  -cp, --copy-other-files   copy non-java files to output");
+    eprintln!("  -l,  --link <map.json>    link against a dependency symbol map (repeatable)");
 }
 
 fn main() {
@@ -134,6 +143,14 @@ fn main() {
         }
     };
 
+    let mut link = LinkIndex::default();
+    for path in &opts.link {
+        if let Err(e) = link.load(Path::new(path)) {
+            eprintln!("error loading link map: {e}");
+            std::process::exit(1);
+        }
+    }
+
     match opts.input {
         Some(ref input) => {
             if let Err(e) = convert_to_rust(
@@ -142,6 +159,7 @@ fn main() {
                 opts.ignore_existing,
                 opts.verbosity,
                 opts.copy_other_files,
+                &link,
             ) {
                 eprintln!("error: {e}");
                 std::process::exit(1);

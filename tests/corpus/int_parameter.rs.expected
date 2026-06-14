@@ -1,9 +1,11 @@
+/// @java A
 #[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
+    /// @java A#m
     fn m(&self,  x: f64)   {
         self.m(10);
     }

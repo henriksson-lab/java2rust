@@ -1,12 +1,15 @@
 // package com::example;
 
+/// @java com.example.Calc
 #[derive(Clone, Default)]
 pub struct Calc {
+    /// @java com.example.Calc#total
     total: i32,
 }
 
 impl Calc {
 
+    /// @java com.example.Calc#addAll
     pub fn add_all(&mut self,  xs: &Vec<i32>) -> i32  {
          {
              let mut i: i32 = 0;
@@ -25,6 +28,7 @@ impl Calc {
         }
     }
 
+    /// @java com.example.Calc#half
     fn half( v: f64) -> f64  {
         return v / 2.0;
     }

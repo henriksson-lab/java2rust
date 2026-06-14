@@ -1,9 +1,11 @@
+/// @java A
 #[derive(Clone, Default)]
 struct A {
 }
 
 impl A {
 
+    /// @java A#testMethod
     #[test]
     fn test_method(&self)   {
          let a: i32;

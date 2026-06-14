@@ -102,6 +102,12 @@ pub struct RustDumpVisitor<'a> {
     /// When true, string literals are emitted raw (`"x"`, not `"x".to_string()`)
     /// — used for `match` patterns.
     raw_string: bool,
+    /// Symbol maps of previously-translated dependencies; used to resolve
+    /// referenced types to their real Rust paths.
+    link: &'a crate::symbol_map::LinkIndex,
+    /// Names of the current method's parameters that are used as receivers of a
+    /// linked `&mut self` (refmut) call, so their type is emitted `&mut T`.
+    mut_borrow_params: std::collections::HashSet<String>,
 }
 
 impl<'a> RustDumpVisitor<'a> {
@@ -110,6 +116,7 @@ impl<'a> RustDumpVisitor<'a> {
         arena: &'a Arena,
         id: &'a mut IdTracker,
         nullable: &'a std::collections::HashSet<NodeId>,
+        link: &'a crate::symbol_map::LinkIndex,
     ) -> Self {
         RustDumpVisitor {
             printer: SourcePrinter::new("    "),
@@ -121,7 +128,158 @@ impl<'a> RustDumpVisitor<'a> {
             nullable,
             expect_option: false,
             raw_string: false,
+            link,
+            mut_borrow_params: std::collections::HashSet::new(),
         }
+    }
+
+    /// Scan a method body for parameters/locals used as the receiver of a linked
+    /// `refmut` call; their names need a `&mut` borrow in the caller's signature.
+    fn collect_mut_borrow_params(&self, body: NodeId) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        if self.link.is_empty() {
+            return out;
+        }
+        let mut stack = vec![body];
+        while let Some(n) = stack.pop() {
+            if let Node::MethodCallExpr { scope: Some(s), name, .. } = self.arena.kind(n) {
+                if let Node::NameExpr { name: recv } = self.arena.kind(*s) {
+                    if let Some(m) = self.resolve_linked_callee(Some(*s), name) {
+                        if m.receiver == "refmut" {
+                            out.insert(recv.clone());
+                        }
+                    }
+                }
+            }
+            for c in self.arena.children(n) {
+                stack.push(c);
+            }
+        }
+        out
+    }
+
+    /// This file's non-static imports, split into (explicit `a.b.C`, wildcard
+    /// packages `a.b`), for FQN reconstruction against the linked maps.
+    fn link_candidates(&self) -> (Vec<String>, Vec<String>) {
+        let mut explicit: Vec<String> = Vec::new();
+        let mut wildcard: Vec<String> = Vec::new();
+        for i in &self.id.imports {
+            if i.static_import {
+                continue;
+            }
+            if i.wildcard_import {
+                wildcard.push(i.import_string.clone());
+            } else {
+                explicit.push(i.import_string.clone());
+            }
+        }
+        (explicit, wildcard)
+    }
+
+    /// Resolve a Java simple type name to a linked dependency type, if any.
+    fn resolve_type_sym(&self, name: &str) -> Option<&'a crate::symbol_map::TypeSym> {
+        if self.link.is_empty() {
+            return None;
+        }
+        let (explicit, wildcard) = self.link_candidates();
+        let link: &'a crate::symbol_map::LinkIndex = self.link;
+        link.resolve(name, &explicit, &wildcard, self.id.package_name.as_deref())
+    }
+
+    /// Resolve a Java type name to the Rust type to emit. Consults the linked
+    /// dependency maps first (using this file's imports + package to rebuild the
+    /// FQN); falls back to the built-in stdlib mapping otherwise.
+    fn resolve_type_name(&self, name: &str) -> String {
+        if let Some(t) = self.resolve_type_sym(name) {
+            return t.rust_path.clone();
+        }
+        map_type_name(name).replace('$', "_")
+    }
+
+    /// The simple Java type name of a method-call receiver, if it can be tied to
+    /// a concrete type (a typed local/param/field, a `new X()`, or a static type
+    /// reference). Used to look the call up in the linked maps.
+    fn callee_recv_type(&self, scope: NodeId) -> Option<String> {
+        match self.arena.kind(scope) {
+            Node::NameExpr { name } => {
+                if let Some(t) = self.decl_java_type_name(name, scope) {
+                    Some(t)
+                } else if self.is_static_class_ref(scope) {
+                    // `Point.staticMethod()` — the name itself is the type.
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            }
+            Node::ObjectCreationExpr { typ, .. } => self.type_simple_name(*typ),
+            Node::EnclosedExpr { inner: Some(i) } => self.callee_recv_type(*i),
+            _ => None,
+        }
+    }
+
+    /// If a scoped call resolves to a method of a linked dependency type, return
+    /// that method's recorded signature so the call site can be shaped to match
+    /// (exact Rust name, argument borrowing, return nullability).
+    fn resolve_linked_callee(
+        &self,
+        scope: Option<NodeId>,
+        name: &str,
+    ) -> Option<&'a crate::symbol_map::MethodSym> {
+        if self.link.is_empty() {
+            return None;
+        }
+        let simple = self.callee_recv_type(scope?)?;
+        let t = self.resolve_type_sym(&simple)?;
+        t.methods.get(name)
+    }
+
+    /// Emit a call's arguments shaped to a linked callee's parameter signature:
+    /// `&`/`&mut` for by-reference params, `Some(..)` for nullable-by-value
+    /// params, a clone for non-Copy by-value names. Args beyond the recorded
+    /// params (e.g. varargs) fall back to the default argument emission.
+    fn print_arguments_linked(
+        &mut self,
+        args: &[NodeId],
+        params: &[crate::symbol_map::ParamSym],
+        arg: Arg,
+    ) {
+        self.printer.print("(");
+        for (i, &e) in args.iter().enumerate() {
+            match params.get(i) {
+                Some(p) if p.by_ref => {
+                    self.printer.print(if p.mutable { "&mut " } else { "&" });
+                    if p.nullable {
+                        let saved = self.expect_option;
+                        self.expect_option = true;
+                        self.visit(e, arg);
+                        self.expect_option = saved;
+                    } else {
+                        self.visit(e, arg);
+                    }
+                }
+                Some(p) if p.nullable => self.emit_into_option(e, arg),
+                Some(_) => self.emit_moved_value(e, arg),
+                None => self.print_one_default_argument(e, arg),
+            }
+            if i + 1 < args.len() {
+                self.printer.print(", ");
+            }
+        }
+        self.printer.print(")");
+    }
+
+    /// The default per-argument emission (a `&` borrow for non-primitive names),
+    /// factored out of [`print_arguments`] so it can be reused for trailing
+    /// (e.g. varargs) arguments of a linked call.
+    fn print_one_default_argument(&mut self, e: NodeId, arg: Arg) {
+        if let Node::NameExpr { name } = self.arena.kind(e) {
+            if let Some((Some(left), _)) = self.id.find_declaration_node_for(self.arena, name, e) {
+                if !left.is_primitive || left.array_count > 0 {
+                    self.printer.print("&");
+                }
+            }
+        }
+        self.visit(e, arg);
     }
 
     // ---- nullability helpers ----
@@ -322,19 +480,7 @@ impl<'a> RustDumpVisitor<'a> {
     fn print_arguments(&mut self, args: &[NodeId], arg: Arg) {
         self.printer.print("(");
         for (i, &e) in args.iter().enumerate() {
-            match self.arena.kind(e) {
-                Node::NameExpr { name } => {
-                    if let Some((Some(left), _)) =
-                        self.id.find_declaration_node_for(self.arena, name, e)
-                    {
-                        if !left.is_primitive || left.array_count > 0 {
-                            self.printer.print("&");
-                        }
-                    }
-                }
-                _ => {}
-            }
-            self.visit(e, arg);
+            self.print_one_default_argument(e, arg);
             if i + 1 < args.len() {
                 self.printer.print(", ");
             }
@@ -883,6 +1029,54 @@ impl<'a> RustDumpVisitor<'a> {
         self.print_orphan_comments_ending(id);
     }
 
+    // ---- provenance (Java FQN markers, for symbol-map extraction) ----
+
+    fn package_prefix(&self) -> String {
+        match &self.id.package_name {
+            Some(p) if !p.is_empty() => format!("{p}."),
+            _ => String::new(),
+        }
+    }
+
+    /// Java FQN of a type declaration: `pkg.Outer.Inner` (walks the parent chain
+    /// so hoisted nested types keep their enclosing names).
+    fn java_type_fqn(&self, type_node: NodeId) -> String {
+        let mut parts = Vec::new();
+        let mut cur = Some(type_node);
+        while let Some(n) = cur {
+            match self.arena.kind(n) {
+                Node::ClassOrInterfaceDeclaration { name, .. }
+                | Node::EnumDeclaration { name, .. } => parts.push(name.clone()),
+                _ => {}
+            }
+            cur = self.arena.parent(n);
+        }
+        parts.reverse();
+        format!("{}{}", self.package_prefix(), parts.join("."))
+    }
+
+    /// Java FQN of a member: `pkg.Type#memberName`.
+    fn java_member_fqn(&self, member_node: NodeId, java_name: &str) -> String {
+        let mut cur = self.arena.parent(member_node);
+        while let Some(n) = cur {
+            if matches!(
+                self.arena.kind(n),
+                Node::ClassOrInterfaceDeclaration { .. } | Node::EnumDeclaration { .. }
+            ) {
+                return format!("{}#{}", self.java_type_fqn(n), java_name);
+            }
+            cur = self.arena.parent(n);
+        }
+        let pkg = self.package_prefix();
+        format!("{}#{}", pkg.trim_end_matches('.'), java_name)
+    }
+
+    /// Emit a `/// @java <marker>` provenance doc line.
+    fn emit_provenance(&mut self, marker: &str) {
+        self.printer.print(&format!("/// @java {marker}"));
+        self.printer.print_ln();
+    }
+
     fn visit_class(&mut self, id: NodeId, arg: Arg) {
         let (modifiers_v, is_interface, name, type_parameters, extends, implements, members) =
             match self.kind(id) {
@@ -898,6 +1092,7 @@ impl<'a> RustDumpVisitor<'a> {
                 _ => unreachable!(),
             };
         self.print_java_comment(id, arg);
+        self.emit_provenance(&self.java_type_fqn(id));
 
         if is_interface {
             self.visit_trait(modifiers_v, &name, &type_parameters, &extends, &members, arg);
@@ -1068,6 +1263,15 @@ impl<'a> RustDumpVisitor<'a> {
         };
         for var in variables {
             let name = self.field_var_name(var);
+            let java_name = self
+                .var_decl_id(var)
+                .and_then(|d| match self.arena.kind(d) {
+                    Node::VariableDeclaratorId { name } => Some(name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let m = self.java_member_fqn(field_id, &java_name);
+            self.emit_provenance(&m);
             let nullable = self.var_decl_id(var).map(|d| self.decl_nullable(d)).unwrap_or(false);
             self.printer.print(&format!("{name}: "));
             if nullable {
@@ -1147,7 +1351,8 @@ impl<'a> RustDumpVisitor<'a> {
             self.visit(s, arg);
             self.printer.print("::");
         }
-        self.printer.print(&map_type_name(&name).replace('$', "_"));
+        let resolved = self.resolve_type_name(&name);
+        self.printer.print(&resolved);
         if using_diamond {
             // No empty turbofish in Rust; let the args be inferred.
         } else {
@@ -1453,6 +1658,9 @@ impl<'a> RustDumpVisitor<'a> {
         if self.try_emit_known_method(scope, &name, &args, arg) {
             return;
         }
+        // If the callee resolves to a linked dependency method, shape the call to
+        // its recorded signature (exact Rust name, arg borrowing, nullable ret).
+        let callee = self.resolve_linked_callee(scope, &name);
         self.print_java_comment(id, arg);
         if let Some(s) = scope {
             self.visit(s, arg);
@@ -1475,12 +1683,24 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
-        let s = self.to_snake_if_necessary(&name);
-        self.printer.print(&s);
-        self.print_arguments(&args, arg);
-        // A call to a nullable-returning method used as a plain value is unwrapped.
-        if scope.is_none() && !self.expect_option && self.name_decl_nullable(&name, id) {
-            self.printer.print(".unwrap()");
+        match callee {
+            Some(m) => {
+                self.printer.print(&m.rust);
+                self.print_arguments_linked(&args, &m.params, arg);
+                if m.ret_nullable && !self.expect_option {
+                    self.printer.print(".unwrap()");
+                }
+            }
+            None => {
+                let s = self.to_snake_if_necessary(&name);
+                self.printer.print(&s);
+                self.print_arguments(&args, arg);
+                // A call to a nullable-returning method used as a plain value is
+                // unwrapped.
+                if scope.is_none() && !self.expect_option && self.name_decl_nullable(&name, id) {
+                    self.printer.print(".unwrap()");
+                }
+            }
         }
     }
 
@@ -1977,7 +2197,7 @@ impl<'a> RustDumpVisitor<'a> {
         // Emit `<MappedType>::new(...)`, dropping the diamond/type-args. Known
         // collections are constructed with no arguments.
         let base = match self.arena.kind(typ) {
-            Node::ClassOrInterfaceType { name, .. } => map_type_name(name).replace('$', "_"),
+            Node::ClassOrInterfaceType { name, .. } => self.resolve_type_name(name),
             _ => self.accept_and_cut(typ, arg).trim().to_string(),
         };
         self.printer.print(&base);
@@ -2080,7 +2300,9 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.id.set_in_constructor(true);
+        self.mut_borrow_params = self.collect_mut_borrow_params(block);
         self.print_java_comment(id, arg);
+        self.emit_provenance(&self.java_member_fqn(id, "<init>"));
         self.print_modifiers(modifiers_v);
         self.print_type_parameters(&type_parameters, arg);
         if !type_parameters.is_empty() {
@@ -2112,6 +2334,7 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.unindent();
         self.printer.print_ln_s("}");
         self.id.set_in_constructor(false);
+        self.mut_borrow_params.clear();
     }
 
     fn visit_method(&mut self, id: NodeId, arg: Arg) {
@@ -2123,8 +2346,11 @@ impl<'a> RustDumpVisitor<'a> {
                 _ => unreachable!(),
             };
         self.id.set_current_method(Some(name.clone()));
+        self.mut_borrow_params =
+            body.map(|b| self.collect_mut_borrow_params(b)).unwrap_or_default();
         self.print_orphan_comments_before_this_child_node(id);
         self.print_java_comment(id, arg);
+        self.emit_provenance(&self.java_member_fqn(id, &name));
         for a in &annotations {
             if let Node::AnnotationExpr { name: an } = self.arena.kind(*a) {
                 if self.annotation_simple_name(*an) == "Test" {
@@ -2188,6 +2414,7 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         self.id.set_current_method(None);
+        self.mut_borrow_params.clear();
     }
 
     fn replace_throws(&mut self, throws: &[NodeId], arg: Arg, type_string: &str) {
@@ -2236,7 +2463,11 @@ impl<'a> RustDumpVisitor<'a> {
             self.printer.print(">");
         } else {
             if !is_primitive {
-                self.printer.print("&");
+                let needs_mut = match self.arena.kind(vid) {
+                    Node::VariableDeclaratorId { name } => self.mut_borrow_params.contains(name),
+                    _ => false,
+                };
+                self.printer.print(if needs_mut { "&mut " } else { "&" });
             }
             if let Some(t) = typ {
                 self.visit(t, arg);
@@ -2349,6 +2580,7 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
+        self.emit_provenance(&self.java_type_fqn(id));
         self.print_modifiers(modifiers_v);
         self.printer.print("enum ");
         self.printer.print(&name);

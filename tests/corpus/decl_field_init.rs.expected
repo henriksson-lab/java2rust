@@ -1,5 +1,7 @@
+/// @java A
 #[derive(Clone, Default)]
 struct A {
+    /// @java A#i
     i: i32,
 }
 

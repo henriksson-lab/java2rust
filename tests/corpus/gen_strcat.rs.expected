@@ -1,9 +1,11 @@
+/// @java S
 #[derive(Clone, Default)]
 struct S {
 }
 
 impl S {
 
+    /// @java S#g
     fn g(&self,  n: i32) -> String  {
         return format!("n={}!", n);
     }

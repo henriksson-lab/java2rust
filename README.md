@@ -28,6 +28,141 @@ So the legal state of this code is uncertain
 Thus, consider this crate to be public domain by default, but possibly tained with GPL3 and Apache license v2
 
 
+## Using this crate (guide for LLMs)
+
+This section is written for an LLM agent driving or post-editing this tool.
+
+### What it is / is not
+- It does a **mechanical** Java→Rust translation, file by file. Output is
+  syntactically valid Rust but **frequently will not compile** as-is: external
+  deps, cross-file references, and Rust's ownership rules need follow-up edits.
+- **Compiling ≠ correct.** Treat the output as a starting point to be reviewed,
+  not a finished port.
+
+### Build & binaries
+```
+cargo build --release
+```
+Produces two binaries:
+- `java2rust-rs` — the translator (Java → Rust).
+- `gen-symbols` — extracts a Java→Rust **symbol map** from a translated crate.
+
+### Translate
+```
+java2rust-rs -d <file.java | dir> -o <outdir> [-i] [-v <n>] [-cp] [-l map.json]...
+```
+- `-d` input file or directory (directories recurse; the last `-d` wins).
+- `-o` output directory (default `output`). Filenames are snake_cased; the input
+  directory tree (package layout) is mirrored under `-o`.
+- `-i` skip files already present; `-v` verbosity; `-cp` copy non-`.java` files.
+- `-l/--link <map.json>` link against a dependency's symbol map (repeatable) —
+  see **Linking** below.
+
+### Output conventions you must preserve
+Every emitted type, method, constructor, and struct field carries a **provenance
+marker** doc comment recording its Java origin:
+```rust
+/// @java org.example.Point          // on the struct/enum/trait
+/// @java org.example.Point#x        // on a field
+/// @java org.example.Point#<init>   // on a constructor (-> fn new)
+/// @java org.example.Point#getX     // on a method
+```
+**Do not delete these markers.** `gen-symbols` reads them to re-derive the symbol
+map from the *current* (possibly hand/LLM-edited) source. You may freely change
+the Rust around them — rename, add `Option`, switch to `&mut self`, etc.
+
+### Nullability → `Option`
+A dedicated pass marks only declarations that can actually hold `null` as
+`Option<T>` (seeded from `= null` / `return null` / `x != null` / `null` passed
+as an argument, then a cross-method fixpoint). For those: `null`→`None`, values
+into the slot →`Some(v)`, reads →`.unwrap()`, `x != null`→`x.is_some()`.
+Everything else stays a plain `T`. So an `Option` in the output is a real
+nullability signal, not noise.
+
+### Linking a translation to an already-translated dependency
+Goal: when translating crate B that depends on crate A (already translated to
+Rust), make B reference A's **real Rust paths** instead of bare Java names.
+
+Workflow:
+```
+# 1. translate the dependency
+java2rust-rs -d A/src -o A_rust
+# 2. extract its symbol map (run this AFTER any LLM edits to A_rust, so the map
+#    reflects the current code — Option, &mut, renames included)
+gen-symbols A_rust -o A_map.json
+# 3. translate the dependent, linking against the map
+java2rust-rs -d B/src -o B_rust --link A_map.json
+```
+With `--link`, two things happen:
+
+1. **Type references** — a referenced type `Point` (resolved via the file's
+   `import`s + package to the FQN `org.example.Point`) is emitted as its mapped
+   `rust_path` (e.g. `point::Point`) in field types, return types, locals, and
+   `new` calls. Resolution order: explicit import → same package → wildcard
+   import → bare FQN → unique simple-name match. Unknown types fall back to the
+   built-in stdlib mapping.
+
+2. **Call sites** — when a method call's receiver resolves to a linked type
+   (a typed local/param/field, a `new X()`, or a static `Type.m()` reference),
+   the call is shaped to the callee's *recorded* signature:
+   - the **exact current Rust method name** is used, so a dependency method the
+     LLM renamed (`lookup` → `find`) is called correctly;
+   - **argument borrowing** matches the params — `&` / `&mut` for by-reference
+     params, `Some(..)` for nullable-by-value params, a `.clone()` for non-Copy
+     by-value names;
+   - a **nullable (`Option`) return** read as a plain value gets `.unwrap()`.
+
+   Example: `s.lookup(k)` against a dep whose `lookup` was edited to
+   `fn find(&self, key: &String) -> Option<String>` becomes `s.find(&k).unwrap()`.
+
+3. **Caller parameter upgrade** — a method/constructor parameter used as the
+   receiver of a linked `&mut self` call is emitted `&mut T` instead of `&T`, so
+   the call type-checks. (Example: a `Store` parameter on which `add` — a
+   `&mut self` method — is called becomes `s: &mut store::Store`.)
+
+   Caveat (left for a later LLM pass): only *parameters* are upgraded this way.
+   Local variables that receive a linked `&mut self` call are not yet marked
+   `let mut`, and nullability is not propagated back into a caller's own
+   parameter types. The linker shapes calls and parameter borrows; deeper
+   cross-method signature inference is left to a follow-up edit.
+
+Key property: the map is generated **from** the translated crate, not frozen at
+translation time. Edit the Rust to make it idiomatic/performant, re-run
+`gen-symbols`, and the map tracks your edits. The linker links to "whatever the
+code looks like now"; remaining mismatches are left for a later LLM pass.
+
+### Symbol map schema (`A_map.json`)
+JSON keyed by Java FQN (`serde`-serialized; see `src/symbol_map.rs`):
+```jsonc
+{
+  "types": {
+    "org.example.Point": {
+      "rust_path": "point::Point",          // how to name this type in Rust
+      "kind": "struct",                      // struct | enum | trait
+      "fields": {
+        "x": { "rust": "x", "type": "i32", "nullable": false }
+      },
+      "methods": {
+        "getX": {
+          "rust": "get_x", "rust_path": "point::Point::get_x",
+          "receiver": "ref",                 // none | value | ref | refmut
+          "ret": "i32", "ret_nullable": false,
+          "params": [ { "type": "i32", "by_ref": false,
+                        "mutable": false, "nullable": false } ]
+        }
+      }
+    }
+  }
+}
+```
+
+### Gotchas
+- Files are translated in **isolation**: references to other project classes or
+  external libraries won't resolve unless you `--link` a map that covers them.
+- Swing/AWT and other external libraries are out of scope (see below).
+- `rust_path`s come from the dependency crate's module layout at `gen-symbols`
+  time; if you restructure that crate's modules, regenerate the map.
+
 ## Goal (below is for LLM)
 
 The original tool is now treated as **inspiration, not a spec**: we use its
@@ -142,6 +277,9 @@ codegen port mechanically — the lowest-risk route to matching output.
 ## Usage (target)
 
 ```
-java2rust-rs -d <path_file.java | path_directory> [-o output] [-i] [-v 2] [-cp]
+java2rust-rs -d <path_file.java | path_directory> [-o output] [-i] [-v 2] [-cp] [-l map.json]...
 ```
+
+See **Using this crate (guide for LLMs)** above for the `-l/--link` linking
+workflow and the `gen-symbols` map extractor.
 
