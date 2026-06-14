@@ -4,19 +4,25 @@ This tool aims to translate Java code to Rust. The output code needs further wor
 to become idiomatic Rust, and due to the stricting ownership rules of Rust, might
 not compile at all after a first pass. 
 
-The tool is derived from https://github.com/cguz/java-to-rust, which was used
+The tool is derived from [cguz/java-to-rust](https://github.com/cguz/java-to-rust), which was used
 for inspiration. Due to differences in parsing, this code was not translated
 but the semantic mapping decisions where kept. Further rules have been introduced
 by testing the tool on large codebases relevant for bioinformatics.
 
+**Note: Just because the output compiles does not mean that the translation is correct!
+Be sure that you are aware of the pitfalls of translation before you commit to it, and
+unless you know it yourself, ensure you have access to someone with good amount of Rust
+programming experience.**
+
+Read more about our work on Rust translation here: [henriksson-lab/rustification](https://github.com/henriksson-lab/rustification)
 
 ## License
 
 This crate, Java2rust, is made using LLM. Be careful with reusing code as we cannot guarantee that code has not been copied from somewhere.
 
 The original code license is hard to understand:
-* The code is inspired by https://github.com/cguz/java-to-rust, which is stated to be GPL3. 
-* But cguz/java-to-rust is in turn derived from https://github.com/aschoerk/converter-page, which is under the Apache License v2
+* The code is inspired by [cguz/java-to-rust](https://github.com/cguz/java-to-rust), which is stated to be GPL3. 
+* But cguz/java-to-rust is in turn derived from [aschoerk/converter-page](https://github.com/aschoerk/converter-page), which is under the Apache License v2
 So the legal state of this code is uncertain
 
 Thus, consider this crate to be public domain by default, but possibly tained with GPL3 and Apache license v2
@@ -89,14 +95,23 @@ project's own other classes when files are converted in isolation) is out of
 scope for the per-file `rustc` check: such files emit syntactically valid Rust
 but fail to compile with `cannot find type/value` until those types exist.
 
-Two real codebases are used as tests (neither is expected to fully compile —
-both have heavy external dependencies):
-- **htsjdk** — byte-parity reference for the original mapping (see history).
-- **FastQC** (`s-andrews/FastQC`, 156 files) — compile-oriented test. 0 panics
-  and **0 syntax errors** — every file produces syntactically valid Rust. 15
-  compile standalone; the other 141 fail only on external/cross-file references
-  (much of it Swing) — i.e. the out-of-scope boundary, not translation bugs. Run
-  `tools/compilecheck.sh` for the self-contained corpus.
+Real bioinformatics codebases are used as compile tests (none is expected to
+fully compile — all have heavy external dependencies). They are cloned under
+`testdata/`. For each, the converter emits syntactically valid Rust for **every**
+file (0 panics, 0 syntax errors); the files that don't compile fail only on
+external/cross-file references (`cannot find type/value`) — the out-of-scope
+boundary, not translation bugs. Convert a tree with
+`cargo run --release --example batch -- <java-src-dir> <out-dir>`.
+
+- **FastQC** (`s-andrews/FastQC`, 156 files) — 0 syntax errors; 15 compile
+  standalone, the rest fail only on external refs (much of it Swing).
+- **GATK** (`broadinstitute/gatk`, 1595 files) — 0 syntax errors; ~93 compile
+  standalone, the rest on cross-file/external refs.
+- **Picard** (`broadinstitute/picard`) — additional corpus.
+- **htsjdk** — byte-parity reference for the original mapping (historical).
+
+`tools/compilecheck.sh` runs the small self-contained snippet corpus through
+`rustc` (75/75 compiling).
 
 ---
 

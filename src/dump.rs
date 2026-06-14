@@ -241,7 +241,8 @@ impl<'a> RustDumpVisitor<'a> {
         } else {
             n.to_string()
         };
-        escape_rust_keyword(s)
+        // `$` (Scala/synthetic names) is illegal in Rust identifiers.
+        escape_rust_keyword(s.replace('$', "_"))
     }
 
     fn remove_plus_and_suffix(&self, mut value: String, suffixes: &[&str]) -> String {
@@ -558,7 +559,7 @@ impl<'a> RustDumpVisitor<'a> {
             CharLiteralExpr { value } => {
                 self.print_java_comment(id, arg);
                 self.printer.print("'");
-                self.printer.print(&value);
+                self.printer.print(&java_escapes_to_rust(&value));
                 self.printer.print("'");
             }
             DoubleLiteralExpr { value } => {
@@ -599,7 +600,7 @@ impl<'a> RustDumpVisitor<'a> {
                 // bindings type-check — except in a match pattern, where a raw
                 // `"..."` (str literal) is required. (Concatenation uses format!.)
                 self.printer.print("\"");
-                self.printer.print(&value);
+                self.printer.print(&java_escapes_to_rust(&value));
                 self.printer
                     .print(if self.raw_string { "\"" } else { "\".to_string()" });
             }
@@ -1146,7 +1147,7 @@ impl<'a> RustDumpVisitor<'a> {
             self.visit(s, arg);
             self.printer.print("::");
         }
-        self.printer.print(map_type_name(&name));
+        self.printer.print(&map_type_name(&name).replace('$', "_"));
         if using_diamond {
             // No empty turbofish in Rust; let the args be inferred.
         } else {
@@ -1380,7 +1381,9 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print("format!(\"");
         for &node in &chain {
             if let Node::StringLiteralExpr { value } = self.arena.kind(node) {
-                let v = value.clone();
+                // Literal text: escape `{`/`}` (format! placeholders) and convert
+                // Java escapes.
+                let v = java_escapes_to_rust(value).replace('{', "{{").replace('}', "}}");
                 self.printer.print(&v);
             } else {
                 self.printer.print("{}");
@@ -1974,7 +1977,7 @@ impl<'a> RustDumpVisitor<'a> {
         // Emit `<MappedType>::new(...)`, dropping the diamond/type-args. Known
         // collections are constructed with no arguments.
         let base = match self.arena.kind(typ) {
-            Node::ClassOrInterfaceType { name, .. } => map_type_name(name).to_string(),
+            Node::ClassOrInterfaceType { name, .. } => map_type_name(name).replace('$', "_"),
             _ => self.accept_and_cut(typ, arg).trim().to_string(),
         };
         self.printer.print(&base);
@@ -2743,6 +2746,35 @@ impl<'a> RustDumpVisitor<'a> {
             self.visit(c, None);
         }
     }
+}
+
+/// Convert Java string/char escape sequences to Rust ones. Java `\uXXXX`
+/// becomes Rust `\u{XXXX}`; other common escapes are identical.
+fn java_escapes_to_rust(s: &str) -> String {
+    let bytes: Vec<char> = s.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '\\' && i + 1 < bytes.len() {
+            if bytes[i + 1] == 'u' {
+                // \uXXXX -> \u{XXXX}
+                let hex: String = bytes[i + 2..].iter().take(4).collect();
+                if hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    out.push_str(&format!("\\u{{{hex}}}"));
+                    i += 6;
+                    continue;
+                }
+            }
+            // Keep other escapes verbatim (\n, \t, \\, \", \', etc.).
+            out.push(bytes[i]);
+            out.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Convert a Java hex floating-point literal (`0x1.8p3`) to a decimal Rust

@@ -1185,7 +1185,12 @@ impl<'a> Builder<'a> {
             }
             "character_literal" => {
                 let raw = self.text(n);
-                let value = raw.trim_matches('\'').to_string();
+                // Strip exactly the surrounding quotes (keep escapes like `\'`).
+                let value = if raw.len() >= 2 {
+                    raw[1..raw.len() - 1].to_string()
+                } else {
+                    raw
+                };
                 self.alloc(Node::CharLiteralExpr { value }, n)
             }
             "true" => self.alloc(Node::BooleanLiteralExpr { value: true }, n),
@@ -1329,19 +1334,19 @@ impl<'a> Builder<'a> {
         // JavaParser dumps the scope as a type (no snake-casing) unless it is
         // `this`/`super`.
         let scope = named.first().map(|&s| match s.kind() {
-            "this" | "super" => self.expr(s),
+            // Type-path scopes: `Type::method`.
+            "type_identifier" | "scoped_type_identifier" | "generic_type" | "identifier"
+            | "scoped_identifier" => {
+                let typ = self.class_or_interface_type(s);
+                self.alloc(Node::TypeExpr { typ: Some(typ) }, s)
+            }
             "array_type" => {
                 let typ = self.reference_type(s);
                 self.alloc(Node::TypeExpr { typ: Some(typ) }, s)
             }
-            // A value scope (a call/field/etc.) — keep it as an expression so the
-            // dumper can lower `expr::m` to a closure.
-            "method_invocation" | "field_access" | "array_access"
-            | "object_creation_expression" | "parenthesized_expression" => self.expr(s),
-            _ => {
-                let typ = self.class_or_interface_type(s);
-                self.alloc(Node::TypeExpr { typ: Some(typ) }, s)
-            }
+            // Any other scope (a literal, call, field, …) is a value — the dumper
+            // lowers `expr::m` to a closure.
+            _ => self.expr(s),
         });
         // The member after `::` may be an identifier or the `new` keyword.
         let identifier = self
