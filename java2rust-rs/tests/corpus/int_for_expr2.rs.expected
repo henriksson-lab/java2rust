@@ -1,3 +1,4 @@
+#[derive(Clone)]
 struct A {
 }
 
@@ -12,7 +13,7 @@ impl A {
              let mut i: i32 = from;
             while i < source.len() {
                 {
-                    Assert::assert_equals(source[i + 1], dest[i - from + 1], 0);
+                    Assert::assert_equals(source[(i + 1) as usize], dest[(i - from + 1) as usize], 0);
                 }
                 i += 1;
              }

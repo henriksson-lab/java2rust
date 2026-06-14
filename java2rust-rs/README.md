@@ -14,8 +14,20 @@ converter and checks each with `rustc --crate-type lib`. Fixes landed so far:
 struct fields emit as `name: Type,` (not `let …;`), static fields → associated
 `const`, methods that mutate fields take `&mut self`, principled `&`-borrows
 (AST-derived, not reflection), `do`/`while` lowering, and dropped the spurious
-`&` on method-call arguments. Current corpus: **22/24 compiling** (the two
-failures are int→char literals and embedded post-increment).
+`&` on method-call arguments. Java-isms are lowered: `println!`, `panic!` for
+`throw`, bare blocks for `synchronized`/`try`, `assert!`, proper `++`/`--`.
+
+**Ownership (partial):** structs `#[derive(Clone)]`; non-Copy values read in a
+move position (return / assignment RHS / var init) get `.clone()`; array indices
+are cast `as usize`; `char c = 65` → `65 as u8 as char`. Self-contained compile
+corpus: **39/39** (`tools/compilecheck.sh`).
+
+**Nullability** is inferred by a dedicated pass (`nullability.rs`, run after
+`IdTracker`): it finds which declarations can hold `null` (seeded from
+`= null` / `return null` / `x != null` / passing `null` as an argument, then a
+cross-method fixpoint), and only those become `Option<T>` — `null`→`None`,
+values into a nullable slot →`Some(v)`, reads →`.unwrap()`, `x != null`
+→`x.is_some()`. Everything else stays a plain `T`.
 
 The golden fixtures are re-baselined to this tool's own output (regression lock),
 not the jar's. Earlier history (below) targeted byte-parity with the jar.

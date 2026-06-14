@@ -1,3 +1,4 @@
+#[derive(Clone)]
 struct A {
     x_test_string: String,
 }

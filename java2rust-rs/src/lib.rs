@@ -9,6 +9,7 @@ pub mod dump;
 pub mod id_tracker;
 pub mod modifiers;
 pub mod naming;
+pub mod nullability;
 pub mod parse;
 pub mod type_tracker;
 
@@ -26,7 +27,9 @@ pub fn convert(java: &str) -> String {
     id_tracker::run(&arena, root, &mut id_tracker);
     type_tracker::run(&arena, root, &mut id_tracker);
 
-    let mut dumper = dump::RustDumpVisitor::new(true, &arena, &mut id_tracker);
+    let nullable = nullability::analyze(&arena, root, &id_tracker);
+
+    let mut dumper = dump::RustDumpVisitor::new(true, &arena, &mut id_tracker, &nullable);
     dumper.visit(root, None);
     dumper.get_source()
 }

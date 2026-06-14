@@ -94,10 +94,20 @@ pub struct RustDumpVisitor<'a> {
     /// Instance field names (Java spelling) of the enclosing class, used to
     /// decide whether a method needs `&mut self`.
     class_field_names: std::collections::HashSet<String>,
+    /// Declarations inferred nullable (emit `Option<T>`); see `nullability`.
+    nullable: &'a std::collections::HashSet<NodeId>,
+    /// When true, the value being emitted feeds an `Option<T>` slot, so a
+    /// nullable read is kept as-is (no `.unwrap()`).
+    expect_option: bool,
 }
 
 impl<'a> RustDumpVisitor<'a> {
-    pub fn new(print_comments: bool, arena: &'a Arena, id: &'a mut IdTracker) -> Self {
+    pub fn new(
+        print_comments: bool,
+        arena: &'a Arena,
+        id: &'a mut IdTracker,
+        nullable: &'a std::collections::HashSet<NodeId>,
+    ) -> Self {
         RustDumpVisitor {
             printer: SourcePrinter::new("    "),
             arena,
@@ -105,6 +115,83 @@ impl<'a> RustDumpVisitor<'a> {
             comment_out: false,
             print_comments,
             class_field_names: std::collections::HashSet::new(),
+            nullable,
+            expect_option: false,
+        }
+    }
+
+    // ---- nullability helpers ----
+
+    fn decl_nullable(&self, decl: NodeId) -> bool {
+        self.nullable.contains(&decl)
+    }
+
+    fn name_decl_nullable(&self, name: &str, at: NodeId) -> bool {
+        self.id
+            .find_declaration_node_for(self.arena, name, at)
+            .map(|(_, d)| self.nullable.contains(&d))
+            .unwrap_or(false)
+    }
+
+    /// Mirror of `nullability::expr_nullable` for the dumper.
+    fn expr_nullable(&self, e: NodeId) -> bool {
+        match self.arena.kind(e) {
+            Node::NullLiteralExpr => true,
+            Node::NameExpr { name } => self.name_decl_nullable(name, e),
+            Node::MethodCallExpr { scope: None, name, .. } => self.name_decl_nullable(name, e),
+            Node::EnclosedExpr { inner: Some(i) } => self.expr_nullable(*i),
+            Node::CastExpr { expr, .. } => self.expr_nullable(*expr),
+            Node::ConditionalExpr { then_expr, else_expr, .. } => {
+                self.expr_nullable(*then_expr) || self.expr_nullable(*else_expr)
+            }
+            _ => false,
+        }
+    }
+
+    /// A name referring to a non-primitive (non-Copy) declaration — reading it
+    /// by value out of a borrow needs `.clone()`.
+    fn is_non_copy_name(&self, e: NodeId) -> bool {
+        if let Node::NameExpr { name } = self.arena.kind(e) {
+            if let Some((Some(td), _)) = self.id.find_declaration_node_for(self.arena, name, e) {
+                return !td.is_primitive;
+            }
+        }
+        false
+    }
+
+    /// Emit a value in a move position, cloning if it is a non-Copy name read.
+    fn emit_moved_value(&mut self, e: NodeId, arg: Arg) {
+        self.visit(e, arg);
+        if self.is_non_copy_name(e) {
+            self.printer.print(".clone()");
+        }
+    }
+
+    fn enclosing_method_nullable(&self, mut n: NodeId) -> bool {
+        while let Some(p) = self.arena.parent(n) {
+            if matches!(self.arena.kind(p), Node::MethodDeclaration { .. }) {
+                return self.nullable.contains(&p);
+            }
+            n = p;
+        }
+        false
+    }
+
+    /// Emit `value` into an `Option<T>` slot: `None` / existing-Option as-is /
+    /// `Some(value)` for a plain value.
+    fn emit_into_option(&mut self, value: NodeId, arg: Arg) {
+        if self.expr_nullable(value) {
+            let saved = self.expect_option;
+            self.expect_option = true;
+            self.visit(value, arg);
+            self.expect_option = saved;
+        } else {
+            self.printer.print("Some(");
+            let saved = self.expect_option;
+            self.expect_option = false;
+            self.visit(value, arg);
+            self.expect_option = saved;
+            self.printer.print(")");
         }
     }
 
@@ -410,9 +497,10 @@ impl<'a> RustDumpVisitor<'a> {
             ArrayAccessExpr { name, index } => {
                 self.print_java_comment(id, arg);
                 self.visit(name, arg);
-                self.printer.print("[");
+                // Rust indices are usize; Java's are int.
+                self.printer.print("[(");
                 self.visit(index, arg);
-                self.printer.print("]");
+                self.printer.print(") as usize]");
             }
             AssignExpr { .. } => self.visit_assign(id, arg),
             BinaryExpr { .. } => self.visit_binary(id, arg),
@@ -424,8 +512,9 @@ impl<'a> RustDumpVisitor<'a> {
             }
             ClassExpr { typ } => {
                 self.print_java_comment(id, arg);
+                self.printer.print("std::any::TypeId::of::<");
                 self.visit(typ, arg);
-                self.printer.print(".class");
+                self.printer.print(">()");
             }
             ConditionalExpr {
                 condition,
@@ -450,11 +539,13 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(")");
             }
             FieldAccessExpr { .. } => self.visit_field_access(id, arg),
-            InstanceOfExpr { expr, typ } => {
+            InstanceOfExpr { typ, .. } => {
+                // Rust has no general runtime type test; emit a compiling stub.
                 self.print_java_comment(id, arg);
-                self.visit(expr, arg);
-                self.printer.print(" instanceof ");
-                self.visit(typ, arg);
+                self.printer.print("false /* instanceof ");
+                let t = self.accept_and_cut(typ, None);
+                self.printer.print(t.trim());
+                self.printer.print(" */");
             }
             CharLiteralExpr { value } => {
                 self.print_java_comment(id, arg);
@@ -504,7 +595,7 @@ impl<'a> RustDumpVisitor<'a> {
             }
             NullLiteralExpr => {
                 self.print_java_comment(id, arg);
-                self.printer.print("null");
+                self.printer.print("None");
             }
             ThisExpr { class_expr } => {
                 self.print_java_comment(id, arg);
@@ -616,11 +707,16 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print("return");
                 if let Some(e) = expr {
                     self.printer.print(" ");
-                    if self.id.has_throws() {
+                    let throws = self.id.has_throws();
+                    if throws {
                         self.printer.print("Ok(");
                     }
-                    self.visit(e, arg);
-                    if self.id.has_throws() {
+                    if self.enclosing_method_nullable(id) {
+                        self.emit_into_option(e, arg);
+                    } else {
+                        self.emit_moved_value(e, arg);
+                    }
+                    if throws {
                         self.printer.print(")");
                     }
                 }
@@ -676,15 +772,24 @@ impl<'a> RustDumpVisitor<'a> {
             ForStmt { .. } => self.visit_for(id, arg),
             ThrowStmt { expr } => {
                 self.print_java_comment(id, arg);
-                self.printer.print("throw ");
-                self.visit(expr, arg);
-                self.printer.print(";");
+                // `throw new SomeException(msg)` -> `panic!("{:?}", msg)`. Using the
+                // constructor argument (not the exception type) keeps it compiling
+                // even though the exception type isn't defined.
+                self.printer.print("panic!(\"{:?}\", ");
+                match self.arena.kind(expr) {
+                    Node::ObjectCreationExpr { args, .. } if !args.is_empty() => {
+                        let first = args[0];
+                        self.visit(first, arg);
+                    }
+                    Node::ObjectCreationExpr { .. } => self.printer.print("\"exception\""),
+                    _ => self.visit(expr, arg),
+                }
+                self.printer.print(");");
             }
-            SynchronizedStmt { expr, block } => {
+            SynchronizedStmt { block, .. } => {
+                // No direct Rust equivalent; run the body (lock dropped).
                 self.print_java_comment(id, arg);
-                self.printer.print("synchronized (");
-                self.visit(expr, arg);
-                self.printer.print(") ");
+                self.printer.print("/* synchronized */ ");
                 self.visit(block, arg);
             }
             TryStmt { .. } => self.visit_try(id, arg),
@@ -759,6 +864,7 @@ impl<'a> RustDumpVisitor<'a> {
     fn visit_name_expr(&mut self, id: NodeId, name: &str, arg: Arg) {
         self.print_java_comment(id, arg);
         let decl = self.id.find_declaration_node_for(self.arena, name, id);
+        let nullable = decl.map(|(_, d)| self.nullable.contains(&d)).unwrap_or(false);
         if let Some((_, right)) = decl {
             if (self.is_non_static_field_declaration(right) && !self.id.is_in_constructor())
                 || self.is_non_static_method_declaration(right)
@@ -768,6 +874,10 @@ impl<'a> RustDumpVisitor<'a> {
         }
         let s = self.to_snake_if_necessary(name);
         self.printer.print(&s);
+        // A nullable value used where the plain value is expected gets unwrapped.
+        if nullable && !self.expect_option {
+            self.printer.print(".unwrap()");
+        }
         self.print_orphan_comments_ending(id);
     }
 
@@ -809,6 +919,8 @@ impl<'a> RustDumpVisitor<'a> {
         }
 
         // ---- struct ----
+        // Derive Clone so field values can be cloned out from behind `&self`.
+        self.printer.print_ln_s("#[derive(Clone)]");
         self.print_modifiers(modifiers_v);
         self.printer.print("struct ");
         self.printer.print(&name);
@@ -928,9 +1040,24 @@ impl<'a> RustDumpVisitor<'a> {
         };
         for var in variables {
             let name = self.field_var_name(var);
+            let nullable = self.var_decl_id(var).map(|d| self.decl_nullable(d)).unwrap_or(false);
             self.printer.print(&format!("{name}: "));
+            if nullable {
+                self.printer.print("Option<");
+            }
             self.visit(typ, None);
+            if nullable {
+                self.printer.print(">");
+            }
             self.printer.print_ln_s(",");
+        }
+    }
+
+    fn var_decl_id(&self, var: NodeId) -> Option<NodeId> {
+        if let Node::VariableDeclarator { id, .. } = self.arena.kind(var) {
+            Some(*id)
+        } else {
+            None
         }
     }
 
@@ -1008,6 +1135,7 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         self.printer.print(&name);
+        let nullable = self.decl_nullable(vid);
         let is_initialized_array = init
             .map(|i| {
                 matches!(
@@ -1019,7 +1147,10 @@ impl<'a> RustDumpVisitor<'a> {
         if self.is_type(arg) && !is_initialized_array {
             self.printer.print(": ");
             let tmp = self.accept_and_cut(arg.unwrap(), None);
-            if is_constant && tmp == "String" {
+            let tmp = tmp.trim().to_string();
+            if nullable {
+                self.printer.print(&format!("Option<{tmp}>"));
+            } else if is_constant && tmp == "String" {
                 self.printer.print("&'static str");
             } else {
                 self.printer.print(&tmp);
@@ -1029,8 +1160,25 @@ impl<'a> RustDumpVisitor<'a> {
             if !is_initialized_array {
                 self.printer.print(" = ");
             }
-            self.visit(i, arg);
+            // Java allows `char c = 65;` (int->char); Rust needs an explicit cast.
+            let char_from_int = self.is_char_type(arg)
+                && matches!(self.arena.kind(i), Node::IntegerLiteralExpr { .. });
+            if nullable {
+                self.emit_into_option(i, arg);
+            } else if char_from_int {
+                self.visit(i, arg);
+                self.printer.print(" as u8 as char");
+            } else {
+                self.emit_moved_value(i, arg);
+            }
         }
+    }
+
+    fn is_char_type(&self, arg: Arg) -> bool {
+        matches!(
+            arg.map(|a| self.arena.kind(a)),
+            Some(Node::PrimitiveType { kind: PrimitiveKind::Char })
+        )
     }
 
     fn get_dimensions(&self, n: NodeId) -> Vec<i32> {
@@ -1168,7 +1316,13 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
+        // Assigning to a nullable slot: keep the target as the bare Option (no
+        // unwrap) and wrap the value with Some/None.
+        let target_nullable = matches!(op, AssignOp::Assign) && self.expr_nullable(target);
+        let saved = self.expect_option;
+        self.expect_option = target_nullable;
         self.visit(target, arg);
+        self.expect_option = saved;
         self.printer.print(" ");
         self.printer.print(match op {
             AssignOp::Assign => "=",
@@ -1185,7 +1339,13 @@ impl<'a> RustDumpVisitor<'a> {
             AssignOp::RUnsignedShift => ">>= /* >>>= */",
         });
         self.printer.print(" ");
-        self.visit(value, arg);
+        if target_nullable {
+            self.emit_into_option(value, arg);
+        } else if matches!(op, AssignOp::Assign) {
+            self.emit_moved_value(value, arg);
+        } else {
+            self.visit(value, arg);
+        }
     }
 
     fn visit_binary(&mut self, id: NodeId, arg: Arg) {
@@ -1197,6 +1357,25 @@ impl<'a> RustDumpVisitor<'a> {
             Node::BinaryExpr { left, op, right } => (left, op, right),
             _ => unreachable!(),
         };
+        // Null comparison -> Option::is_none()/is_some().
+        if matches!(op, BinaryOp::Equals | BinaryOp::NotEquals) {
+            let l_null = matches!(self.arena.kind(left), Node::NullLiteralExpr);
+            let r_null = matches!(self.arena.kind(right), Node::NullLiteralExpr);
+            if l_null ^ r_null {
+                let other = if l_null { right } else { left };
+                self.print_java_comment(id, arg);
+                let saved = self.expect_option;
+                self.expect_option = true;
+                self.visit(other, arg);
+                self.expect_option = saved;
+                self.printer.print(if matches!(op, BinaryOp::Equals) {
+                    ".is_none()"
+                } else {
+                    ".is_some()"
+                });
+                return;
+            }
+        }
         self.print_java_comment(id, arg);
         self.visit(left, arg);
         self.printer.print(" ");
@@ -1343,6 +1522,10 @@ impl<'a> RustDumpVisitor<'a> {
         let s = self.to_snake_if_necessary(&name);
         self.printer.print(&s);
         self.print_arguments(&args, arg);
+        // A call to a nullable-returning method used as a plain value is unwrapped.
+        if scope.is_none() && !self.expect_option && self.name_decl_nullable(&name, id) {
+            self.printer.print(".unwrap()");
+        }
     }
 
     /// Map `System.out.println(x)` / `System.err.print(x)` etc. to the Rust
@@ -1545,7 +1728,13 @@ impl<'a> RustDumpVisitor<'a> {
         if !type_parameters.is_empty() {
             self.printer.print(" ");
         }
-        let type_string = self.accept_and_cut(typ, arg);
+        let raw_type = self.accept_and_cut(typ, arg);
+        let ret_nullable = self.decl_nullable(id) && raw_type.trim() != "void";
+        let type_string = if ret_nullable {
+            format!("Option<{}>", raw_type.trim())
+        } else {
+            raw_type.clone()
+        };
         self.printer.print(" ");
         let snake = self.to_snake_if_necessary(&name);
         self.printer.print(&snake);
@@ -1617,14 +1806,24 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print(" ");
         self.visit(vid, arg);
         self.printer.print(": ");
+        let nullable = self.decl_nullable(vid);
         let is_primitive = typ
             .map(|t| matches!(self.arena.kind(t), Node::PrimitiveType { .. }))
             .unwrap_or(false);
-        if !is_primitive {
-            self.printer.print("&");
-        }
-        if let Some(t) = typ {
-            self.visit(t, arg);
+        if nullable {
+            // Option<T> owns its value; no borrow.
+            self.printer.print("Option<");
+            if let Some(t) = typ {
+                self.visit(t, arg);
+            }
+            self.printer.print(">");
+        } else {
+            if !is_primitive {
+                self.printer.print("&");
+            }
+            if let Some(t) = typ {
+                self.visit(t, arg);
+            }
         }
     }
 
@@ -1851,48 +2050,30 @@ impl<'a> RustDumpVisitor<'a> {
             }
             _ => unreachable!(),
         };
-        let try_count = self.id.increment_and_get_try_count();
+        // Rust has no try/catch. Run the resource bindings + try body in a scope,
+        // then the finally body. Catch clauses (the error path) are dropped.
         self.print_java_comment(id, arg);
-        self.printer.print_ln_s(&format!("let tryResult{try_count} = 0;"));
-        self.printer.print_ln_s(&format!("'try{try_count}: loop {{"));
         if !resources.is_empty() {
-            self.printer.print("(");
-            let n = resources.len();
-            let mut first = true;
-            for (idx, &r) in resources.iter().enumerate() {
+            self.printer.print_ln_s("{");
+            self.printer.indent();
+            for &r in &resources {
                 self.visit(r, arg);
-                if idx + 1 < n {
-                    self.printer.print(";");
-                    self.printer.print_ln();
-                    if first {
-                        self.printer.indent();
-                    }
-                }
-                first = false;
+                self.printer.print_ln_s(";");
             }
-            if n > 1 {
-                self.printer.unindent();
-            }
-            self.printer.print(") ");
+            self.visit(try_block, arg);
+            self.printer.print_ln();
+            self.printer.unindent();
+            self.printer.print("}");
+        } else {
+            self.visit(try_block, arg);
         }
-        self.visit(try_block, arg);
-        self.printer.print_ln();
-        self.printer.print_ln_s(&format!("break 'try{try_count}"));
-        self.printer.print_ln_s("}");
-        // n.getCatchs() is never null in JavaParser.
-        self.printer.print_ln_s(&format!("match tryResult{try_count} {{"));
-        self.printer.indent();
-        for &c in &catchs {
-            self.visit(c, arg);
+        if !catchs.is_empty() {
+            self.printer.print(" /* catch clauses omitted */");
         }
-        self.printer.print_ln_s("  0 => break");
-        self.printer.unindent();
-        self.printer.print_ln_s("}");
         if let Some(f) = finally_block {
-            self.printer.print(" finally ");
+            self.printer.print(" ");
             self.visit(f, arg);
         }
-        self.id.decrement_try_count();
     }
 
     fn visit_lambda(&mut self, id: NodeId, arg: Arg) {

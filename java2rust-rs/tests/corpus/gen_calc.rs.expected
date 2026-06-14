@@ -1,5 +1,6 @@
 // package com::example;
 
+#[derive(Clone)]
 pub struct Calc {
     total: i32,
 }
@@ -11,7 +12,7 @@ impl Calc {
              let mut i: i32 = 0;
             while i < xs.len() {
                 {
-                    self.total += xs[i];
+                    self.total += xs[(i) as usize];
                 }
                 i += 1;
              }
