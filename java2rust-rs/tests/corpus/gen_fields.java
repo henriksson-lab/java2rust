@@ -1,0 +1,1 @@
+class F { public static final int K = 5; private String name; boolean flag = true; }

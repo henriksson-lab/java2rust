@@ -1,0 +1,1 @@
+class W { void m(){ int i = 0; while (i < 10) { i++; } double d = (double) i; } }

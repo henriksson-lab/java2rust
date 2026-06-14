@@ -1,0 +1,13 @@
+struct A {
+}
+
+impl A {
+
+    fn  m(&self)   {
+         let test_array: vec![Vec<f64>; 6] = vec![0.0, 1.0, 2.0, 3.1, -4.0, 5.0 * 10.0, ]
+        ;
+    }
+
+    ;
+}
+

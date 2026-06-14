@@ -1,0 +1,32 @@
+// package com::example;
+
+pub struct Calc {
+
+     let mut total: i32 = 0;
+}
+
+impl Calc {
+
+    pub fn  add_all(&self,  xs: &Vec<i32>) -> i32  {
+         {
+             let mut i: i32 = 0;
+            while i < xs.len() {
+                {
+                    self.total += xs[i];
+                }
+                i += 1;
+             }
+         }
+
+        if self.total > 100 {
+            return 100;
+        } else {
+            return self.total;
+        }
+    }
+
+    fn  half( v: f64) -> f64  {
+        return v / 2.0;
+    }
+}
+

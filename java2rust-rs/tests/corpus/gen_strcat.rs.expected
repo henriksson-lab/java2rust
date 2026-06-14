@@ -1,0 +1,10 @@
+struct S {
+}
+
+impl S {
+
+    fn  g(&self,  n: i32) -> String  {
+        return format!("n={}!", n);
+    }
+}
+

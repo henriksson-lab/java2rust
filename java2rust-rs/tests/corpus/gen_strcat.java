@@ -1,0 +1,1 @@
+class S { String g(int n){ return "n=" + n + "!"; } }

@@ -1,0 +1,1 @@
+class T { int m(int a){ return a > 0 ? a : -a; } }

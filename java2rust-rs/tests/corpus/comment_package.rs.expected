@@ -1,0 +1,15 @@
+/**
+ * Licence
+ */
+// Comment
+// package y;
+
+/**
+ * Class.
+ */
+pub struct C {
+}
+
+impl C {
+}
+

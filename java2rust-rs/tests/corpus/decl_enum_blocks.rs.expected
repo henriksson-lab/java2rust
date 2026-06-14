@@ -1,0 +1,20 @@
+struct X {
+}
+
+impl X {
+
+    enum A {
+
+        AA();
+
+         let id: i32;
+    }
+
+    enum B {
+
+        BB();
+
+         let id: i32;
+    }
+}
+

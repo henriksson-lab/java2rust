@@ -1,0 +1,1 @@
+ class A { void m() { double[][] testArray = {{0, 1, +2., 3.1, -4, 5}}; };  }  

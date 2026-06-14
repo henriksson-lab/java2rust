@@ -1,0 +1,1 @@
+ class A { void m(double x) { m(10); };  }  

@@ -1,0 +1,1 @@
+ class A { void m() { double test = 1; test = 10 * 1.5; float x = 10; int x2 = 20; };  }  

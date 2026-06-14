@@ -1,0 +1,10 @@
+struct A {
+}
+
+impl A {
+
+    fn  m(&self)   {
+        x_a_a.x_a_a_b();
+    }
+}
+

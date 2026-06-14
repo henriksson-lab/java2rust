@@ -1,0 +1,1 @@
+int i = 0; for (;;) { System.out.println("i: " + i); if (i > 100) break; else { i++; } }

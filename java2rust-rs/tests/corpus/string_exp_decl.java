@@ -1,0 +1,1 @@
+ class A { void m() { String s = "5 choose " + i + "gdgahdgs"; };  }  

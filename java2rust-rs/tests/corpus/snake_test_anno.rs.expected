@@ -1,0 +1,13 @@
+struct A {
+}
+
+impl A {
+
+    #[test]
+    fn  test_method(&self)   {
+         let i: i32;
+    }
+
+    ;
+}
+

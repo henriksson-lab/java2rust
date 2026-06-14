@@ -1,0 +1,1 @@
+class Y { void m(Object o){ synchronized(o){ x(); } } }

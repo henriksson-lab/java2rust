@@ -1,0 +1,16 @@
+struct N {
+}
+
+impl N {
+
+    fn  m(&self)   {
+        if a {
+            if b {
+                c();
+            } else {
+                d();
+            }
+        }
+    }
+}
+

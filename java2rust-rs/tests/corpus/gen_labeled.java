@@ -1,0 +1,1 @@
+class L { void m(){ outer: for(int i=0;i<3;i++){ break outer; } } }

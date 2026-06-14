@@ -1,0 +1,21 @@
+struct A {
+}
+
+impl A {
+
+    fn  m(&self)   {
+         let mut i: i32 = 0;
+        loop {
+            System::out::println(format!("i: {}", i));
+            if i > 100 {
+                break;
+            }
+            else {
+                i += 1;
+            }
+        }
+
+        ;
+    }
+}
+

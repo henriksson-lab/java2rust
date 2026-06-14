@@ -1,0 +1,19 @@
+struct L {
+}
+
+impl L {
+
+    fn  m(&self)   {
+        'outer:  {
+             let mut i: i32 = 0;
+            while i < 3 {
+                {
+                    break 'outer;
+                }
+                i += 1;
+             }
+         }
+
+    }
+}
+

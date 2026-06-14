@@ -1,0 +1,19 @@
+struct Sw {
+}
+
+impl Sw {
+
+    fn  m(&self,  x: i32)   {
+        match x {
+              1 => 
+                 {
+                    return;
+                }
+            _ => 
+                 {
+                    break;
+                }
+        }
+    }
+}
+

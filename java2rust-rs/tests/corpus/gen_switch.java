@@ -1,0 +1,1 @@
+class Sw { void m(int x){ switch(x){ case 1: return; default: break; } } }

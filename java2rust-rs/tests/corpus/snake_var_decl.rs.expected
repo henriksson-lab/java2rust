@@ -1,0 +1,10 @@
+struct A {
+
+     let x_test_string: String;
+}
+
+impl A {
+
+    ;
+}
+

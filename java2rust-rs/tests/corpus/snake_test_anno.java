@@ -1,0 +1,1 @@
+@Test void testMethod() { int i; }

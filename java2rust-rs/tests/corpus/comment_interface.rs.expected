@@ -1,0 +1,17 @@
+/**
+ * Interface comment
+ */
+pub trait X {
+
+    /**
+   * Hello
+   */
+    // World
+    fn  hello(&self) -> i32 ;
+
+    /**
+   * Just javadoc
+   */
+    fn  ohyes(&self) -> i32 ;
+}
+
