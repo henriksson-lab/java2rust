@@ -51,6 +51,21 @@ fn records_free_function_with_inferred_return() {
 }
 
 #[test]
+fn all_caps_class_names_are_stubbed_but_short_generics_arent() {
+    let java = r#"
+package org.app;
+import java.net.URL;
+public class M {
+    public URL u;
+    public <T> T pick(T a) { return a; }
+}
+"#;
+    let out = stubs_of(java, &HashSet::new());
+    assert!(out.contains("struct URL"), "all-caps class URL is stubbed:\n{out}");
+    assert!(!out.contains("struct T "), "short generic T is not stubbed:\n{out}");
+}
+
+#[test]
 fn does_not_stub_stdlib_types() {
     let out = stubs_of(SRC, &HashSet::new());
     assert!(!out.contains("struct String"), "String must not be stubbed:\n{out}");

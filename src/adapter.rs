@@ -876,6 +876,19 @@ impl<'a> Builder<'a> {
                 let res = self.field(n, "resources");
                 self.try_statement(n, res)
             }
+            // A local class/interface/enum declared inside a method body.
+            "class_declaration" => {
+                let td = self.class_declaration(n, false);
+                self.alloc(Node::TypeDeclarationStmt { type_declaration: td }, n)
+            }
+            "interface_declaration" => {
+                let td = self.class_declaration(n, true);
+                self.alloc(Node::TypeDeclarationStmt { type_declaration: td }, n)
+            }
+            "enum_declaration" => {
+                let td = self.enum_declaration(n);
+                self.alloc(Node::TypeDeclarationStmt { type_declaration: td }, n)
+            }
             ";" => self.alloc(Node::EmptyStmt, n),
             _ => self.alloc(Node::EmptyStmt, n),
         }

@@ -6,7 +6,7 @@ pub struct A {
 impl A {
 
     /// @java A#methodMIs
-    pub fn method_m_is(&self) -> String ;
+    pub fn method_m_is(&self) -> String { unimplemented!() }
 
 
 

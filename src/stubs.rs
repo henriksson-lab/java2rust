@@ -143,20 +143,22 @@ impl StubCollector {
                 format!("stub_{}", pkg.replace('.', "_"))
             };
             let rust_path = format!("crate::{module}::{}", t.rust_name);
+            let entry = TypeSym {
+                rust_path: rust_path.clone(),
+                kind: "struct".to_string(),
+                parent: None,
+                interfaces: Vec::new(),
+                generic: false,
+                fields: Default::default(),
+                methods: Default::default(),
+            };
             for fqn in &t.java_fqns {
-                map.types.insert(
-                    fqn.clone(),
-                    TypeSym {
-                        rust_path: rust_path.clone(),
-                        kind: "struct".to_string(),
-                        parent: None,
-                        interfaces: Vec::new(),
-                        generic: false,
-                        fields: Default::default(),
-                        methods: Default::default(),
-                    },
-                );
+                map.types.insert(fqn.clone(), entry.clone());
             }
+            // Also key by bare simple name, so a reference resolves regardless of
+            // how the file imports it. Safe: only stubs add simple-name keys, and
+            // project/dep types resolve via their FQN (import/package) first.
+            map.types.entry(t.rust_name.clone()).or_insert(entry);
         }
         map
     }

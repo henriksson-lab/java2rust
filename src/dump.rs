@@ -121,6 +121,19 @@ pub struct RustDumpVisitor<'a> {
     /// FQN of the class currently being emitted, for inherited-member resolution
     /// against the linked project map.
     current_class_fqn: Option<String>,
+    /// Type-parameter nodes of the enclosing class(es), so a hoisted inner class
+    /// can re-declare the outer params it references.
+    enclosing_type_params: Vec<NodeId>,
+    /// Counter for naming generated anonymous-class structs.
+    anon_counter: u32,
+    /// If the current class extends an *external* (stub) type: its (FQN, Rust
+    /// name), so a bare inherited-field read resolves to `self.base.<field>` and
+    /// the field is recorded on the parent's stub.
+    current_external_base: Option<(String, String)>,
+    /// Names of the current `impl` block's type parameters, so a method that
+    /// re-declares one (a Java static generic method shadowing the class param)
+    /// drops it (Rust forbids the shadow — E0403).
+    impl_param_names: Vec<String>,
     /// Overload disambiguation for the current type: method/constructor NodeId →
     /// its emitted Rust name (only present for members in an overloaded group).
     overload_name: std::collections::HashMap<NodeId, String>,
@@ -154,6 +167,10 @@ impl<'a> RustDumpVisitor<'a> {
             stubs: std::cell::RefCell::new(crate::stubs::StubCollector::default()),
             in_trait: false,
             current_class_fqn: None,
+            enclosing_type_params: Vec::new(),
+            anon_counter: 0,
+            impl_param_names: Vec::new(),
+            current_external_base: None,
             overload_name: std::collections::HashMap::new(),
             overload_by_arity: std::collections::HashMap::new(),
         }
@@ -402,7 +419,13 @@ impl<'a> RustDumpVisitor<'a> {
         // Must look like a class name (CamelCase): excludes type parameters (`T`,
         // `E`) and all-caps acronyms we can't distinguish from generics.
         let first_upper = simple.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-        if !first_upper || !simple.chars().any(|c| c.is_lowercase()) {
+        if !first_upper {
+            return None;
+        }
+        // Short all-caps names are type parameters / acronym generics (`T`, `E`,
+        // `K`, `V`, `T1`); longer all-caps names are real classes (`URL`, `URI`,
+        // `CRC32`). Only exclude the short ones.
+        if !simple.chars().any(|c| c.is_lowercase()) && simple.chars().count() <= 2 {
             return None;
         }
         if self.resolve_type_sym(simple).is_some() {
@@ -1147,7 +1170,6 @@ impl<'a> RustDumpVisitor<'a> {
                 if let Some(ce) = class_expr {
                     self.visit(ce, arg);
                 } else if self.id.is_in_constructor() {
-                    // The value being built (see visit_constructor).
                     self.printer.print("__self");
                 } else {
                     self.printer.print("self");
@@ -1410,8 +1432,21 @@ impl<'a> RustDumpVisitor<'a> {
         // An inherited instance field (not declared locally): reach it through the
         // embedded `base` field(s).
         if decl.is_none() {
+            // Inherited instance field of a project superclass -> through `base`.
             if let Some(path) = self.inherited_field(name) {
                 self.printer.print(&path);
+                self.print_orphan_comments_ending(id);
+                return;
+            }
+            // Otherwise, an unresolved bare name in a class extending an external
+            // (stub) superclass is assumed to be that parent's field: `self.base.x`
+            // (and recorded on the parent's stub so the field exists).
+            if let Some((fqn, rust_name)) = self.current_external_base.clone() {
+                let snake = self.to_snake_if_necessary(name);
+                if self.emit_stubs {
+                    self.stubs.borrow_mut().add_field(&fqn, &rust_name, &snake);
+                }
+                self.printer.print(&format!("self.base.{snake}"));
                 self.print_orphan_comments_ending(id);
                 return;
             }
@@ -1517,6 +1552,27 @@ impl<'a> RustDumpVisitor<'a> {
         let saved_class_fqn = self.current_class_fqn.take();
         self.current_class_fqn = Some(self.java_type_fqn(id));
         self.compute_overloads(&members);
+
+        // A hoisted *inner* (non-static) class re-declares the enclosing type
+        // parameters it references, so they're in scope in its body.
+        let extra_params: Vec<NodeId> = if modifiers::is_static(modifiers_v)
+            || self.enclosing_type_params.is_empty()
+        {
+            Vec::new()
+        } else {
+            self.enclosing_type_params
+                .clone()
+                .into_iter()
+                .filter(|&p| {
+                    self.type_param_name(p)
+                        .map(|n| members.iter().any(|&m| self.subtree_uses_type(m, &n)))
+                        .unwrap_or(false)
+                })
+                .collect()
+        };
+        let mut combined: Vec<NodeId> = extra_params.clone();
+        combined.extend(type_parameters.iter().copied());
+
         for &m in &members {
             if let Node::FieldDeclaration { modifiers, variables, .. } = self.arena.kind(m) {
                 if !modifiers::is_static(*modifiers) {
@@ -1538,14 +1594,37 @@ impl<'a> RustDumpVisitor<'a> {
         self.print_modifiers(modifiers_v);
         self.printer.print("struct ");
         self.printer.print(&name);
-        self.print_type_parameters(&type_parameters, arg);
+        self.print_type_parameters(&combined, arg);
         let _ = &implements; // `implements` -> traits is Stage 2; not modelled here.
         // Single inheritance via composition: embed the superclass as `base`.
         let parent_rust = extends.first().map(|&e| self.accept_and_cut(e, arg).trim().to_string());
+        // External (stub) superclass? Then bare inherited fields go through `base`.
+        let saved_ext_base = self.current_external_base.take();
+        self.current_external_base = extends.first().and_then(|&e| {
+            let simple = self.type_simple_name(e)?;
+            let external = match self.resolve_type_sym(&simple) {
+                None => true,
+                Some(t) => t.rust_path.contains("::stub_"),
+            };
+            if !external {
+                return None;
+            }
+            let cands = self.type_candidates(&simple);
+            let fqn = cands.into_iter().find(|c| c.contains('.')).unwrap_or_else(|| simple.clone());
+            Some((fqn, map_type_name(&simple).replace('$', "_")))
+        });
         self.printer.print_ln_s(" {");
         self.printer.indent();
         if let Some(p) = &parent_rust {
             self.printer.print_ln_s(&format!("pub base: {p},"));
+        }
+        // Carried outer type params must appear in a field (E0392) — `PhantomData`.
+        if !extra_params.is_empty() {
+            let names: Vec<String> =
+                extra_params.iter().filter_map(|&p| self.type_param_name(p)).collect();
+            let inner =
+                if names.len() == 1 { names[0].clone() } else { format!("({})", names.join(", ")) };
+            self.printer.print_ln_s(&format!("pub __phantom: std::marker::PhantomData<{inner}>,"));
         }
         for &m in &members {
             if let Node::FieldDeclaration { modifiers, .. } = self.arena.kind(m) {
@@ -1561,19 +1640,19 @@ impl<'a> RustDumpVisitor<'a> {
         if let Some(p) = &parent_rust {
             self.printer.print_ln();
             self.printer.print("impl");
-            self.print_type_parameters(&type_parameters, arg);
+            self.print_type_parameters(&combined, arg);
             self.printer.print(" std::ops::Deref for ");
             self.printer.print(&name);
-            self.print_type_param_names(&type_parameters);
+            self.print_type_param_names(&combined);
             self.printer.print_ln_s(" {");
             self.printer.print_ln_s(&format!("    type Target = {p};"));
             self.printer.print_ln_s(&format!("    fn deref(&self) -> &{p} {{ &self.base }}"));
             self.printer.print_ln_s("}");
             self.printer.print("impl");
-            self.print_type_parameters(&type_parameters, arg);
+            self.print_type_parameters(&combined, arg);
             self.printer.print(" std::ops::DerefMut for ");
             self.printer.print(&name);
-            self.print_type_param_names(&type_parameters);
+            self.print_type_param_names(&combined);
             self.printer.print_ln_s(" {");
             self.printer.print_ln_s(&format!("    fn deref_mut(&mut self) -> &mut {p} {{ &mut self.base }}"));
             self.printer.print_ln_s("}");
@@ -1583,12 +1662,15 @@ impl<'a> RustDumpVisitor<'a> {
         // ---- impl ----
         // `impl<T: Bound> Type<T>` — bounds in the binder, names in the path.
         self.printer.print("impl");
-        self.print_type_parameters(&type_parameters, arg);
+        self.print_type_parameters(&combined, arg);
         self.printer.print(" ");
         self.printer.print(&name);
-        self.print_type_param_names(&type_parameters);
+        self.print_type_param_names(&combined);
         self.printer.print_ln_s(" {");
         self.printer.indent();
+        let impl_names: Vec<String> =
+            combined.iter().filter_map(|&p| self.type_param_name(p)).collect();
+        let saved_impl_params = std::mem::replace(&mut self.impl_param_names, impl_names);
         // static fields as associated constants
         for &m in &members {
             if let Node::FieldDeclaration { modifiers, .. } = self.arena.kind(m) {
@@ -1612,8 +1694,13 @@ impl<'a> RustDumpVisitor<'a> {
         self.print_orphan_comments_ending(id);
         self.printer.unindent();
         self.printer.print_ln_s("}");
+        self.impl_param_names = saved_impl_params;
 
-        // Nested type declarations are hoisted to module level.
+        // Nested type declarations are hoisted to module level. Expose this
+        // class's (effective) type params so nested inner classes can re-declare
+        // the ones they use.
+        let saved_enclosing = self.enclosing_type_params.len();
+        self.enclosing_type_params.extend(combined.iter().copied());
         for &m in &members {
             if matches!(
                 self.arena.kind(m),
@@ -1624,10 +1711,36 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print_ln();
             }
         }
+        self.enclosing_type_params.truncate(saved_enclosing);
         self.class_field_names = saved_fields;
         self.overload_name = saved_overload_name;
         self.overload_by_arity = saved_overload_arity;
         self.current_class_fqn = saved_class_fqn;
+        self.current_external_base = saved_ext_base;
+    }
+
+    fn type_param_name(&self, p: NodeId) -> Option<String> {
+        match self.arena.kind(p) {
+            Node::TypeParameter { name, .. } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    /// Does `node`'s subtree reference a type named `name` (e.g. an outer class's
+    /// type parameter used inside a nested class)?
+    fn subtree_uses_type(&self, node: NodeId, name: &str) -> bool {
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if let Node::ClassOrInterfaceType { name: tn, .. } = self.arena.kind(n) {
+                if tn == name {
+                    return true;
+                }
+            }
+            for c in self.arena.children(n) {
+                stack.push(c);
+            }
+        }
+        false
     }
 
     /// Does this subtree assign to an instance field (→ method needs `&mut self`)?
@@ -1955,15 +2068,20 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print(&name);
         let nullable = self.decl_nullable(vid);
         if self.is_type(arg) {
-            self.printer.print(": ");
             let tmp = self.accept_and_cut(arg.unwrap(), None);
             let tmp = tmp.trim().to_string();
-            if nullable {
-                self.printer.print(&format!("Option<{tmp}>"));
-            } else if is_constant && tmp == "String" {
-                self.printer.print("&'static str");
+            // Java `var` -> let inference (no annotation).
+            if tmp == "var" && !nullable {
+                // emit no `: Type`
             } else {
-                self.printer.print(&tmp);
+                self.printer.print(": ");
+                if nullable {
+                    self.printer.print(&format!("Option<{tmp}>"));
+                } else if is_constant && tmp == "String" {
+                    self.printer.print("&'static str");
+                } else {
+                    self.printer.print(&tmp);
+                }
             }
         }
         if let Some(i) = init {
@@ -2080,6 +2198,15 @@ impl<'a> RustDumpVisitor<'a> {
         }
     }
 
+    /// A `getClass()` call (any receiver, no args), possibly parenthesized.
+    fn is_get_class_call(&self, n: NodeId) -> bool {
+        match self.arena.kind(n) {
+            Node::MethodCallExpr { name, args, .. } => name == "getClass" && args.is_empty(),
+            Node::EnclosedExpr { inner: Some(i) } => self.is_get_class_call(*i),
+            _ => false,
+        }
+    }
+
     fn visit_binary(&mut self, id: NodeId, arg: Arg) {
         if self.id.get_type(id) == Some(JClass::StringClass) {
             self.print_string_expression(id, arg);
@@ -2105,6 +2232,14 @@ impl<'a> RustDumpVisitor<'a> {
                 } else {
                     ".is_some()"
                 });
+                return;
+            }
+            // `getClass() == other.getClass()` (the Java `equals` idiom): in Rust
+            // the operands are statically typed, so the runtime classes always
+            // match — fold to a constant (`true` for `==`, `false` for `!=`).
+            if self.is_get_class_call(left) && self.is_get_class_call(right) {
+                self.print_java_comment(id, arg);
+                self.printer.print(if matches!(op, BinaryOp::Equals) { "true" } else { "false" });
                 return;
             }
         }
@@ -2842,6 +2977,28 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
+        // Anonymous class: `new Iface() { body }` -> an inline struct carrying the
+        // body's methods, instantiated as a block expression. (Capturing enclosing
+        // state and implementing the interface are left for an LLM pass.)
+        if let Some(body) = &anonymous_body {
+            let body = body.clone();
+            let n = self.anon_counter;
+            self.anon_counter += 1;
+            let anon = format!("__Anon{n}");
+            self.printer.print_ln_s("{");
+            self.printer.indent();
+            self.printer.print_ln_s("#[derive(Clone, Default)]");
+            self.printer.print_ln_s(&format!("struct {anon} {{}}"));
+            self.printer.print_ln_s(&format!("impl {anon} {{"));
+            self.printer.indent();
+            self.print_members(&body, arg, Filter::Method);
+            self.printer.unindent();
+            self.printer.print_ln_s("}");
+            self.printer.print_ln_s(&format!("{anon}::default()"));
+            self.printer.unindent();
+            self.printer.print("}");
+            return;
+        }
         if let Some(s) = scope {
             self.visit(s, arg);
             self.printer.print(".");
@@ -2873,10 +3030,6 @@ impl<'a> RustDumpVisitor<'a> {
             self.printer.print("()");
         } else {
             self.print_arguments(&args, arg);
-        }
-        // Anonymous class bodies have no inline Rust equivalent; drop them.
-        if anonymous_body.is_some() {
-            self.printer.print(" /* anonymous class body omitted */");
         }
     }
 
@@ -3040,8 +3193,17 @@ impl<'a> RustDumpVisitor<'a> {
         let snake = self.to_snake_if_necessary(&name);
         let snake = self.decl_emitted_name(id, &snake);
         self.printer.print(&snake);
-        // Type parameters go after the name in Rust: `fn name<T>(...)`.
-        self.print_type_parameters(&type_parameters, arg);
+        // Type parameters go after the name in Rust: `fn name<T>(...)`. Drop any
+        // that re-declare an `impl` type param (Java static generic method
+        // shadowing the class param — Rust forbids the shadow, E0403).
+        let method_params: Vec<NodeId> = type_parameters
+            .iter()
+            .copied()
+            .filter(|&p| {
+                self.type_param_name(p).map(|n| !self.impl_param_names.contains(&n)).unwrap_or(true)
+            })
+            .collect();
+        self.print_type_parameters(&method_params, arg);
         self.printer.print("(");
         if !modifiers::is_static(modifiers_v) {
             let needs_mut = body.map(|b| self.mutates_self(b)).unwrap_or(false);
@@ -3077,7 +3239,10 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.print(" ");
         match body {
-            None => self.printer.print(";"),
+            // No body: a trait method declaration keeps `;`; an abstract method
+            // in a concrete `impl` needs a body (Rust requires one) -> stub it.
+            None if self.in_trait => self.printer.print(";"),
+            None => self.printer.print("{ unimplemented!() }"),
             Some(b) => {
                 self.printer.print(" ");
                 self.visit(b, arg);
