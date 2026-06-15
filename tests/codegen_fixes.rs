@@ -212,6 +212,18 @@ fn concrete_erasure_bound_is_dropped() {
 }
 
 #[test]
+fn switch_expression_arrow_form_lowers_to_match() {
+    // Java 14 arrow-form switch *expression* (`return switch(x){ case A -> v; }`)
+    // -> a Rust `match` expression with `A | B => v` arms.
+    let java = "class C { String m(int x) { return switch (x) { case 1, 2 -> \"a\"; default -> \"b\"; }; } }";
+    let out = convert(java);
+    assert!(out.contains("match x"), "switch expression -> match:\n{out}");
+    assert!(out.contains("1 | 2 =>"), "arrow multi-label -> or-pattern:\n{out}");
+    assert!(out.contains("_ =>"), "default -> wildcard arm:\n{out}");
+    assert!(!out.contains("switch ("), "no verbatim Java switch:\n{out}");
+}
+
+#[test]
 fn switch_case_scoped_local_is_hoisted() {
     // A local declared in one `switch` case and used in another (Java cases share
     // a scope) is hoisted above the `match`; its in-case decl becomes assignment.

@@ -1019,46 +1019,91 @@ impl<'a> Builder<'a> {
         self.alloc(Node::CatchClause { param, catch_block }, n)
     }
 
+    /// Arrow-form switch rule (`case A, B -> stmt|block|expr|throw`). Emits one
+    /// `SwitchEntryStmt` per case value (fall-through / or-pattern), the body on
+    /// the last; `default ->` gets a `None` label.
+    fn switch_rule(&mut self, grp: TsNode<'a>, entries: &mut Vec<NodeId>) {
+        let mut label_node = None;
+        let mut body_nodes = Vec::new();
+        for c in self.all_children(grp) {
+            match c.kind() {
+                "switch_label" => label_node = Some(c),
+                "->" | "," | ";" | "line_comment" | "block_comment" => {}
+                _ => body_nodes.push(c),
+            }
+        }
+        // The body: a block's inner statements, or the single stmt/expr/throw.
+        let mut stmts: Vec<NodeId> = Vec::new();
+        for b in body_nodes {
+            if b.kind() == "block" {
+                for s in self.named_children(b) {
+                    if matches!(s.kind(), "line_comment" | "block_comment") {
+                        continue;
+                    }
+                    stmts.push(self.stmt(s));
+                }
+            } else {
+                stmts.push(self.stmt(b));
+            }
+        }
+        let Some(lbl) = label_node else { return };
+        let is_default = self.all_children(lbl).iter().any(|c| c.kind() == "default");
+        if is_default {
+            entries.push(self.alloc(Node::SwitchEntryStmt { label: None, stmts }, grp));
+            return;
+        }
+        let case_vals = self.named_children(lbl);
+        let last = case_vals.len().saturating_sub(1);
+        for (i, &cv) in case_vals.iter().enumerate() {
+            let label = Some(self.expr(cv));
+            let s = if i == last { stmts.clone() } else { Vec::new() };
+            entries.push(self.alloc(Node::SwitchEntryStmt { label, stmts: s }, lbl));
+        }
+    }
+
     fn switch_statement(&mut self, n: TsNode<'a>) -> NodeId {
         let selector = self.expr(self.unwrap_paren(self.field(n, "condition").unwrap()));
         let body = self.field(n, "body").unwrap();
         let mut entries = Vec::new();
         for grp in self.named_children(body) {
-            if matches!(grp.kind(), "line_comment" | "block_comment") {
-                continue;
-            }
-            if grp.kind() != "switch_block_statement_group" {
-                self.unsupported("switch entry", grp);
-            }
-            // Collect labels (case/default) and the statements that follow them.
-            let mut labels = Vec::new();
-            let mut stmt_nodes = Vec::new();
-            for c in self.all_children(grp) {
-                match c.kind() {
-                    "switch_label" => labels.push(c),
-                    ":" | "{" | "}" => {}
-                    "line_comment" | "block_comment" => {}
-                    ";" => stmt_nodes.push(None),
-                    _ => stmt_nodes.push(Some(c)),
+            match grp.kind() {
+                "line_comment" | "block_comment" => continue,
+                // Arrow form (Java 14+): `case A, B -> stmt|block|expr|throw`.
+                "switch_rule" => self.switch_rule(grp, &mut entries),
+                "switch_block_statement_group" => {
+                    // Colon form: collect labels and the statements that follow.
+                    let mut labels = Vec::new();
+                    let mut stmt_nodes = Vec::new();
+                    for c in self.all_children(grp) {
+                        match c.kind() {
+                            "switch_label" => labels.push(c),
+                            ":" | "{" | "}" => {}
+                            "line_comment" | "block_comment" => {}
+                            ";" => stmt_nodes.push(None),
+                            _ => stmt_nodes.push(Some(c)),
+                        }
+                    }
+                    // One SwitchEntryStmt per label; the statements go with the
+                    // last label of the group, the rest get empty bodies.
+                    let last = labels.len().saturating_sub(1);
+                    for (i, &lbl) in labels.iter().enumerate() {
+                        let label =
+                            self.named_children(lbl).into_iter().next().map(|e| self.expr(e));
+                        let stmts = if i == last {
+                            stmt_nodes
+                                .iter()
+                                .map(|o| match o {
+                                    Some(s) => self.stmt(*s),
+                                    None => self.alloc(Node::EmptyStmt, grp),
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        entries.push(self.alloc(Node::SwitchEntryStmt { label, stmts }, lbl));
+                    }
                 }
-            }
-            // JavaParser emits one SwitchEntryStmt per label; the statements go
-            // with the last label of the group, the rest get empty bodies.
-            let last = labels.len().saturating_sub(1);
-            for (i, &lbl) in labels.iter().enumerate() {
-                let label = self.named_children(lbl).into_iter().next().map(|e| self.expr(e));
-                let stmts = if i == last {
-                    stmt_nodes
-                        .iter()
-                        .map(|o| match o {
-                            Some(s) => self.stmt(*s),
-                            None => self.alloc(Node::EmptyStmt, grp),
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                entries.push(self.alloc(Node::SwitchEntryStmt { label, stmts }, lbl));
+                _ => self.unsupported("switch entry", grp),
             }
         }
         self.alloc(Node::SwitchStmt { selector, entries }, n)
@@ -1174,6 +1219,9 @@ impl<'a> Builder<'a> {
 
     fn expr(&mut self, n: TsNode<'a>) -> NodeId {
         match n.kind() {
+            // A switch *expression* (`return switch(x){...}`): a Rust `match` is
+            // an expression, so the same lowering works in expression position.
+            "switch_expression" => self.switch_statement(n),
             "identifier" => {
                 let name = self.text(n);
                 self.alloc(Node::NameExpr { name }, n)
