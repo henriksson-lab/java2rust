@@ -4,7 +4,7 @@
 #[derive(Clone, Default)]
 pub struct Calc {
     /// @java com.example.Calc#total
-    total: i32,
+    pub total: i32,
 }
 
 impl Calc {
@@ -29,7 +29,7 @@ impl Calc {
     }
 
     /// @java com.example.Calc#half
-    fn half( v: f64) -> f64  {
+    pub fn half( v: f64) -> f64  {
         return v / 2.0;
     }
 

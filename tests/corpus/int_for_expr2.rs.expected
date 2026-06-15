@@ -1,12 +1,12 @@
 /// @java A
 #[derive(Clone, Default)]
-struct A {
+pub struct A {
 }
 
 impl A {
 
     /// @java A#m
-    fn m(&self)   {
+    pub fn m(&self)   {
          let from: i32 = 3;
          let to: i32 = source.len() + 14;
          let dest: Vec<f64> = MathArrays::copy_of_range(source, from, to);

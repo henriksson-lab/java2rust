@@ -1,12 +1,12 @@
 /// @java Y
 #[derive(Clone, Default)]
-struct Y {
+pub struct Y {
 }
 
 impl Y {
 
     /// @java Y#m
-    fn m(&self,  o: &Box<dyn std::any::Any>)   {
+    pub fn m(&self,  o: &Box<dyn std::any::Any>)   {
         /* synchronized */ {
             x();
         }

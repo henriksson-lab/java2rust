@@ -1,12 +1,12 @@
 /// @java S
 #[derive(Clone, Default)]
-struct S {
+pub struct S {
 }
 
 impl S {
 
     /// @java S#g
-    fn g(&self,  n: i32) -> String  {
+    pub fn g(&self,  n: i32) -> String  {
         return format!("n={}!", n);
     }
 

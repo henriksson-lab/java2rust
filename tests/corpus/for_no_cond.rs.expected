@@ -1,12 +1,12 @@
 /// @java A
 #[derive(Clone, Default)]
-struct A {
+pub struct A {
 }
 
 impl A {
 
     /// @java A#m
-    fn m(&self)   {
+    pub fn m(&self)   {
          {
              let mut i: i32 = 10;
             loop  {

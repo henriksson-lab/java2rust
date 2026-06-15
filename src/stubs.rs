@@ -14,6 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::symbol_map::{SymbolMap, TypeSym};
+
 /// Placeholder type emitted where a Rust type could not be inferred.
 pub const UNKNOWN: &str = "Unknown";
 
@@ -120,6 +122,43 @@ impl StubCollector {
                 self.free_fns.insert(rust_name.to_string(), sig);
             }
         }
+    }
+
+    /// A symbol map from each stub type's Java FQN(s) to its `crate::stub_…::Name`
+    /// path, matching the per-package files [`render_grouped`] emits. Merged into
+    /// the link index (crate mode, pass 2) so references to stubbed externals
+    /// resolve instead of staying bare.
+    pub fn crate_symbol_map(&self) -> SymbolMap {
+        let mut map = SymbolMap::default();
+        for t in self.types.values() {
+            let pkg = t
+                .java_fqns
+                .iter()
+                .next()
+                .and_then(|f| f.rsplit_once('.').map(|(p, _)| p.to_string()))
+                .unwrap_or_default();
+            let module = if pkg.is_empty() {
+                "stubs".to_string()
+            } else {
+                format!("stub_{}", pkg.replace('.', "_"))
+            };
+            let rust_path = format!("crate::{module}::{}", t.rust_name);
+            for fqn in &t.java_fqns {
+                map.types.insert(
+                    fqn.clone(),
+                    TypeSym {
+                        rust_path: rust_path.clone(),
+                        kind: "struct".to_string(),
+                        parent: None,
+                        interfaces: Vec::new(),
+                        generic: false,
+                        fields: Default::default(),
+                        methods: Default::default(),
+                    },
+                );
+            }
+        }
+        map
     }
 
     pub fn merge(&mut self, other: StubCollector) {

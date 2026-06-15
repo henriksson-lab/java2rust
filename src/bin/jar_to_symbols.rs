@@ -164,6 +164,9 @@ fn process_class(
     let mut t = TypeSym {
         rust_path: binary_to_rust_path(&class.this_class),
         kind: kind.to_string(),
+        parent: class.super_class.as_ref().map(|s| binary_to_fqn(s)),
+        interfaces: class.interfaces.iter().map(|i| binary_to_fqn(i)).collect(),
+        generic: false,
         fields: BTreeMap::new(),
         methods: BTreeMap::new(),
     };

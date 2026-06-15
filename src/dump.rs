@@ -118,6 +118,9 @@ pub struct RustDumpVisitor<'a> {
     stubs: std::cell::RefCell<crate::stubs::StubCollector>,
     /// True while emitting trait body items, where Rust forbids `pub`.
     in_trait: bool,
+    /// FQN of the class currently being emitted, for inherited-member resolution
+    /// against the linked project map.
+    current_class_fqn: Option<String>,
     /// Overload disambiguation for the current type: method/constructor NodeId →
     /// its emitted Rust name (only present for members in an overloaded group).
     overload_name: std::collections::HashMap<NodeId, String>,
@@ -150,9 +153,50 @@ impl<'a> RustDumpVisitor<'a> {
             known_types: None,
             stubs: std::cell::RefCell::new(crate::stubs::StubCollector::default()),
             in_trait: false,
+            current_class_fqn: None,
             overload_name: std::collections::HashMap::new(),
             overload_by_arity: std::collections::HashMap::new(),
         }
+    }
+
+    /// If `member` is an inherited instance field (not declared in the current
+    /// class but in an ancestor), the access path through `base` fields, e.g.
+    /// `self.base.base.rust_name`. Uses the linked project map's parent links.
+    fn inherited_field(&self, member: &str) -> Option<String> {
+        let mut t = self.link.lookup(self.current_class_fqn.as_deref()?)?;
+        let mut bases = String::new();
+        while let Some(parent) = t.parent.as_deref() {
+            bases.push_str("base.");
+            let pt = self.link.lookup(parent)?;
+            if let Some(f) = pt.fields.get(member) {
+                return Some(format!("self.{bases}{}", f.rust));
+            }
+            t = pt;
+        }
+        None
+    }
+
+    /// The Rust path of the current class's direct superclass, if known.
+    fn current_parent_rust_path(&self) -> Option<String> {
+        let t = self.link.lookup(self.current_class_fqn.as_deref()?)?;
+        let p = t.parent.as_deref()?;
+        Some(self.link.lookup(p)?.rust_path.clone())
+    }
+
+    /// Is `member` an inherited instance method (in an ancestor)? Such calls use
+    /// `self.method()` and dispatch through `Deref`.
+    fn inherited_method(&self, member: &str) -> bool {
+        let Some(mut t) = self.current_class_fqn.as_deref().and_then(|f| self.link.lookup(f)) else {
+            return false;
+        };
+        while let Some(parent) = t.parent.as_deref() {
+            let Some(pt) = self.link.lookup(parent) else { return false };
+            if pt.methods.contains_key(member) {
+                return true;
+            }
+            t = pt;
+        }
+        false
     }
 
     /// Compute overload-disambiguated names for a type's members. Java permits
@@ -365,10 +409,13 @@ impl<'a> RustDumpVisitor<'a> {
             return None; // linked
         }
         if map_type_name(simple) != simple {
-            return None; // stdlib-mapped (List->Vec, Integer->i32, ...)
+            return None; // stdlib-mapped (List->Vec, Integer->i32, Exception->String, ...)
         }
-        if crate::id_tracker::is_known_jdk_type(simple) {
-            return None; // identity-mapped JDK type (String, Object, Exception, ...)
+        // Types valid in Rust as-is or handled elsewhere are not stubbed; every
+        // other unmapped JDK/external class IS (so it — and its called methods —
+        // resolves via a stub, e.g. `File`, `Path`, `InputStream`).
+        if matches!(simple, "String" | "Object") {
+            return None;
         }
         if self.is_known_project_type(simple) {
             return None; // defined elsewhere in this tree
@@ -740,19 +787,15 @@ impl<'a> RustDumpVisitor<'a> {
 
     // ---- printModifiers ----
 
-    fn print_modifiers(&mut self, m: i32) {
+    fn print_modifiers(&mut self, _m: i32) {
         // Rust forbids visibility qualifiers on trait items.
         if self.in_trait {
             return;
         }
-        // commentOut is always false in this configuration, so only the `pub`
-        // emissions remain observable.
-        if modifiers::is_protected(m) {
-            self.printer.print("pub ");
-        }
-        if modifiers::is_public(m) {
-            self.printer.print("pub ");
-        }
+        // Emit everything `pub`: Java's package-private default is more visible
+        // than Rust's private, and once the tree is one crate (`--crate`),
+        // cross-module references need the items to be visible (else E0603).
+        self.printer.print("pub ");
     }
 
     fn print_members(&mut self, members: &[NodeId], arg: Arg, filter: Filter) {
@@ -1111,12 +1154,11 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
             SuperExpr { class_expr } => {
+                // `super` refers to the embedded base (`super.m()` -> `self.base.m()`).
                 self.print_java_comment(id, arg);
-                if let Some(ce) = class_expr {
-                    self.visit(ce, arg);
-                    self.printer.print(".");
-                }
-                self.printer.print("super");
+                let _ = class_expr;
+                self.printer
+                    .print(if self.id.is_in_constructor() { "__self.base" } else { "self.base" });
             }
             MethodCallExpr { .. } => self.visit_method_call(id, arg),
             ObjectCreationExpr { .. } => self.visit_object_creation(id, arg),
@@ -1124,20 +1166,32 @@ impl<'a> RustDumpVisitor<'a> {
             ConstructorDeclaration { .. } => self.visit_constructor(id, arg),
             MethodDeclaration { .. } => self.visit_method(id, arg),
             Parameter { .. } => self.visit_parameter(id, arg),
-            MultiTypeParameter { modifiers: m, typ, id: vid } => {
-                self.print_modifiers(m);
+            MultiTypeParameter { modifiers: _, typ, id: vid } => {
                 self.visit(typ, arg);
                 self.printer.print(" ");
                 self.visit(vid, arg);
             }
-            ExplicitConstructorInvocationStmt { .. } => {
-                // `this(...)` / `super(...)` — no Rust equivalent; drop it.
+            ExplicitConstructorInvocationStmt { is_this, args, .. } => {
                 self.print_java_comment(id, arg);
-                self.printer.print("/* super/this constructor call omitted */");
+                let (is_this, args) = (is_this, args.clone());
+                if is_this {
+                    // Delegating constructor `this(args)` -> rebuild via the
+                    // matching `Self::new*`.
+                    let nm = self.call_emitted_name(None, "new", args.len());
+                    self.printer.print(&format!("*__self = Self::{nm}"));
+                    self.print_arguments(&args, arg);
+                    self.printer.print(";");
+                } else if let Some(p) = self.current_parent_rust_path() {
+                    // `super(args)` -> initialise the embedded base.
+                    self.printer.print(&format!("__self.base = {p}::new"));
+                    self.print_arguments(&args, arg);
+                    self.printer.print(";");
+                } else {
+                    self.printer.print("/* super(...) omitted */");
+                }
             }
-            VariableDeclarationExpr { modifiers: m, typ, vars } => {
+            VariableDeclarationExpr { modifiers: _, typ, vars } => {
                 self.print_java_comment(id, arg);
-                self.print_modifiers(m);
                 self.printer.print(" ");
                 // `int i = 0, j = 1;` -> separate `let` statements (`; `-joined).
                 for (i, &v) in vars.iter().enumerate() {
@@ -1353,12 +1407,26 @@ impl<'a> RustDumpVisitor<'a> {
     fn visit_name_expr(&mut self, id: NodeId, name: &str, arg: Arg) {
         self.print_java_comment(id, arg);
         let decl = self.id.find_declaration_node_for(self.arena, name, id);
+        // An inherited instance field (not declared locally): reach it through the
+        // embedded `base` field(s).
+        if decl.is_none() {
+            if let Some(path) = self.inherited_field(name) {
+                self.printer.print(&path);
+                self.print_orphan_comments_ending(id);
+                return;
+            }
+        }
         let nullable = decl.map(|(_, d)| self.nullable.contains(&d)).unwrap_or(false);
         if let Some((_, right)) = decl {
-            if (self.is_non_static_field_declaration(right) && !self.id.is_in_constructor())
-                || self.is_non_static_method_declaration(right)
-            {
-                self.printer.print("self.");
+            if self.is_non_static_field_declaration(right) {
+                // An instance field read: `self.f` (or `__self.f` in a ctor body,
+                // where `self` doesn't exist yet).
+                self.printer.print(if self.id.is_in_constructor() { "__self." } else { "self." });
+            } else if self.is_non_static_method_declaration(right) {
+                self.printer.print(if self.id.is_in_constructor() { "__self." } else { "self." });
+            } else if self.is_static_field_declaration(right) {
+                // A static field is an associated const: `Self::F`.
+                self.printer.print("Self::");
             }
         }
         let s = self.to_snake_if_necessary(name);
@@ -1446,6 +1514,8 @@ impl<'a> RustDumpVisitor<'a> {
         // types don't clobber the enclosing type's table).
         let saved_overload_name = std::mem::take(&mut self.overload_name);
         let saved_overload_arity = std::mem::take(&mut self.overload_by_arity);
+        let saved_class_fqn = self.current_class_fqn.take();
+        self.current_class_fqn = Some(self.java_type_fqn(id));
         self.compute_overloads(&members);
         for &m in &members {
             if let Node::FieldDeclaration { modifiers, variables, .. } = self.arena.kind(m) {
@@ -1469,11 +1539,14 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print("struct ");
         self.printer.print(&name);
         self.print_type_parameters(&type_parameters, arg);
-        // (Java `extends`/`implements` have no direct struct equivalent and are
-        // dropped — inheritance is not modelled.)
-        let _ = (&extends, &implements);
+        let _ = &implements; // `implements` -> traits is Stage 2; not modelled here.
+        // Single inheritance via composition: embed the superclass as `base`.
+        let parent_rust = extends.first().map(|&e| self.accept_and_cut(e, arg).trim().to_string());
         self.printer.print_ln_s(" {");
         self.printer.indent();
+        if let Some(p) = &parent_rust {
+            self.printer.print_ln_s(&format!("pub base: {p},"));
+        }
         for &m in &members {
             if let Node::FieldDeclaration { modifiers, .. } = self.arena.kind(m) {
                 if !modifiers::is_static(*modifiers) {
@@ -1483,6 +1556,28 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.unindent();
         self.printer.print_ln_s("}");
+        // `Deref`/`DerefMut` to the base so inherited methods dispatch and
+        // overrides (inherent items) shadow them.
+        if let Some(p) = &parent_rust {
+            self.printer.print_ln();
+            self.printer.print("impl");
+            self.print_type_parameters(&type_parameters, arg);
+            self.printer.print(" std::ops::Deref for ");
+            self.printer.print(&name);
+            self.print_type_param_names(&type_parameters);
+            self.printer.print_ln_s(" {");
+            self.printer.print_ln_s(&format!("    type Target = {p};"));
+            self.printer.print_ln_s(&format!("    fn deref(&self) -> &{p} {{ &self.base }}"));
+            self.printer.print_ln_s("}");
+            self.printer.print("impl");
+            self.print_type_parameters(&type_parameters, arg);
+            self.printer.print(" std::ops::DerefMut for ");
+            self.printer.print(&name);
+            self.print_type_param_names(&type_parameters);
+            self.printer.print_ln_s(" {");
+            self.printer.print_ln_s(&format!("    fn deref_mut(&mut self) -> &mut {p} {{ &mut self.base }}"));
+            self.printer.print_ln_s("}");
+        }
         self.printer.print_ln();
 
         // ---- impl ----
@@ -1532,6 +1627,7 @@ impl<'a> RustDumpVisitor<'a> {
         self.class_field_names = saved_fields;
         self.overload_name = saved_overload_name;
         self.overload_by_arity = saved_overload_arity;
+        self.current_class_fqn = saved_class_fqn;
     }
 
     /// Does this subtree assign to an instance field (→ method needs `&mut self`)?
@@ -1640,7 +1736,8 @@ impl<'a> RustDumpVisitor<'a> {
             let m = self.java_member_fqn(field_id, &java_name);
             self.emit_provenance(&m);
             let nullable = self.var_decl_id(var).map(|d| self.decl_nullable(d)).unwrap_or(false);
-            self.printer.print(&format!("{name}: "));
+            // `pub` so fields accessed cross-module (`x.field`) resolve.
+            self.printer.print(&format!("pub {name}: "));
             if nullable {
                 self.printer.print("Option<");
             }
@@ -2174,19 +2271,24 @@ impl<'a> RustDumpVisitor<'a> {
         // `::<T>name` here would be invalid).
         let _ = &type_args;
         if scope.is_none() {
+            // In a constructor body the receiver is `__self`, not `self`.
+            let recv = if self.id.is_in_constructor() { "__self." } else { "self." };
             if let Some((_, right)) = self.id.find_declaration_node_for(self.arena, &name, id) {
                 match self.arena.kind(right) {
                     Node::MethodDeclaration { modifiers: m, .. } => {
                         if !modifiers::is_static(*m) {
-                            self.printer.print("self.");
+                            self.printer.print(recv);
                         } else {
                             // A static method of the current type: `Self::name`,
                             // never a bare `::name` (an invalid crate-root path).
                             self.printer.print("Self::");
                         }
                     }
-                    _ => self.printer.print("self."),
+                    _ => self.printer.print(recv),
                 }
+            } else if self.inherited_method(&name) {
+                // Inherited instance method: `self.m()` dispatches through Deref.
+                self.printer.print(recv);
             }
         }
         match callee {
@@ -2949,7 +3051,7 @@ impl<'a> RustDumpVisitor<'a> {
             }
         } else if !throws.is_empty() {
             self.printer.print(" -> ");
-            self.replace_throws(&throws, arg, "Void");
+            self.replace_throws(&throws, arg, "()");
         }
         self.printer.print(" ");
         match body {
@@ -2973,9 +3075,11 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         self.printer.print(" */");
+        // Java exceptions have no Rust type; use `String` as the error channel
+        // (a defined type — avoids undefined `Rc`/`Exception`).
         self.printer.print("Result<");
         self.printer.print(type_string);
-        self.printer.print(", Rc<Exception>> ");
+        self.printer.print(", String> ");
     }
 
     fn visit_parameter(&mut self, id: NodeId, arg: Arg) {
@@ -3008,17 +3112,33 @@ impl<'a> RustDumpVisitor<'a> {
             }
             self.printer.print(">");
         } else {
+            // An interface-typed parameter becomes `&dyn Trait`: implementors
+            // coerce at the call site (`&concrete` -> `&dyn Trait`), since we now
+            // generate `impl Trait for Class`.
+            let is_trait = typ
+                .and_then(|t| self.type_simple_name(t))
+                .map(|n| self.resolved_is_trait(&n))
+                .unwrap_or(false);
             if !is_primitive {
                 let needs_mut = match self.arena.kind(vid) {
                     Node::VariableDeclaratorId { name } => self.mut_borrow_params.contains(name),
                     _ => false,
                 };
                 self.printer.print(if needs_mut { "&mut " } else { "&" });
+                if is_trait {
+                    self.printer.print("dyn ");
+                }
             }
             if let Some(t) = typ {
                 self.visit(t, arg);
             }
         }
+    }
+
+    /// Does `name` resolve to a *non-generic* trait (interface)? Only those can
+    /// be a plain `&dyn Trait` (a generic trait needs its type args).
+    fn resolved_is_trait(&self, name: &str) -> bool {
+        self.resolve_type_sym(name).map(|t| t.kind == "trait" && !t.generic).unwrap_or(false)
     }
 
     fn visit_block(&mut self, id: NodeId, arg: Arg) {
@@ -3440,6 +3560,19 @@ impl<'a> RustDumpVisitor<'a> {
         false
     }
 
+    fn is_static_field_declaration(&self, n: NodeId) -> bool {
+        if matches!(self.arena.kind(n), Node::VariableDeclaratorId { .. }) {
+            if let Some(p) = self.arena.parent(n) {
+                if let Some(g) = self.arena.parent(p) {
+                    if let Node::FieldDeclaration { modifiers, .. } = self.arena.kind(g) {
+                        return modifiers::is_static(*modifiers);
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn is_non_static_method_declaration(&self, n: NodeId) -> bool {
         if let Node::MethodDeclaration { modifiers, .. } = self.arena.kind(n) {
             !modifiers::is_static(*modifiers)
@@ -3753,6 +3886,14 @@ pub fn map_type_name(name: &str) -> &str {
         "Float" => "f32",
         "Boolean" => "bool",
         "Character" => "char",
+        // Common java.lang types with no plain identifier mapping. These have no
+        // import (auto-imported), so they must be mapped here by simple name.
+        "Void" => "()",
+        "StringBuilder" | "StringBuffer" | "CharSequence" => "String",
+        "Number" => "f64",
+        // Exceptions have no Rust equivalent; the throws channel uses `String`
+        // (see `replace_throws`), so an exception-typed value maps the same way.
+        "Exception" | "Throwable" | "Error" | "RuntimeException" => "String",
         other => other,
     }
 }

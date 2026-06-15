@@ -1,8 +1,8 @@
 /// @java A
 #[derive(Clone, Default)]
-struct A {
+pub struct A {
     /// @java A#i
-    i: i32,
+    pub i: i32,
 }
 
 impl A {

@@ -1,12 +1,12 @@
 /// @java A
 #[derive(Clone, Default)]
-struct A {
+pub struct A {
 }
 
 impl A {
 
     /// @java A#staticMethod
-    fn static_method()   {
+    pub fn static_method()   {
     }
 
 

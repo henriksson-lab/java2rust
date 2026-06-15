@@ -191,58 +191,110 @@ fn main() {
 
     match opts.input {
         Some(ref input) => {
-            // In crate mode, link the project against itself so cross-file type
-            // references resolve to `crate::…` paths.
+            let input_path = Path::new(input);
             if opts.make_crate {
-                link.merge(java2rust_rs::crate_layout::build_project_map(Path::new(input)));
-            }
-            // Pre-pass: which types are defined in this tree (so cross-file refs
-            // aren't recorded as missing externals).
-            let mut known = HashSet::new();
-            if opts.stubs {
-                gather_known_types(Path::new(input), &mut known);
-            }
-            let ctx = Ctx {
-                link: &link,
-                known: &known,
-                emit_stubs: opts.stubs,
-                ignore_existing: opts.ignore_existing,
-                verbosity: opts.verbosity,
-                copy_other_files: opts.copy_other_files,
-                stubs: std::cell::RefCell::new(StubCollector::default()),
-            };
-            if let Err(e) = convert_to_rust(Path::new(input), &opts.output, &ctx) {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
-            if opts.stubs {
-                let collected = ctx.stubs.into_inner();
-                if !collected.is_empty() {
-                    // One file per originating package (proxy for the dependency
-                    // JAR); free functions / package-less types go to stubs.rs.
-                    for (filename, content) in collected.render_grouped() {
-                        let path = format!("{}/{filename}", opts.output);
-                        if let Err(e) = fs::write(&path, content) {
-                            eprintln!("error writing stubs: {e}");
-                            std::process::exit(1);
-                        }
-                        if opts.verbosity > 0 {
-                            println!("- {path}");
-                        }
-                    }
+                run_crate_mode(input_path, &opts, link);
+            } else {
+                // Single-pass: optional stub collection, no crate wiring.
+                let mut known = HashSet::new();
+                if opts.stubs {
+                    gather_known_types(input_path, &mut known);
                 }
-            }
-            // Post-pass: emit the module tree + Cargo.toml so the files form a crate.
-            if opts.make_crate {
-                if let Err(e) = java2rust_rs::crate_layout::finish_crate(Path::new(&opts.output)) {
-                    eprintln!("error writing crate layout: {e}");
+                let ctx = Ctx {
+                    link: &link,
+                    known: &known,
+                    emit_stubs: opts.stubs,
+                    ignore_existing: opts.ignore_existing,
+                    verbosity: opts.verbosity,
+                    copy_other_files: opts.copy_other_files,
+                    stubs: std::cell::RefCell::new(StubCollector::default()),
+                };
+                if let Err(e) = convert_to_rust(input_path, &opts.output, &ctx) {
+                    eprintln!("error: {e}");
                     std::process::exit(1);
                 }
-                if opts.verbosity > 0 {
-                    println!("- {}/Cargo.toml  (+ module tree)", opts.output);
+                if opts.stubs {
+                    write_stub_files(&ctx.stubs.into_inner(), &opts.output, opts.verbosity);
                 }
             }
         }
         None => print_help(),
+    }
+}
+
+/// Crate mode: link the project against itself, then translate in two passes —
+/// pass 1 collects the stubs for unmapped externals, pass 2 re-translates with
+/// those stubs added to the link index so references resolve to `crate::stub_…`
+/// paths. Finally write the stub files and the module tree + Cargo.toml.
+fn run_crate_mode(input: &Path, opts: &Options, mut link: LinkIndex) {
+    link.merge(java2rust_rs::crate_layout::build_project_map(input));
+    let known = HashSet::new();
+
+    // Pass 1 — collect stubs (references to unmapped externals are bare here).
+    let collected = {
+        let ctx = Ctx {
+            link: &link,
+            known: &known,
+            emit_stubs: true,
+            ignore_existing: opts.ignore_existing,
+            verbosity: 0,
+            copy_other_files: opts.copy_other_files,
+            stubs: std::cell::RefCell::new(StubCollector::default()),
+        };
+        if let Err(e) = convert_to_rust(input, &opts.output, &ctx) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        ctx.stubs.into_inner()
+    };
+
+    // Resolve stub references to their crate paths for pass 2.
+    link.merge(collected.crate_symbol_map());
+
+    // Pass 2 — final translation; stub references now resolve.
+    {
+        let ctx = Ctx {
+            link: &link,
+            known: &known,
+            emit_stubs: false,
+            ignore_existing: opts.ignore_existing,
+            verbosity: opts.verbosity,
+            copy_other_files: opts.copy_other_files,
+            stubs: std::cell::RefCell::new(StubCollector::default()),
+        };
+        if let Err(e) = convert_to_rust(input, &opts.output, &ctx) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    write_stub_files(&collected, &opts.output, opts.verbosity);
+
+    // Generate `impl Trait for Class` for implemented interfaces (polymorphism).
+    java2rust_rs::crate_layout::generate_interface_impls(Path::new(&opts.output), &link);
+
+    if let Err(e) = java2rust_rs::crate_layout::finish_crate(Path::new(&opts.output)) {
+        eprintln!("error writing crate layout: {e}");
+        std::process::exit(1);
+    }
+    if opts.verbosity > 0 {
+        println!("- {}/Cargo.toml  (+ module tree)", opts.output);
+    }
+}
+
+/// Write the per-package stub files into `output`.
+fn write_stub_files(collected: &StubCollector, output: &str, verbosity: i32) {
+    if collected.is_empty() {
+        return;
+    }
+    for (filename, content) in collected.render_grouped() {
+        let path = format!("{output}/{filename}");
+        if let Err(e) = fs::write(&path, content) {
+            eprintln!("error writing stubs: {e}");
+            std::process::exit(1);
+        }
+        if verbosity > 0 {
+            println!("- {path}");
+        }
     }
 }

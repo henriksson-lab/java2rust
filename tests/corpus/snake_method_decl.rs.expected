@@ -1,12 +1,12 @@
 /// @java A
 #[derive(Clone, Default)]
-struct A {
+pub struct A {
 }
 
 impl A {
 
     /// @java A#methodMIs
-    fn method_m_is(&self) -> String ;
+    pub fn method_m_is(&self) -> String ;
 
 
 

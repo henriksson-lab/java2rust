@@ -1,12 +1,12 @@
 /// @java N
 #[derive(Clone, Default)]
-struct N {
+pub struct N {
 }
 
 impl N {
 
     /// @java N#m
-    fn m(&self)   {
+    pub fn m(&self)   {
         if a {
             if b {
                 c();

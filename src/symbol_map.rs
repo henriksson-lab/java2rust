@@ -20,6 +20,16 @@ pub struct SymbolMap {
 pub struct TypeSym {
     pub rust_path: String,
     pub kind: String,
+    /// FQN of the `extends` superclass, if any (for inherited-member resolution).
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// FQNs of implemented interfaces (for generating `impl Trait for Type`).
+    #[serde(default)]
+    pub interfaces: Vec<String>,
+    /// True if the type has type parameters (a generic trait can't be a plain
+    /// `dyn` object without its args, so polymorphism skips it).
+    #[serde(default)]
+    pub generic: bool,
     #[serde(default)]
     pub fields: BTreeMap<String, FieldSym>,
     #[serde(default)]
@@ -89,6 +99,11 @@ impl LinkIndex {
     /// Exact FQN lookup.
     pub fn lookup(&self, fqn: &str) -> Option<&TypeSym> {
         self.map.types.get(fqn)
+    }
+
+    /// Iterate all (FQN, type) entries.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &TypeSym)> {
+        self.map.types.iter()
     }
 
     /// Resolve a referenced Java type to a known dependency type, given the

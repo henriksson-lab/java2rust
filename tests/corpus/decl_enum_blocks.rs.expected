@@ -1,6 +1,6 @@
 /// @java X
 #[derive(Clone, Default)]
-struct X {
+pub struct X {
 }
 
 impl X {
@@ -9,13 +9,13 @@ impl X {
 }
 
 /// @java X.A
-enum A {
+pub enum A {
     AA,
 }
 
 
 /// @java X.B
-enum B {
+pub enum B {
     BB,
 }
 

@@ -1,10 +1,10 @@
 /// @java F
 #[derive(Clone, Default)]
-struct F {
+pub struct F {
     /// @java F#name
-    name: String,
+    pub name: String,
     /// @java F#flag
-    flag: bool,
+    pub flag: bool,
 }
 
 impl F {

@@ -8,6 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use java2rust_rs::crate_layout::{build_project_map, finish_crate};
+use java2rust_rs::stubs::StubCollector;
 use java2rust_rs::symbol_map::LinkIndex;
 use java2rust_rs::convert_with_links;
 
@@ -70,6 +71,66 @@ public class App {
     assert!(
         out.contains("crate::cw_static::com::ex::util::helper::Helper::twice(3)"),
         "static call crate-qualified:\n{out}"
+    );
+}
+
+#[test]
+fn stub_types_map_to_crate_paths() {
+    // The two-pass crate flow resolves stubbed externals to `crate::stub_*::Name`.
+    let mut s = StubCollector::default();
+    s.note_type("org.xerial.snappy.SnappyInputStream", "SnappyInputStream");
+    s.note_type("java.io.File", "File");
+    let map = s.crate_symbol_map();
+    assert_eq!(
+        map.types["org.xerial.snappy.SnappyInputStream"].rust_path,
+        "crate::stub_org_xerial_snappy::SnappyInputStream"
+    );
+    assert_eq!(map.types["java.io.File"].rust_path, "crate::stub_java_io::File");
+}
+
+#[test]
+fn inheritance_emits_base_and_resolves_inherited_members() {
+    let src = tmp("cw_inh/com/z");
+    fs::write(
+        src.join("Animal.java"),
+        "package com.z;\npublic class Animal { protected String name; public int legs() { return 4; } }\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("Dog.java"),
+        "package com.z;\npublic class Dog extends Animal {\n  public int total() { return legs() + name.length(); }\n  public String d() { return super.toString(); }\n}\n",
+    )
+    .unwrap();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cw_inh");
+    let mut link = LinkIndex::default();
+    link.merge(build_project_map(&root));
+
+    let dog = fs::read_to_string(src.join("Dog.java")).unwrap();
+    let out = convert_with_links(&dog, &link);
+    // Base composition + Deref.
+    assert!(out.contains("pub base: crate::cw_inh::com::z::animal::Animal"), "base field:\n{out}");
+    assert!(out.contains("impl std::ops::Deref for Dog"), "Deref:\n{out}");
+    // Inherited field via base, inherited method via Deref (self.), super via base.
+    assert!(out.contains("self.base.name"), "inherited field:\n{out}");
+    assert!(out.contains("self.legs()"), "inherited method call:\n{out}");
+    assert!(out.contains("self.base."), "super -> self.base:\n{out}");
+}
+
+#[test]
+fn interface_param_becomes_dyn_trait() {
+    // A non-generic interface used as a parameter type -> `&dyn Trait` (so any
+    // implementor coerces at the call site).
+    let src = tmp("cw_poly/com/s");
+    fs::write(src.join("Shape.java"), "package com.s;\npublic interface Shape { int area(); }\n").unwrap();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cw_poly");
+    let mut link = LinkIndex::default();
+    link.merge(build_project_map(&root));
+
+    let consumer = "package com.s;\npublic class Calc { public int m(Shape s) { return s.area(); } }\n";
+    let out = convert_with_links(consumer, &link);
+    assert!(
+        out.contains("&dyn crate::cw_poly::com::s::shape::Shape"),
+        "interface param is &dyn:\n{out}"
     );
 }
 

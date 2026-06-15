@@ -1,12 +1,12 @@
 /// @java A
 #[derive(Clone, Default)]
-struct A {
+pub struct A {
 }
 
 impl A {
 
     /// @java A#m
-    fn m(&self)   {
+    pub fn m(&self)   {
          let s: String = format!("5 choose {}gdgahdgs", i);
     }
 
