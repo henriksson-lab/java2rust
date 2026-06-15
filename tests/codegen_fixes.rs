@@ -122,6 +122,24 @@ fn inherited_field_from_external_super_goes_through_base() {
 }
 
 #[test]
+fn uppercase_local_is_let_not_const() {
+    // A local variable that merely starts uppercase is a `let` binding (mutable
+    // if reassigned), not a `const` — only class fields become associated consts.
+    let java = "class C { void m(int i) { int X = i; X >>= 7; } }";
+    let out = convert(java);
+    assert!(out.contains("let mut X"), "uppercase local is a mutable let:\n{out}");
+    assert!(!out.contains("const X"), "not emitted as const:\n{out}");
+}
+
+#[test]
+fn uppercase_static_field_is_const() {
+    // A class-level (static) uppercase field stays an associated const.
+    let java = "class C { static final int MAX = 9; }";
+    let out = convert(java);
+    assert!(out.contains("const MAX"), "static field is const:\n{out}");
+}
+
+#[test]
 fn stdlib_rewrite_still_applies_to_collections() {
     // A genuine List receiver must still get `.size()` -> `.len()`.
     let java = r#"

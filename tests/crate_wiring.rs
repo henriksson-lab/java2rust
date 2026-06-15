@@ -159,6 +159,40 @@ public class Zoo {
 }
 
 #[test]
+fn non_trait_bounds_dropped_and_non_generic_type_args_dropped() {
+    // `Klass` is a (non-generic) struct in the link map. As a type-parameter
+    // bound it's invalid in Rust (`T: Klass`) -> dropped; and referenced with a
+    // type argument (`Klass<X>`) the spurious arg is dropped.
+    let json = r#"{ "types": { "com.x.Klass": { "rust_path": "crate::x::klass::Klass", "kind": "struct", "generic": false } } }"#;
+    let mut link = LinkIndex::default();
+    link.merge_json(json).unwrap();
+
+    let consumer = "package p;\nimport com.x.Klass;\npublic class A<T extends Klass> { public Klass<String> k; }\n";
+    let out = convert_with_links(consumer, &link);
+    assert!(out.contains("struct A<T>"), "class bound dropped (no `T: Klass`):\n{out}");
+    assert!(!out.contains("T: crate::x"), "no struct bound:\n{out}");
+    assert!(
+        out.contains("crate::x::klass::Klass>") || out.contains("crate::x::klass::Klass,"),
+        "non-generic type args dropped (`Klass`, not `Klass<String>`):\n{out}"
+    );
+    assert!(!out.contains("Klass<String>"), "spurious type arg dropped:\n{out}");
+}
+
+#[test]
+fn scoped_type_drops_qualifier_when_name_resolves() {
+    // `Outer.Inner` whose `Inner` resolves to a full crate path emits that path
+    // alone — the `Outer::` qualifier is subsumed (the nested type is hoisted).
+    let json = r#"{ "types": { "com.x.Entry": { "rust_path": "crate::x::entry::Entry", "kind": "struct" } } }"#;
+    let mut link = LinkIndex::default();
+    link.merge_json(json).unwrap();
+
+    let consumer = "package p;\nimport com.x.Entry;\npublic class A { public Map.Entry e; }\n";
+    let out = convert_with_links(consumer, &link);
+    assert!(out.contains("crate::x::entry::Entry"), "resolved path emitted:\n{out}");
+    assert!(!out.contains("Map::crate"), "stale `Map::` qualifier dropped:\n{out}");
+}
+
+#[test]
 fn dependency_types_are_emitted_as_crate_modules() {
     // A jar-recovered dependency type (`rust_path` not crate-/std-relative)
     // becomes a unit struct under its package path, with generic-parameter

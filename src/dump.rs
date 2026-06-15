@@ -1048,12 +1048,21 @@ impl<'a> RustDumpVisitor<'a> {
             TypeParameter { name, type_bound } => {
                 self.print_java_comment(id, arg);
                 self.printer.print(&name);
-                if !type_bound.is_empty() {
+                // Rust type-parameter bounds must be traits. Java allows a class
+                // bound (`T extends ConcreteClass`); drop any bound that resolves
+                // to a known non-trait (struct/enum/stub), which has no Rust
+                // equivalent and would be `expected trait, found struct`.
+                let kept: Vec<NodeId> = type_bound
+                    .iter()
+                    .copied()
+                    .filter(|&c| !self.bound_is_known_non_trait(c))
+                    .collect();
+                if !kept.is_empty() {
                     self.printer.print(": ");
-                    for (i, &c) in type_bound.iter().enumerate() {
+                    for (i, &c) in kept.iter().enumerate() {
                         self.trait_bound_pos = true;
                         self.visit(c, arg);
-                        if i + 1 < type_bound.len() {
+                        if i + 1 < kept.len() {
                             self.printer.print(" + ");
                         }
                     }
@@ -1901,6 +1910,8 @@ impl<'a> RustDumpVisitor<'a> {
                 if i > 0 {
                     self.printer.print(" + ");
                 }
+                // A supertrait is a bound: emit the trait bare, not `Box<dyn …>`.
+                self.trait_bound_pos = true;
                 self.visit(e, arg);
             }
         }
@@ -2089,10 +2100,6 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
-        if let Some(s) = scope {
-            self.visit(s, arg);
-            self.printer.print("::");
-        }
         let resolved = self.resolve_type_name(&name);
         // An interface (non-generic trait) used as a type isn't a value type in
         // Rust — it needs `dyn`. In an owned position it must be sized, so box
@@ -2105,11 +2112,25 @@ impl<'a> RustDumpVisitor<'a> {
         let wrap = is_trait && !self.trait_bound_pos;
         self.trait_dyn_ref = false;
         self.trait_bound_pos = false;
+        // A scoped type `Outer.Inner`: when the name resolves to a full path (a
+        // hoisted/stubbed nested type), the qualifier is subsumed by that path —
+        // emit it alone. Only an unresolved nested name keeps `Outer::Inner`.
+        if let Some(s) = scope {
+            if !resolved.contains("::") {
+                self.visit(s, arg);
+                self.printer.print("::");
+            }
+        }
         if wrap {
             self.printer.print(if dyn_ref { "dyn " } else { "Box<dyn " });
         }
         self.printer.print(&resolved);
-        if using_diamond {
+        // A type that resolves to a non-generic Rust type (a stub, a dep, or a
+        // non-generic project type) takes no arguments — drop any Java type args
+        // (`PooledWriter<T>` -> `PooledWriter`), which would be `takes 0 generic
+        // arguments but N were supplied`.
+        let drop_args = self.resolve_type_sym(&name).map(|t| !t.generic).unwrap_or(false);
+        if using_diamond || drop_args {
             // No empty turbofish in Rust; let the args be inferred.
         } else {
             self.print_type_args(&type_args, arg);
@@ -2157,7 +2178,15 @@ impl<'a> RustDumpVisitor<'a> {
         self.print_java_comment(id, arg);
         let name = self.accept_and_cut(vid, arg);
         let mut is_constant = false;
-        if name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        // An uppercase name is a constant only as a *field* (a class static ->
+        // associated `const`); a local variable that merely starts uppercase is
+        // still a `let` binding (and may be mutated).
+        let is_field = self
+            .arena
+            .parent(id)
+            .map(|p| matches!(self.arena.kind(p), Node::FieldDeclaration { .. }))
+            .unwrap_or(false);
+        if is_field && name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
             self.printer.print("const ");
             is_constant = true;
         } else {
@@ -3470,6 +3499,16 @@ impl<'a> RustDumpVisitor<'a> {
     /// be a plain `&dyn Trait` (a generic trait needs its type args).
     fn resolved_is_trait(&self, name: &str) -> bool {
         self.resolve_type_sym(name).map(|t| t.kind == "trait" && !t.generic).unwrap_or(false)
+    }
+
+    /// Does this bound type resolve to a *known non-trait* (a struct/enum/stub)?
+    /// Such a bound is invalid in Rust and is dropped. Unresolved bounds are
+    /// kept (they may be traits).
+    fn bound_is_known_non_trait(&self, c: NodeId) -> bool {
+        self.type_simple_name(c)
+            .and_then(|n| self.resolve_type_sym(&n))
+            .map(|t| t.kind != "trait")
+            .unwrap_or(false)
     }
 
     fn visit_block(&mut self, id: NodeId, arg: Arg) {
