@@ -156,6 +156,9 @@ pub struct RustDumpVisitor<'a> {
     enclosing_type_params: Vec<NodeId>,
     /// Counter for naming generated anonymous-class structs.
     anon_counter: u32,
+    /// Java names of the enclosing locals/params captured by the anonymous class
+    /// currently being emitted — references to them become `self.<field>`.
+    anon_captures: std::collections::HashSet<String>,
     /// If the current class extends an *external* (stub) type: its (FQN, Rust
     /// name), so a bare inherited-field read resolves to `self.base.<field>` and
     /// the field is recorded on the parent's stub.
@@ -207,6 +210,7 @@ impl<'a> RustDumpVisitor<'a> {
             current_inner_classes: std::collections::HashSet::new(),
             enclosing_type_params: Vec::new(),
             anon_counter: 0,
+            anon_captures: std::collections::HashSet::new(),
             impl_param_names: Vec::new(),
             current_external_base: None,
             overload_name: std::collections::HashMap::new(),
@@ -279,6 +283,56 @@ impl<'a> RustDumpVisitor<'a> {
             t = self.link.lookup(parent)?;
             bases.push_str("base.");
         }
+    }
+
+    /// Java names of enclosing locals/params referenced inside an anonymous-class
+    /// `body` but declared outside it (`anon_id`) — the free variables it must
+    /// capture as fields.
+    fn collect_anon_captures(&self, body: &[NodeId], anon_id: NodeId) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack: Vec<NodeId> = body.to_vec();
+        while let Some(n) = stack.pop() {
+            if let Node::NameExpr { name } = self.arena.kind(n) {
+                if !seen.contains(name) {
+                    if let Some((_, decl)) = self.id.find_declaration_node_for(self.arena, name, n) {
+                        if self.is_local_or_param(decl) && self.is_strict_descendant(decl, anon_id) == false {
+                            seen.insert(name.clone());
+                            out.push(name.clone());
+                        }
+                    }
+                }
+            }
+            for c in self.arena.children(n) {
+                stack.push(c);
+            }
+        }
+        out
+    }
+
+    /// Is `decl` a method parameter or a local variable (not a field/type)?
+    fn is_local_or_param(&self, decl: NodeId) -> bool {
+        let Some(parent) = self.arena.parent(decl) else { return false };
+        if matches!(self.arena.kind(parent), Node::Parameter { .. }) {
+            return true;
+        }
+        if matches!(self.arena.kind(decl), Node::VariableDeclaratorId { .. }) {
+            if let Some(g) = self.arena.parent(parent) {
+                return matches!(self.arena.kind(g), Node::VariableDeclarationExpr { .. });
+            }
+        }
+        false
+    }
+
+    /// Is `ancestor` a strict ancestor of `node`?
+    fn is_strict_descendant(&self, mut node: NodeId, ancestor: NodeId) -> bool {
+        while let Some(p) = self.arena.parent(node) {
+            if p == ancestor {
+                return true;
+            }
+            node = p;
+        }
+        false
     }
 
     /// The `Rc<RefCell<Outer<…>>>` type of a capturing inner class's `__outer`
@@ -1177,7 +1231,9 @@ impl<'a> RustDumpVisitor<'a> {
                     .iter()
                     .copied()
                     .filter(|&c| {
-                        !self.bound_is_known_non_trait(c) && !self.bound_has_bare_wildcard(c)
+                        !self.bound_is_known_non_trait(c)
+                            && !self.bound_has_bare_wildcard(c)
+                            && !self.bound_is_std_concrete(c)
                     })
                     .collect();
                 if !kept.is_empty() {
@@ -1341,12 +1397,14 @@ impl<'a> RustDumpVisitor<'a> {
                 if let Some(dec) = hex_float_to_decimal(&value) {
                     self.printer.print(&dec);
                 } else {
-                    let mut value = value;
+                    // Strip the Java float/double suffix first (Rust infers the
+                    // type; `f`/`F`/`d`/`D` are not valid Rust literal suffixes),
+                    // then ensure a decimal point so it's a float literal.
+                    let mut value = self.remove_plus_and_suffix(value, &["D", "d", "F", "f"]);
                     if !value.contains(['.', 'e', 'E', 'x', 'X']) {
                         value = format!("{value}.0");
                     }
-                    let s = self.remove_plus_and_suffix(value, &["D", "d"]);
-                    self.printer.print(&s);
+                    self.printer.print(&value);
                 }
             }
             IntegerLiteralExpr { value } => {
@@ -1648,6 +1706,13 @@ impl<'a> RustDumpVisitor<'a> {
 
     fn visit_name_expr(&mut self, id: NodeId, name: &str, arg: Arg) {
         self.print_java_comment(id, arg);
+        // A variable captured by the current anonymous class -> its field.
+        if self.anon_captures.contains(name) {
+            let s = self.to_snake_if_necessary(name);
+            self.printer.print(&format!("self.{s}"));
+            self.print_orphan_comments_ending(id);
+            return;
+        }
         let decl = self.id.find_declaration_node_for(self.arena, name, id);
         // An inherited instance field (not declared locally): reach it through the
         // embedded `base` field(s).
@@ -2734,6 +2799,15 @@ impl<'a> RustDumpVisitor<'a> {
                 if !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
                     return false;
                 }
+                // A statically-imported *member* (e.g. an enum constant `CG` from
+                // `import static SAMTag.CG`) is a value, not a static class ref:
+                // it resolves via `static_import_path` to `Owner::CG`, and the
+                // call separator must be `.` (`SAMTag::CG.name()`).
+                if self.id.find_declaration_node_for(self.arena, name, s).is_none()
+                    && self.static_import_path(name).is_some()
+                {
+                    return false;
+                }
                 // A type reference: either an unknown uppercase name, or one that
                 // resolves to a type declaration (e.g. a static call on the
                 // class's own name, `Foo.bar()` inside `Foo`). A name resolving to
@@ -2805,6 +2879,24 @@ impl<'a> RustDumpVisitor<'a> {
             Node::MethodCallExpr { scope, type_args, name, args } => (scope, type_args, name, args),
             _ => unreachable!(),
         };
+        // `getClass().getName()`/`.getSimpleName()` (and a bare `getClass()`) ->
+        // the Rust type name. These appear in `toString`/log strings; folding the
+        // chain to `type_name::<Self>()` compiles (display-only; precise runtime
+        // class is a later concern).
+        if args.is_empty() {
+            if matches!(name.as_str(), "getName" | "getSimpleName" | "getCanonicalName")
+                && scope.map(|s| self.is_get_class_call(s)).unwrap_or(false)
+            {
+                self.print_java_comment(id, arg);
+                self.printer.print("std::any::type_name::<Self>()");
+                return;
+            }
+            if name == "getClass" {
+                self.print_java_comment(id, arg);
+                self.printer.print("std::any::type_name::<Self>()");
+                return;
+            }
+        }
         // A linked dependency method takes precedence over the built-in stdlib
         // rewrites below — those assume Rust collection/String/Math receivers, so
         // e.g. `jsonObj.put(k, v)` must not be rewritten to `.insert(...)` when
@@ -2861,7 +2953,9 @@ impl<'a> RustDumpVisitor<'a> {
                             self.printer.print(recv);
                         }
                     }
-                    _ => self.printer.print(recv),
+                    // A non-callable shadow (e.g. a same-named local): in a static
+                    // method a bare call is still `Self::` (no `self`).
+                    _ => self.printer.print(if self.in_static_method { "Self::" } else { recv }),
                 }
             } else if self.inherited_method(&name) {
                 // Inherited instance method: `self.m()` dispatches through Deref
@@ -2871,6 +2965,12 @@ impl<'a> RustDumpVisitor<'a> {
                 // An instance method of the enclosing class, called from a
                 // non-static inner class: `<recv>.__outer.borrow().m()`.
                 self.printer.print(&format!("{}.__outer.borrow().", self.self_receiver()));
+            } else if !self.in_static_method {
+                // An unresolved bare call in an instance method is `this.method()`
+                // — an inner-class or inherited method we couldn't resolve
+                // statically. Emit the receiver so `Deref` dispatch can find it
+                // (Java has no free functions, and stdlib shortcuts ran earlier).
+                self.printer.print(recv);
             }
         }
         match callee {
@@ -2985,7 +3085,11 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print("format!(\"");
         self.printer.print(&converted);
         self.printer.print("\"");
-        for &a in &args[1..] {
+        // Emit only as many value args as there are `{}` placeholders: Java code
+        // that misuses SLF4J-style `{}` inside `String.format` leaves them as
+        // literal text (zero real specifiers), and Rust rejects unused args.
+        let placeholders = count_fmt_placeholders(&converted);
+        for &a in args[1..].iter().take(placeholders) {
             self.printer.print(", ");
             self.visit(a, arg);
         }
@@ -3373,14 +3477,31 @@ impl<'a> RustDumpVisitor<'a> {
 
     /// Map `Math.x(...)` to a Rust receiver method, e.g. `Math.max(a, b)` ->
     /// `(a).max(b)`, `Math.sqrt(x)` -> `(x).sqrt()`. Returns true if handled.
+    /// Is `java.lang.Math` statically imported (so its functions are called bare)?
+    fn math_statically_imported(&self) -> bool {
+        self.id.imports.iter().any(|i| {
+            i.static_import
+                && (i.import_string == "java.lang.Math"
+                    || i.import_string.starts_with("java.lang.Math."))
+        })
+    }
+
     fn try_emit_math(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
-        let Some(s) = scope else { return false };
-        if !matches!(self.arena.kind(s), Node::NameExpr { name } if name == "Math") {
+        // `Math.x(..)`, or a bare `x(..)` when `java.lang.Math` is statically
+        // imported (`import static java.lang.Math.*`).
+        let is_math = match scope {
+            Some(s) => matches!(self.arena.kind(s), Node::NameExpr { name } if name == "Math"),
+            None => self.math_statically_imported(),
+        };
+        if !is_math {
             return false;
         }
         // (receiver-method, arity)
         let m = match name {
-            "abs" | "sqrt" | "floor" | "ceil" | "round" | "signum" => (name, 1),
+            "abs" | "sqrt" | "floor" | "ceil" | "round" | "signum" | "sin" | "cos" | "tan"
+            | "exp" | "sinh" | "cosh" | "tanh" => (name, 1),
+            "log" => ("ln", 1),
+            "log10" => ("log10", 1),
             "max" | "min" => (name, 2),
             "pow" => ("powf", 2),
             _ => return false,
@@ -3416,16 +3537,46 @@ impl<'a> RustDumpVisitor<'a> {
             let n = self.anon_counter;
             self.anon_counter += 1;
             let anon = format!("__Anon{n}");
+            // Capture the enclosing locals/params the body references. Each is a
+            // generic field, so its type is inferred from the construction site
+            // (no fragile type re-derivation) — references become `self.<field>`.
+            let caps = self.collect_anon_captures(&body, id);
+            let snakes: Vec<String> = caps.iter().map(|c| self.to_snake_if_necessary(c)).collect();
+            let generics = if caps.is_empty() {
+                String::new()
+            } else {
+                format!("<{}>", (0..caps.len()).map(|i| format!("Cap{i}")).collect::<Vec<_>>().join(", "))
+            };
             self.printer.print_ln_s("{");
             self.printer.indent();
-            self.printer.print_ln_s("#[derive(Clone, Default)]");
-            self.printer.print_ln_s(&format!("struct {anon} {{}}"));
-            self.printer.print_ln_s(&format!("impl {anon} {{"));
+            if caps.is_empty() {
+                self.printer.print_ln_s("#[derive(Clone, Default)]");
+                self.printer.print_ln_s(&format!("struct {anon} {{}}"));
+            } else {
+                self.printer.print_ln_s("#[derive(Clone)]");
+                self.printer.print_ln_s(&format!("struct {anon}{generics} {{"));
+                self.printer.indent();
+                for (i, s) in snakes.iter().enumerate() {
+                    self.printer.print_ln_s(&format!("{s}: Cap{i},"));
+                }
+                self.printer.unindent();
+                self.printer.print_ln_s("}");
+            }
+            self.printer.print_ln_s(&format!("impl{generics} {anon}{generics} {{"));
             self.printer.indent();
+            let saved_caps =
+                std::mem::replace(&mut self.anon_captures, caps.iter().cloned().collect());
             self.print_members(&body, arg, Filter::Method);
+            self.anon_captures = saved_caps;
             self.printer.unindent();
             self.printer.print_ln_s("}");
-            self.printer.print_ln_s(&format!("{anon}::default()"));
+            if caps.is_empty() {
+                self.printer.print_ln_s(&format!("{anon}::default()"));
+            } else {
+                let inits: Vec<String> =
+                    snakes.iter().map(|s| format!("{s}: {s}.clone()")).collect();
+                self.printer.print_ln_s(&format!("{anon} {{ {} }}", inits.join(", ")));
+            }
             self.printer.unindent();
             self.printer.print("}");
             return;
@@ -3710,6 +3861,13 @@ impl<'a> RustDumpVisitor<'a> {
             self.printer.print(" -> ");
             self.replace_throws(&throws, arg, "()");
         }
+        // A Java `static` interface method becomes a trait method with no `self`
+        // receiver, which makes the trait not object-safe (so `Box<dyn Trait>`
+        // fails). `where Self: Sized` exempts it from object-safety while keeping
+        // it callable as `Trait::method`.
+        if self.in_trait && modifiers::is_static(modifiers_v) {
+            self.printer.print(" where Self: Sized");
+        }
         self.printer.print(" ");
         match body {
             // No body: a trait method declaration keeps `;`; an abstract method
@@ -3814,6 +3972,22 @@ impl<'a> RustDumpVisitor<'a> {
             .and_then(|n| self.resolve_type_sym(&n))
             .map(|t| t.kind != "trait")
             .unwrap_or(false)
+    }
+
+    /// Does this bound's erasure map to a concrete (non-trait) Rust type — a Java
+    /// `T extends List<E>` (-> `Vec`), `T extends Object` (-> `Box<dyn Any>`), or
+    /// a primitive? Such a bound has no Rust trait meaning and is dropped.
+    fn bound_is_std_concrete(&self, c: NodeId) -> bool {
+        let Some(simple) = self.type_simple_name(c) else { return false };
+        if matches!(simple.as_str(), "Object" | "Class") {
+            return true; // rendered as `Box<dyn Any>`
+        }
+        matches!(
+            map_type_name(&simple),
+            "Vec" | "Box" | "HashMap" | "HashSet" | "BTreeMap" | "String" | "str" | "i8" | "i16"
+                | "i32" | "i64" | "i128" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+                | "isize" | "f32" | "f64" | "bool" | "char"
+        )
     }
 
     /// Does this bound contain a bare wildcard (`Foo<?>` -> `Foo<_>`)? A `_`
@@ -4214,6 +4388,30 @@ impl<'a> RustDumpVisitor<'a> {
         String::new()
     }
 
+    /// If a method-reference scope is a bare name that resolves to a value
+    /// (local/param/field) rather than a type, the receiver expression to use in
+    /// the lowered closure (`name`, or `self.name` for a field). `None` for a
+    /// genuine `Type::method`.
+    fn method_ref_value_recv(&self, s: NodeId) -> Option<String> {
+        let Node::TypeExpr { typ: Some(t) } = self.arena.kind(s) else { return None };
+        let Node::ClassOrInterfaceType { scope: None, name, .. } = self.arena.kind(*t) else {
+            return None;
+        };
+        let (_, decl) = self.id.find_declaration_node_for(self.arena, name, s)?;
+        if matches!(
+            self.arena.kind(decl),
+            Node::ClassOrInterfaceDeclaration { .. } | Node::EnumDeclaration { .. }
+        ) {
+            return None; // a real type reference
+        }
+        let snake = self.to_snake_if_necessary(name);
+        if self.is_non_static_field_declaration(decl) {
+            Some(format!("{}.{snake}", self.self_receiver()))
+        } else {
+            Some(snake)
+        }
+    }
+
     fn visit_method_ref(&mut self, id: NodeId, arg: Arg) {
         let (scope, type_arguments, identifier) = match self.kind(id) {
             Node::MethodReferenceExpr { scope, type_arguments, identifier } => {
@@ -4225,6 +4423,13 @@ impl<'a> RustDumpVisitor<'a> {
         let _ = &type_arguments;
         let ident = self.to_snake_if_necessary(&identifier);
         match scope {
+            // `value::method` where the receiver only *looks* like a type (a bare
+            // name resolving to a local/param/field): lower to a closure, not a
+            // path (`name::ends_with` -> `|__mr| name.ends_with(__mr)`).
+            Some(s) if self.method_ref_value_recv(s).is_some() => {
+                let recv = self.method_ref_value_recv(s).unwrap();
+                self.printer.print(&format!("|__mr| {recv}.{ident}(__mr)"));
+            }
             // `Type::method` — a path (valid as a function value). A generic
             // type needs turbofish in a path: `Vec::<T>::new`, not `Vec<T>::new`.
             Some(s) if matches!(self.arena.kind(s), Node::TypeExpr { .. }) => {
@@ -4563,6 +4768,28 @@ pub fn escape_rust_keyword(s: String) -> String {
 /// Convert a Java `String.format`/`printf` format string to a Rust `format!`
 /// template: `%d`/`%s`/`%.2f`/… → `{}`, `%n` → newline, `%%` → `%`. Literal
 /// braces are escaped.
+/// Count `{}`-style placeholders in a Rust format string, skipping the escaped
+/// `{{` / `}}`.
+fn count_fmt_placeholders(s: &str) -> usize {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let mut n = 0;
+    while i < b.len() {
+        if b[i] == b'{' {
+            if i + 1 < b.len() && b[i + 1] == b'{' {
+                i += 2;
+                continue;
+            }
+            n += 1;
+        } else if b[i] == b'}' && i + 1 < b.len() && b[i + 1] == b'}' {
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    n
+}
+
 fn java_format_to_rust(fmt: &str) -> String {
     let mut out = String::new();
     let mut chars = fmt.chars().peekable();

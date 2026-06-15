@@ -96,6 +96,27 @@ fn anonymous_class_lowered_to_inline_struct() {
 }
 
 #[test]
+fn anonymous_class_captures_enclosing_locals() {
+    // An anon class referencing an enclosing local/param captures it as a generic
+    // field (type inferred at construction); the body reference becomes `self.x`.
+    let java = "class C { int run(int x) { var h = new Object() { int get() { return x; } }; return h.get(); } }";
+    let out = convert(java);
+    assert!(out.contains("struct __Anon0<Cap0>"), "generic capture field:\n{out}");
+    assert!(out.contains("x: Cap0"), "captured field declared:\n{out}");
+    assert!(out.contains("return self.x"), "body ref -> self.x:\n{out}");
+    assert!(out.contains("__Anon0 { x: x.clone() }"), "instantiated with captured value:\n{out}");
+}
+
+#[test]
+fn java_float_suffix_is_stripped() {
+    // Java `f`/`F`/`d`/`D` literal suffixes aren't valid in Rust; strip them.
+    let out = convert("class C { void m() { float a = 0.75f; double b = 5f; double c = 2D; } }");
+    assert!(out.contains("0.75") && !out.contains("0.75f"), "f suffix stripped:\n{out}");
+    assert!(out.contains("5.0") && !out.contains("= 5f"), "bare-int float suffix -> 5.0:\n{out}");
+    assert!(!out.contains("2D"), "D suffix stripped:\n{out}");
+}
+
+#[test]
 fn java_var_uses_let_inference() {
     let out = convert("class C { void m() { var x = 3; } }");
     assert!(out.contains("let x = 3") || out.contains("let mut x = 3"), "var -> inferred let:\n{out}");
@@ -178,6 +199,57 @@ fn static_factory_get_is_not_rewritten_to_indexing() {
     let out = convert("class C { Object m() { return Paths.get(0); } }");
     assert!(!out.contains("Paths[") && !out.contains("Paths [("), "no indexing on static ref:\n{out}");
     assert!(out.contains("Paths::get") || out.contains("::Paths::get"), "static call preserved:\n{out}");
+}
+
+#[test]
+fn concrete_erasure_bound_is_dropped() {
+    // A Java bound whose erasure is a concrete Rust type (`T extends List` -> Vec)
+    // isn't a trait and is dropped from the type-parameter list.
+    let java = "import java.util.List;\nclass C<T extends List<String>> { T x; }";
+    let out = convert(java);
+    assert!(out.contains("struct C<T>"), "concrete bound dropped:\n{out}");
+    assert!(!out.contains("T: Vec"), "no `T: Vec` bound:\n{out}");
+}
+
+#[test]
+fn get_class_name_folds_to_type_name() {
+    // `getClass().getSimpleName()`/`.getName()` (toString/log strings) fold to
+    // the Rust type name so they compile (display-only).
+    let out = convert("class C { String m() { return getClass().getSimpleName(); } }");
+    assert!(out.contains("std::any::type_name::<Self>()"), "getClass chain folded:\n{out}");
+    assert!(!out.contains("get_simple_name"), "no bare get_simple_name:\n{out}");
+}
+
+#[test]
+fn bare_self_method_call_gets_receiver() {
+    // A bare call to a method of the current class is `this.m()` -> `self.m()`,
+    // not a (non-existent) free function.
+    let out = convert("class C { int run() { return helper(); } int helper() { return 1; } }");
+    assert!(out.contains("self.helper()"), "bare instance call gets self.:\n{out}");
+}
+
+#[test]
+fn method_reference_on_value_lowers_to_closure() {
+    // `value::method` (receiver is a local/param, not a type) -> a closure.
+    let java = "import java.util.function.Predicate;\nclass C { Predicate<String> m(String p) { return p::startsWith; } }";
+    let out = convert(java);
+    assert!(out.contains("|__mr| p.starts_with(__mr)"), "value method-ref -> closure:\n{out}");
+}
+
+#[test]
+fn string_format_drops_args_without_placeholders() {
+    // Java code that misuses `{}` inside String.format leaves them literal (zero
+    // specifiers); surplus value args are dropped so Rust doesn't reject them.
+    let out = convert("class C { String m(int x) { return String.format(\"a {} b\", x); } }");
+    assert!(out.contains("format!(\"a {{}} b\")"), "literal braces, no args:\n{out}");
+}
+
+#[test]
+fn static_interface_method_is_object_safe() {
+    // A Java `static` interface method becomes a trait method with no `self`;
+    // `where Self: Sized` keeps the trait object-safe.
+    let out = convert("interface I { static int f() { return 1; } int g(); }");
+    assert!(out.contains("where Self: Sized"), "static trait method gets Self: Sized bound:\n{out}");
 }
 
 #[test]

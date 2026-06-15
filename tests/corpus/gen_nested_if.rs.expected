@@ -9,9 +9,9 @@ impl N {
     pub fn m(&self)   {
         if a {
             if b {
-                c();
+                self.c();
             } else {
-                d();
+                self.d();
             }
         }
     }

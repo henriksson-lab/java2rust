@@ -325,6 +325,13 @@ fn stub_ret_renderable(t: &str) -> bool {
     if t == UNKNOWN {
         return true;
     }
+    // A generic container named with no type argument (`Vec`, `Option`, …) takes
+    // type params -> `-> Vec` is `wrong number of generic arguments`; drop it.
+    if !t.contains('<')
+        && matches!(t, "Vec" | "Option" | "Box" | "HashMap" | "HashSet" | "BTreeMap")
+    {
+        return false;
+    }
     const SAFE: &[&str] = &[
         "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "usize", "isize",
         "f32", "f64", "bool", "char", "String", "str", "Vec", "Option", "Box", "HashMap",

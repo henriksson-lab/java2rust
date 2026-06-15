@@ -8,7 +8,7 @@ impl Y {
     /// @java Y#m
     pub fn m(&self,  o: &Box<dyn std::any::Any>)   {
         /* synchronized */ {
-            x();
+            self.x();
         }
     }
 

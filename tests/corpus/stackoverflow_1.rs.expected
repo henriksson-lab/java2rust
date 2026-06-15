@@ -7,10 +7,10 @@ impl A {
 
     /// @java A#toString
     pub fn to_string(&self) -> String  {
-        if !signal_detected() {
+        if !self.signal_detected() {
             return "IR Seeker: --% signal at ---.- degrees".to_string();
         }
-        return format!("IR Seeker: {}% signal at {} degrees", get_strength() * 100.0, get_angle());
+        return format!("IR Seeker: {}% signal at {} degrees", self.get_strength() * 100.0, self.get_angle());
     }
 
     /// @java A#throwIfModernRoboticsI2cAddressIsInvalid
