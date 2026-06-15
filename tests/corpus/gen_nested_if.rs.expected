@@ -15,5 +15,7 @@ impl N {
             }
         }
     }
+
+    pub fn new() -> Self { Default::default() }
 }
 

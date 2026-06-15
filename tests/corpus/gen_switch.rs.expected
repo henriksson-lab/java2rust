@@ -15,5 +15,7 @@ impl Sw {
             }
         }
     }
+
+    pub fn new() -> Self { Default::default() }
 }
 

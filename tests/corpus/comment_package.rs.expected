@@ -13,5 +13,7 @@ pub struct C {
 }
 
 impl C {
+
+    pub fn new() -> Self { Default::default() }
 }
 

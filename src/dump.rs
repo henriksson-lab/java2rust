@@ -297,12 +297,11 @@ impl<'a> RustDumpVisitor<'a> {
     /// dependency maps first (using this file's imports + package to rebuild the
     /// FQN); falls back to the built-in stdlib mapping otherwise.
     fn resolve_type_name(&self, name: &str) -> String {
-        // A type defined elsewhere in this tree wins over any linked dependency
-        // that merely shares its simple name (prevents link-shadowing).
-        if !self.is_known_project_type(name) {
-            if let Some(t) = self.resolve_type_sym(name) {
-                return t.rust_path.clone();
-            }
+        // Resolve against the link map (project self-map + dependency maps), which
+        // is import/package-driven, so a bare name can't shadow to an unrelated
+        // dependency type (the unqualified fallback was removed).
+        if let Some(t) = self.resolve_type_sym(name) {
+            return t.rust_path.clone();
         }
         let mapped = map_type_name(name).replace('$', "_");
         if let Some(key) = self.missing_type_key(name) {
@@ -894,7 +893,7 @@ impl<'a> RustDumpVisitor<'a> {
                 // Emit as a normal block comment, not `/**` — a Rust doc comment
                 // requires an item to follow, which isn't guaranteed here.
                 self.printer.print("/*");
-                self.printer.print(&content);
+                self.printer.print(&sanitize_block_comment(&content));
                 self.printer.print_ln_s("*/");
             }
             ClassOrInterfaceType { .. } => self.visit_class_type(id, arg),
@@ -1306,7 +1305,7 @@ impl<'a> RustDumpVisitor<'a> {
             BlockComment { content } => {
                 if self.print_comments {
                     self.printer.print("/*");
-                    self.printer.print(&content);
+                    self.printer.print(&sanitize_block_comment(&content));
                     self.printer.print_ln_s("*/");
                 }
             }
@@ -1506,6 +1505,15 @@ impl<'a> RustDumpVisitor<'a> {
         // methods / constructors / initializers (NOT nested types — Rust forbids
         // `struct`/`enum`/`trait` items inside an `impl`).
         self.print_members(&members, arg, Filter::Method);
+        // Java's implicit no-arg constructor: emit a default `new()` when the
+        // class declares none, so `new X()` (-> `X::new()`) resolves.
+        let has_ctor = members
+            .iter()
+            .any(|&m| matches!(self.arena.kind(m), Node::ConstructorDeclaration { .. }));
+        if !has_ctor {
+            self.printer.print_ln();
+            self.printer.print_ln_s("pub fn new() -> Self { Default::default() }");
+        }
         self.print_orphan_comments_ending(id);
         self.printer.unindent();
         self.printer.print_ln_s("}");
@@ -1696,10 +1704,11 @@ impl<'a> RustDumpVisitor<'a> {
                     self.visit(i, None);
                     self.printer.print_ln_s(";");
                 }
-                // Non-const initializer (constructor, Vec::new, method call): a
-                // lazily-initialised `static` is the only valid form.
+                // Non-const initializer (constructor, Vec::new, method call):
+                // wrap in `LazyLock`. `LazyLock::new` is a `const fn`, so this is
+                // a valid associated `const` (a `static` is forbidden in `impl`).
                 Some(i) => {
-                    self.printer.print(&format!("static {name}: std::sync::LazyLock<"));
+                    self.printer.print(&format!("const {name}: std::sync::LazyLock<"));
                     self.visit(typ, None);
                     self.printer.print("> = std::sync::LazyLock::new(|| ");
                     self.visit(i, None);
@@ -2076,6 +2085,21 @@ impl<'a> RustDumpVisitor<'a> {
         }
     }
 
+    /// Emit a method-call / field-access receiver. For a static type reference
+    /// (`Foo.bar()`, `Foo.CONST`), emit the *resolved* type path (crate- or
+    /// dependency-qualified) instead of the bare name, so it resolves.
+    fn emit_scope(&mut self, s: NodeId, arg: Arg) {
+        if self.is_static_class_ref(s) {
+            if let Node::NameExpr { name } = self.arena.kind(s) {
+                let name = name.clone();
+                let resolved = self.resolve_type_name(&name);
+                self.printer.print(&resolved);
+                return;
+            }
+        }
+        self.visit(s, arg);
+    }
+
     fn visit_field_access(&mut self, id: NodeId, arg: Arg) {
         let (scope, field) = match self.kind(id) {
             Node::FieldAccessExpr { scope, field, .. } => (scope, field),
@@ -2093,7 +2117,7 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
-        self.visit(scope, arg);
+        self.emit_scope(scope, arg);
         self.printer.print(if self.is_static_class_ref(scope) { "::" } else { "." });
         // `.length` -> `.len()`; otherwise snake-case + keyword-escape the field
         // to match how the field declaration is emitted.
@@ -2143,7 +2167,7 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.print_java_comment(id, arg);
         if let Some(s) = scope {
-            self.visit(s, arg);
+            self.emit_scope(s, arg);
             self.printer.print(if self.is_static_class_ref(s) { "::" } else { "." });
         }
         // Explicit method type arguments are dropped (Rust infers them; emitting
@@ -3366,9 +3390,15 @@ impl<'a> RustDumpVisitor<'a> {
         let _ = &type_arguments;
         let ident = self.to_snake_if_necessary(&identifier);
         match scope {
-            // `Type::method` — a path (valid as a function value).
+            // `Type::method` — a path (valid as a function value). A generic
+            // type needs turbofish in a path: `Vec::<T>::new`, not `Vec<T>::new`.
             Some(s) if matches!(self.arena.kind(s), Node::TypeExpr { .. }) => {
-                self.visit(s, arg);
+                let ty = self.accept_and_cut(s, arg);
+                let ty = match ty.find('<') {
+                    Some(i) => format!("{}::{}", &ty[..i], &ty[i..]),
+                    None => ty,
+                };
+                self.printer.print(&ty);
                 self.printer.print("::");
                 self.printer.print(&ident);
             }
@@ -3564,13 +3594,21 @@ impl<'a> RustDumpVisitor<'a> {
 
 /// Convert Java string/char escape sequences to Rust ones. Java `\uXXXX`
 /// becomes Rust `\u{XXXX}`; other common escapes are identical.
+/// Neutralize `/*` and `*/` inside a comment body: Rust block comments *nest*
+/// (Java's don't), so a Java comment containing `/*` would open an unbalanced
+/// nested comment (leaving the outer one unterminated).
+fn sanitize_block_comment(content: &str) -> String {
+    content.replace("/*", "/ *").replace("*/", "* /")
+}
+
 fn java_escapes_to_rust(s: &str) -> String {
     let bytes: Vec<char> = s.chars().collect();
     let mut out = String::new();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == '\\' && i + 1 < bytes.len() {
-            if bytes[i + 1] == 'u' {
+            let c = bytes[i + 1];
+            if c == 'u' {
                 // \uXXXX -> \u{XXXX}
                 let hex: String = bytes[i + 2..].iter().take(4).collect();
                 if hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -3579,9 +3617,36 @@ fn java_escapes_to_rust(s: &str) -> String {
                     continue;
                 }
             }
-            // Keep other escapes verbatim (\n, \t, \\, \", \', etc.).
+            // Java octal escape `\ooo` (1-3 octal digits) -> `\u{hex}` (Rust has
+            // no octal string escapes).
+            if ('0'..='7').contains(&c) {
+                let mut digits = String::new();
+                let mut j = i + 1;
+                while j < bytes.len() && digits.len() < 3 && ('0'..='7').contains(&bytes[j]) {
+                    digits.push(bytes[j]);
+                    j += 1;
+                }
+                if let Ok(v) = u32::from_str_radix(&digits, 8) {
+                    // Prefer `\xNN` for ASCII (no braces — safe inside a
+                    // `format!` literal, where `{`/`}` would be doubled).
+                    if v <= 0x7f {
+                        out.push_str(&format!("\\x{v:02x}"));
+                    } else {
+                        out.push_str(&format!("\\u{{{v:x}}}"));
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            // Java-only escapes Rust lacks: \b (backspace), \f (form feed).
+            if c == 'b' || c == 'f' {
+                out.push_str(if c == 'b' { "\\u{8}" } else { "\\u{c}" });
+                i += 2;
+                continue;
+            }
+            // Valid-in-both escapes (\n \r \t \\ \" \' \0) kept verbatim.
             out.push(bytes[i]);
-            out.push(bytes[i + 1]);
+            out.push(c);
             i += 2;
             continue;
         }

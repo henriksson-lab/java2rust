@@ -8,5 +8,7 @@ impl A {
     // initializer block omitted
 
 
+
+    pub fn new() -> Self { Default::default() }
 }
 

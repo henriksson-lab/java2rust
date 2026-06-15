@@ -4,6 +4,8 @@ struct X {
 }
 
 impl X {
+
+    pub fn new() -> Self { Default::default() }
 }
 
 /// @java X.A

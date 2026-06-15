@@ -9,5 +9,7 @@ impl A {
     fn m(&self)   {
         x_aa.x_aab();
     }
+
+    pub fn new() -> Self { Default::default() }
 }
 

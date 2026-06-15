@@ -17,6 +17,7 @@ struct Options {
     copy_other_files: bool,
     link: Vec<String>,
     stubs: bool,
+    make_crate: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
@@ -28,6 +29,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         copy_other_files: false,
         link: Vec::new(),
         stubs: false,
+        make_crate: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -55,6 +57,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 opts.link.push(args.get(i).ok_or("missing value for -l")?.clone());
             }
             "-s" | "--stubs" => opts.stubs = true,
+            "--crate" => opts.make_crate = true,
             other => return Err(format!("unknown option: {other}")),
         }
         i += 1;
@@ -164,6 +167,7 @@ fn print_help() {
     eprintln!("  -cp, --copy-other-files   copy non-java files to output");
     eprintln!("  -l,  --link <map.json>    link against a dependency symbol map (repeatable)");
     eprintln!("  -s,  --stubs              emit <output>/stubs.rs for unresolved external symbols");
+    eprintln!("       --crate              wire output into a crate (mod tree + Cargo.toml); resolve cross-file refs");
 }
 
 fn main() {
@@ -187,6 +191,11 @@ fn main() {
 
     match opts.input {
         Some(ref input) => {
+            // In crate mode, link the project against itself so cross-file type
+            // references resolve to `crate::…` paths.
+            if opts.make_crate {
+                link.merge(java2rust_rs::crate_layout::build_project_map(Path::new(input)));
+            }
             // Pre-pass: which types are defined in this tree (so cross-file refs
             // aren't recorded as missing externals).
             let mut known = HashSet::new();
@@ -221,6 +230,16 @@ fn main() {
                             println!("- {path}");
                         }
                     }
+                }
+            }
+            // Post-pass: emit the module tree + Cargo.toml so the files form a crate.
+            if opts.make_crate {
+                if let Err(e) = java2rust_rs::crate_layout::finish_crate(Path::new(&opts.output)) {
+                    eprintln!("error writing crate layout: {e}");
+                    std::process::exit(1);
+                }
+                if opts.verbosity > 0 {
+                    println!("- {}/Cargo.toml  (+ module tree)", opts.output);
                 }
             }
         }

@@ -9,5 +9,7 @@ impl T {
     fn m(&self,  a: i32) -> i32  {
         return  if a > 0 { a } else { -a };
     }
+
+    pub fn new() -> Self { Default::default() }
 }
 

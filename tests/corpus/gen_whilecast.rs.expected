@@ -13,5 +13,7 @@ impl W {
         }
          let d: f64 = i as f64;
     }
+
+    pub fn new() -> Self { Default::default() }
 }
 

@@ -9,5 +9,7 @@ impl A {
     fn m(&self)   {
         Class::new(i);
     }
+
+    pub fn new() -> Self { Default::default() }
 }
 

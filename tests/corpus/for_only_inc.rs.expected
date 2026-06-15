@@ -21,5 +21,7 @@ impl A {
 
         ;
     }
+
+    pub fn new() -> Self { Default::default() }
 }
 

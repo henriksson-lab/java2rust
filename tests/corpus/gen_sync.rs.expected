@@ -11,5 +11,7 @@ impl Y {
             x();
         }
     }
+
+    pub fn new() -> Self { Default::default() }
 }
 

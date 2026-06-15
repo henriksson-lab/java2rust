@@ -6,5 +6,7 @@ struct A {
 }
 
 impl A {
+
+    pub fn new() -> Self { Default::default() }
 }
 
