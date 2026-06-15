@@ -2,29 +2,40 @@
 
 /// Convert a camel-case string to its snake-case representation.
 ///
-/// Mirrors `NamingHelper.camelToSnakeCase`.
+/// Acronym-aware: runs of capitals stay together (`JSONObject` →
+/// `json_object`, `getJSONObject` → `get_json_object`, `parseURL` →
+/// `parse_url`), splitting only at a lowercase/digit→upper boundary or where an
+/// acronym meets the next word (an upper followed by a lower). Inspired by
+/// `NamingHelper.camelToSnakeCase`, but the original split before every capital.
 pub fn camel_to_snake_case(input: &str) -> String {
-    // early return
     if input.is_empty() {
         return input.to_string();
     }
-
+    let chars: Vec<char> = input.chars().collect();
     let mut snake = String::new();
-    let mut chars = input.chars();
-
-    // lowercase first character
-    let first = chars.next().unwrap();
-    for lc in first.to_lowercase() {
-        snake.push(lc);
-    }
-
-    // create snake case string
-    for c in chars {
+    for i in 0..chars.len() {
+        let c = chars[i];
         if c.is_uppercase() {
-            snake.push('_');
-        }
-        for lc in c.to_lowercase() {
-            snake.push(lc);
+            let prev = if i > 0 { Some(chars[i - 1]) } else { None };
+            let next = chars.get(i + 1).copied();
+            let boundary = match (prev, next) {
+                // first character: never a boundary
+                (None, _) => false,
+                // a lowercase/digit before an upper always starts a new word
+                (Some(p), _) if p.is_lowercase() || p.is_ascii_digit() => true,
+                // upper preceded by upper but followed by lower: acronym → word
+                // (`JSONObject`: split before the `O` of `Object`)
+                (Some(p), Some(n)) if p.is_uppercase() && n.is_lowercase() => true,
+                _ => false,
+            };
+            if boundary {
+                snake.push('_');
+            }
+            for lc in c.to_lowercase() {
+                snake.push(lc);
+            }
+        } else {
+            snake.push(c);
         }
     }
     snake
@@ -50,5 +61,17 @@ mod tests {
         assert_eq_snake("", "");
         assert_eq_snake("nothing", "nothing");
         assert_eq_snake("snake", "Snake");
+    }
+
+    #[test]
+    fn test_acronyms_stay_together() {
+        assert_eq_snake("json_object", "JSONObject");
+        assert_eq_snake("get_json_object", "getJSONObject");
+        assert_eq_snake("opt_json_array", "optJSONArray");
+        assert_eq_snake("parse_url", "parseURL");
+        assert_eq_snake("get_id", "getID");
+        assert_eq_snake("sam_record", "SAMRecord");
+        assert_eq_snake("io_exception", "IOException");
+        assert_eq_snake("https_connection", "HTTPSConnection");
     }
 }

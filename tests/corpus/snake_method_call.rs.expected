@@ -7,7 +7,7 @@ impl A {
 
     /// @java A#m
     fn m(&self)   {
-        x_a_a.x_a_a_b();
+        x_aa.x_aab();
     }
 }
 

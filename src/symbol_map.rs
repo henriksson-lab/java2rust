@@ -7,7 +7,7 @@
 //! (see `bin/gen_symbols.rs`) and consumed here to resolve referenced types to
 //! their real Rust paths.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -59,9 +59,6 @@ pub struct ParamSym {
 #[derive(Default)]
 pub struct LinkIndex {
     map: SymbolMap,
-    /// Simple Rust/Java type name → FQNs that carry it (for the unqualified
-    /// fallback when imports don't pin a name).
-    by_simple: HashMap<String, Vec<String>>,
 }
 
 impl LinkIndex {
@@ -72,8 +69,6 @@ impl LinkIndex {
     /// Merge another map in. Later entries win on FQN collision.
     pub fn merge(&mut self, other: SymbolMap) {
         for (fqn, t) in other.types {
-            let simple = fqn.rsplit('.').next().unwrap_or(&fqn).to_string();
-            self.by_simple.entry(simple).or_default().push(fqn.clone());
             self.map.types.insert(fqn, t);
         }
     }
@@ -98,8 +93,11 @@ impl LinkIndex {
 
     /// Resolve a referenced Java type to a known dependency type, given the
     /// importing file's imports and package. Tries, in order: an explicit
-    /// import of `name`, the same package, each wildcard import, the name as a
-    /// bare FQN, and finally a unique simple-name match.
+    /// import of `name`, the same package, each wildcard import, and the name as
+    /// a bare FQN. There is deliberately no unqualified simple-name fallback: a
+    /// bare name with no import must NOT silently bind to an unrelated dependency
+    /// type that merely shares its simple name (e.g. project `Feature` vs a dep's
+    /// `…UnsupportedZipFeatureException.Feature`).
     pub fn resolve(
         &self,
         name: &str,
@@ -136,12 +134,6 @@ impl LinkIndex {
         // 4. the name itself is already an FQN we know
         if let Some(t) = self.map.types.get(name) {
             return Some(t);
-        }
-        // 5. last resort: a globally-unique simple name
-        if let Some(fqns) = self.by_simple.get(simple) {
-            if fqns.len() == 1 {
-                return self.map.types.get(&fqns[0]);
-            }
         }
         None
     }

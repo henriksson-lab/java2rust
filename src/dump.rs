@@ -116,6 +116,14 @@ pub struct RustDumpVisitor<'a> {
     known_types: Option<&'a std::collections::HashSet<String>>,
     /// Collected stub signatures for unresolved external symbols.
     stubs: std::cell::RefCell<crate::stubs::StubCollector>,
+    /// True while emitting trait body items, where Rust forbids `pub`.
+    in_trait: bool,
+    /// Overload disambiguation for the current type: method/constructor NodeId →
+    /// its emitted Rust name (only present for members in an overloaded group).
+    overload_name: std::collections::HashMap<NodeId, String>,
+    /// Per base name, the overloaded members as (arity, emitted-name), so a
+    /// self-call can pick the arity-matching overload.
+    overload_by_arity: std::collections::HashMap<String, Vec<(usize, String)>>,
 }
 
 impl<'a> RustDumpVisitor<'a> {
@@ -141,7 +149,79 @@ impl<'a> RustDumpVisitor<'a> {
             emit_stubs: false,
             known_types: None,
             stubs: std::cell::RefCell::new(crate::stubs::StubCollector::default()),
+            in_trait: false,
+            overload_name: std::collections::HashMap::new(),
+            overload_by_arity: std::collections::HashMap::new(),
         }
+    }
+
+    /// Compute overload-disambiguated names for a type's members. Java permits
+    /// same-name/different-param methods (and multiple constructors); Rust does
+    /// not, so an overloaded group keeps its first member's name and suffixes the
+    /// rest by arity (`foo`, `foo_2`, …). Self-calls resolve by arity; calls from
+    /// other files fall back to the base (first) name, which always exists.
+    fn compute_overloads(&mut self, members: &[NodeId]) {
+        use std::collections::{HashMap, HashSet};
+        let mut groups: HashMap<String, Vec<(NodeId, usize)>> = HashMap::new();
+        for &m in members {
+            match self.arena.kind(m) {
+                Node::MethodDeclaration { name, parameters, .. } => {
+                    let base = self.to_snake_if_necessary(name);
+                    groups.entry(base).or_default().push((m, parameters.len()));
+                }
+                Node::ConstructorDeclaration { parameters, .. } => {
+                    groups.entry("new".to_string()).or_default().push((m, parameters.len()));
+                }
+                _ => {}
+            }
+        }
+        self.overload_name.clear();
+        self.overload_by_arity.clear();
+        for (base, list) in groups {
+            if list.len() <= 1 {
+                continue;
+            }
+            let mut used: HashSet<String> = HashSet::new();
+            used.insert(base.clone());
+            let mut by_arity: Vec<(usize, String)> = Vec::new();
+            for (i, &(node, arity)) in list.iter().enumerate() {
+                let mangled = if i == 0 {
+                    base.clone()
+                } else {
+                    let mut cand = format!("{base}_{arity}");
+                    let mut k = 2;
+                    while used.contains(&cand) {
+                        cand = format!("{base}_{arity}_{k}");
+                        k += 1;
+                    }
+                    cand
+                };
+                used.insert(mangled.clone());
+                self.overload_name.insert(node, mangled.clone());
+                by_arity.push((arity, mangled));
+            }
+            self.overload_by_arity.insert(base, by_arity);
+        }
+    }
+
+    /// The emitted Rust name for a method/constructor declaration node (its
+    /// overload-mangled name, or the plain base name if not overloaded).
+    fn decl_emitted_name(&self, node: NodeId, base: &str) -> String {
+        self.overload_name.get(&node).cloned().unwrap_or_else(|| base.to_string())
+    }
+
+    /// The name to emit for a call: for a self-call to an overloaded method, the
+    /// arity-matching overload; otherwise the base name.
+    fn call_emitted_name(&self, scope: Option<NodeId>, name: &str, arity: usize) -> String {
+        let base = self.to_snake_if_necessary(name);
+        if scope.is_none() {
+            if let Some(list) = self.overload_by_arity.get(&base) {
+                if let Some((_, m)) = list.iter().find(|(a, _)| *a == arity) {
+                    return m.clone();
+                }
+            }
+        }
+        base
     }
 
     /// Enable recording of unresolved external symbols into the stub collector,
@@ -217,8 +297,12 @@ impl<'a> RustDumpVisitor<'a> {
     /// dependency maps first (using this file's imports + package to rebuild the
     /// FQN); falls back to the built-in stdlib mapping otherwise.
     fn resolve_type_name(&self, name: &str) -> String {
-        if let Some(t) = self.resolve_type_sym(name) {
-            return t.rust_path.clone();
+        // A type defined elsewhere in this tree wins over any linked dependency
+        // that merely shares its simple name (prevents link-shadowing).
+        if !self.is_known_project_type(name) {
+            if let Some(t) = self.resolve_type_sym(name) {
+                return t.rust_path.clone();
+            }
         }
         let mapped = map_type_name(name).replace('$', "_");
         if let Some(key) = self.missing_type_key(name) {
@@ -542,10 +626,24 @@ impl<'a> RustDumpVisitor<'a> {
         false
     }
 
-    /// Emit a value in a move position, cloning if it is a non-Copy name read.
+    /// A read of an instance field (`self.field` / `this.field` / a bare field
+    /// name) — moving it out of `&self` needs `.clone()`. Cloning a Copy field is
+    /// harmless, so we don't need the field's exact type here.
+    fn is_field_read(&self, e: NodeId) -> bool {
+        match self.arena.kind(e) {
+            Node::FieldAccessExpr { scope, field, .. } => {
+                matches!(self.arena.kind(*scope), Node::ThisExpr { .. })
+                    || self.class_field_names.contains(field)
+            }
+            _ => false,
+        }
+    }
+
+    /// Emit a value in a move position, cloning if it is a non-Copy name read or
+    /// an instance-field read (both move out of a borrow otherwise).
     fn emit_moved_value(&mut self, e: NodeId, arg: Arg) {
         self.visit(e, arg);
-        if self.is_non_copy_name(e) {
+        if self.is_non_copy_name(e) || self.is_field_read(e) {
             self.printer.print(".clone()");
         }
     }
@@ -644,6 +742,10 @@ impl<'a> RustDumpVisitor<'a> {
     // ---- printModifiers ----
 
     fn print_modifiers(&mut self, m: i32) {
+        // Rust forbids visibility qualifiers on trait items.
+        if self.in_trait {
+            return;
+        }
         // commentOut is always false in this configuration, so only the `pub`
         // emissions remain observable.
         if modifiers::is_protected(m) {
@@ -696,6 +798,25 @@ impl<'a> RustDumpVisitor<'a> {
             }
             self.printer.print(">");
         }
+    }
+
+    /// Print only the type-parameter *names* (no bounds): `<T, SOURCE>`. Used for
+    /// the type path in an `impl<…> Type<…>` header, where bounds belong in the
+    /// binder, not the path.
+    fn print_type_param_names(&mut self, args: &[NodeId]) {
+        if args.is_empty() {
+            return;
+        }
+        self.printer.print("<");
+        for (i, &t) in args.iter().enumerate() {
+            if let Node::TypeParameter { name, .. } = self.arena.kind(t) {
+                self.printer.print(name);
+            }
+            if i + 1 < args.len() {
+                self.printer.print(", ");
+            }
+        }
+        self.printer.print(">");
     }
 
     fn print_arguments(&mut self, args: &[NodeId], arg: Arg) {
@@ -1322,6 +1443,11 @@ impl<'a> RustDumpVisitor<'a> {
 
         // Track this class's instance field names for `&mut self` decisions.
         let saved_fields = std::mem::take(&mut self.class_field_names);
+        // Overload-disambiguation table for this type (restored after, so nested
+        // types don't clobber the enclosing type's table).
+        let saved_overload_name = std::mem::take(&mut self.overload_name);
+        let saved_overload_arity = std::mem::take(&mut self.overload_by_arity);
+        self.compute_overloads(&members);
         for &m in &members {
             if let Node::FieldDeclaration { modifiers, variables, .. } = self.arena.kind(m) {
                 if !modifiers::is_static(*modifiers) {
@@ -1361,9 +1487,12 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print_ln();
 
         // ---- impl ----
-        self.printer.print("impl ");
-        self.printer.print(&name);
+        // `impl<T: Bound> Type<T>` — bounds in the binder, names in the path.
+        self.printer.print("impl");
         self.print_type_parameters(&type_parameters, arg);
+        self.printer.print(" ");
+        self.printer.print(&name);
+        self.print_type_param_names(&type_parameters);
         self.printer.print_ln_s(" {");
         self.printer.indent();
         // static fields as associated constants
@@ -1393,6 +1522,8 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         self.class_field_names = saved_fields;
+        self.overload_name = saved_overload_name;
+        self.overload_by_arity = saved_overload_arity;
     }
 
     /// Does this subtree assign to an instance field (→ method needs `&mut self`)?
@@ -1459,7 +1590,14 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print_ln_s(" {");
         self.printer.indent();
         // Methods only; nested types (and fields) can't live in a trait body.
+        let saved_overload_name = std::mem::take(&mut self.overload_name);
+        let saved_overload_arity = std::mem::take(&mut self.overload_by_arity);
+        self.compute_overloads(members);
+        self.in_trait = true;
         self.print_members(members, arg, Filter::Method);
+        self.in_trait = false;
+        self.overload_name = saved_overload_name;
+        self.overload_by_arity = saved_overload_arity;
         self.printer.unindent();
         self.printer.print_ln_s("}");
         // Hoist nested type declarations to module level.
@@ -1534,20 +1672,72 @@ impl<'a> RustDumpVisitor<'a> {
         let type_str = type_str.trim().to_string();
         for var in variables {
             let name = self.field_var_name(var);
-            self.printer.print(&format!("const {name}: "));
-            self.visit(typ, None);
-            self.printer.print(" = ");
-            match self.arena.kind(var) {
-                Node::VariableDeclarator { init: Some(i), .. } => {
-                    let i = *i;
+            let init = match self.arena.kind(var) {
+                Node::VariableDeclarator { init: Some(i), .. } => Some(*i),
+                _ => None,
+            };
+            match init {
+                // String literal -> `const X: &'static str = "...";` (a Rust
+                // `const`/`static` initializer must be const-evaluable, so the
+                // usual `"...".to_string()` is illegal here).
+                Some(i) if type_str == "String" && self.is_string_literal(i) => {
+                    self.printer.print(&format!("const {name}: &'static str = "));
+                    let saved = self.raw_string;
+                    self.raw_string = true;
                     self.visit(i, None);
+                    self.raw_string = saved;
+                    self.printer.print_ln_s(";");
                 }
-                _ => {
+                // Other const-evaluable literal (numeric / bool / char).
+                Some(i) if self.is_const_literal(i) => {
+                    self.printer.print(&format!("const {name}: "));
+                    self.visit(typ, None);
+                    self.printer.print(" = ");
+                    self.visit(i, None);
+                    self.printer.print_ln_s(";");
+                }
+                // Non-const initializer (constructor, Vec::new, method call): a
+                // lazily-initialised `static` is the only valid form.
+                Some(i) => {
+                    self.printer.print(&format!("static {name}: std::sync::LazyLock<"));
+                    self.visit(typ, None);
+                    self.printer.print("> = std::sync::LazyLock::new(|| ");
+                    self.visit(i, None);
+                    self.printer.print_ln_s(");");
+                }
+                // No initializer: fall back to a const default.
+                None => {
+                    self.printer.print(&format!("const {name}: "));
+                    self.visit(typ, None);
+                    self.printer.print(" = ");
                     let d = self.default_value(&type_str);
                     self.printer.print(&d);
+                    self.printer.print_ln_s(";");
                 }
             }
-            self.printer.print_ln_s(";");
+        }
+    }
+
+    fn is_string_literal(&self, n: NodeId) -> bool {
+        matches!(self.arena.kind(n), Node::StringLiteralExpr { .. })
+    }
+
+    /// Is `n` a const-evaluable literal (numeric/bool/char/string, possibly with
+    /// a unary sign or parens)? Such initializers are legal in a Rust `const`.
+    fn is_const_literal(&self, n: NodeId) -> bool {
+        match self.arena.kind(n) {
+            Node::IntegerLiteralExpr { .. }
+            | Node::LongLiteralExpr { .. }
+            | Node::DoubleLiteralExpr { .. }
+            | Node::BooleanLiteralExpr { .. }
+            | Node::CharLiteralExpr { .. }
+            | Node::StringLiteralExpr { .. } => true,
+            Node::EnclosedExpr { inner: Some(i) } => self.is_const_literal(*i),
+            Node::UnaryExpr { expr, op } => {
+                matches!(op, UnaryOp::Negative | UnaryOp::Positive | UnaryOp::Inverse)
+                    && self.is_const_literal(*expr)
+            }
+            _ => false,
         }
     }
 
@@ -1568,6 +1758,18 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
+        // Special-case JDK types with no plain identifier mapping: the
+        // untranslatable `Object`/`Class`, and functional interfaces (which
+        // become `Box<dyn Fn(..)->..>`, reordering their type arguments).
+        if scope.is_none() {
+            let simple = name.rsplit('.').next().unwrap_or(&name);
+            if !self.is_known_project_type(simple) {
+                if let Some(rendered) = self.special_jdk_type(simple, &type_args) {
+                    self.printer.print(&rendered);
+                    return;
+                }
+            }
+        }
         if let Some(s) = scope {
             self.visit(s, arg);
             self.printer.print("::");
@@ -1578,6 +1780,36 @@ impl<'a> RustDumpVisitor<'a> {
             // No empty turbofish in Rust; let the args be inferred.
         } else {
             self.print_type_args(&type_args, arg);
+        }
+    }
+
+    /// Map JDK types that have no identifier-level Rust equivalent: `Object`/
+    /// `Class` → `Box<dyn Any>`, and functional interfaces → `Box<dyn Fn...>`
+    /// (their type args reorder into the Fn signature). Returns `None` to fall
+    /// through to normal mapping (e.g. a raw functional interface with no args).
+    fn special_jdk_type(&mut self, simple: &str, type_args: &[NodeId]) -> Option<String> {
+        if matches!(simple, "Object" | "Class") {
+            return Some("Box<dyn std::any::Any>".to_string());
+        }
+        // Render each type argument to a Rust type string.
+        let a: Vec<String> = type_args
+            .iter()
+            .map(|&t| self.accept_and_cut(t, None).trim().to_string())
+            .collect();
+        let n = a.len();
+        let func = |params: String, ret: String| Some(format!("Box<dyn Fn({params}){ret}>"));
+        match (simple, n) {
+            ("Function", 2) => func(a[0].clone(), format!(" -> {}", a[1])),
+            ("BiFunction", 3) => func(format!("{}, {}", a[0], a[1]), format!(" -> {}", a[2])),
+            ("UnaryOperator", 1) => func(a[0].clone(), format!(" -> {}", a[0])),
+            ("BinaryOperator", 1) => func(format!("{}, {}", a[0], a[0]), format!(" -> {}", a[0])),
+            ("Predicate", 1) => func(a[0].clone(), " -> bool".to_string()),
+            ("BiPredicate", 2) => func(format!("{}, {}", a[0], a[1]), " -> bool".to_string()),
+            ("Supplier", 1) | ("Callable", 1) => func(String::new(), format!(" -> {}", a[0])),
+            ("Consumer", 1) => func(a[0].clone(), String::new()),
+            ("BiConsumer", 2) => func(format!("{}, {}", a[0], a[1]), String::new()),
+            ("Runnable", 0) => func(String::new(), String::new()),
+            _ => None,
         }
     }
 
@@ -1884,7 +2116,12 @@ impl<'a> RustDumpVisitor<'a> {
         // `jsonObj` is a linked `JSONObject`. Resolve the callee first and, when
         // it matches a linked type's method, skip the heuristic shortcuts.
         let callee = self.resolve_linked_callee(scope, &name);
-        if callee.is_none() {
+        // Also skip the stdlib rewrites when the receiver has a known user type
+        // (a project/linked class that defines its own method of this name) —
+        // e.g. `dict.size()` on a `SAMSequenceDictionary` must call its `size`,
+        // not become `.len()`. Unknown receiver types keep the old behaviour.
+        let user_recv = scope.map(|s| self.receiver_is_user_type(s)).unwrap_or(false);
+        if callee.is_none() && !user_recv {
             if self.try_emit_print_macro(scope, &name, &args, arg) {
                 return;
             }
@@ -1919,7 +2156,9 @@ impl<'a> RustDumpVisitor<'a> {
                         if !modifiers::is_static(*m) {
                             self.printer.print("self.");
                         } else {
-                            self.printer.print("::");
+                            // A static method of the current type: `Self::name`,
+                            // never a bare `::name` (an invalid crate-root path).
+                            self.printer.print("Self::");
                         }
                     }
                     _ => self.printer.print("self."),
@@ -1936,7 +2175,7 @@ impl<'a> RustDumpVisitor<'a> {
             }
             None => {
                 self.record_missing_call(scope, &name, &args, id);
-                let s = self.to_snake_if_necessary(&name);
+                let s = self.call_emitted_name(scope, &name, args.len());
                 self.printer.print(&s);
                 self.print_arguments(&args, arg);
                 // A call to a nullable-returning method used as a plain value is
@@ -2396,6 +2635,28 @@ impl<'a> RustDumpVisitor<'a> {
         }
     }
 
+    /// Is `simple` a stdlib type the built-in method rewrites apply to (a
+    /// collection that maps to `Vec`/`HashMap`/…, a `String`/`StringBuilder`, or
+    /// `Optional`)? Other class types are user types and must NOT be rewritten.
+    fn is_stdlib_rewritable(simple: &str) -> bool {
+        map_type_name(simple) != simple
+            || matches!(simple, "String" | "CharSequence" | "StringBuilder" | "StringBuffer")
+    }
+
+    /// Does the call receiver have a *known* user (project/linked/other class)
+    /// type — i.e. one the collection/String rewrites must not fire on? Returns
+    /// false when the type is unknown (keep the existing best-effort behaviour)
+    /// or is a stdlib collection/String/Optional.
+    fn receiver_is_user_type(&self, recv: NodeId) -> bool {
+        match self.recv_type_name(recv) {
+            Some(t) => {
+                let simple = t.rsplit('.').next().unwrap_or(&t);
+                !Self::is_stdlib_rewritable(simple)
+            }
+            None => false,
+        }
+    }
+
     /// Map `Math.x(...)` to a Rust receiver method, e.g. `Math.max(a, b)` ->
     /// `(a).max(b)`, `Math.sqrt(x)` -> `(x).sqrt()`. Returns true if handled.
     fn try_emit_math(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
@@ -2567,7 +2828,9 @@ impl<'a> RustDumpVisitor<'a> {
             self.printer.print(" ");
         }
         let _ = throws; // Java `throws` has no Rust equivalent here.
-        self.printer.print("fn new");
+        let ctor_name = self.decl_emitted_name(id, "new");
+        self.printer.print("fn ");
+        self.printer.print(&ctor_name);
         self.printer.print("(");
         for (i, &p) in parameters.iter().enumerate() {
             self.visit(p, arg);
@@ -2627,6 +2890,7 @@ impl<'a> RustDumpVisitor<'a> {
             raw_type.clone()
         };
         let snake = self.to_snake_if_necessary(&name);
+        let snake = self.decl_emitted_name(id, &snake);
         self.printer.print(&snake);
         // Type parameters go after the name in Rust: `fn name<T>(...)`.
         self.print_type_parameters(&type_parameters, arg);
@@ -2794,7 +3058,13 @@ impl<'a> RustDumpVisitor<'a> {
             self.emit_switch_patterns(&pending, pending_default, arg);
             self.printer.print_ln_s(" => {");
             self.printer.indent();
-            for &s in &stmts {
+            // Drop a trailing unlabeled `break;` — in Java it terminates the
+            // case, but a Rust `match` arm has no `break` (E0268).
+            let mut body = stmts.clone();
+            if matches!(body.last().map(|&s| self.arena.kind(s)), Some(Node::BreakStmt { id: None })) {
+                body.pop();
+            }
+            for &s in &body {
                 self.visit(s, arg);
                 self.printer.print_ln();
             }
@@ -2935,30 +3205,84 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print_ln_s(";");
             }
         }
-        if let Some(c) = compare {
-            self.printer.print("while ");
-            self.visit(c, arg);
-        } else {
-            self.printer.print("loop ");
-        }
-        if !update.is_empty() {
-            self.printer.print_ln_s(" {");
-            self.printer.indent();
-        }
-        self.encapsulate_if_not_block(body, arg);
-        self.printer.print_ln_s("");
-        if !update.is_empty() {
+
+        // If the body `continue`s, the naive `while cond { body; update }` form
+        // would skip `update` (Java runs the update on `continue`). Move the
+        // update into the loop condition, guarded so it doesn't run on the first
+        // iteration — this reproduces C-`for` semantics: update runs before the
+        // condition on every iteration after the first, and `continue` jumps to
+        // the condition (so it runs the update too).
+        let needs_continue_safe = !update.is_empty() && self.body_has_unlabeled_continue(body);
+
+        if needs_continue_safe {
+            self.printer.print_ln_s("let mut __first = true;");
+            self.printer.print("while { if !__first { ");
             for &e in &update {
                 self.visit(e, arg);
-                self.printer.print_ln_s(";");
+                self.printer.print("; ");
             }
-            self.printer.unindent();
-            self.printer.print_ln_s(" }");
+            self.printer.print("} __first = false; ");
+            match compare {
+                Some(c) => self.visit(c, arg),
+                None => self.printer.print("true"),
+            }
+            self.printer.print(" } ");
+            self.encapsulate_if_not_block(body, arg);
+            self.printer.print_ln_s("");
+        } else {
+            if let Some(c) = compare {
+                self.printer.print("while ");
+                self.visit(c, arg);
+            } else {
+                self.printer.print("loop ");
+            }
+            if !update.is_empty() {
+                self.printer.print_ln_s(" {");
+                self.printer.indent();
+            }
+            self.encapsulate_if_not_block(body, arg);
+            self.printer.print_ln_s("");
+            if !update.is_empty() {
+                for &e in &update {
+                    self.visit(e, arg);
+                    self.printer.print_ln_s(";");
+                }
+                self.printer.unindent();
+                self.printer.print_ln_s(" }");
+            }
         }
+
         if !init.is_empty() {
             self.printer.unindent();
             self.printer.print_ln_s(" }");
         }
+    }
+
+    /// Does `body` contain an unlabeled `continue` that targets *this* loop (i.e.
+    /// not one nested inside another loop)? Used to pick a `continue`-safe `for`
+    /// lowering.
+    fn body_has_unlabeled_continue(&self, body: NodeId) -> bool {
+        let mut stack = vec![body];
+        while let Some(n) = stack.pop() {
+            match self.arena.kind(n) {
+                Node::ContinueStmt { id: None } => return true,
+                // Don't descend into a nested loop — its `continue` targets it.
+                Node::ForStmt { .. }
+                | Node::WhileStmt { .. }
+                | Node::DoStmt { .. }
+                | Node::ForeachStmt { .. }
+                    if n != body =>
+                {
+                    continue;
+                }
+                _ => {
+                    for c in self.arena.children(n) {
+                        stack.push(c);
+                    }
+                }
+            }
+        }
+        false
     }
 
     fn visit_try(&mut self, id: NodeId, arg: Arg) {
