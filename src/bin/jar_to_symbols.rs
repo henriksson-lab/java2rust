@@ -168,6 +168,7 @@ fn process_class(
         interfaces: class.interfaces.iter().map(|i| binary_to_fqn(i)).collect(),
         generic: false,
         fields: BTreeMap::new(),
+        static_fields: BTreeMap::new(),
         methods: BTreeMap::new(),
     };
 

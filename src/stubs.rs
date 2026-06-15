@@ -150,6 +150,7 @@ impl StubCollector {
                 interfaces: Vec::new(),
                 generic: false,
                 fields: Default::default(),
+                static_fields: Default::default(),
                 methods: Default::default(),
             };
             for fqn in &t.java_fqns {
@@ -291,17 +292,49 @@ fn render_fn(name: &str, sig: &StubSig, ctor_ret: Option<&str>) -> String {
         Receiver::RefMut => parts.push("&mut self".to_string()),
         Receiver::None => {}
     }
-    for (i, p) in sig.params.iter().enumerate() {
-        parts.push(format!("a{i}: {p}"));
+    // Each parameter is a generic type so any argument is accepted: the inferred
+    // param types are guesses, and naming another stub type here would reference
+    // it by bare name across self-contained stub files (E0412). Generics also
+    // avoid argument-type mismatches against `Unknown`.
+    let generics = if sig.params.is_empty() {
+        String::new()
+    } else {
+        let ps: Vec<String> = (0..sig.params.len()).map(|i| format!("A{i}")).collect();
+        format!("<{}>", ps.join(", "))
+    };
+    for i in 0..sig.params.len() {
+        parts.push(format!("a{i}: A{i}"));
     }
+    // The constructor returns the stub's own (same-file) type. A method return is
+    // kept only when it's resolvable here (a primitive/std type or `Unknown`);
+    // any other name would be a cross-file stub reference, so drop it.
     let ret = match ctor_ret {
         Some(t) => format!(" -> {t}"),
-        None => match &sig.ret {
-            Some(t) => format!(" -> {t}"),
-            None => String::new(),
+        None => match sig.ret.as_deref() {
+            Some(t) if stub_ret_renderable(t) => format!(" -> {t}"),
+            _ => String::new(),
         },
     };
-    format!("pub fn {name}({}){ret} {{ unimplemented!() }}", parts.join(", "))
+    format!("pub fn {name}{generics}({}){ret} {{ unimplemented!() }}", parts.join(", "))
+}
+
+/// A stub return type is renderable in a self-contained stub file only if it's
+/// `Unknown` or built from primitive/std tokens (no cross-file stub names).
+fn stub_ret_renderable(t: &str) -> bool {
+    let t = t.trim_start_matches('&').trim();
+    if t == UNKNOWN {
+        return true;
+    }
+    const SAFE: &[&str] = &[
+        "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "usize", "isize",
+        "f32", "f64", "bool", "char", "String", "str", "Vec", "Option", "Box", "HashMap",
+        "HashSet", "BTreeMap", "std", "core", "alloc", "collections", "Unknown",
+    ];
+    let tokens: Vec<&str> = t
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|s| !s.is_empty() && s.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false))
+        .collect();
+    !tokens.is_empty() && tokens.iter().all(|s| SAFE.contains(s))
 }
 
 /// Walk a parsed compilation unit and collect the fully-qualified names of every

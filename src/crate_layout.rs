@@ -37,6 +37,8 @@ struct RawType {
     interface_simples: Vec<String>,
     /// (java name, rust name) for instance fields / methods.
     fields: Vec<(String, String)>,
+    /// (java name, rust name) for static fields (associated consts).
+    static_fields: Vec<(String, String)>,
     methods: Vec<(String, String)>,
     /// The defining file's import/package context, for resolving `parent_simple`.
     explicit_imports: Vec<String>,
@@ -79,10 +81,17 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
             interfaces,
             generic: r.generic,
             fields: Default::default(),
+            static_fields: Default::default(),
             methods: Default::default(),
         };
         for (java, rust) in &r.fields {
             t.fields.insert(
+                java.clone(),
+                FieldSym { rust: rust.clone(), rust_type: String::new(), nullable: false },
+            );
+        }
+        for (java, rust) in &r.static_fields {
+            t.static_fields.insert(
                 java.clone(),
                 FieldSym { rust: rust.clone(), rust_type: String::new(), nullable: false },
             );
@@ -200,10 +209,14 @@ fn collect_types(
             let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
             let fqn = if pkg.is_empty() { path.clone() } else { format!("{pkg}.{path}") };
             let rust_name = name.replace('$', "_");
-            let (parent_simple, interface_simples, fields, methods) = if is_class {
+            let (parent_simple, interface_simples, fields, static_fields, methods) = if is_class {
                 type_members(arena, c)
+            } else if kind == "enum" {
+                // Enum variants are recorded as `static_fields` (same `Enum::Name`
+                // access), so a `switch` on the enum can qualify its case labels.
+                (None, Vec::new(), Vec::new(), enum_variants(arena, c), Vec::new())
             } else {
-                (None, Vec::new(), Vec::new(), Vec::new())
+                (None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
             };
             raw.push(RawType {
                 fqn,
@@ -213,6 +226,7 @@ fn collect_types(
                 parent_simple,
                 interface_simples,
                 fields,
+                static_fields,
                 methods,
                 explicit_imports: explicit.to_vec(),
                 wildcard_pkgs: wildcard.to_vec(),
@@ -231,11 +245,12 @@ fn collect_types(
 fn type_members(
     arena: &Arena,
     decl: NodeId,
-) -> (Option<String>, Vec<String>, Vec<(String, String)>, Vec<(String, String)>) {
+) -> (Option<String>, Vec<String>, Vec<(String, String)>, Vec<(String, String)>, Vec<(String, String)>)
+{
     use crate::modifiers;
     let Node::ClassOrInterfaceDeclaration { extends, implements, members, .. } = arena.kind(decl)
     else {
-        return (None, Vec::new(), Vec::new(), Vec::new());
+        return (None, Vec::new(), Vec::new(), Vec::new(), Vec::new());
     };
     let simple_of = |e: NodeId| match arena.kind(e) {
         Node::ClassOrInterfaceType { name, .. } => {
@@ -246,14 +261,20 @@ fn type_members(
     let parent = extends.first().and_then(|&e| simple_of(e));
     let interfaces: Vec<String> = implements.iter().filter_map(|&i| simple_of(i)).collect();
     let mut fields = Vec::new();
+    let mut static_fields = Vec::new();
     let mut methods = Vec::new();
     for &m in members {
         match arena.kind(m) {
-            Node::FieldDeclaration { modifiers, variables, .. } if !modifiers::is_static(*modifiers) => {
+            Node::FieldDeclaration { modifiers, variables, .. } => {
+                let target = if modifiers::is_static(*modifiers) {
+                    &mut static_fields
+                } else {
+                    &mut fields
+                };
                 for &v in variables {
                     if let Node::VariableDeclarator { id: vid, .. } = arena.kind(v) {
                         if let Node::VariableDeclaratorId { name } = arena.kind(*vid) {
-                            fields.push((name.clone(), rust_member_name(name)));
+                            target.push((name.clone(), rust_member_name(name)));
                         }
                     }
                 }
@@ -264,7 +285,22 @@ fn type_members(
             _ => {}
         }
     }
-    (parent, interfaces, fields, methods)
+    (parent, interfaces, fields, static_fields, methods)
+}
+
+/// An enum's variant names as `(java, rust)` pairs (the variant is emitted with
+/// its source name, so the two coincide).
+fn enum_variants(arena: &Arena, decl: NodeId) -> Vec<(String, String)> {
+    let Node::EnumDeclaration { entries, .. } = arena.kind(decl) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|&e| match arena.kind(e) {
+            Node::EnumConstantDeclaration { name, .. } => Some((name.clone(), name.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Mirror of the dumper's `to_snake_if_necessary` for member names (snake unless

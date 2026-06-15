@@ -32,6 +32,10 @@ pub struct TypeSym {
     pub generic: bool,
     #[serde(default)]
     pub fields: BTreeMap<String, FieldSym>,
+    /// Static fields (kept separate from instance `fields`: a static is an
+    /// associated `const`, resolved as `Type::NAME`, not `self.base.name`).
+    #[serde(default)]
+    pub static_fields: BTreeMap<String, FieldSym>,
     #[serde(default)]
     pub methods: BTreeMap<String, MethodSym>,
 }

@@ -31,23 +31,24 @@ fn records_external_type_with_ctor_and_method() {
     let out = stubs_of(SRC, &HashSet::new());
     assert!(out.contains("/// @java com.ext.Widget"), "{out}");
     assert!(out.contains("pub struct Widget"), "{out}");
-    assert!(out.contains("pub fn new(a0: i32) -> Widget"), "ctor inferred:\n{out}");
-    assert!(out.contains("pub fn do_thing(&self, a0: String)"), "method inferred:\n{out}");
+    // Parameters are generic (any argument accepted); the ctor returns the stub.
+    assert!(out.contains("pub fn new<A0>(a0: A0) -> Widget"), "ctor inferred:\n{out}");
+    assert!(out.contains("pub fn do_thing<A0>(&self, a0: A0)"), "method inferred:\n{out}");
 }
 
 #[test]
 fn records_static_call_as_associated_fn() {
     let out = stubs_of(SRC, &HashSet::new());
     assert!(out.contains("pub struct Gadget"), "{out}");
-    // `compute` has no receiver (static) and takes the String arg.
-    assert!(out.contains("pub fn compute(a0: String)"), "{out}");
+    // `compute` has no receiver (static) and takes a (generic) arg.
+    assert!(out.contains("pub fn compute<A0>(a0: A0)"), "{out}");
 }
 
 #[test]
 fn records_free_function_with_inferred_return() {
     let out = stubs_of(SRC, &HashSet::new());
-    // `int n = helper(s, 3)` -> return type i32, params String + i32.
-    assert!(out.contains("pub fn helper(a0: String, a1: i32) -> i32"), "{out}");
+    // `int n = helper(s, 3)` -> return type i32 (primitive, kept); params generic.
+    assert!(out.contains("pub fn helper<A0, A1>(a0: A0, a1: A1) -> i32"), "{out}");
 }
 
 #[test]

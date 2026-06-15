@@ -75,6 +75,57 @@ public class App {
 }
 
 #[test]
+fn switch_on_enum_qualifies_case_labels() {
+    // A `switch` on an enum: bare case labels are qualified to `Enum::Label`
+    // unit-variant patterns (a bare label would be a binding -> E0408).
+    let src = tmp("cw_enum/com/z");
+    fs::write(
+        src.join("Color.java"),
+        "package com.z;\npublic enum Color { RED, GREEN, BLUE }\n",
+    )
+    .unwrap();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cw_enum");
+    let mut link = LinkIndex::default();
+    link.merge(build_project_map(&root));
+
+    let consumer = "package com.z;\npublic class A { public int f(Color c) { switch (c) { case RED: case GREEN: return 1; default: return 0; } } }\n";
+    let out = convert_with_links(consumer, &link);
+    assert!(
+        out.contains("crate::cw_enum::com::z::color::Color::RED")
+            && out.contains("crate::cw_enum::com::z::color::Color::GREEN"),
+        "case labels qualified as Enum::Label:\n{out}"
+    );
+}
+
+#[test]
+fn inherited_static_constant_resolves_to_parent_path() {
+    // A bare reference to a `static final` declared in a superclass resolves to
+    // the parent's associated const (`Parent::MAX`), not `self.base.…` (statics
+    // aren't reached through Deref).
+    let src = tmp("cw_istatic/com/z");
+    fs::write(
+        src.join("Base.java"),
+        "package com.z;\npublic class Base { public static final int MAX = 9; }\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("Sub.java"),
+        "package com.z;\npublic class Sub extends Base { public int f() { return MAX; } }\n",
+    )
+    .unwrap();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cw_istatic");
+    let mut link = LinkIndex::default();
+    link.merge(build_project_map(&root));
+
+    let sub = "package com.z;\npublic class Sub extends Base { public int f() { return MAX; } }\n";
+    let out = convert_with_links(sub, &link);
+    assert!(
+        out.contains("crate::cw_istatic::com::z::base::Base::MAX"),
+        "inherited static const via parent path:\n{out}"
+    );
+}
+
+#[test]
 fn fully_qualified_static_call_resolves_to_crate_path() {
     // A static call written with a fully-qualified name and no import
     // (`com.z.Util.help()`) resolves to the type's crate path + `::`, instead of

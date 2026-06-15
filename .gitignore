@@ -1,3 +1,6 @@
 /target
 tools/*.class
 /testdata
+
+# stray rustc lib outputs
+*.rlib

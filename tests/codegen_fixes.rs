@@ -140,6 +140,19 @@ fn uppercase_static_field_is_const() {
 }
 
 #[test]
+fn inherited_field_in_constructor_uses_self_placeholder() {
+    // Inside a constructor body `self` doesn't exist yet (`__self` is used); an
+    // inherited field read must also go through `__self.base`, not `self.base`.
+    let out = convert("class C extends Ext { C() { val = 1; } }");
+    assert!(out.contains("__self.base.val"), "ctor inherited field via __self.base:\n{out}");
+    // No *bare* `self.base.val` (i.e. not the `__self` form).
+    assert!(
+        !out.replace("__self.base.val", "").contains("self.base.val"),
+        "no bare self.base in ctor:\n{out}"
+    );
+}
+
+#[test]
 fn stdlib_rewrite_still_applies_to_collections() {
     // A genuine List receiver must still get `.size()` -> `.len()`.
     let java = r#"

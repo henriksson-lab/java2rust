@@ -122,6 +122,10 @@ pub struct RustDumpVisitor<'a> {
     /// Transiently set while printing a type-parameter bound (`T: Trait`): a
     /// trait there is a bound, emitted bare (no `dyn`/`Box`).
     trait_bound_pos: bool,
+    /// Crate path of the enum being matched in the current `switch`, if its
+    /// variants cover the case labels — used to qualify bare labels as
+    /// `Enum::Label` in match patterns.
+    switch_enum_path: Option<String>,
     /// FQNs of types defined elsewhere in the same translated tree, so their
     /// cross-file references are not recorded as missing externals.
     known_types: Option<&'a std::collections::HashSet<String>>,
@@ -177,6 +181,7 @@ impl<'a> RustDumpVisitor<'a> {
             crate_mode: false,
             trait_dyn_ref: false,
             trait_bound_pos: false,
+            switch_enum_path: None,
             known_types: None,
             stubs: std::cell::RefCell::new(crate::stubs::StubCollector::default()),
             in_trait: false,
@@ -200,11 +205,51 @@ impl<'a> RustDumpVisitor<'a> {
             bases.push_str("base.");
             let pt = self.link.lookup(parent)?;
             if let Some(f) = pt.fields.get(member) {
-                return Some(format!("self.{bases}{}", f.rust));
+                return Some(format!("{}.{bases}{}", self.self_receiver(), f.rust));
             }
             t = pt;
         }
         None
+    }
+
+    /// The crate path of the enum whose variant set contains every one of these
+    /// `switch` case labels (bare names) — so a `match` on the enum can qualify
+    /// them as `Enum::Label`. Matching the *whole* label set disambiguates even
+    /// when individual variant names recur across enums.
+    fn enum_path_for_labels(&self, labels: &[String]) -> Option<String> {
+        if self.link.is_empty() || labels.is_empty() {
+            return None;
+        }
+        for (_fqn, t) in self.link.iter() {
+            if t.kind == "enum" && labels.iter().all(|l| t.static_fields.contains_key(l)) {
+                return Some(self.crate_relativize(&t.rust_path));
+            }
+        }
+        None
+    }
+
+    /// An inherited *static* constant (a `static final` in an ancestor): resolved
+    /// as an associated const on the declaring type, `<ParentPath>::NAME`.
+    fn inherited_static_const(&self, member: &str) -> Option<String> {
+        let mut t = self.link.lookup(self.current_class_fqn.as_deref()?)?;
+        while let Some(parent) = t.parent.as_deref() {
+            let pt = self.link.lookup(parent)?;
+            if let Some(f) = pt.static_fields.get(member) {
+                return Some(format!("{}::{}", self.crate_relativize(&pt.rust_path), f.rust));
+            }
+            t = pt;
+        }
+        None
+    }
+
+    /// The receiver name for an instance member: `__self` in a constructor body
+    /// (where `self` doesn't exist yet), `self` elsewhere.
+    fn self_receiver(&self) -> &'static str {
+        if self.id.is_in_constructor() {
+            "__self"
+        } else {
+            "self"
+        }
     }
 
     /// The Rust path of the current class's direct superclass, if known.
@@ -1530,6 +1575,13 @@ impl<'a> RustDumpVisitor<'a> {
                 self.print_orphan_comments_ending(id);
                 return;
             }
+            // An inherited static constant (a `static final` in an ancestor) ->
+            // `<ParentPath>::NAME` (associated consts aren't reached via Deref).
+            if let Some(path) = self.inherited_static_const(name) {
+                self.printer.print(&path);
+                self.print_orphan_comments_ending(id);
+                return;
+            }
             // A statically-imported constant/field referenced bare -> qualify
             // with the owning type's path (`Class::NAME`).
             if let Some(path) = self.static_import_path(name) {
@@ -1545,7 +1597,7 @@ impl<'a> RustDumpVisitor<'a> {
                 if self.emit_stubs {
                     self.stubs.borrow_mut().add_field(&fqn, &rust_name, &snake);
                 }
-                self.printer.print(&format!("self.base.{snake}"));
+                self.printer.print(&format!("{}.base.{snake}", self.self_receiver()));
                 self.print_orphan_comments_ending(id);
                 return;
             }
@@ -3551,6 +3603,21 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.print_ln_s(" {");
         self.printer.indent();
+        // If every bare-name case label is a variant of one enum, qualify them as
+        // `Enum::Label` patterns (a bare `Label` would be a binding, breaking
+        // or-patterns with E0408).
+        let label_names: Vec<String> = entries
+            .iter()
+            .filter_map(|&e| match self.arena.kind(e) {
+                Node::SwitchEntryStmt { label: Some(l), .. } => match self.arena.kind(*l) {
+                    Node::NameExpr { name } => Some(name.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let new_enum_path = self.enum_path_for_labels(&label_names);
+        let saved_enum_path = std::mem::replace(&mut self.switch_enum_path, new_enum_path);
         // Java case fall-through: consecutive labels with no body share the body
         // of the next labelled case. In Rust that is an or-pattern
         // `a | b | c => { ... }`. A `default` label becomes `_`.
@@ -3592,6 +3659,7 @@ impl<'a> RustDumpVisitor<'a> {
             self.emit_switch_patterns(&pending, pending_default, arg);
             self.printer.print_ln_s(" => {}");
         }
+        self.switch_enum_path = saved_enum_path;
         self.printer.unindent();
         self.printer.print("}");
     }
@@ -3609,7 +3677,16 @@ impl<'a> RustDumpVisitor<'a> {
             if i > 0 {
                 self.printer.print(" | ");
             }
-            self.visit(l, arg);
+            // Qualify a bare enum-variant label as `Enum::Label` (a unit-variant
+            // pattern), rather than emitting a binding.
+            let qualified = match (self.switch_enum_path.as_deref(), self.arena.kind(l)) {
+                (Some(path), Node::NameExpr { name }) => Some(format!("{path}::{name}")),
+                _ => None,
+            };
+            match qualified {
+                Some(p) => self.printer.print(&p),
+                None => self.visit(l, arg),
+            }
         }
         self.raw_string = saved;
     }
