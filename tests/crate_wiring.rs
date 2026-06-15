@@ -282,6 +282,21 @@ fn dep_modules_sanitize_keyword_segments_and_dollar_names() {
 }
 
 #[test]
+fn raw_generic_use_gets_placeholder_args() {
+    // A raw use of a generic type (`Tree` for `Tree<T>`) gets `<()>` placeholders
+    // (using the recorded generic arity) so the arity is correct.
+    let src = tmp("cw_raw/p");
+    fs::write(src.join("Tree.java"), "package p;\npublic class Tree<T> { T value; }\n").unwrap();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cw_raw");
+    let mut link = LinkIndex::default();
+    link.merge(build_project_map(&root));
+
+    let consumer = "package p;\npublic class Holder { Tree t; }\n";
+    let out = convert_with_links(consumer, &link);
+    assert!(out.contains("Tree<()>"), "raw generic gets placeholder arg:\n{out}");
+}
+
+#[test]
 fn scoped_type_drops_qualifier_when_name_resolves() {
     // `Outer.Inner` whose `Inner` resolves to a full crate path emits that path
     // alone — the `Outer::` qualifier is subsumed (the nested type is hoisted).

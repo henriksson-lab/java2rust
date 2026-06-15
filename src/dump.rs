@@ -2444,9 +2444,20 @@ impl<'a> RustDumpVisitor<'a> {
         // non-generic project type) takes no arguments — drop any Java type args
         // (`PooledWriter<T>` -> `PooledWriter`), which would be `takes 0 generic
         // arguments but N were supplied`.
-        let drop_args = self.resolve_type_sym(&name).map(|t| !t.generic).unwrap_or(false);
+        let (drop_args, raw_arity) = match self.resolve_type_sym(&name) {
+            Some(t) => (
+                !t.generic,
+                if t.generic && type_args.is_empty() { t.generic_params.len() } else { 0 },
+            ),
+            None => (false, 0),
+        };
         if using_diamond || drop_args {
             // No empty turbofish in Rust; let the args be inferred.
+        } else if raw_arity > 0 {
+            // Java raw use of a generic type (`HuffmanTree` for `HuffmanTree<T>`):
+            // fill `()` placeholders so the generic arity is correct.
+            let ph = vec!["()"; raw_arity].join(", ");
+            self.printer.print(&format!("<{ph}>"));
         } else {
             self.print_type_args(&type_args, arg);
         }
