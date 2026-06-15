@@ -111,6 +111,17 @@ pub struct RustDumpVisitor<'a> {
     mut_borrow_params: std::collections::HashSet<String>,
     /// When true, unresolved external symbols are recorded into `stubs`.
     emit_stubs: bool,
+    /// When true (crate mode), a resolved dependency path that isn't already
+    /// crate-/std-relative is prefixed with `crate::` (the deps are generated as
+    /// crate modules).
+    crate_mode: bool,
+    /// Transiently set by a parameter already emitting `&`: a trait type renders
+    /// as the unsized `dyn Trait` (so the param is `&dyn Trait`) instead of the
+    /// owned `Box<dyn Trait>` used in field/return/local positions.
+    trait_dyn_ref: bool,
+    /// Transiently set while printing a type-parameter bound (`T: Trait`): a
+    /// trait there is a bound, emitted bare (no `dyn`/`Box`).
+    trait_bound_pos: bool,
     /// FQNs of types defined elsewhere in the same translated tree, so their
     /// cross-file references are not recorded as missing externals.
     known_types: Option<&'a std::collections::HashSet<String>>,
@@ -163,6 +174,9 @@ impl<'a> RustDumpVisitor<'a> {
             link,
             mut_borrow_params: std::collections::HashSet::new(),
             emit_stubs: false,
+            crate_mode: false,
+            trait_dyn_ref: false,
+            trait_bound_pos: false,
             known_types: None,
             stubs: std::cell::RefCell::new(crate::stubs::StubCollector::default()),
             in_trait: false,
@@ -296,6 +310,12 @@ impl<'a> RustDumpVisitor<'a> {
         self.known_types = Some(known_types);
     }
 
+    /// Enable crate mode: linked dependency paths are made `crate::`-relative
+    /// (the deps are generated as crate modules).
+    pub fn set_crate_mode(&mut self, crate_mode: bool) {
+        self.crate_mode = crate_mode;
+    }
+
     /// Take the collected stubs (call after `visit`).
     pub fn take_stubs(self) -> crate::stubs::StubCollector {
         self.stubs.into_inner()
@@ -344,6 +364,51 @@ impl<'a> RustDumpVisitor<'a> {
         (explicit, wildcard)
     }
 
+    /// A bare name matching a static import resolves to the owning type's path
+    /// (`Class::NAME`). Explicit (`import static a.b.C.NAME`) names the member
+    /// directly; wildcard (`import static a.b.C.*`) requires the owner to
+    /// actually declare a field `name` (so it can't swallow unrelated names).
+    fn static_import_path(&self, name: &str) -> Option<String> {
+        if self.link.is_empty() {
+            return None;
+        }
+        let suffix = format!(".{name}");
+        for imp in &self.id.imports {
+            if !imp.static_import {
+                continue;
+            }
+            if imp.wildcard_import {
+                // A wildcard static import pulls in constants/static methods.
+                // The owner declares few instance fields in the map, so trust it
+                // for a constant-shaped name (all-caps), else require the field.
+                let require = !is_const_name(name);
+                if let Some(p) = self.static_member_path(&imp.import_string, name, require) {
+                    return Some(p);
+                }
+            } else if let Some(owner_fqn) = imp.import_string.strip_suffix(&suffix) {
+                if let Some(p) = self.static_member_path(owner_fqn, name, false) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
+    /// Path to a static member `name` of the linked type `owner_fqn`, using the
+    /// field's recorded Rust name when known. With `require_field`, returns
+    /// `None` unless the type declares that field.
+    fn static_member_path(&self, owner_fqn: &str, name: &str, require_field: bool) -> Option<String> {
+        let t = self.link.lookup(owner_fqn)?;
+        let path = self.crate_relativize(&t.rust_path);
+        if let Some(f) = t.fields.get(name) {
+            return Some(format!("{path}::{}", f.rust));
+        }
+        if require_field {
+            return None;
+        }
+        Some(format!("{path}::{}", self.to_snake_if_necessary(name)))
+    }
+
     /// Resolve a Java simple type name to a linked dependency type, if any.
     fn resolve_type_sym(&self, name: &str) -> Option<&'a crate::symbol_map::TypeSym> {
         if self.link.is_empty() {
@@ -362,13 +427,30 @@ impl<'a> RustDumpVisitor<'a> {
         // is import/package-driven, so a bare name can't shadow to an unrelated
         // dependency type (the unqualified fallback was removed).
         if let Some(t) = self.resolve_type_sym(name) {
-            return t.rust_path.clone();
+            return self.crate_relativize(&t.rust_path);
         }
         let mapped = map_type_name(name).replace('$', "_");
         if let Some(key) = self.missing_type_key(name) {
             self.stubs.borrow_mut().note_type(&key, &mapped);
         }
         mapped
+    }
+
+    /// In crate mode, a linked *dependency* path (e.g. `org::json::JSONObject`,
+    /// recovered from a jar) isn't crate- or std-relative, so a bare `org::…`
+    /// reference won't resolve inside the assembled crate. The deps are emitted
+    /// as crate modules (see `generate_dep_modules`), so prefix such paths with
+    /// `crate::`. Project (`crate::…`) and stdlib (`std::`/`core::`/`alloc::`)
+    /// paths are left untouched.
+    fn crate_relativize(&self, path: &str) -> String {
+        if !self.crate_mode || !path.contains("::") {
+            return path.to_string();
+        }
+        let head = path.split("::").next().unwrap_or("");
+        if matches!(head, "crate" | "std" | "core" | "alloc") {
+            return path.to_string();
+        }
+        format!("crate::{path}")
     }
 
     // ---- stub collection (unresolved external symbols) ----
@@ -969,6 +1051,7 @@ impl<'a> RustDumpVisitor<'a> {
                 if !type_bound.is_empty() {
                     self.printer.print(": ");
                     for (i, &c) in type_bound.iter().enumerate() {
+                        self.trait_bound_pos = true;
                         self.visit(c, arg);
                         if i + 1 < type_bound.len() {
                             self.printer.print(" + ");
@@ -1434,6 +1517,13 @@ impl<'a> RustDumpVisitor<'a> {
         if decl.is_none() {
             // Inherited instance field of a project superclass -> through `base`.
             if let Some(path) = self.inherited_field(name) {
+                self.printer.print(&path);
+                self.print_orphan_comments_ending(id);
+                return;
+            }
+            // A statically-imported constant/field referenced bare -> qualify
+            // with the owning type's path (`Class::NAME`).
+            if let Some(path) = self.static_import_path(name) {
                 self.printer.print(&path);
                 self.print_orphan_comments_ending(id);
                 return;
@@ -2004,11 +2094,28 @@ impl<'a> RustDumpVisitor<'a> {
             self.printer.print("::");
         }
         let resolved = self.resolve_type_name(&name);
+        // An interface (non-generic trait) used as a type isn't a value type in
+        // Rust — it needs `dyn`. In an owned position it must be sized, so box
+        // it (`Box<dyn Trait>`); a parameter already behind `&` opts into the
+        // unsized `dyn Trait` via `trait_dyn_ref`. Reset the flag before type
+        // args so nested traits box by default.
+        let is_trait = scope.is_none() && self.resolved_is_trait(&name);
+        let dyn_ref = self.trait_dyn_ref;
+        // In a bound position (`T: Trait`) a trait is emitted bare, not wrapped.
+        let wrap = is_trait && !self.trait_bound_pos;
+        self.trait_dyn_ref = false;
+        self.trait_bound_pos = false;
+        if wrap {
+            self.printer.print(if dyn_ref { "dyn " } else { "Box<dyn " });
+        }
         self.printer.print(&resolved);
         if using_diamond {
             // No empty turbofish in Rust; let the args be inferred.
         } else {
             self.print_type_args(&type_args, arg);
+        }
+        if wrap && !dyn_ref {
+            self.printer.print(">");
         }
     }
 
@@ -2317,7 +2424,37 @@ impl<'a> RustDumpVisitor<'a> {
     /// Is `s` a reference to a class/type (→ `::`), as opposed to a value
     /// (variable/field, → `.`)? A class name is an uppercase `NameExpr` that does
     /// not resolve to any declaration in scope.
+    /// Reconstruct a dotted name from a pure `Name`/`FieldAccess` chain
+    /// (`htsjdk.samtools.util.IOUtil`); `None` if any segment is a call/index.
+    fn fqn_chain(&self, n: NodeId) -> Option<String> {
+        match self.arena.kind(n) {
+            Node::NameExpr { name } => Some(name.clone()),
+            Node::FieldAccessExpr { scope, field, .. } => {
+                Some(format!("{}.{}", self.fqn_chain(*scope)?, field))
+            }
+            _ => None,
+        }
+    }
+
+    /// If a receiver is a fully-qualified reference to a linked type
+    /// (`a.b.C.method()` / `a.b.C.FIELD`), the type's crate-relative path.
+    fn resolve_fqn_type(&self, s: NodeId) -> Option<String> {
+        if self.link.is_empty() {
+            return None;
+        }
+        let chain = self.fqn_chain(s)?;
+        if !chain.contains('.') {
+            return None; // a bare simple name is handled elsewhere
+        }
+        let t = self.link.lookup(&chain)?;
+        Some(self.crate_relativize(&t.rust_path))
+    }
+
     fn is_static_class_ref(&self, s: NodeId) -> bool {
+        // A fully-qualified type reference (`a.b.C`) is a static class ref.
+        if self.resolve_fqn_type(s).is_some() {
+            return true;
+        }
         match self.arena.kind(s) {
             Node::NameExpr { name } => {
                 if !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
@@ -2343,6 +2480,12 @@ impl<'a> RustDumpVisitor<'a> {
     /// (`Foo.bar()`, `Foo.CONST`), emit the *resolved* type path (crate- or
     /// dependency-qualified) instead of the bare name, so it resolves.
     fn emit_scope(&mut self, s: NodeId, arg: Arg) {
+        // A fully-qualified type chain (`a.b.C.m()`) -> the resolved crate path,
+        // not the bare `a.b.C` dotted chain (whose head `a` is an unknown value).
+        if let Some(path) = self.resolve_fqn_type(s) {
+            self.printer.print(&path);
+            return;
+        }
         if self.is_static_class_ref(s) {
             if let Node::NameExpr { name } = self.arena.kind(s) {
                 let name = name.clone();
@@ -3312,13 +3455,14 @@ impl<'a> RustDumpVisitor<'a> {
                     _ => false,
                 };
                 self.printer.print(if needs_mut { "&mut " } else { "&" });
-                if is_trait {
-                    self.printer.print("dyn ");
-                }
+                // The trait type renders as `dyn Trait` (behind the `&` just
+                // printed) rather than the owned `Box<dyn Trait>`.
+                self.trait_dyn_ref = is_trait;
             }
             if let Some(t) = typ {
                 self.visit(t, arg);
             }
+            self.trait_dyn_ref = false;
         }
     }
 
@@ -4001,6 +4145,13 @@ fn hex_float_to_decimal(s: &str) -> Option<String> {
 /// If `s` is a Rust keyword, escape it as a raw identifier (`r#s`). A few
 /// keywords (`self`/`super`/`crate`/`Self`) cannot be raw, but they are also
 /// reserved in Java so never appear as user identifiers.
+/// A constant-shaped name: all uppercase/digits/underscore, with at least one
+/// letter (`UNKNOWN_SEQUENCE_LENGTH`, `MD5_TAG`).
+fn is_const_name(name: &str) -> bool {
+    name.chars().any(|c| c.is_ascii_alphabetic())
+        && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 pub fn escape_rust_keyword(s: String) -> String {
     const KW: &[&str] = &[
         "as", "break", "const", "continue", "dyn", "else", "enum", "extern", "false", "fn",

@@ -47,6 +47,19 @@ pub fn convert_full(
     known_types: &HashSet<String>,
     emit_stubs: bool,
 ) -> (String, StubCollector) {
+    convert_full_opts(java, link, known_types, emit_stubs, false)
+}
+
+/// Like [`convert_full`], but with an explicit `crate_mode` flag: in crate mode,
+/// linked dependency paths are made `crate::`-relative (the deps are emitted as
+/// crate modules by [`crate_layout::generate_dep_modules`]).
+pub fn convert_full_opts(
+    java: &str,
+    link: &LinkIndex,
+    known_types: &HashSet<String>,
+    emit_stubs: bool,
+    crate_mode: bool,
+) -> (String, StubCollector) {
     let Some((arena, root)) = parse::create_compilation_unit(java) else {
         // PartParser would throw ParseException; JavaConverter.convert returns
         // e.toString(). We approximate by emitting nothing for now.
@@ -62,6 +75,7 @@ pub fn convert_full(
     let mut dumper =
         dump::RustDumpVisitor::new(true, &arena, &mut id_tracker, &nullable, link);
     dumper.set_stub_collection(emit_stubs, known_types);
+    dumper.set_crate_mode(crate_mode);
     dumper.visit(root, None);
     let src = dumper.get_source();
     (src, dumper.take_stubs())

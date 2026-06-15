@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use java2rust_rs::convert_full;
+use java2rust_rs::convert_full_opts;
 use java2rust_rs::naming::camel_to_snake_case;
 use java2rust_rs::stubs::{collect_defined_types, StubCollector};
 use java2rust_rs::symbol_map::LinkIndex;
@@ -74,6 +74,7 @@ struct Ctx<'a> {
     link: &'a LinkIndex,
     known: &'a HashSet<String>,
     emit_stubs: bool,
+    crate_mode: bool,
     ignore_existing: bool,
     verbosity: i32,
     copy_other_files: bool,
@@ -116,8 +117,13 @@ fn convert_to_rust(file: &Path, output_dir: &str, ctx: &Ctx) -> std::io::Result<
             if ctx.verbosity > 0 {
                 println!("- {output}");
             }
-            let (result, file_stubs) =
-                convert_full(&text, ctx.link, ctx.known, ctx.emit_stubs);
+            let (result, file_stubs) = convert_full_opts(
+                &text,
+                ctx.link,
+                ctx.known,
+                ctx.emit_stubs,
+                ctx.crate_mode,
+            );
             if ctx.emit_stubs {
                 ctx.stubs.borrow_mut().merge(file_stubs);
             }
@@ -204,6 +210,7 @@ fn main() {
                     link: &link,
                     known: &known,
                     emit_stubs: opts.stubs,
+                    crate_mode: false,
                     ignore_existing: opts.ignore_existing,
                     verbosity: opts.verbosity,
                     copy_other_files: opts.copy_other_files,
@@ -236,6 +243,7 @@ fn run_crate_mode(input: &Path, opts: &Options, mut link: LinkIndex) {
             link: &link,
             known: &known,
             emit_stubs: true,
+            crate_mode: true,
             ignore_existing: opts.ignore_existing,
             verbosity: 0,
             copy_other_files: opts.copy_other_files,
@@ -257,6 +265,7 @@ fn run_crate_mode(input: &Path, opts: &Options, mut link: LinkIndex) {
             link: &link,
             known: &known,
             emit_stubs: false,
+            crate_mode: true,
             ignore_existing: opts.ignore_existing,
             verbosity: opts.verbosity,
             copy_other_files: opts.copy_other_files,
@@ -269,6 +278,10 @@ fn run_crate_mode(input: &Path, opts: &Options, mut link: LinkIndex) {
     }
 
     write_stub_files(&collected, &opts.output, opts.verbosity);
+
+    // Emit linked dependency types (recovered from jars) as crate modules so
+    // their `crate::`-relative references resolve.
+    java2rust_rs::crate_layout::generate_dep_modules(Path::new(&opts.output), &link);
 
     // Generate `impl Trait for Class` for implemented interfaces (polymorphism).
     java2rust_rs::crate_layout::generate_interface_impls(Path::new(&opts.output), &link);

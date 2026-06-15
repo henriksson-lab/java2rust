@@ -75,6 +75,125 @@ public class App {
 }
 
 #[test]
+fn fully_qualified_static_call_resolves_to_crate_path() {
+    // A static call written with a fully-qualified name and no import
+    // (`com.z.Util.help()`) resolves to the type's crate path + `::`, instead of
+    // leaking the package chain as a value (`com.z.Util.help`).
+    let src = tmp("cw_fqn/com/z");
+    fs::write(
+        src.join("Util.java"),
+        "package com.z;\npublic class Util { public static int help() { return 1; } }\n",
+    )
+    .unwrap();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cw_fqn");
+    let mut link = LinkIndex::default();
+    link.merge(build_project_map(&root));
+
+    let consumer = "package com.z;\npublic class A { public int f() { return com.z.Util.help(); } }\n";
+    let out = convert_with_links(consumer, &link);
+    assert!(
+        out.contains("crate::cw_fqn::com::z::util::Util::help()"),
+        "fully-qualified static call resolved to crate path:\n{out}"
+    );
+}
+
+#[test]
+fn statically_imported_constant_is_qualified() {
+    // A bare reference to a statically-imported constant resolves to the owning
+    // type's crate path, for both explicit and wildcard static imports.
+    let src = tmp("cw_static_imp/com/z");
+    fs::write(
+        src.join("Limits.java"),
+        "package com.z;\npublic class Limits { public static final int MAX_LEN = 9; }\n",
+    )
+    .unwrap();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cw_static_imp");
+    let mut link = LinkIndex::default();
+    link.merge(build_project_map(&root));
+
+    let explicit = "package com.z;\nimport static com.z.Limits.MAX_LEN;\npublic class A { public int f() { return MAX_LEN; } }\n";
+    let out = convert_with_links(explicit, &link);
+    assert!(
+        out.contains("crate::cw_static_imp::com::z::limits::Limits::MAX_LEN"),
+        "explicit static import qualified:\n{out}"
+    );
+
+    let wildcard = "package com.z;\nimport static com.z.Limits.*;\npublic class B { public int f() { return MAX_LEN; } }\n";
+    let out = convert_with_links(wildcard, &link);
+    assert!(
+        out.contains("crate::cw_static_imp::com::z::limits::Limits::MAX_LEN"),
+        "wildcard static import qualified (constant-shaped name):\n{out}"
+    );
+}
+
+#[test]
+fn interface_typed_fields_box_dyn_and_params_ref_dyn() {
+    // An interface resolves to a Rust trait, which isn't a value type: owned
+    // positions (fields) get `Box<dyn Trait>`; parameters get `&dyn Trait`.
+    let src = tmp("cw_dyn/com/z");
+    fs::write(
+        src.join("Animal.java"),
+        "package com.z;\npublic interface Animal { int legs(); }\n",
+    )
+    .unwrap();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cw_dyn");
+    let mut link = LinkIndex::default();
+    link.merge(build_project_map(&root));
+
+    let consumer = r#"
+package com.z;
+public class Zoo {
+    private Animal star;
+    public int count(Animal a) { return a.legs(); }
+}
+"#;
+    let out = convert_with_links(consumer, &link);
+    assert!(
+        out.contains("star: Box<dyn crate::cw_dyn::com::z::animal::Animal>"),
+        "interface field is Box<dyn Trait>:\n{out}"
+    );
+    assert!(
+        out.contains("&dyn crate::cw_dyn::com::z::animal::Animal"),
+        "interface param is &dyn Trait:\n{out}"
+    );
+}
+
+#[test]
+fn dependency_types_are_emitted_as_crate_modules() {
+    // A jar-recovered dependency type (`rust_path` not crate-/std-relative)
+    // becomes a unit struct under its package path, with generic-parameter
+    // methods that return the concrete sibling type (so builder chains compile).
+    let json = r#"{ "types": {
+        "org.json.JSONObject": {
+            "rust_path": "org::json::JSONObject", "kind": "struct",
+            "methods": {
+                "put": { "rust": "put", "rust_path": "org::json::JSONObject::put",
+                         "receiver": "ref", "ret": "JSONObject", "ret_nullable": false,
+                         "params": [ {"type": "&String", "by_ref": true, "mutable": false, "nullable": false},
+                                     {"type": "&Object", "by_ref": true, "mutable": false, "nullable": false} ] },
+                "length": { "rust": "length", "rust_path": "org::json::JSONObject::length",
+                            "receiver": "ref", "ret": "i32", "ret_nullable": false, "params": [] }
+            }
+        }
+    } }"#;
+    let mut link = LinkIndex::default();
+    link.merge_json(json).unwrap();
+
+    let out = tmp("cw_deps");
+    java2rust_rs::crate_layout::generate_dep_modules(&out, &link);
+
+    let file = fs::read_to_string(out.join("org").join("json.rs")).expect("org/json.rs written");
+    assert!(file.contains("pub struct JSONObject;"), "unit struct:\n{file}");
+    // Two params -> two generic params, any argument accepted.
+    assert!(
+        file.contains("pub fn put<A0, A1>(&self, a0: A0, a1: A1) -> crate::org::json::JSONObject"),
+        "generic-param builder method with sibling return:\n{file}"
+    );
+    // Primitive return kept verbatim; no-param method has no generics.
+    assert!(file.contains("pub fn length(&self) -> i32"), "primitive return kept:\n{file}");
+}
+
+#[test]
 fn stub_types_map_to_crate_paths() {
     // The two-pass crate flow resolves stubbed externals to `crate::stub_*::Name`.
     let mut s = StubCollector::default();

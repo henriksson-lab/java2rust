@@ -469,6 +469,136 @@ fn is_ident(s: &str) -> bool {
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Emit linked **dependency** types (recovered from jars: `rust_path` not
+/// crate-/std-relative) as crate modules, so references made `crate::`-relative
+/// by the translator resolve. Each type becomes a unit `struct` whose methods
+/// (from the jar signatures) take **generic** parameters — any argument is
+/// accepted, sidestepping argument-type and overload-arity mismatches — and
+/// return the concrete sibling-dependency type when known (so builder chains
+/// like `obj.put(..).put(..)` type-check), else `()`.
+pub fn generate_dep_modules(out_root: &Path, link: &crate::symbol_map::LinkIndex) {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::fmt::Write;
+
+    // simple name -> rust_path, for every dependency type (used to qualify
+    // sibling return types).
+    let mut dep_simple: HashMap<String, String> = HashMap::new();
+    for (_fqn, t) in link.iter() {
+        if is_dep_path(&t.rust_path) {
+            if let Some(name) = t.rust_path.rsplit("::").next() {
+                dep_simple.entry(name.to_string()).or_insert_with(|| t.rust_path.clone());
+            }
+        }
+    }
+    if dep_simple.is_empty() {
+        return;
+    }
+
+    // module path ("org::json") -> rendered file body.
+    let mut files: BTreeMap<String, String> = BTreeMap::new();
+    for (_fqn, t) in link.iter() {
+        if !is_dep_path(&t.rust_path) {
+            continue;
+        }
+        let segs: Vec<&str> = t.rust_path.split("::").collect();
+        if segs.len() < 2 {
+            continue;
+        }
+        let type_name = segs[segs.len() - 1];
+        let module = segs[..segs.len() - 1].join("::");
+        let body = files.entry(module).or_default();
+
+        let _ = writeln!(body, "pub struct {type_name};");
+        let _ = writeln!(body, "impl {type_name} {{");
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        for m in t.methods.values() {
+            if !seen.insert(m.rust.clone()) {
+                continue; // collapse rust-name collisions (lost overloads)
+            }
+            let name = escape_rust_keyword(m.rust.clone());
+            let generics: String = if m.params.is_empty() {
+                String::new()
+            } else {
+                let ps: Vec<String> = (0..m.params.len()).map(|i| format!("A{i}")).collect();
+                format!("<{}>", ps.join(", "))
+            };
+            let mut args: Vec<String> = Vec::new();
+            match m.receiver.as_str() {
+                "ref" => args.push("&self".to_string()),
+                "refmut" => args.push("&mut self".to_string()),
+                "val" => args.push("self".to_string()),
+                _ => {} // "none" -> associated fn
+            }
+            for i in 0..m.params.len() {
+                args.push(format!("a{i}: A{i}"));
+            }
+            let ret = match dep_return_type(m.ret.as_deref(), &dep_simple) {
+                Some(r) => format!(" -> {r}"),
+                None => String::new(),
+            };
+            let _ = writeln!(
+                body,
+                "    pub fn {name}{generics}({}){ret} {{ unimplemented!() }}",
+                args.join(", ")
+            );
+        }
+        let _ = writeln!(body, "}}");
+    }
+
+    for (module, body) in files {
+        let parts: Vec<&str> = module.split("::").collect();
+        let mut path = out_root.to_path_buf();
+        for p in &parts[..parts.len() - 1] {
+            path.push(p);
+        }
+        if std::fs::create_dir_all(&path).is_err() {
+            continue;
+        }
+        path.push(format!("{}.rs", parts[parts.len() - 1]));
+        // Don't clobber a real project/stub file that happens to share the path.
+        if path.exists() {
+            continue;
+        }
+        let _ = std::fs::write(&path, body);
+    }
+}
+
+/// A path that is neither crate-relative nor a stdlib path — i.e. a dependency
+/// type recovered from a jar (`org::json::JSONObject`).
+fn is_dep_path(path: &str) -> bool {
+    path.contains("::")
+        && !matches!(path.split("::").next().unwrap_or(""), "crate" | "std" | "core" | "alloc")
+}
+
+/// Resolve a jar method's return type to something that exists in the crate:
+/// a sibling dependency type is qualified to its `crate::` path; a plain
+/// primitive/std composite is kept; anything else (JDK types, `Object`, type
+/// variables) collapses to no return.
+fn dep_return_type(ret: Option<&str>, dep_simple: &std::collections::HashMap<String, String>) -> Option<String> {
+    let r = ret?.trim().trim_start_matches('&').trim();
+    if r.is_empty() || r == "()" || r == "void" {
+        return None;
+    }
+    // Bare sibling dependency type -> concrete crate path (enables chaining).
+    if let Some(path) = dep_simple.get(r) {
+        return Some(format!("crate::{path}"));
+    }
+    // Composite/primitive made only of known-safe tokens is emitted verbatim.
+    const SAFE: &[&str] = &[
+        "String", "str", "bool", "char", "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32",
+        "u64", "u128", "usize", "isize", "f32", "f64", "Vec", "Option", "Box", "HashMap",
+        "HashSet", "BTreeMap", "BTreeSet", "std", "core", "alloc", "collections",
+    ];
+    let tokens: Vec<&str> = r
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|t| !t.is_empty() && t.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false))
+        .collect();
+    if !tokens.is_empty() && tokens.iter().all(|t| SAFE.contains(t)) {
+        return Some(r.to_string());
+    }
+    None
+}
+
 fn sanitize_crate_name(s: &str) -> String {
     let n: String = s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     if n.is_empty() || n.chars().next().unwrap().is_ascii_digit() {
