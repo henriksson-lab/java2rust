@@ -159,6 +159,10 @@ pub struct RustDumpVisitor<'a> {
     /// Java names of the enclosing locals/params captured by the anonymous class
     /// currently being emitted — references to them become `self.<field>`.
     anon_captures: std::collections::HashSet<String>,
+    /// Java names of locals hoisted above the current `switch` (declared in one
+    /// case, used in another — Java cases share a scope, Rust match arms don't):
+    /// their in-case declaration becomes a plain assignment.
+    hoisted_switch_vars: std::collections::HashSet<String>,
     /// If the current class extends an *external* (stub) type: its (FQN, Rust
     /// name), so a bare inherited-field read resolves to `self.base.<field>` and
     /// the field is recorded on the parent's stub.
@@ -211,6 +215,7 @@ impl<'a> RustDumpVisitor<'a> {
             enclosing_type_params: Vec::new(),
             anon_counter: 0,
             anon_captures: std::collections::HashSet::new(),
+            hoisted_switch_vars: std::collections::HashSet::new(),
             impl_param_names: Vec::new(),
             current_external_base: None,
             overload_name: std::collections::HashMap::new(),
@@ -2487,6 +2492,25 @@ impl<'a> RustDumpVisitor<'a> {
         };
         self.print_java_comment(id, arg);
         let name = self.accept_and_cut(vid, arg);
+        // A local hoisted above a `switch` is declared before the match; here its
+        // declaration is just an assignment (`name = init`), no `let`/type.
+        let java_name = match self.arena.kind(vid) {
+            Node::VariableDeclaratorId { name } => name.clone(),
+            _ => name.clone(),
+        };
+        if self.hoisted_switch_vars.contains(&java_name) {
+            self.printer.print(&name);
+            let nullable = self.decl_nullable(vid);
+            if let Some(i) = init {
+                self.printer.print(" = ");
+                if nullable {
+                    self.emit_into_option(i, arg);
+                } else {
+                    self.emit_moved_value(i, arg);
+                }
+            }
+            return;
+        }
         let mut is_constant = false;
         // An uppercase name is a constant only as a *field* (a class static ->
         // associated `const`); a local variable that merely starts uppercase is
@@ -4023,12 +4047,68 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print("}");
     }
 
+    /// Locals declared in one `switch` case and referenced in another (Java
+    /// cases share a scope) — `(java name, type node)`, to hoist above the match.
+    fn switch_hoist_vars(&self, entries: &[NodeId]) -> Vec<(String, NodeId)> {
+        use std::collections::HashMap;
+        let mut decls: HashMap<String, (usize, NodeId)> = HashMap::new();
+        let mut uses: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, &e) in entries.iter().enumerate() {
+            let Node::SwitchEntryStmt { stmts, .. } = self.arena.kind(e) else { continue };
+            let mut stack: Vec<NodeId> = stmts.clone();
+            while let Some(n) = stack.pop() {
+                match self.arena.kind(n) {
+                    Node::VariableDeclarationExpr { typ, vars, .. } => {
+                        for &v in vars {
+                            if let Node::VariableDeclarator { id: vid, .. } = self.arena.kind(v) {
+                                if let Node::VariableDeclaratorId { name } = self.arena.kind(*vid) {
+                                    decls.entry(name.clone()).or_insert((i, *typ));
+                                }
+                            }
+                        }
+                    }
+                    Node::NameExpr { name } => uses.entry(name.clone()).or_default().push(i),
+                    _ => {}
+                }
+                for c in self.arena.children(n) {
+                    stack.push(c);
+                }
+            }
+        }
+        decls
+            .into_iter()
+            .filter(|(name, (decl_i, _))| {
+                uses.get(name).map(|v| v.iter().any(|j| j != decl_i)).unwrap_or(false)
+            })
+            .map(|(name, (_, typ))| (name, typ))
+            .collect()
+    }
+
     fn visit_switch(&mut self, id: NodeId, arg: Arg) {
         let (selector, entries) = match self.kind(id) {
             Node::SwitchStmt { selector, entries } => (selector, entries),
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
+        // Java `switch` cases share one scope; a local declared in one case and
+        // used in another must be hoisted above the `match` (whose arms are
+        // separate scopes). Declare them `let mut x: T;` (uninitialized — any
+        // definite-assignment issue is ownership, out of scope) in a wrapping
+        // block; their in-case declarations become assignments.
+        let hoist = self.switch_hoist_vars(&entries);
+        if !hoist.is_empty() {
+            self.printer.print_ln_s("{");
+            self.printer.indent();
+            for (name, typ) in &hoist {
+                let snake = self.to_snake_if_necessary(name);
+                let ty = self.accept_and_cut(*typ, None).trim().to_string();
+                self.printer.print_ln_s(&format!("let mut {snake}: {ty};"));
+            }
+        }
+        let saved_hoist = std::mem::replace(
+            &mut self.hoisted_switch_vars,
+            hoist.iter().map(|(n, _)| n.clone()).collect(),
+        );
         // Matching on Java String requires `match sel.as_str() { "a" => ... }`.
         let string_switch = entries.iter().any(|&e| {
             matches!(self.arena.kind(e),
@@ -4104,6 +4184,13 @@ impl<'a> RustDumpVisitor<'a> {
         self.switch_enum_path = saved_enum_path;
         self.printer.unindent();
         self.printer.print("}");
+        // Close the hoist wrapping block.
+        self.hoisted_switch_vars = saved_hoist;
+        if !hoist.is_empty() {
+            self.printer.unindent();
+            self.printer.print_ln();
+            self.printer.print("}");
+        }
     }
 
     /// Emit a match pattern: `_` for default, else `p1 | p2 | …`. String labels

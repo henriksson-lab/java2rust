@@ -149,6 +149,7 @@ impl StubCollector {
                 parent: None,
                 interfaces: Vec::new(),
                 generic: false,
+                generic_params: Vec::new(),
                 fields: Default::default(),
                 static_fields: Default::default(),
                 methods: Default::default(),

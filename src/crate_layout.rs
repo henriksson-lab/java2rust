@@ -31,6 +31,7 @@ struct RawType {
     rust_path: String,
     kind: String,
     generic: bool,
+    generic_params: Vec<String>,
     /// `extends` superclass simple name (classes only).
     parent_simple: Option<String>,
     /// `implements` interface simple names.
@@ -80,6 +81,7 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
             parent,
             interfaces,
             generic: r.generic,
+            generic_params: r.generic_params.clone(),
             fields: Default::default(),
             static_fields: Default::default(),
             methods: Default::default(),
@@ -195,15 +197,27 @@ fn collect_types(
     raw: &mut Vec<RawType>,
 ) {
     for c in arena.children(node) {
-        let (name, is_class, kind, generic) = match arena.kind(c) {
-            Node::ClassOrInterfaceDeclaration { name, is_interface, type_parameters, .. } => (
-                Some(name.clone()),
-                !is_interface,
-                if *is_interface { "trait" } else { "struct" },
-                !type_parameters.is_empty(),
-            ),
-            Node::EnumDeclaration { name, .. } => (Some(name.clone()), false, "enum", false),
-            _ => (None, false, "", false),
+        let (name, is_class, kind, generic, generic_params) = match arena.kind(c) {
+            Node::ClassOrInterfaceDeclaration { name, is_interface, type_parameters, .. } => {
+                let params: Vec<String> = type_parameters
+                    .iter()
+                    .filter_map(|&p| match arena.kind(p) {
+                        Node::TypeParameter { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                (
+                    Some(name.clone()),
+                    !is_interface,
+                    if *is_interface { "trait" } else { "struct" },
+                    !type_parameters.is_empty(),
+                    params,
+                )
+            }
+            Node::EnumDeclaration { name, .. } => {
+                (Some(name.clone()), false, "enum", false, Vec::new())
+            }
+            _ => (None, false, "", false, Vec::new()),
         };
         if let Some(name) = name {
             let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}.{name}") };
@@ -224,6 +238,7 @@ fn collect_types(
                 rust_path: format!("{mod_path}::{rust_name}"),
                 kind: kind.to_string(),
                 generic,
+                generic_params,
                 parent_simple,
                 interface_simples,
                 fields,
@@ -357,7 +372,14 @@ pub fn generate_interface_impls(out_root: &Path, link: &crate::symbol_map::LinkI
             if sigs.is_empty() {
                 continue;
             }
-            let _ = writeln!(block, "impl {} for {} {{", it.rust_path, class_name);
+            // A generic class needs its type params in both the `impl` header and
+            // the self-type: `impl<E> Trait for Class<E>`.
+            let gp = if t.generic_params.is_empty() {
+                String::new()
+            } else {
+                format!("<{}>", t.generic_params.join(", "))
+            };
+            let _ = writeln!(block, "impl{gp} {} for {}{gp} {{", it.rust_path, class_name);
             for (sig, _name, _params) in sigs.iter() {
                 // `unimplemented!()` keeps the generated impl compiling regardless
                 // of inherent-signature drift; an LLM fills in real dispatch

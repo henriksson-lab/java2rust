@@ -212,6 +212,17 @@ fn concrete_erasure_bound_is_dropped() {
 }
 
 #[test]
+fn switch_case_scoped_local_is_hoisted() {
+    // A local declared in one `switch` case and used in another (Java cases share
+    // a scope) is hoisted above the `match`; its in-case decl becomes assignment.
+    let java = "class C { int m(int k) { int r = 0; switch (k) { case 1: int x = 5; r = x; break; case 2: r = x; break; } return r; } }";
+    let out = convert(java);
+    assert!(out.contains("let mut x: i32;"), "shared local hoisted above match:\n{out}");
+    assert!(out.contains("x = 5"), "in-case decl becomes assignment:\n{out}");
+    assert!(!out.contains("let x = 5") && !out.contains("let mut x = 5"), "no in-case let:\n{out}");
+}
+
+#[test]
 fn get_class_name_folds_to_type_name() {
     // `getClass().getSimpleName()`/`.getName()` (toString/log strings) fold to
     // the Rust type name so they compile (display-only).

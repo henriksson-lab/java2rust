@@ -30,6 +30,10 @@ pub struct TypeSym {
     /// `dyn` object without its args, so polymorphism skips it).
     #[serde(default)]
     pub generic: bool,
+    /// The type's own type-parameter names (e.g. `["E"]`), for emitting correct
+    /// generic arity in generated `impl` headers.
+    #[serde(default)]
+    pub generic_params: Vec<String>,
     #[serde(default)]
     pub fields: BTreeMap<String, FieldSym>,
     /// Static fields (kept separate from instance `fields`: a static is an

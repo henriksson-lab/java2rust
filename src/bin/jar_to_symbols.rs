@@ -167,6 +167,7 @@ fn process_class(
         parent: class.super_class.as_ref().map(|s| binary_to_fqn(s)),
         interfaces: class.interfaces.iter().map(|i| binary_to_fqn(i)).collect(),
         generic: false,
+        generic_params: Vec::new(),
         fields: BTreeMap::new(),
         static_fields: BTreeMap::new(),
         methods: BTreeMap::new(),
