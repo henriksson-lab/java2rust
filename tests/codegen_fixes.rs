@@ -153,6 +153,34 @@ fn inherited_field_in_constructor_uses_self_placeholder() {
 }
 
 #[test]
+fn cast_is_parenthesized() {
+    // A cast operand of a shift must be parenthesized (`x as i64 << 8` would
+    // parse `i64<…>`).
+    let out = convert("class C { long f(int x) { return (long)x << 8; } }");
+    assert!(out.contains("(x as i64) << 8"), "cast parenthesized before shift:\n{out}");
+}
+
+#[test]
+fn static_method_uses_self_type_for_members() {
+    // Inside a `static` method there's no `self`; a bare static field/method
+    // reference must be `Self::X` / `Self::g()`, not `self.X` / `self.g()`.
+    let java = "class C { static int X = 5; static int f() { return X + g(); } static int g() { return 1; } }";
+    let out = convert(java);
+    assert!(out.contains("Self::X"), "static field via Self:::\n{out}");
+    assert!(out.contains("Self::g()"), "static call via Self:::\n{out}");
+    assert!(!out.contains("self.X") && !out.contains("self.g("), "no self receiver:\n{out}");
+}
+
+#[test]
+fn static_factory_get_is_not_rewritten_to_indexing() {
+    // `Paths.get(x)` is a static factory, not collection indexing — the
+    // `.get(i)` -> `[i]` rewrite must not fire on a static class reference.
+    let out = convert("class C { Object m() { return Paths.get(0); } }");
+    assert!(!out.contains("Paths[") && !out.contains("Paths [("), "no indexing on static ref:\n{out}");
+    assert!(out.contains("Paths::get") || out.contains("::Paths::get"), "static call preserved:\n{out}");
+}
+
+#[test]
 fn stdlib_rewrite_still_applies_to_collections() {
     // A genuine List receiver must still get `.size()` -> `.len()`.
     let java = r#"

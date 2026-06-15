@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::ast::{Arena, Node, NodeId};
-use crate::dump::escape_rust_keyword;
+use crate::dump::{escape_rust_keyword, sanitize_path_segments};
 use std::collections::HashSet;
 
 use crate::naming::camel_to_snake_case;
@@ -210,13 +210,14 @@ fn collect_types(
             let fqn = if pkg.is_empty() { path.clone() } else { format!("{pkg}.{path}") };
             let rust_name = name.replace('$', "_");
             let (parent_simple, interface_simples, fields, static_fields, methods) = if is_class {
-                type_members(arena, c)
+                type_members(arena, c, false)
             } else if kind == "enum" {
                 // Enum variants are recorded as `static_fields` (same `Enum::Name`
                 // access), so a `switch` on the enum can qualify its case labels.
                 (None, Vec::new(), Vec::new(), enum_variants(arena, c), Vec::new())
             } else {
-                (None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                // An interface: its fields are implicitly `static final` constants.
+                type_members(arena, c, true)
             };
             raw.push(RawType {
                 fqn,
@@ -245,6 +246,7 @@ fn collect_types(
 fn type_members(
     arena: &Arena,
     decl: NodeId,
+    is_interface: bool,
 ) -> (Option<String>, Vec<String>, Vec<(String, String)>, Vec<(String, String)>, Vec<(String, String)>)
 {
     use crate::modifiers;
@@ -266,7 +268,8 @@ fn type_members(
     for &m in members {
         match arena.kind(m) {
             Node::FieldDeclaration { modifiers, variables, .. } => {
-                let target = if modifiers::is_static(*modifiers) {
+                // Interface fields are implicitly `static final` constants.
+                let target = if is_interface || modifiers::is_static(*modifiers) {
                     &mut static_fields
                 } else {
                     &mut fields
@@ -495,7 +498,16 @@ fn gen_mod_file(dir: &Path, is_root: bool) -> std::io::Result<()> {
         body.push_str(&format!("pub mod {};\n", escape_rust_keyword(m.clone())));
     }
     let file = if is_root { "lib.rs" } else { "mod.rs" };
-    std::fs::write(dir.join(file), body)?;
+    let out = dir.join(file);
+    // A dependency package's `mod.rs` already holds its generated types; keep that
+    // content and append the submodule declarations to it.
+    if let Ok(existing) = std::fs::read_to_string(&out) {
+        if !existing.is_empty() {
+            body.push('\n');
+            body.push_str(&existing);
+        }
+    }
+    std::fs::write(out, body)?;
     Ok(())
 }
 
@@ -540,7 +552,10 @@ pub fn generate_dep_modules(out_root: &Path, link: &crate::symbol_map::LinkIndex
         if segs.len() < 2 {
             continue;
         }
-        let type_name = segs[segs.len() - 1];
+        // Sanitize the type name (synthetic/nested names carry `$`, keywords need
+        // raw-escaping) so the `struct`/`impl` matches the references emitted via
+        // `crate_relativize`.
+        let type_name = escape_rust_keyword(segs[segs.len() - 1].replace('$', "_"));
         let module = segs[..segs.len() - 1].join("::");
         let body = files.entry(module).or_default();
 
@@ -551,7 +566,7 @@ pub fn generate_dep_modules(out_root: &Path, link: &crate::symbol_map::LinkIndex
             if !seen.insert(m.rust.clone()) {
                 continue; // collapse rust-name collisions (lost overloads)
             }
-            let name = escape_rust_keyword(m.rust.clone());
+            let name = escape_rust_keyword(m.rust.replace('$', "_"));
             let generics: String = if m.params.is_empty() {
                 String::new()
             } else {
@@ -582,16 +597,19 @@ pub fn generate_dep_modules(out_root: &Path, link: &crate::symbol_map::LinkIndex
     }
 
     for (module, body) in files {
+        // Each dependency package is a directory with its types in `mod.rs`, so a
+        // package that also has sub-packages doesn't collide as both `pkg.rs` and
+        // `pkg/mod.rs` (E0761). `gen_mod_file` later appends the submodule
+        // declarations to this content.
         let parts: Vec<&str> = module.split("::").collect();
-        let mut path = out_root.to_path_buf();
-        for p in &parts[..parts.len() - 1] {
-            path.push(p);
+        let mut dir = out_root.to_path_buf();
+        for p in &parts {
+            dir.push(p);
         }
-        if std::fs::create_dir_all(&path).is_err() {
+        if std::fs::create_dir_all(&dir).is_err() {
             continue;
         }
-        path.push(format!("{}.rs", parts[parts.len() - 1]));
-        // Don't clobber a real project/stub file that happens to share the path.
+        let path = dir.join("mod.rs");
         if path.exists() {
             continue;
         }
@@ -617,7 +635,7 @@ fn dep_return_type(ret: Option<&str>, dep_simple: &std::collections::HashMap<Str
     }
     // Bare sibling dependency type -> concrete crate path (enables chaining).
     if let Some(path) = dep_simple.get(r) {
-        return Some(format!("crate::{path}"));
+        return Some(format!("crate::{}", sanitize_path_segments(path)));
     }
     // Composite/primitive made only of known-safe tokens is emitted verbatim.
     const SAFE: &[&str] = &[

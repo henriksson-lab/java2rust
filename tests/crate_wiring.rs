@@ -230,6 +230,58 @@ fn non_trait_bounds_dropped_and_non_generic_type_args_dropped() {
 }
 
 #[test]
+fn generic_interface_field_is_boxed_and_supertrait_is_bare() {
+    // A generic interface as a field type keeps its args inside `Box<dyn …>`;
+    // as a supertrait it's emitted bare (`trait Sub : Iter<String>`), not boxed.
+    let src = tmp("cw_giface/p");
+    fs::write(src.join("Iter.java"), "package p;\npublic interface Iter<T> { T next(); }\n").unwrap();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cw_giface");
+    let mut link = LinkIndex::default();
+    link.merge(build_project_map(&root));
+
+    let field = "package p;\npublic class Holder { private Iter<String> it; }\n";
+    let out = convert_with_links(field, &link);
+    assert!(
+        out.contains("it: Box<dyn crate::cw_giface::p::iter::Iter<String>>"),
+        "generic interface field boxed with args:\n{out}"
+    );
+
+    let sub = "package p;\npublic interface Sub extends Iter<String> { }\n";
+    let out = convert_with_links(sub, &link);
+    assert!(
+        out.contains("trait Sub : crate::cw_giface::p::iter::Iter<String>"),
+        "generic supertrait emitted bare:\n{out}"
+    );
+    assert!(!out.contains("Sub : Box<dyn"), "supertrait not boxed:\n{out}");
+}
+
+#[test]
+fn dep_modules_sanitize_keyword_segments_and_dollar_names() {
+    // A dependency package named `impl` (a Rust keyword) and a synthetic `$`
+    // type/return are sanitized: `impl/mod.rs`, `struct My_Type`, and a sibling
+    // return qualified as `crate::org::r#impl::Helper_X`.
+    let json = r#"{ "types": {
+        "org.impl.MyType": { "rust_path": "org::impl::My$Type", "kind": "struct",
+            "methods": { "make": { "rust": "make", "rust_path": "org::impl::My$Type::make",
+                "receiver": "none", "ret": "Helper$X", "ret_nullable": false, "params": [] } } },
+        "org.impl.HelperX": { "rust_path": "org::impl::Helper$X", "kind": "struct" }
+    } }"#;
+    let mut link = LinkIndex::default();
+    link.merge_json(json).unwrap();
+    let out = tmp("cw_kw");
+    java2rust_rs::crate_layout::generate_dep_modules(&out, &link);
+
+    let file = fs::read_to_string(out.join("org").join("impl").join("mod.rs"))
+        .expect("org/impl/mod.rs written");
+    assert!(file.contains("pub struct My_Type"), "$ name sanitized:\n{file}");
+    assert!(file.contains("pub struct Helper_X"), "$ type sanitized:\n{file}");
+    assert!(
+        file.contains("-> crate::org::r#impl::Helper_X"),
+        "return path keyword-escaped + sanitized:\n{file}"
+    );
+}
+
+#[test]
 fn scoped_type_drops_qualifier_when_name_resolves() {
     // `Outer.Inner` whose `Inner` resolves to a full crate path emits that path
     // alone — the `Outer::` qualifier is subsumed (the nested type is hoisted).
@@ -241,6 +293,38 @@ fn scoped_type_drops_qualifier_when_name_resolves() {
     let out = convert_with_links(consumer, &link);
     assert!(out.contains("crate::x::entry::Entry"), "resolved path emitted:\n{out}");
     assert!(!out.contains("Map::crate"), "stale `Map::` qualifier dropped:\n{out}");
+}
+
+#[test]
+fn non_static_inner_class_captures_enclosing_instance() {
+    // A non-static inner class reaches the outer instance's members. It's hoisted
+    // with an `__outer: Rc<RefCell<Outer>>` capture field, an invented
+    // constructor taking the parent, and outer-member refs via `__outer.borrow()`.
+    let src = tmp("cw_inner/p");
+    fs::write(
+        src.join("Outer.java"),
+        "package p;\npublic class Outer {\n  int codec;\n  class Inner { int read() { return codec; } }\n  Inner make() { return new Inner(); }\n}\n",
+    )
+    .unwrap();
+    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cw_inner");
+    let mut link = LinkIndex::default();
+    link.merge(build_project_map(&root));
+
+    let consumer = "package p;\npublic class Outer {\n  int codec;\n  class Inner { int read() { return codec; } }\n  Inner make() { return new Inner(); }\n}\n";
+    let out = convert_with_links(consumer, &link);
+    assert!(
+        out.contains("__outer: std::rc::Rc<std::cell::RefCell<crate::cw_inner::p::outer::Outer>>"),
+        "capture field:\n{out}"
+    );
+    assert!(out.contains("self.__outer.borrow().codec"), "outer field via __outer.borrow():\n{out}");
+    assert!(
+        out.contains("pub fn new(__outer: std::rc::Rc<std::cell::RefCell<"),
+        "invented ctor takes parent:\n{out}"
+    );
+    assert!(
+        out.contains("Inner::new(std::rc::Rc::new(std::cell::RefCell::new(self.clone())))"),
+        "call site threads the enclosing instance:\n{out}"
+    );
 }
 
 #[test]
@@ -267,7 +351,8 @@ fn dependency_types_are_emitted_as_crate_modules() {
     let out = tmp("cw_deps");
     java2rust_rs::crate_layout::generate_dep_modules(&out, &link);
 
-    let file = fs::read_to_string(out.join("org").join("json.rs")).expect("org/json.rs written");
+    let file = fs::read_to_string(out.join("org").join("json").join("mod.rs"))
+        .expect("org/json/mod.rs written");
     assert!(file.contains("pub struct JSONObject;"), "unit struct:\n{file}");
     // Two params -> two generic params, any argument accepted.
     assert!(

@@ -122,6 +122,9 @@ pub struct RustDumpVisitor<'a> {
     /// Transiently set while printing a type-parameter bound (`T: Trait`): a
     /// trait there is a bound, emitted bare (no `dyn`/`Box`).
     trait_bound_pos: bool,
+    /// True while emitting a `static` method body: a bare self-call there can't
+    /// use `self` (it must be a static `Self::` call).
+    in_static_method: bool,
     /// Crate path of the enum being matched in the current `switch`, if its
     /// variants cover the case labels — used to qualify bare labels as
     /// `Enum::Label` in match patterns.
@@ -136,6 +139,18 @@ pub struct RustDumpVisitor<'a> {
     /// FQN of the class currently being emitted, for inherited-member resolution
     /// against the linked project map.
     current_class_fqn: Option<String>,
+    /// When emitting a non-static inner class, the outer class's FQN: outer
+    /// instance members are reached via a synthesized `__outer` field
+    /// (`self.__outer.borrow().<member>`), and the inner struct carries that
+    /// field. `None` for top-level / static-nested classes.
+    enclosing_class_fqn: Option<String>,
+    /// The enclosing (outer) class's type-parameter nodes, so the inner can
+    /// re-declare them and type its `__outer` field (`Rc<RefCell<Outer<…>>>`).
+    enclosing_class_params: Vec<NodeId>,
+    /// Names of the current class's non-static inner classes: at a `new Inner(…)`
+    /// site the enclosing instance is threaded in as the synthesized `__outer`
+    /// first argument.
+    current_inner_classes: std::collections::HashSet<String>,
     /// Type-parameter nodes of the enclosing class(es), so a hoisted inner class
     /// can re-declare the outer params it references.
     enclosing_type_params: Vec<NodeId>,
@@ -181,11 +196,15 @@ impl<'a> RustDumpVisitor<'a> {
             crate_mode: false,
             trait_dyn_ref: false,
             trait_bound_pos: false,
+            in_static_method: false,
             switch_enum_path: None,
             known_types: None,
             stubs: std::cell::RefCell::new(crate::stubs::StubCollector::default()),
             in_trait: false,
             current_class_fqn: None,
+            enclosing_class_fqn: None,
+            enclosing_class_params: Vec::new(),
+            current_inner_classes: std::collections::HashSet::new(),
             enclosing_type_params: Vec::new(),
             anon_counter: 0,
             impl_param_names: Vec::new(),
@@ -240,6 +259,55 @@ impl<'a> RustDumpVisitor<'a> {
             t = pt;
         }
         None
+    }
+
+    /// A bare name that's an instance field of the enclosing class or one of its
+    /// ancestors (accessed from a non-static inner class) ->
+    /// `self.__outer.borrow().[base.]*<field>`.
+    fn enclosing_field(&self, name: &str) -> Option<String> {
+        let mut t = self.link.lookup(self.enclosing_class_fqn.as_deref()?)?;
+        let mut bases = String::new();
+        loop {
+            if let Some(f) = t.fields.get(name) {
+                return Some(format!(
+                    "{}.__outer.borrow().{bases}{}",
+                    self.self_receiver(),
+                    f.rust
+                ));
+            }
+            let parent = t.parent.as_deref()?;
+            t = self.link.lookup(parent)?;
+            bases.push_str("base.");
+        }
+    }
+
+    /// The `Rc<RefCell<Outer<…>>>` type of a capturing inner class's `__outer`
+    /// field/constructor param, if we're in such an inner class.
+    fn enclosing_outer_type(&self) -> Option<String> {
+        let t = self.link.lookup(self.enclosing_class_fqn.as_deref()?)?;
+        let path = self.crate_relativize(&t.rust_path);
+        let names: Vec<String> =
+            self.enclosing_class_params.iter().filter_map(|&p| self.type_param_name(p)).collect();
+        let args = if names.is_empty() { String::new() } else { format!("<{}>", names.join(", ")) };
+        Some(format!("std::rc::Rc<std::cell::RefCell<{path}{args}>>"))
+    }
+
+    /// Is `name` an instance method of the enclosing class or an ancestor
+    /// (reached from a non-static inner class via `self.__outer.borrow().m()`)?
+    fn enclosing_method(&self, name: &str) -> bool {
+        let mut t = match self.enclosing_class_fqn.as_deref().and_then(|f| self.link.lookup(f)) {
+            Some(t) => t,
+            None => return false,
+        };
+        loop {
+            if t.methods.contains_key(name) {
+                return true;
+            }
+            match t.parent.as_deref().and_then(|p| self.link.lookup(p)) {
+                Some(p) => t = p,
+                None => return false,
+            }
+        }
     }
 
     /// The receiver name for an instance member: `__self` in a constructor body
@@ -492,10 +560,18 @@ impl<'a> RustDumpVisitor<'a> {
             return path.to_string();
         }
         let head = path.split("::").next().unwrap_or("");
-        if matches!(head, "crate" | "std" | "core" | "alloc") {
+        if matches!(head, "std" | "core" | "alloc") {
             return path.to_string();
         }
-        format!("crate::{path}")
+        // Escape path segments that are Rust keywords (Java package `impl`,
+        // `type`, …) or contain `$` (synthetic/nested names) — segments that are
+        // valid Java identifiers but invalid as a bare Rust path element.
+        let escaped = sanitize_path_segments(path);
+        if head == "crate" {
+            escaped
+        } else {
+            format!("crate::{escaped}")
+        }
     }
 
     // ---- stub collection (unresolved external symbols) ----
@@ -1100,7 +1176,9 @@ impl<'a> RustDumpVisitor<'a> {
                 let kept: Vec<NodeId> = type_bound
                     .iter()
                     .copied()
-                    .filter(|&c| !self.bound_is_known_non_trait(c))
+                    .filter(|&c| {
+                        !self.bound_is_known_non_trait(c) && !self.bound_has_bare_wildcard(c)
+                    })
                     .collect();
                 if !kept.is_empty() {
                     self.printer.print(": ");
@@ -1205,9 +1283,14 @@ impl<'a> RustDumpVisitor<'a> {
             BinaryExpr { .. } => self.visit_binary(id, arg),
             CastExpr { typ, expr } => {
                 self.print_java_comment(id, arg);
+                // Parenthesize: an unparenthesized cast can't be the operand of a
+                // shift (`x as i64 << 31` parses `i64<…>`) or a method receiver
+                // (`x as T.m()`), both hard parse errors.
+                self.printer.print("(");
                 self.visit(expr, arg);
                 self.printer.print(" as ");
                 self.visit(typ, arg);
+                self.printer.print(")");
             }
             ClassExpr { typ } => {
                 self.print_java_comment(id, arg);
@@ -1575,6 +1658,13 @@ impl<'a> RustDumpVisitor<'a> {
                 self.print_orphan_comments_ending(id);
                 return;
             }
+            // An instance field of the enclosing class, reached from a non-static
+            // inner class -> `self.__outer.<field>`.
+            if let Some(path) = self.enclosing_field(name) {
+                self.printer.print(&path);
+                self.print_orphan_comments_ending(id);
+                return;
+            }
             // An inherited static constant (a `static final` in an ancestor) ->
             // `<ParentPath>::NAME` (associated consts aren't reached via Deref).
             if let Some(path) = self.inherited_static_const(name) {
@@ -1603,13 +1693,39 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         let nullable = decl.map(|(_, d)| self.nullable.contains(&d)).unwrap_or(false);
+        // In an inner class, a name whose declaration is a *field* but which is
+        // not one of the inner's own fields is an enclosing-class member found in
+        // the same compilation unit -> reach it through `__outer`.
         if let Some((_, right)) = decl {
-            if self.is_non_static_field_declaration(right) {
-                // An instance field read: `self.f` (or `__self.f` in a ctor body,
-                // where `self` doesn't exist yet).
-                self.printer.print(if self.id.is_in_constructor() { "__self." } else { "self." });
-            } else if self.is_non_static_method_declaration(right) {
-                self.printer.print(if self.id.is_in_constructor() { "__self." } else { "self." });
+            if self.enclosing_class_fqn.is_some()
+                && self.is_non_static_field_declaration(right)
+                && !self.class_field_names.contains(name)
+            {
+                if let Some(path) = self.enclosing_field(name) {
+                    self.printer.print(&path);
+                    if nullable && !self.expect_option {
+                        self.printer.print(".unwrap()");
+                    }
+                    self.print_orphan_comments_ending(id);
+                    return;
+                }
+            }
+        }
+        if let Some((_, right)) = decl {
+            // In a `static` method there's no receiver, so a member accessed bare
+            // there is necessarily static -> `Self::` (Java forbids reaching an
+            // instance member without a receiver from a static context).
+            let recv = if self.in_static_method {
+                "Self::"
+            } else if self.id.is_in_constructor() {
+                "__self."
+            } else {
+                "self."
+            };
+            if self.is_non_static_field_declaration(right)
+                || self.is_non_static_method_declaration(right)
+            {
+                self.printer.print(recv);
             } else if self.is_static_field_declaration(right) {
                 // A static field is an associated const: `Self::F`.
                 self.printer.print("Self::");
@@ -1702,24 +1818,54 @@ impl<'a> RustDumpVisitor<'a> {
         let saved_overload_arity = std::mem::take(&mut self.overload_by_arity);
         let saved_class_fqn = self.current_class_fqn.take();
         self.current_class_fqn = Some(self.java_type_fqn(id));
+        // This class's non-static inner classes — their instantiation sites get
+        // the enclosing instance threaded in.
+        let saved_inner = std::mem::take(&mut self.current_inner_classes);
+        self.current_inner_classes = members
+            .iter()
+            .filter_map(|&m| match self.arena.kind(m) {
+                Node::ClassOrInterfaceDeclaration { modifiers, name, .. }
+                    if !modifiers::is_static(*modifiers) =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
         self.compute_overloads(&members);
 
         // A hoisted *inner* (non-static) class re-declares the enclosing type
-        // parameters it references, so they're in scope in its body.
-        let extra_params: Vec<NodeId> = if modifiers::is_static(modifiers_v)
-            || self.enclosing_type_params.is_empty()
-        {
+        // parameters it references. The inner's own params take precedence (Java
+        // allows shadowing; Rust forbids a duplicate name), so the carried set
+        // excludes any name the inner already declares.
+        let own_names: std::collections::HashSet<String> =
+            type_parameters.iter().filter_map(|&p| self.type_param_name(p)).collect();
+        let extra_params: Vec<NodeId> = if modifiers::is_static(modifiers_v) {
             Vec::new()
-        } else {
+        } else if self.enclosing_class_fqn.is_some() {
+            // Capturing inner: carry *all* the immediate outer's params (the
+            // `__outer: Rc<RefCell<Outer<…>>>` field references every one).
+            self.enclosing_class_params
+                .clone()
+                .into_iter()
+                .filter(|&p| self.type_param_name(p).map(|n| !own_names.contains(&n)).unwrap_or(false))
+                .collect()
+        } else if !self.enclosing_type_params.is_empty() {
+            // Non-capturing nested: re-declare only the outer params it uses.
             self.enclosing_type_params
                 .clone()
                 .into_iter()
                 .filter(|&p| {
                     self.type_param_name(p)
-                        .map(|n| members.iter().any(|&m| self.subtree_uses_type(m, &n)))
+                        .map(|n| {
+                            !own_names.contains(&n)
+                                && members.iter().any(|&m| self.subtree_uses_type(m, &n))
+                        })
                         .unwrap_or(false)
                 })
                 .collect()
+        } else {
+            Vec::new()
         };
         let mut combined: Vec<NodeId> = extra_params.clone();
         combined.extend(type_parameters.iter().copied());
@@ -1776,6 +1922,24 @@ impl<'a> RustDumpVisitor<'a> {
             let inner =
                 if names.len() == 1 { names[0].clone() } else { format!("({})", names.join(", ")) };
             self.printer.print_ln_s(&format!("pub __phantom: std::marker::PhantomData<{inner}>,"));
+        }
+        // A non-static inner class captures the enclosing instance: an
+        // `Rc<RefCell<Outer<…>>>` field models shared mutable access to the real
+        // parent. `Default` fills it (a default parent) so the struct still
+        // derives `Default`; the invented constructor overwrites it with the
+        // passed-in parent (the real wiring is a downstream ownership concern).
+        if let Some(outer_fqn) = self.enclosing_class_fqn.clone() {
+            if let Some(t) = self.link.lookup(&outer_fqn) {
+                let path = self.crate_relativize(&t.rust_path);
+                let names: Vec<String> = self
+                    .enclosing_class_params
+                    .iter()
+                    .filter_map(|&p| self.type_param_name(p))
+                    .collect();
+                let args = if names.is_empty() { String::new() } else { format!("<{}>", names.join(", ")) };
+                self.printer
+                    .print_ln_s(&format!("pub __outer: std::rc::Rc<std::cell::RefCell<{path}{args}>>,"));
+            }
         }
         for &m in &members {
             if let Node::FieldDeclaration { modifiers, .. } = self.arena.kind(m) {
@@ -1840,7 +2004,15 @@ impl<'a> RustDumpVisitor<'a> {
             .any(|&m| matches!(self.arena.kind(m), Node::ConstructorDeclaration { .. }));
         if !has_ctor {
             self.printer.print_ln();
-            self.printer.print_ln_s("pub fn new() -> Self { Default::default() }");
+            // A capturing inner class's generated default ctor still takes the
+            // enclosing instance (matching the threaded call sites).
+            if let Some(ty) = self.enclosing_outer_type() {
+                self.printer.print_ln_s(&format!(
+                    "pub fn new(__outer: {ty}) -> Self {{ let mut s = Self::default(); s.__outer = __outer; s }}"
+                ));
+            } else {
+                self.printer.print_ln_s("pub fn new() -> Self { Default::default() }");
+            }
         }
         self.print_orphan_comments_ending(id);
         self.printer.unindent();
@@ -1852,14 +2024,30 @@ impl<'a> RustDumpVisitor<'a> {
         // the ones they use.
         let saved_enclosing = self.enclosing_type_params.len();
         self.enclosing_type_params.extend(combined.iter().copied());
+        // A non-static inner class captures the enclosing instance: expose this
+        // class's FQN and type params to it (the inner re-declares the params and
+        // types its `__outer` field against them).
+        let outer_capturable = self.current_class_fqn.is_some();
         for &m in &members {
-            if matches!(
-                self.arena.kind(m),
-                Node::ClassOrInterfaceDeclaration { .. } | Node::EnumDeclaration { .. }
-            ) {
+            let nested_kind = match self.arena.kind(m) {
+                Node::ClassOrInterfaceDeclaration { modifiers, .. } => {
+                    Some(modifiers::is_static(*modifiers))
+                }
+                Node::EnumDeclaration { .. } => Some(true), // enums are never inner
+                _ => None,
+            };
+            if let Some(is_static_nested) = nested_kind {
+                let prev_fqn = self.enclosing_class_fqn.take();
+                let prev_params = std::mem::take(&mut self.enclosing_class_params);
+                if !is_static_nested && outer_capturable {
+                    self.enclosing_class_fqn = self.current_class_fqn.clone();
+                    self.enclosing_class_params = combined.clone();
+                }
                 self.printer.print_ln();
                 self.visit(m, arg);
                 self.printer.print_ln();
+                self.enclosing_class_fqn = prev_fqn;
+                self.enclosing_class_params = prev_params;
             }
         }
         self.enclosing_type_params.truncate(saved_enclosing);
@@ -1867,6 +2055,7 @@ impl<'a> RustDumpVisitor<'a> {
         self.overload_name = saved_overload_name;
         self.overload_by_arity = saved_overload_arity;
         self.current_class_fqn = saved_class_fqn;
+        self.current_inner_classes = saved_inner;
         self.current_external_base = saved_ext_base;
     }
 
@@ -2145,7 +2334,11 @@ impl<'a> RustDumpVisitor<'a> {
         // become `Box<dyn Fn(..)->..>`, reordering their type arguments).
         if scope.is_none() {
             let simple = name.rsplit('.').next().unwrap_or(&name);
-            if !self.is_known_project_type(simple) {
+            // Skip the JDK special-casing for a type that resolves via the link
+            // (a project/dep type is never `Object`/`Class`/a functional
+            // interface): `special_jdk_type` eagerly renders the type args, which
+            // would consume `trait_bound_pos` before the outer type is examined.
+            if !self.is_known_project_type(simple) && self.resolve_type_sym(simple).is_none() {
                 if let Some(rendered) = self.special_jdk_type(simple, &type_args) {
                     self.printer.print(&rendered);
                     return;
@@ -2652,24 +2845,32 @@ impl<'a> RustDumpVisitor<'a> {
         // `::<T>name` here would be invalid).
         let _ = &type_args;
         if scope.is_none() {
-            // In a constructor body the receiver is `__self`, not `self`.
+            // In a constructor body the receiver is `__self`, not `self`. Inside a
+            // `static` method there is no receiver, so a bare self-call must be a
+            // static `Self::` call (Java only allows calling static methods bare
+            // from a static context).
             let recv = if self.id.is_in_constructor() { "__self." } else { "self." };
             if let Some((_, right)) = self.id.find_declaration_node_for(self.arena, &name, id) {
                 match self.arena.kind(right) {
                     Node::MethodDeclaration { modifiers: m, .. } => {
-                        if !modifiers::is_static(*m) {
-                            self.printer.print(recv);
-                        } else {
+                        if modifiers::is_static(*m) || self.in_static_method {
                             // A static method of the current type: `Self::name`,
                             // never a bare `::name` (an invalid crate-root path).
                             self.printer.print("Self::");
+                        } else {
+                            self.printer.print(recv);
                         }
                     }
                     _ => self.printer.print(recv),
                 }
             } else if self.inherited_method(&name) {
-                // Inherited instance method: `self.m()` dispatches through Deref.
-                self.printer.print(recv);
+                // Inherited instance method: `self.m()` dispatches through Deref
+                // (or `Self::` from a static context).
+                self.printer.print(if self.in_static_method { "Self::" } else { recv });
+            } else if self.enclosing_method(&name) {
+                // An instance method of the enclosing class, called from a
+                // non-static inner class: `<recv>.__outer.borrow().m()`.
+                self.printer.print(&format!("{}.__outer.borrow().", self.self_receiver()));
             }
         }
         match callee {
@@ -2819,6 +3020,12 @@ impl<'a> RustDumpVisitor<'a> {
     /// Map common collection / String methods to their Rust equivalents.
     fn try_emit_known_method(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
         let Some(recv) = scope else { return false };
+        // A static class reference (`Paths.get(...)`, `Files.x(...)`) is not a
+        // collection/String value, so the stdlib instance-method rewrites (e.g.
+        // `.get(i)` -> indexing) must not apply.
+        if self.is_static_class_ref(recv) {
+            return false;
+        }
         match (name, args.len()) {
             ("size", 0) | ("length", 0) => {
                 self.printer.print("(");
@@ -3248,10 +3455,39 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
+        // Is this a `new Inner(…)` for a non-static inner class of the current
+        // class? If so, thread the enclosing instance in as the synthesized
+        // `__outer` first argument (matching the invented constructor param).
+        let inner_simple = match self.arena.kind(typ) {
+            Node::ClassOrInterfaceType { name, .. } => {
+                Some(name.rsplit('.').next().unwrap_or(name).to_string())
+            }
+            _ => None,
+        };
+        let is_inner = inner_simple.map(|n| self.current_inner_classes.contains(&n)).unwrap_or(false);
         self.printer.print(&base);
         self.printer.print("::new");
         if is_rust_collection(&base) {
             self.printer.print("()");
+        } else if is_inner {
+            // Thread the enclosing instance in. A static method has no `this`, so
+            // there's no real outer to capture -> a default placeholder (the
+            // value is a downstream ownership concern anyway).
+            let parent = if self.in_static_method {
+                "std::default::Default::default()".to_string()
+            } else {
+                format!(
+                    "std::rc::Rc::new(std::cell::RefCell::new({}.clone()))",
+                    self.self_receiver()
+                )
+            };
+            self.printer.print("(");
+            self.printer.print(&parent);
+            for &a in &args {
+                self.printer.print(", ");
+                self.visit(a, arg);
+            }
+            self.printer.print(")");
         } else {
             self.print_arguments(&args, arg);
         }
@@ -3357,6 +3593,15 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print("fn ");
         self.printer.print(&ctor_name);
         self.printer.print("(");
+        // A capturing inner class's constructor takes the enclosing instance as a
+        // synthesized first parameter `__outer` (invented for the capture).
+        let outer_ty = self.enclosing_outer_type();
+        if let Some(ty) = &outer_ty {
+            self.printer.print(&format!("__outer: {ty}"));
+            if !parameters.is_empty() {
+                self.printer.print(", ");
+            }
+        }
         for (i, &p) in parameters.iter().enumerate() {
             self.visit(p, arg);
             if i + 1 < parameters.len() {
@@ -3370,6 +3615,9 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.indent();
         self.printer
             .print_ln_s(&format!("let mut __self: {name} = Default::default();"));
+        if outer_ty.is_some() {
+            self.printer.print_ln_s("__self.__outer = __outer;");
+        }
         if let Node::BlockStmt { stmts } = self.kind(block) {
             for s in stmts {
                 self.visit(s, arg);
@@ -3392,6 +3640,7 @@ impl<'a> RustDumpVisitor<'a> {
                 _ => unreachable!(),
             };
         self.id.set_current_method(Some(name.clone()));
+        self.in_static_method = modifiers::is_static(modifiers_v);
         self.mut_borrow_params =
             body.map(|b| self.collect_mut_borrow_params(b)).unwrap_or_default();
         self.print_orphan_comments_before_this_child_node(id);
@@ -3473,6 +3722,7 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         self.id.set_current_method(None);
+        self.in_static_method = false;
         self.mut_borrow_params.clear();
     }
 
@@ -3550,7 +3800,10 @@ impl<'a> RustDumpVisitor<'a> {
     /// Does `name` resolve to a *non-generic* trait (interface)? Only those can
     /// be a plain `&dyn Trait` (a generic trait needs its type args).
     fn resolved_is_trait(&self, name: &str) -> bool {
-        self.resolve_type_sym(name).map(|t| t.kind == "trait" && !t.generic).unwrap_or(false)
+        // Generic traits are included: their type args are kept on the rendered
+        // type (non-generic-arg dropping doesn't apply), so `dyn Trait<T>` is
+        // well-formed.
+        self.resolve_type_sym(name).map(|t| t.kind == "trait").unwrap_or(false)
     }
 
     /// Does this bound type resolve to a *known non-trait* (a struct/enum/stub)?
@@ -3561,6 +3814,21 @@ impl<'a> RustDumpVisitor<'a> {
             .and_then(|n| self.resolve_type_sym(&n))
             .map(|t| t.kind != "trait")
             .unwrap_or(false)
+    }
+
+    /// Does this bound contain a bare wildcard (`Foo<?>` -> `Foo<_>`)? A `_`
+    /// placeholder is illegal in an item-signature bound, so the bound is dropped.
+    fn bound_has_bare_wildcard(&self, c: NodeId) -> bool {
+        let mut stack = vec![c];
+        while let Some(n) = stack.pop() {
+            if let Node::WildcardType { ext: None, sup: None } = self.arena.kind(n) {
+                return true;
+            }
+            for ch in self.arena.children(n) {
+                stack.push(ch);
+            }
+        }
+        false
     }
 
     fn visit_block(&mut self, id: NodeId, arg: Arg) {
@@ -4266,6 +4534,15 @@ fn hex_float_to_decimal(s: &str) -> Option<String> {
 fn is_const_name(name: &str) -> bool {
     name.chars().any(|c| c.is_ascii_alphabetic())
         && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Escape each `::`-segment of a path so it's a valid Rust path element: `$`
+/// (synthetic/nested names) becomes `_`, and Rust keywords are raw-escaped.
+pub fn sanitize_path_segments(path: &str) -> String {
+    path.split("::")
+        .map(|s| escape_rust_keyword(s.replace('$', "_")))
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 pub fn escape_rust_keyword(s: String) -> String {

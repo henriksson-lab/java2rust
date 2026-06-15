@@ -11,7 +11,7 @@ impl W {
         while i < 10 {
             i += 1;
         }
-         let d: f64 = i as f64;
+         let d: f64 = (i as f64);
     }
 
     pub fn new() -> Self { Default::default() }
