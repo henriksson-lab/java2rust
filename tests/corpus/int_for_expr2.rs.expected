@@ -8,12 +8,12 @@ impl A {
     /// @java A#m
     pub fn m(&self)   {
          let from: i32 = 3;
-         let to: i32 = source.len() + 14;
+         let to: i32 = (source.len() as i32) + 14;
          let dest: Vec<f64> = MathArrays::copy_of_range(source, from, to);
-        Assert::assert_equals(dest.len(), to - from);
+        Assert::assert_equals((dest.len() as i32), to - from);
          {
              let mut i: i32 = from;
-            while i < source.len() {
+            while i < (source.len() as i32) {
                 {
                     Assert::assert_equals(source[(i + 1) as usize], dest[(i - from + 1) as usize], 0);
                 }

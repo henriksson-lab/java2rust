@@ -237,6 +237,9 @@ pub enum Node {
     VariableDeclarator {
         id: NodeId,
         init: Option<NodeId>,
+        /// C-style trailing array dimensions (`String tokens[]`), which attach to
+        /// the declarator rather than the shared type. Wraps the type in `Vec<>`.
+        array_count: i32,
     },
     VariableDeclaratorId {
         name: String,
@@ -658,7 +661,7 @@ impl Arena {
                 out.push(*typ);
                 out.push(*vid);
             }
-            VariableDeclarator { id: vid, init } => {
+            VariableDeclarator { id: vid, init, .. } => {
                 out.push(*vid);
                 push(*init, &mut out);
             }

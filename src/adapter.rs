@@ -498,7 +498,13 @@ impl<'a> Builder<'a> {
             name_node,
         );
         let init = self.field(n, "value").map(|v| self.expr(v));
-        self.alloc(Node::VariableDeclarator { id, init }, n)
+        // C-style trailing dims (`String tokens[]`) attach to the declarator's
+        // `name` (a `dimensions` node sits between name and `=`), not the type.
+        let array_count = self
+            .field(n, "dimensions")
+            .map(|d| self.count_dims(d))
+            .unwrap_or(0);
+        self.alloc(Node::VariableDeclarator { id, init, array_count }, n)
     }
 
     fn method_declaration(&mut self, n: TsNode<'a>) -> NodeId {
@@ -619,6 +625,16 @@ impl<'a> Builder<'a> {
                 .find(|c| !matches!(c.kind(), "variable_declarator" | "modifiers"))
                 .map(|t| self.typ(t));
             (id, typ)
+        };
+        // C-style trailing dims on the parameter name (`float vals[]`) attach to
+        // the parameter, not the type — wrap the element type in a ReferenceType
+        // so it renders as `Vec<..>`.
+        let dims = self.field(n, "dimensions").map(|d| self.count_dims(d)).unwrap_or(0);
+        let typ = match typ {
+            Some(t) if dims > 0 => {
+                Some(self.alloc(Node::ReferenceType { typ: t, array_count: dims }, n))
+            }
+            other => other,
         };
         self.alloc(
             Node::Parameter {
@@ -962,7 +978,7 @@ impl<'a> Builder<'a> {
             name_node,
         );
         let init = self.field(n, "value").map(|v| self.expr(v));
-        let vd = self.alloc(Node::VariableDeclarator { id: vid, init }, n);
+        let vd = self.alloc(Node::VariableDeclarator { id: vid, init, array_count: 0 }, n);
         self.alloc(
             Node::VariableDeclarationExpr {
                 modifiers: 0,
@@ -1158,7 +1174,7 @@ impl<'a> Builder<'a> {
             },
             name_node,
         );
-        let vd = self.alloc(Node::VariableDeclarator { id: vid, init: None }, name_node);
+        let vd = self.alloc(Node::VariableDeclarator { id: vid, init: None, array_count: 0 }, name_node);
         let variable = self.alloc(
             Node::VariableDeclarationExpr {
                 modifiers: 0,

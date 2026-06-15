@@ -125,6 +125,10 @@ pub struct RustDumpVisitor<'a> {
     /// True while emitting a `static` method body: a bare self-call there can't
     /// use `self` (it must be a static `Self::` call).
     in_static_method: bool,
+    /// A tail expression the next block must emit before its closing brace —
+    /// used to append `Ok(())` to a `void`-but-`throws` method body (whose
+    /// return type is `Result<(), String>`). Consumed by the first `visit_block`.
+    pending_tail: Option<String>,
     /// Crate path of the enum being matched in the current `switch`, if its
     /// variants cover the case labels — used to qualify bare labels as
     /// `Enum::Label` in match patterns.
@@ -204,6 +208,7 @@ impl<'a> RustDumpVisitor<'a> {
             trait_dyn_ref: false,
             trait_bound_pos: false,
             in_static_method: false,
+            pending_tail: None,
             switch_enum_path: None,
             known_types: None,
             stubs: std::cell::RefCell::new(crate::stubs::StubCollector::default()),
@@ -502,9 +507,9 @@ impl<'a> RustDumpVisitor<'a> {
         }
         let mut stack = vec![body];
         while let Some(n) = stack.pop() {
-            if let Node::MethodCallExpr { scope: Some(s), name, .. } = self.arena.kind(n) {
+            if let Node::MethodCallExpr { scope: Some(s), name, args, .. } = self.arena.kind(n) {
                 if let Node::NameExpr { name: recv } = self.arena.kind(*s) {
-                    if let Some(m) = self.resolve_linked_callee(Some(*s), name) {
+                    if let Some(m) = self.resolve_linked_callee(Some(*s), name, args.len()) {
                         if m.receiver == "refmut" {
                             out.insert(recv.clone());
                         }
@@ -860,13 +865,32 @@ impl<'a> RustDumpVisitor<'a> {
         &self,
         scope: Option<NodeId>,
         name: &str,
+        arity: usize,
     ) -> Option<&'a crate::symbol_map::MethodSym> {
         if self.link.is_empty() {
             return None;
         }
         let simple = self.callee_recv_type(scope?)?;
         let t = self.resolve_type_sym(&simple)?;
-        t.methods.get(name)
+        // Overloaded methods are keyed `name#arity`; the base overload keeps the
+        // bare name. Prefer the arity-specific entry, then fall back.
+        t.methods
+            .get(&format!("{name}#{arity}"))
+            .or_else(|| t.methods.get(name))
+    }
+
+    /// Resolve the constructor of `type_simple` matching `arity`. Project/linked
+    /// types record constructors under `new` (the base overload) and
+    /// `new#arity` (the rest); returns `None` for unknown/unrecorded types so
+    /// the caller emits a plain `::new`.
+    fn resolve_ctor(&self, type_simple: &str, arity: usize) -> Option<&'a crate::symbol_map::MethodSym> {
+        if self.link.is_empty() {
+            return None;
+        }
+        let t = self.resolve_type_sym(type_simple)?;
+        t.methods
+            .get(&format!("new#{arity}"))
+            .or_else(|| t.methods.get("new"))
     }
 
     /// Emit a call's arguments shaped to a linked callee's parameter signature:
@@ -1552,9 +1576,9 @@ impl<'a> RustDumpVisitor<'a> {
             ReturnStmt { expr } => {
                 self.print_java_comment(id, arg);
                 self.printer.print("return");
+                let throws = self.id.has_throws();
                 if let Some(e) = expr {
                     self.printer.print(" ");
-                    let throws = self.id.has_throws();
                     if throws {
                         self.printer.print("Ok(");
                     }
@@ -1566,6 +1590,9 @@ impl<'a> RustDumpVisitor<'a> {
                     if throws {
                         self.printer.print(")");
                     }
+                } else if throws {
+                    // A bare `return;` in a `throws` (Result-returning) method.
+                    self.printer.print(" Ok(())");
                 }
                 self.printer.print(";");
             }
@@ -2497,8 +2524,8 @@ impl<'a> RustDumpVisitor<'a> {
     }
 
     fn visit_variable_declarator(&mut self, id: NodeId, arg: Arg) {
-        let (vid, init) = match self.kind(id) {
-            Node::VariableDeclarator { id: vid, init } => (vid, init),
+        let (vid, init, array_count) = match self.kind(id) {
+            Node::VariableDeclarator { id: vid, init, array_count } => (vid, init, array_count),
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
@@ -2551,6 +2578,8 @@ impl<'a> RustDumpVisitor<'a> {
         if self.is_type(arg) {
             let tmp = self.accept_and_cut(arg.unwrap(), None);
             let tmp = tmp.trim().to_string();
+            // C-style trailing dims (`String tokens[]`) wrap the shared type.
+            let tmp = (0..array_count).fold(tmp, |t, _| format!("Vec<{t}>"));
             // Java `var` -> let inference (no annotation).
             if tmp == "var" && !nullable {
                 // emit no `: Type`
@@ -2647,6 +2676,15 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
+        // Java chained assignment `a = b = v` is an expression yielding `v`; Rust
+        // assignment yields `()`. Lower `a = b = … = v` to a block that evaluates
+        // `v` once and assigns it to every target.
+        if matches!(op, AssignOp::Assign)
+            && matches!(self.arena.kind(value), Node::AssignExpr { op: AssignOp::Assign, .. })
+        {
+            self.emit_chained_assign(id, arg);
+            return;
+        }
         // Assigning to a nullable slot: keep the target as the bare Option (no
         // unwrap) and wrap the value with Some/None.
         let target_nullable = matches!(op, AssignOp::Assign) && self.expr_nullable(target);
@@ -2677,6 +2715,31 @@ impl<'a> RustDumpVisitor<'a> {
         } else {
             self.visit(value, arg);
         }
+    }
+
+    /// Lower a Java chained assignment (`a = b = … = v`) to a block:
+    /// `{ let __chain = v; a = __chain.clone(); …; __chain }`. The block yields
+    /// the assigned value, so it works in both statement and expression position.
+    fn emit_chained_assign(&mut self, id: NodeId, arg: Arg) {
+        let mut targets = Vec::new();
+        let mut cur = id;
+        let rhs = loop {
+            match self.arena.kind(cur) {
+                Node::AssignExpr { target, op: AssignOp::Assign, value } => {
+                    targets.push(*target);
+                    cur = *value;
+                }
+                _ => break cur,
+            }
+        };
+        self.printer.print("{ let __chain = ");
+        self.emit_moved_value(rhs, arg);
+        self.printer.print("; ");
+        for &t in &targets {
+            self.visit(t, arg);
+            self.printer.print(" = __chain.clone(); ");
+        }
+        self.printer.print("__chain }");
     }
 
     /// A `getClass()` call (any receiver, no args), possibly parenthesized.
@@ -2886,6 +2949,15 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
+        // Boxed-primitive constants (`Integer.MAX_VALUE` -> `i32::MAX`, ...).
+        if let Node::NameExpr { name: cls } = self.arena.kind(scope) {
+            if self.id.find_declaration_node_for(self.arena, cls, scope).is_none() {
+                if let Some(c) = boxed_constant(cls, field.as_str()) {
+                    self.printer.print(c);
+                    return;
+                }
+            }
+        }
         // Record an instance-field access on an unresolved external type as a
         // stub struct field.
         if self.emit_stubs && field != "length" && !self.is_static_class_ref(scope) {
@@ -2897,16 +2969,19 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
+        // Array `.length` -> `(recv.len() as i32)`: Java `length` is an `int`, so
+        // the cast keeps it comparable/assignable to the `i32`-typed surroundings
+        // (mirrors the `.length()`/`.size()` method rewrites).
+        if field == "length" && !self.is_static_class_ref(scope) {
+            self.printer.print("(");
+            self.emit_scope(scope, arg);
+            self.printer.print(".len() as i32)");
+            return;
+        }
         self.emit_scope(scope, arg);
         self.printer.print(if self.is_static_class_ref(scope) { "::" } else { "." });
-        // `.length` -> `.len()`; otherwise snake-case + keyword-escape the field
-        // to match how the field declaration is emitted.
-        if field == "length" {
-            self.printer.print("len()");
-        } else {
-            let f = self.to_snake_if_necessary(&field);
-            self.printer.print(&f);
-        }
+        let f = self.to_snake_if_necessary(&field);
+        self.printer.print(&f);
     }
 
     fn visit_method_call(&mut self, id: NodeId, arg: Arg) {
@@ -2937,7 +3012,7 @@ impl<'a> RustDumpVisitor<'a> {
         // e.g. `jsonObj.put(k, v)` must not be rewritten to `.insert(...)` when
         // `jsonObj` is a linked `JSONObject`. Resolve the callee first and, when
         // it matches a linked type's method, skip the heuristic shortcuts.
-        let callee = self.resolve_linked_callee(scope, &name);
+        let callee = self.resolve_linked_callee(scope, &name, args.len());
         // Also skip the stdlib rewrites when the receiver has a known user type
         // (a project/linked class that defines its own method of this name) —
         // e.g. `dict.size()` on a `SAMSequenceDictionary` must call its `size`,
@@ -2948,6 +3023,9 @@ impl<'a> RustDumpVisitor<'a> {
                 return;
             }
             if self.try_emit_math(scope, &name, &args, arg) {
+                return;
+            }
+            if self.try_emit_boxed_static(scope, &name, &args, arg) {
                 return;
             }
             if self.try_emit_int_range(scope, &name, &args, arg) {
@@ -3288,6 +3366,17 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(".sum::<i32>()");
                 true
             }
+            // StringBuilder.append(x) -> push_str. The builder maps to `String`,
+            // so any appendable (char/&str/String/number) goes through
+            // `to_string()`. Chaining returns the unit value, but the source
+            // never chains across statements, so that is unobservable.
+            ("append", 1) => {
+                self.visit(recv, arg);
+                self.printer.print(".push_str(&(");
+                self.visit(args[0], arg);
+                self.printer.print(").to_string())");
+                true
+            }
             // ---- more String ops (arg is a String -> &str) ----
             ("startsWith", 1) => self.emit_str_arg(recv, "starts_with", args[0], arg),
             ("endsWith", 1) => self.emit_str_arg(recv, "ends_with", args[0], arg),
@@ -3521,6 +3610,87 @@ impl<'a> RustDumpVisitor<'a> {
         })
     }
 
+    /// Map static methods on the boxed primitive wrappers
+    /// (`Integer.parseInt`, `Long.bitCount`, `Double.toString`, ...) to their
+    /// Rust equivalents. The generic path would otherwise emit nonsense like
+    /// `i32::parse_int(..)` (snake-cased Java name on the mapped primitive).
+    fn try_emit_boxed_static(
+        &mut self,
+        scope: Option<NodeId>,
+        name: &str,
+        args: &[NodeId],
+        arg: Arg,
+    ) -> bool {
+        let Some(s) = scope else { return false };
+        let Node::NameExpr { name: cls } = self.arena.kind(s) else {
+            return false;
+        };
+        // A local/param/field shadowing the class name is a value, not the box.
+        if self.id.find_declaration_node_for(self.arena, cls, s).is_some() {
+            return false;
+        }
+        let prim = match cls.as_str() {
+            "Integer" => "i32",
+            "Long" => "i64",
+            "Short" => "i16",
+            "Byte" => "i8",
+            "Double" => "f64",
+            "Float" => "f32",
+            _ if cls == "Boolean" || cls == "Character" => "",
+            _ => return false,
+        };
+        match (cls.as_str(), name, args.len()) {
+            // X.parseX(s) -> (s).parse::<prim>().unwrap()
+            ("Integer", "parseInt", 1)
+            | ("Long", "parseLong", 1)
+            | ("Short", "parseShort", 1)
+            | ("Byte", "parseByte", 1)
+            | ("Double", "parseDouble", 1)
+            | ("Float", "parseFloat", 1) => {
+                self.printer.print("(");
+                self.visit(args[0], arg);
+                self.printer.print(&format!(").parse::<{prim}>().unwrap()"));
+                true
+            }
+            // X.parseX(s, radix) -> prim::from_str_radix((s), (radix) as u32).unwrap()
+            ("Integer", "parseInt", 2) | ("Long", "parseLong", 2) => {
+                self.printer.print(&format!("{prim}::from_str_radix(("));
+                self.visit(args[0], arg);
+                self.printer.print(").as_str(), (");
+                self.visit(args[1], arg);
+                self.printer.print(") as u32).unwrap()");
+                true
+            }
+            ("Boolean", "parseBoolean", 1) => {
+                self.printer.print("(");
+                self.visit(args[0], arg);
+                self.printer.print(").parse::<bool>().unwrap()");
+                true
+            }
+            // Integer/Long.bitCount(x) -> ((x).count_ones() as i32)
+            ("Integer" | "Long", "bitCount", 1) => {
+                self.printer.print("((");
+                self.visit(args[0], arg);
+                self.printer.print(").count_ones() as i32)");
+                true
+            }
+            // X.valueOf(s)/X.toString(v) -> parse / to_string.
+            ("Integer" | "Long" | "Short" | "Byte" | "Double" | "Float", "valueOf", 1) => {
+                self.printer.print("(");
+                self.visit(args[0], arg);
+                self.printer.print(&format!(").parse::<{prim}>().unwrap()"));
+                true
+            }
+            (_, "toString", 1) => {
+                self.printer.print("(");
+                self.visit(args[0], arg);
+                self.printer.print(").to_string()");
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn try_emit_math(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
         // `Math.x(..)`, or a bare `x(..)` when `java.lang.Math` is statically
         // imported (`import static java.lang.Math.*`).
@@ -3627,6 +3797,30 @@ impl<'a> RustDumpVisitor<'a> {
             Node::ClassOrInterfaceType { name, .. } => self.resolve_type_name(name),
             _ => self.accept_and_cut(typ, arg).trim().to_string(),
         };
+        // StringBuilder/StringBuffer map to `String`. The capacity ctor
+        // `new StringBuilder(int)` -> `String::new()`; the copy ctor
+        // `new StringBuilder(CharSequence)` -> the argument's string value.
+        if base == "String" {
+            if let Node::ClassOrInterfaceType { name, .. } = self.arena.kind(typ) {
+                let simple = name.rsplit('.').next().unwrap_or(name);
+                if matches!(simple, "StringBuilder" | "StringBuffer") {
+                    match args.first() {
+                        Some(&a)
+                            if !matches!(
+                                self.infer_expr_rust_type(a).as_str(),
+                                "i32" | "i64"
+                            ) =>
+                        {
+                            self.printer.print("(");
+                            self.visit(a, arg);
+                            self.printer.print(").to_string()");
+                        }
+                        _ => self.printer.print("String::new()"),
+                    }
+                    return;
+                }
+            }
+        }
         // Record a constructor stub for an unresolved external type.
         if self.emit_stubs {
             let tname = match self.arena.kind(typ) {
@@ -3650,8 +3844,25 @@ impl<'a> RustDumpVisitor<'a> {
             }
             _ => None,
         };
-        let is_inner = inner_simple.map(|n| self.current_inner_classes.contains(&n)).unwrap_or(false);
+        let is_inner =
+            inner_simple.as_deref().map(|n| self.current_inner_classes.contains(n)).unwrap_or(false);
         self.printer.print(&base);
+        if !is_rust_collection(&base) && !is_inner {
+            // Resolve the constructor overload by arity (project/linked types
+            // record `new`/`new#arity`); plain `::new` for everything else.
+            if let Some(m) = inner_simple
+                .as_deref()
+                .and_then(|s| self.resolve_ctor(s, args.len()))
+            {
+                self.printer.print("::");
+                self.printer.print(&m.rust);
+                self.print_arguments_linked(&args, &m.params, arg);
+                return;
+            }
+            self.printer.print("::new");
+            self.print_arguments(&args, arg);
+            return;
+        }
         self.printer.print("::new");
         if is_rust_collection(&base) {
             self.printer.print("()");
@@ -3911,7 +4122,14 @@ impl<'a> RustDumpVisitor<'a> {
             None => self.printer.print("{ unimplemented!() }"),
             Some(b) => {
                 self.printer.print(" ");
+                // A `void` method that `throws` returns `Result<(), String>`; its
+                // body needs an `Ok(())` tail (and bare `return;` -> `return Ok(());`,
+                // handled in `ReturnStmt`).
+                if type_string == "void" && !throws.is_empty() {
+                    self.pending_tail = Some("Ok(())".to_string());
+                }
                 self.visit(b, arg);
+                self.pending_tail = None;
             }
         }
         self.id.set_current_method(None);
@@ -4047,11 +4265,16 @@ impl<'a> RustDumpVisitor<'a> {
         };
         self.print_orphan_comments_before_this_child_node(id);
         self.print_java_comment(id, arg);
+        // Take any pending tail (e.g. `Ok(())`) so nested blocks don't inherit it.
+        let tail = self.pending_tail.take();
         self.printer.print_ln_s("{");
         self.printer.indent();
         for &s in &stmts {
             self.visit(s, arg);
             self.printer.print_ln();
+        }
+        if let Some(t) = tail {
+            self.printer.print_ln_s(&t);
         }
         self.printer.unindent();
         self.print_orphan_comments_ending(id);
@@ -4952,6 +5175,29 @@ pub fn map_type_name(name: &str) -> &str {
         "Exception" | "Throwable" | "Error" | "RuntimeException" => "String",
         other => other,
     }
+}
+
+/// Map a boxed-primitive constant (`Integer.MAX_VALUE`) to its Rust path
+/// (`i32::MAX`). Returns `None` for non-constant fields or non-boxed classes.
+fn boxed_constant(cls: &str, field: &str) -> Option<&'static str> {
+    Some(match (cls, field) {
+        ("Integer", "MAX_VALUE") => "i32::MAX",
+        ("Integer", "MIN_VALUE") => "i32::MIN",
+        ("Long", "MAX_VALUE") => "i64::MAX",
+        ("Long", "MIN_VALUE") => "i64::MIN",
+        ("Short", "MAX_VALUE") => "i16::MAX",
+        ("Short", "MIN_VALUE") => "i16::MIN",
+        ("Byte", "MAX_VALUE") => "i8::MAX",
+        ("Byte", "MIN_VALUE") => "i8::MIN",
+        ("Double", "MAX_VALUE") => "f64::MAX",
+        ("Double", "MIN_VALUE") => "f64::MIN_POSITIVE",
+        ("Float", "MAX_VALUE") => "f32::MAX",
+        ("Float", "MIN_VALUE") => "f32::MIN_POSITIVE",
+        ("Double" | "Float", "POSITIVE_INFINITY") => "f64::INFINITY",
+        ("Double" | "Float", "NEGATIVE_INFINITY") => "f64::NEG_INFINITY",
+        ("Double" | "Float", "NaN") => "f64::NAN",
+        _ => return None,
+    })
 }
 
 /// Does this (already-mapped) Rust type name name a collection constructed with

@@ -102,7 +102,7 @@ impl<'a> Analyzer<'a> {
         };
         match self.arena.kind(parent).clone() {
             // T x = null;
-            Node::VariableDeclarator { id, init } if init == Some(null_node) => {
+            Node::VariableDeclarator { id, init, .. } if init == Some(null_node) => {
                 self.mark(id);
             }
             // x = null;
@@ -147,7 +147,7 @@ impl<'a> Analyzer<'a> {
             for i in 0..self.node_count() {
                 let n = NodeId(i);
                 match self.arena.kind(n).clone() {
-                    Node::VariableDeclarator { id, init: Some(v) } => {
+                    Node::VariableDeclarator { id, init: Some(v), .. } => {
                         if self.expr_nullable(v) && self.mark(id) {
                             changed = true;
                         }

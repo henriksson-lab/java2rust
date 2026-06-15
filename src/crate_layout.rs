@@ -40,7 +40,9 @@ struct RawType {
     fields: Vec<(String, String)>,
     /// (java name, rust name) for static fields (associated consts).
     static_fields: Vec<(String, String)>,
-    methods: Vec<(String, String)>,
+    /// (symbol-map key, rust name, param signatures) for instance methods. The
+    /// key is the bare Java name, or `name#arity` for non-base overloads.
+    methods: Vec<(String, String, Vec<crate::symbol_map::ParamSym>)>,
     /// The defining file's import/package context, for resolving `parent_simple`.
     explicit_imports: Vec<String>,
     wildcard_pkgs: Vec<String>,
@@ -98,9 +100,11 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
                 FieldSym { rust: rust.clone(), rust_type: String::new(), nullable: false },
             );
         }
-        for (java, rust) in &r.methods {
-            t.methods
-                .insert(java.clone(), MethodSym { rust: rust.clone(), ..Default::default() });
+        for (java, rust, params) in &r.methods {
+            t.methods.insert(
+                java.clone(),
+                MethodSym { rust: rust.clone(), params: params.clone(), ..Default::default() },
+            );
         }
         map.types.insert(r.fqn.clone(), t);
     }
@@ -161,6 +165,8 @@ fn collect_file(path: &Path, prefix: &[String], raw: &mut Vec<RawType>) {
     let Some((arena, root)) = crate::parse::create_compilation_unit(&text) else { return };
     let mut id = crate::id_tracker::IdTracker::new();
     crate::id_tracker::run(&arena, root, &mut id);
+    crate::type_tracker::run(&arena, root, &mut id);
+    let nullable = crate::nullability::analyze(&arena, root, &id);
     let package = id.package_name.clone().unwrap_or_default();
     let mut explicit = Vec::new();
     let mut wildcard = Vec::new();
@@ -182,7 +188,7 @@ fn collect_file(path: &Path, prefix: &[String], raw: &mut Vec<RawType>) {
     let escaped: Vec<String> = segs.iter().map(|s| escape_rust_keyword(s.clone())).collect();
     let mod_path = format!("crate::{}", escaped.join("::"));
 
-    collect_types(&arena, root, &package, "", &mod_path, &explicit, &wildcard, raw);
+    collect_types(&arena, root, &package, "", &mod_path, &explicit, &wildcard, &nullable, raw);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,6 +200,7 @@ fn collect_types(
     mod_path: &str,
     explicit: &[String],
     wildcard: &[String],
+    nullable: &std::collections::HashSet<NodeId>,
     raw: &mut Vec<RawType>,
 ) {
     for c in arena.children(node) {
@@ -224,14 +231,14 @@ fn collect_types(
             let fqn = if pkg.is_empty() { path.clone() } else { format!("{pkg}.{path}") };
             let rust_name = name.replace('$', "_");
             let (parent_simple, interface_simples, fields, static_fields, methods) = if is_class {
-                type_members(arena, c, false)
+                type_members(arena, c, false, nullable)
             } else if kind == "enum" {
                 // Enum variants are recorded as `static_fields` (same `Enum::Name`
                 // access), so a `switch` on the enum can qualify its case labels.
                 (None, Vec::new(), Vec::new(), enum_variants(arena, c), Vec::new())
             } else {
                 // An interface: its fields are implicitly `static final` constants.
-                type_members(arena, c, true)
+                type_members(arena, c, true, nullable)
             };
             raw.push(RawType {
                 fqn,
@@ -248,9 +255,9 @@ fn collect_types(
                 wildcard_pkgs: wildcard.to_vec(),
                 package: pkg.to_string(),
             });
-            collect_types(arena, c, pkg, &path, mod_path, explicit, wildcard, raw);
+            collect_types(arena, c, pkg, &path, mod_path, explicit, wildcard, nullable, raw);
         } else {
-            collect_types(arena, c, pkg, prefix, mod_path, explicit, wildcard, raw);
+            collect_types(arena, c, pkg, prefix, mod_path, explicit, wildcard, nullable, raw);
         }
     }
 }
@@ -262,8 +269,14 @@ fn type_members(
     arena: &Arena,
     decl: NodeId,
     is_interface: bool,
-) -> (Option<String>, Vec<String>, Vec<(String, String)>, Vec<(String, String)>, Vec<(String, String)>)
-{
+    nullable: &std::collections::HashSet<NodeId>,
+) -> (
+    Option<String>,
+    Vec<String>,
+    Vec<(String, String)>,
+    Vec<(String, String)>,
+    Vec<(String, String, Vec<crate::symbol_map::ParamSym>)>,
+) {
     use crate::modifiers;
     let Node::ClassOrInterfaceDeclaration { extends, implements, members, .. } = arena.kind(decl)
     else {
@@ -279,7 +292,11 @@ fn type_members(
     let interfaces: Vec<String> = implements.iter().filter_map(|&i| simple_of(i)).collect();
     let mut fields = Vec::new();
     let mut static_fields = Vec::new();
-    let mut methods = Vec::new();
+    // Instance methods and constructors in declaration order, as
+    // (map-key, rust-base, param-sigs), so overload mangling matches
+    // `RustDumpVisitor::compute_overloads` exactly (which groups constructors
+    // under the base name `new`).
+    let mut method_decls: Vec<(String, String, Vec<crate::symbol_map::ParamSym>)> = Vec::new();
     for &m in members {
         match arena.kind(m) {
             Node::FieldDeclaration { modifiers, variables, .. } => {
@@ -297,12 +314,20 @@ fn type_members(
                     }
                 }
             }
-            Node::MethodDeclaration { modifiers, name, .. } if !modifiers::is_static(*modifiers) => {
-                methods.push((name.clone(), rust_member_name(name)));
+            Node::MethodDeclaration { modifiers, name, parameters, .. }
+                if !modifiers::is_static(*modifiers) =>
+            {
+                let params = parameters.iter().map(|&p| param_sym(arena, p, nullable)).collect();
+                method_decls.push((name.clone(), rust_member_name(name), params));
+            }
+            Node::ConstructorDeclaration { parameters, .. } => {
+                let params = parameters.iter().map(|&p| param_sym(arena, p, nullable)).collect();
+                method_decls.push(("new".to_string(), "new".to_string(), params));
             }
             _ => {}
         }
     }
+    let methods = mangle_overloads(&method_decls);
     (parent, interfaces, fields, static_fields, methods)
 }
 
@@ -319,6 +344,79 @@ fn enum_variants(arena: &Arena, decl: NodeId) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
+}
+
+/// Compute the `(symbol-map-key, rust-name)` pairs for a type's instance
+/// methods, applying the same overload mangling as
+/// `RustDumpVisitor::compute_overloads`: in each same-name group the first
+/// member keeps the base name, later ones are suffixed by arity (`foo`,
+/// `foo_2`, …). The map key is the bare Java name for the base overload and
+/// `name#arity` for the others, so a cross-file caller resolves by arity
+/// (see `resolve_linked_callee`).
+fn mangle_overloads(
+    decls: &[(String, String, Vec<crate::symbol_map::ParamSym>)],
+) -> Vec<(String, String, Vec<crate::symbol_map::ParamSym>)> {
+    use std::collections::HashMap;
+    let mut groups: HashMap<String, usize> = HashMap::new();
+    for (_, base, _) in decls {
+        *groups.entry(base.clone()).or_insert(0) += 1;
+    }
+    let mut out = Vec::new();
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (name, base, params) in decls {
+        let arity = params.len();
+        let base = base.clone();
+        let overloaded = groups.get(&base).copied().unwrap_or(0) > 1;
+        if !overloaded {
+            out.push((name.clone(), base, params.clone()));
+            continue;
+        }
+        let idx = *seen.entry(base.clone()).or_insert(0);
+        *seen.get_mut(&base).unwrap() += 1;
+        if idx == 0 {
+            used.insert(base.clone());
+            out.push((name.clone(), base, params.clone()));
+        } else {
+            let mut cand = format!("{base}_{arity}");
+            let mut k = 2;
+            while used.contains(&cand) {
+                cand = format!("{base}_{arity}_{k}");
+                k += 1;
+            }
+            used.insert(cand.clone());
+            // Key by arity so the caller can pick this overload; the base
+            // overload remains reachable under the bare name.
+            out.push((format!("{name}#{arity}"), cand, params.clone()));
+        }
+    }
+    out
+}
+
+/// Best-effort `ParamSym` for a method parameter, mirroring how
+/// `RustDumpVisitor::visit_parameter` renders it: a nullable param is owned
+/// `Option<T>`; a non-nullable non-primitive is borrowed `&T`; a primitive is
+/// owned by value. (Varargs render as an owned `Vec<T>`.)
+fn param_sym(
+    arena: &Arena,
+    p: NodeId,
+    nullable: &std::collections::HashSet<NodeId>,
+) -> crate::symbol_map::ParamSym {
+    use crate::symbol_map::ParamSym;
+    let (typ, vid, is_var_args) = match arena.kind(p) {
+        Node::Parameter { typ, id, is_var_args, .. } => (*typ, *id, *is_var_args),
+        _ => return ParamSym::default(),
+    };
+    let is_nullable = nullable.contains(&vid);
+    let is_primitive = typ
+        .map(|t| matches!(arena.kind(t), Node::PrimitiveType { .. }))
+        .unwrap_or(false);
+    ParamSym {
+        rust_type: String::new(),
+        by_ref: !is_var_args && !is_nullable && !is_primitive,
+        mutable: false,
+        nullable: is_nullable,
+    }
 }
 
 /// Mirror of the dumper's `to_snake_if_necessary` for member names (snake unless
