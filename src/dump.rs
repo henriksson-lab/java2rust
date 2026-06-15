@@ -1682,9 +1682,19 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print("trait ");
         self.printer.print(name);
         self.print_type_parameters(type_parameters, arg);
-        if !extends.is_empty() {
+        // Supertraits: only keep extends that resolve to a non-generic project
+        // trait. External/stub interfaces resolve to a struct (E0404) and generic
+        // ones need their args (E0107), so drop those.
+        let supers: Vec<NodeId> = extends
+            .iter()
+            .copied()
+            .filter(|&e| {
+                self.type_simple_name(e).map(|n| self.resolved_is_trait(&n)).unwrap_or(false)
+            })
+            .collect();
+        if !supers.is_empty() {
             self.printer.print(" : ");
-            for (i, &e) in extends.iter().enumerate() {
+            for (i, &e) in supers.iter().enumerate() {
                 if i > 0 {
                     self.printer.print(" + ");
                 }
@@ -2175,8 +2185,20 @@ impl<'a> RustDumpVisitor<'a> {
     fn is_static_class_ref(&self, s: NodeId) -> bool {
         match self.arena.kind(s) {
             Node::NameExpr { name } => {
-                name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
-                    && self.id.find_declaration_node_for(self.arena, name, s).is_none()
+                if !name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    return false;
+                }
+                // A type reference: either an unknown uppercase name, or one that
+                // resolves to a type declaration (e.g. a static call on the
+                // class's own name, `Foo.bar()` inside `Foo`). A name resolving to
+                // a value (local/param/field) is NOT a static class ref.
+                match self.id.find_declaration_node_for(self.arena, name, s) {
+                    None => true,
+                    Some((_, decl)) => matches!(
+                        self.arena.kind(decl),
+                        Node::ClassOrInterfaceDeclaration { .. } | Node::EnumDeclaration { .. }
+                    ),
+                }
             }
             _ => false,
         }
