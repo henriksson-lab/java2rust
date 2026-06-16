@@ -201,14 +201,36 @@ impl StubCollector {
         }
     }
 
+    /// `rust_name -> crate path` for every stub type, so a stub method's return
+    /// that names another stub type can be emitted as a resolvable path.
+    fn stub_type_paths(&self) -> BTreeMap<String, String> {
+        let mut m = BTreeMap::new();
+        for t in self.types.values() {
+            let pkg = t
+                .java_fqns
+                .iter()
+                .next()
+                .and_then(|f| f.rsplit_once('.').map(|(p, _)| p.to_string()))
+                .unwrap_or_default();
+            let module = if pkg.is_empty() {
+                "stubs".to_string()
+            } else {
+                format!("stub_{}", pkg.replace('.', "_"))
+            };
+            m.insert(t.rust_name.clone(), format!("crate::{module}::{}", t.rust_name));
+        }
+        m
+    }
+
     /// Render all stubs as a single Rust source file.
     pub fn render(&self) -> String {
+        let paths = self.stub_type_paths();
         let mut s = file_header();
         for t in self.types.values() {
-            s.push_str(&render_type(t));
+            s.push_str(&render_type(t, &paths));
         }
         for (name, sig) in &self.free_fns {
-            s.push_str(&render_fn(name, sig, None));
+            s.push_str(&render_fn(name, sig, None, &paths));
             s.push('\n');
         }
         s
@@ -219,6 +241,7 @@ impl StubCollector {
     /// and `stubs.rs` for free functions and package-less types. Group a whole
     /// translation's stubs so each dependency can be filled in independently.
     pub fn render_grouped(&self) -> BTreeMap<String, String> {
+        let paths = self.stub_type_paths();
         // package -> rendered type blocks
         let mut groups: BTreeMap<String, String> = BTreeMap::new();
         for t in self.types.values() {
@@ -228,13 +251,13 @@ impl StubCollector {
                 .next()
                 .and_then(|f| f.rsplit_once('.').map(|(p, _)| p.to_string()))
                 .unwrap_or_default();
-            groups.entry(pkg).or_default().push_str(&render_type(t));
+            groups.entry(pkg).or_default().push_str(&render_type(t, &paths));
         }
         // Free functions have no package; put them in the base file.
         if !self.free_fns.is_empty() {
             let base = groups.entry(String::new()).or_default();
             for (name, sig) in &self.free_fns {
-                base.push_str(&render_fn(name, sig, None));
+                base.push_str(&render_fn(name, sig, None, &paths));
                 base.push('\n');
             }
         }
@@ -274,7 +297,7 @@ fn ctor_names(idx: usize, arity: usize) -> (String, String) {
     }
 }
 
-fn render_type(t: &StubType) -> String {
+fn render_type(t: &StubType, paths: &BTreeMap<String, String>) -> String {
     let mut s = String::new();
     for fqn in &t.java_fqns {
         s.push_str(&format!("/// @java {fqn}\n"));
@@ -294,13 +317,13 @@ fn render_type(t: &StubType) -> String {
         s.push_str(&format!("impl {} {{\n", t.rust_name));
         for (i, (arity, c)) in t.ctors.iter().enumerate() {
             let (rust, _) = ctor_names(i, *arity);
-            s.push_str(&format!("    {}\n", render_fn(&rust, c, Some(&t.rust_name))));
+            s.push_str(&format!("    {}\n", render_fn(&rust, c, Some(&t.rust_name), paths)));
         }
         for (name, sig) in &t.statics {
-            s.push_str(&format!("    {}\n", render_fn(name, sig, None)));
+            s.push_str(&format!("    {}\n", render_fn(name, sig, None, paths)));
         }
         for (name, sig) in &t.methods {
-            s.push_str(&format!("    {}\n", render_fn(name, sig, None)));
+            s.push_str(&format!("    {}\n", render_fn(name, sig, None, paths)));
         }
         s.push_str("}\n");
     }
@@ -310,7 +333,12 @@ fn render_type(t: &StubType) -> String {
 
 /// Render a single function/method as one line. `ctor_ret` forces the return
 /// type (the type name) for constructors.
-fn render_fn(name: &str, sig: &StubSig, ctor_ret: Option<&str>) -> String {
+fn render_fn(
+    name: &str,
+    sig: &StubSig,
+    ctor_ret: Option<&str>,
+    paths: &BTreeMap<String, String>,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     match sig.receiver {
         Receiver::Ref => parts.push("&self".to_string()),
@@ -336,8 +364,17 @@ fn render_fn(name: &str, sig: &StubSig, ctor_ret: Option<&str>) -> String {
     let ret = match ctor_ret {
         Some(t) => format!(" -> {t}"),
         None => match sig.ret.as_deref() {
-            Some(t) if stub_ret_renderable(t) => format!(" -> {t}"),
-            _ => String::new(),
+            // A bare name that's another stub type -> its crate path (resolves
+            // cross-file; bare names from pass 1 otherwise get dropped).
+            Some(t) => {
+                let resolved = paths.get(t.trim()).map(String::as_str).unwrap_or(t);
+                if stub_ret_renderable(resolved) {
+                    format!(" -> {resolved}")
+                } else {
+                    String::new()
+                }
+            }
+            None => String::new(),
         },
     };
     format!("pub fn {name}{generics}({}){ret} {{ unimplemented!() }}", parts.join(", "))
@@ -348,6 +385,11 @@ fn render_fn(name: &str, sig: &StubSig, ctor_ret: Option<&str>) -> String {
 fn stub_ret_renderable(t: &str) -> bool {
     let t = t.trim_start_matches('&').trim();
     if t == UNKNOWN {
+        return true;
+    }
+    // A fully-qualified path (`crate::…`, `std::…`) resolves from inside the stub
+    // file, so a project/std return type is renderable as-is.
+    if t.starts_with("crate::") || t.starts_with("std::") || t.starts_with("core::") {
         return true;
     }
     // A generic container named with no type argument (`Vec`, `Option`, …) takes

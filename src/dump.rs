@@ -2136,22 +2136,41 @@ impl<'a> RustDumpVisitor<'a> {
         self.print_type_parameters(&combined, arg);
         let _ = &implements; // `implements` -> traits is Stage 2; not modelled here.
         // Single inheritance via composition: embed the superclass as `base`.
-        let parent_rust = extends.first().map(|&e| self.accept_and_cut(e, arg).trim().to_string());
+        // Prefer the symbol map's resolved parent path — bare-name resolution of
+        // the `extends` type misses a *nested* (inner-class) parent and would
+        // pick the empty stub, but `resolve_parent` records the real project FQN.
+        let map_parent_path = self
+            .current_class_fqn
+            .as_deref()
+            .and_then(|f| self.link.lookup(f))
+            .and_then(|t| t.parent.clone())
+            .and_then(|p| self.link.lookup(&p).map(|pt| self.crate_relativize(&pt.rust_path)));
+        let parent_rust = if let Some(p) = &map_parent_path {
+            Some(p.clone())
+        } else {
+            extends.first().map(|&e| self.accept_and_cut(e, arg).trim().to_string())
+        };
         // External (stub) superclass? Then bare inherited fields go through `base`.
+        // A parent resolved via the map is a known project type, so inherited
+        // members resolve through it (not the external-base path).
         let saved_ext_base = self.current_external_base.take();
-        self.current_external_base = extends.first().and_then(|&e| {
-            let simple = self.type_simple_name(e)?;
-            let external = match self.resolve_type_sym(&simple) {
-                None => true,
-                Some(t) => t.rust_path.contains("::stub_"),
-            };
-            if !external {
-                return None;
-            }
-            let cands = self.type_candidates(&simple);
-            let fqn = cands.into_iter().find(|c| c.contains('.')).unwrap_or_else(|| simple.clone());
-            Some((fqn, map_type_name(&simple).replace('$', "_")))
-        });
+        self.current_external_base = if map_parent_path.is_some() {
+            None
+        } else {
+            extends.first().and_then(|&e| {
+                let simple = self.type_simple_name(e)?;
+                let external = match self.resolve_type_sym(&simple) {
+                    None => true,
+                    Some(t) => t.rust_path.contains("::stub_"),
+                };
+                if !external {
+                    return None;
+                }
+                let cands = self.type_candidates(&simple);
+                let fqn = cands.into_iter().find(|c| c.contains('.')).unwrap_or_else(|| simple.clone());
+                Some((fqn, map_type_name(&simple).replace('$', "_")))
+            })
+        };
         self.printer.print_ln_s(" {");
         self.printer.indent();
         if let Some(p) = &parent_rust {
@@ -3394,28 +3413,34 @@ impl<'a> RustDumpVisitor<'a> {
                 self.record_missing_call(scope, &name, &args, id);
                 let s = self.call_emitted_name(scope, &name, args.len());
                 self.printer.print(&s);
-                // Borrow arguments per the resolved sibling method's parameter
-                // signature (a bare self-call otherwise misses the param-aware
-                // path and passes owned values to `&`/`&mut` params).
-                let self_params = if scope.is_none() {
-                    self.resolve_self_callee(&name, args.len()).map(|m| m.params.clone())
+                // Resolve a bare self-call's callee (current class or an
+                // ancestor) once: its signature drives argument borrowing AND the
+                // throws/nullable unwraps below — `has_throws_name`/
+                // `name_decl_nullable` only see the *current file*, so an
+                // inherited `throws`/nullable method would otherwise be missed.
+                let callee = if scope.is_none() {
+                    self.resolve_self_callee(&name, args.len())
+                        .map(|m| (m.params.clone(), m.throws, m.ret_nullable))
                 } else {
                     None
                 };
-                match self_params {
-                    Some(params) if !params.is_empty() => {
-                        self.print_arguments_linked(&args, &params, arg)
+                match &callee {
+                    Some((params, _, _)) if !params.is_empty() => {
+                        self.print_arguments_linked(&args, params, arg)
                     }
                     _ => self.print_arguments(&args, arg),
                 }
-                // A bare self-call to a `throws` method of the current type
-                // returns `Result<_, String>` -> unwrap to the value.
-                if scope.is_none() && self.id.has_throws_name(&name) {
+                let c_throws = callee.as_ref().map(|c| c.1).unwrap_or(false);
+                let c_nullable = callee.as_ref().map(|c| c.2).unwrap_or(false);
+                // A `throws` method returns `Result<_, String>` -> unwrap.
+                if scope.is_none() && (self.id.has_throws_name(&name) || c_throws) {
                     self.printer.print(".unwrap()");
                 }
-                // A call to a nullable-returning method used as a plain value is
-                // unwrapped.
-                if scope.is_none() && !self.expect_option && self.name_decl_nullable(&name, id) {
+                // A nullable-returning method used as a plain value is unwrapped.
+                if scope.is_none()
+                    && !self.expect_option
+                    && (self.name_decl_nullable(&name, id) || c_nullable)
+                {
                     self.printer.print(".unwrap()");
                 }
             }

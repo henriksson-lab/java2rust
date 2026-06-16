@@ -43,7 +43,7 @@ struct RawType {
     /// (symbol-map key, rust name, param signatures, throws, recv-mut,
     /// numeric-ret) for instance methods. The key is the bare Java name, or
     /// `name#arity` for non-base overloads.
-    methods: Vec<(String, String, Vec<crate::symbol_map::ParamSym>, bool, bool, Option<String>)>,
+    methods: Vec<(String, String, Vec<crate::symbol_map::ParamSym>, bool, bool, Option<String>, bool)>,
     /// The defining file's import/package context, for resolving `parent_simple`.
     explicit_imports: Vec<String>,
     wildcard_pkgs: Vec<String>,
@@ -69,13 +69,13 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
     let mut map = SymbolMap::default();
     for r in &raw {
         let parent = r.parent_simple.as_ref().and_then(|p| {
-            resolve_parent(p, &r.explicit_imports, &r.wildcard_pkgs, &r.package, &defined)
+            resolve_parent(p, &r.explicit_imports, &r.wildcard_pkgs, &r.package, &r.fqn, &defined)
         });
         let interfaces = r
             .interface_simples
             .iter()
             .filter_map(|s| {
-                resolve_parent(s, &r.explicit_imports, &r.wildcard_pkgs, &r.package, &defined)
+                resolve_parent(s, &r.explicit_imports, &r.wildcard_pkgs, &r.package, &r.fqn, &defined)
             })
             .collect();
         let mut t = TypeSym {
@@ -101,7 +101,7 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
                 FieldSym { rust: rust.clone(), rust_type: String::new(), nullable: false },
             );
         }
-        for (java, rust, params, throws, recv_mut, ret) in &r.methods {
+        for (java, rust, params, throws, recv_mut, ret, ret_nullable) in &r.methods {
             t.methods.insert(
                 java.clone(),
                 MethodSym {
@@ -109,6 +109,7 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
                     params: params.clone(),
                     throws: *throws,
                     ret: ret.clone(),
+                    ret_nullable: *ret_nullable,
                     // A `&mut self` project method records `refmut` so callers
                     // borrow the receiver variable mutably (see
                     // `collect_mut_borrow_params`).
@@ -129,6 +130,7 @@ fn resolve_parent(
     explicit: &[String],
     wildcard: &[String],
     package: &str,
+    self_fqn: &str,
     defined: &HashSet<&String>,
 ) -> Option<String> {
     let suffix = format!(".{simple}");
@@ -152,7 +154,24 @@ fn resolve_parent(
     if defined.contains(&simple.to_string()) {
         return Some(simple.to_string());
     }
-    None
+    // Nested parent: a class `extends`/`implements` an *inner* class by simple
+    // name, but that type's FQN carries the enclosing-class segment(s) (e.g.
+    // `…Trimmer.IlluminaClippingSeq`), so the lookups above miss it. Fall back to
+    // a defined type whose FQN ends with `.simple`, preferring the candidate
+    // sharing the longest prefix with `self_fqn` (a sibling inner class of the
+    // same outer). Deterministic: ties broken by FQN order.
+    let mut candidates: Vec<&String> =
+        defined.iter().copied().filter(|f| f.ends_with(&suffix)).collect();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .max_by_key(|f| shared_prefix_len(self_fqn, f))
+        .cloned()
+}
+
+/// Number of leading bytes two strings share.
+fn shared_prefix_len(a: &str, b: &str) -> usize {
+    a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
 }
 
 fn walk_sources(dir: &Path, prefix: &[String], raw: &mut Vec<RawType>) {
@@ -288,7 +307,7 @@ fn type_members(
     Vec<String>,
     Vec<(String, String)>,
     Vec<(String, String)>,
-    Vec<(String, String, Vec<crate::symbol_map::ParamSym>, bool, bool, Option<String>)>,
+    Vec<(String, String, Vec<crate::symbol_map::ParamSym>, bool, bool, Option<String>, bool)>,
 ) {
     use crate::modifiers;
     let Node::ClassOrInterfaceDeclaration { extends, implements, members, .. } = arena.kind(decl)
@@ -316,6 +335,7 @@ fn type_members(
         bool,
         bool,
         Option<String>,
+        bool,
     )> = Vec::new();
     // `&mut self` set for the whole class (includes self-call propagation), so a
     // method's recorded receiver matches what the dumper emits.
@@ -350,6 +370,7 @@ fn type_members(
                     !throws.is_empty(),
                     mut_methods.contains(name),
                     numeric_ret(arena, m),
+                    nullable.contains(&m),
                 ));
             }
             Node::ConstructorDeclaration { parameters, throws, .. } => {
@@ -363,6 +384,7 @@ fn type_members(
                     !throws.is_empty(),
                     false,
                     None,
+                    false,
                 ));
             }
             _ => {}
@@ -395,8 +417,8 @@ fn enum_variants(arena: &Arena, decl: NodeId) -> Vec<(String, String)> {
 /// `name#arity` for the others, so a cross-file caller resolves by arity
 /// (see `resolve_linked_callee`).
 fn mangle_overloads(
-    decls: &[(String, String, Vec<crate::symbol_map::ParamSym>, bool, bool, Option<String>)],
-) -> Vec<(String, String, Vec<crate::symbol_map::ParamSym>, bool, bool, Option<String>)> {
+    decls: &[(String, String, Vec<crate::symbol_map::ParamSym>, bool, bool, Option<String>, bool)],
+) -> Vec<(String, String, Vec<crate::symbol_map::ParamSym>, bool, bool, Option<String>, bool)> {
     use std::collections::HashMap;
     let mut groups: HashMap<String, usize> = HashMap::new();
     // Per base name, how many overloads share each arity — an arity that recurs
@@ -404,26 +426,26 @@ fn mangle_overloads(
     // `name#arity` (callers would resolve the wrong one); they fall back to the
     // base overload instead.
     let mut arity_counts: HashMap<(String, usize), usize> = HashMap::new();
-    for (_, base, params, _, _, _) in decls {
+    for (_, base, params, _, _, _, _) in decls {
         *groups.entry(base.clone()).or_insert(0) += 1;
         *arity_counts.entry((base.clone(), params.len())).or_insert(0) += 1;
     }
     let mut out = Vec::new();
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
-    for (name, base, params, throws, recv_mut, ret) in decls {
+    for (name, base, params, throws, recv_mut, ret, ret_null) in decls {
         let arity = params.len();
         let base = base.clone();
         let overloaded = groups.get(&base).copied().unwrap_or(0) > 1;
         if !overloaded {
-            out.push((name.clone(), base, params.clone(), *throws, *recv_mut, ret.clone()));
+            out.push((name.clone(), base, params.clone(), *throws, *recv_mut, ret.clone(), *ret_null));
             continue;
         }
         let idx = *seen.entry(base.clone()).or_insert(0);
         *seen.get_mut(&base).unwrap() += 1;
         if idx == 0 {
             used.insert(base.clone());
-            out.push((name.clone(), base, params.clone(), *throws, *recv_mut, ret.clone()));
+            out.push((name.clone(), base, params.clone(), *throws, *recv_mut, ret.clone(), *ret_null));
         } else {
             let mut cand = format!("{base}_{arity}");
             let mut k = 2;
@@ -437,7 +459,7 @@ fn mangle_overloads(
             // sibling — same-arity calls then resolve to the base overload.
             let unique_arity = arity_counts.get(&(base.clone(), arity)).copied().unwrap_or(0) == 1;
             let key = if unique_arity { format!("{name}#{arity}") } else { cand.clone() };
-            out.push((key, cand, params.clone(), *throws, *recv_mut, ret.clone()));
+            out.push((key, cand, params.clone(), *throws, *recv_mut, ret.clone(), *ret_null));
         }
     }
     out
