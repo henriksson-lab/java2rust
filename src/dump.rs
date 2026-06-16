@@ -269,6 +269,21 @@ impl<'a> RustDumpVisitor<'a> {
         None
     }
 
+    /// The crate path of the ancestor that declares an inherited method `member`
+    /// (for qualifying an inherited *static* call, which can't dispatch through
+    /// `Deref`). Walks the linked project map's parent chain.
+    fn inherited_method_owner(&self, member: &str) -> Option<String> {
+        let mut t = self.link.lookup(self.current_class_fqn.as_deref()?)?;
+        while let Some(parent) = t.parent.as_deref() {
+            let pt = self.link.lookup(parent)?;
+            if pt.methods.contains_key(member) {
+                return Some(self.crate_relativize(&pt.rust_path));
+            }
+            t = pt;
+        }
+        None
+    }
+
     /// An inherited *static* constant (a `static final` in an ancestor): resolved
     /// as an associated const on the declaring type, `<ParentPath>::NAME`.
     fn inherited_static_const(&self, member: &str) -> Option<String> {
@@ -854,7 +869,11 @@ impl<'a> RustDumpVisitor<'a> {
                 .to_string(),
             ),
             Node::ClassOrInterfaceType { name, .. } => Some(self.stub_type_name(name)),
-            Node::ReferenceType { typ, .. } => self.rust_type_of(*typ),
+            // Preserve array dimensions: `byte[]` -> `Vec<i8>`, not `i8`.
+            Node::ReferenceType { typ, array_count } => {
+                let inner = self.rust_type_of(*typ)?;
+                Some((0..*array_count).fold(inner, |t, _| format!("Vec<{t}>")))
+            }
             _ => None,
         }
     }
@@ -2462,12 +2481,20 @@ impl<'a> RustDumpVisitor<'a> {
             let m = self.java_member_fqn(field_id, &java_name);
             self.emit_provenance(&m);
             let nullable = self.var_decl_id(var).map(|d| self.decl_nullable(d)).unwrap_or(false);
+            // C-style trailing dims (`long pack[];`) attach to the declarator,
+            // not the shared field type — wrap the rendered type in `Vec<>`.
+            let array_count = match self.arena.kind(var) {
+                Node::VariableDeclarator { array_count, .. } => *array_count,
+                _ => 0,
+            };
             // `pub` so fields accessed cross-module (`x.field`) resolve.
             self.printer.print(&format!("pub {name}: "));
             if nullable {
                 self.printer.print("Option<");
             }
-            self.visit(typ, None);
+            let ty = self.accept_and_cut(typ, None).trim().to_string();
+            let ty = (0..array_count).fold(ty, |t, _| format!("Vec<{t}>"));
+            self.printer.print(&ty);
             if nullable {
                 self.printer.print(">");
             }
@@ -3020,20 +3047,25 @@ impl<'a> RustDumpVisitor<'a> {
         right: NodeId,
     ) -> (Option<String>, Option<String>) {
         use BinaryOp::*;
-        // Arithmetic and bitwise ops require matching operand types; shifts do
-        // not (the right operand is a count), so they are excluded.
-        if !matches!(op, Plus | Minus | Times | Divide | Remainder | BinOr | BinAnd | Xor) {
+        // Arithmetic/bitwise ops and ordering comparisons require matching
+        // operand types (Java promotes the narrower); shifts do not (the right
+        // operand is a count), so they are excluded.
+        let is_arith = matches!(op, Plus | Minus | Times | Divide | Remainder | BinOr | BinAnd | Xor);
+        let is_cmp = matches!(op, Less | Greater | LessEquals | GreaterEquals);
+        if !is_arith && !is_cmp {
             return (None, None);
         }
-        // Java promotes `char` to `int` in arithmetic (`ch - 'A'`); Rust has no
-        // char arithmetic, so cast each char operand to `i32`.
-        let l_char = self.expr_is_char(left);
-        let r_char = self.expr_is_char(right);
-        if l_char || r_char {
-            return (
-                l_char.then(|| "i32".to_string()),
-                r_char.then(|| "i32".to_string()),
-            );
+        // Java promotes `char` to `int` in *arithmetic* (`ch - 'A'`); Rust has no
+        // char arithmetic. Char *comparisons* (`ch < 'Z'`) stay char-vs-char.
+        if is_arith {
+            let l_char = self.expr_is_char(left);
+            let r_char = self.expr_is_char(right);
+            if l_char || r_char {
+                return (
+                    l_char.then(|| "i32".to_string()),
+                    r_char.then(|| "i32".to_string()),
+                );
+            }
         }
         let (Some(l), Some(r)) = (self.expr_num_type(left), self.expr_num_type(right)) else {
             return (None, None);
@@ -3264,6 +3296,21 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
+        // Record a static-final constant access on a stub type
+        // (`TimeUnit.MILLISECONDS`) so the stub emits an associated `const`.
+        if self.emit_stubs && self.is_static_class_ref(scope) {
+            if let Node::NameExpr { name } = self.arena.kind(scope) {
+                let is_const = field.chars().any(|c| c.is_ascii_uppercase())
+                    && field.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit());
+                if is_const {
+                    if let Some(key) = self.missing_type_key(name) {
+                        let rust_struct = map_type_name(name).replace('$', "_");
+                        let c = self.to_snake_if_necessary(&field);
+                        self.stubs.borrow_mut().add_static_const(&key, &rust_struct, &c);
+                    }
+                }
+            }
+        }
         // Array `.length` -> `(recv.len() as i32)`: Java `length` is an `int`, so
         // the cast keeps it comparable/assignable to the `i32`-typed surroundings
         // (mirrors the `.length()`/`.size()` method rewrites).
@@ -3381,9 +3428,18 @@ impl<'a> RustDumpVisitor<'a> {
                     _ => self.printer.print(if self.in_static_method { "Self::" } else { recv }),
                 }
             } else if self.inherited_method(&name) {
-                // Inherited instance method: `self.m()` dispatches through Deref
-                // (or `Self::` from a static context).
-                self.printer.print(if self.in_static_method { "Self::" } else { recv });
+                // Inherited method. From an instance context, `self.m()` dispatches
+                // through Deref. From a static context the method is necessarily a
+                // *static* inherited one, which Rust associated fns don't inherit
+                // through Deref -> qualify by the declaring parent (`Parent::m`).
+                if self.in_static_method {
+                    match self.inherited_method_owner(&name) {
+                        Some(p) => self.printer.print(&format!("{p}::")),
+                        None => self.printer.print("Self::"),
+                    }
+                } else {
+                    self.printer.print(recv);
+                }
             } else if self.enclosing_method(&name) {
                 // An instance method of the enclosing class, called from a
                 // non-static inner class: `<recv>.__outer.borrow().m()`.
@@ -4616,11 +4672,18 @@ impl<'a> RustDumpVisitor<'a> {
         } else {
             // An interface-typed parameter becomes `&dyn Trait`: implementors
             // coerce at the call site (`&concrete` -> `&dyn Trait`), since we now
-            // generate `impl Trait for Class`.
-            let is_trait = typ
-                .and_then(|t| self.type_simple_name(t))
-                .map(|n| self.resolved_is_trait(&n))
+            // generate `impl Trait for Class`. Only a *direct* interface param
+            // takes `&dyn` — an array of interface (`Trimmer[]`) must keep its
+            // element boxed (`Vec<Box<dyn Trimmer>>`), so don't set the `&dyn`
+            // flag (which would leak `dyn` into the unsized Vec element).
+            let is_array = typ
+                .map(|t| matches!(self.arena.kind(t), Node::ReferenceType { array_count, .. } if *array_count > 0))
                 .unwrap_or(false);
+            let is_trait = !is_array
+                && typ
+                    .and_then(|t| self.type_simple_name(t))
+                    .map(|n| self.resolved_is_trait(&n))
+                    .unwrap_or(false);
             if !is_primitive {
                 let needs_mut = match self.arena.kind(vid) {
                     Node::VariableDeclaratorId { name } => self.mut_borrow_params.contains(name),

@@ -9,7 +9,7 @@ impl A {
     pub fn m(&self)   {
          {
              let mut i: i32 = 0;
-            while i < 10.0 {
+            while (i as f64) < 10.0 {
                 {
                 }
                 i += 1;

@@ -57,6 +57,9 @@ pub struct StubType {
     pub fields: BTreeSet<String>,
     pub methods: BTreeMap<String, StubSig>,
     pub statics: BTreeMap<String, StubSig>,
+    /// Static-final constant names accessed as `Type::NAME` (e.g.
+    /// `TimeUnit.MILLISECONDS`), emitted as `pub const NAME: Unknown = ()`.
+    pub static_consts: BTreeSet<String>,
     /// Constructors keyed by arity — Java overloads by parameter count, which
     /// Rust can't, so each arity becomes a distinct `new`/`new_<arity>` fn.
     pub ctors: BTreeMap<usize, StubSig>,
@@ -118,6 +121,10 @@ impl StubCollector {
 
     pub fn add_field(&mut self, fqn: &str, rust_name: &str, field: &str) {
         self.type_entry(fqn, rust_name).fields.insert(field.to_string());
+    }
+
+    pub fn add_static_const(&mut self, fqn: &str, rust_name: &str, name: &str) {
+        self.type_entry(fqn, rust_name).static_consts.insert(name.to_string());
     }
 
     pub fn add_free_fn(&mut self, rust_name: &str, sig: StubSig) {
@@ -194,6 +201,9 @@ impl StubCollector {
             }
             for f in t.fields {
                 self.add_field(&fqn, &t.rust_name, &f);
+            }
+            for c in t.static_consts {
+                self.add_static_const(&fqn, &t.rust_name, &c);
             }
         }
         for (name, sig) in other.free_fns {
@@ -312,9 +322,15 @@ fn render_type(t: &StubType, paths: &BTreeMap<String, String>) -> String {
         }
         s.push_str("}\n");
     }
-    let has_impl = !t.ctors.is_empty() || !t.methods.is_empty() || !t.statics.is_empty();
+    let has_impl = !t.ctors.is_empty()
+        || !t.methods.is_empty()
+        || !t.statics.is_empty()
+        || !t.static_consts.is_empty();
     if has_impl {
         s.push_str(&format!("impl {} {{\n", t.rust_name));
+        for c in &t.static_consts {
+            s.push_str(&format!("    pub const {c}: Unknown = ();\n"));
+        }
         for (i, (arity, c)) in t.ctors.iter().enumerate() {
             let (rust, _) = ctor_names(i, *arity);
             s.push_str(&format!("    {}\n", render_fn(&rust, c, Some(&t.rust_name), paths)));
