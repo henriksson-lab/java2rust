@@ -59,6 +59,10 @@ pub struct MethodSym {
     pub receiver: String,
     pub ret: Option<String>,
     pub ret_nullable: bool,
+    /// The Java method declares `throws`, so it returns `Result<_, String>` and
+    /// call sites must unwrap (or `?`) to reach the underlying value.
+    #[serde(default)]
+    pub throws: bool,
     #[serde(default)]
     pub params: Vec<ParamSym>,
 }

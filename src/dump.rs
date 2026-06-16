@@ -125,6 +125,12 @@ pub struct RustDumpVisitor<'a> {
     /// True while emitting a `static` method body: a bare self-call there can't
     /// use `self` (it must be a static `Self::` call).
     in_static_method: bool,
+    /// Whether the method currently being emitted mutates `self` (needs
+    /// `&mut self`), per the borrow analysis. Set in `visit_method`.
+    method_recv_mut: bool,
+    /// Names of the current method's parameters reassigned in the body, which
+    /// need a `mut` binding. Set in `visit_method`, read by `visit_parameter`.
+    reassigned_params: std::collections::HashSet<String>,
     /// A tail expression the next block must emit before its closing brace —
     /// used to append `Ok(())` to a `void`-but-`throws` method body (whose
     /// return type is `Result<(), String>`). Consumed by the first `visit_block`.
@@ -208,6 +214,8 @@ impl<'a> RustDumpVisitor<'a> {
             trait_dyn_ref: false,
             trait_bound_pos: false,
             in_static_method: false,
+            method_recv_mut: false,
+            reassigned_params: std::collections::HashSet::new(),
             pending_tail: None,
             switch_enum_path: None,
             known_types: None,
@@ -347,6 +355,30 @@ impl<'a> RustDumpVisitor<'a> {
 
     /// The `Rc<RefCell<Outer<…>>>` type of a capturing inner class's `__outer`
     /// field/constructor param, if we're in such an inner class.
+    /// The enclosing type *declaration* node (class/interface/enum) of `n`.
+    fn owner_type_decl(&self, n: NodeId) -> Option<NodeId> {
+        let mut cur = self.arena.parent(n)?;
+        loop {
+            if matches!(
+                self.arena.kind(cur),
+                Node::ClassOrInterfaceDeclaration { .. } | Node::EnumDeclaration { .. }
+            ) {
+                return Some(cur);
+            }
+            cur = self.arena.parent(cur)?;
+        }
+    }
+
+    /// The declared (Java) name of a type declaration node.
+    fn type_decl_name(&self, decl: NodeId) -> Option<String> {
+        match self.arena.kind(decl) {
+            Node::ClassOrInterfaceDeclaration { name, .. } | Node::EnumDeclaration { name, .. } => {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    }
+
     fn enclosing_outer_type(&self) -> Option<String> {
         let t = self.link.lookup(self.enclosing_class_fqn.as_deref()?)?;
         let path = self.crate_relativize(&t.rust_path);
@@ -752,8 +784,45 @@ impl<'a> RustDumpVisitor<'a> {
                 None
             }
             Node::ReturnStmt { expr: Some(e) } if *e == call => self.enclosing_method_ret_type(call),
+            // A call used as a condition or logical operand returns `bool`.
+            Node::WhileStmt { condition, .. }
+            | Node::DoStmt { condition, .. }
+            | Node::IfStmt { condition, .. }
+            | Node::ConditionalExpr { condition, .. }
+                if *condition == call =>
+            {
+                Some("bool".to_string())
+            }
+            Node::ForStmt { compare: Some(c), .. } if *c == call => Some("bool".to_string()),
+            Node::UnaryExpr { op: UnaryOp::Not, expr } if *expr == call => Some("bool".to_string()),
+            Node::BinaryExpr { op: BinaryOp::And | BinaryOp::Or, .. } => Some("bool".to_string()),
+            // `target = <call>` -> the call returns the target's declared type.
+            Node::AssignExpr { target, value, .. } if *value == call => {
+                self.assign_target_rust_type(*target)
+            }
             _ => None,
         }
+    }
+
+    /// The Rust type of an assignment target (a name or `self.field`), for stub
+    /// return-type inference of `target = <stub call>`.
+    fn assign_target_rust_type(&self, target: NodeId) -> Option<String> {
+        let name = match self.arena.kind(target) {
+            Node::NameExpr { name } => name.clone(),
+            Node::FieldAccessExpr { field, .. } => field.clone(),
+            _ => return None,
+        };
+        let (_, decl) = self.id.find_declaration_node_for(self.arena, &name, target)?;
+        let parent = self.arena.parent(decl)?;
+        let typ = match self.arena.kind(parent) {
+            Node::Parameter { typ, .. } => (*typ)?,
+            _ => match self.arena.parent(parent).map(|g| self.arena.kind(g)) {
+                Some(Node::FieldDeclaration { typ, .. })
+                | Some(Node::VariableDeclarationExpr { typ, .. }) => *typ,
+                _ => return None,
+            },
+        };
+        self.rust_type_of(typ)
     }
 
     fn enclosing_method_ret_type(&self, mut n: NodeId) -> Option<String> {
@@ -879,6 +948,27 @@ impl<'a> RustDumpVisitor<'a> {
             .or_else(|| t.methods.get(name))
     }
 
+    /// Resolve a bare self-call (`name(args)`) to its `MethodSym` in the current
+    /// class or an ancestor, so its parameter signature drives argument borrowing
+    /// (bare calls otherwise miss the linked-callee path and under-/over-borrow).
+    fn resolve_self_callee(&self, name: &str, arity: usize) -> Option<&'a crate::symbol_map::MethodSym> {
+        if self.link.is_empty() {
+            return None;
+        }
+        let mut t = self.link.lookup(self.current_class_fqn.as_deref()?);
+        while let Some(ty) = t {
+            if let Some(m) = ty
+                .methods
+                .get(&format!("{name}#{arity}"))
+                .or_else(|| ty.methods.get(name))
+            {
+                return Some(m);
+            }
+            t = ty.parent.as_deref().and_then(|p| self.link.lookup(p));
+        }
+        None
+    }
+
     /// Resolve the constructor of `type_simple` matching `arity`. Project/linked
     /// types record constructors under `new` (the base overload) and
     /// `new#arity` (the rest); returns `None` for unknown/unrecorded types so
@@ -932,14 +1022,21 @@ impl<'a> RustDumpVisitor<'a> {
     /// factored out of [`print_arguments`] so it can be reused for trailing
     /// (e.g. varargs) arguments of a linked call.
     fn print_one_default_argument(&mut self, e: NodeId, arg: Arg) {
+        let mut borrowed = false;
         if let Node::NameExpr { name } = self.arena.kind(e) {
             if let Some((Some(left), _)) = self.id.find_declaration_node_for(self.arena, name, e) {
                 if !left.is_primitive || left.array_count > 0 {
                     self.printer.print("&");
+                    borrowed = true;
                 }
             }
         }
         self.visit(e, arg);
+        // An array element read passed by value moves out of the `Vec`; clone it
+        // (unless it was borrowed above).
+        if !borrowed && self.is_array_read(e) {
+            self.printer.print(".clone()");
+        }
     }
 
     // ---- nullability helpers ----
@@ -974,8 +1071,16 @@ impl<'a> RustDumpVisitor<'a> {
     /// by value out of a borrow needs `.clone()`.
     fn is_non_copy_name(&self, e: NodeId) -> bool {
         if let Node::NameExpr { name } = self.arena.kind(e) {
-            if let Some((Some(td), _)) = self.id.find_declaration_node_for(self.arena, name, e) {
-                return !td.is_primitive;
+            if let Some((td, _)) = self.id.find_declaration_node_for(self.arena, name, e) {
+                if let Some(td) = td {
+                    return !td.is_primitive;
+                }
+                // No type descriptor (e.g. a parameter): fall back to the
+                // declared Java type. A non-scalar (class/array, emitted as a
+                // borrow) is non-Copy, so moving/returning it needs `.clone()`.
+                if let Some(jt) = self.decl_java_type_name(name, e) {
+                    return !is_scalar_java_type(&jt);
+                }
             }
         }
         false
@@ -998,9 +1103,28 @@ impl<'a> RustDumpVisitor<'a> {
     /// an instance-field read (both move out of a borrow otherwise).
     fn emit_moved_value(&mut self, e: NodeId, arg: Arg) {
         self.visit(e, arg);
-        if self.is_non_copy_name(e) || self.is_field_read(e) {
+        // A non-Copy name, field read, or array element read can't be moved out
+        // of its borrow — clone it to produce an owned value. (`emit_moved_value`
+        // is only used in owned/rvalue positions, so this is lvalue-safe.)
+        if self.is_non_copy_name(e) || self.is_field_read(e) || self.is_array_read(e) {
             self.printer.print(".clone()");
         }
+    }
+
+    /// An array element read (`a[i]`) of a *non-Copy* element. Indexing a `Vec`
+    /// of non-Copy elements moves the element out, so an owned position must
+    /// clone; a scalar element is Copy and needs no clone (avoids noise).
+    fn is_array_read(&self, e: NodeId) -> bool {
+        if let Node::ArrayAccessExpr { name, .. } = self.arena.kind(e) {
+            if let Node::NameExpr { name: n } = self.arena.kind(*name) {
+                if let Some(jt) = self.decl_java_type_name(n, *name) {
+                    return !is_scalar_java_type(&jt);
+                }
+            }
+            // Unknown element type: don't clone (avoid spurious clones on Copy
+            // elements; a genuine move error here is left for follow-up).
+        }
+        false
     }
 
     fn enclosing_method_nullable(&self, mut n: NodeId) -> bool {
@@ -1025,7 +1149,9 @@ impl<'a> RustDumpVisitor<'a> {
             self.printer.print("Some(");
             let saved = self.expect_option;
             self.expect_option = false;
-            self.visit(value, arg);
+            // The Option owns its value, so clone a non-Copy borrow (e.g. a `&`
+            // parameter or a field read) rather than moving out of it.
+            self.emit_moved_value(value, arg);
             self.expect_option = saved;
             self.printer.print(")");
         }
@@ -1824,15 +1950,34 @@ impl<'a> RustDumpVisitor<'a> {
             {
                 self.printer.print(recv);
             } else if self.is_static_field_declaration(right) {
-                // A static field is an associated const: `Self::F`.
-                self.printer.print("Self::");
+                // A static field is an associated const. It's `Self::F` when the
+                // field belongs to the current type, but an inner class reaching
+                // an *outer* class's static must qualify by that type's name
+                // (`Outer::F`) — `Self::` would name the inner class.
+                let field_owner = self.owner_type_decl(right);
+                let here_owner = self.owner_type_decl(id);
+                match field_owner {
+                    Some(fo) if Some(fo) != here_owner => {
+                        if let Some(o) = self.type_decl_name(fo) {
+                            self.printer.print(&o.replace('$', "_"));
+                            self.printer.print("::");
+                        } else {
+                            self.printer.print("Self::");
+                        }
+                    }
+                    _ => self.printer.print("Self::"),
+                }
             }
         }
+        // A nullable field read unwrapped in place would move the `Option` out
+        // of `&self`; clone it first. (`Option<Copy>` clones trivially, so this
+        // is unconditional for fields.)
+        let is_field = decl.map(|(_, r)| self.is_non_static_field_declaration(r)).unwrap_or(false);
         let s = self.to_snake_if_necessary(name);
         self.printer.print(&s);
         // A nullable value used where the plain value is expected gets unwrapped.
         if nullable && !self.expect_option {
-            self.printer.print(".unwrap()");
+            self.printer.print(if is_field { ".clone().unwrap()" } else { ".unwrap()" });
         }
         self.print_orphan_comments_ending(id);
     }
@@ -2568,7 +2713,10 @@ impl<'a> RustDumpVisitor<'a> {
                 Node::VariableDeclaratorId { name } => name.clone(),
                 _ => name.clone(),
             };
-            if self.id.is_changed(self.arena, &name, id) || self.mut_borrow_params.contains(&java_name)
+            // `is_changed` is keyed by the *Java* name (the change-tracker records
+            // the original identifier), not the snake-cased Rust name.
+            if self.id.is_changed(self.arena, &java_name, id)
+                || self.mut_borrow_params.contains(&java_name)
             {
                 self.printer.print("mut ");
             }
@@ -2599,11 +2747,23 @@ impl<'a> RustDumpVisitor<'a> {
             // Java allows `char c = 65;` (int->char); Rust needs an explicit cast.
             let char_from_int = self.is_char_type(arg)
                 && matches!(self.arena.kind(i), Node::IntegerLiteralExpr { .. });
+            // Java widens a narrower numeric to the declared type (`long x =
+            // intExpr`); Rust needs an explicit cast.
+            let widen = arg
+                .and_then(|t| self.rust_type_of(t))
+                .filter(|t| is_numeric_rust(t))
+                .filter(|t| {
+                    self.expr_num_type(i).map(|s| num_rank(&s) < num_rank(t)).unwrap_or(false)
+                });
             if nullable {
                 self.emit_into_option(i, arg);
             } else if char_from_int {
                 self.visit(i, arg);
                 self.printer.print(" as u8 as char");
+            } else if let Some(t) = widen {
+                self.printer.print("(");
+                self.visit(i, arg);
+                self.printer.print(&format!(") as {t}"));
             } else {
                 self.emit_moved_value(i, arg);
             }
@@ -2788,7 +2948,11 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         self.print_java_comment(id, arg);
-        self.visit(left, arg);
+        // Java promotes mixed-width numeric operands (`float * int` -> both
+        // `float`); Rust requires matching types. When both operand types are
+        // known and differ, cast the narrower to the wider — exactly Java's rule.
+        let (cast_l, cast_r) = self.numeric_promotion(op, left, right);
+        self.emit_operand(left, cast_l.as_deref(), arg);
         self.printer.print(" ");
         self.printer.print(match op {
             BinaryOp::Or => "||",
@@ -2812,7 +2976,109 @@ impl<'a> RustDumpVisitor<'a> {
             BinaryOp::Remainder => "%",
         });
         self.printer.print(" ");
-        self.visit(right, arg);
+        self.emit_operand(right, cast_r.as_deref(), arg);
+    }
+
+    /// Emit an operand, optionally cast to `cast` (`(<expr> as <cast>)`).
+    fn emit_operand(&mut self, e: NodeId, cast: Option<&str>, arg: Arg) {
+        match cast {
+            Some(t) => {
+                self.printer.print("(");
+                self.visit(e, arg);
+                self.printer.print(&format!(" as {t})"));
+            }
+            None => self.visit(e, arg),
+        }
+    }
+
+    /// For an arithmetic binary op, returns the cast (if any) each operand needs
+    /// so both share Java's promoted type. Casts only when *both* operand types
+    /// are known numerics — otherwise nothing (leaving the code unchanged).
+    fn numeric_promotion(
+        &self,
+        op: BinaryOp,
+        left: NodeId,
+        right: NodeId,
+    ) -> (Option<String>, Option<String>) {
+        use BinaryOp::*;
+        // Arithmetic and bitwise ops require matching operand types; shifts do
+        // not (the right operand is a count), so they are excluded.
+        if !matches!(op, Plus | Minus | Times | Divide | Remainder | BinOr | BinAnd | Xor) {
+            return (None, None);
+        }
+        let (Some(l), Some(r)) = (self.expr_num_type(left), self.expr_num_type(right)) else {
+            return (None, None);
+        };
+        if l == r {
+            return (None, None);
+        }
+        let t = if num_rank(&l) >= num_rank(&r) { l.clone() } else { r.clone() };
+        // A numeric literal needs no cast: Rust infers its type from context (and
+        // the literal-emission already floats int literals in float arithmetic).
+        let cast_l = (l != t && !self.is_numeric_literal(left)).then(|| t.clone());
+        let cast_r = (r != t && !self.is_numeric_literal(right)).then(|| t.clone());
+        (cast_l, cast_r)
+    }
+
+    fn is_numeric_literal(&self, e: NodeId) -> bool {
+        match self.arena.kind(e) {
+            Node::IntegerLiteralExpr { .. }
+            | Node::LongLiteralExpr { .. }
+            | Node::DoubleLiteralExpr { .. } => true,
+            Node::EnclosedExpr { inner: Some(i) } => self.is_numeric_literal(*i),
+            _ => false,
+        }
+    }
+
+    /// Best-effort numeric Rust type of an expression (`f64`/`f32`/`i64`/`i32`/
+    /// `i16`/`i8`), or `None` if not a determinable numeric.
+    fn expr_num_type(&self, e: NodeId) -> Option<String> {
+        let t = match self.arena.kind(e) {
+            Node::IntegerLiteralExpr { .. } => "i32".to_string(),
+            Node::LongLiteralExpr { .. } => "i64".to_string(),
+            Node::DoubleLiteralExpr { .. } => "f64".to_string(),
+            Node::EnclosedExpr { inner: Some(i) } => return self.expr_num_type(*i),
+            Node::UnaryExpr { expr, .. } => return self.expr_num_type(*expr),
+            Node::CastExpr { typ, .. } => self.rust_type_of(*typ)?,
+            // Shifts take the left operand's type; the right is a count.
+            Node::BinaryExpr { left, op, .. }
+                if matches!(
+                    op,
+                    BinaryOp::LShift | BinaryOp::RSignedShift | BinaryOp::RUnsignedShift
+                ) =>
+            {
+                self.expr_num_type(*left)?
+            }
+            // Arithmetic/bitwise: the promoted (wider) operand type.
+            Node::BinaryExpr { left, op, right }
+                if matches!(
+                    op,
+                    BinaryOp::Plus
+                        | BinaryOp::Minus
+                        | BinaryOp::Times
+                        | BinaryOp::Divide
+                        | BinaryOp::Remainder
+                        | BinaryOp::BinOr
+                        | BinaryOp::BinAnd
+                        | BinaryOp::Xor
+                ) =>
+            {
+                let l = self.expr_num_type(*left)?;
+                let r = self.expr_num_type(*right)?;
+                if num_rank(&l) >= num_rank(&r) { l } else { r }
+            }
+            Node::NameExpr { .. } | Node::FieldAccessExpr { .. } => self.assign_target_rust_type(e)?,
+            // A call to a project method whose numeric return type was recorded.
+            Node::MethodCallExpr { scope, name, args, .. } => {
+                let m = match scope {
+                    Some(_) => self.resolve_linked_callee(*scope, name, args.len()),
+                    None => self.resolve_self_callee(name, args.len()),
+                }?;
+                m.ret.clone()?
+            }
+            _ => return None,
+        };
+        matches!(t.as_str(), "f64" | "f32" | "i64" | "i32" | "i16" | "i8").then_some(t)
     }
 
     fn gen_string_expr_sequence(&self, id: NodeId, result: &mut Vec<NodeId>) {
@@ -3090,6 +3356,11 @@ impl<'a> RustDumpVisitor<'a> {
             Some(m) => {
                 self.printer.print(&m.rust);
                 self.print_arguments_linked(&args, &m.params, arg);
+                // A `throws` method returns `Result<_, String>`; unwrap to the
+                // value (before any nullable unwrap, which peels the inner Option).
+                if m.throws {
+                    self.printer.print(".unwrap()");
+                }
                 if m.ret_nullable && !self.expect_option {
                     self.printer.print(".unwrap()");
                 }
@@ -3098,7 +3369,25 @@ impl<'a> RustDumpVisitor<'a> {
                 self.record_missing_call(scope, &name, &args, id);
                 let s = self.call_emitted_name(scope, &name, args.len());
                 self.printer.print(&s);
-                self.print_arguments(&args, arg);
+                // Borrow arguments per the resolved sibling method's parameter
+                // signature (a bare self-call otherwise misses the param-aware
+                // path and passes owned values to `&`/`&mut` params).
+                let self_params = if scope.is_none() {
+                    self.resolve_self_callee(&name, args.len()).map(|m| m.params.clone())
+                } else {
+                    None
+                };
+                match self_params {
+                    Some(params) if !params.is_empty() => {
+                        self.print_arguments_linked(&args, &params, arg)
+                    }
+                    _ => self.print_arguments(&args, arg),
+                }
+                // A bare self-call to a `throws` method of the current type
+                // returns `Result<_, String>` -> unwrap to the value.
+                if scope.is_none() && self.id.has_throws_name(&name) {
+                    self.printer.print(".unwrap()");
+                }
                 // A call to a nullable-returning method used as a plain value is
                 // unwrapped.
                 if scope.is_none() && !self.expect_option && self.name_decl_nullable(&name, id) {
@@ -3343,9 +3632,10 @@ impl<'a> RustDumpVisitor<'a> {
                 let is_string = matches!(self.recv_type_name(recv).as_deref(), Some("String"));
                 self.visit(recv, arg);
                 if is_string {
-                    self.printer.print(".contains((");
-                    self.visit(args[0], arg);
-                    self.printer.print(").as_str())");
+                    // String.contains accepts a `&str` or a `char` pattern.
+                    self.printer.print(".contains(");
+                    self.emit_string_pattern(args[0], arg);
+                    self.printer.print(")");
                 } else {
                     self.printer.print(".contains(&(");
                     self.visit(args[0], arg);
@@ -3391,16 +3681,24 @@ impl<'a> RustDumpVisitor<'a> {
             }
             ("split", 1) => {
                 self.visit(recv, arg);
-                self.printer.print(".split((");
-                self.visit(args[0], arg);
-                self.printer.print(").as_str()).map(|x| x.to_string()).collect::<Vec<_>>()");
+                self.printer.print(".split(");
+                self.emit_string_pattern(args[0], arg);
+                self.printer.print(").map(|x| x.to_string()).collect::<Vec<_>>()");
                 true
             }
             ("indexOf", 1) => {
                 self.visit(recv, arg);
-                self.printer.print(".find((");
-                self.visit(args[0], arg);
-                self.printer.print(").as_str()).map(|i| i as i32).unwrap_or(-1)");
+                self.printer.print(".find(");
+                self.emit_string_pattern(args[0], arg);
+                self.printer.print(").map(|i| i as i32).unwrap_or(-1)");
+                true
+            }
+            ("lastIndexOf", 1) => {
+                // Byte index ~ char index for ASCII (the bioinformatics norm).
+                self.visit(recv, arg);
+                self.printer.print(".rfind(");
+                self.emit_string_pattern(args[0], arg);
+                self.printer.print(").map(|i| i as i32).unwrap_or(-1)");
                 true
             }
             ("containsKey", 1) => {
@@ -3552,13 +3850,45 @@ impl<'a> RustDumpVisitor<'a> {
         true
     }
 
-    /// `recv.<method>((arg).as_str())` — for String methods taking a &str.
+    /// `recv.<method>(&(arg)[..])` — for String methods taking a `&str`. The
+    /// `&(..)[..]` slice form coerces both a `String` and an existing `&str`
+    /// (e.g. a `&'static str` constant) to `&str`, where `.as_str()` would be
+    /// the unstable `str::as_str` on the latter.
     fn emit_str_arg(&mut self, recv: NodeId, method: &str, s: NodeId, arg: Arg) -> bool {
         self.visit(recv, arg);
-        self.printer.print(&format!(".{method}(("));
-        self.visit(s, arg);
-        self.printer.print(").as_str())");
+        self.printer.print(&format!(".{method}("));
+        self.emit_string_pattern(s, arg);
+        self.printer.print(")");
         true
+    }
+
+    /// Emit a string search/pattern argument: a `char` is a valid `Pattern` on
+    /// its own; anything else is coerced to `&str` via `&(..)[..]` (works for
+    /// both `String` and an existing `&str`).
+    fn emit_string_pattern(&mut self, s: NodeId, arg: Arg) {
+        if self.expr_is_char(s) {
+            self.printer.print("(");
+            self.visit(s, arg);
+            self.printer.print(")");
+        } else {
+            self.printer.print("&(");
+            self.visit(s, arg);
+            self.printer.print(")[..]");
+        }
+    }
+
+    /// Is `e` a `char`-typed expression (a char literal or a `char`-declared
+    /// name/field)?
+    fn expr_is_char(&self, e: NodeId) -> bool {
+        match self.arena.kind(e) {
+            Node::CharLiteralExpr { .. } => true,
+            Node::EnclosedExpr { inner: Some(i) } => self.expr_is_char(*i),
+            Node::NameExpr { name } => self.decl_java_type_name(name, e).as_deref() == Some("char"),
+            Node::FieldAccessExpr { field, .. } => {
+                self.decl_java_type_name(field, e).as_deref() == Some("char")
+            }
+            _ => false,
+        }
     }
 
     fn emit_recv_method(&mut self, recv: NodeId, method: &str, arg: Arg) -> bool {
@@ -3978,6 +4308,10 @@ impl<'a> RustDumpVisitor<'a> {
         };
         self.id.set_in_constructor(true);
         self.mut_borrow_params = self.collect_mut_borrow_params(block);
+        // Borrow inference also applies to constructor params (`&mut`/`mut`).
+        let borrow = crate::borrow::analyze_method(self.arena, self.id, id);
+        self.mut_borrow_params.extend(borrow.mut_params.iter().cloned());
+        self.reassigned_params = borrow.reassigned.clone();
         self.print_java_comment(id, arg);
         self.emit_provenance(&self.java_member_fqn(id, "<init>"));
         self.print_modifiers(modifiers_v);
@@ -4026,6 +4360,7 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print_ln_s("}");
         self.id.set_in_constructor(false);
         self.mut_borrow_params.clear();
+        self.reassigned_params.clear();
     }
 
     fn visit_method(&mut self, id: NodeId, arg: Arg) {
@@ -4040,6 +4375,17 @@ impl<'a> RustDumpVisitor<'a> {
         self.in_static_method = modifiers::is_static(modifiers_v);
         self.mut_borrow_params =
             body.map(|b| self.collect_mut_borrow_params(b)).unwrap_or_default();
+        // Borrow inference: reference params mutated through (`p.f = …`,
+        // `p.add(..)`) need `&mut`; a body that mutates `self` needs `&mut self`.
+        let borrow = crate::borrow::analyze_method(self.arena, self.id, id);
+        self.mut_borrow_params.extend(borrow.mut_params.iter().cloned());
+        self.reassigned_params = borrow.reassigned.clone();
+        // `&mut self` includes propagation through self-calls (a method calling a
+        // `&mut self` sibling on `self`), computed at class granularity.
+        self.method_recv_mut = self
+            .owner_type_decl(id)
+            .map(|cls| crate::borrow::class_mut_methods(self.arena, self.id, cls).contains(&name))
+            .unwrap_or(borrow.recv_mut);
         self.print_orphan_comments_before_this_child_node(id);
         self.print_java_comment(id, arg);
         self.emit_provenance(&self.java_member_fqn(id, &name));
@@ -4076,7 +4422,8 @@ impl<'a> RustDumpVisitor<'a> {
         self.print_type_parameters(&method_params, arg);
         self.printer.print("(");
         if !modifiers::is_static(modifiers_v) {
-            let needs_mut = body.map(|b| self.mutates_self(b)).unwrap_or(false);
+            let needs_mut =
+                self.method_recv_mut || body.map(|b| self.mutates_self(b)).unwrap_or(false);
             self.printer.print(if needs_mut { "&mut self" } else { "&self" });
             if !parameters.is_empty() {
                 self.printer.print(", ");
@@ -4135,6 +4482,7 @@ impl<'a> RustDumpVisitor<'a> {
         self.id.set_current_method(None);
         self.in_static_method = false;
         self.mut_borrow_params.clear();
+        self.reassigned_params.clear();
     }
 
     fn replace_throws(&mut self, throws: &[NodeId], arg: Arg, type_string: &str) {
@@ -4161,6 +4509,12 @@ impl<'a> RustDumpVisitor<'a> {
         };
         self.print_java_comment(id, arg);
         self.printer.print(" ");
+        // A parameter reassigned in the body needs a `mut` binding.
+        let reassigned = matches!(self.arena.kind(vid),
+            Node::VariableDeclaratorId { name } if self.reassigned_params.contains(name));
+        if reassigned {
+            self.printer.print("mut ");
+        }
         self.visit(vid, arg);
         self.printer.print(": ");
         let nullable = self.decl_nullable(vid);
@@ -4379,6 +4733,7 @@ impl<'a> RustDumpVisitor<'a> {
         // `a | b | c => { ... }`. A `default` label becomes `_`.
         let mut pending: Vec<NodeId> = Vec::new(); // accumulated case-label exprs
         let mut pending_default = false;
+        let mut had_default = false; // any `default` label seen across the switch
         for &e in &entries {
             let (label, stmts) = match self.arena.kind(e) {
                 Node::SwitchEntryStmt { label, stmts } => (*label, stmts.clone()),
@@ -4407,6 +4762,7 @@ impl<'a> RustDumpVisitor<'a> {
             }
             self.printer.unindent();
             self.printer.print_ln_s("}");
+            had_default |= pending_default;
             pending.clear();
             pending_default = false;
         }
@@ -4414,6 +4770,12 @@ impl<'a> RustDumpVisitor<'a> {
         if pending_default || !pending.is_empty() {
             self.emit_switch_patterns(&pending, pending_default, arg);
             self.printer.print_ln_s(" => {}");
+            had_default |= pending_default;
+        }
+        // Rust `match` must be exhaustive: a Java `switch` with no `default` over
+        // a non-enumerable selector (char/int/String) needs a catch-all arm.
+        if !had_default {
+            self.printer.print_ln_s("_ => {}");
         }
         self.switch_enum_path = saved_enum_path;
         self.printer.unindent();
@@ -5174,6 +5536,35 @@ pub fn map_type_name(name: &str) -> &str {
         // (see `replace_throws`), so an exception-typed value maps the same way.
         "Exception" | "Throwable" | "Error" | "RuntimeException" => "String",
         other => other,
+    }
+}
+
+/// A numeric Rust primitive the widening/promotion logic operates on.
+fn is_numeric_rust(t: &str) -> bool {
+    matches!(t, "f64" | "f32" | "i64" | "i32" | "i16" | "i8")
+}
+
+/// A scalar (Copy) Java type — a primitive or its boxed wrapper. Such values are
+/// passed/returned by value; everything else is a class/array (non-Copy).
+fn is_scalar_java_type(name: &str) -> bool {
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    matches!(
+        simple,
+        "int" | "long" | "short" | "byte" | "char" | "boolean" | "float" | "double"
+            | "Integer" | "Long" | "Short" | "Byte" | "Character" | "Boolean" | "Float" | "Double"
+    )
+}
+
+/// Java numeric-promotion rank: `double` > `float` > `long` > `int` > `short` >
+/// `byte`. Mixed arithmetic promotes both operands to the higher rank.
+fn num_rank(t: &str) -> u8 {
+    match t {
+        "f64" => 5,
+        "f32" => 4,
+        "i64" => 3,
+        "i32" => 2,
+        "i16" => 1,
+        _ => 0,
     }
 }
 

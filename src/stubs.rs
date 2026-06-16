@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::symbol_map::{SymbolMap, TypeSym};
+use crate::symbol_map::{MethodSym, SymbolMap, TypeSym};
 
 /// Placeholder type emitted where a Rust type could not be inferred.
 pub const UNKNOWN: &str = "Unknown";
@@ -57,7 +57,9 @@ pub struct StubType {
     pub fields: BTreeSet<String>,
     pub methods: BTreeMap<String, StubSig>,
     pub statics: BTreeMap<String, StubSig>,
-    pub ctor: Option<StubSig>,
+    /// Constructors keyed by arity — Java overloads by parameter count, which
+    /// Rust can't, so each arity becomes a distinct `new`/`new_<arity>` fn.
+    pub ctors: BTreeMap<usize, StubSig>,
 }
 
 #[derive(Default)]
@@ -105,9 +107,12 @@ impl StubCollector {
 
     pub fn add_ctor(&mut self, fqn: &str, rust_name: &str, sig: StubSig) {
         let t = self.type_entry(fqn, rust_name);
-        match &mut t.ctor {
+        let arity = sig.params.len();
+        match t.ctors.get_mut(&arity) {
             Some(existing) => keep_better(existing, sig),
-            None => t.ctor = Some(sig),
+            None => {
+                t.ctors.insert(arity, sig);
+            }
         }
     }
 
@@ -143,6 +148,13 @@ impl StubCollector {
                 format!("stub_{}", pkg.replace('.', "_"))
             };
             let rust_path = format!("crate::{module}::{}", t.rust_name);
+            // Expose the per-arity constructors so an object creation resolves to
+            // the right `new`/`new_<arity>` (see `resolve_ctor`).
+            let mut methods = BTreeMap::new();
+            for (i, (arity, _)) in t.ctors.iter().enumerate() {
+                let (rust, key) = ctor_names(i, *arity);
+                methods.insert(key, MethodSym { rust, ..Default::default() });
+            }
             let entry = TypeSym {
                 rust_path: rust_path.clone(),
                 kind: "struct".to_string(),
@@ -152,7 +164,7 @@ impl StubCollector {
                 generic_params: Vec::new(),
                 fields: Default::default(),
                 static_fields: Default::default(),
-                methods: Default::default(),
+                methods,
             };
             for fqn in &t.java_fqns {
                 map.types.insert(fqn.clone(), entry.clone());
@@ -177,7 +189,7 @@ impl StubCollector {
             for (m, sig) in t.statics {
                 self.add_method(&fqn, &t.rust_name, &m, sig, true);
             }
-            if let Some(c) = t.ctor {
+            for (_arity, c) in t.ctors {
                 self.add_ctor(&fqn, &t.rust_name, c);
             }
             for f in t.fields {
@@ -251,6 +263,17 @@ fn file_header() -> String {
         .to_string()
 }
 
+/// The `(rust-name, symbol-map-key)` for the `idx`-th constructor (in ascending
+/// arity): the lowest arity is the base `new`; others are `new_<arity>`, keyed
+/// `new#<arity>` so a caller resolves the right overload by argument count.
+fn ctor_names(idx: usize, arity: usize) -> (String, String) {
+    if idx == 0 {
+        ("new".to_string(), "new".to_string())
+    } else {
+        (format!("new_{arity}"), format!("new#{arity}"))
+    }
+}
+
 fn render_type(t: &StubType) -> String {
     let mut s = String::new();
     for fqn in &t.java_fqns {
@@ -266,11 +289,12 @@ fn render_type(t: &StubType) -> String {
         }
         s.push_str("}\n");
     }
-    let has_impl = t.ctor.is_some() || !t.methods.is_empty() || !t.statics.is_empty();
+    let has_impl = !t.ctors.is_empty() || !t.methods.is_empty() || !t.statics.is_empty();
     if has_impl {
         s.push_str(&format!("impl {} {{\n", t.rust_name));
-        if let Some(c) = &t.ctor {
-            s.push_str(&format!("    {}\n", render_fn("new", c, Some(&t.rust_name))));
+        for (i, (arity, c)) in t.ctors.iter().enumerate() {
+            let (rust, _) = ctor_names(i, *arity);
+            s.push_str(&format!("    {}\n", render_fn(&rust, c, Some(&t.rust_name))));
         }
         for (name, sig) in &t.statics {
             s.push_str(&format!("    {}\n", render_fn(name, sig, None)));

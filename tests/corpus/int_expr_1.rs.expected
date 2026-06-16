@@ -7,9 +7,9 @@ impl A {
 
     /// @java A#m
     pub fn m(&self)   {
-         let mut test: f64 = 1;
+         let mut test: f64 = (1) as f64;
         test = 10.0 * 1.5;
-         let x: f32 = 10;
+         let x: f32 = (10) as f32;
     }
 
 

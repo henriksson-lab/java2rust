@@ -289,6 +289,9 @@ fn process_method(
         receiver: receiver.to_string(),
         ret: if is_ctor { Some(simple_rust_name(fqn)) } else { ret },
         ret_nullable,
+        // External (already-compiled) dep methods are real Rust signatures, not
+        // our `throws`->`Result` translation, so they are never auto-unwrapped.
+        throws: false,
         params,
     };
 

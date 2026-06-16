@@ -5,6 +5,7 @@
 
 pub mod adapter;
 pub mod ast;
+pub mod borrow;
 pub mod crate_layout;
 pub mod dump;
 pub mod id_tracker;
