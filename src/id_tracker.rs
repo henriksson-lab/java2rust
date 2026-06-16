@@ -525,6 +525,8 @@ pub fn is_mutating_method(name: &str) -> bool {
         name,
         "add" | "addAll" | "set" | "put" | "putAll" | "remove" | "removeAll" | "removeIf"
             | "clear" | "push" | "pop" | "insert" | "sort" | "append" | "addFirst" | "addLast"
+            // An iterator/cursor advances on next/previous (`&mut self`).
+            | "next" | "previous"
     )
 }
 

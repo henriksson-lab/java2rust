@@ -673,9 +673,54 @@ fn read_trait_sigs(file: &Path, trait_name: &str) -> Vec<(String, String, Vec<St
 
 // ---- post-pass: module tree + Cargo.toml ----
 
+/// The `java_runtime` module source: a `JavaIter<T>` shim mirroring
+/// `java.util.Iterator`/`ListIterator` (forward + backward reads).
+const JAVA_RUNTIME: &str = "\
+//! java2rust runtime support.
+#![allow(dead_code)]
+
+/// A Java external iterator over a snapshot of a collection.
+pub struct JavaIter<T> {
+    items: Vec<T>,
+    pos: usize,
+}
+
+impl<T: Clone> JavaIter<T> {
+    pub fn new<I: IntoIterator<Item = T>>(src: I) -> Self {
+        JavaIter { items: src.into_iter().collect(), pos: 0 }
+    }
+    pub fn has_next(&self) -> bool {
+        self.pos < self.items.len()
+    }
+    pub fn next(&mut self) -> Option<T> {
+        let v = self.items.get(self.pos).cloned();
+        if v.is_some() {
+            self.pos += 1;
+        }
+        v
+    }
+    pub fn has_previous(&self) -> bool {
+        self.pos > 0
+    }
+    pub fn previous(&mut self) -> Option<T> {
+        if self.pos > 0 {
+            self.pos -= 1;
+            self.items.get(self.pos).cloned()
+        } else {
+            None
+        }
+    }
+}
+";
+
 /// Generate the `mod` tree (`lib.rs` at the root, `mod.rs` in each subdir) and a
 /// `Cargo.toml`, turning the emitted files into one crate rooted at `out_root`.
 pub fn finish_crate(out_root: &Path) -> std::io::Result<()> {
+    // Runtime support: a Java-shaped external iterator (`Iterator`/`ListIterator`
+    // map to this). It owns a snapshot of the collection so reads never conflict
+    // with the source; `next`/`previous` return `Option<T>` so the nullable
+    // machinery can unwrap in raw contexts and keep `Option` in `?:`/null ones.
+    std::fs::write(out_root.join("java_runtime.rs"), JAVA_RUNTIME)?;
     gen_mod_file(out_root, true)?;
     let name = out_root
         .file_name()

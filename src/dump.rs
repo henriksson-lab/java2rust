@@ -3558,6 +3558,32 @@ impl<'a> RustDumpVisitor<'a> {
             return false;
         }
         match (name, args.len()) {
+            // `collection.iterator()`/`listIterator()` -> a `JavaIter` over a
+            // snapshot. `has_next()`/`has_previous()` then resolve by default
+            // emission (snake-cased); `next()`/`previous()` are handled below.
+            ("iterator", 0) | ("listIterator", 0) => {
+                self.printer.print("crate::java_runtime::JavaIter::new((");
+                self.visit(recv, arg);
+                self.printer.print(").iter().cloned())");
+                true
+            }
+            // `it.next()`/`it.previous()` on a `JavaIter` return `Option<T>`;
+            // unwrap in a plain-value context, keep the `Option` in an
+            // `expect_option` one (a `?:`/null-compared slot). Gated on the
+            // receiver's declared type so a user cursor's `next()` is untouched.
+            ("next", 0) | ("previous", 0)
+                if matches!(
+                    self.recv_type_name(recv).as_deref(),
+                    Some("Iterator" | "ListIterator")
+                ) =>
+            {
+                self.visit(recv, arg);
+                self.printer.print(if name == "next" { ".next()" } else { ".previous()" });
+                if !self.expect_option {
+                    self.printer.print(".unwrap()");
+                }
+                true
+            }
             ("size", 0) | ("length", 0) => {
                 self.printer.print("(");
                 self.visit(recv, arg);
@@ -5543,6 +5569,9 @@ pub fn map_type_name(name: &str) -> &str {
         | "AbstractMap" => "std::collections::HashMap",
         "Set" | "HashSet" | "LinkedHashSet" | "TreeSet" | "SortedSet" | "NavigableSet"
         | "AbstractSet" => "std::collections::HashSet",
+        // Java's external iterators map to a runtime shim with Java-shaped
+        // `has_next()`/`next()`/`has_previous()`/`previous()` methods.
+        "Iterator" | "ListIterator" => "crate::java_runtime::JavaIter",
         "Optional" => "Option",
         "Integer" => "i32",
         "Long" => "i64",
