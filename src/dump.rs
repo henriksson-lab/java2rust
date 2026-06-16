@@ -3006,6 +3006,16 @@ impl<'a> RustDumpVisitor<'a> {
         if !matches!(op, Plus | Minus | Times | Divide | Remainder | BinOr | BinAnd | Xor) {
             return (None, None);
         }
+        // Java promotes `char` to `int` in arithmetic (`ch - 'A'`); Rust has no
+        // char arithmetic, so cast each char operand to `i32`.
+        let l_char = self.expr_is_char(left);
+        let r_char = self.expr_is_char(right);
+        if l_char || r_char {
+            return (
+                l_char.then(|| "i32".to_string()),
+                r_char.then(|| "i32".to_string()),
+            );
+        }
         let (Some(l), Some(r)) = (self.expr_num_type(left), self.expr_num_type(right)) else {
             return (None, None);
         };
@@ -3325,9 +3335,24 @@ impl<'a> RustDumpVisitor<'a> {
                 match self.arena.kind(right) {
                     Node::MethodDeclaration { modifiers: m, .. } => {
                         if modifiers::is_static(*m) || self.in_static_method {
-                            // A static method of the current type: `Self::name`,
-                            // never a bare `::name` (an invalid crate-root path).
-                            self.printer.print("Self::");
+                            // A static method: `Self::name` for the current type,
+                            // but `Outer::name` when an inner class calls an
+                            // enclosing class's static (mirrors the static-field
+                            // qualification in `visit_name_expr`).
+                            let owner = self.owner_type_decl(right);
+                            let here = self.owner_type_decl(id);
+                            match owner {
+                                Some(o) if Some(o) != here => {
+                                    match self.type_decl_name(o) {
+                                        Some(n) => {
+                                            self.printer.print(&n.replace('$', "_"));
+                                            self.printer.print("::");
+                                        }
+                                        None => self.printer.print("Self::"),
+                                    }
+                                }
+                                _ => self.printer.print("Self::"),
+                            }
                         } else {
                             self.printer.print(recv);
                         }
