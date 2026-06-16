@@ -523,7 +523,8 @@ impl<'a> IdVisitor<'a> {
 pub fn is_mutating_method(name: &str) -> bool {
     matches!(
         name,
-        "add" | "addAll" | "set" | "put" | "putAll" | "remove" | "removeAll" | "removeIf"
+        "add" | "addAll" | "set" | "put" | "putAll" | "putIfAbsent" | "computeIfAbsent"
+            | "merge" | "remove" | "removeAll" | "removeIf" | "retainAll"
             | "clear" | "push" | "pop" | "insert" | "sort" | "append" | "addFirst" | "addLast"
             // An iterator/cursor advances on next/previous (`&mut self`).
             | "next" | "previous"

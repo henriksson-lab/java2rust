@@ -9,13 +9,17 @@ impl X {
 }
 
 /// @java X.A
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum A {
+    #[default]
     AA,
 }
 
 
 /// @java X.B
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum B {
+    #[default]
     BB,
 }
 

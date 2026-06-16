@@ -516,6 +516,14 @@ fn rust_numeric_of_type(arena: &Arena, t: NodeId) -> Option<String> {
             .to_string(),
         ),
         Node::ReferenceType { typ, array_count: 0 } => rust_numeric_of_type(arena, *typ),
+        // A `char[]` return, recorded so the dumper's `expr_is_char_vec` routes
+        // string append/concat of the result to `.iter().collect::<String>()`.
+        // Inert in numeric contexts (`expr_num_type` filters to scalar numerics).
+        Node::ReferenceType { typ, array_count: 1 }
+            if matches!(arena.kind(*typ), Node::PrimitiveType { kind: Char }) =>
+        {
+            Some("Vec<char>".to_string())
+        }
         _ => None,
     }
 }
@@ -548,8 +556,13 @@ fn param_sym(
     let is_primitive = typ
         .map(|t| matches!(arena.kind(t), Node::PrimitiveType { .. }))
         .unwrap_or(false);
+    // Record the param's numeric Rust type so call sites widen a numeric arg to
+    // it (`align(o: f32)` called with an `int` -> `(o) as f32`). Only numeric
+    // types are recorded — `emit_numeric_arg` ignores non-numeric `rust_type`,
+    // so a blank for class/String params keeps the prior behaviour.
+    let rust_type = typ.and_then(|t| rust_numeric_of_type(arena, t)).unwrap_or_default();
     ParamSym {
-        rust_type: String::new(),
+        rust_type,
         by_ref: !is_var_args && !is_nullable && !is_primitive,
         mutable: false,
         nullable: is_nullable,

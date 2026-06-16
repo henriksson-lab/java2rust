@@ -291,8 +291,20 @@ fn file_header() -> String {
      //! bodies and replace `Unknown` placeholders, or translate the real\n\
      //! dependency, run `gen-symbols` on it, and `--link` its map instead.\n\
      #![allow(dead_code, unused_variables, non_snake_case)]\n\n\
-     /// Placeholder for a type that could not be inferred.\n\
-     pub type Unknown = ();\n\n"
+     /// Placeholder for a type that could not be inferred. A real struct (not a\n\
+     /// `()` alias) so it can implement the traits stubbed values are used with\n\
+     /// (`Display` in `format!`, `Hash`/`Eq`/`Ord` as map keys, etc.).\n\
+     #[derive(Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]\n\
+     pub struct Unknown;\n\
+     impl std::fmt::Display for Unknown {\n\
+         fn fmt(&self, _f: &mut std::fmt::Formatter) -> std::fmt::Result { Ok(()) }\n\
+     }\n\
+     // A stubbed iterable/stream resolves to `Unknown`; a degenerate empty\n\
+     // iterator lets `for x in unknown {}` and `unknown.collect()` compile.\n\
+     impl Iterator for Unknown {\n\
+         type Item = Unknown;\n\
+         fn next(&mut self) -> Option<Unknown> { None }\n\
+     }\n\n"
         .to_string()
 }
 
@@ -312,7 +324,11 @@ fn render_type(t: &StubType, paths: &BTreeMap<String, String>) -> String {
     for fqn in &t.java_fqns {
         s.push_str(&format!("/// @java {fqn}\n"));
     }
-    s.push_str("#[derive(Clone, Default)]\n");
+    // Every stub field is typed `Unknown` (which derives all of these), so a
+    // stub can always satisfy `Eq`/`Hash`/`Ord` — needed when a stubbed value is
+    // a `HashMap`/`BTreeMap` key or compared with `==` (common for external
+    // enum-like constants).
+    s.push_str("#[derive(Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]\n");
     if t.fields.is_empty() {
         s.push_str(&format!("pub struct {} {{}}\n", t.rust_name));
     } else {
@@ -329,7 +345,7 @@ fn render_type(t: &StubType, paths: &BTreeMap<String, String>) -> String {
     if has_impl {
         s.push_str(&format!("impl {} {{\n", t.rust_name));
         for c in &t.static_consts {
-            s.push_str(&format!("    pub const {c}: Unknown = ();\n"));
+            s.push_str(&format!("    pub const {c}: Unknown = Unknown;\n"));
         }
         for (i, (arity, c)) in t.ctors.iter().enumerate() {
             let (rust, _) = ctor_names(i, *arity);
@@ -377,7 +393,14 @@ fn render_fn(
     // The constructor returns the stub's own (same-file) type. A method return is
     // kept only when it's resolvable here (a primitive/std type or `Unknown`);
     // any other name would be a cross-file stub reference, so drop it.
-    let ret = match ctor_ret {
+    // `BufferedReader.readLine()` is the canonical nullable JDK reader method;
+    // force its stub return to `Option<String>` so the read-loop lowering
+    // `while let Some(line) = rdr.read_line()` typechecks (see
+    // `as_readline_assign`).
+    let ret = if ctor_ret.is_none() && name == "read_line" && sig.params.is_empty() {
+        " -> Option<String>".to_string()
+    } else {
+        match ctor_ret {
         Some(t) => format!(" -> {t}"),
         None => match sig.ret.as_deref() {
             // A bare name that's another stub type -> its crate path (resolves
@@ -387,11 +410,14 @@ fn render_fn(
                 if stub_ret_renderable(resolved) {
                     format!(" -> {resolved}")
                 } else {
-                    String::new()
+                    " -> Unknown".to_string()
                 }
             }
-            None => String::new(),
+            // No inferred return -> `Unknown` (a real type implementing Display/
+            // Hash/etc.), so a stubbed result used in `format!`/as a key compiles.
+            None => " -> Unknown".to_string(),
         },
+        }
     };
     format!("pub fn {name}{generics}({}){ret} {{ unimplemented!() }}", parts.join(", "))
 }

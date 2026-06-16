@@ -1030,7 +1030,11 @@ impl<'a> RustDumpVisitor<'a> {
                     }
                 }
                 Some(p) if p.nullable => self.emit_into_option(e, arg),
-                Some(_) => self.emit_moved_value(e, arg),
+                // A by-value (scalar) param: widen a numeric arg to the param's
+                // type — Java auto-widens `int`->`float`/`long` at the call
+                // boundary, Rust does not. Non-numeric params fall through to a
+                // plain moved value.
+                Some(p) => self.emit_numeric_arg(e, &p.rust_type, arg),
                 None => self.print_one_default_argument(e, arg),
             }
             if i + 1 < args.len() {
@@ -1079,6 +1083,9 @@ impl<'a> RustDumpVisitor<'a> {
         match self.arena.kind(e) {
             Node::NullLiteralExpr => true,
             Node::NameExpr { name } => self.name_decl_nullable(name, e),
+            // `readLine()` yields `Option<String>` (its stub/shim is nullable);
+            // mark it so an `Option`-target assignment isn't double-wrapped.
+            Node::MethodCallExpr { name, args, .. } if name == "readLine" && args.is_empty() => true,
             Node::MethodCallExpr { scope: None, name, .. } => self.name_decl_nullable(name, e),
             Node::EnclosedExpr { inner: Some(i) } => self.expr_nullable(*i),
             Node::CastExpr { expr, .. } => self.expr_nullable(*expr),
@@ -1094,6 +1101,12 @@ impl<'a> RustDumpVisitor<'a> {
     fn is_non_copy_name(&self, e: NodeId) -> bool {
         if let Node::NameExpr { name } = self.arena.kind(e) {
             if let Some((td, _)) = self.id.find_declaration_node_for(self.arena, name, e) {
+                // An array maps to a `Vec` (non-Copy) even when its *element* is
+                // primitive (`char[]`'s descriptor reports `char`, which is
+                // Copy) — reading it out of a borrow still needs `.clone()`.
+                if self.decl_is_array(name, e) {
+                    return true;
+                }
                 if let Some(td) = td {
                     return !td.is_primitive;
                 }
@@ -1669,9 +1682,11 @@ impl<'a> RustDumpVisitor<'a> {
                 let (is_this, args) = (is_this, args.clone());
                 if is_this {
                     // Delegating constructor `this(args)` -> rebuild via the
-                    // matching `Self::new*`.
+                    // matching `Self::new*`. `__self` is a value (`let mut
+                    // __self: T = …`), not a pointer — reassign it directly (a
+                    // `*__self` deref is E0614).
                     let nm = self.call_emitted_name(None, "new", args.len());
-                    self.printer.print(&format!("*__self = Self::{nm}"));
+                    self.printer.print(&format!("__self = Self::{nm}"));
                     self.print_arguments(&args, arg);
                     self.printer.print(";");
                 } else if let Some(p) = self.current_parent_rust_path() {
@@ -1779,9 +1794,17 @@ impl<'a> RustDumpVisitor<'a> {
             IfStmt { .. } => self.visit_if(id, arg),
             WhileStmt { condition, body } => {
                 self.print_java_comment(id, arg);
-                self.printer.print("while ");
-                self.visit(condition, arg);
-                self.printer.print(" ");
+                // `while ((line = in.readLine()) != null)` -> `while let
+                // Some(mut line) = in.read_line()` (read_line yields Option).
+                if let Some((nm, value)) = self.as_readline_assign(condition) {
+                    self.printer.print(&format!("while let Some(mut {nm}) = "));
+                    self.visit(value, arg);
+                    self.printer.print(" ");
+                } else {
+                    self.printer.print("while ");
+                    self.visit(condition, arg);
+                    self.printer.print(" ");
+                }
                 self.encapsulate_if_not_block(body, arg);
             }
             ContinueStmt { id: lbl } => {
@@ -2012,15 +2035,15 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
-        // A nullable field read unwrapped in place would move the `Option` out
-        // of `&self`; clone it first. (`Option<Copy>` clones trivially, so this
-        // is unconditional for fields.)
-        let is_field = decl.map(|(_, r)| self.is_non_static_field_declaration(r)).unwrap_or(false);
+        // A nullable read unwrapped in place would move the `Option` out of its
+        // borrow (`&self` for a field, `&Option<T>` for a by-ref param); clone it
+        // first. A param read multiple times (`p.unwrap().a(); p.unwrap().b()`)
+        // also needs the clone. (`Option<Copy>` clones trivially.)
         let s = self.to_snake_if_necessary(name);
         self.printer.print(&s);
         // A nullable value used where the plain value is expected gets unwrapped.
         if nullable && !self.expect_option {
-            self.printer.print(if is_field { ".clone().unwrap()" } else { ".unwrap()" });
+            self.printer.print(".clone().unwrap()");
         }
         self.print_orphan_comments_ending(id);
     }
@@ -2169,10 +2192,34 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
 
+        // An own type param used by no field (nor the `extends` type) would be
+        // E0392 ("never used") and, via `#[derive(Clone, Default)]`, force an
+        // `O: Clone`/`O: Default` bound the using code can't satisfy. Phantom such
+        // params AND emit manual (unbounded) `Clone`/`Default` impls instead.
+        let phantom_params: Vec<NodeId> = {
+            let mut v = extra_params.clone();
+            for &p in &type_parameters {
+                let n = self.type_param_name(p).unwrap_or_default();
+                let used = members.iter().any(|&m| {
+                    matches!(self.arena.kind(m), Node::FieldDeclaration { modifiers, .. } if !modifiers::is_static(*modifiers))
+                        && self.subtree_uses_type(m, &n)
+                }) || extends.first().map(|&e| self.subtree_uses_type(e, &n)).unwrap_or(false);
+                if !used {
+                    v.push(p);
+                }
+            }
+            v
+        };
+        let manual_impls = phantom_params.len() > extra_params.len();
+
         // ---- struct ----
         // Clone: so field values can be cloned out from behind `&self`.
         // Default: so generated `new(...) -> Self` can start from a default value.
-        self.printer.print_ln_s("#[derive(Clone, Default)]");
+        // (A struct with an unused own type param uses manual impls instead — a
+        // derive would bound that param `Clone + Default` spuriously.)
+        if !manual_impls {
+            self.printer.print_ln_s("#[derive(Clone, Default)]");
+        }
         self.print_modifiers(modifiers_v);
         self.printer.print("struct ");
         self.printer.print(&name);
@@ -2223,10 +2270,11 @@ impl<'a> RustDumpVisitor<'a> {
         if let Some(p) = &parent_rust {
             self.printer.print_ln_s(&format!("pub base: {p},"));
         }
-        // Carried outer type params must appear in a field (E0392) — `PhantomData`.
-        if !extra_params.is_empty() {
+        // Carried outer type params + unused own params must appear in a field
+        // (E0392) — `PhantomData`.
+        if !phantom_params.is_empty() {
             let names: Vec<String> =
-                extra_params.iter().filter_map(|&p| self.type_param_name(p)).collect();
+                phantom_params.iter().filter_map(|&p| self.type_param_name(p)).collect();
             let inner =
                 if names.len() == 1 { names[0].clone() } else { format!("({})", names.join(", ")) };
             self.printer.print_ln_s(&format!("pub __phantom: std::marker::PhantomData<{inner}>,"));
@@ -2258,6 +2306,57 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.unindent();
         self.printer.print_ln_s("}");
+        // Manual (unbounded) `Default`/`Clone` for a struct with an unused own
+        // type param — replaces the derive, which would bound that param.
+        if manual_impls {
+            let mut field_names: Vec<String> = Vec::new();
+            if parent_rust.is_some() {
+                field_names.push("base".to_string());
+            }
+            if !phantom_params.is_empty() {
+                field_names.push("__phantom".to_string());
+            }
+            if self.enclosing_class_fqn.as_deref().and_then(|f| self.link.lookup(f)).is_some() {
+                field_names.push("__outer".to_string());
+            }
+            for &m in &members {
+                if let Node::FieldDeclaration { modifiers, variables, .. } = self.arena.kind(m) {
+                    if !modifiers::is_static(*modifiers) {
+                        for &var in variables {
+                            field_names.push(self.field_var_name(var));
+                        }
+                    }
+                }
+            }
+            let field_init = |f: &str, src: &str| {
+                if f == "__phantom" {
+                    format!("            {f}: std::marker::PhantomData,")
+                } else {
+                    format!("            {f}: {src},")
+                }
+            };
+            for (trait_name, body) in [("Default", "Default::default()"), ("Clone", "")] {
+                self.printer.print("impl");
+                self.print_type_parameters(&combined, arg);
+                self.printer.print(&format!(" {trait_name} for {name}"));
+                self.print_type_param_names(&combined);
+                self.printer.print_ln_s(" {");
+                if trait_name == "Default" {
+                    self.printer.print_ln_s("    fn default() -> Self {");
+                } else {
+                    self.printer.print_ln_s("    fn clone(&self) -> Self {");
+                }
+                self.printer.print_ln_s("        Self {");
+                for f in &field_names {
+                    let src =
+                        if body.is_empty() { format!("self.{f}.clone()") } else { body.to_string() };
+                    self.printer.print_ln_s(&field_init(f, &src));
+                }
+                self.printer.print_ln_s("        }");
+                self.printer.print_ln_s("    }");
+                self.printer.print_ln_s("}");
+            }
+        }
         // `Deref`/`DerefMut` to the base so inherited methods dispatch and
         // overrides (inherent items) shadow them.
         if let Some(p) = &parent_rust {
@@ -2861,9 +2960,11 @@ impl<'a> RustDumpVisitor<'a> {
         };
         self.print_java_comment(id, arg);
         // A plain Vec literal; the binding's type is emitted by the declarator.
+        // Elements are owned, so a non-Copy name/field read is cloned out of its
+        // borrow (`vec![chrom1, chrom2]` where the elements are `&String`).
         self.printer.print("vec![");
         for &val in &values {
-            self.visit(val, None);
+            self.emit_moved_value(val, None);
             self.printer.print(", ");
         }
         self.printer.print("]");
@@ -2899,7 +3000,15 @@ impl<'a> RustDumpVisitor<'a> {
             // `new T[n]` -> `vec![<default>; (n) as usize]`, nested for `[a][b]`.
             let ty = self.accept_and_cut(typ, arg);
             let ty = ty.trim().to_string();
-            let default = self.default_value(&ty);
+            // `new T[n]` zero-fills. For a non-primitive element the right
+            // default depends on the Rust representation (`Option`-wrapped or
+            // not), so emit `Default::default()` — it is `None` for an
+            // `Option<T>` element and the derived default otherwise, both
+            // correct, where a bare `None` only fits the nullable case.
+            let default = match self.default_value(&ty).as_str() {
+                "None" => "Default::default()".to_string(),
+                d => d.to_string(),
+            };
             let mut s = default;
             for &d in dimensions.iter().rev() {
                 let dim = self.accept_and_cut(d, arg);
@@ -3010,6 +3119,63 @@ impl<'a> RustDumpVisitor<'a> {
             Node::MethodCallExpr { name, args, .. } => name == "getClass" && args.is_empty(),
             Node::EnclosedExpr { inner: Some(i) } => self.is_get_class_call(*i),
             _ => false,
+        }
+    }
+
+    /// Recognize the Java read-loop idiom `(name = recv.readLine()) != null` as a
+    /// `while`/`if` condition. Returns the assigned variable's snake-cased name
+    /// and the `readLine()` call node, so the loop can lower to
+    /// `while let Some(mut name) = recv.read_line()`. Gated to `readLine` (whose
+    /// stub return is overridden to `Option<String>`) — a different call would
+    /// not typecheck under `while let Some`. The whole condition must be the
+    /// comparison (a `&&` conjunct is a different `BinaryExpr` and is excluded).
+    fn as_readline_assign(&self, cond: NodeId) -> Option<(String, NodeId)> {
+        let cond = match self.arena.kind(cond) {
+            Node::EnclosedExpr { inner: Some(i) } => *i,
+            _ => cond,
+        };
+        let Node::BinaryExpr { left, op, right } = self.arena.kind(cond) else {
+            return None;
+        };
+        if !matches!(op, BinaryOp::NotEquals) {
+            return None;
+        }
+        let (left, right) = (*left, *right);
+        let l_null = matches!(self.arena.kind(left), Node::NullLiteralExpr);
+        let r_null = matches!(self.arena.kind(right), Node::NullLiteralExpr);
+        if l_null == r_null {
+            return None;
+        }
+        let assign = if l_null { right } else { left };
+        let assign = match self.arena.kind(assign) {
+            Node::EnclosedExpr { inner: Some(i) } => *i,
+            _ => assign,
+        };
+        let Node::AssignExpr { target, op, value } = self.arena.kind(assign) else {
+            return None;
+        };
+        if !matches!(op, AssignOp::Assign) {
+            return None;
+        }
+        let Node::NameExpr { name } = self.arena.kind(*target) else {
+            return None;
+        };
+        let Node::MethodCallExpr { name: m, args, .. } = self.arena.kind(*value) else {
+            return None;
+        };
+        if m != "readLine" || !args.is_empty() {
+            return None;
+        }
+        Some((self.to_snake_if_necessary(name), *value))
+    }
+
+    /// The type node of a `Foo.class` (`ClassExpr`) scope, seeing through
+    /// parentheses, else `None`.
+    fn class_expr_type(&self, n: NodeId) -> Option<NodeId> {
+        match self.arena.kind(n) {
+            Node::ClassExpr { typ } => Some(*typ),
+            Node::EnclosedExpr { inner: Some(i) } => self.class_expr_type(*i),
+            _ => None,
         }
     }
 
@@ -3130,10 +3296,23 @@ impl<'a> RustDumpVisitor<'a> {
             return (None, None);
         }
         let t = if num_rank(&l) >= num_rank(&r) { l.clone() } else { r.clone() };
-        // A numeric literal needs no cast: Rust infers its type from context (and
-        // the literal-emission already floats int literals in float arithmetic).
-        let cast_l = (l != t && !self.is_numeric_literal(left)).then(|| t.clone());
-        let cast_r = (r != t && !self.is_numeric_literal(right)).then(|| t.clone());
+        let t_is_float = t.starts_with('f');
+        // A numeric literal usually needs no cast (Rust infers its type from
+        // context). EXCEPTION: an integer literal promoted to a float type that
+        // the float-literal emission won't already float (`is_float_in_history`)
+        // — e.g. `f32_arr[i][j] > 0`, where the sibling's float-ness isn't
+        // tracked — needs an explicit `(0) as f32`.
+        let needs_cast = |me: &Self, side: NodeId, side_ty: &str| -> bool {
+            if side_ty == t {
+                return false;
+            }
+            if !me.is_numeric_literal(side) {
+                return true;
+            }
+            t_is_float && me.is_integer_literal(side) && !me.is_float_in_history(Some(side))
+        };
+        let cast_l = needs_cast(self, left, &l).then(|| t.clone());
+        let cast_r = needs_cast(self, right, &r).then(|| t.clone());
         (cast_l, cast_r)
     }
 
@@ -3147,6 +3326,30 @@ impl<'a> RustDumpVisitor<'a> {
         }
     }
 
+    /// An *integer* literal (`5`/`5L`), excluding float literals. Used to decide
+    /// when a literal operand still needs a cast: an int literal promoted to a
+    /// float type can't be inferred by Rust (`f32_expr > 0` needs `0 as f32`).
+    fn is_integer_literal(&self, e: NodeId) -> bool {
+        match self.arena.kind(e) {
+            Node::IntegerLiteralExpr { .. } | Node::LongLiteralExpr { .. } => true,
+            Node::EnclosedExpr { inner: Some(i) } => self.is_integer_literal(*i),
+            _ => false,
+        }
+    }
+
+    /// The Rust element type of an array-access expression, recursing through
+    /// nested dimensions (`Vec<Vec<T>>` indexed twice -> `T`).
+    fn array_access_rust_type(&self, e: NodeId) -> Option<String> {
+        let Node::ArrayAccessExpr { name, .. } = self.arena.kind(e) else {
+            return None;
+        };
+        let base = match self.arena.kind(*name) {
+            Node::ArrayAccessExpr { .. } => self.array_access_rust_type(*name)?,
+            _ => self.assign_target_rust_type(*name)?,
+        };
+        base.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')).map(str::to_string)
+    }
+
     /// If a numeric `value` must be coerced to a known numeric `target_ty` (both
     /// known and *different*, and `value` isn't a bare literal Rust would infer),
     /// return the target type to cast to. Mirrors the declarator-widening guards.
@@ -3154,6 +3357,23 @@ impl<'a> RustDumpVisitor<'a> {
         let t = target_ty.filter(|t| is_numeric_rust(t))?;
         let s = self.expr_num_type(value)?;
         (s != t && !self.is_numeric_literal(value)).then_some(t)
+    }
+
+    /// Emit a call argument, casting a numeric value to the param's numeric type
+    /// when they differ. Unlike [`Self::numeric_coercion`] this does *not* skip
+    /// literals: `f(10)` for an `f32` param needs `(10) as f32` (Rust won't infer
+    /// an integer literal as a float across a call boundary). Non-numeric params
+    /// emit a plain moved value.
+    fn emit_numeric_arg(&mut self, value: NodeId, target_ty: &str, arg: Arg) {
+        let cast = is_numeric_rust(target_ty)
+            && self.expr_num_type(value).is_some_and(|s| s != target_ty);
+        if cast {
+            self.printer.print("(");
+            self.visit(value, arg);
+            self.printer.print(&format!(") as {target_ty}"));
+        } else {
+            self.emit_moved_value(value, arg);
+        }
     }
 
     /// Emit `value`, cast to `target_ty` if numeric coercion is needed, else as a
@@ -3207,18 +3427,32 @@ impl<'a> RustDumpVisitor<'a> {
                 if num_rank(&l) >= num_rank(&r) { l } else { r }
             }
             Node::NameExpr { .. } | Node::FieldAccessExpr { .. } => self.assign_target_rust_type(e)?,
-            // An array element read: the base array's element type (`Vec<T>` -> T).
-            Node::ArrayAccessExpr { name, .. } => {
-                let base = self.assign_target_rust_type(*name)?;
-                base.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')).map(str::to_string)?
-            }
-            // A call to a project method whose numeric return type was recorded.
+            // An array element read: the base array's element type, recursing
+            // through nested dimensions (`Vec<Vec<T>>[i][j]` -> T).
+            Node::ArrayAccessExpr { .. } => self.array_access_rust_type(e)?,
+            // A call to a project method whose numeric return type was recorded,
+            // else a stdlib numeric fallback so the surrounding arithmetic gets
+            // promoted (`n * Math.log(x)` is `i32 * f64`). Resolve-first keeps a
+            // user method's recorded return winning over the name heuristic.
             Node::MethodCallExpr { scope, name, args, .. } => {
-                let m = match scope {
+                let resolved = match scope {
                     Some(_) => self.resolve_linked_callee(*scope, name, args.len()),
                     None => self.resolve_self_callee(name, args.len()),
-                }?;
-                m.ret.clone()?
+                };
+                match resolved {
+                    Some(m) => m.ret.clone()?,
+                    // Float-returning `Math` functions, and `.size()/.length()`
+                    // (our `.len() as i32`). `abs/round/min/max/signum` are
+                    // excluded — Java's return type there follows the arg type.
+                    None => match name.as_str() {
+                        "sqrt" | "cbrt" | "log" | "ln" | "log10" | "log1p" | "exp" | "expm1"
+                        | "pow" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
+                        | "sinh" | "cosh" | "tanh" | "hypot" | "toRadians" | "toDegrees"
+                        | "ceil" | "floor" | "rint" => "f64".to_string(),
+                        "size" | "length" if args.is_empty() => "i32".to_string(),
+                        _ => return None,
+                    },
+                }
             }
             _ => return None,
         };
@@ -3422,9 +3656,21 @@ impl<'a> RustDumpVisitor<'a> {
             if matches!(name.as_str(), "getName" | "getSimpleName" | "getCanonicalName")
                 && scope.map(|s| self.is_get_class_call(s)).unwrap_or(false)
             {
+                // Java `getName()` returns a `String`, so own the `&'static str`.
                 self.print_java_comment(id, arg);
-                self.printer.print("std::any::type_name::<Self>()");
+                self.printer.print("std::any::type_name::<Self>().to_string()");
                 return;
+            }
+            // `Foo.class.getName()` -> `type_name::<Foo>()` (the scope is a
+            // `ClassExpr`, which on its own emits a `TypeId` with no `getName`).
+            if matches!(name.as_str(), "getName" | "getSimpleName" | "getCanonicalName") {
+                if let Some(typ) = scope.and_then(|s| self.class_expr_type(s)) {
+                    self.print_java_comment(id, arg);
+                    self.printer.print("std::any::type_name::<");
+                    self.visit(typ, arg);
+                    self.printer.print(">().to_string()");
+                    return;
+                }
             }
             if name == "getClass" {
                 self.print_java_comment(id, arg);
@@ -3463,6 +3709,9 @@ impl<'a> RustDumpVisitor<'a> {
                 return;
             }
             if self.try_emit_known_method(scope, &name, &args, arg) {
+                return;
+            }
+            if self.try_emit_stdlib(scope, &name, &args, arg) {
                 return;
             }
         }
@@ -3712,6 +3961,31 @@ impl<'a> RustDumpVisitor<'a> {
         }
     }
 
+    /// Is the variable `name` declared as an array (`T[]`)? Arrays map to a
+    /// non-Copy `Vec`, which `type_simple_name`/`is_primitive` can't see (they
+    /// look through to the element type).
+    fn decl_is_array(&self, name: &str, at: NodeId) -> bool {
+        let Some((_, decl)) = self.id.find_declaration_node_for(self.arena, name, at) else {
+            return false;
+        };
+        let Some(parent) = self.arena.parent(decl) else { return false };
+        let grand = self.arena.parent(parent);
+        let typ = match self.arena.kind(parent) {
+            Node::Parameter { typ, .. } => *typ,
+            _ => match grand.map(|g| self.arena.kind(g)) {
+                Some(Node::FieldDeclaration { typ, .. })
+                | Some(Node::VariableDeclarationExpr { typ, .. }) => Some(*typ),
+                _ => None,
+            },
+        };
+        if let Some(t) = typ {
+            if let Node::ReferenceType { array_count, .. } = self.arena.kind(t) {
+                return *array_count > 0;
+            }
+        }
+        false
+    }
+
     /// Map common collection / String methods to their Rust equivalents.
     fn try_emit_known_method(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
         let Some(recv) = scope else { return false };
@@ -3794,18 +4068,20 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(".collect::<Vec<_>>(); __s.sort(); __s.into_iter() }");
                 true
             }
-            // String `.equals(x)` -> compare as `&str` (borrow-depth agnostic: a
-            // `&String`/`String`/`&str` receiver and arg all coerce). `String ==`
-            // doesn't hold for `&String == String`, so this avoids E0277.
+            // String `.equals(x)` -> compare as `&str` via the `&(..)[..]` slice
+            // form (borrow-depth agnostic: `&String`/`String`/`&str` all coerce).
+            // `String ==` doesn't hold for `&String == String` (E0277), and
+            // `.as_str()` is the *nightly-unstable* `str::as_str` on an existing
+            // `&str` (E0658) — the slice form is stable for both.
             ("equals", 1)
                 if self.recv_type_name(recv).as_deref() == Some("String")
                     || self.is_string_literal(args[0]) =>
             {
-                self.printer.print("((");
+                self.printer.print("(&(");
                 self.visit(recv, arg);
-                self.printer.print(").as_str() == (");
+                self.printer.print(")[..] == &(");
                 self.visit(args[0], arg);
-                self.printer.print(").as_str())");
+                self.printer.print(")[..])");
                 true
             }
             ("equalsIgnoreCase", 1) => {
@@ -3901,19 +4177,28 @@ impl<'a> RustDumpVisitor<'a> {
                 self.visit(recv, arg);
                 self.printer.print(".push_str(&(");
                 self.visit(args[0], arg);
-                self.printer.print(").to_string())");
+                // A `char[]` (`Vec<char>`) has no `Display`; Java appends its
+                // chars, so collect into a `String` instead of `.to_string()`.
+                if self.expr_is_char_vec(args[0]) {
+                    self.printer.print(").iter().collect::<String>())");
+                } else {
+                    self.printer.print(").to_string())");
+                }
                 true
             }
             // ---- more String ops (arg is a String -> &str) ----
             ("startsWith", 1) => self.emit_str_arg(recv, "starts_with", args[0], arg),
             ("endsWith", 1) => self.emit_str_arg(recv, "ends_with", args[0], arg),
             ("replace", 2) => {
+                // `str::replace(from: Pattern, to: &str)`. `from` may be a char or
+                // a String (char-aware pattern); `to` coerces to `&str`. (Java's
+                // `replace(char,char)` would break a hardcoded `.as_str()`.)
                 self.visit(recv, arg);
-                self.printer.print(".replace((");
-                self.visit(args[0], arg);
-                self.printer.print(").as_str(), (");
+                self.printer.print(".replace(");
+                self.emit_string_pattern(args[0], arg);
+                self.printer.print(", &(");
                 self.visit(args[1], arg);
-                self.printer.print(").as_str())");
+                self.printer.print(").to_string())");
                 true
             }
             // `split(regex)` and `split(regex, limit)` -> `Vec<String>`. The limit
@@ -3926,14 +4211,21 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(").map(|x| x.to_string()).collect::<Vec<_>>()");
                 true
             }
-            ("indexOf", 1) => {
+            // String index-of (a `&str`/char search). Gated away from
+            // collections, whose `indexOf(elem)` is an element search handled by
+            // the stdlib table (`.iter().position(..)`).
+            ("indexOf", 1)
+                if !matches!(self.recv_category(recv), Some("List" | "Set" | "Map" | "Option")) =>
+            {
                 self.visit(recv, arg);
                 self.printer.print(".find(");
                 self.emit_string_pattern(args[0], arg);
                 self.printer.print(").map(|i| i as i32).unwrap_or(-1)");
                 true
             }
-            ("lastIndexOf", 1) => {
+            ("lastIndexOf", 1)
+                if !matches!(self.recv_category(recv), Some("List" | "Set" | "Map" | "Option")) =>
+            {
                 // Byte index ~ char index for ASCII (the bioinformatics norm).
                 self.visit(recv, arg);
                 self.printer.print(".rfind(");
@@ -3984,6 +4276,13 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(".contains_key(&(");
                 self.visit(args[0], arg);
                 self.printer.print("))");
+                true
+            }
+            // `Map.keySet()` -> an owned `Vec<K>` (matches how `.iterator()`/
+            // foreach over the key set is handled).
+            ("keySet", 0) => {
+                self.visit(recv, arg);
+                self.printer.print(".keys().cloned().collect::<Vec<_>>()");
                 true
             }
             // ---- streams ----
@@ -4165,6 +4464,36 @@ impl<'a> RustDumpVisitor<'a> {
             Node::FieldAccessExpr { field, .. } => {
                 self.decl_java_type_name(field, e).as_deref() == Some("char")
             }
+            // A `char[]` element read (`arr[i]`): so `arr[i] - 'A'` promotes the
+            // element to `i32` (Java char arithmetic) and string-pattern args use
+            // the bare-char form.
+            Node::ArrayAccessExpr { .. } => self.array_access_rust_type(e).as_deref() == Some("char"),
+            _ => false,
+        }
+    }
+
+    /// Does `e` resolve to a `Vec<char>` (a Java `char[]`)? Such values have no
+    /// `Display`, so string append/concat must `.iter().collect::<String>()`
+    /// rather than `.to_string()`.
+    fn expr_is_char_vec(&self, e: NodeId) -> bool {
+        match self.arena.kind(e) {
+            Node::EnclosedExpr { inner: Some(i) } => self.expr_is_char_vec(*i),
+            Node::NameExpr { .. } | Node::FieldAccessExpr { .. } => {
+                self.assign_target_rust_type(e).as_deref() == Some("Vec<char>")
+            }
+            Node::ArrayAccessExpr { .. } => {
+                self.array_access_rust_type(e).as_deref() == Some("Vec<char>")
+            }
+            Node::MethodCallExpr { scope, name, args, .. } => {
+                if name == "toCharArray" && args.is_empty() {
+                    return true;
+                }
+                let m = match scope {
+                    Some(_) => self.resolve_linked_callee(*scope, name, args.len()),
+                    None => self.resolve_self_callee(name, args.len()),
+                };
+                m.and_then(|m| m.ret.clone()).as_deref() == Some("Vec<char>")
+            }
             _ => false,
         }
     }
@@ -4204,6 +4533,96 @@ impl<'a> RustDumpVisitor<'a> {
                 !Self::is_stdlib_rewritable(simple)
             }
             None => false,
+        }
+    }
+
+    /// Normalize a receiver's declared Java type to a stdlib *category* used to
+    /// key [`crate::stdlib::instance_rule`] (`String`/`Map`/`Set`/`List`/
+    /// `Option`), or `None` when the type is unknown or a user type. The
+    /// category gate keeps a user class's same-named method from being hijacked.
+    fn recv_category(&self, recv: NodeId) -> Option<&'static str> {
+        let t = self.recv_type_name(recv)?;
+        let simple = t.rsplit('.').next().unwrap_or(&t);
+        Some(match simple {
+            "String" | "CharSequence" | "StringBuilder" | "StringBuffer" => "String",
+            "Map" | "HashMap" | "LinkedHashMap" | "TreeMap" | "SortedMap" | "NavigableMap"
+            | "ConcurrentHashMap" => "Map",
+            "Set" | "HashSet" | "LinkedHashSet" | "TreeSet" | "SortedSet" | "NavigableSet" => "Set",
+            "List" | "ArrayList" | "LinkedList" | "Vector" | "Stack" | "Collection" | "Queue"
+            | "Deque" | "ArrayDeque" => "List",
+            "Optional" => "Option",
+            _ => return None,
+        })
+    }
+
+    /// Apply the declarative JDK rewrite table ([`crate::stdlib`]). Runs after
+    /// the bespoke handlers, so it only fires for table entries those don't
+    /// cover. Static-class calls (`Character.isDigit`) match by class name;
+    /// instance calls match by receiver category.
+    fn try_emit_stdlib(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
+        let Some(recv) = scope else { return false };
+        if self.is_static_class_ref(recv) {
+            if let Node::NameExpr { name: cls } = self.arena.kind(recv) {
+                // A local/param/field shadowing the class name is a value.
+                if self.id.find_declaration_node_for(self.arena, cls, recv).is_none() {
+                    if let Some(rule) = crate::stdlib::static_rule(cls, name, args.len()) {
+                        self.emit_template(rule.template, None, args, arg);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        if let Some(cat) = self.recv_category(recv) {
+            if let Some(rule) = crate::stdlib::instance_rule(cat, name, args.len()) {
+                self.emit_template(rule.template, Some(recv), args, arg);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Evaluate a [`crate::stdlib`] template, substituting `${…}` placeholders
+    /// (`recv`, arg indices, and `:str`/`:usize`/`:ref`/`:move` coercions). A
+    /// literal `{…}` (e.g. inside a `format!`) is emitted untouched.
+    fn emit_template(&mut self, tmpl: &str, recv: Option<NodeId>, args: &[NodeId], arg: Arg) {
+        let mut rest = tmpl;
+        while let Some(pos) = rest.find("${") {
+            let (lit, after) = rest.split_at(pos);
+            self.printer.print(lit);
+            let after = &after[2..];
+            let end = after.find('}').expect("unterminated ${ in stdlib template");
+            self.emit_template_token(&after[..end], recv, args, arg);
+            rest = &after[end + 1..];
+        }
+        self.printer.print(rest);
+    }
+
+    fn emit_template_token(&mut self, tok: &str, recv: Option<NodeId>, args: &[NodeId], arg: Arg) {
+        let (idx, kind) = match tok.split_once(':') {
+            Some((a, b)) => (a, Some(b)),
+            None => (tok, None),
+        };
+        let node = if idx == "recv" {
+            recv.expect("`${recv}` in template with no receiver")
+        } else {
+            args[idx.parse::<usize>().expect("bad arg index in stdlib template")]
+        };
+        match kind {
+            None => self.visit(node, arg),
+            Some("str") => self.emit_string_pattern(node, arg),
+            Some("usize") => {
+                self.printer.print("(");
+                self.visit(node, arg);
+                self.printer.print(") as usize");
+            }
+            Some("ref") => {
+                self.printer.print("&(");
+                self.visit(node, arg);
+                self.printer.print(")");
+            }
+            Some("move") => self.emit_moved_value(node, arg),
+            Some(other) => panic!("unknown stdlib template directive `:{other}`"),
         }
     }
 
@@ -4282,6 +4701,13 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(").count_ones() as i32)");
                 true
             }
+            // Double/Float.isNaN(x)/isInfinite(x) -> (x).is_nan()/is_infinite().
+            ("Double" | "Float", "isNaN", 1) | ("Double" | "Float", "isInfinite", 1) => {
+                self.printer.print("(");
+                self.visit(args[0], arg);
+                self.printer.print(if name == "isNaN" { ").is_nan()" } else { ").is_infinite()" });
+                true
+            }
             // X.valueOf(s)/X.toString(v) -> parse / to_string.
             ("Integer" | "Long" | "Short" | "Byte" | "Double" | "Float", "valueOf", 1) => {
                 self.printer.print("(");
@@ -4317,24 +4743,38 @@ impl<'a> RustDumpVisitor<'a> {
         }
         // (receiver-method, arity)
         let m = match name {
-            "abs" | "sqrt" | "floor" | "ceil" | "round" | "signum" | "sin" | "cos" | "tan"
-            | "exp" | "sinh" | "cosh" | "tanh" => (name, 1),
+            "abs" | "sqrt" | "cbrt" | "floor" | "ceil" | "round" | "signum" | "sin" | "cos"
+            | "tan" | "asin" | "acos" | "atan" | "exp" | "sinh" | "cosh" | "tanh" => (name, 1),
             "log" => ("ln", 1),
             "log10" => ("log10", 1),
+            "log1p" => ("ln_1p", 1),
+            "expm1" => ("exp_m1", 1),
+            "rint" => ("round", 1),
+            "toRadians" => ("to_radians", 1),
+            "toDegrees" => ("to_degrees", 1),
             "max" | "min" => (name, 2),
+            "atan2" | "hypot" => (name, 2),
             "pow" => ("powf", 2),
             _ => return false,
         };
         if args.len() != m.1 {
             return false;
         }
+        // The inherently-float functions need their args as `f64` (Rust has no
+        // `i32::sqrt`/`.ln()`, and an int/literal arg would be ambiguous).
+        // `abs/round/min/max/signum` keep the arg type — Java overloads those on
+        // `int`, so casting would wrongly turn `Math.abs(int)` into `f64`.
+        let float_args = !matches!(name, "abs" | "round" | "min" | "max" | "signum");
         self.printer.print("(");
         self.visit(args[0], arg);
-        self.printer.print(").");
+        self.printer.print(if float_args { " as f64)." } else { ")." });
         self.printer.print(m.0);
         self.printer.print("(");
         if m.1 == 2 {
             self.visit(args[1], arg);
+            if float_args {
+                self.printer.print(" as f64");
+            }
         }
         self.printer.print(")");
         true
@@ -5157,6 +5597,17 @@ impl<'a> RustDumpVisitor<'a> {
         };
         self.print_java_comment(id, arg);
         self.emit_provenance(&self.java_type_fqn(id));
+        // Variants are unit-only (Java enum bodies are dropped below), so these
+        // all derive trivially — and they're needed pervasively: `.clone()`,
+        // `==`/`!=` against a variant, and use as map keys. `Default` (with the
+        // first variant marked `#[default]`) lets an enum-typed struct field
+        // participate in the struct's derived `Default` — but only when the enum
+        // has at least one variant (a variant-less enum can't derive `Default`).
+        if entries.is_empty() {
+            self.printer.print_ln_s("#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]");
+        } else {
+            self.printer.print_ln_s("#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]");
+        }
         self.print_modifiers(modifiers_v);
         self.printer.print("enum ");
         self.printer.print(&name);
@@ -5166,7 +5617,10 @@ impl<'a> RustDumpVisitor<'a> {
         // Variants only. Java enum fields/constructors/methods have no direct
         // Rust enum equivalent and are dropped.
         let _ = &members;
-        for &e in &entries {
+        for (i, &e) in entries.iter().enumerate() {
+            if i == 0 {
+                self.printer.print_ln_s("#[default]");
+            }
             self.visit(e, arg);
             self.printer.print_ln_s(",");
         }
@@ -5192,8 +5646,14 @@ impl<'a> RustDumpVisitor<'a> {
             _ => unreachable!(),
         };
         self.print_java_comment(id, arg);
-        self.printer.print("if ");
-        self.visit(condition, arg);
+        // `if ((line = in.readLine()) != null)` -> `if let Some(mut line) = …`.
+        if let Some((nm, value)) = self.as_readline_assign(condition) {
+            self.printer.print(&format!("if let Some(mut {nm}) = "));
+            self.visit(value, arg);
+        } else {
+            self.printer.print("if ");
+            self.visit(condition, arg);
+        }
         let then_block = matches!(self.arena.kind(then_stmt), Node::BlockStmt { .. });
         if then_block {
             self.printer.print(" ");
@@ -5927,6 +6387,8 @@ fn boxed_constant(cls: &str, field: &str) -> Option<&'static str> {
         ("Float", "NaN") => "f32::NAN",
         ("Math", "PI") => "std::f64::consts::PI",
         ("Math", "E") => "std::f64::consts::E",
+        ("Boolean", "TRUE") => "true",
+        ("Boolean", "FALSE") => "false",
         _ => return None,
     })
 }

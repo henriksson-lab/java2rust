@@ -76,7 +76,7 @@ fn does_not_stub_stdlib_types() {
 #[test]
 fn generated_stub_file_is_valid_rust_shape() {
     let out = stubs_of(SRC, &HashSet::new());
-    assert!(out.contains("pub type Unknown = ();"), "{out}");
+    assert!(out.contains("pub struct Unknown;"), "{out}");
     assert!(out.contains("unimplemented!()"), "{out}");
 }
 
@@ -91,7 +91,7 @@ fn grouped_by_package_into_separate_files() {
     let base = files.get("stubs.rs").expect("base file for free fns");
     assert!(base.contains("pub fn helper"), "free fn in stubs.rs:\n{base}");
     // Each file is self-contained.
-    assert!(ext.contains("pub type Unknown = ();"), "self-contained header:\n{ext}");
+    assert!(ext.contains("pub struct Unknown;"), "self-contained header:\n{ext}");
 }
 
 #[test]
