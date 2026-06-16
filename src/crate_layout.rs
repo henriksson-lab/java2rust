@@ -559,6 +559,12 @@ fn param_sym(
 /// Mirror of the dumper's `to_snake_if_necessary` for member names (snake unless
 /// the name starts uppercase; keyword-escaped).
 fn rust_member_name(n: &str) -> String {
+    // A Java method literally named `clone` collides with Rust's derived
+    // `Clone::clone`; rename it (call sites resolving through the map follow,
+    // while synthetic `.clone()` from value-moves still hits derived `Clone`).
+    if n == "clone" {
+        return "clone_java".to_string();
+    }
     let s = if n.chars().next().map(|c| c.is_lowercase()).unwrap_or(false) {
         camel_to_snake_case(n)
     } else {

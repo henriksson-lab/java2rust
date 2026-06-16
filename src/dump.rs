@@ -2924,6 +2924,19 @@ impl<'a> RustDumpVisitor<'a> {
             self.emit_chained_assign(id, arg);
             return;
         }
+        // Java `String += x` is concatenation, but Rust has no `AddAssign<String>`
+        // for `String` -> `target.push_str(&(x).to_string())`. Gated on a String
+        // target (numeric `+=` resolves to `i32`/`i64` and keeps `+=`).
+        if matches!(op, AssignOp::Plus)
+            && self.assign_target_rust_type(target).as_deref() == Some("String")
+            && !self.expr_nullable(target)
+        {
+            self.visit(target, arg);
+            self.printer.print(".push_str(&(");
+            self.visit(value, arg);
+            self.printer.print(").to_string())");
+            return;
+        }
         // Assigning to a nullable slot: keep the target as the bare Option (no
         // unwrap) and wrap the value with Some/None.
         let target_nullable = matches!(op, AssignOp::Assign) && self.expr_nullable(target);
@@ -4712,7 +4725,13 @@ impl<'a> RustDumpVisitor<'a> {
         } else {
             raw_type.clone()
         };
-        let snake = self.to_snake_if_necessary(&name);
+        // A method named `clone` is renamed (see `rust_member_name`) to avoid
+        // colliding with the derived `Clone::clone`.
+        let snake = if name == "clone" {
+            "clone_java".to_string()
+        } else {
+            self.to_snake_if_necessary(&name)
+        };
         let snake = self.decl_emitted_name(id, &snake);
         self.printer.print(&snake);
         // Type parameters go after the name in Rust: `fn name<T>(...)`. Drop any
@@ -5906,6 +5925,8 @@ fn boxed_constant(cls: &str, field: &str) -> Option<&'static str> {
         ("Float", "POSITIVE_INFINITY") => "f32::INFINITY",
         ("Float", "NEGATIVE_INFINITY") => "f32::NEG_INFINITY",
         ("Float", "NaN") => "f32::NAN",
+        ("Math", "PI") => "std::f64::consts::PI",
+        ("Math", "E") => "std::f64::consts::E",
         _ => return None,
     })
 }
