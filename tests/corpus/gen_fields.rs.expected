@@ -8,7 +8,7 @@ pub struct F {
 }
 
 impl F {
-const K: i32 = 5;
+pub const K: i32 = 5;
 
     pub fn new() -> Self { Default::default() }
 }

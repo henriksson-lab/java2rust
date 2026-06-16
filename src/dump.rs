@@ -793,10 +793,13 @@ impl<'a> RustDumpVisitor<'a> {
         match self.arena.kind(p) {
             Node::VariableDeclarator { init: Some(i), .. } if *i == call => {
                 let gp = self.arena.parent(p)?;
-                if let Node::VariableDeclarationExpr { typ, .. } = self.arena.kind(gp) {
-                    return self.rust_type_of(*typ);
+                match self.arena.kind(gp) {
+                    // A local (`T x = call()`) or a field (`static final T f = call()`)
+                    // initializer — infer the call's return from the declared type.
+                    Node::VariableDeclarationExpr { typ, .. }
+                    | Node::FieldDeclaration { typ, .. } => self.rust_type_of(*typ),
+                    _ => None,
                 }
-                None
             }
             Node::ReturnStmt { expr: Some(e) } if *e == call => self.enclosing_method_ret_type(call),
             // A call used as a condition or logical operand returns `bool`.
@@ -1270,6 +1273,22 @@ impl<'a> RustDumpVisitor<'a> {
         }
     }
 
+    /// Render a type node's own type-args as a `<A, B>` string (empty if none).
+    /// Used to re-attach a generic parent's args to a map-resolved path.
+    fn render_type_args_of(&mut self, t: NodeId) -> String {
+        let args = match self.arena.kind(t) {
+            Node::ClassOrInterfaceType { type_args, .. } => type_args.clone(),
+            Node::ReferenceType { typ, .. } => return self.render_type_args_of(*typ),
+            _ => return String::new(),
+        };
+        if args.is_empty() {
+            return String::new();
+        }
+        let parts: Vec<String> =
+            args.iter().map(|&a| self.accept_and_cut(a, None).trim().to_string()).collect();
+        format!("<{}>", parts.join(", "))
+    }
+
     fn print_type_args(&mut self, args: &[NodeId], arg: Arg) {
         if !args.is_empty() {
             self.printer.print("<");
@@ -1730,11 +1749,16 @@ impl<'a> RustDumpVisitor<'a> {
                     if self.enclosing_method_nullable(id) {
                         self.emit_into_option(e, arg);
                     } else {
-                        self.emit_moved_value(e, arg);
+                        // Coerce a numeric return value to the method's return type.
+                        self.emit_numeric_coerced(e, self.enclosing_method_ret_type(id), arg);
                     }
                     if throws {
                         self.printer.print(")");
                     }
+                } else if self.id.is_in_constructor() {
+                    // A bare `return;` in a constructor early-exits; the ctor
+                    // returns the instance it is building (`-> Type`, not Result).
+                    self.printer.print(" __self");
                 } else if throws {
                     // A bare `return;` in a `throws` (Result-returning) method.
                     self.printer.print(" Ok(())");
@@ -2165,7 +2189,11 @@ impl<'a> RustDumpVisitor<'a> {
             .and_then(|t| t.parent.clone())
             .and_then(|p| self.link.lookup(&p).map(|pt| self.crate_relativize(&pt.rust_path)));
         let parent_rust = if let Some(p) = &map_parent_path {
-            Some(p.clone())
+            // The map path is the bare rust path (no type args); re-attach the
+            // `extends` clause's args so a generic parent stays `Hmm<O>`.
+            let p = p.clone();
+            let targs = extends.first().map(|&e| self.render_type_args_of(e)).unwrap_or_default();
+            Some(format!("{p}{targs}"))
         } else {
             extends.first().map(|&e| self.accept_and_cut(e, arg).trim().to_string())
         };
@@ -2539,7 +2567,7 @@ impl<'a> RustDumpVisitor<'a> {
                 // `const`/`static` initializer must be const-evaluable, so the
                 // usual `"...".to_string()` is illegal here).
                 Some(i) if type_str == "String" && self.is_string_literal(i) => {
-                    self.printer.print(&format!("const {name}: &'static str = "));
+                    self.printer.print(&format!("pub const {name}: &'static str = "));
                     let saved = self.raw_string;
                     self.raw_string = true;
                     self.visit(i, None);
@@ -2548,7 +2576,7 @@ impl<'a> RustDumpVisitor<'a> {
                 }
                 // Other const-evaluable literal (numeric / bool / char).
                 Some(i) if self.is_const_literal(i) => {
-                    self.printer.print(&format!("const {name}: "));
+                    self.printer.print(&format!("pub const {name}: "));
                     self.visit(typ, None);
                     self.printer.print(" = ");
                     self.visit(i, None);
@@ -2558,7 +2586,7 @@ impl<'a> RustDumpVisitor<'a> {
                 // wrap in `LazyLock`. `LazyLock::new` is a `const fn`, so this is
                 // a valid associated `const` (a `static` is forbidden in `impl`).
                 Some(i) => {
-                    self.printer.print(&format!("const {name}: std::sync::LazyLock<"));
+                    self.printer.print(&format!("pub const {name}: std::sync::LazyLock<"));
                     self.visit(typ, None);
                     self.printer.print("> = std::sync::LazyLock::new(|| ");
                     self.visit(i, None);
@@ -2566,7 +2594,7 @@ impl<'a> RustDumpVisitor<'a> {
                 }
                 // No initializer: fall back to a const default.
                 None => {
-                    self.printer.print(&format!("const {name}: "));
+                    self.printer.print(&format!("pub const {name}: "));
                     self.visit(typ, None);
                     self.printer.print(" = ");
                     let d = self.default_value(&type_str);
@@ -2750,7 +2778,10 @@ impl<'a> RustDumpVisitor<'a> {
             .map(|p| matches!(self.arena.kind(p), Node::FieldDeclaration { .. }))
             .unwrap_or(false);
         if is_field && name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-            self.printer.print("const ");
+            // `pub` so the associated const resolves cross-module (`Type::NAME`);
+            // Java's `static final` are effectively public for our purposes, and
+            // over-exposing a private one is harmless.
+            self.printer.print("pub const ");
             is_constant = true;
         } else {
             self.printer.print("let ");
@@ -2843,6 +2874,8 @@ impl<'a> RustDumpVisitor<'a> {
             "f64" | "f32" => "0.0",
             "u64" | "u32" | "u16" | "u8" | "usize" | "i64" | "i32" | "i16" | "i8" => "0",
             "bool" => "false",
+            // Java zero-initializes `char[]` to `'\0'` (ascii 0), not null.
+            "char" => "'\\0'",
             _ => "None",
         }
         .to_string()
@@ -2917,9 +2950,19 @@ impl<'a> RustDumpVisitor<'a> {
         if target_nullable {
             self.emit_into_option(value, arg);
         } else if matches!(op, AssignOp::Assign) {
-            self.emit_moved_value(value, arg);
+            // Coerce a numeric RHS to the target's type (Java widens/narrows; e.g.
+            // `long x = intExpr`, `float f = doubleExpr`).
+            self.emit_numeric_coerced(value, self.assign_target_rust_type(target), arg);
         } else {
-            self.visit(value, arg);
+            // Compound assignment (`+=`, …): Java promotes the RHS to the target.
+            match self.numeric_coercion(self.assign_target_rust_type(target), value) {
+                Some(t) => {
+                    self.printer.print("(");
+                    self.visit(value, arg);
+                    self.printer.print(&format!(") as {t}"));
+                }
+                None => self.visit(value, arg),
+            }
         }
     }
 
@@ -3091,6 +3134,28 @@ impl<'a> RustDumpVisitor<'a> {
         }
     }
 
+    /// If a numeric `value` must be coerced to a known numeric `target_ty` (both
+    /// known and *different*, and `value` isn't a bare literal Rust would infer),
+    /// return the target type to cast to. Mirrors the declarator-widening guards.
+    fn numeric_coercion(&self, target_ty: Option<String>, value: NodeId) -> Option<String> {
+        let t = target_ty.filter(|t| is_numeric_rust(t))?;
+        let s = self.expr_num_type(value)?;
+        (s != t && !self.is_numeric_literal(value)).then_some(t)
+    }
+
+    /// Emit `value`, cast to `target_ty` if numeric coercion is needed, else as a
+    /// moved value (clone for non-Copy).
+    fn emit_numeric_coerced(&mut self, value: NodeId, target_ty: Option<String>, arg: Arg) {
+        match self.numeric_coercion(target_ty, value) {
+            Some(t) => {
+                self.printer.print("(");
+                self.visit(value, arg);
+                self.printer.print(&format!(") as {t}"));
+            }
+            None => self.emit_moved_value(value, arg),
+        }
+    }
+
     /// Best-effort numeric Rust type of an expression (`f64`/`f32`/`i64`/`i32`/
     /// `i16`/`i8`), or `None` if not a determinable numeric.
     fn expr_num_type(&self, e: NodeId) -> Option<String> {
@@ -3129,6 +3194,11 @@ impl<'a> RustDumpVisitor<'a> {
                 if num_rank(&l) >= num_rank(&r) { l } else { r }
             }
             Node::NameExpr { .. } | Node::FieldAccessExpr { .. } => self.assign_target_rust_type(e)?,
+            // An array element read: the base array's element type (`Vec<T>` -> T).
+            Node::ArrayAccessExpr { name, .. } => {
+                let base = self.assign_target_rust_type(*name)?;
+                base.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')).map(str::to_string)?
+            }
             // A call to a project method whose numeric return type was recorded.
             Node::MethodCallExpr { scope, name, args, .. } => {
                 let m = match scope {
@@ -3711,6 +3781,28 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(".collect::<Vec<_>>(); __s.sort(); __s.into_iter() }");
                 true
             }
+            // String `.equals(x)` -> compare as `&str` (borrow-depth agnostic: a
+            // `&String`/`String`/`&str` receiver and arg all coerce). `String ==`
+            // doesn't hold for `&String == String`, so this avoids E0277.
+            ("equals", 1)
+                if self.recv_type_name(recv).as_deref() == Some("String")
+                    || self.is_string_literal(args[0]) =>
+            {
+                self.printer.print("((");
+                self.visit(recv, arg);
+                self.printer.print(").as_str() == (");
+                self.visit(args[0], arg);
+                self.printer.print(").as_str())");
+                true
+            }
+            ("equalsIgnoreCase", 1) => {
+                self.printer.print("((");
+                self.visit(recv, arg);
+                self.printer.print(").to_lowercase() == (");
+                self.visit(args[0], arg);
+                self.printer.print(").to_lowercase())");
+                true
+            }
             ("equals", 1) => {
                 self.printer.print("(");
                 self.visit(recv, arg);
@@ -3811,7 +3903,10 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(").as_str())");
                 true
             }
-            ("split", 1) => {
+            // `split(regex)` and `split(regex, limit)` -> `Vec<String>`. The limit
+            // is dropped: Java's `-1`/`<=0` keeps trailing empties, which Rust's
+            // `.split()` already does. (Pattern treated as literal, not regex.)
+            ("split", 1) | ("split", 2) => {
                 self.visit(recv, arg);
                 self.printer.print(".split(");
                 self.emit_string_pattern(args[0], arg);
@@ -3831,6 +3926,44 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(".rfind(");
                 self.emit_string_pattern(args[0], arg);
                 self.printer.print(").map(|i| i as i32).unwrap_or(-1)");
+                true
+            }
+            // `String.toCharArray()` -> `Vec<char>`. String-specific in practice
+            // (often on a `toString()` result, so the receiver type is unknown).
+            ("toCharArray", 0) => {
+                self.visit(recv, arg);
+                self.printer.print(".chars().collect::<Vec<char>>()");
+                true
+            }
+            // `compareTo`/`compareToIgnoreCase` return an int whose *sign* callers
+            // use; `(a>b) - (a<b)` gives -1/0/1 portably (enum discriminants of
+            // `Ordering` aren't guaranteed). `compareTo` gated to String only
+            // (it's the generic `Comparable` name).
+            ("compareToIgnoreCase", 1) => {
+                self.printer.print("{ let __a = (");
+                self.visit(recv, arg);
+                self.printer.print(").to_lowercase(); let __b = (");
+                self.visit(args[0], arg);
+                self.printer
+                    .print(").to_lowercase(); (__a > __b) as i32 - (__a < __b) as i32 }");
+                true
+            }
+            ("compareTo", 1) if self.recv_type_name(recv).as_deref() == Some("String") => {
+                self.printer.print("{ let __a = (");
+                self.visit(recv, arg);
+                self.printer.print("); let __b = (");
+                self.visit(args[0], arg);
+                self.printer.print("); (__a > __b) as i32 - (__a < __b) as i32 }");
+                true
+            }
+            // `replaceAll` on a String: best-effort literal replace (NOT regex).
+            ("replaceAll", 2) if self.recv_type_name(recv).as_deref() == Some("String") => {
+                self.visit(recv, arg);
+                self.printer.print(".replace(/* replaceAll: literal, not regex */ ");
+                self.emit_string_pattern(args[0], arg);
+                self.printer.print(", &(");
+                self.visit(args[1], arg);
+                self.printer.print(")[..])");
                 true
             }
             ("containsKey", 1) => {
@@ -4157,7 +4290,13 @@ impl<'a> RustDumpVisitor<'a> {
         // `Math.x(..)`, or a bare `x(..)` when `java.lang.Math` is statically
         // imported (`import static java.lang.Math.*`).
         let is_math = match scope {
-            Some(s) => matches!(self.arena.kind(s), Node::NameExpr { name } if name == "Math"),
+            // Bare `Math.x(..)` or fully-qualified `java.lang.Math.x(..)` (a
+            // `QualifiedNameExpr`/`FieldAccessExpr` whose last segment is `Math`).
+            Some(s) => match self.arena.kind(s) {
+                Node::NameExpr { name } | Node::QualifiedNameExpr { name, .. } => name == "Math",
+                Node::FieldAccessExpr { field, .. } => field == "Math",
+                _ => false,
+            },
             None => self.math_statically_imported(),
         };
         if !is_math {
@@ -4281,6 +4420,34 @@ impl<'a> RustDumpVisitor<'a> {
                     }
                     return;
                 }
+            }
+        }
+        // Boxed-primitive constructors: `new Integer(x)` (mapped to `i32::new`,
+        // which doesn't exist) -> parse a string arg, else unbox/cast the value.
+        if let Node::ClassOrInterfaceType { name, .. } = self.arena.kind(typ) {
+            let simple = name.rsplit('.').next().unwrap_or(name);
+            let prim = match simple {
+                "Integer" => Some("i32"),
+                "Long" => Some("i64"),
+                "Short" => Some("i16"),
+                "Byte" => Some("i8"),
+                "Double" => Some("f64"),
+                "Float" => Some("f32"),
+                "Boolean" => Some("bool"),
+                "Character" => Some("char"),
+                _ => None,
+            };
+            if let (Some(prim), Some(&a)) = (prim, args.first()) {
+                if self.infer_expr_rust_type(a) == "String" && prim != "char" && prim != "bool" {
+                    self.printer.print("(");
+                    self.visit(a, arg);
+                    self.printer.print(&format!(").parse::<{prim}>().unwrap()"));
+                } else {
+                    self.printer.print("((");
+                    self.visit(a, arg);
+                    self.printer.print(&format!(") as {prim})"));
+                }
+                return;
             }
         }
         // Record a constructor stub for an unresolved external type.
@@ -4471,13 +4638,20 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(", ");
             }
         }
+        // A generic class's constructor returns/builds the parameterized type
+        // (`-> Hmm<O>`, `let __self: Hmm<O>`), not the bare name.
+        let type_suffix = if self.impl_param_names.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", self.impl_param_names.join(", "))
+        };
         self.printer.print(") -> ");
-        self.printer.print(&name);
+        self.printer.print(&format!("{name}{type_suffix}"));
         // Build the value in `__self` (`this` maps to it), then return it.
         self.printer.print_ln_s(" {");
         self.printer.indent();
         self.printer
-            .print_ln_s(&format!("let mut __self: {name} = Default::default();"));
+            .print_ln_s(&format!("let mut __self: {name}{type_suffix} = Default::default();"));
         if outer_ty.is_some() {
             self.printer.print_ln_s("__self.__outer = __outer;");
         }
@@ -5726,9 +5900,12 @@ fn boxed_constant(cls: &str, field: &str) -> Option<&'static str> {
         ("Double", "MIN_VALUE") => "f64::MIN_POSITIVE",
         ("Float", "MAX_VALUE") => "f32::MAX",
         ("Float", "MIN_VALUE") => "f32::MIN_POSITIVE",
-        ("Double" | "Float", "POSITIVE_INFINITY") => "f64::INFINITY",
-        ("Double" | "Float", "NEGATIVE_INFINITY") => "f64::NEG_INFINITY",
-        ("Double" | "Float", "NaN") => "f64::NAN",
+        ("Double", "POSITIVE_INFINITY") => "f64::INFINITY",
+        ("Double", "NEGATIVE_INFINITY") => "f64::NEG_INFINITY",
+        ("Double", "NaN") => "f64::NAN",
+        ("Float", "POSITIVE_INFINITY") => "f32::INFINITY",
+        ("Float", "NEGATIVE_INFINITY") => "f32::NEG_INFINITY",
+        ("Float", "NaN") => "f32::NAN",
         _ => return None,
     })
 }
