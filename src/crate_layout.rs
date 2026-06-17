@@ -408,7 +408,7 @@ fn type_members(
                     params,
                     !throws.is_empty(),
                     mut_methods.contains(name),
-                    numeric_ret(arena, m),
+                    method_ret_type(arena, m),
                     nullable.contains(&m),
                 ));
             }
@@ -564,6 +564,32 @@ fn numeric_ret(arena: &Arena, decl: NodeId) -> Option<String> {
         _ => return None,
     };
     rust_numeric_of_type(arena, typ)
+}
+
+/// The return type recorded in the symbol map for a method: the numeric Rust
+/// type (drives argument widening) or, for a class/interface return, its simple
+/// name. The latter lets a call site resolve the returned type — e.g. to coerce
+/// a concrete factory return into a `Box<dyn Trait>` slot (R2). Skips
+/// void/primitive non-numeric returns (no useful type to record).
+fn method_ret_type(arena: &Arena, decl: NodeId) -> Option<String> {
+    if let Some(n) = numeric_ret(arena, decl) {
+        return Some(n);
+    }
+    let typ = match arena.kind(decl) {
+        Node::MethodDeclaration { typ, .. } => *typ,
+        _ => return None,
+    };
+    let s = type_java_simple(arena, typ);
+    if s.is_empty()
+        || matches!(
+            s.as_str(),
+            "void" | "int" | "long" | "double" | "float" | "boolean" | "char" | "byte" | "short"
+        )
+    {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 fn rust_numeric_of_type(arena: &Arena, t: NodeId) -> Option<String> {

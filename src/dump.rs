@@ -1019,8 +1019,10 @@ impl<'a> RustDumpVisitor<'a> {
     }
 
     /// Does the enclosing method's return type render as an owned trait object
-    /// (`Box<dyn T>`)? Then a `new Concrete()` return needs `Box::new(..)`.
-    fn enclosing_ret_box_dyn(&mut self, mut n: NodeId) -> bool {
+    /// (`Box<dyn T>`)? Returns the trait's simple name, so a concrete return
+    /// value (`new Concrete()` or a value of an implementing struct type) can be
+    /// `Box::new(..)`-coerced into it.
+    fn enclosing_ret_box_dyn(&mut self, mut n: NodeId) -> Option<String> {
         let typ = loop {
             match self.arena.parent(n) {
                 Some(p) => {
@@ -1029,10 +1031,85 @@ impl<'a> RustDumpVisitor<'a> {
                     }
                     n = p;
                 }
-                None => return false,
+                None => return None,
             }
         };
-        self.accept_and_cut(typ, None).trim().starts_with("Box<dyn ")
+        Self::box_dyn_trait_simple(self.accept_and_cut(typ, None).trim())
+    }
+
+    /// If `rust_ty` is an owned trait object `Box<dyn Trait…>`, the trait's simple
+    /// name (`Box<dyn module::Trimmer + 'static>` → `Trimmer`).
+    fn box_dyn_trait_simple(rust_ty: &str) -> Option<String> {
+        let inner = rust_ty.trim().strip_prefix("Box<dyn ")?;
+        let inner = inner.strip_suffix('>').unwrap_or(inner);
+        let head = inner.split(['+', '<']).next().unwrap_or(inner).trim();
+        Some(head.rsplit("::").next().unwrap_or(head).trim().to_string())
+    }
+
+    /// The simple name of `expr`'s concrete project *struct* type, if it has one
+    /// and is provably **not** already a trait object — either the resolver types
+    /// it as a `Named` struct, or it's a (possibly static) method call whose
+    /// recorded return type is a concrete struct (a return type that is itself a
+    /// `Box<dyn …>` yields `None`, so a factory already returning a boxed value is
+    /// never re-boxed). `None` for `new Concrete()` (handled separately) and for
+    /// anything of unknown type.
+    fn expr_concrete_struct(&self, expr: NodeId) -> Option<String> {
+        let simple_of = |s: &str| {
+            let s = s.split(['<', '[']).next().unwrap_or(s);
+            s.rsplit(['.', ':']).next().unwrap_or(s).trim().to_string()
+        };
+        if let crate::types::Type::Named { path, .. } = self.ty(expr) {
+            return Some(simple_of(&path));
+        }
+        if let Node::MethodCallExpr { scope, name, args, .. } = self.arena.kind(expr) {
+            let m = self.resolve_linked_callee(*scope, name, args.len())?;
+            let ret = m.ret.as_ref()?;
+            if ret.contains("dyn ") {
+                return None; // already a trait object — don't re-box
+            }
+            return Some(simple_of(ret));
+        }
+        None
+    }
+
+    /// Does `struct_simple` implement `trait_simple` (directly, or via a
+    /// superclass/interface chain in the symbol map)?
+    fn struct_impls_trait(&self, struct_simple: &str, trait_simple: &str) -> bool {
+        fn simple_of(s: &str) -> &str {
+            s.rsplit(['.', ':']).next().unwrap_or(s)
+        }
+        let mut cur = self.resolve_type_sym(struct_simple);
+        let mut seen: Vec<&str> = Vec::new();
+        while let Some(ty) = cur {
+            if ty.kind != "struct" {
+                return false;
+            }
+            if ty.interfaces.iter().any(|i| simple_of(i) == trait_simple) {
+                return true;
+            }
+            match ty.parent.as_deref() {
+                Some(p) => {
+                    if simple_of(p) == trait_simple {
+                        return true;
+                    }
+                    if seen.contains(&p) {
+                        break;
+                    }
+                    seen.push(p);
+                    cur = self.link.lookup(p);
+                }
+                None => break,
+            }
+        }
+        false
+    }
+
+    /// Does `expr` resolve to a concrete struct implementing `trait_simple`, so
+    /// flowing it into a `Box<dyn trait_simple>` slot needs `Box::new(..)`? Never
+    /// true for a value already a trait object (so it never double-boxes).
+    fn expr_impls_trait(&self, expr: NodeId, trait_simple: &str) -> bool {
+        self.expr_concrete_struct(expr)
+            .is_some_and(|s| self.struct_impls_trait(&s, trait_simple))
     }
 
     /// The Rust type string for a type node (primitives, mapped/linked class
@@ -2024,10 +2101,15 @@ impl<'a> RustDumpVisitor<'a> {
                     if throws {
                         self.printer.print("Ok(");
                     }
+                    let ret_box_trait = self.enclosing_ret_box_dyn(id);
                     if self.enclosing_method_nullable(id) {
                         self.emit_into_option(e, arg);
-                    } else if self.is_object_creation(e) && self.enclosing_ret_box_dyn(id) {
-                        // `return new Concrete()` into a `Box<dyn T>` method.
+                    } else if ret_box_trait
+                        .as_deref()
+                        .is_some_and(|tr| self.is_object_creation(e) || self.expr_impls_trait(e, tr))
+                    {
+                        // `return <concrete>` into a `Box<dyn T>` method: a
+                        // `new Concrete()`, or any value of an implementing struct.
                         self.printer.print("Box::new(");
                         self.emit_moved_value(e, arg);
                         self.printer.print(")");
@@ -3219,9 +3301,9 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.print(&name);
         let nullable = self.decl_nullable(vid);
-        // Whether the declared type is an owned trait object (`Box<dyn T>`): a
-        // concrete initializer then needs `Box::new(..)` to coerce.
-        let mut target_box_dyn = false;
+        // The declared type's trait, if it's an owned trait object (`Box<dyn
+        // T>`): a concrete initializer then needs `Box::new(..)` to coerce.
+        let mut box_dyn_target: Option<String> = None;
         if self.is_type(arg) {
             let tmp = self.accept_and_cut(arg.unwrap(), None);
             let tmp = tmp.trim().to_string();
@@ -3232,7 +3314,7 @@ impl<'a> RustDumpVisitor<'a> {
             } else {
                 tmp
             };
-            target_box_dyn = tmp.starts_with("Box<dyn ");
+            box_dyn_target = Self::box_dyn_trait_simple(&tmp);
             // Java `var` -> let inference (no annotation).
             if tmp == "var" && !nullable {
                 // emit no `: Type`
@@ -3269,11 +3351,15 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print("(");
                 self.visit(i, arg);
                 self.printer.print(&format!(") as {t}"));
-            } else if target_box_dyn && self.is_object_creation(i) {
-                // `Box<dyn T> x = new Concrete()` -> `Box::new(Concrete::new())`.
-                // Gated to `new` expressions only: a method/factory value may
-                // already return a `Box<dyn T>` (whose boxed return type the
-                // symbol map doesn't record), so wrapping it would double-box.
+            } else if box_dyn_target
+                .as_deref()
+                .is_some_and(|tr| self.is_object_creation(i) || self.expr_impls_trait(i, tr))
+            {
+                // `Box<dyn T> x = <concrete>` -> `Box::new(..)`. Fires for a
+                // `new Concrete()` (can't already be boxed) or any value of a
+                // struct implementing `T`. A method/factory value of unknown
+                // type stays unwrapped (its return may already be `Box<dyn T>`,
+                // so wrapping would double-box).
                 self.printer.print("Box::new(");
                 self.emit_moved_value(i, arg);
                 self.printer.print(")");
