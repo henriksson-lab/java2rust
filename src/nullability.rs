@@ -27,6 +27,63 @@ pub fn analyze(arena: &crate::ast::Arena, root: NodeId, id: &IdTracker) -> HashS
     a.nullable
 }
 
+/// Array declarations (`T[]`) whose *elements* can be null — evidenced by an
+/// element null-comparison (`arr[i] == null` / `!= null`) or null-assignment
+/// (`arr[i] = null`). Such arrays render as `Vec<Option<T>>` so element
+/// reads/assigns/null-checks typecheck. Keyed by the array's
+/// `VariableDeclaratorId` (what `find_declaration_node_for` returns), distinct
+/// from the `analyze` set so it never perturbs name/field nullability. The
+/// element type is always a reference type (Java forbids comparing a primitive
+/// element to `null`), so no extra guard is needed.
+pub fn array_elem_nullable(
+    arena: &crate::ast::Arena,
+    _root: NodeId,
+    id: &IdTracker,
+) -> HashSet<NodeId> {
+    let mut set = HashSet::new();
+    for i in 0..arena.nodes.len() as u32 {
+        let n = NodeId(i);
+        match arena.kind(n) {
+            Node::BinaryExpr { left, op, right }
+                if matches!(op, BinaryOp::Equals | BinaryOp::NotEquals) =>
+            {
+                let (l, r) = (*left, *right);
+                if matches!(arena.kind(r), Node::NullLiteralExpr) {
+                    mark_array_base(arena, id, l, &mut set);
+                } else if matches!(arena.kind(l), Node::NullLiteralExpr) {
+                    mark_array_base(arena, id, r, &mut set);
+                }
+            }
+            Node::AssignExpr { target, value, .. }
+                if matches!(arena.kind(*value), Node::NullLiteralExpr) =>
+            {
+                mark_array_base(arena, id, *target, &mut set);
+            }
+            _ => {}
+        }
+    }
+    set
+}
+
+/// If `expr` is an array element access `base[i]` whose base is a simple
+/// name/field, mark that base array's declaration as element-nullable.
+fn mark_array_base(
+    arena: &crate::ast::Arena,
+    id: &IdTracker,
+    expr: NodeId,
+    set: &mut HashSet<NodeId>,
+) {
+    let Node::ArrayAccessExpr { name, .. } = arena.kind(expr) else { return };
+    let ident = match arena.kind(*name) {
+        Node::NameExpr { name } => name,
+        Node::FieldAccessExpr { field, .. } => field,
+        _ => return,
+    };
+    if let Some((_, d)) = id.find_declaration_node_for(arena, ident, *name) {
+        set.insert(d);
+    }
+}
+
 struct Analyzer<'a> {
     arena: &'a crate::ast::Arena,
     id: &'a IdTracker,

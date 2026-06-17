@@ -73,9 +73,11 @@ pub fn convert_full_opts(
     type_tracker::run(&arena, root, &mut id_tracker);
 
     let nullable = nullability::analyze(&arena, root, &id_tracker);
+    let elem_nullable = nullability::array_elem_nullable(&arena, root, &id_tracker);
 
     let mut dumper =
         dump::RustDumpVisitor::new(true, &arena, &mut id_tracker, &nullable, link);
+    dumper.set_elem_nullable(&elem_nullable);
     dumper.set_stub_collection(emit_stubs, known_types);
     dumper.set_crate_mode(crate_mode);
     dumper.visit(root, None);

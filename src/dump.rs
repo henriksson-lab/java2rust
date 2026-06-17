@@ -96,6 +96,9 @@ pub struct RustDumpVisitor<'a> {
     class_field_names: std::collections::HashSet<String>,
     /// Declarations inferred nullable (emit `Option<T>`); see `nullability`.
     nullable: &'a std::collections::HashSet<NodeId>,
+    /// Array declarations whose *elements* are nullable: render `Vec<Option<T>>`
+    /// and unwrap/`Some`-wrap element reads/assigns. See `array_elem_nullable`.
+    elem_nullable: Option<&'a std::collections::HashSet<NodeId>>,
     /// When true, the value being emitted feeds an `Option<T>` slot, so a
     /// nullable read is kept as-is (no `.unwrap()`).
     expect_option: bool,
@@ -205,6 +208,7 @@ impl<'a> RustDumpVisitor<'a> {
             print_comments,
             class_field_names: std::collections::HashSet::new(),
             nullable,
+            elem_nullable: None,
             expect_option: false,
             raw_string: false,
             link,
@@ -538,6 +542,41 @@ impl<'a> RustDumpVisitor<'a> {
     /// (the deps are generated as crate modules).
     pub fn set_crate_mode(&mut self, crate_mode: bool) {
         self.crate_mode = crate_mode;
+    }
+
+    pub fn set_elem_nullable(&mut self, e: &'a std::collections::HashSet<NodeId>) {
+        self.elem_nullable = Some(e);
+    }
+
+    /// Is the declaration `decl` an array whose elements are nullable
+    /// (`Vec<Option<T>>`)?
+    fn decl_elem_nullable(&self, decl: NodeId) -> bool {
+        self.elem_nullable.is_some_and(|s| s.contains(&decl))
+    }
+
+    /// Is `expr` an element read `base[i]` of an element-nullable array?
+    fn array_access_elem_nullable(&self, expr: NodeId) -> bool {
+        let Node::ArrayAccessExpr { name, .. } = self.arena.kind(expr) else {
+            return false;
+        };
+        let ident = match self.arena.kind(*name) {
+            Node::NameExpr { name } => name,
+            Node::FieldAccessExpr { field, .. } => field,
+            _ => return false,
+        };
+        self.id
+            .find_declaration_node_for(self.arena, ident, *name)
+            .map(|(_, d)| self.decl_elem_nullable(d))
+            .unwrap_or(false)
+    }
+
+    /// Wrap the element of a rendered array type in `Option`: `Vec<T>` ->
+    /// `Vec<Option<T>>` (for an element-nullable array declaration).
+    fn wrap_elem_option(ty: &str) -> String {
+        match ty.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')) {
+            Some(inner) => format!("Vec<Option<{inner}>>"),
+            None => ty.to_string(),
+        }
     }
 
     /// Take the collected stubs (call after `visit`).
@@ -1535,11 +1574,22 @@ impl<'a> RustDumpVisitor<'a> {
             ArrayCreationExpr { .. } => self.visit_array_creation(id, arg),
             ArrayAccessExpr { name, index } => {
                 self.print_java_comment(id, arg);
+                // `expect_option` (set around an assignment target) must not leak
+                // into the base/index sub-expressions — they're plain values.
+                let elem_opt = self.array_access_elem_nullable(id) && !self.expect_option;
+                let saved = self.expect_option;
+                self.expect_option = false;
                 self.visit(name, arg);
                 // Rust indices are usize; Java's are int.
                 self.printer.print("[(");
                 self.visit(index, arg);
                 self.printer.print(") as usize]");
+                self.expect_option = saved;
+                // A read of a nullable element (`Vec<Option<T>>`) in a value
+                // position yields the owned `T`.
+                if elem_opt {
+                    self.printer.print(".clone().unwrap()");
+                }
             }
             AssignExpr { .. } => self.visit_assign(id, arg),
             BinaryExpr { .. } => self.visit_binary(id, arg),
@@ -2637,6 +2687,11 @@ impl<'a> RustDumpVisitor<'a> {
             }
             let ty = self.accept_and_cut(typ, None).trim().to_string();
             let ty = (0..array_count).fold(ty, |t, _| format!("Vec<{t}>"));
+            let ty = if self.var_decl_id(var).map(|d| self.decl_elem_nullable(d)).unwrap_or(false) {
+                Self::wrap_elem_option(&ty)
+            } else {
+                ty
+            };
             self.printer.print(&ty);
             if nullable {
                 self.printer.print(">");
@@ -2923,6 +2978,11 @@ impl<'a> RustDumpVisitor<'a> {
             let tmp = tmp.trim().to_string();
             // C-style trailing dims (`String tokens[]`) wrap the shared type.
             let tmp = (0..array_count).fold(tmp, |t, _| format!("Vec<{t}>"));
+            let tmp = if self.decl_elem_nullable(vid) {
+                Self::wrap_elem_option(&tmp)
+            } else {
+                tmp
+            };
             target_box_dyn = tmp.starts_with("Box<dyn ");
             // Java `var` -> let inference (no annotation).
             if tmp == "var" && !nullable {
@@ -3086,8 +3146,10 @@ impl<'a> RustDumpVisitor<'a> {
             return;
         }
         // Assigning to a nullable slot: keep the target as the bare Option (no
-        // unwrap) and wrap the value with Some/None.
-        let target_nullable = matches!(op, AssignOp::Assign) && self.expr_nullable(target);
+        // unwrap) and wrap the value with Some/None. Includes an element-nullable
+        // array element (`arr[i] = x` -> `arr[i] = Some(x)`).
+        let target_nullable = matches!(op, AssignOp::Assign)
+            && (self.expr_nullable(target) || self.array_access_elem_nullable(target));
         let saved = self.expect_option;
         self.expect_option = target_nullable;
         self.visit(target, arg);
@@ -5362,14 +5424,32 @@ impl<'a> RustDumpVisitor<'a> {
             self.printer.print(">");
             return;
         }
+        // An element-nullable array param (`T[]` null-compared in the body) is a
+        // `&Vec<Option<T>>` (rendered from a string so the element wraps).
+        if !nullable && self.decl_elem_nullable(vid) {
+            if let Some(t) = typ {
+                let ty = Self::wrap_elem_option(self.accept_and_cut(t, arg).trim());
+                let needs_mut = matches!(self.arena.kind(vid),
+                    Node::VariableDeclaratorId { name } if self.mut_borrow_params.contains(name));
+                self.printer.print(if needs_mut { "&mut " } else { "&" });
+                self.printer.print(&ty);
+                return;
+            }
+        }
         let is_primitive = typ
             .map(|t| matches!(self.arena.kind(t), Node::PrimitiveType { .. }))
             .unwrap_or(false);
         if nullable {
-            // Option<T> owns its value; no borrow.
+            // Option<T> owns its value; no borrow. An element-nullable array also
+            // wraps the element: `Option<Vec<Option<T>>>`.
             self.printer.print("Option<");
             if let Some(t) = typ {
-                self.visit(t, arg);
+                if self.decl_elem_nullable(vid) {
+                    let ty = Self::wrap_elem_option(self.accept_and_cut(t, arg).trim());
+                    self.printer.print(&ty);
+                } else {
+                    self.visit(t, arg);
+                }
             }
             self.printer.print(">");
         } else {
