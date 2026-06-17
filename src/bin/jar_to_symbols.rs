@@ -263,6 +263,7 @@ fn process_method(
                 .unwrap_or_else(|| descriptor_to_rust(p));
             ParamSym {
                 rust_type: maybe_ref(by_ref, base),
+                java_type: String::new(),
                 by_ref,
                 mutable: false,
                 nullable: param_anns.get(i).copied().flatten().unwrap_or(false),

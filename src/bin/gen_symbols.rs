@@ -243,6 +243,7 @@ fn method_sym(sig: &syn::Signature, module: &str, self_ty: &str) -> MethodSym {
                 let (by_ref, mutable, inner) = deref(&pt.ty);
                 m.params.push(ParamSym {
                     rust_type: type_str(&pt.ty),
+                    java_type: String::new(),
                     by_ref,
                     mutable,
                     nullable: is_option(inner),

@@ -69,8 +69,16 @@ pub struct MethodSym {
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct ParamSym {
+    /// The param's *numeric* Rust type (`f32`/`i64`/…), or empty — drives
+    /// numeric argument widening at call sites.
     #[serde(rename = "type")]
     pub rust_type: String,
+    /// The param's full Java type (`Double`, `Map<K, V>`, `String[]`), or empty
+    /// — used to infer a stub call's return type from the argument position it
+    /// flows into. Kept separate from `rust_type` so the numeric-widening path
+    /// (which expects only numeric Rust types) is unaffected.
+    #[serde(default)]
+    pub java_type: String,
     pub by_ref: bool,
     pub mutable: bool,
     pub nullable: bool,

@@ -880,12 +880,94 @@ impl<'a> RustDumpVisitor<'a> {
             Node::ForStmt { compare: Some(c), .. } if *c == call => Some("bool".to_string()),
             Node::UnaryExpr { op: UnaryOp::Not, expr } if *expr == call => Some("bool".to_string()),
             Node::BinaryExpr { op: BinaryOp::And | BinaryOp::Or, .. } => Some("bool".to_string()),
+            // `<call> <arith/cmp> other` -> the call shares the other operand's
+            // numeric type (gated to a non-literal operand, so a bare `2` doesn't
+            // mis-pin a `double`-returning stub to `i32`).
+            Node::BinaryExpr { left, op, right }
+                if matches!(
+                    op,
+                    BinaryOp::Plus
+                        | BinaryOp::Minus
+                        | BinaryOp::Times
+                        | BinaryOp::Divide
+                        | BinaryOp::Remainder
+                        | BinaryOp::Less
+                        | BinaryOp::Greater
+                        | BinaryOp::LessEquals
+                        | BinaryOp::GreaterEquals
+                ) =>
+            {
+                let other = if *left == call {
+                    *right
+                } else if *right == call {
+                    *left
+                } else {
+                    return None;
+                };
+                if self.is_numeric_literal(other) {
+                    return None;
+                }
+                self.ty(other).numeric_rust().map(str::to_string)
+            }
             // `target = <call>` -> the call returns the target's declared type.
             Node::AssignExpr { target, value, .. } if *value == call => {
                 self.assign_target_rust_type(*target)
             }
+            // `f(<call>)` -> the call returns the type of the parameter it flows
+            // into (when `f` resolves to a known method with a typed param). Only
+            // when `call` is an *argument* (not the receiver — `position` is
+            // `None` then).
+            Node::MethodCallExpr { scope, name, args, .. } => {
+                // `<call>.<m>(..)`: a distinctive String/StringBuilder method on
+                // the result pins it to `String` (e.g. Java `append` -> our
+                // `push_str`, which a bare `Unknown` receiver can't satisfy).
+                if *scope == Some(call) {
+                    return matches!(
+                        name.as_str(),
+                        "append" | "charAt" | "substring" | "toLowerCase" | "toUpperCase"
+                    )
+                    .then(|| "String".to_string());
+                }
+                let idx = args.iter().position(|&a| a == call)?;
+                let m = match scope {
+                    Some(_) => self.resolve_linked_callee(*scope, name, args.len()),
+                    None => self.resolve_self_callee(name, args.len()),
+                }?;
+                Self::java_simple_to_rust_static(&m.params.get(idx)?.java_type).map(str::to_string)
+            }
+            // `new Foo(<call>)` -> the type of the constructor parameter `call`
+            // flows into.
+            Node::ObjectCreationExpr { typ, args, .. } => {
+                let idx = args.iter().position(|&a| a == call)?;
+                let t = self.resolve_type_sym(&self.type_simple_name(*typ)?)?;
+                let m = t
+                    .methods
+                    .get(&format!("new#{}", args.len()))
+                    .or_else(|| t.methods.get("new"))?;
+                Self::java_simple_to_rust_static(&m.params.get(idx)?.java_type).map(str::to_string)
+            }
             _ => None,
         }
+    }
+
+    /// Convert a *simple* Java type name to the Rust type the translator emits,
+    /// for the clean cases only (primitive/boxed/String/`char[]`). Returns `None`
+    /// for generics/collections/user types — there a stub return is left
+    /// `Unknown` rather than guessed.
+    fn java_simple_to_rust_static(s: &str) -> Option<&'static str> {
+        Some(match s {
+            "double" | "Double" => "f64",
+            "float" | "Float" => "f32",
+            "int" | "Integer" => "i32",
+            "long" | "Long" => "i64",
+            "short" | "Short" => "i16",
+            "byte" | "Byte" => "i8",
+            "boolean" | "Boolean" => "bool",
+            "char" | "Character" => "char",
+            "String" => "String",
+            "char[]" => "Vec<char>",
+            _ => return None,
+        })
     }
 
     /// The Rust type of an assignment target (a name or `self.field`), for stub

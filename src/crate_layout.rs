@@ -593,8 +593,12 @@ fn param_sym(
     // types are recorded — `emit_numeric_arg` ignores non-numeric `rust_type`,
     // so a blank for class/String params keeps the prior behaviour.
     let rust_type = typ.and_then(|t| rust_numeric_of_type(arena, t)).unwrap_or_default();
+    // The full Java type (`Double`, `Map<K, V>`) for stub-return-from-argument
+    // inference (see `infer_call_ret_type`).
+    let java_type = typ.map(|t| type_java_simple(arena, t)).unwrap_or_default();
     ParamSym {
         rust_type,
+        java_type,
         by_ref: !is_var_args && !is_nullable && !is_primitive,
         mutable: false,
         nullable: is_nullable,
