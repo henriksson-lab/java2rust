@@ -278,13 +278,26 @@ nothing drops the count until slots+construction+delegation+dispatch land togeth
    they're excluded for free; casts/`instanceof`/`new`/throws fall to the non-slot arm.
    Verified: marker test shows substitution lands only at field/param/return/type-arg
    slots; with the hook returning `None`, output is byte-identical (1951 + 15, all green).
-2. Enum synthesis + method delegation for a **single** supertype (`VCFHeaderLine` only;
-   defer intermediates) + derives.
-3. Construction wrapping + instanceof/cast rewiring for that one supertype; **measure**.
-4. Generalize to intermediates + inter-enum coercion only if step 3 nets positive.
+1.5. **(prerequisite, found by the 2nd fork) a whole-program `Eq/Hash`-derivability
+   FIXPOINT.** `dump.rs:2660` denies `PartialEq/Eq/Hash` to any subtype (`extends`
+   non-empty) because the synthesized `base: Parent` field is a *struct* and
+   `type_derives_eq` categorically rejects struct fields (a naive local allow once
+   "regressed badly"). The synthesized enum must be `Hash+Eq` (it keys
+   `HashSet<VCFHeaderLine>`), so every variant struct must be — blocked by this gate.
+   Correct fix = a fixpoint (a type derives `Eq/Hash` iff every field incl. the base
+   chain transitively does); a real multi-file analysis with cross-corpus blast radius,
+   **NOT** a scoped lift. **Measured independent payoff: ~2 errors across all 9** — so
+   it's almost pure R4-unblocking cost.
+2. Enum synthesis + method delegation (~10 methods) for the hierarchy (one root enum for
+   all three supertypes — dissolves the inter-enum-coercion wall) + derives.
+3. Construction wrapping (33 sites) + instanceof→`matches!` + cast→`if let`; **measure**.
 
-The ~35-error vcf payoff is real but gated behind step 1. R4 is a multi-day staged
-build, not a one-shot.
+**Economics (honest, after 3 forks ≈1.1M tokens):** step 1 landed (zero-diff foundation).
+Remaining = step 1.5 (~0 payoff) + the step 2–3 5-subsystem atomic landing (which may wall
+again). Total payoff **~35 vcf errors (~1.8% of 1951)**. The payoff/effort ratio is
+unfavorable — **recommend pausing R4** with step 1 kept, unless the correctness value
+(working `instanceof`/downcast at runtime) is wanted for its own sake. The design is fully
+mapped here for a future deliberate build.
 
 ## Object handling: R4 is primary, R3 is the fallback (ordering: R4 → R3)
 
