@@ -170,6 +170,41 @@ impl LinkIndex {
         if let Some(t) = self.map.types.get(name) {
             return Some(t);
         }
+        // 5. A *nested* type referenced by simple name from within the same
+        //    package (e.g. inside `Alignments`, a bare `ProfileProfileAlignerType`
+        //    means `pkg.Alignments.ProfileProfileAlignerType`). The map keys
+        //    nested types under `pkg.Outer.Simple`, but steps 2/3 only try
+        //    `pkg.Simple`, so the defining file falls through to a stub while
+        //    other files (which qualify it) resolve it — the inconsistency that
+        //    produced `expected X, found alignments::X`. Match a known type whose
+        //    FQN is `pkg.Outer.Simple` where the enclosing prefix `pkg.Outer` is
+        //    *itself a known type*: this distinguishes a nested class from a
+        //    sub-package type and from an unrelated dependency that merely shares
+        //    the simple name (the caveat above). Bail on ambiguity (two same-
+        //    package nested types sharing a simple name) — safer to stub than to
+        //    bind the wrong one.
+        if let Some(pkg) = package {
+            let pkg_prefix = format!("{pkg}.");
+            let mut found: Option<&TypeSym> = None;
+            let mut ambiguous = false;
+            for fqn in self.map.types.keys() {
+                if fqn.starts_with(&pkg_prefix) && fqn.ends_with(&suffix) {
+                    let outer = &fqn[..fqn.len() - suffix.len()];
+                    if outer.len() > pkg.len() && self.map.types.contains_key(outer) {
+                        if found.is_some() {
+                            ambiguous = true;
+                            break;
+                        }
+                        found = self.map.types.get(fqn);
+                    }
+                }
+            }
+            if !ambiguous {
+                if let Some(t) = found {
+                    return Some(t);
+                }
+            }
+        }
         None
     }
 }
