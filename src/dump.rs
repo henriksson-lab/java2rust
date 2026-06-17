@@ -1001,6 +1001,23 @@ impl<'a> RustDumpVisitor<'a> {
         None
     }
 
+    /// Does the enclosing method's return type render as an owned trait object
+    /// (`Box<dyn T>`)? Then a `new Concrete()` return needs `Box::new(..)`.
+    fn enclosing_ret_box_dyn(&mut self, mut n: NodeId) -> bool {
+        let typ = loop {
+            match self.arena.parent(n) {
+                Some(p) => {
+                    if let Node::MethodDeclaration { typ, .. } = self.arena.kind(p) {
+                        break *typ;
+                    }
+                    n = p;
+                }
+                None => return false,
+            }
+        };
+        self.accept_and_cut(typ, None).trim().starts_with("Box<dyn ")
+    }
+
     /// The Rust type string for a type node (primitives, mapped/linked class
     /// types, array element type), for stub return-type inference. `None` for
     /// `void`/unknown.
@@ -1922,6 +1939,11 @@ impl<'a> RustDumpVisitor<'a> {
                     }
                     if self.enclosing_method_nullable(id) {
                         self.emit_into_option(e, arg);
+                    } else if self.is_object_creation(e) && self.enclosing_ret_box_dyn(id) {
+                        // `return new Concrete()` into a `Box<dyn T>` method.
+                        self.printer.print("Box::new(");
+                        self.emit_moved_value(e, arg);
+                        self.printer.print(")");
                     } else {
                         // Coerce a numeric return value to the method's return type.
                         self.emit_numeric_coerced(e, self.enclosing_method_ret_type(id), arg);
