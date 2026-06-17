@@ -60,6 +60,12 @@ pub fn instance_rule(cat: &str, name: &str, arity: usize) -> Option<StdRule> {
         // best-effort literal replace (NOT regex), mirroring `replaceAll`. `.replacen`
         // also dodges the nightly-unstable `str::replace_first`.
         ("String", "replaceFirst", 2) => r("${recv}.replacen(${0:str}, &(${1}).to_string(), 1)"),
+        // Java's `String.hashCode` (`h = 31*h + c`), foldable and faithful.
+        ("String", "hashCode", 0) => {
+            r("(${recv}.chars().fold(0i32, |__h, __c| __h.wrapping_mul(31).wrapping_add(__c as i32)))")
+        }
+        // `String.getBytes()` -> `Vec<i8>` (Java `byte` is signed).
+        ("String", "getBytes", 0) => r("${recv}.bytes().map(|__b| __b as i8).collect::<Vec<i8>>()"),
 
         // ---- Map ----
         ("Map", "getOrDefault", 2) => r("${recv}.get(&(${0})).cloned().unwrap_or(${1})"),
@@ -67,12 +73,14 @@ pub fn instance_rule(cat: &str, name: &str, arity: usize) -> Option<StdRule> {
         ("Map", "containsValue", 1) => r("${recv}.values().any(|__v| __v == &(${0}))"),
         ("Map", "remove", 1) => rm("${recv}.remove(&(${0}))"),
         ("Map", "putIfAbsent", 2) => rm("${recv}.entry(${0}).or_insert(${1})"),
+        ("Map", "putAll", 1) => rm("${recv}.extend((${0}).clone())"),
         ("Map", "clear", 0) => rm("${recv}.clear()"),
 
         // ---- Set ----
         ("Set", "remove", 1) => rm("${recv}.remove(&(${0}))"),
         ("Set", "addAll", 1) => rm("${recv}.extend((${0}).iter().cloned())"),
         ("Set", "retainAll", 1) => rm("${recv}.retain(|__e| (${0}).contains(__e))"),
+        ("Set", "removeAll", 1) => rm("${recv}.retain(|__e| !(${0}).contains(__e))"),
         ("Set", "clear", 0) => rm("${recv}.clear()"),
 
         // ---- List / Collection ----

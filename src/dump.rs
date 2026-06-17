@@ -2000,6 +2000,13 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
+        // A `LazyLock<T>` associated const read in a value position must be
+        // dereferenced (`*Self::X`), and owned out of the deref via `.clone()`
+        // for a non-Copy inner type.
+        let lazy_const = decl.map(|(_, r)| self.is_lazylock_field(r)).unwrap_or(false);
+        if lazy_const {
+            self.printer.print("(*");
+        }
         if let Some((_, right)) = decl {
             // In a `static` method there's no receiver, so a member accessed bare
             // there is necessarily static -> `Self::` (Java forbids reaching an
@@ -2041,6 +2048,12 @@ impl<'a> RustDumpVisitor<'a> {
         // also needs the clone. (`Option<Copy>` clones trivially.)
         let s = self.to_snake_if_necessary(name);
         self.printer.print(&s);
+        if lazy_const {
+            self.printer.print(")");
+            if self.is_non_copy_name(id) {
+                self.printer.print(".clone()");
+            }
+        }
         // A nullable value used where the plain value is expected gets unwrapped.
         if nullable && !self.expect_option {
             self.printer.print(".clone().unwrap()");
@@ -2217,6 +2230,9 @@ impl<'a> RustDumpVisitor<'a> {
         // Default: so generated `new(...) -> Self` can start from a default value.
         // (A struct with an unused own type param uses manual impls instead — a
         // derive would bound that param `Clone + Default` spuriously.)
+        // (Adding `PartialEq`/`Eq`/`Hash` here was tried and reverted: a local
+        // field-type guard can't see *transitive* non-`PartialEq` field types, so
+        // it cascaded badly — needs a whole-program derivability analysis.)
         if !manual_impls {
             self.printer.print_ln_s("#[derive(Clone, Default)]");
         }
@@ -2899,11 +2915,15 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.print(&name);
         let nullable = self.decl_nullable(vid);
+        // Whether the declared type is an owned trait object (`Box<dyn T>`): a
+        // concrete initializer then needs `Box::new(..)` to coerce.
+        let mut target_box_dyn = false;
         if self.is_type(arg) {
             let tmp = self.accept_and_cut(arg.unwrap(), None);
             let tmp = tmp.trim().to_string();
             // C-style trailing dims (`String tokens[]`) wrap the shared type.
             let tmp = (0..array_count).fold(tmp, |t, _| format!("Vec<{t}>"));
+            target_box_dyn = tmp.starts_with("Box<dyn ");
             // Java `var` -> let inference (no annotation).
             if tmp == "var" && !nullable {
                 // emit no `: Type`
@@ -2940,9 +2960,28 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print("(");
                 self.visit(i, arg);
                 self.printer.print(&format!(") as {t}"));
+            } else if target_box_dyn && self.is_object_creation(i) {
+                // `Box<dyn T> x = new Concrete()` -> `Box::new(Concrete::new())`.
+                // Gated to `new` expressions only: a method/factory value may
+                // already return a `Box<dyn T>` (whose boxed return type the
+                // symbol map doesn't record), so wrapping it would double-box.
+                self.printer.print("Box::new(");
+                self.emit_moved_value(i, arg);
+                self.printer.print(")");
             } else {
                 self.emit_moved_value(i, arg);
             }
+        }
+    }
+
+    /// Is `e` a `new Concrete(...)` expression (through parentheses)? The
+    /// unambiguous "concrete value" case for `Box::new` coercion into a
+    /// `Box<dyn T>` slot — unlike a method value, it can't already be boxed.
+    fn is_object_creation(&self, e: NodeId) -> bool {
+        match self.arena.kind(e) {
+            Node::ObjectCreationExpr { .. } => true,
+            Node::EnclosedExpr { inner: Some(i) } => self.is_object_creation(*i),
+            _ => false,
         }
     }
 
@@ -4233,6 +4272,34 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(").map(|i| i as i32).unwrap_or(-1)");
                 true
             }
+            // `String.indexOf(pat, fromIndex)` -> search the suffix from
+            // `fromIndex`, re-offsetting the found position. (Byte≈char for ASCII.)
+            ("indexOf", 2)
+                if !matches!(self.recv_category(recv), Some("List" | "Set" | "Map" | "Option")) =>
+            {
+                self.printer.print("(");
+                self.visit(recv, arg);
+                self.printer.print("[(");
+                self.visit(args[1], arg);
+                self.printer.print(") as usize..].find(");
+                self.emit_string_pattern(args[0], arg);
+                self.printer.print(").map(|i| (i as i32) + (");
+                self.visit(args[1], arg);
+                self.printer.print(")).unwrap_or(-1))");
+                true
+            }
+            // `String.lastIndexOf(pat, fromIndex)` -> best-effort: search the
+            // prefix up to `fromIndex` backwards.
+            ("lastIndexOf", 2)
+                if !matches!(self.recv_category(recv), Some("List" | "Set" | "Map" | "Option")) =>
+            {
+                self.visit(recv, arg);
+                self.printer.print(".rfind(");
+                self.emit_string_pattern(args[0], arg);
+                self.printer.print(").map(|i| i as i32).unwrap_or(-1)");
+                let _ = args[1];
+                true
+            }
             // `String.toCharArray()` -> `Vec<char>`. String-specific in practice
             // (often on a `toString()` result, so the receiver type is unknown).
             ("toCharArray", 0) => {
@@ -4507,10 +4574,13 @@ impl<'a> RustDumpVisitor<'a> {
     }
 
     fn recv_type_name(&self, recv: NodeId) -> Option<String> {
-        if let Node::NameExpr { name } = self.arena.kind(recv) {
-            self.decl_java_type_name(name, recv)
-        } else {
-            None
+        match self.arena.kind(recv) {
+            Node::NameExpr { name } => self.decl_java_type_name(name, recv),
+            // A field-access receiver (`Constraints.aa2X`, `this.cache`) — resolve
+            // its declared type too, so map/string rewrites fire on it (a `.get(k)`
+            // on a `Map`-typed field must index by key, not by `as usize`).
+            Node::FieldAccessExpr { field, .. } => self.decl_java_type_name(field, recv),
+            _ => None,
         }
     }
 
@@ -5966,6 +6036,28 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         false
+    }
+
+    /// Is `n` (a field's `VariableDeclaratorId`) a static field emitted as a
+    /// `LazyLock<T>` associated const? Mirrors `emit_const_field`: a static field
+    /// with a *non-const* initializer (not a numeric/bool/char literal, nor a
+    /// String-literal `String`). Such a const reads as `LazyLock<T>`, so a value
+    /// position must deref it (`*Self::X` / `(*Self::X).clone()`).
+    fn is_lazylock_field(&self, n: NodeId) -> bool {
+        if !self.is_static_field_declaration(n) {
+            return false;
+        }
+        let Some(var) = self.arena.parent(n) else { return false };
+        let Node::VariableDeclarator { init: Some(i), .. } = self.arena.kind(var) else {
+            return false;
+        };
+        let i = *i;
+        let Some(field) = self.arena.parent(var) else { return false };
+        let Node::FieldDeclaration { typ, .. } = self.arena.kind(field) else {
+            return false;
+        };
+        let is_string = self.type_simple_name(*typ).as_deref() == Some("String");
+        !(is_string && self.is_string_literal(i)) && !self.is_const_literal(i)
     }
 
     fn is_non_static_method_declaration(&self, n: NodeId) -> bool {
