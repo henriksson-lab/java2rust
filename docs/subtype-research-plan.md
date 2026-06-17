@@ -292,6 +292,40 @@ nothing drops the count until slots+construction+delegation+dispatch land togeth
    all three supertypes — dissolves the inter-enum-coercion wall) + derives.
 3. Construction wrapping (33 sites) + instanceof→`matches!` + cast→`if let`; **measure**.
 
+### R4 TERRAIN MAP (after 5 forks ≈1.5M tokens — only step 1 landed)
+
+The enum approach is sound in principle (step 1's slot-context works), but every
+*real* hierarchy hits a substantial, target-specific wall:
+
+- **vcf `VCFHeaderLine` — `Hash` wall, but SOLVABLE via manual impls (correcting the
+  fork).** The enum keys `HashSet<VCFHeaderLine>`, so it needs `Hash`.
+  `#[derive(Hash)]` fails because `VCFSimpleHeaderLine` has a
+  `genericFields: LinkedHashMap<String,String>` and Rust's std maps don't impl
+  `Hash`. The fork concluded "never Hash" — but that only tested *derive*. Java
+  hashes these fine: `VCFSimpleHeaderLine.hashCode()` does
+  `... + genericFields.hashCode()`, and Java `Map.hashCode()` is the
+  order-INDEPENDENT sum of entry hashes (`AbstractMap`). Rust can replicate that
+  with a **manual `impl Hash`** that folds the map entries order-independently.
+  → **The real prerequisite is NOT a de-`Hash` semantics change** (no `HashSet`→`Vec`
+  dedup loss). It's: translate the Java `equals()`/`hashCode()` these types already
+  define into **manual `impl Hash`/`PartialEq`/`Eq`**, hashing/comparing a `Map`/`Set`
+  field by an order-independent fold (not `.hash(state)`). Semantics-preserving,
+  independently useful (any Java value-type with a map field used in a `HashSet`
+  hits this today), and reopens vcf R4. The translator detects `manual_impls`
+  (`dump.rs:2660`) but doesn't emit a working `impl Hash` for the map-bearing case —
+  that's the gap. Delegation is small (~10 methods).
+- **imagej `ImageProcessor` — MECHANICAL wall, NO prerequisites.** No `Hash`-
+  requiring containers, no `equals`/`hashCode` overrides → enum needs only
+  `Clone`/`Default`. But the abstract base has 239 methods, **~75 actually called**
+  on `ImageProcessor`-typed values → the enum must delegate ~75 methods (a `match`
+  per method) OR `Deref<Target=ImageProcessor>` for non-overridden + explicit
+  dispatch for overridden ones. 33 `(ConcreteProcessor)` downcasts are the payoff.
+
+**Conclusion:** R4 is a multi-day feature on ANY real target; the choice is which
+wall to climb. imagej's is *mechanical* (generate N delegating methods — bounded
+codegen, no semantics decisions), which is more landable than vcf's *architectural*
+onion. **If R4 continues, imagej `ImageProcessor` is the better first target.**
+
 **Economics (honest, after 3 forks ≈1.1M tokens):** step 1 landed (zero-diff foundation).
 Remaining = step 1.5 (~0 payoff) + the step 2–3 5-subsystem atomic landing (which may wall
 again). Total payoff **~35 vcf errors (~1.8% of 1951)**. The payoff/effort ratio is
