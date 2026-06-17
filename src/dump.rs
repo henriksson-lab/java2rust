@@ -743,6 +743,44 @@ impl<'a> RustDumpVisitor<'a> {
         mapped
     }
 
+    /// Is the type node `n` rendered at a value-storage SLOT — a field/parameter/
+    /// method-return/local-variable declaration, or a type-argument nested inside
+    /// such — as opposed to a non-slot render (a cast target, `instanceof` type,
+    /// `new` type, `throws`, or an `extends`/`implements` clause)? Walks up through
+    /// `ReferenceType` array wrappers and `ClassOrInterfaceType` type-arg nesting.
+    ///
+    /// R4 uses this to substitute a supertype's synthesized enum *only at slots*:
+    /// a slot stores a value (so it must carry the variant), whereas the struct's
+    /// own definition, its `base:` composition field (emitted directly, not via
+    /// `visit_class_type`), `impl` headers, and dispatch-site type renders must
+    /// keep the plain type.
+    fn is_slot_type(&self, n: NodeId) -> bool {
+        let Some(p) = self.arena.parent(n) else { return false };
+        match self.arena.kind(p) {
+            // Array wrapper / type-arg nesting: inherit the enclosing context.
+            Node::ReferenceType { .. } => self.is_slot_type(p),
+            Node::ClassOrInterfaceType { .. } => self.is_slot_type(p),
+            // Declaration slots — match the *type* field specifically (so a
+            // `MethodDeclaration`'s `throws` types are excluded, only its `typ`
+            // return slot qualifies).
+            Node::FieldDeclaration { typ, .. } => *typ == n,
+            Node::VariableDeclarationExpr { typ, .. } => *typ == n,
+            Node::MethodDeclaration { typ, .. } => *typ == n,
+            Node::Parameter { typ, .. } => *typ == Some(n),
+            // Cast / instanceof / new / extends-implements / throws / catch: the
+            // type is being tested or constructed, not stored — not a slot.
+            _ => false,
+        }
+    }
+
+    /// R4 hook: the synthesized enum name for a supertype that has a closed
+    /// project-subtype hierarchy, when the name appears at a value-storage slot.
+    /// Returns `None` until enum synthesis (R4 step 2) is implemented — so this is
+    /// currently a no-op and type rendering is unchanged.
+    fn slot_enum_name(&self, _name: &str) -> Option<String> {
+        None
+    }
+
     /// In crate mode, a linked *dependency* path (e.g. `org::json::JSONObject`,
     /// recovered from a jar) isn't crate- or std-relative, so a bare `org::…`
     /// reference won't resolve inside the assembled crate. The deps are emitted
@@ -3197,7 +3235,14 @@ impl<'a> RustDumpVisitor<'a> {
                 }
             }
         }
-        let resolved = self.resolve_type_name(&name);
+        // R4: at a value-storage slot, a supertype with a synthesized enum renders
+        // as that enum (so subtype values dispatch through it). `slot_enum_name`
+        // returns `None` until enum synthesis (step 2) populates it, so this is
+        // currently a no-op.
+        let resolved = match self.slot_enum_name(&name).filter(|_| self.is_slot_type(id)) {
+            Some(enum_name) => self.crate_relativize(&enum_name),
+            None => self.resolve_type_name(&name),
+        };
         // An interface (non-generic trait) used as a type isn't a value type in
         // Rust — it needs `dyn`. In an owned position it must be sized, so box
         // it (`Box<dyn Trait>`); a parameter already behind `&` opts into the
