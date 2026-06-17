@@ -8,7 +8,7 @@
  * Class.
  */
 /// @java y.C
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct C {
 }
 

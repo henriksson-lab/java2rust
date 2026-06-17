@@ -17,6 +17,7 @@ pub mod stdlib;
 pub mod stubs;
 pub mod symbol_map;
 pub mod type_tracker;
+pub mod types;
 
 use std::collections::HashSet;
 

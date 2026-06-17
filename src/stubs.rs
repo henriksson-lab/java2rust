@@ -304,7 +304,16 @@ fn file_header() -> String {
      impl Iterator for Unknown {\n\
          type Item = Unknown;\n\
          fn next(&mut self) -> Option<Unknown> { None }\n\
-     }\n\n"
+     }\n\
+     // Arithmetic on a stubbed numeric value (with `Unknown` on the left): keep\n\
+     // it `Unknown` so the surrounding expression still type-checks. (`prim op\n\
+     // Unknown` can't be covered — the orphan rule forbids it.)\n\
+     macro_rules! __unknown_op { ($t:ident, $m:ident) => {\n\
+         impl<T> std::ops::$t<T> for Unknown { type Output = Unknown;\n\
+             fn $m(self, _: T) -> Unknown { Unknown } }\n\
+     }; }\n\
+     __unknown_op!(Add, add); __unknown_op!(Sub, sub); __unknown_op!(Mul, mul);\n\
+     __unknown_op!(Div, div); __unknown_op!(Rem, rem);\n\n"
         .to_string()
 }
 

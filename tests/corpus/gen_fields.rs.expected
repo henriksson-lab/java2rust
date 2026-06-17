@@ -1,5 +1,5 @@
 /// @java F
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct F {
     /// @java F#name
     pub name: String,

@@ -570,6 +570,33 @@ impl<'a> RustDumpVisitor<'a> {
             .unwrap_or(false)
     }
 
+    /// `(can_derive_PartialEq, can_derive_Eq+Hash)` for a *rendered Rust type
+    /// string*, considering only types that derive these unconditionally: this
+    /// avoids any cross-struct dependency (so the per-struct decision can't
+    /// cascade). A struct/enum path, trait object, or unknown ident returns
+    /// `(false, false)` — conservatively excluded even when it would in fact
+    /// derive. Floats are `PartialEq` but not `Eq`/`Hash`.
+    fn type_derives_eq(ty: &str) -> (bool, bool) {
+        let ty = ty.trim();
+        for w in ["Vec<", "Option<", "Box<"] {
+            if let Some(inner) = ty.strip_prefix(w).and_then(|s| s.strip_suffix('>')) {
+                if w == "Box<" && inner.trim_start().starts_with("dyn ") {
+                    return (false, false);
+                }
+                return Self::type_derives_eq(inner);
+            }
+        }
+        match ty {
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "usize" | "isize"
+            | "bool" | "char" => (true, true),
+            "f32" | "f64" => (true, false),
+            "String" | "str" | "&str" | "&'static str" | "Unknown" => (true, true),
+            // Struct/enum crate paths, trait objects, type params, unknown idents:
+            // conservatively non-derivable (no cross-struct reasoning).
+            _ => (false, false),
+        }
+    }
+
     /// Wrap the element of a rendered array type in `Option`: `Vec<T>` ->
     /// `Vec<Option<T>>` (for an element-nullable array declaration).
     fn wrap_elem_option(ty: &str) -> String {
@@ -2280,11 +2307,38 @@ impl<'a> RustDumpVisitor<'a> {
         // Default: so generated `new(...) -> Self` can start from a default value.
         // (A struct with an unused own type param uses manual impls instead — a
         // derive would bound that param `Clone + Default` spuriously.)
-        // (Adding `PartialEq`/`Eq`/`Hash` here was tried and reverted: a local
-        // field-type guard can't see *transitive* non-`PartialEq` field types, so
-        // it cascaded badly — needs a whole-program derivability analysis.)
+        // Equality (`PartialEq`/`Eq`/`Hash`) is added only when *every* field is
+        // an unconditionally-derivable type (primitive, `String`, `Unknown`, or a
+        // `Vec`/`Option`/`Box` of those). A field that is another struct/enum, a
+        // trait object, or a float excludes the struct (conservative: no
+        // cross-struct dependency, so no cascade — an earlier local guard that
+        // allowed struct fields regressed badly). Classes with *synthesized*
+        // fields not in `members` are also excluded: an inherited `base`
+        // (`extends`) and a capturing inner class's `__outer: Rc<RefCell<…>>`.
+        let eligible =
+            !manual_impls && extends.is_empty() && self.enclosing_class_fqn.is_none();
+        let (mut can_partial_eq, mut can_eq_hash) = (eligible, eligible);
+        for &m in &members {
+            if let Node::FieldDeclaration { typ, modifiers, .. } = self.arena.kind(m) {
+                if modifiers::is_static(*modifiers) {
+                    continue;
+                }
+                let typ = *typ;
+                let ty = self.accept_and_cut(typ, None).trim().to_string();
+                let (pe, eh) = Self::type_derives_eq(&ty);
+                can_partial_eq &= pe;
+                can_eq_hash &= eh;
+            }
+        }
         if !manual_impls {
-            self.printer.print_ln_s("#[derive(Clone, Default)]");
+            let mut d = String::from("Clone, Default");
+            if can_partial_eq {
+                d.push_str(", PartialEq");
+            }
+            if can_eq_hash {
+                d.push_str(", Eq, Hash");
+            }
+            self.printer.print_ln_s(&format!("#[derive({d})]"));
         }
         self.print_modifiers(modifiers_v);
         self.printer.print("struct ");
@@ -3178,7 +3232,19 @@ impl<'a> RustDumpVisitor<'a> {
             self.emit_numeric_coerced(value, self.assign_target_rust_type(target), arg);
         } else {
             // Compound assignment (`+=`, …): Java promotes the RHS to the target.
-            match self.numeric_coercion(self.assign_target_rust_type(target), value) {
+            let target_ty = self.assign_target_rust_type(target);
+            // `f64 += 1`: an integer literal RHS won't infer as the float target
+            // (numeric_coercion skips literals), so cast it explicitly. The
+            // target's type comes from the resolver (robust for locals).
+            let cast = self.numeric_coercion(target_ty, value).or_else(|| {
+                match self.ty(target).numeric_rust() {
+                    Some(t @ ("f64" | "f32")) if self.is_integer_literal(value) => {
+                        Some(t.to_string())
+                    }
+                    _ => None,
+                }
+            });
+            match cast {
                 Some(t) => {
                     self.printer.print("(");
                     self.visit(value, arg);
@@ -3438,19 +3504,6 @@ impl<'a> RustDumpVisitor<'a> {
         }
     }
 
-    /// The Rust element type of an array-access expression, recursing through
-    /// nested dimensions (`Vec<Vec<T>>` indexed twice -> `T`).
-    fn array_access_rust_type(&self, e: NodeId) -> Option<String> {
-        let Node::ArrayAccessExpr { name, .. } = self.arena.kind(e) else {
-            return None;
-        };
-        let base = match self.arena.kind(*name) {
-            Node::ArrayAccessExpr { .. } => self.array_access_rust_type(*name)?,
-            _ => self.assign_target_rust_type(*name)?,
-        };
-        base.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')).map(str::to_string)
-    }
-
     /// If a numeric `value` must be coerced to a known numeric `target_ty` (both
     /// known and *different*, and `value` isn't a bare literal Rust would infer),
     /// return the target type to cast to. Mirrors the declarator-widening guards.
@@ -3492,72 +3545,14 @@ impl<'a> RustDumpVisitor<'a> {
 
     /// Best-effort numeric Rust type of an expression (`f64`/`f32`/`i64`/`i32`/
     /// `i16`/`i8`), or `None` if not a determinable numeric.
+    ///
+    /// NOTE: deliberately *not* delegating to the unified resolver yet. The
+    /// resolver resolves strictly more numerics (map values, boxed unboxing,
+    /// method chains), and the numeric-coercion sites that consume this were
+    /// tuned to the narrower coverage — switching here regresses (bjaaprop +7).
+    /// Re-migrate together with `numeric_coercion`/`emit_numeric_*` (Phase 3).
     fn expr_num_type(&self, e: NodeId) -> Option<String> {
-        let t = match self.arena.kind(e) {
-            Node::IntegerLiteralExpr { .. } => "i32".to_string(),
-            Node::LongLiteralExpr { .. } => "i64".to_string(),
-            Node::DoubleLiteralExpr { .. } => "f64".to_string(),
-            Node::EnclosedExpr { inner: Some(i) } => return self.expr_num_type(*i),
-            Node::UnaryExpr { expr, .. } => return self.expr_num_type(*expr),
-            Node::CastExpr { typ, .. } => self.rust_type_of(*typ)?,
-            // Shifts take the left operand's type; the right is a count.
-            Node::BinaryExpr { left, op, .. }
-                if matches!(
-                    op,
-                    BinaryOp::LShift | BinaryOp::RSignedShift | BinaryOp::RUnsignedShift
-                ) =>
-            {
-                self.expr_num_type(*left)?
-            }
-            // Arithmetic/bitwise: the promoted (wider) operand type.
-            Node::BinaryExpr { left, op, right }
-                if matches!(
-                    op,
-                    BinaryOp::Plus
-                        | BinaryOp::Minus
-                        | BinaryOp::Times
-                        | BinaryOp::Divide
-                        | BinaryOp::Remainder
-                        | BinaryOp::BinOr
-                        | BinaryOp::BinAnd
-                        | BinaryOp::Xor
-                ) =>
-            {
-                let l = self.expr_num_type(*left)?;
-                let r = self.expr_num_type(*right)?;
-                if num_rank(&l) >= num_rank(&r) { l } else { r }
-            }
-            Node::NameExpr { .. } | Node::FieldAccessExpr { .. } => self.assign_target_rust_type(e)?,
-            // An array element read: the base array's element type, recursing
-            // through nested dimensions (`Vec<Vec<T>>[i][j]` -> T).
-            Node::ArrayAccessExpr { .. } => self.array_access_rust_type(e)?,
-            // A call to a project method whose numeric return type was recorded,
-            // else a stdlib numeric fallback so the surrounding arithmetic gets
-            // promoted (`n * Math.log(x)` is `i32 * f64`). Resolve-first keeps a
-            // user method's recorded return winning over the name heuristic.
-            Node::MethodCallExpr { scope, name, args, .. } => {
-                let resolved = match scope {
-                    Some(_) => self.resolve_linked_callee(*scope, name, args.len()),
-                    None => self.resolve_self_callee(name, args.len()),
-                };
-                match resolved {
-                    Some(m) => m.ret.clone()?,
-                    // Float-returning `Math` functions, and `.size()/.length()`
-                    // (our `.len() as i32`). `abs/round/min/max/signum` are
-                    // excluded — Java's return type there follows the arg type.
-                    None => match name.as_str() {
-                        "sqrt" | "cbrt" | "log" | "ln" | "log10" | "log1p" | "exp" | "expm1"
-                        | "pow" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-                        | "sinh" | "cosh" | "tanh" | "hypot" | "toRadians" | "toDegrees"
-                        | "ceil" | "floor" | "rint" => "f64".to_string(),
-                        "size" | "length" if args.is_empty() => "i32".to_string(),
-                        _ => return None,
-                    },
-                }
-            }
-            _ => return None,
-        };
-        matches!(t.as_str(), "f64" | "f32" | "i64" | "i32" | "i16" | "i8").then_some(t)
+        self.ty(e).numeric_rust().map(str::to_string)
     }
 
     fn gen_string_expr_sequence(&self, id: NodeId, result: &mut Vec<NodeId>) {
@@ -4583,48 +4578,31 @@ impl<'a> RustDumpVisitor<'a> {
         }
     }
 
-    /// Is `e` a `char`-typed expression (a char literal or a `char`-declared
-    /// name/field)?
+    /// Is `e` a `char`-typed expression (literal, `char` name/field, or a
+    /// `char[]` element read — the latter so `arr[i] - 'A'` promotes correctly)?
     fn expr_is_char(&self, e: NodeId) -> bool {
-        match self.arena.kind(e) {
-            Node::CharLiteralExpr { .. } => true,
-            Node::EnclosedExpr { inner: Some(i) } => self.expr_is_char(*i),
-            Node::NameExpr { name } => self.decl_java_type_name(name, e).as_deref() == Some("char"),
-            Node::FieldAccessExpr { field, .. } => {
-                self.decl_java_type_name(field, e).as_deref() == Some("char")
-            }
-            // A `char[]` element read (`arr[i]`): so `arr[i] - 'A'` promotes the
-            // element to `i32` (Java char arithmetic) and string-pattern args use
-            // the bare-char form.
-            Node::ArrayAccessExpr { .. } => self.array_access_rust_type(e).as_deref() == Some("char"),
-            _ => false,
-        }
+        self.ty(e).is_char()
+    }
+
+    /// A short-lived [`crate::types::TypeResolver`] over this unit (the dumper
+    /// holds `&mut IdTracker`, so the resolver — which needs `&IdTracker` — is
+    /// built per query rather than stored). The per-call memo still caches the
+    /// recursion within a single `type_of`.
+    fn ty(&self, e: NodeId) -> crate::types::Type {
+        crate::types::TypeResolver::new(
+            self.arena,
+            &*self.id,
+            self.link,
+            self.current_class_fqn.clone(),
+        )
+        .type_of(e)
     }
 
     /// Does `e` resolve to a `Vec<char>` (a Java `char[]`)? Such values have no
     /// `Display`, so string append/concat must `.iter().collect::<String>()`
     /// rather than `.to_string()`.
     fn expr_is_char_vec(&self, e: NodeId) -> bool {
-        match self.arena.kind(e) {
-            Node::EnclosedExpr { inner: Some(i) } => self.expr_is_char_vec(*i),
-            Node::NameExpr { .. } | Node::FieldAccessExpr { .. } => {
-                self.assign_target_rust_type(e).as_deref() == Some("Vec<char>")
-            }
-            Node::ArrayAccessExpr { .. } => {
-                self.array_access_rust_type(e).as_deref() == Some("Vec<char>")
-            }
-            Node::MethodCallExpr { scope, name, args, .. } => {
-                if name == "toCharArray" && args.is_empty() {
-                    return true;
-                }
-                let m = match scope {
-                    Some(_) => self.resolve_linked_callee(*scope, name, args.len()),
-                    None => self.resolve_self_callee(name, args.len()),
-                };
-                m.and_then(|m| m.ret.clone()).as_deref() == Some("Vec<char>")
-            }
-            _ => false,
-        }
+        self.ty(e).is_char_vec()
     }
 
     fn emit_recv_method(&mut self, recv: NodeId, method: &str, arg: Arg) -> bool {
@@ -4640,10 +4618,30 @@ impl<'a> RustDumpVisitor<'a> {
             Node::NameExpr { name } => self.decl_java_type_name(name, recv),
             // A field-access receiver (`Constraints.aa2X`, `this.cache`) — resolve
             // its declared type too, so map/string rewrites fire on it (a `.get(k)`
-            // on a `Map`-typed field must index by key, not by `as usize`).
-            Node::FieldAccessExpr { field, .. } => self.decl_java_type_name(field, recv),
+            // on a `Map`-typed field must index by key, not by `as usize`). An
+            // in-file field resolves via the AST; a cross-class static field
+            // (`OtherClass.field`) via the symbol map.
+            Node::FieldAccessExpr { scope, field, .. } => self
+                .decl_java_type_name(field, recv)
+                .or_else(|| self.static_field_java_type(*scope, field)),
             _ => None,
         }
+    }
+
+    /// The Java simple type name of a cross-class static field `Class.field`,
+    /// from the symbol map (the field's `rust_type` slot stores it). Lets the
+    /// receiver-category rewrites fire on a static map/collection field defined
+    /// in another class.
+    fn static_field_java_type(&self, scope: NodeId, field: &str) -> Option<String> {
+        let Node::NameExpr { name: cls } = self.arena.kind(scope) else {
+            return None;
+        };
+        let t = self.resolve_type_sym(cls)?;
+        let f = t.static_fields.get(field).or_else(|| t.fields.get(field))?;
+        // The stored type may carry generics/array (`Map<K, V>`, `String[]`);
+        // `recv_type_name`'s consumers compare simple names, so strip to that.
+        let simple = f.rust_type.split(['<', '[']).next().unwrap_or(&f.rust_type).trim();
+        (!simple.is_empty()).then(|| simple.to_string())
     }
 
     /// Is `simple` a stdlib type the built-in method rewrites apply to (a
@@ -4673,17 +4671,13 @@ impl<'a> RustDumpVisitor<'a> {
     /// `Option`), or `None` when the type is unknown or a user type. The
     /// category gate keeps a user class's same-named method from being hijacked.
     fn recv_category(&self, recv: NodeId) -> Option<&'static str> {
-        let t = self.recv_type_name(recv)?;
-        let simple = t.rsplit('.').next().unwrap_or(&t);
-        Some(match simple {
-            "String" | "CharSequence" | "StringBuilder" | "StringBuffer" => "String",
-            "Map" | "HashMap" | "LinkedHashMap" | "TreeMap" | "SortedMap" | "NavigableMap"
-            | "ConcurrentHashMap" => "Map",
-            "Set" | "HashSet" | "LinkedHashSet" | "TreeSet" | "SortedSet" | "NavigableSet" => "Set",
-            "List" | "ArrayList" | "LinkedList" | "Vector" | "Stack" | "Collection" | "Queue"
-            | "Deque" | "ArrayDeque" => "List",
-            "Optional" => "Option",
-            _ => return None,
+        use crate::types::Category;
+        Some(match self.ty(recv).category()? {
+            Category::String => "String",
+            Category::List => "List",
+            Category::Map => "Map",
+            Category::Set => "Set",
+            Category::Option => "Option",
         })
     }
 
@@ -5143,11 +5137,14 @@ impl<'a> RustDumpVisitor<'a> {
         match op {
             PreIncrement | PreDecrement | PosIncrement | PosDecrement => {
                 self.print_java_comment(id, arg);
-                let opstr = if matches!(op, PreDecrement | PosDecrement) {
-                    " -= 1"
-                } else {
-                    " += 1"
+                // A float operand needs a float step (`f64 += 1.0`); an integer
+                // `1` won't add-assign to `f64`.
+                let one = match self.ty(expr).numeric_rust() {
+                    Some("f64") | Some("f32") => "1.0",
+                    _ => "1",
                 };
+                let dec = matches!(op, PreDecrement | PosDecrement);
+                let opstr = format!(" {} {one}", if dec { "-=" } else { "+=" });
                 let post = matches!(op, PosIncrement | PosDecrement);
                 if self.is_embedded_in_stmt(id) {
                     // Used as a value: lower to a block expression.
@@ -5157,13 +5154,13 @@ impl<'a> RustDumpVisitor<'a> {
                         self.visit(expr, arg);
                         self.printer.print("; ");
                         self.visit(expr, arg);
-                        self.printer.print(opstr);
+                        self.printer.print(&opstr);
                         self.printer.print("; __v }");
                     } else {
                         // ++x : increment then yield
                         self.printer.print("{ ");
                         self.visit(expr, arg);
-                        self.printer.print(opstr);
+                        self.printer.print(&opstr);
                         self.printer.print("; ");
                         self.visit(expr, arg);
                         self.printer.print(" }");
@@ -5171,7 +5168,7 @@ impl<'a> RustDumpVisitor<'a> {
                 } else {
                     // Statement context: a plain compound assignment.
                     self.visit(expr, arg);
-                    self.printer.print(opstr);
+                    self.printer.print(&opstr);
                 }
             }
             Positive => {

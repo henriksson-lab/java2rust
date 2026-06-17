@@ -1,5 +1,5 @@
 /// @java T
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct T {
 }
 
