@@ -3895,8 +3895,14 @@ impl<'a> RustDumpVisitor<'a> {
         }
         // Array `.length` -> `(recv.len() as i32)`: Java `length` is an `int`, so
         // the cast keeps it comparable/assignable to the `i32`-typed surroundings
-        // (mirrors the `.length()`/`.size()` method rewrites).
-        if field == "length" && !self.is_static_class_ref(scope) {
+        // (mirrors the `.length()`/`.size()` method rewrites). Skipped for
+        // `this.length` when the class declares a real `length` field — that's a
+        // genuine field, not the array pseudo-field (the `.len()` form is also an
+        // invalid assignment target, E0070).
+        let this_real_length_field = field == "length"
+            && matches!(self.arena.kind(scope), Node::ThisExpr { .. })
+            && self.class_field_names.contains("length");
+        if field == "length" && !self.is_static_class_ref(scope) && !this_real_length_field {
             self.printer.print("(");
             self.emit_scope(scope, arg);
             self.printer.print(".len() as i32)");
