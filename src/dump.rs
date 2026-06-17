@@ -989,6 +989,32 @@ impl<'a> RustDumpVisitor<'a> {
 
     /// The Rust type of an assignment target (a name or `self.field`), for stub
     /// return-type inference of `target = <stub call>`.
+    /// If the assignment target's declared type is a project *interface* — which
+    /// renders as an owned `Box<dyn Trait>` field — the trait's simple name. Lets
+    /// `self.field = <concrete>` box the RHS. (`assign_target_rust_type` returns
+    /// the bare type name via `rust_type_of`, never the `Box<dyn …>` form, so the
+    /// interface must be detected from the symbol map here.)
+    fn assign_target_trait(&self, target: NodeId) -> Option<String> {
+        let name = match self.arena.kind(target) {
+            Node::NameExpr { name } => name.clone(),
+            Node::FieldAccessExpr { field, .. } => field.clone(),
+            _ => return None,
+        };
+        let (_, decl) = self.id.find_declaration_node_for(self.arena, &name, target)?;
+        let parent = self.arena.parent(decl)?;
+        let typ = match self.arena.kind(parent) {
+            Node::Parameter { typ, .. } => (*typ)?,
+            _ => match self.arena.parent(parent).map(|g| self.arena.kind(g)) {
+                Some(Node::FieldDeclaration { typ, .. })
+                | Some(Node::VariableDeclarationExpr { typ, .. }) => *typ,
+                _ => return None,
+            },
+        };
+        let simple = self.type_simple_name(typ)?;
+        let t = self.resolve_type_sym(&simple)?;
+        (t.kind == "trait").then_some(simple)
+    }
+
     fn assign_target_rust_type(&self, target: NodeId) -> Option<String> {
         let name = match self.arena.kind(target) {
             Node::NameExpr { name } => name.clone(),
@@ -3090,7 +3116,16 @@ impl<'a> RustDumpVisitor<'a> {
                     self.printer.print(&format!("pub const {name}: std::sync::LazyLock<"));
                     self.visit(typ, None);
                     self.printer.print("> = std::sync::LazyLock::new(|| ");
-                    self.visit(i, None);
+                    // A concrete value into a `Box<dyn Trait>` field needs boxing.
+                    let box_it = Self::box_dyn_trait_simple(&type_str)
+                        .is_some_and(|tr| self.is_object_creation(i) || self.expr_impls_trait(i, &tr));
+                    if box_it {
+                        self.printer.print("Box::new(");
+                        self.visit(i, None);
+                        self.printer.print(")");
+                    } else {
+                        self.visit(i, None);
+                    }
                     self.printer.print_ln_s(");");
                 }
                 // No initializer: fall back to a const default.
@@ -3508,9 +3543,20 @@ impl<'a> RustDumpVisitor<'a> {
         if target_nullable {
             self.emit_into_option(value, arg);
         } else if matches!(op, AssignOp::Assign) {
-            // Coerce a numeric RHS to the target's type (Java widens/narrows; e.g.
-            // `long x = intExpr`, `float f = doubleExpr`).
-            self.emit_numeric_coerced(value, self.assign_target_rust_type(target), arg);
+            let box_tr = self.assign_target_trait(target);
+            if box_tr
+                .as_deref()
+                .is_some_and(|tr| self.is_object_creation(value) || self.expr_impls_trait(value, tr))
+            {
+                // `self.field = <concrete>` where the field is `Box<dyn Trait>`.
+                self.printer.print("Box::new(");
+                self.emit_moved_value(value, arg);
+                self.printer.print(")");
+            } else {
+                // Coerce a numeric RHS to the target's type (Java widens/narrows;
+                // e.g. `long x = intExpr`, `float f = doubleExpr`).
+                self.emit_numeric_coerced(value, self.assign_target_rust_type(target), arg);
+            }
         } else {
             // Compound assignment (`+=`, …): Java promotes the RHS to the target.
             let target_ty = self.assign_target_rust_type(target);
