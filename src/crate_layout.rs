@@ -36,10 +36,10 @@ struct RawType {
     parent_simple: Option<String>,
     /// `implements` interface simple names.
     interface_simples: Vec<String>,
-    /// (java name, rust name, java simple type) for instance fields.
-    fields: Vec<(String, String, String)>,
-    /// (java name, rust name, java simple type) for static fields (assoc consts).
-    static_fields: Vec<(String, String, String)>,
+    /// (java name, rust name, java simple type, nullable) for instance fields.
+    fields: Vec<(String, String, String, bool)>,
+    /// (java, rust, java simple type, nullable) for static fields (assoc consts).
+    static_fields: Vec<(String, String, String, bool)>,
     /// (symbol-map key, rust name, param signatures, throws, recv-mut,
     /// numeric-ret) for instance methods. The key is the bare Java name, or
     /// `name#arity` for non-base overloads.
@@ -92,16 +92,16 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
         // `rust_type` holds the field's *Java simple type name* (e.g. `Map`),
         // used by the dumper to resolve a cross-class static field's receiver
         // category (`Constraints.aaMap.get(k)`).
-        for (java, rust, jty) in &r.fields {
+        for (java, rust, jty, nn) in &r.fields {
             t.fields.insert(
                 java.clone(),
-                FieldSym { rust: rust.clone(), rust_type: jty.clone(), nullable: false },
+                FieldSym { rust: rust.clone(), rust_type: jty.clone(), nullable: *nn },
             );
         }
-        for (java, rust, jty) in &r.static_fields {
+        for (java, rust, jty, nn) in &r.static_fields {
             t.static_fields.insert(
                 java.clone(),
-                FieldSym { rust: rust.clone(), rust_type: jty.clone(), nullable: false },
+                FieldSym { rust: rust.clone(), rust_type: jty.clone(), nullable: *nn },
             );
         }
         for (java, rust, params, throws, recv_mut, ret, ret_nullable) in &r.methods {
@@ -308,9 +308,9 @@ fn type_members(
 ) -> (
     Option<String>,
     Vec<String>,
-    // (java name, rust name, java simple type name) for fields / static fields.
-    Vec<(String, String, String)>,
-    Vec<(String, String, String)>,
+    // (java name, rust name, java simple type, nullable) for fields / statics.
+    Vec<(String, String, String, bool)>,
+    Vec<(String, String, String, bool)>,
     Vec<(String, String, Vec<crate::symbol_map::ParamSym>, bool, bool, Option<String>, bool)>,
 ) {
     use crate::modifiers;
@@ -357,7 +357,8 @@ fn type_members(
                 for &v in variables {
                     if let Node::VariableDeclarator { id: vid, .. } = arena.kind(v) {
                         if let Node::VariableDeclaratorId { name } = arena.kind(*vid) {
-                            target.push((name.clone(), rust_member_name(name), jty.clone()));
+                            let nn = nullable.contains(vid);
+                            target.push((name.clone(), rust_member_name(name), jty.clone(), nn));
                         }
                     }
                 }
@@ -401,7 +402,7 @@ fn type_members(
 
 /// An enum's variant names as `(java, rust)` pairs (the variant is emitted with
 /// its source name, so the two coincide).
-fn enum_variants(arena: &Arena, decl: NodeId) -> Vec<(String, String, String)> {
+fn enum_variants(arena: &Arena, decl: NodeId) -> Vec<(String, String, String, bool)> {
     let Node::EnumDeclaration { entries, .. } = arena.kind(decl) else {
         return Vec::new();
     };
@@ -409,7 +410,7 @@ fn enum_variants(arena: &Arena, decl: NodeId) -> Vec<(String, String, String)> {
         .iter()
         .filter_map(|&e| match arena.kind(e) {
             Node::EnumConstantDeclaration { name, .. } => {
-                Some((name.clone(), name.clone(), String::new()))
+                Some((name.clone(), name.clone(), String::new(), false))
             }
             _ => None,
         })

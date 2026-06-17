@@ -257,6 +257,23 @@ impl<'a> RustDumpVisitor<'a> {
         None
     }
 
+    /// Is `member` an inherited (superclass) field that is nullable? Walks the
+    /// parent chain in the symbol map, mirroring [`Self::inherited_field`].
+    fn inherited_field_nullable(&self, member: &str) -> bool {
+        let Some(mut t) = self.current_class_fqn.as_deref().and_then(|f| self.link.lookup(f))
+        else {
+            return false;
+        };
+        while let Some(parent) = t.parent.as_deref() {
+            let Some(pt) = self.link.lookup(parent) else { return false };
+            if let Some(f) = pt.fields.get(member) {
+                return f.nullable;
+            }
+            t = pt;
+        }
+        false
+    }
+
     /// The crate path of the enum whose variant set contains every one of these
     /// `switch` case labels (bare names) — so a `match` on the enum can qualify
     /// them as `Enum::Label`. Matching the *whole* label set disambiguates even
@@ -1243,15 +1260,59 @@ impl<'a> RustDumpVisitor<'a> {
             .unwrap_or(false)
     }
 
+    /// Is `field` a nullable instance field of the class enclosing `at`? Resolves
+    /// against the class's fields directly, so a same-named param/local (which
+    /// would shadow under general name resolution) can't mislead.
+    fn this_field_nullable(&self, field: &str, at: NodeId) -> bool {
+        let mut n = at;
+        while let Some(p) = self.arena.parent(n) {
+            if let Node::ClassOrInterfaceDeclaration { members, .. } = self.arena.kind(p) {
+                for &m in members {
+                    if let Node::FieldDeclaration { variables, .. } = self.arena.kind(m) {
+                        for &v in variables {
+                            if let Node::VariableDeclarator { id: vid, .. } = self.arena.kind(v) {
+                                if let Node::VariableDeclaratorId { name } = self.arena.kind(*vid) {
+                                    if name == field {
+                                        return self.nullable.contains(vid);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+            n = p;
+        }
+        false
+    }
+
     /// Mirror of `nullability::expr_nullable` for the dumper.
     fn expr_nullable(&self, e: NodeId) -> bool {
         match self.arena.kind(e) {
             Node::NullLiteralExpr => true,
-            Node::NameExpr { name } => self.name_decl_nullable(name, e),
+            // A local/param/own-field by name, else (unresolved) an inherited
+            // superclass field — consistent with how `visit_name_expr` emits it.
+            Node::NameExpr { name } => {
+                if self.id.find_declaration_node_for(self.arena, name, e).is_some() {
+                    self.name_decl_nullable(name, e)
+                } else {
+                    self.inherited_field_nullable(name)
+                }
+            }
             // `readLine()` yields `Option<String>` (its stub/shim is nullable);
             // mark it so an `Option`-target assignment isn't double-wrapped.
             Node::MethodCallExpr { name, args, .. } if name == "readLine" && args.is_empty() => true,
             Node::MethodCallExpr { scope: None, name, .. } => self.name_decl_nullable(name, e),
+            // `this.field` where the field is nullable. Resolved against the
+            // enclosing class's *fields* specifically (not general name
+            // resolution, which a same-named param/local would shadow — e.g.
+            // `this.version = version`).
+            Node::FieldAccessExpr { scope, field, .. }
+                if matches!(self.arena.kind(*scope), Node::ThisExpr { .. }) =>
+            {
+                self.this_field_nullable(field, e)
+            }
             Node::EnclosedExpr { inner: Some(i) } => self.expr_nullable(*i),
             Node::CastExpr { expr, .. } => self.expr_nullable(*expr),
             Node::ConditionalExpr { then_expr, else_expr, .. } => {
@@ -2125,6 +2186,10 @@ impl<'a> RustDumpVisitor<'a> {
             // Inherited instance field of a project superclass -> through `base`.
             if let Some(path) = self.inherited_field(name) {
                 self.printer.print(&path);
+                // A nullable inherited field read in a value position is unwrapped.
+                if !self.expect_option && self.inherited_field_nullable(name) {
+                    self.printer.print(".clone().unwrap()");
+                }
                 self.print_orphan_comments_ending(id);
                 return;
             }
@@ -3841,6 +3906,15 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print(if self.is_static_class_ref(scope) { "::" } else { "." });
         let f = self.to_snake_if_necessary(&field);
         self.printer.print(&f);
+        // A nullable `this.field` read in a value position yields the owned `T`
+        // (mirrors `visit_name_expr`). `expect_option` suppresses it for
+        // lvalue / `Option`-slot / null-compare contexts.
+        if !self.expect_option
+            && matches!(self.arena.kind(scope), Node::ThisExpr { .. })
+            && self.this_field_nullable(&field, id)
+        {
+            self.printer.print(".clone().unwrap()");
+        }
     }
 
     fn visit_method_call(&mut self, id: NodeId, arg: Arg) {
