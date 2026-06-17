@@ -552,11 +552,20 @@ impl<'a> TypeResolver<'a> {
     /// class's parent chain in the symbol map.
     fn resolve_self_method_ret(&self, name: &str, arity: usize) -> Option<String> {
         let mut t = self.link.lookup(self.current_class.as_deref()?);
+        // Cycle guard: a loaded dependency map (which bypasses
+        // `break_parent_cycles`) could still carry a looping `parent` chain.
+        let mut seen: Vec<&str> = Vec::new();
         while let Some(ty) = t {
             if let Some(ret) = lookup_method_ret(ty, name, arity) {
                 return Some(ret);
             }
-            t = ty.parent.as_deref().and_then(|p| self.link.lookup(p));
+            match ty.parent.as_deref() {
+                Some(p) if !seen.contains(&p) => {
+                    seen.push(p);
+                    t = self.link.lookup(p);
+                }
+                _ => break,
+            }
         }
         None
     }

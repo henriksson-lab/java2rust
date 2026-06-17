@@ -1150,16 +1150,24 @@ impl<'a> RustDumpVisitor<'a> {
         // a direct lookup misses it and the call site loses the recorded signature
         // (argument borrowing AND return nullability — a nullable inherited getter
         // used as a plain value would not be `.unwrap()`'d).
+        // Overloaded methods are keyed `name#arity`; the base overload keeps the
+        // bare name. The key is loop-invariant — build it once (not per ancestor).
+        let arity_key = format!("{name}#{arity}");
         let mut t = self.resolve_type_sym(&simple);
+        // Guard against a cyclic `parent` chain in the project map (a recorded
+        // superclass that loops back) — otherwise this walk never terminates.
+        let mut seen: Vec<&str> = Vec::new();
         while let Some(ty) = t {
-            // Overloaded methods are keyed `name#arity`; the base overload keeps
-            // the bare name. Prefer the arity-specific entry, then fall back.
-            if let Some(m) =
-                ty.methods.get(&format!("{name}#{arity}")).or_else(|| ty.methods.get(name))
-            {
+            if let Some(m) = ty.methods.get(&arity_key).or_else(|| ty.methods.get(name)) {
                 return Some(m);
             }
-            t = ty.parent.as_deref().and_then(|p| self.link.lookup(p));
+            match ty.parent.as_deref() {
+                Some(p) if !seen.contains(&p) => {
+                    seen.push(p);
+                    t = self.link.lookup(p);
+                }
+                _ => break,
+            }
         }
         None
     }
@@ -1171,16 +1179,22 @@ impl<'a> RustDumpVisitor<'a> {
         if self.link.is_empty() {
             return None;
         }
+        let arity_key = format!("{name}#{arity}");
         let mut t = self.link.lookup(self.current_class_fqn.as_deref()?);
+        // Cycle guard (see `resolve_linked_callee`): a looping `parent` chain in
+        // the project map would otherwise spin here forever.
+        let mut seen: Vec<&str> = Vec::new();
         while let Some(ty) = t {
-            if let Some(m) = ty
-                .methods
-                .get(&format!("{name}#{arity}"))
-                .or_else(|| ty.methods.get(name))
-            {
+            if let Some(m) = ty.methods.get(&arity_key).or_else(|| ty.methods.get(name)) {
                 return Some(m);
             }
-            t = ty.parent.as_deref().and_then(|p| self.link.lookup(p));
+            match ty.parent.as_deref() {
+                Some(p) if !seen.contains(&p) => {
+                    seen.push(p);
+                    t = self.link.lookup(p);
+                }
+                _ => break,
+            }
         }
         None
     }

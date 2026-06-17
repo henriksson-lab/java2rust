@@ -89,6 +89,12 @@ pub struct ParamSym {
 #[derive(Default)]
 pub struct LinkIndex {
     map: SymbolMap,
+    /// Lazily-built index for the step-5 nested-type fallback: simple name →
+    /// the FQNs `pkg.Outer.Simple` whose enclosing prefix `pkg.Outer` is itself
+    /// a known type (i.e. genuine nested types). Without this, step 5 scanned
+    /// *every* map key on each resolve miss — O(map) per call, which made a
+    /// large project (Bio-Formats) pathologically slow. Built once on first use.
+    nested_index: std::sync::OnceLock<std::collections::HashMap<String, Vec<String>>>,
 }
 
 impl LinkIndex {
@@ -184,13 +190,15 @@ impl LinkIndex {
         //    package nested types sharing a simple name) — safer to stub than to
         //    bind the wrong one.
         if let Some(pkg) = package {
-            let pkg_prefix = format!("{pkg}.");
-            let mut found: Option<&TypeSym> = None;
-            let mut ambiguous = false;
-            for fqn in self.map.types.keys() {
-                if fqn.starts_with(&pkg_prefix) && fqn.ends_with(&suffix) {
-                    let outer = &fqn[..fqn.len() - suffix.len()];
-                    if outer.len() > pkg.len() && self.map.types.contains_key(outer) {
+            // The index already restricts to nested types (`pkg.Outer.Simple`
+            // with `pkg.Outer` a known type); here we only filter to the
+            // referencing file's package and bail on ambiguity.
+            if let Some(cands) = self.nested_index().get(simple) {
+                let pkg_prefix = format!("{pkg}.");
+                let mut found: Option<&TypeSym> = None;
+                let mut ambiguous = false;
+                for fqn in cands {
+                    if fqn.starts_with(&pkg_prefix) && fqn.len() - suffix.len() > pkg.len() {
                         if found.is_some() {
                             ambiguous = true;
                             break;
@@ -198,13 +206,32 @@ impl LinkIndex {
                         found = self.map.types.get(fqn);
                     }
                 }
-            }
-            if !ambiguous {
-                if let Some(t) = found {
-                    return Some(t);
+                if !ambiguous {
+                    if let Some(t) = found {
+                        return Some(t);
+                    }
                 }
             }
         }
         None
+    }
+
+    /// Build (once) the simple-name → nested-FQN index used by `resolve` step 5.
+    /// A nested type's FQN is `pkg.Outer.Simple` where the prefix `pkg.Outer`
+    /// (everything before the last segment) is itself a known type.
+    fn nested_index(&self) -> &std::collections::HashMap<String, Vec<String>> {
+        self.nested_index.get_or_init(|| {
+            let mut idx: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for fqn in self.map.types.keys() {
+                if let Some(dot) = fqn.rfind('.') {
+                    let outer = &fqn[..dot];
+                    if self.map.types.contains_key(outer) {
+                        idx.entry(fqn[dot + 1..].to_string()).or_default().push(fqn.clone());
+                    }
+                }
+            }
+            idx
+        })
     }
 }

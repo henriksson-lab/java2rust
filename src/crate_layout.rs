@@ -123,7 +123,40 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
         }
         map.types.insert(r.fqn.clone(), t);
     }
+    break_parent_cycles(&mut map);
     map
+}
+
+/// Sever cyclic `parent` chains in the project map. `resolve_parent`'s
+/// nested-type fallback (longest-shared-prefix match) can pick a candidate that
+/// makes a class transitively extend itself — e.g. Bio-Formats produced a cycle
+/// that sent every parent-chain walk (inherited method/field resolution) into an
+/// infinite loop. A type can never legitimately extend itself, so detect each
+/// cycle and drop the back-edge.
+fn break_parent_cycles(map: &mut SymbolMap) {
+    let fqns: Vec<String> = map.types.keys().cloned().collect();
+    let mut to_clear: Vec<String> = Vec::new();
+    for start in &fqns {
+        let mut seen = HashSet::new();
+        let mut cur = start.clone();
+        loop {
+            if !seen.insert(cur.clone()) {
+                // Revisited `cur` ⇒ it sits on a cycle; clearing its parent
+                // breaks the loop while leaving the acyclic prefix intact.
+                to_clear.push(cur);
+                break;
+            }
+            match map.types.get(&cur).and_then(|t| t.parent.clone()) {
+                Some(p) if map.types.contains_key(&p) => cur = p,
+                _ => break,
+            }
+        }
+    }
+    for f in to_clear {
+        if let Some(t) = map.types.get_mut(&f) {
+            t.parent = None;
+        }
+    }
 }
 
 /// Resolve an `extends` simple name to a defined FQN, via the file's imports and
