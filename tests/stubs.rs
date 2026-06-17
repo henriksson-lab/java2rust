@@ -62,8 +62,14 @@ public class M {
 }
 "#;
     let out = stubs_of(java, &HashSet::new());
-    assert!(out.contains("struct URL"), "all-caps class URL is stubbed:\n{out}");
-    assert!(!out.contains("struct T "), "short generic T is not stubbed:\n{out}");
+    // URL is method-free here (only used as a field type), so R1 collapses it to
+    // a `pub type URL = Unknown;` alias rather than a distinct struct — either
+    // form counts as "stubbed".
+    assert!(
+        out.contains("struct URL") || out.contains("type URL = Unknown"),
+        "all-caps class URL is stubbed:\n{out}"
+    );
+    assert!(!out.contains("struct T ") && !out.contains("type T "), "short generic T is not stubbed:\n{out}");
 }
 
 #[test]

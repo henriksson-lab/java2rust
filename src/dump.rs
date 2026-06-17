@@ -1144,12 +1144,24 @@ impl<'a> RustDumpVisitor<'a> {
             return None;
         }
         let simple = self.callee_recv_type(scope?)?;
-        let t = self.resolve_type_sym(&simple)?;
-        // Overloaded methods are keyed `name#arity`; the base overload keeps the
-        // bare name. Prefer the arity-specific entry, then fall back.
-        t.methods
-            .get(&format!("{name}#{arity}"))
-            .or_else(|| t.methods.get(name))
+        // Walk the receiver type's superclass chain (mirrors `resolve_self_callee`):
+        // an *inherited* method (e.g. `get_id` declared on a base `VCFHeaderLine`,
+        // called on a `VCFInfoHeaderLine`) isn't in the subtype's own `methods`, so
+        // a direct lookup misses it and the call site loses the recorded signature
+        // (argument borrowing AND return nullability — a nullable inherited getter
+        // used as a plain value would not be `.unwrap()`'d).
+        let mut t = self.resolve_type_sym(&simple);
+        while let Some(ty) = t {
+            // Overloaded methods are keyed `name#arity`; the base overload keeps
+            // the bare name. Prefer the arity-specific entry, then fall back.
+            if let Some(m) =
+                ty.methods.get(&format!("{name}#{arity}")).or_else(|| ty.methods.get(name))
+            {
+                return Some(m);
+            }
+            t = ty.parent.as_deref().and_then(|p| self.link.lookup(p));
+        }
+        None
     }
 
     /// Resolve a bare self-call (`name(args)`) to its `MethodSym` in the current
@@ -5957,6 +5969,16 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.unindent();
         self.printer.print_ln_s("}");
+        // Java enums are routinely used as strings (`enum.toString()`, string
+        // concatenation, `name()`). A bare Rust enum has no `Display`/`to_string`
+        // — which the capable `Unknown` stub *did* provide, so resolving a value
+        // to its real project enum (e.g. nested-type resolution) otherwise loses
+        // that capability. Forward `Display` to the derived `Debug` (variants are
+        // unit-only, so `{:?}` prints the bare variant name, matching Java's
+        // default `toString`).
+        self.printer.print_ln_s(&format!(
+            "impl std::fmt::Display for {name} {{ fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"{{:?}}\", self) }} }}"
+        ));
     }
 
     fn visit_enum_constant(&mut self, id: NodeId, arg: Arg) {

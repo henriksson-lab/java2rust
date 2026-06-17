@@ -333,6 +333,24 @@ fn render_type(t: &StubType, paths: &BTreeMap<String, String>) -> String {
     for fqn in &t.java_fqns {
         s.push_str(&format!("/// @java {fqn}\n"));
     }
+    // R1: a stub type with NO inferred capability (no fields, methods, statics,
+    // constructors, or static consts) is a bare opaque struct that provides
+    // nothing `Unknown` doesn't already (all derives + Display + Iterator +
+    // arithmetic). Alias it to `Unknown` instead of emitting a distinct struct:
+    // this makes any Java upcast between two such stub types (`flows(X, Y)` with
+    // both capability-free) free coercion — both are `Unknown`, so the
+    // `expected Y, found X` mismatch disappears at zero capability cost. The
+    // method-free gate is what keeps this safe: there is no `.foo()` to break
+    // (the Engine-1 failure mode), and no `X::new()`/`X::CONST`/`.field` either.
+    if t.fields.is_empty()
+        && t.methods.is_empty()
+        && t.statics.is_empty()
+        && t.ctors.is_empty()
+        && t.static_consts.is_empty()
+    {
+        s.push_str(&format!("pub type {} = Unknown;\n\n", t.rust_name));
+        return s;
+    }
     // Every stub field is typed `Unknown` (which derives all of these), so a
     // stub can always satisfy `Eq`/`Hash`/`Ord` — needed when a stubbed value is
     // a `HashMap`/`BTreeMap` key or compared with `==` (common for external
