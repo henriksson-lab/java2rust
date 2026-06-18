@@ -593,6 +593,115 @@ impl<'a> RustDumpVisitor<'a> {
     /// cascade). A struct/enum path, trait object, or unknown ident returns
     /// `(false, false)` — conservatively excluded even when it would in fact
     /// derive. Floats are `PartialEq` but not `Eq`/`Hash`.
+    /// Emit synthesized `impl PartialEq`/`Eq`/`Hash` (see call site). Only fires
+    /// for a non-generic, non-`manual_impls` struct that did NOT `#[derive]` the
+    /// trait but is capability-flagged in the symbol map.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_synth_eq_impls(
+        &mut self,
+        name: &str,
+        members: &[NodeId],
+        has_base: bool,
+        derived_pe: bool,
+        derived_eh: bool,
+        manual_impls: bool,
+        non_generic: bool,
+    ) {
+        if manual_impls || !non_generic {
+            return;
+        }
+        let (cap_pe, cap_eh) = self
+            .current_class_fqn
+            .as_deref()
+            .and_then(|f| self.link.lookup(f))
+            .map(|t| (t.partial_eq_capable, t.eq_hash_capable))
+            .unwrap_or((false, false));
+        let want_eh = !derived_eh && cap_eh;
+        let want_pe = (!derived_pe && cap_pe) || want_eh;
+        if !want_pe {
+            return;
+        }
+        // (field ident, is-top-level-map/set, is-Option-wrapped) in declaration order.
+        let mut fields: Vec<(String, bool, bool)> = Vec::new();
+        if has_base {
+            fields.push(("base".to_string(), false, false));
+        }
+        for &m in members {
+            let (typ, vars) = match self.arena.kind(m) {
+                Node::FieldDeclaration { modifiers, variables, typ, .. } => {
+                    if modifiers::is_static(*modifiers) {
+                        continue;
+                    }
+                    (*typ, variables.clone())
+                }
+                _ => continue,
+            };
+            let ty = self.accept_and_cut(typ, None);
+            // `accept_and_cut` yields the bare type; `Option<…>` (nullable) and
+            // `Vec<…>` (array dims) are added at field emission, so detect those
+            // from the declarator, not the string.
+            let core = ty.trim().trim_start_matches("std::collections::");
+            let bare_is_map_set = core.starts_with("HashMap<")
+                || core.starts_with("HashSet<")
+                || core.starts_with("BTreeMap<")
+                || core.starts_with("BTreeSet<");
+            for &var in &vars {
+                let array = matches!(self.arena.kind(var), Node::VariableDeclarator { array_count, .. } if *array_count > 0);
+                // A nullable map/set is `Option<map>` → fold via `.iter().flatten()`.
+                let opt = self.var_decl_id(var).map(|d| self.decl_nullable(d)).unwrap_or(false);
+                let is_map_set = bare_is_map_set && !array;
+                fields.push((self.field_var_name(var), is_map_set, is_map_set && opt));
+            }
+        }
+        // impl PartialEq
+        self.printer.print_ln_s(&format!("impl PartialEq for {name} {{"));
+        self.printer.indent();
+        self.printer.print_ln_s("fn eq(&self, other: &Self) -> bool {");
+        self.printer.indent();
+        if fields.is_empty() {
+            self.printer.print_ln_s("true");
+        } else {
+            let conj = fields
+                .iter()
+                .map(|(f, _, _)| format!("self.{f} == other.{f}"))
+                .collect::<Vec<_>>()
+                .join(" && ");
+            self.printer.print_ln_s(&conj);
+        }
+        self.printer.unindent();
+        self.printer.print_ln_s("}");
+        self.printer.unindent();
+        self.printer.print_ln_s("}");
+        if want_eh {
+            self.printer.print_ln_s(&format!("impl Eq for {name} {{}}"));
+            self.printer.print_ln_s(&format!("impl std::hash::Hash for {name} {{"));
+            self.printer.indent();
+            self.printer.print_ln_s("fn hash<H: std::hash::Hasher>(&self, state: &mut H) {");
+            self.printer.indent();
+            for (f, is_map_set, opt) in &fields {
+                if *is_map_set {
+                    // Order-independent fold (mirrors Java `Map`/`Set.hashCode()`),
+                    // since std maps/sets don't implement `Hash`. A nullable
+                    // map/set (`Option<…>`) folds via `.iter().flatten()`.
+                    let iter = if *opt {
+                        format!("self.{f}.iter().flatten()")
+                    } else {
+                        format!("self.{f}.iter()")
+                    };
+                    self.printer.print_ln_s(&format!(
+                        "{{ let mut __acc: u64 = 0; for __e in {iter} {{ let mut __h = std::collections::hash_map::DefaultHasher::new(); std::hash::Hash::hash(&__e, &mut __h); __acc = __acc.wrapping_add(std::hash::Hasher::finish(&__h)); }} std::hash::Hash::hash(&__acc, state); }}"
+                    ));
+                } else {
+                    self.printer.print_ln_s(&format!("std::hash::Hash::hash(&self.{f}, state);"));
+                }
+            }
+            self.printer.unindent();
+            self.printer.print_ln_s("}");
+            self.printer.unindent();
+            self.printer.print_ln_s("}");
+        }
+    }
+
     fn type_derives_eq(ty: &str) -> (bool, bool) {
         let ty = ty.trim();
         for w in ["Vec<", "Option<", "Box<"] {
@@ -2767,6 +2876,12 @@ impl<'a> RustDumpVisitor<'a> {
         }
         self.printer.unindent();
         self.printer.print_ln_s("}");
+        // Synthesized `impl PartialEq`/`Eq`/`Hash` for a struct that can't
+        // `#[derive]` them (a subtype via `base`, or a `Map`/`Set`-bearing value
+        // type) but whose fields are all comparable/hashable (per the
+        // `crate_layout` capability fixpoint). Field-wise `==`; `Hash` folds a
+        // top-level map/set order-independently (mirrors Java `Map.hashCode()`).
+        self.emit_synth_eq_impls(&name, &members, parent_rust.is_some(), can_partial_eq, can_eq_hash, manual_impls, combined.is_empty());
         // Manual (unbounded) `Default`/`Clone` for a struct with an unused own
         // type param — replaces the derive, which would bound that param.
         if manual_impls {
@@ -6543,11 +6658,22 @@ impl<'a> RustDumpVisitor<'a> {
     }
 
     fn stop_history_search(&self, n: NodeId) -> bool {
+        use crate::ast::BinaryOp::{BinAnd, BinOr, LShift, RSignedShift, RUnsignedShift, Xor};
+        // A bitwise/shift expression yields an *integer* regardless of any float
+        // context above it (Java bitwise/shift operands are integral). Stop the
+        // upward float-history walk here so an integer literal operand isn't
+        // float-coerced — e.g. `f * ((rgb >> 24) & 0xff)` must keep `24`/`0xff`
+        // as ints (a `.0` on a hex literal yields the invalid Rust `0xff.0`), and
+        // the float multiply casts the whole integer subexpression instead.
         matches!(
             self.arena.kind(n),
             Node::VariableDeclarator { .. }
                 | Node::MethodCallExpr { .. }
                 | Node::ArrayAccessExpr { .. }
+                | Node::BinaryExpr {
+                    op: BinAnd | BinOr | Xor | LShift | RSignedShift | RUnsignedShift,
+                    ..
+                }
         ) || self.is_statement(n)
     }
 

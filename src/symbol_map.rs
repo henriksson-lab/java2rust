@@ -42,6 +42,18 @@ pub struct TypeSym {
     pub static_fields: BTreeMap<String, FieldSym>,
     #[serde(default)]
     pub methods: BTreeMap<String, MethodSym>,
+    /// Can a synthesized `impl PartialEq`/`Eq` be emitted for this struct (every
+    /// field, incl. the `base` chain, is `==`-comparable)? Computed by a fixpoint
+    /// in `crate_layout`; lets a type that can't `#[derive]` (a subtype, or a
+    /// map/set-bearing value type) still work in `==`.
+    #[serde(default)]
+    pub partial_eq_capable: bool,
+    /// Like `partial_eq_capable`, but for `Eq + Hash` (so the type can key a
+    /// `HashSet`/`HashMap`): every field is hashable, where a *top-level*
+    /// `Map`/`Set` field is hashed by an order-independent fold (it isn't `Hash`
+    /// itself) and a nested one is not hashable.
+    #[serde(default)]
+    pub eq_hash_capable: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]

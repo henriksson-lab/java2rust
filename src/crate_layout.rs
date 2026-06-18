@@ -88,6 +88,8 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
             fields: Default::default(),
             static_fields: Default::default(),
             methods: Default::default(),
+            partial_eq_capable: false,
+            eq_hash_capable: false,
         };
         // `rust_type` holds the field's *Java simple type name* (e.g. `Map`),
         // used by the dumper to resolve a cross-class static field's receiver
@@ -124,7 +126,243 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
         map.types.insert(r.fqn.clone(), t);
     }
     break_parent_cycles(&mut map);
+    compute_eq_capability(&mut map);
     map
+}
+
+/// Compute, per project struct, whether a synthesized `impl PartialEq`/`Eq+Hash`
+/// can be emitted — a monotone fixpoint over the map. A type that can't
+/// `#[derive]` (a subtype, via its `base` field; or a `Map`/`Set`-bearing value
+/// type) can still get hand-written impls iff every field (incl. the `base`
+/// chain) is comparable/hashable. The dumper hashes a *top-level* `Map`/`Set`
+/// field by an order-independent fold; a nested one (`Vec<Map>`) is not hashable.
+fn compute_eq_capability(map: &mut SymbolMap) {
+    use std::collections::HashMap;
+    // simple name -> FQNs, for resolving a field that names a project type.
+    let mut by_simple: HashMap<String, Vec<String>> = HashMap::new();
+    for fqn in map.types.keys() {
+        let s = fqn.rsplit('.').next().unwrap_or(fqn).to_string();
+        by_simple.entry(s).or_default().push(fqn.clone());
+    }
+    let fqns: Vec<String> = map.types.keys().cloned().collect();
+    let mut pe: HashMap<String, bool> = fqns.iter().map(|f| (f.clone(), true)).collect();
+    let mut eh = pe.clone();
+    loop {
+        let mut changed = false;
+        for fqn in &fqns {
+            let t = &map.types[fqn];
+            let mut p = !t.generic;
+            let mut e = !t.generic;
+            if p {
+                for fs in t.fields.values() {
+                    let (fp, fe) = field_cap(&fs.rust_type, map, &by_simple, &pe, &eh, &t.generic_params);
+                    p &= fp;
+                    e &= fe;
+                }
+                if let Some(par) = &t.parent {
+                    // Unknown (external) base: stub derives all — treat as capable.
+                    p &= pe.get(par).copied().unwrap_or(true);
+                    e &= eh.get(par).copied().unwrap_or(true);
+                }
+            }
+            if pe[fqn] != p {
+                pe.insert(fqn.clone(), p);
+                changed = true;
+            }
+            if eh[fqn] != e {
+                eh.insert(fqn.clone(), e);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for fqn in &fqns {
+        let t = map.types.get_mut(fqn).unwrap();
+        t.partial_eq_capable = pe[fqn];
+        t.eq_hash_capable = eh[fqn];
+    }
+}
+
+/// `(partial_eq, eq_hash)` capability of a field given its *Java* type string
+/// (`type_java_simple`, with generics). `eq_hash` here means "the dumper can
+/// hash this field": a top-level `Map`/`Set` is hashable via fold (iff elements
+/// are directly hashable); everything else must be directly hashable.
+fn field_cap(
+    jty: &str,
+    map: &SymbolMap,
+    by_simple: &std::collections::HashMap<String, Vec<String>>,
+    pe: &std::collections::HashMap<String, bool>,
+    eh: &std::collections::HashMap<String, bool>,
+    gparams: &[String],
+) -> (bool, bool) {
+    let s = jty.trim();
+    if let Some(elem) = s.strip_suffix("[]") {
+        // array -> Vec: PartialEq if elem; Hash only if elem is DIRECTLY hashable.
+        let (p, _) = field_cap(elem, map, by_simple, pe, eh, gparams);
+        return (p, field_hash_direct(elem, map, by_simple, eh, gparams));
+    }
+    if let (Some(lt), true) = (s.find('<'), s.ends_with('>')) {
+        let outer = &s[..lt];
+        let args = split_top_commas(&s[lt + 1..s.len() - 1]);
+        let pall = args.iter().all(|a| field_cap(a, map, by_simple, pe, eh, gparams).0);
+        match outer {
+            "Map" | "HashMap" | "LinkedHashMap" | "TreeMap" | "SortedMap" | "NavigableMap"
+            | "Hashtable" | "Set" | "HashSet" | "LinkedHashSet" | "TreeSet" | "SortedSet"
+            | "NavigableSet" | "EnumSet" => {
+                // top-level map/set: folded -> hashable iff elements directly hashable.
+                let eall = args.iter().all(|a| field_hash_direct(a, map, by_simple, eh, gparams));
+                (pall, eall)
+            }
+            "List" | "ArrayList" | "LinkedList" | "Vector" | "Collection" | "Queue" | "Deque"
+            | "Iterable" | "Stack" | "Optional" => {
+                let eall = args.iter().all(|a| field_hash_direct(a, map, by_simple, eh, gparams));
+                (pall, eall)
+            }
+            _ => {
+                // a generic project/external type — classify by its outer name.
+                field_cap(outer, map, by_simple, pe, eh, gparams)
+            }
+        }
+    } else {
+        let p = field_pe_bare(s, map, by_simple, pe, gparams);
+        let e = field_hash_direct(s, map, by_simple, eh, gparams);
+        (p, e)
+    }
+}
+
+/// Does the field's Rust type implement `Hash` *directly* (derive or synthesized
+/// impl — no fold)? Maps/sets are NOT directly hashable.
+fn field_hash_direct(
+    jty: &str,
+    map: &SymbolMap,
+    by_simple: &std::collections::HashMap<String, Vec<String>>,
+    eh: &std::collections::HashMap<String, bool>,
+    gparams: &[String],
+) -> bool {
+    let s = jty.trim();
+    if let Some(elem) = s.strip_suffix("[]") {
+        return field_hash_direct(elem, map, by_simple, eh, gparams);
+    }
+    if let (Some(lt), true) = (s.find('<'), s.ends_with('>')) {
+        let outer = &s[..lt];
+        let args = split_top_commas(&s[lt + 1..s.len() - 1]);
+        return match outer {
+            "Map" | "HashMap" | "LinkedHashMap" | "TreeMap" | "SortedMap" | "NavigableMap"
+            | "Hashtable" | "Set" | "HashSet" | "LinkedHashSet" | "TreeSet" | "SortedSet"
+            | "NavigableSet" | "EnumSet" => false, // not directly Hash
+            "List" | "ArrayList" | "LinkedList" | "Vector" | "Collection" | "Queue" | "Deque"
+            | "Iterable" | "Stack" | "Optional" => {
+                args.iter().all(|a| field_hash_direct(a, map, by_simple, eh, gparams))
+            }
+            _ => field_hash_direct(outer, map, by_simple, eh, gparams),
+        };
+    }
+    match s {
+        "int" | "long" | "short" | "byte" | "char" | "boolean" | "Integer" | "Long" | "Short"
+        | "Byte" | "Character" | "Boolean" | "String" | "CharSequence" | "Object" => true,
+        "float" | "double" | "Float" | "Double" => false,
+        _ => {
+            if gparams.iter().any(|g| g == s) {
+                return false;
+            }
+            match resolve_simple(s, map, by_simple) {
+                Some(t) => match t.kind.as_str() {
+                    "trait" => false,
+                    "enum" => true,
+                    _ => eh.get_fqn(map, by_simple, s),
+                },
+                None => true, // external -> stub derives Hash
+            }
+        }
+    }
+}
+
+fn field_pe_bare(
+    s: &str,
+    map: &SymbolMap,
+    by_simple: &std::collections::HashMap<String, Vec<String>>,
+    pe: &std::collections::HashMap<String, bool>,
+    gparams: &[String],
+) -> bool {
+    match s {
+        "int" | "long" | "short" | "byte" | "char" | "boolean" | "Integer" | "Long" | "Short"
+        | "Byte" | "Character" | "Boolean" | "String" | "CharSequence" | "Object" | "float"
+        | "double" | "Float" | "Double" => true,
+        _ => {
+            if gparams.iter().any(|g| g == s) {
+                return false;
+            }
+            match resolve_simple(s, map, by_simple) {
+                Some(t) => match t.kind.as_str() {
+                    "trait" => false,
+                    "enum" => true,
+                    _ => pe.get_fqn(map, by_simple, s),
+                },
+                None => true,
+            }
+        }
+    }
+}
+
+/// Resolve a simple type name to its `TypeSym` (conservatively: only if it maps
+/// to project types; ambiguity is handled by the caller AND-ing all candidates).
+fn resolve_simple<'a>(
+    simple: &str,
+    map: &'a SymbolMap,
+    by_simple: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<&'a crate::symbol_map::TypeSym> {
+    let fqns = by_simple.get(simple)?;
+    map.types.get(fqns.first()?)
+}
+
+/// Helper trait: read a capability for a simple project-type name, AND-ing over
+/// all FQN candidates (conservative — if any matching type isn't capable, the
+/// field isn't, so a synthesized impl is never emitted for an uncertain case).
+trait CapLookup {
+    fn get_fqn(
+        &self,
+        map: &SymbolMap,
+        by_simple: &std::collections::HashMap<String, Vec<String>>,
+        simple: &str,
+    ) -> bool;
+}
+impl CapLookup for std::collections::HashMap<String, bool> {
+    fn get_fqn(
+        &self,
+        _map: &SymbolMap,
+        by_simple: &std::collections::HashMap<String, Vec<String>>,
+        simple: &str,
+    ) -> bool {
+        match by_simple.get(simple) {
+            Some(fqns) => fqns.iter().all(|f| self.get(f).copied().unwrap_or(false)),
+            None => true, // external
+        }
+    }
+}
+
+/// Split on top-level commas (not inside nested `<...>`).
+fn split_top_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(s[start..i].trim().to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = s[start..].trim();
+    if !last.is_empty() {
+        out.push(last.to_string());
+    }
+    out
 }
 
 /// Sever cyclic `parent` chains in the project map. `resolve_parent`'s

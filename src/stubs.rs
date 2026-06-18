@@ -172,6 +172,8 @@ impl StubCollector {
                 fields: Default::default(),
                 static_fields: Default::default(),
                 methods,
+                partial_eq_capable: false,
+                eq_hash_capable: false,
             };
             for fqn in &t.java_fqns {
                 map.types.insert(fqn.clone(), entry.clone());

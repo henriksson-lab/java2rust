@@ -171,6 +171,8 @@ fn process_class(
         fields: BTreeMap::new(),
         static_fields: BTreeMap::new(),
         methods: BTreeMap::new(),
+        partial_eq_capable: false,
+        eq_hash_capable: false,
     };
 
     if let Some(sup) = &class.super_class {

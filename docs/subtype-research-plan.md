@@ -292,6 +292,26 @@ nothing drops the count until slots+construction+delegation+dispatch land togeth
    all three supertypes — dissolves the inter-enum-coercion wall) + derives.
 3. Construction wrapping (33 sites) + instanceof→`matches!` + cast→`if let`; **measure**.
 
+### R4 status update — two prerequisites now LANDED
+
+- **Hash prerequisite — DONE (the real one).** Synthesized `impl PartialEq`/`Eq`/`Hash`
+  for project structs that can't `#[derive]` (subtypes via the `base` field; map/set-
+  bearing value types). A monotone capability fixpoint in `crate_layout`
+  (`compute_eq_capability`) + codegen in `dump.rs` (`emit_synth_eq_impls`) that hashes a
+  *top-level* `Map`/`Set` field by an order-independent fold (mirrors Java
+  `AbstractMap.hashCode`). Error-neutral (all 10 corpora at baseline), **0 `E0119`**, all
+  green. **The whole `VCFHeaderLine` hierarchy is now `Hash`+`Eq`** → the enum can key a
+  `HashSet`. This is the de-`Hash`-semantics-change *avoided*.
+- **Bonus (not R4): hex-float / bitop-on-float fix.** `stop_history_search` now stops the
+  float-context walk at bitwise/shift ops (their result is integral), so hex int masks
+  (`0xff`) stop being float-coerced. jhlabs 1426→1365 (−61).
+
+**R4 remaining = just the enum itself (steps 2–3), now genuinely unblocked:** step 1
+(slot-context) ✅ + Hash ✅ done. What's left for vcf `VCFHeaderLine`: synthesize the enum
+(one root enum, all supertype slots) with `Hash`/`Eq` delegating to variants, ~10-method
+delegation, 33 construction wraps, instanceof→`matches!`, cast→`if let`. No architectural
+walls remain — both onion layers (slot-context, Hash) are peeled.
+
 ### R4 TERRAIN MAP (after 5 forks ≈1.5M tokens — only step 1 landed)
 
 The enum approach is sound in principle (step 1's slot-context works), but every
