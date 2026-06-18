@@ -335,6 +335,12 @@ pub struct TypeResolver<'a> {
     /// FQN of the class being translated, for resolving `this.m()` / bare self
     /// method-call return types against the symbol map.
     current_class: Option<String>,
+    /// Tier-2 inferred element types for RAW collection declarations, keyed by
+    /// the declaration's *type-node* id → element `Type`. The dumper builds this
+    /// (from `.add`/initializer evidence) and shares it here so a raw `List`
+    /// field and every `.get()`/iteration over it agree on the element (render &
+    /// resolver consult the same map by the same node id).
+    coll_elem: Option<std::rc::Rc<HashMap<NodeId, Type>>>,
     memo: RefCell<HashMap<NodeId, Type>>,
 }
 
@@ -345,7 +351,17 @@ impl<'a> TypeResolver<'a> {
         link: &'a LinkIndex,
         current_class: Option<String>,
     ) -> Self {
-        TypeResolver { arena, id, link, current_class, memo: RefCell::new(HashMap::new()) }
+        Self::with_coll_elem(arena, id, link, current_class, None)
+    }
+
+    pub fn with_coll_elem(
+        arena: &'a Arena,
+        id: &'a IdTracker,
+        link: &'a LinkIndex,
+        current_class: Option<String>,
+        coll_elem: Option<std::rc::Rc<HashMap<NodeId, Type>>>,
+    ) -> Self {
+        TypeResolver { arena, id, link, current_class, coll_elem, memo: RefCell::new(HashMap::new()) }
     }
 
     /// The type of a *type node* (`int`, `Map<K,V>`, `String[]`, `Foo<T>`).
@@ -362,14 +378,25 @@ impl<'a> TypeResolver<'a> {
                 let arg = |i: usize| {
                     type_args.get(i).map(|&a| self.type_of_node(a)).unwrap_or(Type::Unknown)
                 };
+                // For a RAW (no-type-arg) arity-1 collection, prefer the Tier-2
+                // inferred element (keyed by this type node) over `Unknown`, so a
+                // raw `List` and its `.get()`/iteration agree on the element.
+                let raw0 = || {
+                    if type_args.is_empty() {
+                        if let Some(t) = self.coll_elem.as_ref().and_then(|m| m.get(&typ)) {
+                            return t.clone();
+                        }
+                    }
+                    arg(0)
+                };
                 match simple {
                     "String" | "CharSequence" | "StringBuilder" | "StringBuffer" => Type::Str,
                     "List" | "ArrayList" | "LinkedList" | "Vector" | "Stack" | "Collection"
-                    | "Queue" | "Deque" | "ArrayDeque" | "Iterable" => Type::Vec(Box::new(arg(0))),
+                    | "Queue" | "Deque" | "ArrayDeque" | "Iterable" => Type::Vec(Box::new(raw0())),
                     "Map" | "HashMap" | "LinkedHashMap" | "TreeMap" | "SortedMap" | "NavigableMap"
                     | "ConcurrentHashMap" => Type::Map(Box::new(arg(0)), Box::new(arg(1))),
                     "Set" | "HashSet" | "LinkedHashSet" | "TreeSet" | "SortedSet"
-                    | "NavigableSet" => Type::Set(Box::new(arg(0))),
+                    | "NavigableSet" => Type::Set(Box::new(raw0())),
                     "Optional" => Type::Opt(Box::new(arg(0))),
                     "Integer" => Type::Prim(Prim::I32),
                     "Long" => Type::Prim(Prim::I64),

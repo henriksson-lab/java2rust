@@ -1,0 +1,240 @@
+diff --git a/src/dump.rs b/src/dump.rs
+index 3198052..bf01249 100644
+--- a/src/dump.rs
++++ b/src/dump.rs
+@@ -194,6 +194,11 @@ pub struct RustDumpVisitor<'a> {
+     /// this member's variant name, is-root). Built once; drives slot routing
+     /// (root slots → enum), construction-wrap, cast-extract, and instanceof.
+     slot_enum_cache: std::sync::OnceLock<std::collections::HashMap<String, (String, String, bool)>>,
++    /// Tier-2: per-file inferred element `Type` for RAW collection declarations,
++    /// keyed by the declaration's type-node id. Built once (lazily) from
++    /// `.add`/initializer evidence; shared with the resolver so render and
++    /// `type_of` agree on the element.
++    collection_elem: std::cell::OnceCell<std::rc::Rc<std::collections::HashMap<NodeId, crate::types::Type>>>,
+ }
+ 
+ impl<'a> RustDumpVisitor<'a> {
+@@ -241,6 +246,7 @@ impl<'a> RustDumpVisitor<'a> {
+             current_external_base: None,
+             overload_name: std::collections::HashMap::new(),
+             overload_by_arity: std::collections::HashMap::new(),
++            collection_elem: std::cell::OnceCell::new(),
+             slot_enum_cache: std::sync::OnceLock::new(),
+         }
+     }
+@@ -3697,6 +3703,15 @@ impl<'a> RustDumpVisitor<'a> {
+             // fill `()` placeholders so the generic arity is correct.
+             let ph = vec!["()"; raw_arity].join(", ");
+             self.printer.print(&format!("<{ph}>"));
++        } else if type_args.is_empty() {
++            // Tier-2: a RAW collection whose element was inferred (same map the
++            // resolver uses, keyed by this type node) → emit `Vec<Elem>` so the
++            // declaration and its `.get()`/iteration agree on the element.
++            if let Some(elem) = self.collection_elem_map().get(&id).cloned() {
++                self.printer.print(&format!("<{}>", self.elem_type_to_rust(&elem)));
++            } else {
++                self.print_type_args(&type_args, arg);
++            }
+         } else {
+             self.print_type_args(&type_args, arg);
+         }
+@@ -5411,15 +5426,134 @@ impl<'a> RustDumpVisitor<'a> {
+     /// built per query rather than stored). The per-call memo still caches the
+     /// recursion within a single `type_of`.
+     fn ty(&self, e: NodeId) -> crate::types::Type {
+-        crate::types::TypeResolver::new(
++        crate::types::TypeResolver::with_coll_elem(
+             self.arena,
+             &*self.id,
+             self.link,
+             self.current_class_fqn.clone(),
++            Some(self.collection_elem_map()),
+         )
+         .type_of(e)
+     }
+ 
++    /// Tier-2: the per-file map (lazily built) of RAW collection declaration
++    /// type-node → inferred element `Type`. Shared (cheap `Rc` clone) with every
++    /// resolver this dumper creates, so a raw `List` field and its uses agree.
++    fn collection_elem_map(&self) -> std::rc::Rc<std::collections::HashMap<NodeId, crate::types::Type>> {
++        self.collection_elem.get_or_init(|| std::rc::Rc::new(self.infer_collection_elems())).clone()
++    }
++
++    /// Tier-2 Phase 1 inference: for each RAW arity-1 collection declaration in
++    /// this file, gather element evidence from `.add(x)`-family calls on it and
++    /// keep the element type ONLY when every site agrees on a single concrete
++    /// type (conservative/monotone — conflict or unknown leaves it bare).
++    fn infer_collection_elems(&self) -> std::collections::HashMap<NodeId, crate::types::Type> {
++        use crate::types::Type;
++        // A plain resolver (no `coll_elem`) — typing `.add` args must not recurse
++        // through the map being built.
++        let resolver = crate::types::TypeResolver::new(
++            self.arena,
++            &*self.id,
++            self.link,
++            self.current_class_fqn.clone(),
++        );
++        let mut ev: std::collections::HashMap<NodeId, Vec<Type>> = std::collections::HashMap::new();
++        for i in 0..self.arena.node_count() {
++            let id = NodeId(i as u32);
++            let Node::MethodCallExpr { scope: Some(recv), name, args, .. } = self.arena.kind(id)
++            else {
++                continue;
++            };
++            if args.is_empty()
++                || !matches!(
++                    name.as_str(),
++                    "add" | "addElement" | "offer" | "offerLast" | "offerFirst" | "push"
++                        | "addLast" | "addFirst"
++                )
++            {
++                continue;
++            }
++            let Some(tn) = self.decl_type_node_of(*recv) else { continue };
++            if !self.is_raw_arity1_collection(tn) {
++                continue;
++            }
++            // `add(E)` and `add(int, E)` both take the element as the LAST arg.
++            let elem = resolver.type_of(*args.last().unwrap());
++            if matches!(elem, Type::Prim(_) | Type::Str | Type::Named { .. }) {
++                let v = ev.entry(tn).or_default();
++                if !v.contains(&elem) {
++                    v.push(elem);
++                }
++            }
++        }
++        ev.into_iter()
++            .filter_map(|(k, mut v)| (v.len() == 1).then(|| (k, v.pop().unwrap())))
++            .collect()
++    }
++
++    /// The declaration type-node of a `.add` receiver (field/local/param), or
++    /// `None`. Mirrors the resolver's `decl_type_node`.
++    fn decl_type_node_of(&self, recv: NodeId) -> Option<NodeId> {
++        let name = match self.arena.kind(recv) {
++            Node::NameExpr { name } => name.clone(),
++            Node::FieldAccessExpr { field, .. } => field.clone(),
++            _ => return None,
++        };
++        let (_, decl) = self.id.find_declaration_node_for(self.arena, &name, recv)?;
++        let parent = self.arena.parent(decl)?;
++        match self.arena.kind(parent) {
++            Node::Parameter { typ, .. } => *typ,
++            _ => match self.arena.parent(parent).map(|g| self.arena.kind(g)) {
++                Some(Node::FieldDeclaration { typ, .. })
++                | Some(Node::VariableDeclarationExpr { typ, .. }) => Some(*typ),
++                _ => None,
++            },
++        }
++    }
++
++    /// Is `tn` a RAW (no-type-arg) arity-1 collection type node?
++    fn is_raw_arity1_collection(&self, tn: NodeId) -> bool {
++        match self.arena.kind(tn) {
++            Node::ClassOrInterfaceType { name, type_args, .. } => {
++                type_args.is_empty()
++                    && matches!(
++                        name.rsplit('.').next().unwrap_or(name),
++                        "List" | "ArrayList" | "LinkedList" | "Vector" | "Stack" | "Collection"
++                            | "Queue" | "Deque" | "ArrayDeque" | "Iterable" | "Set" | "HashSet"
++                            | "LinkedHashSet" | "TreeSet" | "SortedSet" | "NavigableSet"
++                    )
++            }
++            _ => false,
++        }
++    }
++
++    /// Render an inferred element `Type` to its Rust type string (for emitting
++    /// `Vec<T>`). Mirrors the codebase's type rendering so it agrees with the
++    /// resolver's `Type`.
++    fn elem_type_to_rust(&self, t: &crate::types::Type) -> String {
++        use crate::types::{Prim, Type};
++        match t {
++            Type::Str => "String".to_string(),
++            Type::Prim(p) => match p {
++                Prim::I8 => "i8",
++                Prim::I16 => "i16",
++                Prim::I32 => "i32",
++                Prim::I64 => "i64",
++                Prim::Usize => "usize",
++                Prim::F32 => "f32",
++                Prim::F64 => "f64",
++                Prim::Bool => "bool",
++                Prim::Char => "char",
++            }
++            .to_string(),
++            Type::Named { path, .. } => {
++                let simple = path.rsplit(['.', ':']).next().unwrap_or(path);
++                self.resolve_type_name(simple)
++            }
++            _ => crate::stubs::UNKNOWN.to_string(),
++        }
++    }
++
+     /// Does `e` resolve to a `Vec<char>` (a Java `char[]`)? Such values have no
+     /// `Display`, so string append/concat must `.iter().collect::<String>()`
+     /// rather than `.to_string()`.
+diff --git a/src/types.rs b/src/types.rs
+index de1884a..fa2cd65 100644
+--- a/src/types.rs
++++ b/src/types.rs
+@@ -335,6 +335,12 @@ pub struct TypeResolver<'a> {
+     /// FQN of the class being translated, for resolving `this.m()` / bare self
+     /// method-call return types against the symbol map.
+     current_class: Option<String>,
++    /// Tier-2 inferred element types for RAW collection declarations, keyed by
++    /// the declaration's *type-node* id → element `Type`. The dumper builds this
++    /// (from `.add`/initializer evidence) and shares it here so a raw `List`
++    /// field and every `.get()`/iteration over it agree on the element (render &
++    /// resolver consult the same map by the same node id).
++    coll_elem: Option<std::rc::Rc<HashMap<NodeId, Type>>>,
+     memo: RefCell<HashMap<NodeId, Type>>,
+ }
+ 
+@@ -345,7 +351,17 @@ impl<'a> TypeResolver<'a> {
+         link: &'a LinkIndex,
+         current_class: Option<String>,
+     ) -> Self {
+-        TypeResolver { arena, id, link, current_class, memo: RefCell::new(HashMap::new()) }
++        Self::with_coll_elem(arena, id, link, current_class, None)
++    }
++
++    pub fn with_coll_elem(
++        arena: &'a Arena,
++        id: &'a IdTracker,
++        link: &'a LinkIndex,
++        current_class: Option<String>,
++        coll_elem: Option<std::rc::Rc<HashMap<NodeId, Type>>>,
++    ) -> Self {
++        TypeResolver { arena, id, link, current_class, coll_elem, memo: RefCell::new(HashMap::new()) }
+     }
+ 
+     /// The type of a *type node* (`int`, `Map<K,V>`, `String[]`, `Foo<T>`).
+@@ -362,14 +378,25 @@ impl<'a> TypeResolver<'a> {
+                 let arg = |i: usize| {
+                     type_args.get(i).map(|&a| self.type_of_node(a)).unwrap_or(Type::Unknown)
+                 };
++                // For a RAW (no-type-arg) arity-1 collection, prefer the Tier-2
++                // inferred element (keyed by this type node) over `Unknown`, so a
++                // raw `List` and its `.get()`/iteration agree on the element.
++                let raw0 = || {
++                    if type_args.is_empty() {
++                        if let Some(t) = self.coll_elem.as_ref().and_then(|m| m.get(&typ)) {
++                            return t.clone();
++                        }
++                    }
++                    arg(0)
++                };
+                 match simple {
+                     "String" | "CharSequence" | "StringBuilder" | "StringBuffer" => Type::Str,
+                     "List" | "ArrayList" | "LinkedList" | "Vector" | "Stack" | "Collection"
+-                    | "Queue" | "Deque" | "ArrayDeque" | "Iterable" => Type::Vec(Box::new(arg(0))),
++                    | "Queue" | "Deque" | "ArrayDeque" | "Iterable" => Type::Vec(Box::new(raw0())),
+                     "Map" | "HashMap" | "LinkedHashMap" | "TreeMap" | "SortedMap" | "NavigableMap"
+                     | "ConcurrentHashMap" => Type::Map(Box::new(arg(0)), Box::new(arg(1))),
+                     "Set" | "HashSet" | "LinkedHashSet" | "TreeSet" | "SortedSet"
+-                    | "NavigableSet" => Type::Set(Box::new(arg(0))),
++                    | "NavigableSet" => Type::Set(Box::new(raw0())),
+                     "Optional" => Type::Opt(Box::new(arg(0))),
+                     "Integer" => Type::Prim(Prim::I32),
+                     "Long" => Type::Prim(Prim::I64),
