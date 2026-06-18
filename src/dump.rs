@@ -945,12 +945,37 @@ impl<'a> RustDumpVisitor<'a> {
         })
     }
 
+    /// A *read* of a place (name/field/array-elem/method-result, through
+    /// parentheses) — i.e. a value that, if its slot is enum-routed, already
+    /// renders as the `<Root>Kind` enum (so re-wrapping would double-wrap). A
+    /// non-read root expr (e.g. a borrow/seam) is excluded so it still wraps.
+    fn is_enum_read_expr(&self, expr: NodeId) -> bool {
+        match self.arena.kind(expr) {
+            Node::NameExpr { .. }
+            | Node::FieldAccessExpr { .. }
+            | Node::ArrayAccessExpr { .. }
+            | Node::MethodCallExpr { .. } => true,
+            Node::EnclosedExpr { inner: Some(i) } => self.is_enum_read_expr(*i),
+            _ => false,
+        }
+    }
+
     /// If `expr`'s concrete type is a member of a synthesized hierarchy, return
     /// (enum_path, variant_name) — for wrapping a concrete value into an enum slot.
     fn enum_variant_for_expr(&self, expr: NodeId) -> Option<(String, String)> {
         let simple = self.expr_concrete_struct(expr)?;
         let t = self.resolve_type_sym(&simple)?;
-        let (ep, vn, _) = self.enum_info_map().get(&t.rust_path)?;
+        let (ep, vn, is_root) = self.enum_info_map().get(&t.rust_path)?;
+        // A value resolving to the hierarchy ROOT that is a READ of an
+        // already-routed slot/collection element (a name, field, array elem, or
+        // a routed-return call — a for-each var, `.get()`, etc.) already renders
+        // as the `<Root>Kind` enum, so wrapping it would double-wrap
+        // (`Kind::Root(line)` where `line` is itself a `Kind`). Skip the wrap for
+        // those reads only — a non-read root expr (a borrow/seam) is left to wrap
+        // normally. This only removes spurious wraps.
+        if *is_root && self.is_enum_read_expr(expr) && !self.is_object_creation(expr) {
+            return None;
+        }
         Some((ep.clone(), vn.clone()))
     }
 

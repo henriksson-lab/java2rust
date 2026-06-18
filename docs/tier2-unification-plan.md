@@ -113,6 +113,25 @@ So **universal R4 slot-routing (incl. arrays) is the next lever**, not the fusio
 The fusion is correct but downstream of it. Kept state: Tier-2 Phase-1 leaf-local on main
 (jts 7472).
 
+### Universal-routing investigation — RESULT: the real bug was OVER-wrapping (−1586, LANDED)
+
+Diagnosing the leak flipped the premise: R4 wasn't *under*-routing, it was **over-wrapping**.
+R4 already routes collection element slots to the enum at render (`Vec<CoordinateKind>`),
+but the construction-wrap re-wrapped values that were ALREADY the enum (a for-each var,
+`.get()`, a routed-return read) → `Kind::Root(x)` where `x` is itself a `Kind` →
+`expected Root, found Kind`, *pervasive* in hierarchy-heavy corpora. Subtractive fix in
+`enum_variant_for_expr`: skip the wrap when the value resolves to the hierarchy ROOT, is a
+**read** of an already-routed place (name/field/array-elem/method-result, through parens),
+and isn't a fresh `new Root(...)`. **−1586 across 12 corpora, zero regression, all green:**
+jts 7472→**5964 (−1508)**, jsoup 2742→2673 (−69), vcf 462→455 (−7), jhlabs −1, trim −1.
+(A broader `is_root && !new` gate nets −1593 but regresses jaligner +1; the read-gate trades
+those 7 for zero regression — the disciplined choice.) This is the single largest reduction
+of the arc, and it makes R4's enum machinery far healthier.
+
+**Remaining R4-routing tail (small now):** genuine arrays `T[]` and a few non-read seams
+(jaligner `FormatFactory`) are still un-routed — the original "universal routing" work, now
+a minor follow-up. The Tier-2 fusion (Phase 2, task #39) is also more viable post-over-wrap-fix.
+
 ### (original) Phase 1 — raw-collection elements (JTS ~1038 `E0107`; the lead). One element
 var `e_D` per raw collection declaration `D`. Constraints:
 - initializer `= new ArrayList<Foo>()` → `e_D = Foo`
