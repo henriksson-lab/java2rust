@@ -759,7 +759,7 @@ impl<'a> RustDumpVisitor<'a> {
         while let Some(n) = stack.pop() {
             if let Node::MethodCallExpr { scope: Some(s), name, args, .. } = self.arena.kind(n) {
                 if let Node::NameExpr { name: recv } = self.arena.kind(*s) {
-                    if let Some(m) = self.resolve_linked_callee(Some(*s), name, args.len()) {
+                    if let Some(m) = self.resolve_linked_callee(Some(*s), name, args) {
                         if m.receiver == "refmut" {
                             out.insert(recv.clone());
                         }
@@ -1400,7 +1400,7 @@ impl<'a> RustDumpVisitor<'a> {
                 }
                 let idx = args.iter().position(|&a| a == call)?;
                 let m = match scope {
-                    Some(_) => self.resolve_linked_callee(*scope, name, args.len()),
+                    Some(_) => self.resolve_linked_callee(*scope, name, args),
                     None => self.resolve_self_callee(name, args.len()),
                 }?;
                 Self::java_simple_to_rust_static(&m.params.get(idx)?.java_type).map(str::to_string)
@@ -1582,7 +1582,7 @@ impl<'a> RustDumpVisitor<'a> {
             return Some(simple_of(&path));
         }
         if let Node::MethodCallExpr { scope, name, args, .. } = self.arena.kind(expr) {
-            let m = self.resolve_linked_callee(*scope, name, args.len())?;
+            let m = self.resolve_linked_callee(*scope, name, args)?;
             let ret = m.ret.as_ref()?;
             if ret.contains("dyn ") {
                 return None; // already a trait object — don't re-box
@@ -1735,7 +1735,7 @@ impl<'a> RustDumpVisitor<'a> {
         &self,
         scope: Option<NodeId>,
         name: &str,
-        arity: usize,
+        args: &[NodeId],
     ) -> Option<&'a crate::symbol_map::MethodSym> {
         if self.link.is_empty() {
             return None;
@@ -1749,13 +1749,24 @@ impl<'a> RustDumpVisitor<'a> {
         // used as a plain value would not be `.unwrap()`'d).
         // Overloaded methods are keyed `name#arity`; the base overload keeps the
         // bare name. The key is loop-invariant — build it once (not per ancestor).
-        let arity_key = format!("{name}#{arity}");
+        let arity_key = format!("{name}#{args_len}", args_len = args.len());
         let mut t = self.resolve_type_sym(&simple);
         // Guard against a cyclic `parent` chain in the project map (a recorded
         // superclass that loops back) — otherwise this walk never terminates.
         let mut seen: Vec<&str> = Vec::new();
         while let Some(ty) = t {
-            if let Some(m) = ty.methods.get(&arity_key).or_else(|| ty.methods.get(name)) {
+            // 1. exact `name#arity`. 2. argument-TYPE-directed pick among
+            //    same-name/same-arity overloads (when several share an arity, no
+            //    `name#arity` key exists and the bare-name fallback would wrongly
+            //    pick the base overload — possibly of a different arity entirely).
+            //    3. the bare-name fallback (preserved for everything else).
+            if let Some(m) = ty.methods.get(&arity_key) {
+                return Some(m);
+            }
+            if let Some(m) = self.pick_overload(ty, name, args) {
+                return Some(m);
+            }
+            if let Some(m) = ty.methods.get(name) {
                 return Some(m);
             }
             match ty.parent.as_deref() {
@@ -1767,6 +1778,108 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         None
+    }
+
+    /// Pick among `ty`'s same-name, same-arity overloads by matching argument
+    /// types — used when several overloads share an arity (so no `name#arity`
+    /// key exists). Conservative/monotone: disqualifies a candidate on a
+    /// collection-vs-single shape mismatch, then returns the *unique* highest
+    /// exact-type-match; on a tie or no candidates returns `None` (the caller's
+    /// existing bare-name fallback then applies, unchanged).
+    fn pick_overload(
+        &self,
+        ty: &'a crate::symbol_map::TypeSym,
+        name: &str,
+        args: &[NodeId],
+    ) -> Option<&'a crate::symbol_map::MethodSym> {
+        let snake = self.to_snake_if_necessary(name);
+        let family = |key: &str| -> bool {
+            key == name
+                || key == snake
+                || key
+                    .strip_prefix(&format!("{snake}_"))
+                    .map(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit() || b == b'_'))
+                    .unwrap_or(false)
+        };
+        let mut best: Option<(i32, &crate::symbol_map::MethodSym)> = None;
+        let mut tie = false;
+        for (key, m) in &ty.methods {
+            if m.params.len() != args.len() || !family(key) {
+                continue;
+            }
+            let mut score = 0i32;
+            let mut ok = true;
+            for (p, &a) in m.params.iter().zip(args) {
+                match self.param_arg_score(a, &p.java_type) {
+                    Some(s) => score += s,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                continue;
+            }
+            match best {
+                Some((bs, _)) if score == bs => tie = true,
+                Some((bs, _)) if score < bs => {}
+                _ => {
+                    best = Some((score, m));
+                    tie = false;
+                }
+            }
+        }
+        if tie {
+            return None;
+        }
+        best.map(|(_, m)| m)
+    }
+
+    /// Score how well argument `arg` matches a parameter of Java type
+    /// `java_type`: `None` = incompatible (collection vs single shape mismatch);
+    /// `Some(3)` exact, `Some(1)` weak (`Object`/same-shape), `Some(0)` neutral
+    /// (unknown arg type — no information).
+    fn param_arg_score(&self, arg: NodeId, java_type: &str) -> Option<i32> {
+        use crate::types::Type;
+        if java_type.is_empty() {
+            return Some(0);
+        }
+        let pt = crate::types::parse_java_type(java_type);
+        let simple = |s: &str| s.rsplit(['.', ':']).next().unwrap_or(s).to_string();
+        // `Object` (and unparsed) params accept anything (weak).
+        if matches!(&pt, Type::Named { path, .. } if simple(path) == "Object")
+            || matches!(pt, Type::Unknown)
+        {
+            return Some(1);
+        }
+        let at = self.ty(arg);
+        if matches!(at, Type::Unknown) {
+            return Some(0);
+        }
+        let coll = |t: &Type| matches!(t, Type::Vec(_) | Type::Set(_) | Type::Map(_, _));
+        if coll(&pt) != coll(&at) {
+            return None; // collection-vs-single shape mismatch
+        }
+        Some(match (&pt, &at) {
+            (Type::Prim(a), Type::Prim(b)) => {
+                if a == b {
+                    3
+                } else {
+                    1
+                }
+            }
+            (Type::Str, Type::Str) => 3,
+            (Type::Named { path: pp, .. }, Type::Named { path: ap, .. }) => {
+                let (ps, as_) = (simple(pp), simple(ap));
+                if ps == as_ || as_.strip_suffix("Kind") == Some(&ps) {
+                    3
+                } else {
+                    1
+                }
+            }
+            _ => 1,
+        })
     }
 
     /// Resolve a bare self-call (`name(args)`) to its `MethodSym` in the current
@@ -4703,7 +4816,7 @@ impl<'a> RustDumpVisitor<'a> {
         // e.g. `jsonObj.put(k, v)` must not be rewritten to `.insert(...)` when
         // `jsonObj` is a linked `JSONObject`. Resolve the callee first and, when
         // it matches a linked type's method, skip the heuristic shortcuts.
-        let callee = self.resolve_linked_callee(scope, &name, args.len());
+        let callee = self.resolve_linked_callee(scope, &name, &args);
         // Also skip the stdlib rewrites when the receiver has a known user type
         // (a project/linked class that defines its own method of this name) —
         // e.g. `dict.size()` on a `SAMSequenceDictionary` must call its `size`,
