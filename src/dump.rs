@@ -2688,8 +2688,17 @@ impl<'a> RustDumpVisitor<'a> {
             }
             BlockComment { content } => {
                 if self.print_comments {
+                    let body = sanitize_block_comment(&content);
                     self.printer.print("/*");
-                    self.printer.print(&sanitize_block_comment(&content));
+                    self.printer.print(&body);
+                    // A body ending in `/` (e.g. the Java `//*/` close-comment
+                    // idiom leaves a trailing `//`) would join the closing `*/`
+                    // wrapper into `/*/` → a spurious `/*` nest-open (Rust block
+                    // comments nest, unlike Java), leaving the comment
+                    // unterminated. Separate them.
+                    if body.ends_with('/') {
+                        self.printer.print(" ");
+                    }
                     self.printer.print_ln_s("*/");
                 }
             }

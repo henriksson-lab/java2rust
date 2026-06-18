@@ -1116,6 +1116,7 @@ pub fn finish_crate(out_root: &Path) -> std::io::Result<()> {
     // with the source; `next`/`previous` return `Option<T>` so the nullable
     // machinery can unwrap in raw contexts and keep `Option` in `?:`/null ones.
     std::fs::write(out_root.join("java_runtime.rs"), JAVA_RUNTIME)?;
+    merge_colliding_modules(out_root)?;
     gen_mod_file(out_root, true)?;
     let name = out_root
         .file_name()
@@ -1127,6 +1128,45 @@ pub fn finish_crate(out_root: &Path) -> std::io::Result<()> {
          [lib]\npath = \"lib.rs\"\n\n[dependencies]\n",
     );
     std::fs::write(out_root.join("Cargo.toml"), cargo)?;
+    Ok(())
+}
+
+/// A class file `D/x.rs` whose stem collides with a sibling subpackage directory
+/// `D/x/` cannot coexist as Rust modules (a single `pub mod x;` finds both `x.rs`
+/// and `x/mod.rs` → E0761). They map to the *same* module path (`…::x`), so merge
+/// the class file's content into the subpackage's `mod.rs` and delete the file —
+/// no `rust_path` changes, all references resolve unchanged. Runs before
+/// `gen_mod_file`, which then emits a single `pub mod x;` for the directory.
+fn merge_colliding_modules(dir: &Path) -> std::io::Result<()> {
+    let entries: Vec<_> =
+        std::fs::read_dir(dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    let subdirs: BTreeSet<String> = entries
+        .iter()
+        .filter(|p| p.is_dir())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    for path in &entries {
+        if path.is_dir() {
+            merge_colliding_modules(path)?;
+        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+            let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+            if stem == "mod" || stem == "lib" {
+                continue;
+            }
+            if subdirs.contains(&stem) {
+                let content = std::fs::read_to_string(path)?;
+                let mod_rs = dir.join(&stem).join("mod.rs");
+                let merged = match std::fs::read_to_string(&mod_rs) {
+                    Ok(existing) if !existing.trim().is_empty() => {
+                        format!("{existing}\n{content}")
+                    }
+                    _ => content,
+                };
+                std::fs::write(&mod_rs, merged)?;
+                std::fs::remove_file(path)?;
+            }
+        }
+    }
     Ok(())
 }
 
