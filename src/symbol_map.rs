@@ -14,6 +14,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct SymbolMap {
     pub types: BTreeMap<String, TypeSym>,
+    /// Simple type names that appear as an `instanceof`/cast *target* anywhere in
+    /// the project — i.e. hierarchies actually dispatched dynamically. R4 enum
+    /// synthesis activates only for these (a storage-only hierarchy gains nothing
+    /// from an enum and only risks regressions).
+    #[serde(default)]
+    pub dispatched: std::collections::BTreeSet<String>,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
@@ -119,6 +125,13 @@ impl LinkIndex {
         for (fqn, t) in other.types {
             self.map.types.insert(fqn, t);
         }
+        self.map.dispatched.extend(other.dispatched);
+    }
+
+    /// Is `simple` an `instanceof`/cast target somewhere in the project (i.e. a
+    /// dynamically-dispatched type)? Gates R4 enum activation.
+    pub fn is_dispatched(&self, simple: &str) -> bool {
+        self.map.dispatched.contains(simple)
     }
 
     /// Parse a map from JSON text and merge it.

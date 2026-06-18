@@ -551,6 +551,12 @@ impl Arena {
         &self.nodes[id.0 as usize].kind
     }
 
+    /// Number of allocated nodes — every node has id `0..node_count()`, so this
+    /// allows a flat scan of all nodes without recursion.
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.nodes[id.0 as usize].parent
     }

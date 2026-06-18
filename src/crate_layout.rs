@@ -59,14 +59,16 @@ pub fn build_project_map(input_root: &Path) -> SymbolMap {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     let mut raw = Vec::new();
+    let mut dispatched = BTreeSet::new();
     if input_root.is_dir() {
-        walk_sources(input_root, &[base], &mut raw);
+        walk_sources(input_root, &[base], &mut raw, &mut dispatched);
     } else {
-        collect_file(input_root, &[], &mut raw);
+        collect_file(input_root, &[], &mut raw, &mut dispatched);
     }
 
     let defined: HashSet<&String> = raw.iter().map(|r| &r.fqn).collect();
     let mut map = SymbolMap::default();
+    map.dispatched = dispatched;
     for r in &raw {
         let parent = r.parent_simple.as_ref().and_then(|p| {
             resolve_parent(p, &r.explicit_imports, &r.wildcard_pkgs, &r.package, &r.fqn, &defined)
@@ -448,7 +450,7 @@ fn shared_prefix_len(a: &str, b: &str) -> usize {
     a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
 }
 
-fn walk_sources(dir: &Path, prefix: &[String], raw: &mut Vec<RawType>) {
+fn walk_sources(dir: &Path, prefix: &[String], raw: &mut Vec<RawType>, dispatched: &mut BTreeSet<String>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let mut entries: Vec<_> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
     entries.sort();
@@ -457,16 +459,34 @@ fn walk_sources(dir: &Path, prefix: &[String], raw: &mut Vec<RawType>) {
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             let mut sub = prefix.to_vec();
             sub.push(name);
-            walk_sources(&path, &sub, raw);
+            walk_sources(&path, &sub, raw, dispatched);
         } else if path.extension().map(|e| e == "java").unwrap_or(false) {
-            collect_file(&path, prefix, raw);
+            collect_file(&path, prefix, raw, dispatched);
         }
     }
 }
 
-fn collect_file(path: &Path, prefix: &[String], raw: &mut Vec<RawType>) {
+/// Collect simple type names used as an `instanceof`/cast target (a flat scan of
+/// all nodes — every node id is `0..node_count()`).
+fn collect_dispatched(arena: &Arena, dispatched: &mut BTreeSet<String>) {
+    for i in 0..arena.node_count() {
+        let id = NodeId(i as u32);
+        let typ = match arena.kind(id) {
+            Node::InstanceOfExpr { typ, .. } | Node::CastExpr { typ, .. } => *typ,
+            _ => continue,
+        };
+        let simple = type_java_simple(arena, typ);
+        let simple = simple.split(['<', '[']).next().unwrap_or(&simple).trim();
+        if !simple.is_empty() {
+            dispatched.insert(simple.to_string());
+        }
+    }
+}
+
+fn collect_file(path: &Path, prefix: &[String], raw: &mut Vec<RawType>, dispatched: &mut BTreeSet<String>) {
     let Ok(text) = std::fs::read_to_string(path) else { return };
     let Some((arena, root)) = crate::parse::create_compilation_unit(&text) else { return };
+    collect_dispatched(&arena, dispatched);
     let mut id = crate::id_tracker::IdTracker::new();
     crate::id_tracker::run(&arena, root, &mut id);
     crate::type_tracker::run(&arena, root, &mut id);

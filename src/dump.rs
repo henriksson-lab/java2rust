@@ -190,6 +190,10 @@ pub struct RustDumpVisitor<'a> {
     /// Per base name, the overloaded members as (arity, emitted-name), so a
     /// self-call can pick the arity-matching overload.
     overload_by_arity: std::collections::HashMap<String, Vec<(usize, String)>>,
+    /// R4: every hierarchy member's `rust_path` → (its `<Root>Kind` enum path,
+    /// this member's variant name, is-root). Built once; drives slot routing
+    /// (root slots → enum), construction-wrap, cast-extract, and instanceof.
+    slot_enum_cache: std::sync::OnceLock<std::collections::HashMap<String, (String, String, bool)>>,
 }
 
 impl<'a> RustDumpVisitor<'a> {
@@ -237,6 +241,7 @@ impl<'a> RustDumpVisitor<'a> {
             current_external_base: None,
             overload_name: std::collections::HashMap::new(),
             overload_by_arity: std::collections::HashMap::new(),
+            slot_enum_cache: std::sync::OnceLock::new(),
         }
     }
 
@@ -886,13 +891,122 @@ impl<'a> RustDumpVisitor<'a> {
     /// project-subtype hierarchy, when the name appears at a value-storage slot.
     /// Returns `None` until enum synthesis (R4 step 2) is implemented — so this is
     /// currently a no-op and type rendering is unchanged.
-    fn slot_enum_name(&self, _name: &str) -> Option<String> {
-        // Synthesis foundation is in place (the `<Root>Kind` enum is emitted); the
-        // activation that routes slots to it (with construction-wrap + instanceof
-        // + cast rewiring + intermediate-method delegation) is the remaining R4
-        // step. Dormant until then — activating alone is +20 (vcf), the rewiring
-        // brings it below baseline.
-        None
+    fn slot_enum_name(&self, name: &str) -> Option<String> {
+        // ROOT-ONLY activation: only a hierarchy *root* slot becomes the enum
+        // (its methods are covered by the enum's `Deref` to the root, so no
+        // method delegation is needed). Intermediate supertypes stay concrete.
+        if self.link.is_empty() {
+            return None;
+        }
+        let t = self.resolve_type_sym(name)?;
+        match self.enum_info_map().get(&t.rust_path) {
+            Some((enum_path, _vname, true)) => Some(enum_path.clone()),
+            _ => None,
+        }
+    }
+
+    /// Build (once) `member rust_path → (enum_path, variant_name, is_root)` for
+    /// every member of every synthesizable hierarchy. Drives slot routing,
+    /// construction-wrap, cast-extract, and instanceof.
+    fn enum_info_map(&self) -> &std::collections::HashMap<String, (String, String, bool)> {
+        self.slot_enum_cache.get_or_init(|| {
+            let mut m = std::collections::HashMap::new();
+            if self.link.is_empty() {
+                return m;
+            }
+            for (fqn, _) in self.link.iter() {
+                // `enum_root_variants` returns Some only for a hierarchy root.
+                if let Some((variants, _, _)) = self.enum_root_variants(fqn) {
+                    // GATE: activate only a hierarchy actually dispatched
+                    // dynamically (some member is an `instanceof`/cast target).
+                    // A storage-only hierarchy (e.g. jhlabs's image-op classes)
+                    // gains nothing from an enum and only regresses (construction
+                    // sites the enum-wrap doesn't yet cover).
+                    if !variants.iter().any(|(vname, _, _)| self.link.is_dispatched(vname)) {
+                        continue;
+                    }
+                    let root = match self.link.lookup(fqn) {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let enum_path = self.crate_relativize(&format!("{}Kind", root.rust_path));
+                    for (vname, vpath, hops) in variants {
+                        m.entry(vpath).or_insert((enum_path.clone(), vname, hops == 0));
+                    }
+                }
+            }
+            m
+        })
+    }
+
+    /// If `expr`'s concrete type is a member of a synthesized hierarchy, return
+    /// (enum_path, variant_name) — for wrapping a concrete value into an enum slot.
+    fn enum_variant_for_expr(&self, expr: NodeId) -> Option<(String, String)> {
+        let simple = self.expr_concrete_struct(expr)?;
+        let t = self.resolve_type_sym(&simple)?;
+        let (ep, vn, _) = self.enum_info_map().get(&t.rust_path)?;
+        Some((ep.clone(), vn.clone()))
+    }
+
+    /// If the Java type `name` is a member of a synthesized hierarchy, its
+    /// (enum_path, variant_name) — for cast-extract / instanceof on the enum.
+    fn enum_variant_for_type(&self, name: &str) -> Option<(String, String)> {
+        let t = self.resolve_type_sym(name)?;
+        let (ep, vn, _) = self.enum_info_map().get(&t.rust_path)?;
+        Some((ep.clone(), vn.clone()))
+    }
+
+    /// Does `expr` evaluate to a value of an enum'd hierarchy *root* (so a cast /
+    /// instanceof on it operates on the `<Root>Kind` enum)? Returns the enum path.
+    fn expr_enum_root(&self, expr: NodeId) -> Option<String> {
+        let crate::types::Type::Named { path, .. } = self.ty(expr) else {
+            return None;
+        };
+        let simple = path.rsplit(['.', ':']).next().unwrap_or(&path);
+        self.slot_enum_name(simple)
+    }
+
+    /// The `<Root>Kind` enum path if `ty` is `Named` to an enum'd hierarchy root.
+    fn enum_path_of_type(&self, ty: &crate::types::Type) -> Option<String> {
+        let crate::types::Type::Named { path, .. } = ty else { return None };
+        let simple = path.rsplit(['.', ':']).next().unwrap_or(path);
+        self.slot_enum_name(simple)
+    }
+
+    /// The `<Root>Kind` enum path of the enclosing method's return type, if that
+    /// return type is an enum'd hierarchy slot — so a concrete `return` value is
+    /// construction-wrapped into the variant.
+    fn enclosing_ret_enum(&self, mut n: NodeId) -> Option<String> {
+        let typ = loop {
+            match self.arena.parent(n) {
+                Some(p) => {
+                    if let Node::MethodDeclaration { typ, .. } = self.arena.kind(p) {
+                        break *typ;
+                    }
+                    n = p;
+                }
+                None => return None,
+            }
+        };
+        let simple = self.type_simple_name(typ)?;
+        self.slot_enum_name(&simple)
+    }
+
+    /// Emit `value` wrapped into `enum_path`'s variant if its concrete type is a
+    /// member of that enum (construction-wrap); otherwise emit it plainly.
+    fn emit_enum_wrapped(&mut self, value: NodeId, enum_path: &str, arg: Arg) {
+        let wrap = self
+            .enum_variant_for_expr(value)
+            .filter(|(ep, _)| ep == enum_path)
+            .map(|(_, vn)| vn);
+        match wrap {
+            Some(vname) => {
+                self.printer.print(&format!("{enum_path}::{vname}("));
+                self.visit(value, arg);
+                self.printer.print(")");
+            }
+            None => self.visit(value, arg),
+        }
     }
 
     /// If `root_fqn` is the top of a project class hierarchy (a non-generic struct
@@ -2207,6 +2321,20 @@ impl<'a> RustDumpVisitor<'a> {
             BinaryExpr { .. } => self.visit_binary(id, arg),
             CastExpr { typ, expr } => {
                 self.print_java_comment(id, arg);
+                // R4 cast-extract: `(Sub) x` where `x` is an enum'd hierarchy
+                // root and `Sub` is one of its variants → extract the variant
+                // (`match &x { Kind::Sub(v) => v.clone(), _ => unreachable!() }`),
+                // a cloned owned `Sub` (matches Java's cast-yields-value).
+                let extract = self
+                    .type_simple_name(typ)
+                    .and_then(|n| self.enum_variant_for_type(&n))
+                    .filter(|(ep, _)| self.expr_enum_root(expr).as_ref() == Some(ep));
+                if let Some((ep, vname)) = extract {
+                    self.printer.print(&format!("(match &("));
+                    self.visit(expr, arg);
+                    self.printer.print(&format!(") {{ {ep}::{vname}(v) => v.clone(), _ => unreachable!() }})"));
+                    return;
+                }
                 // Parenthesize: an unparenthesized cast can't be the operand of a
                 // shift (`x as i64 << 31` parses `i64<…>`) or a method receiver
                 // (`x as T.m()`), both hard parse errors.
@@ -2424,8 +2552,14 @@ impl<'a> RustDumpVisitor<'a> {
                         self.printer.print("Ok(");
                     }
                     let ret_box_trait = self.enclosing_ret_box_dyn(id);
+                    let ret_enum = self.enclosing_ret_enum(id);
                     if self.enclosing_method_nullable(id) {
                         self.emit_into_option(e, arg);
+                    } else if let Some(ep) = ret_enum {
+                        // `return <concrete>` into an enum'd hierarchy method:
+                        // construction-wrap into the variant (plain emit if it's
+                        // already the enum).
+                        self.emit_enum_wrapped(e, &ep, arg);
                     } else if ret_box_trait
                         .as_deref()
                         .is_some_and(|tr| self.is_object_creation(e) || self.expr_impls_trait(e, tr))
@@ -3653,7 +3787,16 @@ impl<'a> RustDumpVisitor<'a> {
         // The declared type's trait, if it's an owned trait object (`Box<dyn
         // T>`): a concrete initializer then needs `Box::new(..)` to coerce.
         let mut box_dyn_target: Option<String> = None;
+        // The declared type's `<Root>Kind` enum path, if it's a plain enum'd
+        // hierarchy slot (not array/nullable) — a concrete initializer is then
+        // construction-wrapped into the variant.
+        let mut enum_target: Option<String> = None;
         if self.is_type(arg) {
+            if array_count == 0 && !nullable {
+                if let Some(s) = self.type_simple_name(arg.unwrap()) {
+                    enum_target = self.slot_enum_name(&s);
+                }
+            }
             let tmp = self.accept_and_cut(arg.unwrap(), None);
             let tmp = tmp.trim().to_string();
             // C-style trailing dims (`String tokens[]`) wrap the shared type.
@@ -3700,6 +3843,10 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print("(");
                 self.visit(i, arg);
                 self.printer.print(&format!(") as {t}"));
+            } else if let Some(ep) = enum_target.clone() {
+                // `<Root>Kind x = <concrete>` -> wrap the value in its variant
+                // (plain emit if it's already the enum).
+                self.emit_enum_wrapped(i, &ep, arg);
             } else if box_dyn_target
                 .as_deref()
                 .is_some_and(|tr| self.is_object_creation(i) || self.expr_impls_trait(i, tr))
@@ -4858,9 +5005,15 @@ impl<'a> RustDumpVisitor<'a> {
                     self.recv_type_name(recv).as_deref(),
                     Some("Set" | "HashSet" | "LinkedHashSet" | "TreeSet")
                 );
+                // R4: a concrete subtype added to an enum'd collection
+                // (`Set<Root>`/`List<Root>`) wraps in the enum variant.
+                let elem_enum = self.ty(recv).elem().and_then(|e| self.enum_path_of_type(e));
                 self.visit(recv, arg);
                 self.printer.print(if is_set { ".insert(" } else { ".push(" });
-                self.visit(args[0], arg);
+                match elem_enum {
+                    Some(ep) => self.emit_enum_wrapped(args[0], &ep, arg),
+                    None => self.visit(args[0], arg),
+                }
                 self.printer.print(")");
                 true
             }
@@ -4885,11 +5038,15 @@ impl<'a> RustDumpVisitor<'a> {
                 true
             }
             ("put", 2) => {
+                let val_enum = self.ty(recv).map_value().and_then(|v| self.enum_path_of_type(v));
                 self.visit(recv, arg);
                 self.printer.print(".insert(");
                 self.visit(args[0], arg);
                 self.printer.print(", ");
-                self.visit(args[1], arg);
+                match val_enum {
+                    Some(ep) => self.emit_enum_wrapped(args[1], &ep, arg),
+                    None => self.visit(args[1], arg),
+                }
                 self.printer.print(")");
                 true
             }

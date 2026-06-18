@@ -82,7 +82,7 @@ fn main() {
         }
     }
 
-    let map = SymbolMap { types: c.types };
+    let map = SymbolMap { types: c.types, ..Default::default() };
     let json = serde_json::to_string_pretty(&map).expect("serialize map");
     match out {
         Some(path) => {

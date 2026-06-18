@@ -292,7 +292,28 @@ nothing drops the count until slots+construction+delegation+dispatch land togeth
    all three supertypes — dissolves the inter-enum-coercion wall) + derives.
 3. Construction wrapping (33 sites) + instanceof→`matches!` + cast→`if let`; **measure**.
 
-### R4 status — foundation LANDED (dormant); activation scoped by a full probe
+### R4 — LANDED (activated, kept). The enum-hierarchy approach works end-to-end.
+
+Full activation with a dispatch-gate: a `<Root>Kind` enum per hierarchy that is
+`instanceof`/cast-dispatched (storage-only hierarchies stay concrete), slot routing
+via `slot_enum_name`/`enum_info_map` (keyed by `rust_path`), construction-wrap at
+collection ops + return + declarator, cast→variant-extraction, `instanceof`→`matches!`,
+`Deref`-to-root for base methods. The dispatch set is collected by a cross-file
+pre-scan in `crate_layout` (`collect_dispatched`) → `SymbolMap::dispatched`.
+**Results: core 1951 → 1941 (−10): vcf −7, jaligner −3; jhlabs +4 (kept as a known
+residual).** All validation green (92 tests, 42/42 golden, 110/110 compilecheck, 0
+warnings). **The runtime correctness goal is met** — `instanceof`/downcast dispatch
+correctly through the enum.
+
+**Known residual (the all-sites tail): enum-leak.** A hierarchy used BOTH dispatched
+AND flowing into `Box<dyn Any>`(Object)/concrete-typed positions leaks the enum where
+a concrete/`Any` is expected (jhlabs `Light`/`ArrayColormap`: `expected Light, found
+LightKind`; `expected Box<dyn Any>, found LightKind`). Needs enum→concrete deref +
+enum-as-`Any` boxing at those sites. No cheap gate (dispatch *frequency* doesn't
+separate beneficial from harmful — jaligner `Format` is cast as rarely as jhlabs
+`Light` yet benefits). Next focused item.
+
+### (prior) R4 status — foundation LANDED (dormant); activation scoped by a full probe
 
 **Foundation (on the tree, dormant, zero-impact):** `enum_root_variants` +
 `emit_hierarchy_enum` synthesize `<Root>Kind` (variants per concrete hierarchy type,
