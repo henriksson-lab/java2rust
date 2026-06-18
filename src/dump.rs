@@ -1023,6 +1023,18 @@ impl<'a> RustDumpVisitor<'a> {
         self.slot_enum_name(&simple)
     }
 
+    /// The `<Root>Kind` enum path a linked-call param routes to, if its (plain,
+    /// non-array, non-generic) Java type is an enum'd hierarchy supertype — so a
+    /// concrete argument is construction-wrapped into the variant.
+    fn param_enum_path(&self, p: &crate::symbol_map::ParamSym) -> Option<String> {
+        let jt = p.java_type.trim();
+        if jt.is_empty() || jt.contains('[') || jt.contains('<') {
+            return None;
+        }
+        let simple = jt.rsplit('.').next().unwrap_or(jt);
+        self.slot_enum_name(simple)
+    }
+
     /// Emit `value` wrapped into `enum_path`'s variant if its concrete type is a
     /// member of that enum (construction-wrap); otherwise emit it plainly.
     fn emit_enum_wrapped(&mut self, value: NodeId, enum_path: &str, arg: Arg) {
@@ -1456,6 +1468,47 @@ impl<'a> RustDumpVisitor<'a> {
         (t.kind == "trait").then_some(simple)
     }
 
+    /// The `<Root>Kind` enum path of an assignment TARGET that is an enum-routed
+    /// slot — so a concrete RHS is construction-wrapped into the variant (the
+    /// target-side parallel of `param_enum_path`). Covers `arr[i]` (the array's
+    /// enum'd element) and a plain (non-array) hierarchy-typed `name`/`field`.
+    fn assign_target_enum_path(&self, target: NodeId) -> Option<String> {
+        // `arr[i] = …`: route via the array's element type (`type_of(arr).elem()`),
+        // mapping the concrete element type to its enum (declared `Geometry` →
+        // `GeometryKind`), not relying on the resolver to have routed it.
+        if let Node::ArrayAccessExpr { name, .. } = self.arena.kind(target) {
+            if let Some(crate::types::Type::Named { path, .. }) = self.ty(*name).elem() {
+                let simple = path.rsplit(['.', ':']).next().unwrap_or(path);
+                return self.slot_enum_name(simple);
+            }
+            return None;
+        }
+        // `name`/`field = …`: the declared type, but only a PLAIN (non-array)
+        // hierarchy type — an array-typed var assigns the whole `Vec<…Kind>`, not
+        // a single variant, so it must not be single-wrapped.
+        let name = match self.arena.kind(target) {
+            Node::NameExpr { name } => name.clone(),
+            Node::FieldAccessExpr { field, .. } => field.clone(),
+            _ => return None,
+        };
+        let (_, decl) = self.id.find_declaration_node_for(self.arena, &name, target)?;
+        let parent = self.arena.parent(decl)?;
+        let typ = match self.arena.kind(parent) {
+            Node::Parameter { typ, .. } => (*typ)?,
+            _ => match self.arena.parent(parent).map(|g| self.arena.kind(g)) {
+                Some(Node::FieldDeclaration { typ, .. })
+                | Some(Node::VariableDeclarationExpr { typ, .. }) => *typ,
+                _ => return None,
+            },
+        };
+        if matches!(self.arena.kind(typ), Node::ReferenceType { array_count, .. } if *array_count > 0)
+        {
+            return None;
+        }
+        let simple = self.type_simple_name(typ)?;
+        self.slot_enum_name(&simple)
+    }
+
     fn assign_target_rust_type(&self, target: NodeId) -> Option<String> {
         let name = match self.arena.kind(target) {
             Node::NameExpr { name } => name.clone(),
@@ -1777,6 +1830,9 @@ impl<'a> RustDumpVisitor<'a> {
                         self.expect_option = true;
                         self.visit(e, arg);
                         self.expect_option = saved;
+                    } else if let Some(ep) = self.param_enum_path(p) {
+                        // A concrete arg into a `&<Root>Kind` param → wrap.
+                        self.emit_enum_wrapped(e, &ep, arg);
                     } else {
                         self.visit(e, arg);
                     }
@@ -1786,7 +1842,13 @@ impl<'a> RustDumpVisitor<'a> {
                 // type — Java auto-widens `int`->`float`/`long` at the call
                 // boundary, Rust does not. Non-numeric params fall through to a
                 // plain moved value.
-                Some(p) => self.emit_numeric_arg(e, &p.rust_type, arg),
+                Some(p) => {
+                    if let Some(ep) = self.param_enum_path(p) {
+                        self.emit_enum_wrapped(e, &ep, arg);
+                    } else {
+                        self.emit_numeric_arg(e, &p.rust_type, arg);
+                    }
+                }
                 None => self.print_one_default_argument(e, arg),
             }
             if i + 1 < args.len() {
@@ -4053,8 +4115,18 @@ impl<'a> RustDumpVisitor<'a> {
         if target_nullable {
             self.emit_into_option(value, arg);
         } else if matches!(op, AssignOp::Assign) {
+            // `<enum-routed target> = <concrete member>` -> wrap into the variant
+            // (read-gated `enum_variant_for_expr` won't double-wrap an already-enum
+            // RHS). Target-side parallel of the method-arg wrap.
+            let enum_wrap = self.assign_target_enum_path(target).and_then(|ep| {
+                self.enum_variant_for_expr(value).filter(|(vep, _)| *vep == ep)
+            });
             let box_tr = self.assign_target_trait(target);
-            if box_tr
+            if let Some((ep, vn)) = enum_wrap {
+                self.printer.print(&format!("{ep}::{vn}("));
+                self.emit_moved_value(value, arg);
+                self.printer.print(")");
+            } else if box_tr
                 .as_deref()
                 .is_some_and(|tr| self.is_object_creation(value) || self.expr_impls_trait(value, tr))
             {
