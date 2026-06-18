@@ -292,6 +292,38 @@ nothing drops the count until slots+construction+delegation+dispatch land togeth
    all three supertypes — dissolves the inter-enum-coercion wall) + derives.
 3. Construction wrapping (33 sites) + instanceof→`matches!` + cast→`if let`; **measure**.
 
+### R4 status — foundation LANDED (dormant); activation scoped by a full probe
+
+**Foundation (on the tree, dormant, zero-impact):** `enum_root_variants` +
+`emit_hierarchy_enum` synthesize `<Root>Kind` (variants per concrete hierarchy type,
+correct `.base` hop chains, `#[derive(Clone[,PartialEq,Eq,Hash])]` + manual `Default`
+→ root variant + `Deref`/`DerefMut` to root). `slot_enum_name` returns `None` (gate
+off) so the enum is emitted-but-unused (`#[allow(dead_code)]`). Verified: all 10
+corpora at baseline, all green.
+
+**Activation probe (full supertype activation, then reverted): vcf 469 → 489 (+20).**
+With `slot_enum_name` mapping all polymorphic supertypes (root + intermediates) to the
+enum and NO rewiring, the +20 breaks down (vcf error histogram):
+- `Deref` covers root methods for free (getKey/toString/equals).
+- ~26 `E0599` "no method for enum" + ~25 "method exists but trait bounds" + ~10 "no
+  variant/assoc item" = **intermediate-method calls** (`getID` on `VCFSimpleHeaderLine`,
+  `getType`/`getCount` on `VCFCompoundHeaderLine`) that `Deref`-to-root doesn't cover →
+  need **delegating methods** on the enum (per-variant `match`, `unreachable!` for
+  variants lacking it). *This is the hard subsystem: synthesizing correct Rust method
+  signatures (params/return) from the symbol map.*
+- construction `E0308`: `new Sub()`/concrete value into an enum slot → **construction-wrap**
+  to `VCFHeaderLineKind::Sub(..)` (reuse the `Box::new` coercion sites).
+- 28 `E0605` casts are *baseline* errors → **cast-extract** (`(Sub) x` →
+  `match x { Kind::Sub(v) => v, _ => unreachable!() }`) pushes them *below* baseline.
+
+**Remaining = the rewiring (all-sites — measures only when all land together):**
+delegation (hardest) + construction-wrap + cast-extract + `instanceof`→`matches!`. A
+*root-only* activation is just +6 (the fork's earlier probe) and avoids the
+intermediate-method delegation entirely — a possible cheaper first cut if cast-extract +
+construction-wrap on root-typed values net negative without delegation. Next focused
+build (fork from the committed foundation, fresh budget for the iterate-to-correct
+codegen).
+
 ### R4 status update — two prerequisites now LANDED
 
 - **Hash prerequisite — DONE (the real one).** Synthesized `impl PartialEq`/`Eq`/`Hash`

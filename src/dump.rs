@@ -887,7 +887,156 @@ impl<'a> RustDumpVisitor<'a> {
     /// Returns `None` until enum synthesis (R4 step 2) is implemented — so this is
     /// currently a no-op and type rendering is unchanged.
     fn slot_enum_name(&self, _name: &str) -> Option<String> {
+        // Synthesis foundation is in place (the `<Root>Kind` enum is emitted); the
+        // activation that routes slots to it (with construction-wrap + instanceof
+        // + cast rewiring + intermediate-method delegation) is the remaining R4
+        // step. Dormant until then — activating alone is +20 (vcf), the rewiring
+        // brings it below baseline.
         None
+    }
+
+    /// If `root_fqn` is the top of a project class hierarchy (a non-generic struct
+    /// whose parent is not a project type) with ≥1 project subtype, the
+    /// synthesized-enum data: variants as `(rust variant name, crate-relative
+    /// payload path, `.base` hops up to the root)`, plus whether *all* variants
+    /// support `PartialEq` / `Eq+Hash` (gates the enum's derives). `None` if not a
+    /// root, or if any member is generic/non-struct (out of scope here).
+    fn enum_root_variants(&self, root_fqn: &str) -> Option<(Vec<(String, String, usize)>, bool, bool)> {
+        let root = self.link.lookup(root_fqn)?;
+        if root.kind != "struct" || root.generic {
+            return None;
+        }
+        // The root must be the top of its *project* hierarchy.
+        if root.parent.as_deref().map(|p| self.link.lookup(p).is_some()).unwrap_or(false) {
+            return None;
+        }
+        let mut variants: Vec<(String, String, usize)> = Vec::new();
+        let (mut all_pe, mut all_eh) = (true, true);
+        for (fqn, t) in self.link.iter() {
+            // hops from `t` up to the root via the `parent` chain.
+            let mut hops = 0usize;
+            let mut cur = fqn.clone();
+            let mut found = false;
+            let mut seen = std::collections::HashSet::new();
+            loop {
+                if cur == root_fqn {
+                    found = true;
+                    break;
+                }
+                if !seen.insert(cur.clone()) {
+                    break;
+                }
+                match self.link.lookup(&cur).and_then(|c| c.parent.clone()) {
+                    Some(p) => {
+                        hops += 1;
+                        cur = p;
+                    }
+                    None => break,
+                }
+            }
+            if !found {
+                continue;
+            }
+            if t.generic || t.kind != "struct" {
+                return None; // a generic/non-struct member → bail the whole hierarchy
+            }
+            all_pe &= t.partial_eq_capable;
+            all_eh &= t.eq_hash_capable;
+            let vname = t.rust_path.rsplit("::").next().unwrap_or(fqn).to_string();
+            variants.push((vname, self.crate_relativize(&t.rust_path), hops));
+        }
+        if variants.len() < 2 {
+            return None; // no subtypes → not a polymorphic hierarchy
+        }
+        // Variant identifiers must be unique. The simple rust name collides when a
+        // hierarchy has same-named members (e.g. many nested `Context` classes), so
+        // disambiguate any colliding name with its module path (sanitized full
+        // rust path, `crate::a::b::C` → `a_b_C`).
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (v, _, _) in &variants {
+            *counts.entry(v.as_str()).or_insert(0) += 1;
+        }
+        let dup: std::collections::HashSet<String> =
+            counts.iter().filter(|(_, c)| **c > 1).map(|(k, _)| k.to_string()).collect();
+        for (vname, path, _) in &mut variants {
+            if dup.contains(vname) {
+                *vname = path
+                    .trim_start_matches("crate::")
+                    .replace("::", "_");
+            }
+        }
+        variants.sort();
+        Some((variants, all_pe, all_eh))
+    }
+
+    /// Emit the synthesized `<Root>Kind` enum + `Deref`/`DerefMut` to the root,
+    /// when the type just emitted (`name` / `root_fqn`) is a hierarchy root. One
+    /// variant per concrete type; `Deref` forwards base-method calls to the root
+    /// via each variant's `.base` chain (so no per-method delegation is needed).
+    /// Dormant until `slot_enum_name` routes slots to it; `#[allow(dead_code)]`
+    /// keeps it warning-free meanwhile.
+    fn emit_hierarchy_enum(&mut self, name: &str, root_fqn: &str) {
+        let Some((variants, all_pe, all_eh)) = self.enum_root_variants(root_fqn) else {
+            return;
+        };
+        let ename = format!("{name}Kind");
+        // `Default` can't be *derived* for an enum whose default variant carries a
+        // payload (derive needs a unit `#[default]`), so derive the rest and write
+        // `Default` by hand, returning the root variant.
+        let mut derives = String::from("Clone");
+        if all_pe || all_eh {
+            derives.push_str(", PartialEq");
+        }
+        if all_eh {
+            derives.push_str(", Eq, Hash");
+        }
+        self.printer.print_ln();
+        self.printer.print_ln_s("#[allow(dead_code)]");
+        self.printer.print_ln_s(&format!("#[derive({derives})]"));
+        self.printer.print_ln_s(&format!("pub enum {ename} {{"));
+        self.printer.indent();
+        for (vname, vpath, _hops) in &variants {
+            self.printer.print_ln_s(&format!("{vname}({vpath}),"));
+        }
+        self.printer.unindent();
+        self.printer.print_ln_s("}");
+        // Manual `Default` -> the root variant (the only one always present).
+        if let Some((rname, rpath, _)) = variants.iter().find(|(_, _, h)| *h == 0) {
+            self.printer.print_ln_s(&format!(
+                "impl Default for {ename} {{ fn default() -> Self {{ {ename}::{rname}({rpath}::default()) }} }}"
+            ));
+        }
+        // Deref then DerefMut, via each variant's `.base` chain to the root.
+        self.printer
+            .print_ln_s(&format!("impl std::ops::Deref for {ename} {{ type Target = {name};"));
+        self.printer.indent();
+        self.printer.print_ln_s(&format!("fn deref(&self) -> &{name} {{ match self {{"));
+        self.printer.indent();
+        for (vname, _v, hops) in &variants {
+            let access =
+                if *hops == 0 { "x".to_string() } else { format!("&x{}", ".base".repeat(*hops)) };
+            self.printer.print_ln_s(&format!("{ename}::{vname}(x) => {access},"));
+        }
+        self.printer.unindent();
+        self.printer.print_ln_s("} }");
+        self.printer.unindent();
+        self.printer.print_ln_s("}");
+        self.printer.print_ln_s(&format!("impl std::ops::DerefMut for {ename} {{"));
+        self.printer.indent();
+        self.printer.print_ln_s(&format!("fn deref_mut(&mut self) -> &mut {name} {{ match self {{"));
+        self.printer.indent();
+        for (vname, _v, hops) in &variants {
+            let access = if *hops == 0 {
+                "x".to_string()
+            } else {
+                format!("&mut x{}", ".base".repeat(*hops))
+            };
+            self.printer.print_ln_s(&format!("{ename}::{vname}(x) => {access},"));
+        }
+        self.printer.unindent();
+        self.printer.print_ln_s("} }");
+        self.printer.unindent();
+        self.printer.print_ln_s("}");
     }
 
     /// In crate mode, a linked *dependency* path (e.g. `org::json::JSONObject`,
@@ -2882,6 +3031,11 @@ impl<'a> RustDumpVisitor<'a> {
         // `crate_layout` capability fixpoint). Field-wise `==`; `Hash` folds a
         // top-level map/set order-independently (mirrors Java `Map.hashCode()`).
         self.emit_synth_eq_impls(&name, &members, parent_rust.is_some(), can_partial_eq, can_eq_hash, manual_impls, combined.is_empty());
+        // R4: if this struct is a project-hierarchy root, emit its `<Root>Kind`
+        // tagged enum (+ Deref to the root) so supertype slots can carry subtypes.
+        if let Some(root_fqn) = self.current_class_fqn.clone() {
+            self.emit_hierarchy_enum(&name, &root_fqn);
+        }
         // Manual (unbounded) `Default`/`Clone` for a struct with an unused own
         // type param — replaces the derive, which would bound that param.
         if manual_impls {
