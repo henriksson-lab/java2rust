@@ -2205,6 +2205,22 @@ impl<'a> RustDumpVisitor<'a> {
             .unwrap_or(false)
     }
 
+    /// Is `e` the *receiver* (scope) of a method call whose method is a known
+    /// read-only (`&self`) operation? Such a call only needs to *borrow* the
+    /// value, so a nullable read here can be unwrapped through `.as_ref()`
+    /// (yielding `&T`) instead of cloning out an owned `T` (§6 use-site borrow —
+    /// the call autorefs `&T` identically). The whitelist is intentionally
+    /// conservative: only universally read-only Java methods (and the Rust
+    /// intrinsics the translator lowers them to) — a mutating/consuming method
+    /// (`add`/`put`/`set`/`close`/…) is NOT listed, so the clone stands there.
+    fn is_readonly_method_receiver(&self, e: NodeId) -> bool {
+        let Some(p) = self.arena.parent(e) else { return false };
+        if let Node::MethodCallExpr { scope, name, .. } = self.arena.kind(p) {
+            return *scope == Some(e) && is_readonly_java_method(name);
+        }
+        false
+    }
+
     /// Is `n` inside a loop body between it and `method` (exclusive of `method`)?
     fn within_loop_of(&self, mut n: NodeId, method: NodeId) -> bool {
         while let Some(p) = self.arena.parent(n) {
@@ -3213,6 +3229,11 @@ impl<'a> RustDumpVisitor<'a> {
         if nullable && !self.expect_option {
             if self.is_movable_last_use(id) {
                 self.printer.print(".unwrap()");
+            } else if self.is_non_copy_name(id) && self.is_readonly_method_receiver(id) {
+                // Receiver of a read-only (`&self`) call: borrow through the
+                // Option (`&T`) instead of cloning out an owned `T` — the call
+                // autorefs identically (§6 use-site borrow).
+                self.printer.print(".as_ref().unwrap()");
             } else {
                 self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
             }
@@ -7867,6 +7888,36 @@ fn is_scalar_java_type(name: &str) -> bool {
         simple,
         "int" | "long" | "short" | "byte" | "char" | "boolean" | "float" | "double"
             | "Integer" | "Long" | "Short" | "Byte" | "Character" | "Boolean" | "Float" | "Double"
+    )
+}
+
+/// Java methods that are universally read-only (`&self`): calling one only needs
+/// to *borrow* the receiver. Used to decide whether a nullable read in receiver
+/// position can be unwrapped through `.as_ref()` instead of cloning (§6 use-site
+/// borrow). Deliberately conservative — only names that never mutate or consume
+/// the receiver across String/Number/Collection/Object and conventional getters;
+/// a mutating method (`add`/`put`/`set`/`remove`/`close`/`append`/…) is absent so
+/// its clone is kept. (The call autorefs `&T`, so the *return* ownership of these
+/// methods is irrelevant to receiver-borrow safety.)
+fn is_readonly_java_method(name: &str) -> bool {
+    matches!(
+        name,
+        // Object / general
+        "equals" | "equalsIgnoreCase" | "hashCode" | "toString" | "compareTo"
+            | "compareToIgnoreCase"
+        // String / CharSequence reads
+            | "length" | "isEmpty" | "isBlank" | "charAt" | "codePointAt"
+            | "indexOf" | "lastIndexOf" | "substring" | "contains" | "startsWith"
+            | "endsWith" | "trim" | "strip" | "toLowerCase" | "toUpperCase"
+            | "matches" | "split" | "getBytes" | "toCharArray" | "chars"
+            | "concat" | "replace" | "replaceAll" | "intern"
+        // Collection / Map reads
+            | "size" | "get" | "containsKey" | "containsValue" | "getOrDefault"
+            | "keySet" | "values" | "entrySet" | "iterator" | "listIterator"
+            | "toArray" | "stream" | "subList"
+        // Number reads
+            | "intValue" | "longValue" | "doubleValue" | "floatValue"
+            | "shortValue" | "byteValue" | "isNaN" | "isInfinite"
     )
 }
 

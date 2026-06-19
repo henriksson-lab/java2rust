@@ -18,15 +18,16 @@ landing small, **measured** changes.
   `no-commit-prompts` (**the user commits; never offer to commit**).
 
 ## 1. Current state
-- HEAD `7cfb2a6` (last-use move already committed). **Uncommitted on the tree**: the
-  **nullable-unwrap last-use move** in `src/dump.rs` (clones −78, errors −1 — KEEP,
-  ready to commit; see §3).
+- HEAD `7cfb2a6` (last-use move already committed). **Uncommitted on the tree** (two
+  KEEPs, ready to commit; see §3): the **nullable-unwrap last-use move** (clones −78,
+  errors −1) and the **read-only-method-receiver `.as_ref()` borrow** (clones −466,
+  errors −12) in `src/dump.rs`.
 - **12-corpus error baseline** (current working tree; `tools/<name>_check.sh`):
   trim 187 · jaligner 56 · jahmm 408 · varscan 56 · fastq 53 · bjaaprop 98 · vcf 449
-  · bjalign 594 · bioformats 15 · jhlabs 1338 · jsoup 2584 · jts 5558  (**= 11396**).
+  · bjalign 593 · bioformats 15 · jhlabs 1338 · jsoup 2582 · jts 5549  (**= 11384**).
 - **Clone-marker baseline** (`grep -rho 'validate added clone'` over fresh translation):
-  trim 485 · jaligner 148 · jahmm 214 · varscan 894 · fastq 57 · bjaaprop 442 · vcf 433
-  · bjalign 460 · bioformats 1151 · jhlabs 968 · jsoup 1725 · jts 4556  (**= 11533**).
+  trim 469 · jaligner 141 · jahmm 214 · varscan 890 · fastq 38 · bjaaprop 436 · vcf 387
+  · bjalign 423 · bioformats 1038 · jhlabs 966 · jsoup 1648 · jts 4417  (**= 11067**).
 - Corpora live under `testdata/` (gitignored; cloned). Translator binary: `cargo
   build --release` → `target/release/java2rust-rs`.
 - **Clone markers**: every translation-added `.clone()` carries
@@ -62,25 +63,55 @@ parent-cycle/module-collision/comment robustness · **Tier-2 substrate + Phase-1
 leaf-local collection elements** · **last-use move** (clones −180) · **nullable-unwrap
 last-use move** (clones −78, errors −1, uncommitted): `is_movable_last_use` extended
 to the nullable-name `.clone().unwrap()` site in `visit_name_expr` — an owned local at
-its last read moves through the unwrap (`x.unwrap()`) instead of `x.clone().unwrap()`.
+its last read moves through the unwrap (`x.unwrap()`) instead of `x.clone().unwrap()` ·
+**read-only-method-receiver `.as_ref()` borrow** (clones −466, errors −12, uncommitted):
+first slice of the §6 use-site-borrow analysis. New `is_readonly_method_receiver` +
+`is_readonly_java_method` (conservative `&self` Java-method whitelist) in `dump.rs`; at
+the nullable-name read site (3217), a non-Copy read whose parent is a whitelisted
+read-only method call emits `.as_ref().unwrap()` (yields `&T`, zero clones; the call
+autorefs) instead of `.clone().unwrap()`. Ordering: last-use move > as_ref borrow > clone.
 
 ## 4. Open work — in dependency/priority order
-1. **Clone-pattern audit (task #40) — the recommended next lever.** The user wants
-   parallel workers to audit translated output (grep the clone markers — complete
-   worklist), categorize remaining clone-causing patterns, and find **local,
-   no-ripple** pattern-match fixes. The **last-use move** (clones −180, applied) was
-   exactly such a clean win; find more. See `clone-reduction-audit-loop` memory.
-   NOTE: borrowed-returns (below) is NOT the path for clones — see the closed result.
-   **Marker buckets** (by output-text form, over the 11533 current markers): plain
-   `.clone()` ~4564 · `.clone().unwrap()` (Option-unwrap) ~4700 [the last-use moves
-   target this + `emit_moved_value`'s site] · `as usize].clone()` (Vec index) 1005 —
-   *NOT a clean win: can't move out of a `Vec` index without `swap_remove`* · indexed
-   `get(..).cloned().unwrap()` 528 · match-arm `v.clone()` (R4 cast-extract, dump.rs
-   2668) 309 · `.iter().cloned()` 251 · `__chain.clone()` (dump.rs 4428) 151 ·
-   `.keys().cloned()` 25. Remaining `.clone().unwrap()` are field/param/array reads
-   (behind a borrow — need use-site borrow analysis, not last-use). Next clean
-   candidate to probe: the R4 cast-extract `v.clone()` when the cast result is only
-   borrowed at its use; and `if`/`switch`-as-value (§4.2) to avoid temp clones.
+1. **Clone-pattern audit (task #40) — IN PROGRESS, the active lever.** A 6-agent
+   parallel audit (all 12 corpora) converged on ONE root pattern with the most
+   leverage: **a nullable read emitted in a borrow-only use-site should borrow through
+   the Option (`.as_ref()`/`.as_mut()`), not clone+unwrap.** This is the §6 use-site
+   borrow analysis, applied as a sequence of LOCAL, measured slices. The first slice
+   (read-only-method receiver, NAME site only) landed clones −466 / errors −12 (§3).
+   **Queued slices (each its own measured KEEP; ordered by confidence × leverage):**
+   - (a) **Extend the as_ref-receiver fix to FIELD nullable-read sites 4910
+     (`this.field`) and 3097 (inherited field).** Same helper; `as_ref()` borrows
+     `&self` immutably so it's safe behind `&self`. Adds the bioformats/jhlabs field
+     receivers the NAME-only slice missed. **Do this next — smallest, proven mechanism.**
+   - (b) **Index-base nullable read** `x.clone().unwrap()[i]` → `.as_ref().unwrap()[i]`
+     (read) / `.as_mut().unwrap()[i]` (write target). ~500+ markers; jhlabs pixel/array
+     code dominates. The write-target form (`do_hsv.clone().unwrap()[0] = …`) also fixes
+     a **real correctness bug** (mutation lost to a discarded clone). Detect at
+     `ArrayAccessExpr` (2634); `as_mut` only when the access is an assignment target AND
+     the Option is `&mut`-reachable (local, or `&mut self` field) — else keep clone.
+     Caveat: a non-Copy element read into an owned slot still needs the element clone;
+     don't strip that.
+   - (c) **Comparison/condition operand** (`==`/`!=`/`if`/`while`) → `.as_ref().unwrap()`.
+     ~200. Watch `&T == T` typing on slice-compares (`&(x.as_ref().unwrap())[..]`).
+   - (d) **`&`-borrow argument** (jts P1, ~388): when the emitter already prints a
+     leading `&` for a by-ref param, the value only needs to borrow — but `&` +
+     `.as_ref().unwrap()` = `&&T`, so this needs coordination (suppress the `&`, or emit
+     `&*…as_ref().unwrap()`) in `print_one_default_argument` (~1980). Medium effort.
+   - (e) **LazyLock-const read receiver** (3206): `(*Self::LOGGER).clone().debug(…)` →
+     drop the clone (the deref is already `&T`). ~60-78, whitelist-gated like (a).
+   - (f) **foreach iterable** (2975, ~493): only the **last-use-local / owned-temporary**
+     subset is no-ripple (move/drop the clone). The general `for v in &iterable` form
+     rebinds `v` to `&T` → ripples into the body (MEDIUM); do NOT do the general form.
+   - (g) **`Map.get(k).cloned().unwrap()` read-context** (5399, ~200) → `.get(&k).unwrap()`
+     (`&V`) when consumed by parse/format/comparison; **`.copied()` for Copy values**
+     (drops ~76 false-positive markers — a Copy clone is free).
+   For each: gate on the conservative whitelist / use-context, build, re-translate +
+   measure clones AND all-12 errors (KEEP only if clones down & zero per-corpus error
+   regression). NOTE: borrowed-returns (§4.3) is the CLOSED path — do not restart it.
+   **Genuinely-NOT-avoidable (don't chase):** `Vec`-index `[i].clone()` stored owned;
+   `Validate::not_null(Some(x.clone()))` (by-value param sig); R4 cast-extract
+   `match &x {…=> v.clone()}` (matches `&x`, needs owned); `.iter().cloned()` into
+   `JavaIter` (owning wrapper); copy-ctor `self.x = param.clone()` (param is `&T`).
 2. **`if`/`switch` as a value-expression (task #41)** — `let r = if c {a} else {b}`
    (clone/temp avoider). A concrete local pattern the audit will surface.
 3. **Borrowed-returns / lifetimes — CLOSED as a clone reducer (NO-GO), see SEMANTICS
@@ -125,10 +156,12 @@ its last read moves through the unwrap (`x.unwrap()`) instead of `x.clone().unwr
   ours — leave or ask before deleting.
 
 ## 6. Immediate next action
-Commit the uncommitted **nullable-unwrap last-use move** + docs (TODO), if not done.
-Then continue the **clone-pattern audit (§4.1, task #40)** from the recorded marker
-buckets: the two clean last-use wins are landed; the next *local, no-ripple* candidates
-are the R4 cast-extract `v.clone()` (dump.rs 2668) when its result is only borrowed,
-and `if`/`switch`-as-value (§4.2). The `as usize].clone()` (1005) and field/param
-reads are NOT clean wins (need use-site borrow analysis). Borrowed-returns is closed
-for clones (§4.3) — do not restart it without whole-program caller analysis.
+Commit the two uncommitted KEEPs (nullable-unwrap last-use move; read-only-method
+`.as_ref()` borrow) + docs, if not done. Then continue the **clone-pattern audit
+(§4.1, task #40)** down the queued slice list — **start with slice (a)**: extend the
+proven `is_readonly_method_receiver` → `.as_ref().unwrap()` fix to the FIELD nullable
+sites (dump.rs 4910 `this.field`, 3097 inherited). Same helper, smallest next step;
+build → re-translate → measure clones + all-12 errors → KEEP iff clones down & zero
+per-corpus error regression. Then (b) index-base (also fixes a lost-write correctness
+bug), (e) LazyLock receiver, (f) foreach last-use subset. Borrowed-returns (§4.3) stays
+CLOSED for clones.
