@@ -2221,6 +2221,17 @@ impl<'a> RustDumpVisitor<'a> {
         false
     }
 
+    /// A use-site that only needs to *borrow* the value — currently just a
+    /// read-only method receiver. (Index-base `arr[i]` was investigated as a
+    /// borrow site too — `x.as_ref().unwrap()[i]` — and gives a large clone win,
+    /// but for a non-Copy element struct read in a numeric-coercion context it
+    /// reshuffles/leaks type-coercion errors (jhlabs +3, jts +4); the bad cases
+    /// can't be told from the ~500 good ones by a local predicate — they need
+    /// element-Copy-type + coercion-context info. Parked; see TODO §4.1 slice b.)
+    fn use_is_read_borrow(&self, e: NodeId) -> bool {
+        self.is_readonly_method_receiver(e)
+    }
+
     /// Is `n` inside a loop body between it and `method` (exclusive of `method`)?
     fn within_loop_of(&self, mut n: NodeId, method: NodeId) -> bool {
         while let Some(p) = self.arena.parent(n) {
@@ -3110,7 +3121,14 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(&path);
                 // A nullable inherited field read in a value position is unwrapped.
                 if !self.expect_option && self.inherited_field_nullable(name) {
-                    self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
+                    if self.use_is_read_borrow(id) {
+                        // Read-only use-site (method receiver or index base):
+                        // borrow through the Option (`&T`) instead of cloning
+                        // (§6 use-site borrow).
+                        self.printer.print(".as_ref().unwrap()");
+                    } else {
+                        self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
+                    }
                 }
                 self.print_orphan_comments_ending(id);
                 return;
@@ -3218,7 +3236,11 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print(&s);
         if lazy_const {
             self.printer.print(")");
-            if self.is_non_copy_name(id) {
+            // `(*Self::X)` is already a borrow of the static's value; a read-only
+            // use-site (method receiver or index base) works on it directly, so
+            // skip the owning clone there (§6 use-site borrow). Otherwise own it
+            // out of the deref via `.clone()`.
+            if self.is_non_copy_name(id) && !self.use_is_read_borrow(id) {
                 self.printer.print(".clone()/* TODO(translation): validate added clone */");
             }
         }
@@ -3229,10 +3251,10 @@ impl<'a> RustDumpVisitor<'a> {
         if nullable && !self.expect_option {
             if self.is_movable_last_use(id) {
                 self.printer.print(".unwrap()");
-            } else if self.is_non_copy_name(id) && self.is_readonly_method_receiver(id) {
-                // Receiver of a read-only (`&self`) call: borrow through the
-                // Option (`&T`) instead of cloning out an owned `T` — the call
-                // autorefs identically (§6 use-site borrow).
+            } else if self.is_non_copy_name(id) && self.use_is_read_borrow(id) {
+                // Read-only use-site (method receiver or index base): borrow
+                // through the Option (`&T`) instead of cloning out an owned `T`
+                // — the call/index work on `&T` identically (§6 use-site borrow).
                 self.printer.print(".as_ref().unwrap()");
             } else {
                 self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
@@ -4928,7 +4950,14 @@ impl<'a> RustDumpVisitor<'a> {
             && matches!(self.arena.kind(scope), Node::ThisExpr { .. })
             && self.this_field_nullable(&field, id)
         {
-            self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
+            if self.use_is_read_borrow(id) {
+                // Read-only use-site (method receiver or index base): borrow
+                // `&self.field` through the Option (`&T`) instead of cloning
+                // (§6 use-site borrow); `&self` is held, so `.as_ref()` is sound.
+                self.printer.print(".as_ref().unwrap()");
+            } else {
+                self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
+            }
         }
     }
 
@@ -7918,6 +7947,12 @@ fn is_readonly_java_method(name: &str) -> bool {
         // Number reads
             | "intValue" | "longValue" | "doubleValue" | "floatValue"
             | "shortValue" | "byteValue" | "isNaN" | "isInfinite"
+        // Logging (SLF4J / java.util.logging) — emit-only, never mutate the
+        // logger; distinctive names unlikely to collide with a mutating method.
+            | "trace" | "debug" | "info" | "warn" | "error" | "fatal" | "log"
+            | "fine" | "finer" | "finest" | "config" | "severe" | "warning"
+            | "isDebugEnabled" | "isTraceEnabled" | "isInfoEnabled"
+            | "isWarnEnabled" | "isErrorEnabled"
     )
 }
 
