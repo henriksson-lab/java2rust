@@ -344,6 +344,13 @@ where `Resolve` is Tier-1 ⊕ Tier-2 (§4, §9), `Route` is the enum overlay (§
 *orthogonal* and applied in this order; each must obey its all-sites invariant
 (N1, R1/R2, U1/U2).
 
+**Composition is not optional [have].** The overlays must *nest*, not branch: a
+concrete member into a nullable routed slot is `Some(Kind::V(v))`
+(`emit_into_option_enum`) — `Option^N ∘ Route`, not "Option *or* Route". Treating
+two overlays as mutually-exclusive branches is itself a seam (it produced
+`expected Kind, found Concrete` until composed). Any pair of overlays that can
+co-occur at a slot must compose at that slot.
+
 ---
 
 ## 11. Invariants (the contract every type rewrite must keep)

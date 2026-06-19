@@ -1950,7 +1950,10 @@ impl<'a> RustDumpVisitor<'a> {
                         self.visit(e, arg);
                     }
                 }
-                Some(p) if p.nullable => self.emit_into_option(e, arg),
+                Some(p) if p.nullable => {
+                    let pep = self.param_enum_path(p);
+                    self.emit_into_option_enum(e, pep.as_deref(), arg);
+                }
                 // A by-value (scalar) param: widen a numeric arg to the param's
                 // type — Java auto-widens `int`->`float`/`long` at the call
                 // boundary, Rust does not. Non-numeric params fall through to a
@@ -2146,6 +2149,16 @@ impl<'a> RustDumpVisitor<'a> {
     /// Emit `value` into an `Option<T>` slot: `None` / existing-Option as-is /
     /// `Some(value)` for a plain value.
     fn emit_into_option(&mut self, value: NodeId, arg: Arg) {
+        self.emit_into_option_enum(value, None, arg);
+    }
+
+    /// Like `emit_into_option`, but `enum_path` is the target slot's `<Root>Kind`
+    /// when it is enum-routed — so the overlays *compose* (`Option(Route(v))`): a
+    /// concrete hierarchy member into a nullable routed slot becomes
+    /// `Some(Kind::Variant(v))`, not `Some(v)` (which would be `expected Kind,
+    /// found Concrete`). Read-gated via `enum_variant_for_expr`, so an already-enum
+    /// value is not double-wrapped.
+    fn emit_into_option_enum(&mut self, value: NodeId, enum_path: Option<&str>, arg: Arg) {
         if self.expr_nullable(value) {
             let saved = self.expect_option;
             self.expect_option = true;
@@ -2155,9 +2168,18 @@ impl<'a> RustDumpVisitor<'a> {
             self.printer.print("Some(");
             let saved = self.expect_option;
             self.expect_option = false;
-            // The Option owns its value, so clone a non-Copy borrow (e.g. a `&`
-            // parameter or a field read) rather than moving out of it.
-            self.emit_moved_value(value, arg);
+            let wrap = enum_path
+                .and_then(|ep| self.enum_variant_for_expr(value).filter(|(p, _)| p == ep));
+            match wrap {
+                Some((ep, vn)) => {
+                    self.printer.print(&format!("{ep}::{vn}("));
+                    // The Option owns its value, so clone a non-Copy borrow rather
+                    // than moving out of it.
+                    self.emit_moved_value(value, arg);
+                    self.printer.print(")");
+                }
+                None => self.emit_moved_value(value, arg),
+            }
             self.expect_option = saved;
             self.printer.print(")");
         }
@@ -2760,7 +2782,7 @@ impl<'a> RustDumpVisitor<'a> {
                     let ret_box_trait = self.enclosing_ret_box_dyn(id);
                     let ret_enum = self.enclosing_ret_enum(id);
                     if self.enclosing_method_nullable(id) {
-                        self.emit_into_option(e, arg);
+                        self.emit_into_option_enum(e, ret_enum.as_deref(), arg);
                     } else if let Some(ep) = ret_enum {
                         // `return <concrete>` into an enum'd hierarchy method:
                         // construction-wrap into the variant (plain emit if it's
@@ -4059,7 +4081,7 @@ impl<'a> RustDumpVisitor<'a> {
                     self.expr_num_type(i).map(|s| num_rank(&s) < num_rank(t)).unwrap_or(false)
                 });
             if nullable {
-                self.emit_into_option(i, arg);
+                self.emit_into_option_enum(i, enum_target.as_deref(), arg);
             } else if char_from_int {
                 self.visit(i, arg);
                 self.printer.print(" as u8 as char");
@@ -4226,7 +4248,8 @@ impl<'a> RustDumpVisitor<'a> {
         });
         self.printer.print(" ");
         if target_nullable {
-            self.emit_into_option(value, arg);
+            let tep = self.assign_target_enum_path(target);
+            self.emit_into_option_enum(value, tep.as_deref(), arg);
         } else if matches!(op, AssignOp::Assign) {
             // `<enum-routed target> = <concrete member>` -> wrap into the variant
             // (read-gated `enum_variant_for_expr` won't double-wrap an already-enum
