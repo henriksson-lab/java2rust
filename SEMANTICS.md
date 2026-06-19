@@ -193,6 +193,30 @@ String param                 ⟼  &str / &String (callee-shaped)
 the borrow checker** — borrow seams that remain are accepted as residual errors
 (§12), not chased with ownership rewrites.
 
+**`.clone()` is a symptom of under-borrowing [gap — future refinement].** The
+translator inserts an owning `.clone()` at "move positions" (`emit_moved_value`:
+return / assignment-RHS / var-init / by-value arg of a non-`Copy` value). Each such
+clone is marked `/* TODO(translation): validate added clone */` (README) because it
+can break Java's by-reference aliasing or be wasted allocation. But many of these
+positions are **not actually moves** — they only *read* the value, and a read needs
+a borrow, not ownership:
+
+- **`format!`/`println!`/`write!` arguments never move** — the formatting machinery
+  takes args by shared reference (`&dyn Display`). So a format-position value needs
+  *neither* a clone *nor* an explicit `&` (the macro auto-refs); `format!("{} {}",
+  s, s)` is already correct. Any clone emitted for a format arg is *always* spurious.
+- Comparison operands, `if`/`while` conditions, and read-only method receivers
+  likewise only borrow.
+
+So the model: **own only at a genuine move** (store into an owned slot, return
+owned, pass to a by-value param); **borrow at every read.** A value used N times,
+all reads, needs zero owned copies. The current eager-clone strategy over-owns; a
+*use-site borrow analysis* (classify each use as read-borrow vs move) would
+eliminate most marked clones (and the audit burden), and likely also closes some of
+the §7.2 borrow seams (which are the same "wrong borrow shape at a use" problem).
+Under-borrowing now *forces* clones later; fixing the borrow aggressiveness is the
+root, the clones the symptom. **Investigate after the R1/Tier-2 routing work.**
+
 ---
 
 ## 7. Inheritance & polymorphism
