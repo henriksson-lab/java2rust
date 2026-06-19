@@ -217,6 +217,46 @@ the §7.2 borrow seams (which are the same "wrong borrow shape at a use" problem
 Under-borrowing now *forces* clones later; fixing the borrow aggressiveness is the
 root, the clones the symptom. **Investigate after the R1/Tier-2 routing work.**
 
+### Borrowed returns / explicit lifetimes [gap — investigated, staged, RISKY]
+
+Today a method returning a value derived from `self` or a param **clones** it, even
+when a borrow would do — the `&self → &T` lifetime *elision* is available but unused:
+```rust
+fn get_key(&self) -> String { self.key.clone() }     // today
+fn get_key(&self) -> &String { &self.key }           // possible (elided 'self): no clone
+fn pick<'a>(&self, o:&'a L) -> &'a String { &o.key } // explicit lifetime tied to a PARAM
+```
+A multi-input return (`return cond ? a : b` with `a,b:&String`) is *currently an
+error* (`expected String, found &String`); `fn longer<'a>(&self,a:&'a String,
+b:&'a String)->&'a String` both fixes the error and avoids a clone. So lifetimes
+are a clone-reducer **and** an error-fixer.
+
+**The win is real but the decision is GLOBAL (ownership inference).** Changing a
+return `T → &T` ripples to every call site: a caller that needs an *owned* value now
+must clone at the call site. Net clone count is **≤** today only if call sites
+clone-on-demand — clones move from the callee (always) to *only the call sites that
+need ownership*, so read-only callers save them. The existing linker already shapes
+call sites from the symbol map (it adds `.unwrap()` for nullable returns, `.clone()`
+for by-value non-`Copy` names) — a **"borrowed return"** flag in the symbol map +
+call-site clone-on-demand reuses that machinery.
+
+**The risk (why §6 avoided this):** returning a borrow propagates lifetime
+constraints the borrow checker enforces — a `&self.field` held across a `&mut self`
+call (`E0502`), self-referential storage, a borrow outliving its owner. This is the
+structural-borrow problem the fixed strategy sidesteps; done carelessly it
+**explodes** borrow-checker errors instead of reducing clones. So it must be a
+*measured* experiment, not an assumption.
+
+**Staged plan (gate each on measured error non-regression + clone reduction):**
+1. **Field getters `&self → &T`** (lifetime elided; record `ret_borrow` in the symbol
+   map; call sites clone-on-demand). Smallest, no explicit lifetimes. Measure one
+   corpus first — does the borrow checker cooperate or cascade?
+2. **Param-tied returns** `fn f<'a>(x:&'a T)->&'a U` (single input lifetime).
+3. **Multi-input** unified `'a` (fixes the `longer`-style current errors).
+Each only where the body provably returns a borrow of an input and the measured net
+(errors + clones) improves; otherwise keep the clone. Do **after** the last-use move
+slice (both touch return/emit; serialize to avoid conflicting changes).
+
 ---
 
 ## 7. Inheritance & polymorphism
