@@ -14,6 +14,35 @@ Be sure that you are aware of the pitfalls of translation before you commit to i
 unless you know it yourself, ensure you have access to someone with good amount of Rust
 programming experience.**
 
+## ⚠️ Translation-introduced `.clone()` — MUST be audited
+
+Java passes objects **by reference**; Rust's ownership rules do not. To bridge this,
+the translator inserts `.clone()` (and `.cloned()`, `.clone().unwrap()`) at many
+sites — e.g. when a non-`Copy` value is used where Rust would move it, when an
+`Option` field is read, when an enhanced-`for` iterates by value, or when a downcast
+extracts an enum variant. **Every clone the translator adds is marked in the output:**
+
+```rust
+let g = shapes.get(0).clone()/* TODO(translation): validate added clone */;
+```
+
+**To any human or LLM working on the generated crate: you MUST inspect every marked
+clone (`grep -r 'TODO(translation): validate added clone'`) and decide whether it is
+safe.** A translation-added clone is a potential source of:
+
+- **Correctness bugs (silent semantic divergence).** Java code routinely mutates a
+  shared object through one alias and observes the change through another. A
+  `.clone()` **breaks that aliasing** — the mutation now lands on a *copy*, so the
+  effect is silently lost. The code still compiles and runs, but behaves differently
+  from the Java original. Where the source relied on shared mutation, the clone must
+  be replaced with a real reference / `Rc<RefCell<…>>` / restructured ownership.
+- **Performance / memory regressions.** A clone is a deep copy; an unnecessary one
+  (the value was not aliased or mutated afterward) is wasted allocation. Often it can
+  simply be removed or turned into a borrow.
+
+The marker means *"the translator could not prove this clone unnecessary or
+semantically inert — a human/LLM must."* Do not assume marked clones are correct.
+
 Read more about our work on Rust translation here: [henriksson-lab/rustification](https://github.com/henriksson-lab/rustification)
 
 ## License

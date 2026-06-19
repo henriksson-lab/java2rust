@@ -1991,7 +1991,7 @@ impl<'a> RustDumpVisitor<'a> {
         // An array element read passed by value moves out of the `Vec`; clone it
         // (unless it was borrowed above).
         if !borrowed && self.is_array_read(e) {
-            self.printer.print(".clone()");
+            self.printer.print(".clone()/* TODO(translation): validate added clone */");
         }
     }
 
@@ -2116,7 +2116,7 @@ impl<'a> RustDumpVisitor<'a> {
         // of its borrow — clone it to produce an owned value. (`emit_moved_value`
         // is only used in owned/rvalue positions, so this is lvalue-safe.)
         if self.is_non_copy_name(e) || self.is_field_read(e) || self.is_array_read(e) {
-            self.printer.print(".clone()");
+            self.printer.print(".clone()/* TODO(translation): validate added clone */");
         }
     }
 
@@ -2542,7 +2542,7 @@ impl<'a> RustDumpVisitor<'a> {
                 // A read of a nullable element (`Vec<Option<T>>`) in a value
                 // position yields the owned `T`.
                 if elem_opt {
-                    self.printer.print(".clone().unwrap()");
+                    self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
                 }
             }
             AssignExpr { .. } => self.visit_assign(id, arg),
@@ -2560,7 +2560,7 @@ impl<'a> RustDumpVisitor<'a> {
                 if let Some((ep, vname)) = extract {
                     self.printer.print(&format!("(match &("));
                     self.visit(expr, arg);
-                    self.printer.print(&format!(") {{ {ep}::{vname}(v) => v.clone(), _ => unreachable!() }})"));
+                    self.printer.print(&format!(") {{ {ep}::{vname}(v) => v.clone()/* TODO(translation): validate added clone */, _ => unreachable!() }})"));
                     return;
                 }
                 // Parenthesize: an unparenthesized cast can't be the operand of a
@@ -2867,7 +2867,7 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(&vname);
                 self.printer.print(" in ");
                 self.visit(iterable, arg);
-                self.printer.print(".clone() ");
+                self.printer.print(".clone()/* TODO(translation): validate added clone */ ");
                 self.encapsulate_if_not_block(body, arg);
             }
             ForStmt { .. } => self.visit_for(id, arg),
@@ -2989,7 +2989,7 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(&path);
                 // A nullable inherited field read in a value position is unwrapped.
                 if !self.expect_option && self.inherited_field_nullable(name) {
-                    self.printer.print(".clone().unwrap()");
+                    self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
                 }
                 self.print_orphan_comments_ending(id);
                 return;
@@ -3098,12 +3098,12 @@ impl<'a> RustDumpVisitor<'a> {
         if lazy_const {
             self.printer.print(")");
             if self.is_non_copy_name(id) {
-                self.printer.print(".clone()");
+                self.printer.print(".clone()/* TODO(translation): validate added clone */");
             }
         }
         // A nullable value used where the plain value is expected gets unwrapped.
         if nullable && !self.expect_option {
-            self.printer.print(".clone().unwrap()");
+            self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
         }
         self.print_orphan_comments_ending(id);
     }
@@ -4320,7 +4320,7 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print("; ");
         for &t in &targets {
             self.visit(t, arg);
-            self.printer.print(" = __chain.clone(); ");
+            self.printer.print(" = __chain.clone()/* TODO(translation): validate added clone */; ");
         }
         self.printer.print("__chain }");
     }
@@ -4795,7 +4795,7 @@ impl<'a> RustDumpVisitor<'a> {
             && matches!(self.arena.kind(scope), Node::ThisExpr { .. })
             && self.this_field_nullable(&field, id)
         {
-            self.printer.print(".clone().unwrap()");
+            self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
         }
     }
 
@@ -5158,7 +5158,7 @@ impl<'a> RustDumpVisitor<'a> {
             ("iterator", 0) | ("listIterator", 0) => {
                 self.printer.print("crate::java_runtime::JavaIter::new((");
                 self.visit(recv, arg);
-                self.printer.print(").iter().cloned())");
+                self.printer.print(").iter().cloned()/* TODO(translation): validate added clone */)");
                 true
             }
             // `it.next()`/`it.previous()` on a `JavaIter` return `Option<T>`;
@@ -5284,13 +5284,13 @@ impl<'a> RustDumpVisitor<'a> {
                     self.visit(recv, arg);
                     self.printer.print(".get(&(");
                     self.visit(args[0], arg);
-                    self.printer.print(")).cloned().unwrap()");
+                    self.printer.print(")).cloned()/* TODO(translation): validate added clone */.unwrap()");
                 } else {
                     // List.get(i) -> indexed element (cloned to own it).
                     self.visit(recv, arg);
                     self.printer.print("[(");
                     self.visit(args[0], arg);
-                    self.printer.print(") as usize].clone()");
+                    self.printer.print(") as usize].clone()/* TODO(translation): validate added clone */");
                 }
                 true
             }
@@ -5476,14 +5476,14 @@ impl<'a> RustDumpVisitor<'a> {
             // foreach over the key set is handled).
             ("keySet", 0) => {
                 self.visit(recv, arg);
-                self.printer.print(".keys().cloned().collect::<Vec<_>>()");
+                self.printer.print(".keys().cloned()/* TODO(translation): validate added clone */.collect::<Vec<_>>()");
                 true
             }
             // ---- streams ----
             ("stream", 0) => {
                 // Owned-value iterator so map/forEach closures see `T`, not `&T`.
                 self.visit(recv, arg);
-                self.printer.print(".iter().cloned()");
+                self.printer.print(".iter().cloned()/* TODO(translation): validate added clone */");
                 true
             }
             ("toArray", 0) => {
@@ -5601,7 +5601,7 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print(".");
         self.printer.print(method);
         self.printer
-            .print(&format!("(|{p}| {{ let {p} = {p}.clone(); "));
+            .print(&format!("(|{p}| {{ let {p} = {p}.clone()/* TODO(translation): validate added clone */; "));
         if let Node::ExpressionStmt { expression } = self.arena.kind(body) {
             let e = *expression;
             self.visit(e, arg);
@@ -6177,7 +6177,7 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print_ln_s(&format!("{anon}::default()"));
             } else {
                 let inits: Vec<String> =
-                    snakes.iter().map(|s| format!("{s}: {s}.clone()")).collect();
+                    snakes.iter().map(|s| format!("{s}: {s}.clone()/* TODO(translation): validate added clone */")).collect();
                 self.printer.print_ln_s(&format!("{anon} {{ {} }}", inits.join(", ")));
             }
             self.printer.unindent();

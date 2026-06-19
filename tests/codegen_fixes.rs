@@ -104,7 +104,8 @@ fn anonymous_class_captures_enclosing_locals() {
     assert!(out.contains("struct __Anon0<Cap0>"), "generic capture field:\n{out}");
     assert!(out.contains("x: Cap0"), "captured field declared:\n{out}");
     assert!(out.contains("return self.x"), "body ref -> self.x:\n{out}");
-    assert!(out.contains("__Anon0 { x: x.clone() }"), "instantiated with captured value:\n{out}");
+    // (`.clone()` carries a `/* TODO(translation): validate added clone */` marker.)
+    assert!(out.contains("__Anon0 { x: x.clone()"), "instantiated with captured value:\n{out}");
 }
 
 #[test]
