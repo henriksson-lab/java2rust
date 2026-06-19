@@ -43,6 +43,30 @@ safe.** A translation-added clone is a potential source of:
 The marker means *"the translator could not prove this clone unnecessary or
 semantically inert — a human/LLM must."* Do not assume marked clones are correct.
 
+## Key docs & current state (start here if you're an LLM picking this up)
+
+- **`SEMANTICS.md`** — the authoritative, semi-formal model of how types are
+  handled: the internal `Type` IR, two-tier resolution (deterministic ground +
+  unification), and the four **orthogonal overlays** that compose to a slot's final
+  Rust type — `Borrow ∘ Option^N ∘ Route ∘ Resolve` (ownership, nullability, the R4
+  sealed-hierarchy enum, ground type). Its central law is the **all-sites
+  invariant**: a type-representation change must update every read and write of the
+  value or it cascades. Read this before any type/codegen change.
+- **`TODO.md`** — handover notes: current state, the measure/monotone discipline,
+  what's landed, and the open work in dependency order.
+- `docs/*.md` — research/engine plans with recorded outcomes (NO-GOs included).
+
+The tool is validated by translating **12 corpora** under `testdata/` (gitignored)
+and counting `rustc` errors: trim, jaligner, jahmm, varscan, fastq, bjaaprop, vcf,
+bjalign (bioinformatics), bioformats + jhlabs (image), jsoup (HTML/DOM), jts
+(geometry) — each with a `tools/<name>_check.sh`. Self-contained snippet corpus:
+`tools/compilecheck.sh` (110/110); golden regression fixtures: `cargo run --release
+--example check` (42/42). Major capabilities since the original mapping: principled
+nullability→`Option`, a fixed borrow strategy, R4 **sealed-hierarchy enums** (so
+`instanceof`/downcast on a class hierarchy work), argument-type-directed overload
+resolution, a cross-file symbol map (`--link`), Tier-2 collection-element inference
+(partial), and the audited clone markers above.
+
 Read more about our work on Rust translation here: [henriksson-lab/rustification](https://github.com/henriksson-lab/rustification)
 
 ## License
@@ -322,7 +346,8 @@ called on it.
 **Ownership (partial):** structs `#[derive(Clone)]`; non-Copy values read in a
 move position (return / assignment RHS / var init) get `.clone()`; array indices
 are cast `as usize`; `char c = 65` → `65 as u8 as char`. Self-contained compile
-corpus: **39/39** (`tools/compilecheck.sh`).
+corpus: **110/110** (`tools/compilecheck.sh`). *(This "Goal" section is historical;
+see "Key docs & current state" near the top for the authoritative current state.)*
 
 **Nullability** is inferred by a dedicated pass (`nullability.rs`, run after
 `IdTracker`): it finds which declarations can hold `null` (seeded from
@@ -360,7 +385,7 @@ boundary, not translation bugs. Convert a tree with
 - **htsjdk** — byte-parity reference for the original mapping (historical).
 
 `tools/compilecheck.sh` runs the small self-contained snippet corpus through
-`rustc` (75/75 compiling).
+`rustc` (110/110 compiling).
 
 ---
 

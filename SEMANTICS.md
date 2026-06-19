@@ -257,6 +257,36 @@ Each only where the body provably returns a borrow of an input and the measured 
 (errors + clones) improves; otherwise keep the clone. Do **after** the last-use move
 slice (both touch return/emit; serialize to avoid conflicting changes).
 
+**Probe verdict [measured]: the cascade fear was UNFOUNDED for simple getters — GO.**
+A stage-1 probe (getters `return field;` → `&self → &T`) on vcf + the getter-heavy
+jts (`Geometry` hierarchy) produced **zero new borrow-checker errors** (no `E0502/
+E0515/E0505/…` cascade). So `&self.field`-held-across-`&mut self` is not the minefield
+§6 feared, at least for getters. The getter-only change is +3 (owned-use *ripple* at
+callers receiving `&T` where they need an owned value); the fix is the **call-site
+clone-on-demand** half: a `ret_borrow` flag in `MethodSym` + linker shaping — a call
+to a borrowed-return getter clones only where the *result* is used as an owned value
+(assigned to an owned slot, returned owned, by-value arg), and borrows directly at
+reads. Read-callers then drop their clones → net positive. Stage 1 = getter-borrow
+emission [have, probe] + call-site clone-on-demand [next].
+
+**Stage-1 COMPLETE measured: NO-GO for clone reduction — clones went UP.** Building
+the call-site clone-on-demand half (`ret_borrow` flag + linker shaping) and measuring
+all 12: **clones jts +316, jsoup +23** (vcf flat), and **errors −48** but **vcf +2**
+(over the guard). The decisive finding: a borrowed return moves the clone from the
+callee (**once**) to its callers (**many**); in these corpora **most callers consume
+the result by value** → they each clone → net *more* clones than the one callee clone
+removed. So **borrowed returns reduce clones only when a getter's callers predominantly
+READ the result; otherwise they increase them.** Deciding that requires whole-program
+**caller-read-dominance analysis** — the same global ownership inference the fixed
+borrow strategy deliberately avoids (§6 opening). The getter→`&T` change *does* cut
+errors (−48: it removes the borrow-seam-inducing callee clones), so it's applyable if
+*errors* are prioritized over clone-count and the vcf +2 let-binding edge (`&&T`) is
+fixed — but for the stated **clone-reduction** goal it is a dead end without the
+global caller analysis. **Conclusion: do not pursue borrowed-returns for clones
+without whole-program caller-read-dominance; the empirical clone-pattern audit is the
+better next lever** (the last-use move — a purely *local*, no-ripple clone removal —
+was the clean win; find more of those).
+
 ---
 
 ## 7. Inheritance & polymorphism

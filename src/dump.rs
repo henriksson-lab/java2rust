@@ -2113,11 +2113,116 @@ impl<'a> RustDumpVisitor<'a> {
     fn emit_moved_value(&mut self, e: NodeId, arg: Arg) {
         self.visit(e, arg);
         // A non-Copy name, field read, or array element read can't be moved out
-        // of its borrow — clone it to produce an owned value. (`emit_moved_value`
-        // is only used in owned/rvalue positions, so this is lvalue-safe.)
-        if self.is_non_copy_name(e) || self.is_field_read(e) || self.is_array_read(e) {
+        // of its borrow — clone it to produce an owned value. EXCEPT an owned
+        // local at its last (only, non-loop) read, which can be *moved* instead
+        // (§6 use-site borrow: an eager clone is over-owning).
+        let needs_owned =
+            self.is_non_copy_name(e) || self.is_field_read(e) || self.is_array_read(e);
+        if needs_owned && !self.is_movable_last_use(e) {
             self.printer.print(".clone()/* TODO(translation): validate added clone */");
         }
+    }
+
+    /// Can the value `e` be MOVED (not cloned) here? Sound conditions: (a) `e` is a
+    /// `NameExpr` resolving to a local declared in the current method (not a
+    /// param/field/array-element — those are behind a borrow and can't be moved
+    /// out); (b) `name` is *read* exactly once textually in the method (so this use
+    /// is that read — over-counting under shadowing only makes it more
+    /// conservative); (c) `e` is not inside a loop body (which could re-execute the
+    /// read → use-after-move). When any fails, the caller keeps the clone.
+    fn is_movable_last_use(&self, e: NodeId) -> bool {
+        let Node::NameExpr { name } = self.arena.kind(e) else {
+            return false;
+        };
+        let name = name.clone();
+        // (a) a local: decl's grandparent is a local `VariableDeclarationExpr`
+        // (a param's parent is `Parameter`; a field's grandparent is
+        // `FieldDeclaration`).
+        let Some((_, decl)) = self.id.find_declaration_node_for(self.arena, &name, e) else {
+            return false;
+        };
+        let is_local = self
+            .arena
+            .parent(decl)
+            .and_then(|p| self.arena.parent(p))
+            .map(|gp| matches!(self.arena.kind(gp), Node::VariableDeclarationExpr { .. }))
+            .unwrap_or(false);
+        if !is_local {
+            return false;
+        }
+        let Some(method) = self.enclosing_callable(e) else {
+            return false;
+        };
+        // (c) not inside a loop within the method.
+        if self.within_loop_of(e, method) {
+            return false;
+        }
+        // (b) exactly one textual read of `name` in the method.
+        let mut reads = 0usize;
+        for i in 0..self.arena.node_count() {
+            let n = NodeId(i as u32);
+            if let Node::NameExpr { name: nm } = self.arena.kind(n) {
+                if *nm == name && self.is_descendant_of(n, method) && !self.is_assign_target(n) {
+                    reads += 1;
+                    if reads > 1 {
+                        return false;
+                    }
+                }
+            }
+        }
+        reads == 1
+    }
+
+    /// The enclosing method/constructor declaration node, if any.
+    fn enclosing_callable(&self, mut n: NodeId) -> Option<NodeId> {
+        loop {
+            let p = self.arena.parent(n)?;
+            if matches!(
+                self.arena.kind(p),
+                Node::MethodDeclaration { .. } | Node::ConstructorDeclaration { .. }
+            ) {
+                return Some(p);
+            }
+            n = p;
+        }
+    }
+
+    fn is_descendant_of(&self, mut n: NodeId, anc: NodeId) -> bool {
+        while let Some(p) = self.arena.parent(n) {
+            if p == anc {
+                return true;
+            }
+            n = p;
+        }
+        false
+    }
+
+    /// Is `n` the *target* (write side) of an assignment (so not a read)?
+    fn is_assign_target(&self, n: NodeId) -> bool {
+        self.arena
+            .parent(n)
+            .map(|p| matches!(self.arena.kind(p), Node::AssignExpr { target, .. } if *target == n))
+            .unwrap_or(false)
+    }
+
+    /// Is `n` inside a loop body between it and `method` (exclusive of `method`)?
+    fn within_loop_of(&self, mut n: NodeId, method: NodeId) -> bool {
+        while let Some(p) = self.arena.parent(n) {
+            if p == method {
+                return false;
+            }
+            if matches!(
+                self.arena.kind(p),
+                Node::WhileStmt { .. }
+                    | Node::DoStmt { .. }
+                    | Node::ForStmt { .. }
+                    | Node::ForeachStmt { .. }
+            ) {
+                return true;
+            }
+            n = p;
+        }
+        false
     }
 
     /// An array element read (`a[i]`) of a *non-Copy* element. Indexing a `Vec`
