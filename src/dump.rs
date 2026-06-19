@@ -3207,8 +3207,15 @@ impl<'a> RustDumpVisitor<'a> {
             }
         }
         // A nullable value used where the plain value is expected gets unwrapped.
+        // An owned local at its last read can be *moved* through the unwrap
+        // (`x.unwrap()`) rather than cloned first (§6 use-site borrow — same
+        // last-use move applied to the plain-clone site in `emit_moved_value`).
         if nullable && !self.expect_option {
-            self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
+            if self.is_movable_last_use(id) {
+                self.printer.print(".unwrap()");
+            } else {
+                self.printer.print(".clone()/* TODO(translation): validate added clone */.unwrap()");
+            }
         }
         self.print_orphan_comments_ending(id);
     }

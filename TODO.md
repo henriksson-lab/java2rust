@@ -18,11 +18,15 @@ landing small, **measured** changes.
   `no-commit-prompts` (**the user commits; never offer to commit**).
 
 ## 1. Current state
-- HEAD `56174eb`. **Uncommitted on the tree**: `SEMANTICS.md` edits + the **last-use
-  move** in `src/dump.rs` (clones −180, errors −10 — KEEP, ready to commit).
+- HEAD `7cfb2a6` (last-use move already committed). **Uncommitted on the tree**: the
+  **nullable-unwrap last-use move** in `src/dump.rs` (clones −78, errors −1 — KEEP,
+  ready to commit; see §3).
 - **12-corpus error baseline** (current working tree; `tools/<name>_check.sh`):
   trim 187 · jaligner 56 · jahmm 408 · varscan 56 · fastq 53 · bjaaprop 98 · vcf 449
-  · bjalign 594 · bioformats 15 · jhlabs 1338 · jsoup 2584 · jts 5559  (**= 11397**).
+  · bjalign 594 · bioformats 15 · jhlabs 1338 · jsoup 2584 · jts 5558  (**= 11396**).
+- **Clone-marker baseline** (`grep -rho 'validate added clone'` over fresh translation):
+  trim 485 · jaligner 148 · jahmm 214 · varscan 894 · fastq 57 · bjaaprop 442 · vcf 433
+  · bjalign 460 · bioformats 1151 · jhlabs 968 · jsoup 1725 · jts 4556  (**= 11533**).
 - Corpora live under `testdata/` (gitignored; cloned). Translator binary: `cargo
   build --release` → `target/release/java2rust-rs`.
 - **Clone markers**: every translation-added `.clone()` carries
@@ -55,7 +59,10 @@ enum; instanceof/cast work) · **over-wrap fix −1586** (don't re-wrap already-
 reads) · **overload resolution −361** (arg-type-directed, not base-overload) ·
 arg/assignment/Option-composition enum-wrap · hex-float/bitop fix −61 ·
 parent-cycle/module-collision/comment robustness · **Tier-2 substrate + Phase-1
-leaf-local collection elements** · **last-use move** (clones −180, uncommitted).
+leaf-local collection elements** · **last-use move** (clones −180) · **nullable-unwrap
+last-use move** (clones −78, errors −1, uncommitted): `is_movable_last_use` extended
+to the nullable-name `.clone().unwrap()` site in `visit_name_expr` — an owned local at
+its last read moves through the unwrap (`x.unwrap()`) instead of `x.clone().unwrap()`.
 
 ## 4. Open work — in dependency/priority order
 1. **Clone-pattern audit (task #40) — the recommended next lever.** The user wants
@@ -64,6 +71,16 @@ leaf-local collection elements** · **last-use move** (clones −180, uncommitte
    no-ripple** pattern-match fixes. The **last-use move** (clones −180, applied) was
    exactly such a clean win; find more. See `clone-reduction-audit-loop` memory.
    NOTE: borrowed-returns (below) is NOT the path for clones — see the closed result.
+   **Marker buckets** (by output-text form, over the 11533 current markers): plain
+   `.clone()` ~4564 · `.clone().unwrap()` (Option-unwrap) ~4700 [the last-use moves
+   target this + `emit_moved_value`'s site] · `as usize].clone()` (Vec index) 1005 —
+   *NOT a clean win: can't move out of a `Vec` index without `swap_remove`* · indexed
+   `get(..).cloned().unwrap()` 528 · match-arm `v.clone()` (R4 cast-extract, dump.rs
+   2668) 309 · `.iter().cloned()` 251 · `__chain.clone()` (dump.rs 4428) 151 ·
+   `.keys().cloned()` 25. Remaining `.clone().unwrap()` are field/param/array reads
+   (behind a borrow — need use-site borrow analysis, not last-use). Next clean
+   candidate to probe: the R4 cast-extract `v.clone()` when the cast result is only
+   borrowed at its use; and `if`/`switch`-as-value (§4.2) to avoid temp clones.
 2. **`if`/`switch` as a value-expression (task #41)** — `let r = if c {a} else {b}`
    (clone/temp avoider). A concrete local pattern the audit will surface.
 3. **Borrowed-returns / lifetimes — CLOSED as a clone reducer (NO-GO), see SEMANTICS
@@ -108,8 +125,10 @@ leaf-local collection elements** · **last-use move** (clones −180, uncommitte
   ours — leave or ask before deleting.
 
 ## 6. Immediate next action
-Commit the last-use move + the docs (SEMANTICS/TODO/README), if not already done.
-Then start the **clone-pattern audit (§4.1, task #40)**: parallel workers grep the
-clone markers across the 12 corpora and bucket the clone-causing patterns into
-*local, no-ripple* fixes (like last-use). Borrowed-returns is closed for clones
-(§4.3) — do not restart it without whole-program caller analysis.
+Commit the uncommitted **nullable-unwrap last-use move** + docs (TODO), if not done.
+Then continue the **clone-pattern audit (§4.1, task #40)** from the recorded marker
+buckets: the two clean last-use wins are landed; the next *local, no-ripple* candidates
+are the R4 cast-extract `v.clone()` (dump.rs 2668) when its result is only borrowed,
+and `if`/`switch`-as-value (§4.2). The `as usize].clone()` (1005) and field/param
+reads are NOT clean wins (need use-site borrow analysis). Borrowed-returns is closed
+for clones (§4.3) — do not restart it without whole-program caller analysis.
