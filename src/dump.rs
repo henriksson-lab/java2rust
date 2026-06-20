@@ -5313,6 +5313,42 @@ impl<'a> RustDumpVisitor<'a> {
         if self.is_static_class_ref(recv) {
             return false;
         }
+        // `java.util.BitSet` -> `JavaBitSet`: its `get`/`set`/`clear`/… are real
+        // inherent methods, so the collection rewrites (e.g. `.get(i)` -> `[i]`
+        // indexing) must NOT fire. The runtime arity-overloads its methods by the
+        // `name`/`name_N` convention (Java overloads `set(i)`/`set(i,v)`/`set(f,t)`
+        // by arity), so emit the suffixed name here; index args are generic
+        // (`BitIndex`) so a Java `char` index (widened to int by the JDK) is taken.
+        if matches!(self.recv_type_name(recv).as_deref(), Some("BitSet")) {
+            // Only `get`/`set`/`clear`/`flip` are arity-overloaded; their base
+            // overload keeps the bare name, higher arities get `_N`. Everything
+            // else (`cardinality`, `nextSetBit`, `and`/`or`/…) is non-overloaded
+            // and resolves by default snake-case emission.
+            let rust = match (name, args.len()) {
+                ("set", 2) | ("set", 3) | ("clear", 2) | ("flip", 2) | ("get", 2) => {
+                    format!("{}_{}", camel_to_snake_case(name), args.len())
+                }
+                _ => return false, // base overload / non-overloaded -> default emit
+            };
+            self.visit(recv, arg);
+            self.printer.print(".");
+            self.printer.print(&rust);
+            self.print_arguments(args, arg);
+            return true;
+        }
+        // `java.util.Random`: Java overloads `nextInt()` (arity 0) and
+        // `nextInt(bound)` (arity 1); Rust needs distinct names, so the 1-arg form
+        // maps to `next_int_bound`. All other `next*` methods are non-overloaded
+        // and resolve by default snake-case emission.
+        if matches!(self.recv_type_name(recv).as_deref(), Some("Random"))
+            && name == "nextInt"
+            && args.len() == 1
+        {
+            self.visit(recv, arg);
+            self.printer.print(".next_int_bound");
+            self.print_arguments(args, arg);
+            return true;
+        }
         match (name, args.len()) {
             // `collection.iterator()`/`listIterator()` -> a `JavaIter` over a
             // snapshot. `has_next()`/`has_previous()` then resolve by default
@@ -6451,7 +6487,23 @@ impl<'a> RustDumpVisitor<'a> {
             // symbol map, so `resolve_ctor` can't disambiguate its overloaded
             // constructors. Mirror the arity-suffix convention (`new`, `new_2`,
             // …) the runtime types expose, so `new File(a, b)` -> `…::new_2(a, b)`.
-            if base.starts_with("crate::java_runtime::") && args.len() >= 2 {
+            // `JavaBitSet`'s base ctor is arity-0 (`new()`), so its 1-arg overload
+            // `new BitSet(nbits)` suffixes from arity-1 (`new_2`); the others
+            // (`JavaFile`) have an arity-1 base, so suffix only from arity-2.
+            let rt = base.starts_with("crate::java_runtime::");
+            // `Random(long seed)` -> `new_seeded`, coercing the seed to i64
+            // (`new()` arity-0 keeps the bare `new`, so the 1-arg overload needs a
+            // distinct name).
+            if rt && base.ends_with("::JavaRandom") && args.len() == 1 {
+                self.printer.print("::new_seeded((");
+                self.visit(args[0], arg);
+                self.printer.print(") as i64)");
+                return;
+            }
+            let bitset = base.ends_with("::JavaBitSet");
+            if rt && bitset && args.len() == 1 {
+                self.printer.print("::new_2");
+            } else if rt && args.len() >= 2 {
                 self.printer.print(&format!("::new_{}", args.len()));
             } else {
                 self.printer.print("::new");
@@ -7895,6 +7947,13 @@ pub fn map_type_name(name: &str) -> &str {
         // so `exists()`/`length()`/`getName()`/… do real filesystem work
         // instead of an opaque stub.
         "File" => "crate::java_runtime::JavaFile",
+        // `java.util.BitSet` -> a real word-array bit vector (runtime support),
+        // so `get`/`set`/`cardinality`/`nextSetBit`/… do real bit work.
+        "BitSet" => "crate::java_runtime::JavaBitSet",
+        // `java.util.Random` -> a JDK-bit-compatible 48-bit LCG.
+        "Random" => "crate::java_runtime::JavaRandom",
+        // `java.util.StringTokenizer` -> eager tokenizer over a delimiter set.
+        "StringTokenizer" => "crate::java_runtime::JavaStringTokenizer",
         "Optional" => "Option",
         "Integer" => "i32",
         "Long" => "i64",

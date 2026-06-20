@@ -153,6 +153,24 @@ pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
         ("System", "getProperty", 1) => r("std::env::var(&(${0})).unwrap_or_default()"),
         ("System", "getProperty", 2) => r("std::env::var(&(${0})).unwrap_or(${1})"),
 
+        // ---- Arrays (value-producing forms; mutating sort/fill deferred —
+        // they need the arg passed `&mut` + Ord, which static-arg borrow doesn't
+        // yet give) ----
+        ("Arrays", "equals", 2) => r("(${0} == ${1})"),
+        ("Arrays", "copyOfRange", 3) => {
+            r("(${0})[(${1}) as usize..(${2}) as usize].to_vec()")
+        }
+
+        // ---- Collections (value-producing / identity forms) ----
+        ("Collections", "emptyList", 0) => r("Vec::new()"),
+        ("Collections", "emptySet", 0) => r("std::collections::HashSet::new()"),
+        ("Collections", "singletonList", 1) => r("vec![${0}]"),
+        // `unmodifiable*` drop the immutability wrapper -> identity passthrough.
+        ("Collections", "unmodifiableList", 1)
+        | ("Collections", "unmodifiableMap", 1)
+        | ("Collections", "unmodifiableSet", 1)
+        | ("Collections", "unmodifiableCollection", 1) => r("(${0})"),
+
         // ---- String static ----
         ("String", "valueOf", 1) => r("(${0}).to_string()"),
 

@@ -18,17 +18,17 @@ landing small, **measured** changes.
   `no-commit-prompts` (**the user commits; never offer to commit**).
 
 ## 1. Current state
-- HEAD `cd4663b` (committed: last-use moves + read-only-method `.as_ref()` borrow at the
-  NAME site 3217). **Uncommitted on the tree** (all KEEPs, ready to commit; see §3):
-  (1) the follow-on use-site-borrow slices (clones −163, errors 0); (2) **`java.io.File` →
-  `JavaFile` runtime type** (errors −7); (3) **stdlib-runtime structure refactor (Tier 0)**
-  — runtime now in `src/runtime/{header,iter,io_file}.rs` via `concat!(include_str!())` +
-  `#[cfg(test)] mod java_runtime_compiles`; (4) **`System` statics** (exit/currentTimeMillis/
-  nanoTime/gc/getProperty) as `stdlib.rs` templates (errors −2). Files: `src/dump.rs`,
-  `src/crate_layout.rs`, `src/runtime/*`, `src/stdlib.rs`, `docs/stdlib-checklist.md`.
+- HEAD `bfeca96` (committed through the File runtime + Tier-0 structure refactor + System
+  statics). **Uncommitted on the tree** (all one KEEP, ready to commit) — the **first
+  parallel-agent stdlib wave** (errors −29, zero per-corpus regression): Lane-1 templates
+  in `src/stdlib.rs` (Arrays.equals/copyOfRange, Collections.emptyList/emptySet/
+  singletonList/unmodifiable*); and 3 runtime types `src/runtime/{random,bitset,string_tokenizer}.rs`
+  (`JavaRandom` JDK-bit-exact + `Cell` interior mutability; `JavaBitSet`; `JavaStringTokenizer`)
+  wired in `crate_layout.rs` + `dump.rs` (map_type_name arms, ctor/method overload special-cases)
+  + `id_tracker.rs` (nextToken/nextElement/flip mutating). See §3 + `docs/stdlib-checklist.md`.
 - **12-corpus error baseline** (current working tree; `tools/<name>_check.sh`):
-  trim 187 · jaligner 54 · jahmm 408 · varscan 56 · fastq 53 · bjaaprop 98 · vcf 446
-  · bjalign 593 · bioformats 15 · jhlabs 1338 · jsoup 2578 · jts 5549  (**= 11375**).
+  trim 186 · jaligner 53 · jahmm 408 · varscan 56 · fastq 53 · bjaaprop 98 · vcf 441
+  · bjalign 593 · bioformats 15 · jhlabs 1324 · jsoup 2570 · jts 5549  (**= 11346**).
 - **Clone-marker baseline** (`grep -rho 'validate added clone'` over fresh translation):
   trim 469 · jaligner 121 · jahmm 214 · varscan 890 · fastq 38 · bjaaprop 421 · vcf 379
   · bjalign 404 · bioformats 982 · jhlabs 966 · jsoup 1611 · jts 4409  (**= 10904**).

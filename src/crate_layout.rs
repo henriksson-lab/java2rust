@@ -1077,6 +1077,9 @@ const JAVA_RUNTIME: &str = concat!(
     include_str!("runtime/header.rs"),
     include_str!("runtime/iter.rs"),
     include_str!("runtime/io_file.rs"),
+    include_str!("runtime/bitset.rs"),
+    include_str!("runtime/random.rs"),
+    include_str!("runtime/string_tokenizer.rs"),
 );
 
 /// Compile-check the runtime fragments as part of the translator's own
@@ -1089,6 +1092,9 @@ mod java_runtime_compiles {
     #![allow(dead_code)]
     include!("runtime/iter.rs");
     include!("runtime/io_file.rs");
+    include!("runtime/bitset.rs");
+    include!("runtime/random.rs");
+    include!("runtime/string_tokenizer.rs");
 }
 
 /// Generate the `mod` tree (`lib.rs` at the root, `mod.rs` in each subdir) and a

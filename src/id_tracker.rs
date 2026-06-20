@@ -528,6 +528,12 @@ pub fn is_mutating_method(name: &str) -> bool {
             | "clear" | "push" | "pop" | "insert" | "sort" | "append" | "addFirst" | "addLast"
             // An iterator/cursor advances on next/previous (`&mut self`).
             | "next" | "previous"
+            // StringTokenizer / Enumeration cursors advance on these.
+            | "nextToken" | "nextElement"
+            // BitSet flip mutates.
+            | "flip"
+            // (java.util.Random uses interior `Cell` mutability, so its `nextX()`
+            // take `&self` — deliberately NOT listed here.)
     )
 }
 
