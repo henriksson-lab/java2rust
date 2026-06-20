@@ -139,6 +139,20 @@ pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
         ("Integer" | "Long" | "Double" | "Float", "min", 2) => r("(${0}).min(${1})"),
         ("Integer" | "Long" | "Double" | "Float", "sum", 2) => r("(${0} + ${1})"),
 
+        // ---- System (non-print statics; print routes elsewhere) ----
+        ("System", "exit", 1) => r("std::process::exit((${0}) as i32)"),
+        ("System", "gc", 0) => r("()"),
+        ("System", "currentTimeMillis", 0) => r(
+            "(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|__d| __d.as_millis() as i64).unwrap_or(0))",
+        ),
+        ("System", "nanoTime", 0) => r(
+            "(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|__d| __d.as_nanos() as i64).unwrap_or(0))",
+        ),
+        // Java system properties have no portable Rust analog; best-effort via the
+        // environment (compiles + reasonable for the common `user.dir`/`os.name`).
+        ("System", "getProperty", 1) => r("std::env::var(&(${0})).unwrap_or_default()"),
+        ("System", "getProperty", 2) => r("std::env::var(&(${0})).unwrap_or(${1})"),
+
         // ---- String static ----
         ("String", "valueOf", 1) => r("(${0}).to_string()"),
 

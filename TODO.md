@@ -20,13 +20,15 @@ landing small, **measured** changes.
 ## 1. Current state
 - HEAD `cd4663b` (committed: last-use moves + read-only-method `.as_ref()` borrow at the
   NAME site 3217). **Uncommitted on the tree** (all KEEPs, ready to commit; see §3):
-  (1) the follow-on use-site-borrow slices — read-only-method `.as_ref()` at the FIELD
-  sites (4910/3097), LazyLock-receiver clone-drop (3206), logging-method whitelist (clones
-  −163, errors 0); (2) **`java.io.File` → real `JavaFile` runtime type** (errors −7, zero
-  regression; see §3 + §4.2b) — `src/dump.rs` + `src/crate_layout.rs`.
+  (1) the follow-on use-site-borrow slices (clones −163, errors 0); (2) **`java.io.File` →
+  `JavaFile` runtime type** (errors −7); (3) **stdlib-runtime structure refactor (Tier 0)**
+  — runtime now in `src/runtime/{header,iter,io_file}.rs` via `concat!(include_str!())` +
+  `#[cfg(test)] mod java_runtime_compiles`; (4) **`System` statics** (exit/currentTimeMillis/
+  nanoTime/gc/getProperty) as `stdlib.rs` templates (errors −2). Files: `src/dump.rs`,
+  `src/crate_layout.rs`, `src/runtime/*`, `src/stdlib.rs`, `docs/stdlib-checklist.md`.
 - **12-corpus error baseline** (current working tree; `tools/<name>_check.sh`):
   trim 187 · jaligner 54 · jahmm 408 · varscan 56 · fastq 53 · bjaaprop 98 · vcf 446
-  · bjalign 593 · bioformats 15 · jhlabs 1338 · jsoup 2580 · jts 5549  (**= 11377**).
+  · bjalign 593 · bioformats 15 · jhlabs 1338 · jsoup 2578 · jts 5549  (**= 11375**).
 - **Clone-marker baseline** (`grep -rho 'validate added clone'` over fresh translation):
   trim 469 · jaligner 121 · jahmm 214 · varscan 890 · fastq 38 · bjaaprop 421 · vcf 379
   · bjalign 404 · bioformats 982 · jhlabs 966 · jsoup 1611 · jts 4409  (**= 10904**).
@@ -159,18 +161,28 @@ disambiguates `new`/`new_2`); (ii) path/string args bounded by `ToString` (not
      `new X(a,b)` → `JavaX::new_2(a,b)`; define `new_2`/etc. to match.
    - **MUST cover the FULL called-method surface** of the type (the `stub_<pkg>.rs` file
      lists it exactly) or previously-compiling stub calls regress to E0599/E0061.
-   **Next targets** (file I/O, ranked by the 6-agent audit): the READER STACK
-   (`BufferedReader`/`FileReader`/`FileInputStream`/`InputStreamReader` → wrappers over
-   `Box<dyn Read>`, all `impl Read` so the nested ctors compose; `read_line`→`Option<String>`)
-   and WRITER STACK (`PrintStream`/`FileOutputStream`/`OutputStreamWriter`/`BufferedWriter`
-   → `Box<dyn Write>`). **Hard parts for the stacks (File didn't hit these):** (a) abstract
-   supertypes `InputStream`/`Reader`/`OutputStream`/`Writer` have NO Rust subtyping — map
-   them to `Box<dyn Read/Write>` and make concrete ctors return boxed, or coerce; (b)
-   `PrintStream.println` is heavily overloaded by arg type at the same arity (overload
-   resolution collapses them) — risky. Cheaper non-stack wins also surfaced: `Random`
-   (deterministic LCG, correctness), `Hashtable`→alias `HashMap`, `Rectangle`/`Point` (give
-   the stub real `{x,y,..}` FIELDS — field access currently dangles), and `Arrays`/
-   `Collections`/`System.exit`/`System.arraycopy` as `stdlib.rs` static templates (no type).
+   **➜ FULL CHECKLIST: `docs/stdlib-checklist.md`** — every stub type+method across the 12
+   corpora (built by a 6-agent audit), with per-type vehicle (runtime-type/template/alias/
+   drop/needs-crate), difficulty, and a 5-tier implementation order. Highlights:
+   - **Tier 0 (do first): code-structure refactor.** Move the runtime out of the
+     `crate_layout.rs` string literal into real `src/runtime/*.rs` fragments assembled via
+     `concat!(include_str!(...))` (keeps the flat `crate::java_runtime::Type` module → zero
+     generator/`dump.rs` changes) + a `#[cfg(test)] include!` block so `cargo test`
+     type-checks the runtime. Full steps in the checklist doc's "Code structure plan".
+   - **Tier 1 cheap templates/aliases** (Arrays, Collections, Objects.hash, Map.Entry→tuple,
+     Locale, System statics, Logger, Hashtable/Properties→HashMap, const/exception aliases).
+   - **Tier 2 easy leaves** (io byte/string streams, atomics, BitSet, StringTokenizer).
+   - **Tier 3 the file-I/O stack** — settle abstract supertypes first
+     (`InputStream`/`Reader`/… → `Box<dyn Read/Write>`, no Rust subtyping; wrapper ctors take
+     `impl Read/Write` so nested ctors compose), then BufferedReader/PrintStream/etc.
+   - **Tier 4** Random (bit-match JDK LCG), DecimalFormat, Comparator/function/Stream
+     (boxed closures), jts awt.geom (needs real FIELDS).
+   - **Tier 5 defer** (engine/dependency-bound; low corpus count).
+   - **⚠️ DECISION NEEDED:** regex/flate2/url/reqwest/zip families need Cargo crates —
+     pure-std vs deps is a user call (see the checklist's "DECISION NEEDED" section). Most
+     of the worklist (io/util/lang/text/awt-geom) is pure-std.
+   NOTE the earlier ranking over-counted `java.awt.image` (BufferedImage) — it's NOT a
+   stdlib stub; jhlabs resolves it against app-recovered `com.jhlabs.*` types. Out of scope.
    See memory `stdlib-stub-implementation`. Measure all-12 errors + suites each step.
 3. **Borrowed-returns / lifetimes — CLOSED as a clone reducer (NO-GO), see SEMANTICS
    §6.** The full stage-1 (getter `&self→&T` + call-site clone-on-demand) was built
