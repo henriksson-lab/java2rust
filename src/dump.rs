@@ -3634,6 +3634,22 @@ impl<'a> RustDumpVisitor<'a> {
             self.printer.print_ln_s(" {");
             self.printer.print_ln_s(&format!("    fn deref_mut(&mut self) -> &mut {p} {{ &mut self.base }}"));
             self.printer.print_ln_s("}");
+            // A project class extending a Java reader/stream carrier (e.g.
+            // `class SmartFileReader extends FileReader`) must itself `impl Read`
+            // so it composes into the IO factory fns (which bound their arg
+            // `R: std::io::Read`); `Deref` alone doesn't satisfy a generic bound.
+            if p == "crate::java_runtime::JavaReader" || p == "crate::java_runtime::JavaInputStream" {
+                self.printer.print("impl");
+                self.print_type_parameters(&combined, arg);
+                self.printer.print(" std::io::Read for ");
+                self.printer.print(&name);
+                self.print_type_param_names(&combined);
+                self.printer.print_ln_s(" {");
+                self.printer.print_ln_s("    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {");
+                self.printer.print_ln_s("        std::io::Read::read(&mut &self.base, buf)");
+                self.printer.print_ln_s("    }");
+                self.printer.print_ln_s("}");
+            }
         }
         self.printer.print_ln();
 
@@ -5349,6 +5365,52 @@ impl<'a> RustDumpVisitor<'a> {
             self.print_arguments(args, arg);
             return true;
         }
+        // Stored char-writer carriers (`Writer`/`PrintWriter`/`PrintStream`/… →
+        // `JavaWriter`, plus own-typed `StringWriter`). `println`/`print` are
+        // overloaded by ARITY in Java; Rust can't share one name, so emit the
+        // bare name for arity-0 (newline / nothing) and `_1` for arity-1. Other
+        // methods are real inherent methods — emit snake-cased so the generic
+        // String rewrites (`append`→`push_str`, etc.) don't fire on a writer.
+        // (`System.out.println` is lowered separately and never reaches here.)
+        if matches!(
+            self.recv_type_name(recv).as_deref(),
+            Some(
+                "Writer" | "OutputStreamWriter" | "BufferedWriter" | "FileWriter" | "PrintWriter"
+                    | "PrintStream" | "StringWriter"
+            )
+        ) {
+            match (name, args.len()) {
+                ("println", 0) => return self.emit_recv_method(recv, "println", arg),
+                ("print", 0) => return self.emit_recv_method(recv, "print", arg),
+                ("println", 1) => {
+                    self.visit(recv, arg);
+                    self.printer.print(".println_1");
+                    self.print_arguments(args, arg);
+                    return true;
+                }
+                ("print", 1) => {
+                    self.visit(recv, arg);
+                    self.printer.print(".print_1");
+                    self.print_arguments(args, arg);
+                    return true;
+                }
+                ("write", 1) | ("append", 1) | ("flush", 0) | ("close", 0)
+                | ("checkError", 0) | ("printf", _) | ("format", _) => {
+                    self.visit(recv, arg);
+                    self.printer.print(".");
+                    self.printer.print(&camel_to_snake_case(name));
+                    self.print_arguments(args, arg);
+                    return true;
+                }
+                ("write", 3) | ("append", 3) => {
+                    self.visit(recv, arg);
+                    self.printer.print(&format!(".{}_3", camel_to_snake_case(name)));
+                    self.print_arguments(args, arg);
+                    return true;
+                }
+                _ => {}
+            }
+        }
         match (name, args.len()) {
             // `collection.iterator()`/`listIterator()` -> a `JavaIter` over a
             // snapshot. `has_next()`/`has_previous()` then resolve by default
@@ -6442,6 +6504,75 @@ impl<'a> RustDumpVisitor<'a> {
                     self.visit(a, arg);
                     self.printer.print(&format!(") as {prim})"));
                 }
+                return;
+            }
+        }
+        // I/O constructors: route `new <IoType>(..)` to a family factory free fn
+        // (src/runtime/io_read.rs / io_write.rs). The read/write families collapse
+        // to shared carriers, so per-type ctors collide by arity
+        // (`FileInputStream(path)` vs `BufferedInputStream(stream)`); the factory
+        // fns disambiguate by name and each return the carrier (their generic
+        // `impl Read/Write` params let nested concrete carriers compose). Runs
+        // before the generic `::new_N` emission below.
+        if let Node::ClassOrInterfaceType { name, .. } = self.arena.kind(typ) {
+            let simple = name.rsplit('.').next().unwrap_or(name).to_string();
+            let factory: Option<&str> = match (simple.as_str(), args.len()) {
+                // read: byte streams -> JavaInputStream
+                ("FileInputStream", 1) => Some("crate::java_runtime::java_file_input_stream"),
+                ("ByteArrayInputStream", 1) => Some("crate::java_runtime::java_byte_array_input_stream"),
+                ("ByteArrayInputStream", 3) => Some("crate::java_runtime::java_byte_array_input_stream_3"),
+                ("BufferedInputStream", 1) => Some("crate::java_runtime::java_buffered_input_stream"),
+                ("BufferedInputStream", 2) => Some("crate::java_runtime::java_buffered_input_stream_2"),
+                ("InputStream", 1) | ("DataInputStream", 1) => Some("crate::java_runtime::java_input_stream"),
+                // read: char readers -> JavaReader
+                ("BufferedReader", 1) => Some("crate::java_runtime::java_buffered_reader"),
+                ("BufferedReader", 2) => Some("crate::java_runtime::java_buffered_reader_2"),
+                ("InputStreamReader", 1) => Some("crate::java_runtime::java_input_stream_reader"),
+                ("InputStreamReader", 2) => Some("crate::java_runtime::java_input_stream_reader_2"),
+                ("FileReader", 1) => Some("crate::java_runtime::java_file_reader"),
+                ("StringReader", 1) => Some("crate::java_runtime::java_string_reader"),
+                ("LineNumberReader", 1) => Some("crate::java_runtime::java_line_number_reader"),
+                ("Reader", 1) => Some("crate::java_runtime::java_reader"),
+                // write: byte streams
+                ("OutputStream", 1) => Some("crate::java_runtime::java_output_stream"),
+                ("FileOutputStream", 1) => Some("crate::java_runtime::java_file_output_stream"),
+                ("FileOutputStream", 2) => Some("crate::java_runtime::java_file_output_stream_append"),
+                ("BufferedOutputStream", 1) | ("DataOutputStream", 1) | ("FilterOutputStream", 1) => {
+                    Some("crate::java_runtime::java_buffered_output_stream")
+                }
+                ("BufferedOutputStream", 2) => Some("crate::java_runtime::java_buffered_output_stream_sized"),
+                ("ByteArrayOutputStream", 0) => Some("crate::java_runtime::JavaByteArrayOutputStream::new"),
+                ("ByteArrayOutputStream", 1) => Some("crate::java_runtime::JavaByteArrayOutputStream::new_1"),
+                // write: char writers
+                ("Writer", 1) => Some("crate::java_runtime::java_writer"),
+                ("OutputStreamWriter", 1) => Some("crate::java_runtime::java_output_stream_writer"),
+                ("OutputStreamWriter", 2) => Some("crate::java_runtime::java_output_stream_writer_charset"),
+                ("BufferedWriter", 1) => Some("crate::java_runtime::java_buffered_writer"),
+                ("BufferedWriter", 2) => Some("crate::java_runtime::java_buffered_writer_sized"),
+                ("FileWriter", 1) => Some("crate::java_runtime::java_file_writer"),
+                ("FileWriter", 2) => Some("crate::java_runtime::java_file_writer_append"),
+                ("StringWriter", 0) => Some("crate::java_runtime::JavaStringWriter::new"),
+                ("StringWriter", 1) => Some("crate::java_runtime::JavaStringWriter::new_1"),
+                _ => None,
+            };
+            if let Some(factory) = factory {
+                self.printer.print(factory);
+                self.print_arguments(&args, arg);
+                return;
+            }
+            // `new PrintWriter/PrintStream(File|String)` opens a path; the
+            // `(OutputStream|Writer)` overload wraps — disambiguate by arg type.
+            if args.len() == 1 && matches!(simple.as_str(), "PrintWriter" | "PrintStream") {
+                let t = self.infer_expr_rust_type(args[0]);
+                let path_like = t == "String" || t.ends_with("JavaFile");
+                let f = match (simple.as_str(), path_like) {
+                    ("PrintWriter", true) => "crate::java_runtime::java_print_writer_path",
+                    ("PrintWriter", false) => "crate::java_runtime::java_print_writer",
+                    ("PrintStream", true) => "crate::java_runtime::java_print_stream_path",
+                    _ => "crate::java_runtime::java_print_stream",
+                };
+                self.printer.print(f);
+                self.print_arguments(&args, arg);
                 return;
             }
         }
@@ -7940,6 +8071,23 @@ pub fn map_type_name(name: &str) -> &str {
         "Random" => "crate::java_runtime::JavaRandom",
         // `java.util.StringTokenizer` -> eager tokenizer over a delimiter set.
         "StringTokenizer" => "crate::java_runtime::JavaStringTokenizer",
+        // I/O read stack (src/runtime/io_read.rs): each FAMILY collapses to ONE
+        // carrier so a Java abstract supertype and its concrete subtypes share a
+        // Rust type; `new X(..)` ctors route to factory free fns in
+        // visit_object_creation (arity can't disambiguate `FileInputStream(path)`
+        // from `BufferedInputStream(stream)`).
+        "InputStream" | "FileInputStream" | "BufferedInputStream" | "ByteArrayInputStream"
+        | "DataInputStream" => "crate::java_runtime::JavaInputStream",
+        "Reader" | "BufferedReader" | "FileReader" | "InputStreamReader" | "StringReader"
+        | "LineNumberReader" => "crate::java_runtime::JavaReader",
+        // I/O write stack (src/runtime/io_write.rs). ByteArrayOutputStream/StringWriter
+        // are own-typed (need to_byte_array/to_string); the rest collapse to carriers.
+        "OutputStream" | "FileOutputStream" | "BufferedOutputStream" | "DataOutputStream"
+        | "FilterOutputStream" => "crate::java_runtime::JavaOutputStream",
+        "ByteArrayOutputStream" => "crate::java_runtime::JavaByteArrayOutputStream",
+        "Writer" | "OutputStreamWriter" | "BufferedWriter" | "FileWriter" | "PrintWriter"
+        | "PrintStream" => "crate::java_runtime::JavaWriter",
+        "StringWriter" => "crate::java_runtime::JavaStringWriter",
         // `java.util.concurrent.atomic.*` runtime types (src/runtime/atomic.rs) now
         // have PartialEq/Eq/Hash, but mapping still regresses (trim +14): atomic
         // FIELDS are emitted concrete (`pub x: JavaAtomicBoolean`) yet read-flagged

@@ -301,6 +301,12 @@ fn file_header() -> String {
      impl std::fmt::Display for Unknown {\n\
          fn fmt(&self, _f: &mut std::fmt::Formatter) -> std::fmt::Result { Ok(()) }\n\
      }\n\
+     // A stubbed value passed into a writer/stream position (e.g. a runtime\n\
+     // I/O factory bounded by `Write`): a no-op sink lets it type-check.\n\
+     impl std::io::Write for Unknown {\n\
+         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { Ok(buf.len()) }\n\
+         fn flush(&mut self) -> std::io::Result<()> { Ok(()) }\n\
+     }\n\
      // A stubbed iterable/stream resolves to `Unknown`; a degenerate empty\n\
      // iterator lets `for x in unknown {}` and `unknown.collect()` compile.\n\
      impl Iterator for Unknown {\n\

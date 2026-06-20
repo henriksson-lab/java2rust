@@ -1082,6 +1082,8 @@ const JAVA_RUNTIME: &str = concat!(
     include_str!("runtime/string_tokenizer.rs"),
     include_str!("runtime/atomic.rs"),
     include_str!("runtime/decimal_format.rs"),
+    include_str!("runtime/io_read.rs"),
+    include_str!("runtime/io_write.rs"),
 );
 
 /// Compile-check the runtime fragments as part of the translator's own
@@ -1099,6 +1101,8 @@ mod java_runtime_compiles {
     include!("runtime/string_tokenizer.rs");
     include!("runtime/atomic.rs");
     include!("runtime/decimal_format.rs");
+    include!("runtime/io_read.rs");
+    include!("runtime/io_write.rs");
 }
 
 /// Generate the `mod` tree (`lib.rs` at the root, `mod.rs` in each subdir) and a

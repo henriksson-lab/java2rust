@@ -18,9 +18,21 @@ landing small, **measured** changes.
   `no-commit-prompts` (**the user commits; never offer to commit**).
 
 ## 1. Current state
+- **UNCOMMITTED on tree (wave-3, ready to commit): the file-I/O reader+writer STACK LANDED,
+  errors 11346→11327 (−19), ZERO per-corpus regression.** New `src/runtime/io_read.rs`
+  (JavaInputStream/JavaReader carriers, `Rc<RefCell>` shared cursor; `IntoBoxedRead` adapter
+  trait at the factory boundary) + `src/runtime/io_write.rs` (JavaOutputStream/JavaWriter
+  carriers; `IntoBoxedWrite`). dump.rs: map_type_name arms for the read/write families →
+  carriers, factory-fn ctor routing in `visit_object_creation`, writer-`println` branch,
+  subclass `impl Read` in the Deref block. `src/stubs.rs`: stub `Unknown` now impls a no-op
+  `std::io::Write` (satisfies `IntoBoxedWrite` via blanket). Wins: jahmm −10, varscan −3,
+  jts −3, trim −2, jsoup −1. New per-corpus baseline below (**11327**). Validated: 99 tests,
+  golden 42/42, compilecheck 110/110, 0 warnings. Remaining I/O residual (future): stub
+  InputStream SUBTYPES (GZIPInputStream/BlockCompressedInputStream/SeekablePathStream — named
+  stubs, not `Unknown`) don't impl Read → needs flate2/named-stub Read impls.
 - HEAD `13b150d` (committed: File runtime, Tier-0 structure, System statics, AND wave-1
-  Lane-1 templates + Random/BitSet/StringTokenizer; baseline **11346**). **Uncommitted on
-  the tree** (one net-zero KEEP, ready to commit) — **wave-2 infra**: a *general runtime
+  Lane-1 templates + Random/BitSet/StringTokenizer; baseline **11346**). **Earlier uncommitted
+  wave-2 infra** (folded into the wave-3 tree above): a *general runtime
   ctor-arity rule* (`dump.rs` ~6486: mapped-type ctor = `::new` for arity-0, `::new_<arity>`
   for arity≥1) that REMOVED the per-type ctor special-cases; fragment ctors renamed to match
   (`JavaFile::new_1`/`new_2`, `JavaRandom::new`/`new_1`, `JavaBitSet::new`/`new_1`,
@@ -34,9 +46,10 @@ landing small, **measured** changes.
   blocker: atomic FIELDS emit concrete (`pub x: JavaAtomicBoolean`) yet read-flagged nullable
   → spurious `.clone().unwrap()` on the concrete type (trim +14); needs the translator
   nullable-inference fix OR a no-op `unwrap(self)->Self` on the atomic types, then map.
-- **12-corpus error baseline** (current working tree; `tools/<name>_check.sh`):
-  trim 186 · jaligner 53 · jahmm 408 · varscan 56 · fastq 53 · bjaaprop 98 · vcf 441
-  · bjalign 593 · bioformats 15 · jhlabs 1324 · jsoup 2570 · jts 5549  (**= 11346**).
+- **12-corpus error baseline** (current working tree w/ wave-3 I/O; `tools/<name>_check.sh`):
+  trim 184 · jaligner 53 · jahmm 398 · varscan 53 · fastq 53 · bjaaprop 98 · vcf 441
+  · bjalign 593 · bioformats 15 · jhlabs 1324 · jsoup 2569 · jts 5546  (**= 11327**).
+  (Pre-wave-3 committed baseline was **11346**.)
 - **Clone-marker baseline** (`grep -rho 'validate added clone'` over fresh translation):
   trim 469 · jaligner 121 · jahmm 214 · varscan 890 · fastq 38 · bjaaprop 421 · vcf 379
   · bjalign 404 · bioformats 982 · jhlabs 966 · jsoup 1611 · jts 4409  (**= 10904**).
