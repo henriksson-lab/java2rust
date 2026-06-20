@@ -9,7 +9,7 @@ pub struct JavaStringTokenizer {
 
 impl JavaStringTokenizer {
     /// 1-arg ctor: default delimiters are whitespace.
-    pub fn new<S: ToString>(s: S) -> Self {
+    pub fn new_1<S: ToString>(s: S) -> Self {
         Self::new_3(s, " \t\n\r\x0C", false)
     }
     /// 2-arg ctor: each character in `delim` is a delimiter.
@@ -64,7 +64,7 @@ mod string_tokenizer_tests {
     use super::*;
     #[test]
     fn whitespace_default() {
-        let mut t = JavaStringTokenizer::new("a b  c");
+        let mut t = JavaStringTokenizer::new_1("a b  c");
         assert_eq!(t.count_tokens(), 3);
         assert_eq!(t.next_token(), "a");
         assert_eq!(t.next_token(), "b");

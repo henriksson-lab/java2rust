@@ -13,7 +13,7 @@ impl JavaFile {
     // Path args are bounded by `ToString` (not `AsRef<Path>`) so they accept the
     // same breadth the opaque stub did — `String`/`&str`/`JavaFile`/`Unknown`
     // (all `Display`) — while still doing real path work.
-    pub fn new<P: ToString>(p: P) -> Self {
+    pub fn new_1<P: ToString>(p: P) -> Self {
         JavaFile { path: std::path::PathBuf::from(p.to_string()) }
     }
     pub fn new_2<P: ToString, Q: ToString>(parent: P, child: Q) -> Self {
@@ -59,10 +59,10 @@ impl JavaFile {
         self.get_absolute_path()
     }
     pub fn get_absolute_file(&self) -> JavaFile {
-        JavaFile::new(self.get_absolute_path())
+        JavaFile::new_1(self.get_absolute_path())
     }
     pub fn get_canonical_file(&self) -> JavaFile {
-        JavaFile::new(self.get_canonical_path())
+        JavaFile::new_1(self.get_canonical_path())
     }
     pub fn get_parent(&self) -> String {
         self.path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()

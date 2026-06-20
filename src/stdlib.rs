@@ -171,6 +171,24 @@ pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
         | ("Collections", "unmodifiableSet", 1)
         | ("Collections", "unmodifiableCollection", 1) => r("(${0})"),
 
+        // ---- NumberFormat static factories (mapped runtime type; the locale
+        // overload is dropped — formatting uses the C locale) ----
+        ("NumberFormat", "getInstance", 0) | ("NumberFormat", "getInstance", 1) => {
+            r("crate::java_runtime::JavaNumberFormat::get_instance()")
+        }
+        ("NumberFormat", "getNumberInstance", 0) | ("NumberFormat", "getNumberInstance", 1) => {
+            r("crate::java_runtime::JavaNumberFormat::get_number_instance()")
+        }
+        ("NumberFormat", "getIntegerInstance", 0) | ("NumberFormat", "getIntegerInstance", 1) => {
+            r("crate::java_runtime::JavaNumberFormat::get_integer_instance()")
+        }
+        ("NumberFormat", "getPercentInstance", 0) | ("NumberFormat", "getPercentInstance", 1) => {
+            r("crate::java_runtime::JavaNumberFormat::get_percent_instance()")
+        }
+        ("DecimalFormatSymbols", "getInstance", 0) | ("DecimalFormatSymbols", "getInstance", 1) => {
+            r("crate::java_runtime::JavaDecimalFormatSymbols::get_instance()")
+        }
+
         // ---- String static ----
         ("String", "valueOf", 1) => r("(${0}).to_string()"),
 

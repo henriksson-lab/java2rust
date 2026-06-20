@@ -6485,25 +6485,11 @@ impl<'a> RustDumpVisitor<'a> {
             }
             // A mapped runtime type (`crate::java_runtime::…`) is not in the
             // symbol map, so `resolve_ctor` can't disambiguate its overloaded
-            // constructors. Mirror the arity-suffix convention (`new`, `new_2`,
-            // …) the runtime types expose, so `new File(a, b)` -> `…::new_2(a, b)`.
-            // `JavaBitSet`'s base ctor is arity-0 (`new()`), so its 1-arg overload
-            // `new BitSet(nbits)` suffixes from arity-1 (`new_2`); the others
-            // (`JavaFile`) have an arity-1 base, so suffix only from arity-2.
-            let rt = base.starts_with("crate::java_runtime::");
-            // `Random(long seed)` -> `new_seeded`, coercing the seed to i64
-            // (`new()` arity-0 keeps the bare `new`, so the 1-arg overload needs a
-            // distinct name).
-            if rt && base.ends_with("::JavaRandom") && args.len() == 1 {
-                self.printer.print("::new_seeded((");
-                self.visit(args[0], arg);
-                self.printer.print(") as i64)");
-                return;
-            }
-            let bitset = base.ends_with("::JavaBitSet");
-            if rt && bitset && args.len() == 1 {
-                self.printer.print("::new_2");
-            } else if rt && args.len() >= 2 {
+            // constructors. General convention the runtime fragments expose: the
+            // arity-0 ctor is `new`, every higher arity is `new_<arity>` (so
+            // `new Random()` -> `::new`, `new Random(seed)` -> `::new_1(seed)`,
+            // `new File(p)` -> `::new_1(p)`, `new File(a,b)` -> `::new_2(a,b)`).
+            if base.starts_with("crate::java_runtime::") && !args.is_empty() {
                 self.printer.print(&format!("::new_{}", args.len()));
             } else {
                 self.printer.print("::new");
@@ -7954,6 +7940,19 @@ pub fn map_type_name(name: &str) -> &str {
         "Random" => "crate::java_runtime::JavaRandom",
         // `java.util.StringTokenizer` -> eager tokenizer over a delimiter set.
         "StringTokenizer" => "crate::java_runtime::JavaStringTokenizer",
+        // `java.util.concurrent.atomic.*` runtime types (src/runtime/atomic.rs) now
+        // have PartialEq/Eq/Hash, but mapping still regresses (trim +14): atomic
+        // FIELDS are emitted concrete (`pub x: JavaAtomicBoolean`) yet read-flagged
+        // nullable, so a nullable read emits `.clone().unwrap()` on the concrete type
+        // (no `.unwrap()`). That's a translator nullable-inference quirk for mapped
+        // value types — fix that (or add a no-op `unwrap(self)->Self`) before mapping.
+        // Parked; see TODO/checklist. (arms intentionally omitted.)
+        // `java.text` number formatters -> real `format!`-based shims (a `JavaNum`
+        // arg trait accepts `&f64`/i64/…; `NumberFormat.getInstance(Locale)` is
+        // routed to the 0-arg `get_instance()` by a static_rule arm).
+        "DecimalFormat" => "crate::java_runtime::JavaDecimalFormat",
+        "NumberFormat" => "crate::java_runtime::JavaNumberFormat",
+        "DecimalFormatSymbols" => "crate::java_runtime::JavaDecimalFormatSymbols",
         "Optional" => "Option",
         "Integer" => "i32",
         "Long" => "i64",

@@ -31,13 +31,13 @@ impl Default for JavaRandom {
 impl JavaRandom {
     /// `new Random()` — a fixed default seed (deterministic across runs).
     pub fn new() -> Self {
-        JavaRandom::new_seeded(0)
+        JavaRandom::new_1(0_i64)
     }
 
     /// `new Random(long seed)`.
-    pub fn new_seeded(seed: i64) -> Self {
+    pub fn new_1<S: Into<i64>>(seed: S) -> Self {
         JavaRandom {
-            seed: std::cell::Cell::new(Self::scramble(seed)),
+            seed: std::cell::Cell::new(Self::scramble(seed.into())),
             next_next_gaussian: std::cell::Cell::new(None),
         }
     }
@@ -154,14 +154,14 @@ mod random_tests {
     #[test]
     fn next_int_known_seed_0() {
         // JDK: new Random(0).nextInt() == -1155484576
-        let r = JavaRandom::new_seeded(0);
+        let r = JavaRandom::new_1(0_i64);
         assert_eq!(r.next_int(), -1155484576);
     }
 
     #[test]
     fn next_int_known_seed_42_sequence() {
         // JDK: new Random(42).nextInt() sequence.
-        let r = JavaRandom::new_seeded(42);
+        let r = JavaRandom::new_1(42_i64);
         assert_eq!(r.next_int(), -1170105035);
         assert_eq!(r.next_int(), 234785527);
         assert_eq!(r.next_int(), -1360544799);
@@ -170,14 +170,14 @@ mod random_tests {
     #[test]
     fn next_long_known() {
         // JDK: new Random(0).nextLong() == -4962768465676381896
-        let r = JavaRandom::new_seeded(0);
+        let r = JavaRandom::new_1(0_i64);
         assert_eq!(r.next_long(), -4962768465676381896);
     }
 
     #[test]
     fn next_double_known() {
         // JDK: new Random(0).nextDouble() == 0.730967787376657
-        let r = JavaRandom::new_seeded(0);
+        let r = JavaRandom::new_1(0_i64);
         let d = r.next_double();
         assert!((d - 0.730967787376657).abs() < 1e-15, "got {d}");
     }
@@ -185,14 +185,14 @@ mod random_tests {
     #[test]
     fn next_boolean_known() {
         // JDK: new Random(0).nextBoolean() == true
-        let r = JavaRandom::new_seeded(0);
+        let r = JavaRandom::new_1(0_i64);
         assert!(r.next_boolean());
     }
 
     #[test]
     fn next_int_bound_known() {
         // JDK: new Random(0).nextInt(100) sequence == 60, 48, 29
-        let r = JavaRandom::new_seeded(0);
+        let r = JavaRandom::new_1(0_i64);
         assert_eq!(r.next_int_bound(100), 60);
         assert_eq!(r.next_int_bound(100), 48);
         assert_eq!(r.next_int_bound(100), 29);
@@ -201,7 +201,7 @@ mod random_tests {
     #[test]
     fn next_float_known() {
         // JDK: new Random(0).nextFloat() == 0.73096776 (f32)
-        let r = JavaRandom::new_seeded(0);
+        let r = JavaRandom::new_1(0_i64);
         let f = r.next_float();
         assert!((f - 0.73096776).abs() < 1e-7, "got {f}");
     }
@@ -209,7 +209,7 @@ mod random_tests {
     #[test]
     fn next_gaussian_known() {
         // JDK: new Random(0).nextGaussian() == 0.8025330637390305
-        let r = JavaRandom::new_seeded(0);
+        let r = JavaRandom::new_1(0_i64);
         let g = r.next_gaussian();
         assert!((g - 0.8025330637390305).abs() < 1e-12, "got {g}");
     }

@@ -184,9 +184,7 @@ XML engines (Transformer/XSLT, XPath, StAX), font glyph tessellation, TLS, refle
 - [ ] `stream.Collector`/`StreamSupport`/`Spliterator(s)` (H, defer)
 
 ### java.util.concurrent [runtime-type]
-- [ ] `atomic.AtomicBoolean` (3/12, E): new()/new_1(v), get->bool, set, compare_and_set
-- [ ] `atomic.AtomicInteger` (E): new_1(v), increment_and_get->i32, get/set/get_and_increment/add_and_get/compare_and_set
-- [ ] `atomic.AtomicLong` (E): new(), get->i64, set, add_and_get, increment_and_get
+- [~] `atomic.AtomicBoolean`/`AtomicInteger`/`AtomicLong` — **`src/runtime/atomic.rs` WRITTEN** (std atomics, `&self`, compile-tested) with **`PartialEq`/`Eq`/`Hash` now hand-rolled** (over `.get()`; cut trim 212→200). Still **PARKED/unmapped** on ONE residual: atomic FIELDS emit concrete (`pub x: JavaAtomicBoolean`) yet are read-flagged nullable, so a nullable read emits `.clone().unwrap()` on the concrete type → E0599 (trim +14). FIX before mapping: the translator nullable-inference quirk (concrete-typed field flagged nullable for a mapped value type), OR a pragmatic no-op `unwrap(self)->Self` on the atomic types. Then add the 3 `map_type_name` arms.
 - [ ] `locks.ReentrantLock` (E-M): lock/unlock → Mutex or no-op
 - [ ] **executor stack (H, defer — trim only):** Future.get, ThreadPoolExecutor(6-arg ctor)/submit/shutdown/await_termination, ArrayBlockingQueue(offer/poll/put/take/peek/remaining_capacity), Executors.default_thread_factory, TimeUnit consts, ThreadFactory/Execution/TimeoutException aliases
 
@@ -195,9 +193,7 @@ XML engines (Transformer/XSLT, XPath, StAX), font glyph tessellation, TLS, refle
 - [ ] `Matcher` (stateful): find()->bool, group(n)->String, matches()->bool, replace_all(repl)->String
 
 ### java.text [runtime-type, M]
-- [ ] `DecimalFormat` (4/12): new(pat)/new(pat,symbols), format(num)->String, apply_pattern, set_decimal_separator_always_shown, set_maximum_fraction_digits
-- [ ] `DecimalFormatSymbols` (E): new(), set_decimal_separator
-- [ ] `NumberFormat` (M): get_instance()/get_instance(locale)(static), format, set_maximum_fraction_digits  *(share DecimalFormat)*
+- [x] `DecimalFormat`/`NumberFormat`/`DecimalFormatSymbols` → `src/runtime/decimal_format.rs` *(done 2026-06; `Cell`-based `&self`, hand-rolled PartialEq/Eq/Hash, pattern→fraction-digit `format!` shim + grouping; a `JavaNum` arg trait accepts `&f64`/i64/i32/f32; `NumberFormat.getInstance(Locale)`→0-arg `get_instance()` via a `static_rule` arm dropping the locale. net-zero, zero regression, 10 unit tests.)*
 
 ### java.net [needs-crate: url/reqwest mostly, mixed]
 - [ ] `URLEncoder`/`URLDecoder` (E, hand-roll pure-std): encode/decode(s,charset)

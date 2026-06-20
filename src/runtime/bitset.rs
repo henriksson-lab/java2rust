@@ -55,7 +55,7 @@ impl JavaBitSet {
     pub fn new() -> Self {
         JavaBitSet { words: Vec::new() }
     }
-    pub fn new_2<I: BitIndex>(nbits: I) -> Self {
+    pub fn new_1<I: BitIndex>(nbits: I) -> Self {
         let nbits = nbits.bit_index();
         let words = if nbits > 0 { (nbits as usize).div_ceil(64) } else { 0 };
         JavaBitSet { words: vec![0u64; words] }
@@ -360,7 +360,7 @@ mod bitset_tests {
 
     #[test]
     fn ctor_nbits_and_range_ops() {
-        let mut b = JavaBitSet::new_2(200);
+        let mut b = JavaBitSet::new_1(200);
         assert!(b.is_empty());
         b.set_3(10, 13);
         assert!(b.get(10) && b.get(11) && b.get(12) && !b.get(13));

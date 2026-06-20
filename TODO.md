@@ -18,14 +18,22 @@ landing small, **measured** changes.
   `no-commit-prompts` (**the user commits; never offer to commit**).
 
 ## 1. Current state
-- HEAD `bfeca96` (committed through the File runtime + Tier-0 structure refactor + System
-  statics). **Uncommitted on the tree** (all one KEEP, ready to commit) — the **first
-  parallel-agent stdlib wave** (errors −29, zero per-corpus regression): Lane-1 templates
-  in `src/stdlib.rs` (Arrays.equals/copyOfRange, Collections.emptyList/emptySet/
-  singletonList/unmodifiable*); and 3 runtime types `src/runtime/{random,bitset,string_tokenizer}.rs`
-  (`JavaRandom` JDK-bit-exact + `Cell` interior mutability; `JavaBitSet`; `JavaStringTokenizer`)
-  wired in `crate_layout.rs` + `dump.rs` (map_type_name arms, ctor/method overload special-cases)
-  + `id_tracker.rs` (nextToken/nextElement/flip mutating). See §3 + `docs/stdlib-checklist.md`.
+- HEAD `13b150d` (committed: File runtime, Tier-0 structure, System statics, AND wave-1
+  Lane-1 templates + Random/BitSet/StringTokenizer; baseline **11346**). **Uncommitted on
+  the tree** (one net-zero KEEP, ready to commit) — **wave-2 infra**: a *general runtime
+  ctor-arity rule* (`dump.rs` ~6486: mapped-type ctor = `::new` for arity-0, `::new_<arity>`
+  for arity≥1) that REMOVED the per-type ctor special-cases; fragment ctors renamed to match
+  (`JavaFile::new_1`/`new_2`, `JavaRandom::new`/`new_1`, `JavaBitSet::new`/`new_1`,
+  `JavaStringTokenizer::new_1`/`_2`/`_3`). Net errors 0 (verified all-12 = 11346). PLUS
+  **`java.text.DecimalFormat`/`NumberFormat`/`DecimalFormatSymbols` LANDED** (`src/runtime/
+  decimal_format.rs` mapped; net-zero + real formatting): a `JavaNum` arg trait accepts
+  `&f64`/i64/i32/f32, `getInstance(Locale)`→0-arg `get_instance()` via a `static_rule` arm.
+  `src/runtime/atomic.rs` written (now with PartialEq/Eq/Hash) but still UNMAPPED — see below.
+- **wave-2 NO-GOs (don't retry blind):** Map-family alias→HashMap is unsafe for generic-keyed
+  maps (`EnumMap<E,V>`→`HashMap<E,V>` fails `K:Hash+Eq`, jahmm +13). **Atomics** remaining
+  blocker: atomic FIELDS emit concrete (`pub x: JavaAtomicBoolean`) yet read-flagged nullable
+  → spurious `.clone().unwrap()` on the concrete type (trim +14); needs the translator
+  nullable-inference fix OR a no-op `unwrap(self)->Self` on the atomic types, then map.
 - **12-corpus error baseline** (current working tree; `tools/<name>_check.sh`):
   trim 186 · jaligner 53 · jahmm 408 · varscan 56 · fastq 53 · bjaaprop 98 · vcf 441
   · bjalign 593 · bioformats 15 · jhlabs 1324 · jsoup 2570 · jts 5549  (**= 11346**).
