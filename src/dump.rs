@@ -6447,7 +6447,15 @@ impl<'a> RustDumpVisitor<'a> {
                 self.print_arguments_linked(&args, &m.params, arg);
                 return;
             }
-            self.printer.print("::new");
+            // A mapped runtime type (`crate::java_runtime::…`) is not in the
+            // symbol map, so `resolve_ctor` can't disambiguate its overloaded
+            // constructors. Mirror the arity-suffix convention (`new`, `new_2`,
+            // …) the runtime types expose, so `new File(a, b)` -> `…::new_2(a, b)`.
+            if base.starts_with("crate::java_runtime::") && args.len() >= 2 {
+                self.printer.print(&format!("::new_{}", args.len()));
+            } else {
+                self.printer.print("::new");
+            }
             self.print_arguments(&args, arg);
             return;
         }
@@ -7883,6 +7891,10 @@ pub fn map_type_name(name: &str) -> &str {
         // Java's external iterators map to a runtime shim with Java-shaped
         // `has_next()`/`next()`/`has_previous()`/`previous()` methods.
         "Iterator" | "ListIterator" => "crate::java_runtime::JavaIter",
+        // `java.io.File` -> a real `PathBuf`-backed handle (runtime support),
+        // so `exists()`/`length()`/`getName()`/… do real filesystem work
+        // instead of an opaque stub.
+        "File" => "crate::java_runtime::JavaFile",
         "Optional" => "Option",
         "Integer" => "i32",
         "Long" => "i64",

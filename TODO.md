@@ -19,15 +19,14 @@ landing small, **measured** changes.
 
 ## 1. Current state
 - HEAD `cd4663b` (committed: last-use moves + read-only-method `.as_ref()` borrow at the
-  NAME site 3217, with the `is_readonly_method_receiver`/`is_readonly_java_method`
-  helpers). **Uncommitted on the tree** (all KEEPs, ready to commit; see §3): the
-  follow-on use-site-borrow slices — read-only-method `.as_ref()` at the FIELD sites
-  (4910 `this.field` / 3097 inherited), LazyLock-receiver clone-drop (3206), and the
-  logging-method additions to the whitelist — in `src/dump.rs`. vs HEAD: clones −163,
-  errors 0 (zero per-corpus regression).
+  NAME site 3217). **Uncommitted on the tree** (all KEEPs, ready to commit; see §3):
+  (1) the follow-on use-site-borrow slices — read-only-method `.as_ref()` at the FIELD
+  sites (4910/3097), LazyLock-receiver clone-drop (3206), logging-method whitelist (clones
+  −163, errors 0); (2) **`java.io.File` → real `JavaFile` runtime type** (errors −7, zero
+  regression; see §3 + §4.2b) — `src/dump.rs` + `src/crate_layout.rs`.
 - **12-corpus error baseline** (current working tree; `tools/<name>_check.sh`):
-  trim 187 · jaligner 56 · jahmm 408 · varscan 56 · fastq 53 · bjaaprop 98 · vcf 449
-  · bjalign 593 · bioformats 15 · jhlabs 1338 · jsoup 2582 · jts 5549  (**= 11384**).
+  trim 187 · jaligner 54 · jahmm 408 · varscan 56 · fastq 53 · bjaaprop 98 · vcf 446
+  · bjalign 593 · bioformats 15 · jhlabs 1338 · jsoup 2580 · jts 5549  (**= 11377**).
 - **Clone-marker baseline** (`grep -rho 'validate added clone'` over fresh translation):
   trim 469 · jaligner 121 · jahmm 214 · varscan 890 · fastq 38 · bjaaprop 421 · vcf 379
   · bjalign 404 · bioformats 982 · jhlabs 966 · jsoup 1611 · jts 4409  (**= 10904**).
@@ -80,6 +79,16 @@ call borrows through the Option instead of cloning: emits `.as_ref().unwrap()` (
 `&T`, zero clones; the call autorefs) — applied at the NAME site (3217, slice 1, −466),
 the FIELD sites (4910 `this.field` / 3097 inherited, slice a, −35) and the LazyLock-const
 site (3206 drops its `.clone()`, slice e+logging, −128). Ordering: last-use > as_ref > clone.
+**`java.io.File` → real `JavaFile` runtime type** (errors −7, zero regression, uncommitted):
+first real stdlib type beyond `JavaIter`. `map_type_name` arm `"File" => "crate::java_runtime::JavaFile"`
+(dump.rs ~7888) + a `PathBuf`-backed `JavaFile` in `JAVA_RUNTIME` (crate_layout.rs ~1108)
+with the full `java.io.File` method surface doing real `std::fs`/`std::path` work. Two
+integration fixes were required and are REUSABLE for the next runtime types: (i) ctor
+overload arity-suffix for mapped types (dump.rs ~6450: a `crate::java_runtime::` base with
+≥2 args emits `::new_<arity>`, since mapped types aren't in the symbol map that normally
+disambiguates `new`/`new_2`); (ii) path/string args bounded by `ToString` (not
+`AsRef<Path>`) so they accept the same breadth the opaque stub did (`String`/`JavaFile`/
+`Unknown` — all `Display`). See §4.2b for the full recipe + remaining gotchas.
 
 ## 4. Open work — in dependency/priority order
 1. **Clone-pattern audit (task #40) — IN PROGRESS, the active lever.** A 6-agent
@@ -133,15 +142,36 @@ site (3206 drops its `.clone()`, slice e+logging, −128). Ordering: last-use > 
    `JavaIter` (owning wrapper); copy-ctor `self.x = param.clone()` (param is `&T`).
 2. **`if`/`switch` as a value-expression (task #41)** — `let r = if c {a} else {b}`
    (clone/temp avoider). A concrete local pattern the audit will surface.
-2b. **Implement common stdlib stubs with real Rust equivalents (user-requested,
-   error-reducer not clone-reducer).** Today externals fall back to opaque, no-op stubs
-   in `src/stubs.rs`; wrong/missing stub shapes are an error source. Many Java stdlib
-   APIs map onto Rust std — **start with file I/O** (`java.io`/`java.nio`:
-   `BufferedReader`/`FileReader`/`PrintWriter`/`Files`/`Scanner` → `std::io`/`std::fs`:
-   `BufReader`/`File`/`Read`/`Write`/`BufRead`/`lines`), which the user expects to be
-   easy. Spawn agents to rank the most-called stub types/methods across the 12 corpora,
-   then hand-write a real runtime module (cf. `java::exc`, `crate::java_runtime::JavaIter`).
-   Measure all-12 errors + suites. See memory `stdlib-stub-implementation`.
+2b. **Implement common stdlib stubs with real Rust equivalents (user-requested) — IN
+   PROGRESS.** Externals auto-fall-back to opaque stubs (`pub struct X{}` + generic
+   `unimplemented!()`, `stub_<pkg>.rs`); they COMPILE but do nothing, and `Unknown`
+   returns sometimes mismatch. **`java.io.File` landed** (errors −7; §3). **Proven recipe
+   for the next type** (validated end-to-end):
+   - (1) one arm in `map_type_name` (dump.rs ~7888): `"X" => "crate::java_runtime::JavaX"`.
+     This alone maps the annotation + ctor, flips `receiver_is_user_type`→false so methods
+     emit by snake-case, AND suppresses the stub (via `missing_type_key`).
+   - (2) add `JavaX` to `JAVA_RUNTIME` (crate_layout.rs ~1108). NON-generic struct (type
+     annotations carry no generic args). Methods snake-cased (Java `readLine`→`read_line`).
+     Return **`Option<T>` not `Result`** (no auto-`.unwrap()` for runtime types; fits the
+     `as_readline_assign` lowering `while ((l=in.readLine())!=null)` → `while let Some(l)=`).
+   - (3) bound ctor/path args by **`ToString`** (matches the stub's permissiveness; `Unknown`
+     is `Display`). The ctor arity-suffix fix (dump.rs ~6450) is already in place so
+     `new X(a,b)` → `JavaX::new_2(a,b)`; define `new_2`/etc. to match.
+   - **MUST cover the FULL called-method surface** of the type (the `stub_<pkg>.rs` file
+     lists it exactly) or previously-compiling stub calls regress to E0599/E0061.
+   **Next targets** (file I/O, ranked by the 6-agent audit): the READER STACK
+   (`BufferedReader`/`FileReader`/`FileInputStream`/`InputStreamReader` → wrappers over
+   `Box<dyn Read>`, all `impl Read` so the nested ctors compose; `read_line`→`Option<String>`)
+   and WRITER STACK (`PrintStream`/`FileOutputStream`/`OutputStreamWriter`/`BufferedWriter`
+   → `Box<dyn Write>`). **Hard parts for the stacks (File didn't hit these):** (a) abstract
+   supertypes `InputStream`/`Reader`/`OutputStream`/`Writer` have NO Rust subtyping — map
+   them to `Box<dyn Read/Write>` and make concrete ctors return boxed, or coerce; (b)
+   `PrintStream.println` is heavily overloaded by arg type at the same arity (overload
+   resolution collapses them) — risky. Cheaper non-stack wins also surfaced: `Random`
+   (deterministic LCG, correctness), `Hashtable`→alias `HashMap`, `Rectangle`/`Point` (give
+   the stub real `{x,y,..}` FIELDS — field access currently dangles), and `Arrays`/
+   `Collections`/`System.exit`/`System.arraycopy` as `stdlib.rs` static templates (no type).
+   See memory `stdlib-stub-implementation`. Measure all-12 errors + suites each step.
 3. **Borrowed-returns / lifetimes — CLOSED as a clone reducer (NO-GO), see SEMANTICS
    §6.** The full stage-1 (getter `&self→&T` + call-site clone-on-demand) was built
    and measured: clones went **UP** (jts +316) — a borrowed return moves the one
