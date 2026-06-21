@@ -95,6 +95,34 @@ fn optional_and_stream_static_factories() {
 }
 
 #[test]
+fn runtime_carrier_overloads_route_by_arity() {
+    // BitSet: base overload bare, higher arity suffixed, non-overloaded methods
+    // short-circuit to default emission (NOT the collection `.get` -> indexing).
+    let out = body("import java.util.BitSet; class A { void f(BitSet b) { b.set(1); b.set(1,true); boolean x=b.get(0); int c=b.cardinality(); } }");
+    assert!(out.contains("b.set(1)") && out.contains("b.set_2(1, true)"), "BitSet set:\n{out}");
+    assert!(out.contains("b.get(0)") && out.contains("b.cardinality()"), "BitSet base/non-overloaded:\n{out}");
+    // Random.nextInt(bound) -> next_int_bound; nextInt() falls through to default.
+    let out = body("import java.util.Random; class A { void f(Random r) { int a=r.nextInt(); int d=r.nextInt(10); } }");
+    assert!(out.contains("r.next_int()") && out.contains("r.next_int_bound(10)"), "Random nextInt:\n{out}");
+    // Char-writer: println/print arity-suffixed, write emitted bare (no push_str).
+    let out = body("import java.io.PrintWriter; class A { void f(PrintWriter w) { w.println(); w.println(\"x\"); w.write(\"z\"); } }");
+    assert!(out.contains("w.println()") && out.contains("w.println_1("), "Writer println:\n{out}");
+    assert!(out.contains("w.write(") && !out.contains("push_str"), "Writer write stays bare:\n{out}");
+}
+
+#[test]
+fn stringbuilder_routes_through_string_method_rewrites() {
+    // The String-method gates use `recv_is_string` (recv_category == String), which
+    // also covers StringBuilder/CharSequence (all mapped to a Rust String). So
+    // `StringBuilder.equals/compareTo` get the String rewrites instead of falling
+    // through to a non-existent `.equals`/`.compare_to`.
+    let out = body("class A { boolean f(StringBuilder sb, String s) { return sb.equals(s); } }");
+    assert!(out.contains("[..] == &(") && !out.contains(".equals("), "StringBuilder.equals:\n{out}");
+    let out = body("class A { int g(StringBuilder sb, StringBuilder o) { return sb.compareTo(o); } }");
+    assert!(out.contains("(__a > __b) as i32") && !out.contains(".compare_to("), "StringBuilder.compareTo:\n{out}");
+}
+
+#[test]
 fn user_typed_receiver_is_not_rewritten() {
     // A user class with its own `indexOf`/`clear` must keep the real call.
     let out = body(

@@ -170,12 +170,8 @@ impl std::io::Write for JavaOutputStream {
 }
 // `OutputStream`/`Writer` carriers occasionally land in a `format!`/`toString`
 // position (Java's identity `toString`); a trivial `Display` keeps that compiling.
-impl std::fmt::Display for JavaOutputStream {
-    fn fmt(&self, _f: &mut std::fmt::Formatter) -> std::fmt::Result { Ok(()) }
-}
-impl std::fmt::Display for JavaWriter {
-    fn fmt(&self, _f: &mut std::fmt::Formatter) -> std::fmt::Result { Ok(()) }
-}
+noop_display!(JavaOutputStream);
+noop_display!(JavaWriter);
 /// `java.io.FileOutputStream` — opens a file for writing. Used directly as the
 /// inner sink of the carriers (it is not itself a mapped Java type — its name
 /// maps to `JavaOutputStream` and the ctor lowers to a factory fn).

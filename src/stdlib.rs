@@ -284,6 +284,132 @@ pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
     })
 }
 
+/// Route a `new <IoType>(..)` constructor to a family **factory free fn** in the
+/// runtime (`src/runtime/io_read.rs` / `io_write.rs`), keyed on the Java simple
+/// type name + ctor arity. The read/write families collapse to shared carriers
+/// (`JavaInputStream`/`JavaReader`/`JavaOutputStream`/`JavaWriter`), so per-type
+/// ctors collide by arity (`FileInputStream(path)` vs `BufferedInputStream(stream)`)
+/// — the factory fns disambiguate by name and each return the carrier (their
+/// generic `impl Read/Write` params let nested concrete carriers compose). Pure
+/// data, consulted by the dumper's `visit_object_creation`. The `PrintWriter`/
+/// `PrintStream` ctors are NOT here — they disambiguate by *argument type*, so
+/// they stay bespoke in the dumper.
+pub fn io_ctor_factory(simple: &str, arity: usize) -> Option<&'static str> {
+    Some(match (simple, arity) {
+        // read: byte streams -> JavaInputStream
+        ("FileInputStream", 1) => "crate::java_runtime::java_file_input_stream",
+        ("ByteArrayInputStream", 1) => "crate::java_runtime::java_byte_array_input_stream",
+        ("ByteArrayInputStream", 3) => "crate::java_runtime::java_byte_array_input_stream_3",
+        ("BufferedInputStream", 1) => "crate::java_runtime::java_buffered_input_stream",
+        ("BufferedInputStream", 2) => "crate::java_runtime::java_buffered_input_stream_2",
+        ("InputStream", 1) | ("DataInputStream", 1) => "crate::java_runtime::java_input_stream",
+        // read: java.util.zip decompressing streams -> JavaInputStream
+        // (flate2-backed; compose with BufferedInputStream/InputStreamReader).
+        ("GZIPInputStream", 1) => "crate::java_runtime::java_gzip_input_stream",
+        ("GZIPInputStream", 2) => "crate::java_runtime::java_gzip_input_stream_2",
+        ("InflaterInputStream", 1) => "crate::java_runtime::java_inflater_input_stream",
+        ("InflaterInputStream", 2) => "crate::java_runtime::java_inflater_input_stream_2",
+        ("InflaterInputStream", 3) => "crate::java_runtime::java_inflater_input_stream_3",
+        // read: char readers -> JavaReader
+        ("BufferedReader", 1) => "crate::java_runtime::java_buffered_reader",
+        ("BufferedReader", 2) => "crate::java_runtime::java_buffered_reader_2",
+        ("InputStreamReader", 1) => "crate::java_runtime::java_input_stream_reader",
+        ("InputStreamReader", 2) => "crate::java_runtime::java_input_stream_reader_2",
+        ("FileReader", 1) => "crate::java_runtime::java_file_reader",
+        ("StringReader", 1) => "crate::java_runtime::java_string_reader",
+        ("LineNumberReader", 1) => "crate::java_runtime::java_line_number_reader",
+        ("Reader", 1) => "crate::java_runtime::java_reader",
+        // write: byte streams
+        ("OutputStream", 1) => "crate::java_runtime::java_output_stream",
+        ("FileOutputStream", 1) => "crate::java_runtime::java_file_output_stream",
+        ("FileOutputStream", 2) => "crate::java_runtime::java_file_output_stream_append",
+        ("BufferedOutputStream", 1) | ("DataOutputStream", 1) | ("FilterOutputStream", 1) => {
+            "crate::java_runtime::java_buffered_output_stream"
+        }
+        ("BufferedOutputStream", 2) => "crate::java_runtime::java_buffered_output_stream_sized",
+        ("ByteArrayOutputStream", 0) => "crate::java_runtime::JavaByteArrayOutputStream::new",
+        ("ByteArrayOutputStream", 1) => "crate::java_runtime::JavaByteArrayOutputStream::new_1",
+        // write: java.util.zip compressing streams -> JavaOutputStream.
+        ("GZIPOutputStream", 1) => "crate::java_runtime::java_gzip_output_stream",
+        ("GZIPOutputStream", 2) => "crate::java_runtime::java_gzip_output_stream_2",
+        ("DeflaterOutputStream", 1) => "crate::java_runtime::java_deflater_output_stream",
+        ("DeflaterOutputStream", 2) => "crate::java_runtime::java_deflater_output_stream_2",
+        // write: char writers
+        ("Writer", 1) => "crate::java_runtime::java_writer",
+        ("OutputStreamWriter", 1) => "crate::java_runtime::java_output_stream_writer",
+        ("OutputStreamWriter", 2) => "crate::java_runtime::java_output_stream_writer_charset",
+        ("BufferedWriter", 1) => "crate::java_runtime::java_buffered_writer",
+        ("BufferedWriter", 2) => "crate::java_runtime::java_buffered_writer_sized",
+        ("FileWriter", 1) => "crate::java_runtime::java_file_writer",
+        ("FileWriter", 2) => "crate::java_runtime::java_file_writer_append",
+        ("StringWriter", 0) => "crate::java_runtime::JavaStringWriter::new",
+        ("StringWriter", 1) => "crate::java_runtime::JavaStringWriter::new_1",
+        _ => return None,
+    })
+}
+
+/// The emission verdict for an arity/arg-type-overloaded method on a mapped
+/// runtime carrier (see [`runtime_method_overload`]).
+#[derive(Clone, Copy)]
+pub enum Overload {
+    /// Emit the bare snake-cased name (no suffix): the arity-0 base overload, or a
+    /// carrier method emitted bare so the generic String/collection rewrites can't
+    /// fire on it (the char-writer `write`/`append`/`flush`/…).
+    Bare,
+    /// Emit `snake_name_<arity>` — the higher-arity overload.
+    Suffix,
+    /// Emit a fixed Rust name (`Random.nextInt(bound)` -> `next_int_bound`).
+    Rename(&'static str),
+    /// `CRC32.update(x)` (arity 1) disambiguates by ARG type, not arity: a
+    /// byte-array arg -> `update_1`, an `int` arg -> the base `update`. The dumper
+    /// resolves the arg type and falls back to the base (default emit) for `int`.
+    ByArgVec,
+}
+
+/// Arity/arg-type overload resolution for the mapped runtime carriers (`BitSet`,
+/// the `java.util.zip` `CRC32`/`Deflater`/`Inflater`, `Random`, and the
+/// char-writer family). Java overloads these methods but Rust needs distinct
+/// names; this table holds the per-`(java_type, name, arity)` verdict, consumed by
+/// the dumper's `try_emit_known_method` (which turns it into the emitted name and
+/// applies the carrier's short-circuit/fall-through default for `None`). Keyed on
+/// the Java simple type name (what `recv_type_name` reports).
+pub fn runtime_method_overload(java_type: &str, name: &str, arity: usize) -> Option<Overload> {
+    use Overload::*;
+    Some(match (java_type, name, arity) {
+        // `BitSet`: get/set/clear/flip overloaded by arity (base keeps the bare
+        // name, handled by the dumper's short-circuit default).
+        ("BitSet", "set", 2)
+        | ("BitSet", "set", 3)
+        | ("BitSet", "clear", 2)
+        | ("BitSet", "flip", 2)
+        | ("BitSet", "get", 2) => Suffix,
+        // `java.util.zip` CRC32/Deflater/Inflater: higher-arity overloads.
+        ("CRC32" | "Deflater" | "Inflater", "update", 3)
+        | ("CRC32" | "Deflater" | "Inflater", "setInput", 3)
+        | ("CRC32" | "Deflater" | "Inflater", "setDictionary", 3)
+        | ("CRC32" | "Deflater" | "Inflater", "deflate", 3)
+        | ("CRC32" | "Deflater" | "Inflater", "deflate", 4) => Suffix,
+        ("CRC32" | "Deflater" | "Inflater", "update", 1) => ByArgVec,
+        // `Random.nextInt(bound)`.
+        ("Random", "nextInt", 1) => Rename("next_int_bound"),
+        // Char-writer carriers: println/print + write/append overloaded by arity;
+        // the rest emitted bare so the generic String rewrites don't fire.
+        (
+            "Writer" | "OutputStreamWriter" | "BufferedWriter" | "FileWriter" | "PrintWriter"
+            | "PrintStream" | "StringWriter",
+            n,
+            a,
+        ) => match (n, a) {
+            ("println", 0) | ("print", 0) => Bare,
+            ("println", 1) | ("print", 1) | ("write", 3) | ("append", 3) => Suffix,
+            ("write", 1) | ("append", 1) | ("flush", 0) | ("close", 0) | ("checkError", 0)
+            | ("printf", _) | ("format", _) => Bare,
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
 /// Return type of an instance method on a mapped `crate::java_runtime` type,
 /// keyed on the **Java** simple type name (e.g. `"Random"` — what
 /// [`crate::types::TypeResolver`] records for a `Random`-typed value, NOT the

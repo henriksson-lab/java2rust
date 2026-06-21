@@ -136,17 +136,7 @@ impl Default for JavaInputStream {
         JavaInputStream::from_box(Box::new(Cursor::new(Vec::<u8>::new())))
     }
 }
-impl PartialEq for JavaInputStream {
-    fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.inner, &other.inner)
-    }
-}
-impl Eq for JavaInputStream {}
-impl std::hash::Hash for JavaInputStream {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (Rc::as_ptr(&self.inner) as *const () as usize).hash(state);
-    }
-}
+rc_identity_eq_hash!(JavaInputStream, inner);
 
 // =====================================================================
 // Char readers: JavaReader carrier
@@ -257,17 +247,7 @@ impl Default for JavaReader {
         JavaReader::new_1(Cursor::new(Vec::<u8>::new()))
     }
 }
-impl PartialEq for JavaReader {
-    fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.inner, &other.inner)
-    }
-}
-impl Eq for JavaReader {}
-impl std::hash::Hash for JavaReader {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (Rc::as_ptr(&self.inner) as *const () as usize).hash(state);
-    }
-}
+rc_identity_eq_hash!(JavaReader, inner);
 
 // =====================================================================
 // Factory free fns — one per concrete Java IO type.

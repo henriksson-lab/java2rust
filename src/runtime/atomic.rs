@@ -11,18 +11,8 @@ impl Clone for JavaAtomicInteger {
     }
 }
 // Java code compares/keys atomics; `AtomicI32` isn't `PartialEq`/`Eq`/`Hash`, so
-// hand-roll over the current value.
-impl PartialEq for JavaAtomicInteger {
-    fn eq(&self, o: &Self) -> bool {
-        self.get() == o.get()
-    }
-}
-impl Eq for JavaAtomicInteger {}
-impl std::hash::Hash for JavaAtomicInteger {
-    fn hash<H: std::hash::Hasher>(&self, s: &mut H) {
-        self.get().hash(s)
-    }
-}
+// key on the current value.
+value_eq_hash!(JavaAtomicInteger, get());
 impl JavaAtomicInteger {
     pub fn new() -> Self {
         JavaAtomicInteger { v: std::sync::atomic::AtomicI32::new(0) }
@@ -80,11 +70,7 @@ impl JavaAtomicInteger {
         self.get() as f32
     }
 }
-impl std::fmt::Display for JavaAtomicInteger {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.get())
-    }
-}
+value_display!(JavaAtomicInteger, get());
 
 /// `java.util.concurrent.atomic.AtomicLong` over `AtomicI64`.
 #[derive(Debug, Default)]
@@ -96,17 +82,7 @@ impl Clone for JavaAtomicLong {
         JavaAtomicLong { v: std::sync::atomic::AtomicI64::new(self.get()) }
     }
 }
-impl PartialEq for JavaAtomicLong {
-    fn eq(&self, o: &Self) -> bool {
-        self.get() == o.get()
-    }
-}
-impl Eq for JavaAtomicLong {}
-impl std::hash::Hash for JavaAtomicLong {
-    fn hash<H: std::hash::Hasher>(&self, s: &mut H) {
-        self.get().hash(s)
-    }
-}
+value_eq_hash!(JavaAtomicLong, get());
 impl JavaAtomicLong {
     pub fn new() -> Self {
         JavaAtomicLong { v: std::sync::atomic::AtomicI64::new(0) }
@@ -161,11 +137,7 @@ impl JavaAtomicLong {
         self.get() as f64
     }
 }
-impl std::fmt::Display for JavaAtomicLong {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.get())
-    }
-}
+value_display!(JavaAtomicLong, get());
 
 /// `java.util.concurrent.atomic.AtomicBoolean` over `AtomicBool`.
 #[derive(Debug, Default)]
@@ -177,17 +149,7 @@ impl Clone for JavaAtomicBoolean {
         JavaAtomicBoolean { v: std::sync::atomic::AtomicBool::new(self.get()) }
     }
 }
-impl PartialEq for JavaAtomicBoolean {
-    fn eq(&self, o: &Self) -> bool {
-        self.get() == o.get()
-    }
-}
-impl Eq for JavaAtomicBoolean {}
-impl std::hash::Hash for JavaAtomicBoolean {
-    fn hash<H: std::hash::Hasher>(&self, s: &mut H) {
-        self.get().hash(s)
-    }
-}
+value_eq_hash!(JavaAtomicBoolean, get());
 impl JavaAtomicBoolean {
     pub fn new() -> Self {
         JavaAtomicBoolean { v: std::sync::atomic::AtomicBool::new(false) }
@@ -215,11 +177,7 @@ impl JavaAtomicBoolean {
             .is_ok()
     }
 }
-impl std::fmt::Display for JavaAtomicBoolean {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.get())
-    }
-}
+value_display!(JavaAtomicBoolean, get());
 
 #[cfg(test)]
 mod atomic_tests {

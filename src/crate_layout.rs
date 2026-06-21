@@ -1079,6 +1079,10 @@ fn read_trait_sigs(file: &Path, trait_name: &str) -> Vec<(String, String, Vec<St
 /// atomics mapping lands (see SEMANTICS §12-item-7 / `dump.rs` map_type_name).
 const JAVA_RUNTIME: &str = concat!(
     include_str!("runtime/header.rs"),
+    // Shared trait-boilerplate macros — must precede the carrier fragments that
+    // invoke them. (header.rs can't host them: it's excluded from the
+    // `java_runtime_compiles` check below, where the carriers also need them.)
+    include_str!("runtime/macros.rs"),
     include_str!("runtime/iter.rs"),
     include_str!("runtime/io_file.rs"),
     include_str!("runtime/bitset.rs"),
@@ -1101,6 +1105,7 @@ const JAVA_RUNTIME: &str = concat!(
 #[cfg(test)]
 mod java_runtime_compiles {
     #![allow(dead_code)]
+    include!("runtime/macros.rs");
     include!("runtime/iter.rs");
     include!("runtime/io_file.rs");
     include!("runtime/bitset.rs");

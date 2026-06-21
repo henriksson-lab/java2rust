@@ -103,17 +103,28 @@ The recurring pattern: a `(java_type, name, arity)`-keyed **table** replaces N s
 per-type branches. `stdlib::runtime_method_ret` already proves the shape; extend the
 family.
 
-1. **`runtime_method_overload(java_type, name, arity) -> Option<&str>` (HIGH net-zero).**
-   Collapses the 4 near-identical arity-overload prologue blocks in
-   `try_emit_known_method` (`dump.rs:5394-5505`, ~110 lines: BitSet/CRC32+Deflater+
-   Inflater/Random/Writer-family) into one ~15-line dispatch site + a data table next to
-   `runtime_method_ret`. Behavior-preserving (copy the suffix decisions verbatim). One
-   carve-out: `CRC32.update(1)` disambiguates by arg-type, not arity — keep as a residual
-   or make the table value an enum `{Suffix, ByArgType{vec,scalar}}`.
+1. **`runtime_method_overload(...)` table — ✅ DONE (2026-06-21), net-zero.** Collapsed
+   the 4 arity-overload prologue blocks in `try_emit_known_method` (BitSet/CRC32+Deflater+
+   Inflater/Random/Writer-family, ~118 lines) into a data table `stdlib::runtime_method_
+   overload(java_type,name,arity) -> Option<Overload>` (`Overload = {Bare, Suffix,
+   Rename(&str), ByArgVec}`) + a ~40-line dispatch. **All 12 corpora flat (10863), zero
+   regression**; gates green; added `runtime_carrier_overloads_route_by_arity` test.
+   `ByArgVec` is the `CRC32.update(1)` arg-type carve-out. **Subtlety preserved:** BitSet
+   and the zip carriers `return false` on a non-tabled method (short-circuit to default
+   snake-emit, so their inherent methods skip the generic collection/String rewrites),
+   while Random/Writer fall through to the general match — encoded via a
+   `matches!(tn, "BitSet"|"CRC32"|"Deflater"|"Inflater")` short-circuit after the table
+   consult.
 
-2. **`io_ctor_factory(simple, arity) -> Option<&str>` → move to `stdlib.rs` (HIGH net-zero).**
-   The 50-entry I/O ctor factory `match` (`dump.rs:6636-6685`) is already pure data living
-   in the dispatcher; relocate behind a `stdlib` fn. Mechanical, net-zero.
+2. **`io_ctor_factory(simple, arity) -> Option<&str>` → move to `stdlib.rs` — ✅ DONE
+   (2026-06-21), net-zero.** Relocated the 50-entry I/O ctor factory `match` from
+   `visit_object_creation` into `stdlib::io_ctor_factory`. Byte-identical output, all 12
+   corpora flat (10863), gates green. `PrintWriter`/`PrintStream` stay bespoke (they
+   disambiguate by argument type). **⚠️ Strategy note:** the user prefers *in-place
+   idiomatic* IO translation (Java IO → `std::fs`/`std::io` directly) over the
+   runtime-carrier routing this table feeds (`JavaInputStream`/`JavaReader`). This refactor
+   only tidied the routing table — the carrier strategy itself is now being re-evaluated
+   (prototype in progress). See memory `in-place-translation-preference`.
 
 3. **Bespoke → `StdRule` table migrations (HIGH net-zero, biggest is free today).**
    - **String search family — ✅ DONE (2026-06-21), −2 errors (better than net-zero!).**
@@ -168,21 +179,42 @@ family.
    Caveat: the `recv_type_name` NameExpr/FieldAccess arms must STAY AST-name-based
    (routing `Named` flips `receiver_is_user_type` — measured regression, P1).
 
-5. **Front the `append/charAt/substring → String` name-guess with `self.ty(call)`**
-   (`infer_call_ret_type` `dump.rs:1394-1400`). Try the resolver first (precise via the
-   runtime-ret table), keep the name-match only as the `Unknown`-receiver fallback.
+5. **Front the `append/charAt/substring → String` name-guess with `self.ty(call)` —
+   ⏸ DEFERRED behind B4 (investigated 2026-06-21).** The useful form returns the
+   resolver's *precise* type when it knows the receiver, which needs the `Ty -> Rust-
+   string` renderer (B4). A renderer-free approximation (return `None` instead of
+   mis-pinning to `String` when `self.ty(call)` is a concrete non-`Str` type) was
+   implemented and **measured net-zero on all 12 corpora** (these receiver positions
+   rarely resolve to a concrete non-String) — not worth the extra `self.ty` call, so
+   reverted (deferral comment at `infer_call_ret_type`). Revisit after B4.
 
-6. **Standardize "ask the category" (LOW).** Three ways exist: `recv_type_name=="String"`
-   (5585/5592/5678/5817/5826), `recv_category` (5751…), `self.ty().category()`. They
-   DISAGREE: `recv_category` collapses `StringBuilder`/`CharSequence`→String;
-   `recv_type_name` returns the raw name. Standardize the String-gates on `recv_category`
-   except where a true-`String`-vs-`StringBuilder` distinction is required (comment those).
+6. **Standardize "ask the category" — ✅ DONE (2026-06-21), −4 errors (better than
+   net-zero!).** Added a `recv_is_string(recv)` helper (`recv_category(recv) ==
+   Some("String")`) and routed the bespoke String-method gates (`equals`/`compareTo`/
+   `replaceAll`) through it, replacing the scattered `recv_type_name == Some("String")`.
+   **Measured: total 10863→10859 (varscan −2, jsoup −1, jts −1), ZERO regression**; gates
+   green; added `stringbuilder_routes_through_string_method_rewrites` test. The win:
+   `recv_category` also matches `StringBuilder`/`CharSequence` (all mapped to a Rust
+   `String`), so `StringBuilder.equals/compareTo` now get the String rewrites instead of
+   falling through to a NON-existent `.equals`/`.compare_to` (E0599). The feared opposite
+   risk (a declared-`String` receiver whose `self.ty` is `Unknown` being missed by
+   `recv_category` → E0599 on `compareTo`/`replaceAll`) did not occur in the 12 corpora.
+   No site needed the strict `recv_type_name` form. (`recv_category`/`self.ty().category()`
+   remain the right tool for the stdlib-table dispatch — a separate, legitimate use.)
 
-7. **Trait-boilerplate macros in `runtime/header.rs` (LOW, readability).** ~120-150 lines
-   of hand-rolled `Clone`/`PartialEq`/`Eq`/`Hash`/`Display` across atomic/zip/decimal_format/
-   io_read. Lift `value_eq_hash!`/`rc_identity_eq_hash!`/`noop_display!` into `header.rs`
-   (shared first-include) and reuse the existing `io_write_trivial_traits!`. Macros must
-   expand byte-identically (measure generated output).
+7. **Trait-boilerplate macros — ✅ DONE (2026-06-21), net-zero.** Added
+   `src/runtime/macros.rs` (a NEW fragment, NOT `header.rs` — header is excluded from the
+   `java_runtime_compiles` check, so macros there would be undefined for the carriers; the
+   new fragment is wired into BOTH the shipped concat (after header) AND the compile-check
+   (first), so it precedes every invoker). Macros: `value_eq_hash!(t, acc)` /
+   `value_display!(t, acc)` (token-accessor), `rc_identity_eq_hash!(t, field)`,
+   `noop_eq_hash!(t)`, `noop_display!(t)`. Converted: atomic Int/Long/Bool (eq/hash +
+   Display), zip CRC32 (value) + Inflater/Deflater (noop), io_read Input/Reader
+   (rc-identity), io_write OutputStream/Writer Display (noop). **All 12 corpora flat
+   (10863), zero regression**; runtime compile-check + compilecheck 110/110 + golden 42/42
+   green. Left bespoke (heterogeneous): `decimal_format` multi-field eq/hash,
+   `JavaStringWriter` value Display, and `io_write_trivial_traits!` (already a local macro,
+   adds `Ord` the others don't need).
 
 ## C. Dead-code cleanup
 

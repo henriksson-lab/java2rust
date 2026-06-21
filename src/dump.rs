@@ -1391,6 +1391,15 @@ impl<'a> RustDumpVisitor<'a> {
                 // `<call>.<m>(..)`: a distinctive String/StringBuilder method on
                 // the result pins it to `String` (e.g. Java `append` -> our
                 // `push_str`, which a bare `Unknown` receiver can't satisfy).
+                //
+                // B5 (front this name-guess with `self.ty(call)`) is DEFERRED behind
+                // B4: the useful version returns the resolver's *precise* type when
+                // it knows the receiver concretely, which needs the `Ty -> Rust-
+                // string` renderer (B4). The renderer-free approximation (return
+                // `None` instead of mis-pinning to `String` for a concrete non-`Str`
+                // receiver) measured net-zero on all 12 corpora — these positions
+                // rarely resolve to a concrete non-String type — so it wasn't worth
+                // the extra `self.ty` call. Revisit when B4 lands.
                 if *scope == Some(call) {
                     return matches!(
                         name.as_str(),
@@ -5353,122 +5362,50 @@ impl<'a> RustDumpVisitor<'a> {
         if self.is_static_class_ref(recv) {
             return false;
         }
-        // `java.util.BitSet` -> `JavaBitSet`: its `get`/`set`/`clear`/… are real
-        // inherent methods, so the collection rewrites (e.g. `.get(i)` -> `[i]`
-        // indexing) must NOT fire. The runtime arity-overloads its methods by the
-        // `name`/`name_N` convention (Java overloads `set(i)`/`set(i,v)`/`set(f,t)`
-        // by arity), so emit the suffixed name here; index args are generic
-        // (`BitIndex`) so a Java `char` index (widened to int by the JDK) is taken.
-        if matches!(self.recv_type_name(recv).as_deref(), Some("BitSet")) {
-            // Only `get`/`set`/`clear`/`flip` are arity-overloaded; their base
-            // overload keeps the bare name, higher arities get `_N`. Everything
-            // else (`cardinality`, `nextSetBit`, `and`/`or`/…) is non-overloaded
-            // and resolves by default snake-case emission.
-            let rust = match (name, args.len()) {
-                ("set", 2) | ("set", 3) | ("clear", 2) | ("flip", 2) | ("get", 2) => {
-                    format!("{}_{}", camel_to_snake_case(name), args.len())
-                }
-                _ => return false, // base overload / non-overloaded -> default emit
-            };
-            self.visit(recv, arg);
-            self.printer.print(".");
-            self.printer.print(&rust);
-            self.print_arguments(args, arg);
-            return true;
-        }
-        // `java.util.zip` own-typed runtime types (src/runtime/zip.rs). Java
-        // arity-overloads several methods (`CRC32.update(b)`/`update(b,off,len)`,
-        // `Deflater.setInput`/`deflate`/`setDictionary`, `Inflater.setInput`); Rust
-        // needs distinct names, so emit the bare name for the BASE overload and
-        // `name_N` for the higher arities. Non-overloaded methods (`getValue`,
-        // `finish`, `needsInput`, `reset`, …) resolve by default snake-case emission.
-        if matches!(self.recv_type_name(recv).as_deref(), Some("CRC32" | "Deflater" | "Inflater")) {
-            let suffixed = matches!(
-                (name, args.len()),
-                ("update", 3)
-                    | ("setInput", 3)
-                    | ("setDictionary", 3)
-                    | ("deflate", 3)
-                    | ("deflate", 4)
-            );
-            if suffixed {
-                self.visit(recv, arg);
-                self.printer.print(&format!(".{}_{}", camel_to_snake_case(name), args.len()));
-                self.print_arguments(args, arg);
-                return true;
-            }
-            // `CRC32.update(byte[])` (arity 1) collides with `update(int)` (also
-            // arity 1) but they take different Rust types — route the byte-array
-            // form to `update_1`; the int form keeps the bare `update`.
-            if name == "update" && args.len() == 1 {
-                let t = self.infer_expr_rust_type(args[0]);
-                if t.starts_with("Vec") || t.ends_with("]") || t.contains("i8") {
-                    self.visit(recv, arg);
-                    self.printer.print(".update_1");
-                    self.print_arguments(args, arg);
-                    return true;
-                }
-            }
-            // base overloads / non-overloaded -> default snake-case emit.
-            return false;
-        }
-        // `java.util.Random`: Java overloads `nextInt()` (arity 0) and
-        // `nextInt(bound)` (arity 1); Rust needs distinct names, so the 1-arg form
-        // maps to `next_int_bound`. All other `next*` methods are non-overloaded
-        // and resolve by default snake-case emission.
-        if matches!(self.recv_type_name(recv).as_deref(), Some("Random"))
-            && name == "nextInt"
-            && args.len() == 1
-        {
-            self.visit(recv, arg);
-            self.printer.print(".next_int_bound");
-            self.print_arguments(args, arg);
-            return true;
-        }
-        // Stored char-writer carriers (`Writer`/`PrintWriter`/`PrintStream`/… →
-        // `JavaWriter`, plus own-typed `StringWriter`). `println`/`print` are
-        // overloaded by ARITY in Java; Rust can't share one name, so emit the
-        // bare name for arity-0 (newline / nothing) and `_1` for arity-1. Other
-        // methods are real inherent methods — emit snake-cased so the generic
-        // String rewrites (`append`→`push_str`, etc.) don't fire on a writer.
-        // (`System.out.println` is lowered separately and never reaches here.)
-        if matches!(
-            self.recv_type_name(recv).as_deref(),
-            Some(
-                "Writer" | "OutputStreamWriter" | "BufferedWriter" | "FileWriter" | "PrintWriter"
-                    | "PrintStream" | "StringWriter"
-            )
-        ) {
-            match (name, args.len()) {
-                ("println", 0) => return self.emit_recv_method(recv, "println", arg),
-                ("print", 0) => return self.emit_recv_method(recv, "print", arg),
-                ("println", 1) => {
-                    self.visit(recv, arg);
-                    self.printer.print(".println_1");
-                    self.print_arguments(args, arg);
-                    return true;
-                }
-                ("print", 1) => {
-                    self.visit(recv, arg);
-                    self.printer.print(".print_1");
-                    self.print_arguments(args, arg);
-                    return true;
-                }
-                ("write", 1) | ("append", 1) | ("flush", 0) | ("close", 0)
-                | ("checkError", 0) | ("printf", _) | ("format", _) => {
+        // Arity/arg-type overload dispatch for mapped runtime carriers (`BitSet`,
+        // the `java.util.zip` `CRC32`/`Deflater`/`Inflater`, `Random`, and the
+        // char-writer family). Java overloads these methods by arity (or, for
+        // `CRC32.update`, by arg type); Rust needs distinct names. The data table
+        // `stdlib::runtime_method_overload` holds the per-(type,name,arity)
+        // verdict. For `BitSet` and the zip carriers — whose OTHER methods are real
+        // inherent methods that must NOT reach the generic collection/String
+        // rewrites in the `match` below (e.g. `BitSet.get(i)` -> `[i]` indexing,
+        // `Writer.append` -> `push_str`) — a non-tabled method short-circuits to
+        // default snake-case emission (`return false`). `Random` and the writers
+        // fall through to the general match (their non-tabled methods are safe
+        // there). Mirrors the runtime's `name`/`name_N` convention.
+        if let Some(tn) = self.recv_type_name(recv) {
+            use crate::stdlib::Overload;
+            if let Some(ov) = crate::stdlib::runtime_method_overload(&tn, name, args.len()) {
+                let emitted: Option<String> = match ov {
+                    Overload::Bare => Some(camel_to_snake_case(name)),
+                    Overload::Suffix => {
+                        Some(format!("{}_{}", camel_to_snake_case(name), args.len()))
+                    }
+                    Overload::Rename(s) => Some(s.to_string()),
+                    // `CRC32.update(byte[])` -> `update_1`; the `int` form keeps the
+                    // base `update` (None -> short-circuit to default emit below).
+                    Overload::ByArgVec => {
+                        let t = self.infer_expr_rust_type(args[0]);
+                        if t.starts_with("Vec") || t.ends_with("]") || t.contains("i8") {
+                            Some(format!("{}_1", camel_to_snake_case(name)))
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(m) = emitted {
                     self.visit(recv, arg);
                     self.printer.print(".");
-                    self.printer.print(&camel_to_snake_case(name));
+                    self.printer.print(&m);
                     self.print_arguments(args, arg);
                     return true;
                 }
-                ("write", 3) | ("append", 3) => {
-                    self.visit(recv, arg);
-                    self.printer.print(&format!(".{}_3", camel_to_snake_case(name)));
-                    self.print_arguments(args, arg);
-                    return true;
-                }
-                _ => {}
+            }
+            // `BitSet` / zip carriers: their inherent methods must default-emit, not
+            // fall through to the generic collection/String match below.
+            if matches!(tn.as_str(), "BitSet" | "CRC32" | "Deflater" | "Inflater") {
+                return false;
             }
         }
         match (name, args.len()) {
@@ -5550,14 +5487,13 @@ impl<'a> RustDumpVisitor<'a> {
             // `.as_str()` is the *nightly-unstable* `str::as_str` on an existing
             // `&str` (E0658) — the slice form is stable for both.
             ("equals", 1)
-                if self.recv_type_name(recv).as_deref() == Some("String")
-                    || self.is_string_literal(args[0]) =>
+                if self.recv_is_string(recv) || self.is_string_literal(args[0]) =>
             {
                 // The slice form needs BOTH operands sliceable; when one side is
                 // not string-like (e.g. an `Unknown` stub field reached via a
                 // now-String-typed receiver), `&(x)[..]` is E0608. Fall back to a
                 // `Display`-based compare, valid for `String` and `Unknown` both.
-                let recv_str = self.recv_type_name(recv).as_deref() == Some("String");
+                let recv_str = self.recv_is_string(recv);
                 let arg_str = self.is_string_literal(args[0])
                     || matches!(self.ty(args[0]), crate::types::Type::Str);
                 if recv_str && arg_str {
@@ -5751,7 +5687,7 @@ impl<'a> RustDumpVisitor<'a> {
                     .print(").to_lowercase(); (__a > __b) as i32 - (__a < __b) as i32 }");
                 true
             }
-            ("compareTo", 1) if self.recv_type_name(recv).as_deref() == Some("String") => {
+            ("compareTo", 1) if self.recv_is_string(recv) => {
                 self.printer.print("{ let __a = (");
                 self.visit(recv, arg);
                 self.printer.print("); let __b = (");
@@ -5760,7 +5696,7 @@ impl<'a> RustDumpVisitor<'a> {
                 true
             }
             // `replaceAll` on a String: best-effort literal replace (NOT regex).
-            ("replaceAll", 2) if self.recv_type_name(recv).as_deref() == Some("String") => {
+            ("replaceAll", 2) if self.recv_is_string(recv) => {
                 self.visit(recv, arg);
                 self.printer.print(".replace(/* replaceAll: literal, not regex */ ");
                 self.emit_string_pattern(args[0], arg);
@@ -6201,6 +6137,16 @@ impl<'a> RustDumpVisitor<'a> {
         })
     }
 
+    /// Single predicate for the bespoke String-method gates (`equals`/`compareTo`/
+    /// `replaceAll`), replacing scattered `recv_type_name(recv) == Some("String")`
+    /// checks. Uses `recv_category` (`Type::Str`) so it also covers
+    /// `StringBuilder`/`CharSequence` (all mapped to a Rust `String`, hence
+    /// sliceable/comparable the same way) — the standardization the consistency
+    /// audit called for.
+    fn recv_is_string(&self, recv: NodeId) -> bool {
+        self.recv_category(recv) == Some("String")
+    }
+
     /// Apply the declarative JDK rewrite table ([`crate::stdlib`]). Runs after
     /// the bespoke handlers, so it only fires for table entries those don't
     /// cover. Static-class calls (`Character.isDigit`) match by class name;
@@ -6558,58 +6504,7 @@ impl<'a> RustDumpVisitor<'a> {
         // before the generic `::new_N` emission below.
         if let Node::ClassOrInterfaceType { name, .. } = self.arena.kind(typ) {
             let simple = name.rsplit('.').next().unwrap_or(name).to_string();
-            let factory: Option<&str> = match (simple.as_str(), args.len()) {
-                // read: byte streams -> JavaInputStream
-                ("FileInputStream", 1) => Some("crate::java_runtime::java_file_input_stream"),
-                ("ByteArrayInputStream", 1) => Some("crate::java_runtime::java_byte_array_input_stream"),
-                ("ByteArrayInputStream", 3) => Some("crate::java_runtime::java_byte_array_input_stream_3"),
-                ("BufferedInputStream", 1) => Some("crate::java_runtime::java_buffered_input_stream"),
-                ("BufferedInputStream", 2) => Some("crate::java_runtime::java_buffered_input_stream_2"),
-                ("InputStream", 1) | ("DataInputStream", 1) => Some("crate::java_runtime::java_input_stream"),
-                // read: java.util.zip decompressing streams -> JavaInputStream
-                // (flate2-backed; compose with BufferedInputStream/InputStreamReader).
-                ("GZIPInputStream", 1) => Some("crate::java_runtime::java_gzip_input_stream"),
-                ("GZIPInputStream", 2) => Some("crate::java_runtime::java_gzip_input_stream_2"),
-                ("InflaterInputStream", 1) => Some("crate::java_runtime::java_inflater_input_stream"),
-                ("InflaterInputStream", 2) => Some("crate::java_runtime::java_inflater_input_stream_2"),
-                ("InflaterInputStream", 3) => Some("crate::java_runtime::java_inflater_input_stream_3"),
-                // read: char readers -> JavaReader
-                ("BufferedReader", 1) => Some("crate::java_runtime::java_buffered_reader"),
-                ("BufferedReader", 2) => Some("crate::java_runtime::java_buffered_reader_2"),
-                ("InputStreamReader", 1) => Some("crate::java_runtime::java_input_stream_reader"),
-                ("InputStreamReader", 2) => Some("crate::java_runtime::java_input_stream_reader_2"),
-                ("FileReader", 1) => Some("crate::java_runtime::java_file_reader"),
-                ("StringReader", 1) => Some("crate::java_runtime::java_string_reader"),
-                ("LineNumberReader", 1) => Some("crate::java_runtime::java_line_number_reader"),
-                ("Reader", 1) => Some("crate::java_runtime::java_reader"),
-                // write: byte streams
-                ("OutputStream", 1) => Some("crate::java_runtime::java_output_stream"),
-                ("FileOutputStream", 1) => Some("crate::java_runtime::java_file_output_stream"),
-                ("FileOutputStream", 2) => Some("crate::java_runtime::java_file_output_stream_append"),
-                ("BufferedOutputStream", 1) | ("DataOutputStream", 1) | ("FilterOutputStream", 1) => {
-                    Some("crate::java_runtime::java_buffered_output_stream")
-                }
-                ("BufferedOutputStream", 2) => Some("crate::java_runtime::java_buffered_output_stream_sized"),
-                ("ByteArrayOutputStream", 0) => Some("crate::java_runtime::JavaByteArrayOutputStream::new"),
-                ("ByteArrayOutputStream", 1) => Some("crate::java_runtime::JavaByteArrayOutputStream::new_1"),
-                // write: java.util.zip compressing streams -> JavaOutputStream.
-                ("GZIPOutputStream", 1) => Some("crate::java_runtime::java_gzip_output_stream"),
-                ("GZIPOutputStream", 2) => Some("crate::java_runtime::java_gzip_output_stream_2"),
-                ("DeflaterOutputStream", 1) => Some("crate::java_runtime::java_deflater_output_stream"),
-                ("DeflaterOutputStream", 2) => Some("crate::java_runtime::java_deflater_output_stream_2"),
-                // write: char writers
-                ("Writer", 1) => Some("crate::java_runtime::java_writer"),
-                ("OutputStreamWriter", 1) => Some("crate::java_runtime::java_output_stream_writer"),
-                ("OutputStreamWriter", 2) => Some("crate::java_runtime::java_output_stream_writer_charset"),
-                ("BufferedWriter", 1) => Some("crate::java_runtime::java_buffered_writer"),
-                ("BufferedWriter", 2) => Some("crate::java_runtime::java_buffered_writer_sized"),
-                ("FileWriter", 1) => Some("crate::java_runtime::java_file_writer"),
-                ("FileWriter", 2) => Some("crate::java_runtime::java_file_writer_append"),
-                ("StringWriter", 0) => Some("crate::java_runtime::JavaStringWriter::new"),
-                ("StringWriter", 1) => Some("crate::java_runtime::JavaStringWriter::new_1"),
-                _ => None,
-            };
-            if let Some(factory) = factory {
+            if let Some(factory) = crate::stdlib::io_ctor_factory(&simple, args.len()) {
                 self.printer.print(factory);
                 self.print_arguments(&args, arg);
                 return;

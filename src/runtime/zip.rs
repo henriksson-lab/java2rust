@@ -138,17 +138,7 @@ impl Default for JavaCRC32 {
         Self::new()
     }
 }
-impl PartialEq for JavaCRC32 {
-    fn eq(&self, other: &Self) -> bool {
-        self.crc.get() == other.crc.get()
-    }
-}
-impl Eq for JavaCRC32 {}
-impl std::hash::Hash for JavaCRC32 {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.crc.get().hash(state);
-    }
-}
+value_eq_hash!(JavaCRC32, crc.get());
 
 // =====================================================================
 // Inflater (decompressor) — own-typed runtime struct
@@ -217,15 +207,7 @@ impl Default for JavaInflater {
         Self::new()
     }
 }
-impl PartialEq for JavaInflater {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-impl Eq for JavaInflater {}
-impl std::hash::Hash for JavaInflater {
-    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
-}
+noop_eq_hash!(JavaInflater);
 
 // =====================================================================
 // Deflater (compressor) — own-typed runtime struct
@@ -358,15 +340,7 @@ impl Default for JavaDeflater {
         Self::new()
     }
 }
-impl PartialEq for JavaDeflater {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-impl Eq for JavaDeflater {}
-impl std::hash::Hash for JavaDeflater {
-    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
-}
+noop_eq_hash!(JavaDeflater);
 
 #[cfg(test)]
 mod zip_tests {
