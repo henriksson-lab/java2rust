@@ -572,6 +572,29 @@ impl<'a> TypeResolver<'a> {
                 return parse_rust_type(&ret);
             }
         }
+        // A mapped `crate::java_runtime` carrier receiver (`Random`/`BitSet`/…):
+        // consult the runtime return table. Additive — only reached when none of
+        // the structural/project/self arms above typed the call.
+        if let Some(Type::Named { path, .. }) = &recv {
+            if let Some(ret) = crate::stdlib::runtime_method_ret(path, name, args.len()) {
+                return parse_rust_type(ret);
+            }
+        }
+        // A category receiver (String/Map/…) with a tabled rewrite return type.
+        if let Some(cat) = recv.as_ref().and_then(Type::category) {
+            let cat_name = match cat {
+                Category::String => "String",
+                Category::List => "List",
+                Category::Map => "Map",
+                Category::Set => "Set",
+                Category::Option => "Option",
+            };
+            if let Some(crate::stdlib::StdRule { ret: Some(ret), .. }) =
+                crate::stdlib::instance_rule(cat_name, name, args.len())
+            {
+                return parse_rust_type(ret);
+            }
+        }
         Type::Unknown
     }
 

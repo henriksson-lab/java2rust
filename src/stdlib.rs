@@ -28,13 +28,24 @@
 pub struct StdRule {
     pub template: &'static str,
     pub mutates: bool,
+    /// The Rust type this rewrite *produces*, as a simple name the type tracker
+    /// understands (`"String"`, `"i32"`, `"bool"`, `"Vec"`, …), or `None` when
+    /// the result type is left to context inference. Consulted by
+    /// [`crate::types::TypeResolver`] so a chained call (`a.foo().bar()`) can
+    /// dispatch on `foo()`'s result. A wrong `ret` is worse than `None`; keep
+    /// these conservative.
+    pub ret: Option<&'static str>,
 }
 
 const fn r(template: &'static str) -> StdRule {
-    StdRule { template, mutates: false }
+    StdRule { template, mutates: false, ret: None }
 }
 const fn rm(template: &'static str) -> StdRule {
-    StdRule { template, mutates: true }
+    StdRule { template, mutates: true, ret: None }
+}
+/// Non-mutating rule that also records its produced Rust type.
+const fn rr(template: &'static str, ret: &'static str) -> StdRule {
+    StdRule { template, mutates: false, ret: Some(ret) }
 }
 
 /// Instance-method rewrite for a normalized receiver *category* (`String`,
@@ -46,30 +57,40 @@ const fn rm(template: &'static str) -> StdRule {
 pub fn instance_rule(cat: &str, name: &str, arity: usize) -> Option<StdRule> {
     Some(match (cat, name, arity) {
         // ---- String / CharSequence ----
-        ("String", "isBlank", 0) => r("(${recv}.trim().is_empty())"),
-        ("String", "strip", 0) => r("${recv}.trim().to_string()"),
-        ("String", "stripLeading", 0) => r("${recv}.trim_start().to_string()"),
-        ("String", "stripTrailing", 0) => r("${recv}.trim_end().to_string()"),
-        ("String", "repeat", 1) => r("${recv}.repeat((${0}) as usize)"),
-        ("String", "concat", 1) => r("format!(\"{}{}\", ${recv}, ${0})"),
+        ("String", "isBlank", 0) => rr("(${recv}.trim().is_empty())", "bool"),
+        ("String", "strip", 0) => rr("${recv}.trim().to_string()", "String"),
+        ("String", "stripLeading", 0) => rr("${recv}.trim_start().to_string()", "String"),
+        ("String", "stripTrailing", 0) => rr("${recv}.trim_end().to_string()", "String"),
+        ("String", "repeat", 1) => rr("${recv}.repeat((${0}) as usize)", "String"),
+        ("String", "concat", 1) => rr("format!(\"{}{}\", ${recv}, ${0})", "String"),
         ("String", "matches", 1) => {
             // best-effort: literal equality, NOT regex. Slice form (not
             // `.as_str()`, which is nightly-unstable on an existing `&str`).
-            r("(&(${recv})[..] == ${0:str})")
+            rr("(&(${recv})[..] == ${0:str})", "bool")
         }
         // best-effort literal replace (NOT regex), mirroring `replaceAll`. `.replacen`
         // also dodges the nightly-unstable `str::replace_first`.
-        ("String", "replaceFirst", 2) => r("${recv}.replacen(${0:str}, &(${1}).to_string(), 1)"),
-        // Java's `String.hashCode` (`h = 31*h + c`), foldable and faithful.
-        ("String", "hashCode", 0) => {
-            r("(${recv}.chars().fold(0i32, |__h, __c| __h.wrapping_mul(31).wrapping_add(__c as i32)))")
+        ("String", "replaceFirst", 2) => {
+            rr("${recv}.replacen(${0:str}, &(${1}).to_string(), 1)", "String")
         }
+        // Java's `String.hashCode` (`h = 31*h + c`), foldable and faithful.
+        ("String", "hashCode", 0) => rr(
+            "(${recv}.chars().fold(0i32, |__h, __c| __h.wrapping_mul(31).wrapping_add(__c as i32)))",
+            "i32",
+        ),
         // `String.getBytes()` -> `Vec<i8>` (Java `byte` is signed).
-        ("String", "getBytes", 0) => r("${recv}.bytes().map(|__b| __b as i8).collect::<Vec<i8>>()"),
+        ("String", "getBytes", 0) => {
+            rr("${recv}.bytes().map(|__b| __b as i8).collect::<Vec<i8>>()", "Vec")
+        }
+        // `toLowerCase(Locale)`/`toUpperCase(Locale)` — drop the locale arg (the
+        // 0-arg forms are handled elsewhere; this covers the 1-arg overload that
+        // would otherwise emit a non-existent `to_lower_case`).
+        ("String", "toLowerCase", 1) => rr("${recv}.to_lowercase()", "String"),
+        ("String", "toUpperCase", 1) => rr("${recv}.to_uppercase()", "String"),
 
         // ---- Map ----
         ("Map", "getOrDefault", 2) => r("${recv}.get(&(${0})).cloned().unwrap_or(${1})"),
-        ("Map", "values", 0) => r("${recv}.values().cloned().collect::<Vec<_>>()"),
+        ("Map", "values", 0) => rr("${recv}.values().cloned().collect::<Vec<_>>()", "Vec"),
         ("Map", "containsValue", 1) => r("${recv}.values().any(|__v| __v == &(${0}))"),
         ("Map", "remove", 1) => rm("${recv}.remove(&(${0}))"),
         ("Map", "putIfAbsent", 2) => rm("${recv}.entry(${0}).or_insert(${1})"),
@@ -87,9 +108,10 @@ pub fn instance_rule(cat: &str, name: &str, arity: usize) -> Option<StdRule> {
         ("List", "clear", 0) => rm("${recv}.clear()"),
         ("List", "set", 2) => rm("${recv}[(${0}) as usize] = ${1}"),
         ("List", "addAll", 1) => rm("${recv}.extend((${0}).iter().cloned())"),
-        ("List", "indexOf", 1) => {
-            r("${recv}.iter().position(|__x| __x == &(${0})).map(|__i| __i as i32).unwrap_or(-1)")
-        }
+        ("List", "indexOf", 1) => rr(
+            "${recv}.iter().position(|__x| __x == &(${0})).map(|__i| __i as i32).unwrap_or(-1)",
+            "i32",
+        ),
 
         _ => return None,
     })
@@ -126,6 +148,8 @@ pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
         // position needs to own); `:move` clones only non-Copy borrows.
         ("Objects", "requireNonNull", 1) => r("(${0:move})"),
         ("Objects", "requireNonNull", 2) => r("(${0:move})"),
+        // null-safe equality, best-effort as `==` (both sides same value type).
+        ("Objects", "equals", 2) => r("(${0} == ${1})"),
 
         // ---- Integer / Long radix + compare ----
         ("Integer" | "Long", "toHexString", 1) => r("format!(\"{:x}\", ${0})"),
@@ -160,16 +184,37 @@ pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
         ("Arrays", "copyOfRange", 3) => {
             r("(${0})[(${1}) as usize..(${2}) as usize].to_vec()")
         }
+        // `copyOf(arr, n)` — length-`n` copy (truncate / `Default`-pad).
+        ("Arrays", "copyOf", 2) => {
+            r("crate::java_runtime::java_array_copy_of(&(${0}), (${1}) as i64)")
+        }
+        // `asList(arr)` — a `Vec` view of the array (the common 1-arg form;
+        // the N-scalar overload is left to the stub).
+        ("Arrays", "asList", 1) => r("(${0}).to_vec()"),
+        // `binarySearch(arr, key)` — JDK miss = -(insertion)-1.
+        ("Arrays", "binarySearch", 2) => {
+            r("crate::java_runtime::java_binary_search(&(${0}), &(${1}))")
+        }
 
         // ---- Collections (value-producing / identity forms) ----
         ("Collections", "emptyList", 0) => r("Vec::new()"),
         ("Collections", "emptySet", 0) => r("std::collections::HashSet::new()"),
+        ("Collections", "emptyMap", 0) => r("std::collections::HashMap::new()"),
         ("Collections", "singletonList", 1) => r("vec![${0}]"),
-        // `unmodifiable*` drop the immutability wrapper -> identity passthrough.
+        ("Collections", "singletonMap", 2) => {
+            r("{ let mut __m = std::collections::HashMap::new(); __m.insert(${0}, ${1}); __m }")
+        }
+        ("Collections", "singleton", 1) => {
+            r("{ let mut __s = std::collections::HashSet::new(); __s.insert(${0}); __s }")
+        }
+        // `unmodifiable*`/`synchronized*` drop the wrapper -> identity passthrough.
         ("Collections", "unmodifiableList", 1)
         | ("Collections", "unmodifiableMap", 1)
         | ("Collections", "unmodifiableSet", 1)
-        | ("Collections", "unmodifiableCollection", 1) => r("(${0})"),
+        | ("Collections", "unmodifiableCollection", 1)
+        | ("Collections", "synchronizedList", 1)
+        | ("Collections", "synchronizedMap", 1)
+        | ("Collections", "synchronizedSet", 1) => r("(${0})"),
 
         // ---- NumberFormat static factories (mapped runtime type; the locale
         // overload is dropped — formatting uses the C locale) ----
@@ -192,6 +237,38 @@ pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
         // ---- String static ----
         ("String", "valueOf", 1) => r("(${0}).to_string()"),
 
+        _ => return None,
+    })
+}
+
+/// Return type of an instance method on a mapped `crate::java_runtime` type,
+/// keyed on the **Java** simple type name (e.g. `"Random"` — what
+/// [`crate::types::TypeResolver`] records for a `Random`-typed value, NOT the
+/// `JavaRandom` runtime struct), the Java method name, and arity. Lets the
+/// tracker type a chained call whose receiver is a runtime carrier
+/// (`rng.nextInt() ...`, `fmt.format(x).length()`). Conservative: only entries
+/// with a certain, non-nullable Rust result are listed (nullable results like
+/// `BufferedReader.readLine` are omitted until the nullable overlay lands).
+pub fn runtime_method_ret(java_type: &str, name: &str, arity: usize) -> Option<&'static str> {
+    Some(match (java_type, name, arity) {
+        ("Random", "nextInt", _) => "i32",
+        ("Random", "nextLong", 0) => "i64",
+        ("Random", "nextDouble", 0) => "f64",
+        ("Random", "nextFloat", 0) => "f32",
+        ("Random", "nextGaussian", 0) => "f64",
+        ("Random", "nextBoolean", 0) => "bool",
+        ("BitSet", "cardinality", 0) => "i32",
+        ("BitSet", "length", 0) => "i32",
+        ("BitSet", "size", 0) => "i32",
+        ("BitSet", "get", 1) => "bool",
+        ("BitSet", "isEmpty", 0) => "bool",
+        ("CRC32", "getValue", 0) => "i64",
+        ("StringWriter", "toString", 0) => "String",
+        ("StringTokenizer", "nextToken", _) => "String",
+        ("StringTokenizer", "countTokens", 0) => "i32",
+        ("StringTokenizer", "hasMoreTokens", 0) => "bool",
+        ("DecimalFormat", "format", _) => "String",
+        ("NumberFormat", "format", _) => "String",
         _ => return None,
     })
 }

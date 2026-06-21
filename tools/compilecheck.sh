@@ -131,7 +131,7 @@ for entry in "${cases[@]}"; do
   name="${entry%%|*}"; src="${entry#*|}"
   total=$((total+1))
   printf '%s' "$src" > "$work/$name.java"
-  "$bin" -d "$work/$name.java" -o "$work/out_$name" >/dev/null 2>&1
+  timeout 60 "$bin" -d "$work/$name.java" -o "$work/out_$name" >/dev/null 2>&1
   rs="$work/out_$name/$name.rs"
   if [[ ! -f "$rs" ]]; then echo "FAIL $name (no output)"; continue; fi
   if err=$(rustc --edition 2021 --crate-type lib -A warnings --emit=metadata -o "$work/$name.rmeta" "$rs" 2>&1); then

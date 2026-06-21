@@ -1680,6 +1680,14 @@ impl<'a> RustDumpVisitor<'a> {
         }
         match scope {
             Some(s) => {
+                // Preserve prior behavior for a chained method-call receiver:
+                // before return-type tracking, `callee_recv_type` returned `None`
+                // here (→ no stub). Recording a stub against the newly-resolved
+                // receiver type can change stub shapes and regress previously-
+                // compiling stub calls, so keep stub recording off this path.
+                if matches!(self.arena.kind(s), Node::MethodCallExpr { .. }) {
+                    return;
+                }
                 let Some(tname) = self.callee_recv_type(s) else { return };
                 let Some(key) = self.missing_type_key(&tname) else { return };
                 let is_static = self.is_static_class_ref(s);
@@ -1724,6 +1732,15 @@ impl<'a> RustDumpVisitor<'a> {
             }
             Node::ObjectCreationExpr { typ, .. } => self.type_simple_name(*typ),
             Node::EnclosedExpr { inner: Some(i) } => self.callee_recv_type(*i),
+            // A chained method-call receiver (`a.foo().bar()`): resolve `foo()`'s
+            // return type via the rich type resolver to its Java simple name, so
+            // `bar()` can resolve in the linked maps. (Stub recording deliberately
+            // does NOT use this arm — see `record_missing_call`.)
+            Node::MethodCallExpr { .. } => match self.ty(scope) {
+                crate::types::Type::Named { path, .. } if !path.is_empty() => Some(path),
+                crate::types::Type::Str => Some("String".to_string()),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -3009,13 +3026,14 @@ impl<'a> RustDumpVisitor<'a> {
                 // constructor argument (not the exception type) keeps it compiling
                 // even though the exception type isn't defined.
                 self.printer.print("panic!(\"{:?}\", ");
-                match self.arena.kind(expr) {
-                    Node::ObjectCreationExpr { args, .. } if !args.is_empty() => {
-                        let first = args[0];
-                        self.visit(first, arg);
-                    }
-                    Node::ObjectCreationExpr { .. } => self.printer.print("\"exception\""),
-                    _ => self.visit(expr, arg),
+                // Peel nested exception wrappers (`new UncheckedIOException(new
+                // IOException(msg))`) down to the innermost ctor argument so the
+                // panic carries the *message*, not a stub exception value (which
+                // has no `Debug`). A plain ctor uses its first arg; a no-arg ctor
+                // falls back to a literal.
+                match self.throw_payload(expr) {
+                    Some(payload) => self.visit(payload, arg),
+                    None => self.printer.print("\"exception\""),
                 }
                 self.printer.print(");");
             }
@@ -3075,6 +3093,27 @@ impl<'a> RustDumpVisitor<'a> {
     }
 
     // ---- per-node helpers (the heavier methods) ----
+
+    /// The expression a `throw` lowers into the `panic!` message slot. For
+    /// `throw new Exc(msg)` it is `msg`; nested exception wrappers
+    /// (`new UncheckedIOException(new IOException(msg))`) are peeled to the
+    /// innermost ctor argument (the message), since a stub exception value has
+    /// no `Debug`. `None` for a no-arg ctor (caller emits a literal). A non-ctor
+    /// throw (e.g. `throw e`) is returned as-is.
+    fn throw_payload(&self, expr: NodeId) -> Option<NodeId> {
+        match self.arena.kind(expr) {
+            Node::ObjectCreationExpr { args, .. } if !args.is_empty() => {
+                let first = args[0];
+                // Peel a nested exception ctor to reach the message it wraps.
+                if matches!(self.arena.kind(first), Node::ObjectCreationExpr { .. }) {
+                    return self.throw_payload(first);
+                }
+                Some(first)
+            }
+            Node::ObjectCreationExpr { .. } => None,
+            _ => Some(expr),
+        }
+    }
 
     fn visit_compilation_unit(&mut self, id: NodeId, arg: Arg) {
         let (package, imports, types) = match self.kind(id) {
@@ -5352,6 +5391,42 @@ impl<'a> RustDumpVisitor<'a> {
             self.print_arguments(args, arg);
             return true;
         }
+        // `java.util.zip` own-typed runtime types (src/runtime/zip.rs). Java
+        // arity-overloads several methods (`CRC32.update(b)`/`update(b,off,len)`,
+        // `Deflater.setInput`/`deflate`/`setDictionary`, `Inflater.setInput`); Rust
+        // needs distinct names, so emit the bare name for the BASE overload and
+        // `name_N` for the higher arities. Non-overloaded methods (`getValue`,
+        // `finish`, `needsInput`, `reset`, …) resolve by default snake-case emission.
+        if matches!(self.recv_type_name(recv).as_deref(), Some("CRC32" | "Deflater" | "Inflater")) {
+            let suffixed = matches!(
+                (name, args.len()),
+                ("update", 3)
+                    | ("setInput", 3)
+                    | ("setDictionary", 3)
+                    | ("deflate", 3)
+                    | ("deflate", 4)
+            );
+            if suffixed {
+                self.visit(recv, arg);
+                self.printer.print(&format!(".{}_{}", camel_to_snake_case(name), args.len()));
+                self.print_arguments(args, arg);
+                return true;
+            }
+            // `CRC32.update(byte[])` (arity 1) collides with `update(int)` (also
+            // arity 1) but they take different Rust types — route the byte-array
+            // form to `update_1`; the int form keeps the bare `update`.
+            if name == "update" && args.len() == 1 {
+                let t = self.infer_expr_rust_type(args[0]);
+                if t.starts_with("Vec") || t.ends_with("]") || t.contains("i8") {
+                    self.visit(recv, arg);
+                    self.printer.print(".update_1");
+                    self.print_arguments(args, arg);
+                    return true;
+                }
+            }
+            // base overloads / non-overloaded -> default snake-case emit.
+            return false;
+        }
         // `java.util.Random`: Java overloads `nextInt()` (arity 0) and
         // `nextInt(bound)` (arity 1); Rust needs distinct names, so the 1-arg form
         // maps to `next_int_bound`. All other `next*` methods are non-overloaded
@@ -5493,11 +5568,26 @@ impl<'a> RustDumpVisitor<'a> {
                 if self.recv_type_name(recv).as_deref() == Some("String")
                     || self.is_string_literal(args[0]) =>
             {
-                self.printer.print("(&(");
-                self.visit(recv, arg);
-                self.printer.print(")[..] == &(");
-                self.visit(args[0], arg);
-                self.printer.print(")[..])");
+                // The slice form needs BOTH operands sliceable; when one side is
+                // not string-like (e.g. an `Unknown` stub field reached via a
+                // now-String-typed receiver), `&(x)[..]` is E0608. Fall back to a
+                // `Display`-based compare, valid for `String` and `Unknown` both.
+                let recv_str = self.recv_type_name(recv).as_deref() == Some("String");
+                let arg_str = self.is_string_literal(args[0])
+                    || matches!(self.ty(args[0]), crate::types::Type::Str);
+                if recv_str && arg_str {
+                    self.printer.print("(&(");
+                    self.visit(recv, arg);
+                    self.printer.print(")[..] == &(");
+                    self.visit(args[0], arg);
+                    self.printer.print(")[..])");
+                } else {
+                    self.printer.print("((");
+                    self.visit(recv, arg);
+                    self.printer.print(").to_string() == (");
+                    self.visit(args[0], arg);
+                    self.printer.print(").to_string())");
+                }
                 true
             }
             ("equalsIgnoreCase", 1) => {
@@ -6102,6 +6192,16 @@ impl<'a> RustDumpVisitor<'a> {
             Node::FieldAccessExpr { scope, field, .. } => self
                 .decl_java_type_name(field, recv)
                 .or_else(|| self.static_field_java_type(*scope, field)),
+            // A method-call receiver (`a.foo().bar()`): fall back to the rich
+            // type resolver so the bespoke method handlers dispatch on the
+            // chained result. Only the confidently-typed cases (String / a named
+            // type — the latter's `path` is already a Java simple name) yield a
+            // name; collections/Option flow through `recv_category` instead, and
+            // an `Unknown` stays `None` (preserves prior best-effort behavior).
+            Node::MethodCallExpr { .. } => match self.ty(recv) {
+                crate::types::Type::Str => Some("String".to_string()),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -6524,6 +6624,13 @@ impl<'a> RustDumpVisitor<'a> {
                 ("BufferedInputStream", 1) => Some("crate::java_runtime::java_buffered_input_stream"),
                 ("BufferedInputStream", 2) => Some("crate::java_runtime::java_buffered_input_stream_2"),
                 ("InputStream", 1) | ("DataInputStream", 1) => Some("crate::java_runtime::java_input_stream"),
+                // read: java.util.zip decompressing streams -> JavaInputStream
+                // (flate2-backed; compose with BufferedInputStream/InputStreamReader).
+                ("GZIPInputStream", 1) => Some("crate::java_runtime::java_gzip_input_stream"),
+                ("GZIPInputStream", 2) => Some("crate::java_runtime::java_gzip_input_stream_2"),
+                ("InflaterInputStream", 1) => Some("crate::java_runtime::java_inflater_input_stream"),
+                ("InflaterInputStream", 2) => Some("crate::java_runtime::java_inflater_input_stream_2"),
+                ("InflaterInputStream", 3) => Some("crate::java_runtime::java_inflater_input_stream_3"),
                 // read: char readers -> JavaReader
                 ("BufferedReader", 1) => Some("crate::java_runtime::java_buffered_reader"),
                 ("BufferedReader", 2) => Some("crate::java_runtime::java_buffered_reader_2"),
@@ -6543,6 +6650,11 @@ impl<'a> RustDumpVisitor<'a> {
                 ("BufferedOutputStream", 2) => Some("crate::java_runtime::java_buffered_output_stream_sized"),
                 ("ByteArrayOutputStream", 0) => Some("crate::java_runtime::JavaByteArrayOutputStream::new"),
                 ("ByteArrayOutputStream", 1) => Some("crate::java_runtime::JavaByteArrayOutputStream::new_1"),
+                // write: java.util.zip compressing streams -> JavaOutputStream.
+                ("GZIPOutputStream", 1) => Some("crate::java_runtime::java_gzip_output_stream"),
+                ("GZIPOutputStream", 2) => Some("crate::java_runtime::java_gzip_output_stream_2"),
+                ("DeflaterOutputStream", 1) => Some("crate::java_runtime::java_deflater_output_stream"),
+                ("DeflaterOutputStream", 2) => Some("crate::java_runtime::java_deflater_output_stream_2"),
                 // write: char writers
                 ("Writer", 1) => Some("crate::java_runtime::java_writer"),
                 ("OutputStreamWriter", 1) => Some("crate::java_runtime::java_output_stream_writer"),
@@ -8077,13 +8189,22 @@ pub fn map_type_name(name: &str) -> &str {
         // visit_object_creation (arity can't disambiguate `FileInputStream(path)`
         // from `BufferedInputStream(stream)`).
         "InputStream" | "FileInputStream" | "BufferedInputStream" | "ByteArrayInputStream"
-        | "DataInputStream" => "crate::java_runtime::JavaInputStream",
+        | "DataInputStream"
+        // java.util.zip decompressing read streams (src/runtime/zip.rs, flate2):
+        // a gzip/inflate stream IS-A InputStream, so it collapses to the same
+        // carrier and its `new X(in)` routes to a factory yielding a JavaInputStream
+        // (clears the vcf residual where GZIPInputStream was a non-Read named stub).
+        | "GZIPInputStream" | "InflaterInputStream"
+            => "crate::java_runtime::JavaInputStream",
         "Reader" | "BufferedReader" | "FileReader" | "InputStreamReader" | "StringReader"
         | "LineNumberReader" => "crate::java_runtime::JavaReader",
         // I/O write stack (src/runtime/io_write.rs). ByteArrayOutputStream/StringWriter
         // are own-typed (need to_byte_array/to_string); the rest collapse to carriers.
         "OutputStream" | "FileOutputStream" | "BufferedOutputStream" | "DataOutputStream"
-        | "FilterOutputStream" => "crate::java_runtime::JavaOutputStream",
+        | "FilterOutputStream"
+        // java.util.zip compressing write streams (src/runtime/zip.rs, flate2).
+        | "GZIPOutputStream" | "DeflaterOutputStream"
+            => "crate::java_runtime::JavaOutputStream",
         "ByteArrayOutputStream" => "crate::java_runtime::JavaByteArrayOutputStream",
         "Writer" | "OutputStreamWriter" | "BufferedWriter" | "FileWriter" | "PrintWriter"
         | "PrintStream" => "crate::java_runtime::JavaWriter",
@@ -8098,6 +8219,13 @@ pub fn map_type_name(name: &str) -> &str {
         // `java.text` number formatters -> real `format!`-based shims (a `JavaNum`
         // arg trait accepts `&f64`/i64/…; `NumberFormat.getInstance(Locale)` is
         // routed to the 0-arg `get_instance()` by a static_rule arm).
+        // `java.util.zip` own-typed runtime structs (src/runtime/zip.rs). CRC32 is
+        // pure-std; Inflater/Deflater are flate2-backed. Constants
+        // (`Deflater.DEFAULT_COMPRESSION`/`.DEFLATED`/`.NO_FLUSH`/…) emit as
+        // associated `const`s on the mapped type via the static-field path.
+        "CRC32" => "crate::java_runtime::JavaCRC32",
+        "Inflater" => "crate::java_runtime::JavaInflater",
+        "Deflater" => "crate::java_runtime::JavaDeflater",
         "DecimalFormat" => "crate::java_runtime::JavaDecimalFormat",
         "NumberFormat" => "crate::java_runtime::JavaNumberFormat",
         "DecimalFormatSymbols" => "crate::java_runtime::JavaDecimalFormatSymbols",

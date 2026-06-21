@@ -1,0 +1,323 @@
+diff --git a/src/crate_layout.rs b/src/crate_layout.rs
+index b4cdaee..29eb614 100644
+--- a/src/crate_layout.rs
++++ b/src/crate_layout.rs
+@@ -1084,6 +1084,7 @@ const JAVA_RUNTIME: &str = concat!(
+     include_str!("runtime/decimal_format.rs"),
+     include_str!("runtime/io_read.rs"),
+     include_str!("runtime/io_write.rs"),
++    include_str!("runtime/collections.rs"),
+ );
+ 
+ /// Compile-check the runtime fragments as part of the translator's own
+@@ -1103,6 +1104,7 @@ mod java_runtime_compiles {
+     include!("runtime/decimal_format.rs");
+     include!("runtime/io_read.rs");
+     include!("runtime/io_write.rs");
++    include!("runtime/collections.rs");
+ }
+ 
+ /// Generate the `mod` tree (`lib.rs` at the root, `mod.rs` in each subdir) and a
+diff --git a/src/runtime/collections.rs b/src/runtime/collections.rs
+new file mode 100644
+index 0000000..e7ebaa0
+--- /dev/null
++++ b/src/runtime/collections.rs
+@@ -0,0 +1,297 @@
++/// Java `java.lang.ref.WeakReference` / `SoftReference` -> a transparent wrapper
++/// holding the referent. Rust has no GC, so a weak/soft reference simply keeps
++/// the value alive; `get()` returns a clone of the referent (Java `get()` may
++/// return `null` after collection, but a translation that never collects always
++/// has the value). The annotation drops the Java type argument, so this is a
++/// generic struct `JavaWeakReference<T>` and the emitted field/var type carries
++/// the element (`JavaWeakReference<Vec<Coordinate>>`).
++#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
++pub struct JavaWeakReference<T> {
++    referent: T,
++}
++
++impl<T: Clone> JavaWeakReference<T> {
++    /// `new WeakReference(referent)`.
++    pub fn new_1(referent: T) -> Self {
++        JavaWeakReference { referent }
++    }
++    /// `new WeakReference(referent, queue)` — the reference queue is irrelevant
++    /// without GC; ignore it.
++    pub fn new_2<Q>(referent: T, _queue: Q) -> Self {
++        JavaWeakReference { referent }
++    }
++    /// `get()` — the referent (never `null` in a non-collecting translation).
++    pub fn get(&self) -> T {
++        self.referent.clone()
++    }
++    /// `clear()` — drops the strong link in real Java; a no-op here.
++    pub fn clear(&self) {}
++}
++
++/// `java.util.PriorityQueue<T>` -> a `VecDeque<T>`-backed queue with interior
++/// mutability so the draining methods (`poll`/`peek`/`remove`) take `&self`
++/// (matching the runtime-type convention; a `static final` PQ lowers to an
++/// immutable binding). NOTE: a real priority order needs `T: Ord` (or a
++/// comparator), but the translated element types do not implement Rust `Ord`
++/// (they carry a Java `compareTo` method, not the trait). To stay generic over
++/// any `T: Clone` and keep the corpus compiling, this stores elements in
++/// insertion order — i.e. it is FIFO, not a true min-heap. The method *surface*
++/// is complete; only the ordering semantics are approximated.
++#[derive(Clone, Debug, Default)]
++pub struct JavaPriorityQueue<T> {
++    items: std::cell::RefCell<std::collections::VecDeque<T>>,
++}
++
++impl<T: Clone> JavaPriorityQueue<T> {
++    /// `new PriorityQueue()`.
++    pub fn new() -> Self {
++        JavaPriorityQueue { items: std::cell::RefCell::new(std::collections::VecDeque::new()) }
++    }
++    /// `new PriorityQueue(initialCapacity)` / `new PriorityQueue(comparator)` /
++    /// `new PriorityQueue(collection)`. The argument is a capacity hint, a
++    /// comparator (ordering not applied — see the type note), or a source
++    /// collection; accept it permissively and ignore it.
++    pub fn new_1<A>(_arg: A) -> Self {
++        JavaPriorityQueue::new()
++    }
++    /// `new PriorityQueue(initialCapacity, comparator)`.
++    pub fn new_2<A, B>(_a: A, _b: B) -> Self {
++        JavaPriorityQueue::new()
++    }
++    /// `add(e)` — enqueue; Java returns `true`.
++    pub fn add(&mut self, e: T) -> bool {
++        self.items.borrow_mut().push_back(e);
++        true
++    }
++    /// `offer(e)` — enqueue; Java returns `true`. Takes `&self` so it works on an
++    /// immutable binding (the receiver is rarely `&mut` for `offer` callers).
++    pub fn offer(&self, e: T) -> bool {
++        self.items.borrow_mut().push_back(e);
++        true
++    }
++    /// `peek()` — the head element (clone); panics if empty (Java returns `null`,
++    /// but the annotated call site expects the bare element type).
++    pub fn peek(&self) -> T {
++        self.items.borrow().front().cloned().expect("PriorityQueue.peek on empty queue")
++    }
++    /// `poll()` — remove and return the head element; panics if empty.
++    pub fn poll(&self) -> T {
++        self.items.borrow_mut().pop_front().expect("PriorityQueue.poll on empty queue")
++    }
++    /// `remove()` (no-arg) — remove and return the head element; panics if empty.
++    pub fn remove(&mut self) -> T {
++        self.items.borrow_mut().pop_front().expect("PriorityQueue.remove on empty queue")
++    }
++    /// `remove(o)` — remove a specific element (overload -> `remove_1`); returns
++    /// whether it was present.
++    pub fn remove_1(&mut self, o: T) -> bool
++    where
++        T: PartialEq,
++    {
++        let mut q = self.items.borrow_mut();
++        if let Some(i) = q.iter().position(|x| *x == o) {
++            q.remove(i);
++            true
++        } else {
++            false
++        }
++    }
++    /// `isEmpty()`.
++    pub fn is_empty(&self) -> bool {
++        self.items.borrow().is_empty()
++    }
++    /// `size()`.
++    pub fn size(&self) -> i32 {
++        self.items.borrow().len() as i32
++    }
++    /// `contains(o)`.
++    pub fn contains(&self, o: T) -> bool
++    where
++        T: PartialEq,
++    {
++        self.items.borrow().iter().any(|x| *x == o)
++    }
++    /// `clear()`.
++    pub fn clear(&mut self) {
++        self.items.borrow_mut().clear();
++    }
++    /// `iterator()` — a snapshot iterator over the elements (clone).
++    pub fn iterator(&self) -> JavaIter<T> {
++        let snapshot: Vec<T> = self.items.borrow().iter().cloned().collect();
++        JavaIter::new(snapshot.into_iter())
++    }
++}
++
++/// `java.util.EnumSet<T>` -> a `HashSet<T>`-backed set. EnumSet over a concrete
++/// enum is a fine fit; the element type carries through the annotation
++/// (`JavaEnumSet<Ordinate>`). `allOf`/`complementOf` need enum-variant iteration
++/// (not available generically), so they return an empty set — present so the
++/// method surface stays complete, but not faithful (documented NO-GO surface).
++#[derive(Clone, Debug, Default)]
++pub struct JavaEnumSet<T: std::hash::Hash + Eq> {
++    items: std::collections::HashSet<T>,
++}
++
++impl<T: std::hash::Hash + Eq + Clone> JavaEnumSet<T> {
++    /// `EnumSet.noneOf(elementType)` / construction helper.
++    pub fn new() -> Self {
++        JavaEnumSet { items: std::collections::HashSet::new() }
++    }
++    /// `EnumSet.of(e1, e2)` and the higher-arity overloads (`of_3`/`of_4`/…),
++    /// disambiguated by arity at the call site.
++    pub fn of(e1: T, e2: T) -> Self {
++        let mut s = Self::new();
++        s.items.insert(e1);
++        s.items.insert(e2);
++        s
++    }
++    pub fn of_1(e1: T) -> Self {
++        let mut s = Self::new();
++        s.items.insert(e1);
++        s
++    }
++    pub fn of_3(e1: T, e2: T, e3: T) -> Self {
++        let mut s = Self::of(e1, e2);
++        s.items.insert(e3);
++        s
++    }
++    pub fn of_4(e1: T, e2: T, e3: T, e4: T) -> Self {
++        let mut s = Self::of_3(e1, e2, e3);
++        s.items.insert(e4);
++        s
++    }
++    pub fn of_5(e1: T, e2: T, e3: T, e4: T, e5: T) -> Self {
++        let mut s = Self::of_4(e1, e2, e3, e4);
++        s.items.insert(e5);
++        s
++    }
++    /// `EnumSet.noneOf(elementType)` — an empty set (the class arg is ignored).
++    pub fn none_of<C>(_element_type: C) -> Self {
++        Self::new()
++    }
++    /// `EnumSet.copyOf(other)` — a copy of another EnumSet.
++    pub fn copy_of(other: &JavaEnumSet<T>) -> Self {
++        other.clone()
++    }
++    /// `EnumSet.allOf(elementType)` — needs enum-variant iteration; returns empty
++    /// (NO-GO surface, see the type note).
++    pub fn all_of<C>(_element_type: C) -> Self {
++        Self::new()
++    }
++    /// `EnumSet.complementOf(other)` — needs enum-variant iteration; returns
++    /// empty (NO-GO surface).
++    pub fn complement_of(_other: &JavaEnumSet<T>) -> Self {
++        Self::new()
++    }
++    /// `add(e)` — returns whether the element was newly inserted.
++    pub fn add(&mut self, e: T) -> bool {
++        self.items.insert(e)
++    }
++    /// `remove(o)` — returns whether the element was present.
++    pub fn remove(&mut self, o: T) -> bool {
++        self.items.remove(&o)
++    }
++    /// `contains(o)`.
++    pub fn contains(&self, o: T) -> bool {
++        self.items.contains(&o)
++    }
++    /// `size()`.
++    pub fn size(&self) -> i32 {
++        self.items.len() as i32
++    }
++    /// `isEmpty()`.
++    pub fn is_empty(&self) -> bool {
++        self.items.is_empty()
++    }
++    /// `clear()`.
++    pub fn clear(&mut self) {
++        self.items.clear();
++    }
++    /// `equals(other)`.
++    pub fn equals(&self, other: &JavaEnumSet<T>) -> bool {
++        self.items == other.items
++    }
++    /// `iterator()` — a snapshot iterator (clone; order is unspecified, as in Java
++    /// `EnumSet` insertion is not order-preserving here).
++    pub fn iterator(&self) -> JavaIter<T> {
++        let snapshot: Vec<T> = self.items.iter().cloned().collect();
++        JavaIter::new(snapshot.into_iter())
++    }
++}
++
++impl<T: std::hash::Hash + Eq> PartialEq for JavaEnumSet<T> {
++    fn eq(&self, other: &Self) -> bool {
++        self.items == other.items
++    }
++}
++impl<T: std::hash::Hash + Eq> Eq for JavaEnumSet<T> {}
++impl<T: std::hash::Hash + Eq + Ord + Clone> std::hash::Hash for JavaEnumSet<T> {
++    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
++        // HashSet has no deterministic order; hash a sorted snapshot so equal
++        // sets hash equally.
++        let mut v: Vec<&T> = self.items.iter().collect();
++        v.sort();
++        for e in v {
++            e.hash(state);
++        }
++    }
++}
++
++#[cfg(test)]
++mod collections_tests {
++    use super::*;
++
++    #[test]
++    fn weak_reference_roundtrip() {
++        let r = JavaWeakReference::new_1(vec![1, 2, 3]);
++        assert_eq!(r.get(), vec![1, 2, 3]);
++        r.clear();
++        assert_eq!(r.get(), vec![1, 2, 3]);
++    }
++
++    #[test]
++    fn priority_queue_surface() {
++        let mut q: JavaPriorityQueue<i32> = JavaPriorityQueue::new();
++        assert!(q.is_empty());
++        q.add(3);
++        q.offer(1);
++        q.add(2);
++        assert_eq!(q.size(), 3);
++        assert!(q.contains(2));
++        assert_eq!(q.peek(), 3);
++        assert_eq!(q.poll(), 3);
++        assert_eq!(q.remove(), 1);
++        assert!(q.remove_1(2));
++        assert!(q.is_empty());
++        q.add(9);
++        q.clear();
++        assert!(q.is_empty());
++    }
++
++    #[test]
++    fn priority_queue_iterator() {
++        let mut q: JavaPriorityQueue<i32> = JavaPriorityQueue::new();
++        q.add(5);
++        q.add(6);
++        let mut it = q.iterator();
++        assert!(it.has_next());
++        assert_eq!(it.next(), Some(5));
++        assert_eq!(it.next(), Some(6));
++        assert!(!it.has_next());
++    }
++
++    #[test]
++    fn enum_set_surface() {
++        let mut s: JavaEnumSet<i32> = JavaEnumSet::of(1, 2);
++        assert_eq!(s.size(), 2);
++        assert!(s.contains(1));
++        assert!(s.add(3));
++        assert!(!s.add(3));
++        assert!(s.remove(2));
++        assert!(!s.contains(2));
++        let t = JavaEnumSet::of_3(1, 3, 7);
++        assert!(!s.equals(&t));
++        s.clear();
++        assert!(s.is_empty());
++    }
++}

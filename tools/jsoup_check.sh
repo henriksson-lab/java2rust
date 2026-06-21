@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")/.."
 cargo build --release 2>&1 | grep -E '^error' && { echo "TRANSLATOR BUILD FAILED"; exit 1; } || true
 rm -rf /tmp/jsoup-rs
-./target/release/java2rust-rs -d testdata/jsoup/src/main/java -o /tmp/jsoup-rs --crate -s >/dev/null 2>&1
+timeout 300 ./target/release/java2rust-rs -d testdata/jsoup/src/main/java -o /tmp/jsoup-rs --crate -s >/dev/null 2>&1
 cd /tmp/jsoup-rs
 TOTAL=$(cargo build 2>&1 | grep -cE '^error\[|^error:')
 echo "=== TOTAL ERRORS: $TOTAL ==="

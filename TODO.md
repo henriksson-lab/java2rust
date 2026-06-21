@@ -18,8 +18,41 @@ landing small, **measured** changes.
   `no-commit-prompts` (**the user commits; never offer to commit**).
 
 ## 1. Current state
-- **UNCOMMITTED on tree (wave-3, ready to commit): the file-I/O reader+writer STACK LANDED,
-  errors 11346→11327 (−19), ZERO per-corpus regression.** New `src/runtime/io_read.rs`
+- **UNCOMMITTED on tree (type-frontier Phases 1+2+3a+3b): errors 11284→11114 (−170!), ZERO
+  per-corpus regression** (jts −104, jsoup −35, jhlabs −11, trim −9, vcf −5, jaligner −3,
+  bjalign −2, jahmm −1). Method-call RETURN-TYPE tracking. The rich `TypeResolver`
+  (src/types.rs) already recursively types chained calls + project/self returns; it lacked
+  (a) stdlib/runtime return types and (b) a path from the SHALLOW dispatch helpers into it.
+  Done: **P1** — `ret` column on `StdRule` + `runtime_method_ret(java_type,name,arity)` table,
+  Java-name keyed (a `Random` value types as `Named{"Random"}`, NOT `JavaRandom`). **P2** —
+  `method_call_type` (types.rs ~571) consults both, ADDITIVELY (only fills `Unknown`). **P3a** —
+  `recv_type_name` (dump.rs:6157) falls back to `self.ty()` for a `MethodCallExpr` receiver,
+  **String-only** (a name for any `Named` type regressed +7 by flipping `receiver_is_user_type`
+  — NO-GO); + fixed the `.equals` rewrite (dump.rs:5550) to `.to_string()`-compare unless both
+  sides string-like (was slicing an `Unknown` arg → E0608). **P3b (the big one, −148 alone)** —
+  `callee_recv_type` (dump.rs:1726) resolves a `MethodCallExpr` receiver via `self.ty()` so
+  `resolve_linked_callee` shapes chained calls `a.foo().bar()` (exact rust name, arg borrowing,
+  nullability). GUARD: `record_missing_call` (dump.rs:1683) skips `MethodCallExpr` scopes to
+  preserve prior stub shapes (the documented stub-regression trap). Validated: 715-file jts crate
+  built fully; golden 42/42, compilecheck 110/110, tests 0-fail, 0 warnings.
+  Next: **P4** regex resurrect (docs/parked — chained String dispatch now works), **P5**
+  nullable-overlay (no-op `unwrap(self)->Self`) to unblock atomics, and re-try the **P3b stub
+  recording** (currently guarded off — enabling it for resolved chained receivers may help more).
+  Plan/risks in memory [[stdlib-stub-implementation]] / [[tier2-unification-frontier]].
+- **Prior wave-4: 3 KEEP integrated, errors 11327→11284 (−43), ZERO per-corpus regression.** 5 parallel worktree agents; integrated A+D+E (`git apply --3way`). (A) Tier-1
+  templates −30 (`stdlib.rs` + new `src/runtime/util.rs`; star win: `String.toLowerCase/
+  toUpperCase(Locale)`→`.to_lowercase()`, was emitting non-existent `to_lower_case`). (D)
+  java.util.zip −10 (new `src/runtime/zip.rs` via **flate2**; cleared the vcf GZIPInputStream
+  residual). (E) exceptions −3 (`dump.rs` ThrowStmt nested-wrapper peel; the 460-ref IOException
+  cluster is a non-problem). Combined delta is fully additive. Validated: 99 tests, golden 42/42,
+  compilecheck 110/110, 0 warnings. New per-corpus baseline below (**11284**). **2 NO-GO parked
+  in `docs/parked/`** (patches + README): regex Pattern/Matcher (jsoup +13) and PriorityQueue/
+  EnumSet/WeakReference (jts +52) — both blocked by the translator-core frontier (return-type
+  tracking for runtime-mapped method calls + nullable-overlay for mapped value types; also
+  project-type-name shadowing + raw-generic placeholders for the collections). That frontier
+  now gates regex AND atomics — fix it next to unblock several parked items at once.
+- **Prior wave-3 (committed `3142580`): the file-I/O reader+writer STACK, errors 11346→11327
+  (−19), ZERO per-corpus regression.** New `src/runtime/io_read.rs`
   (JavaInputStream/JavaReader carriers, `Rc<RefCell>` shared cursor; `IntoBoxedRead` adapter
   trait at the factory boundary) + `src/runtime/io_write.rs` (JavaOutputStream/JavaWriter
   carriers; `IntoBoxedWrite`). dump.rs: map_type_name arms for the read/write families →
@@ -46,10 +79,10 @@ landing small, **measured** changes.
   blocker: atomic FIELDS emit concrete (`pub x: JavaAtomicBoolean`) yet read-flagged nullable
   → spurious `.clone().unwrap()` on the concrete type (trim +14); needs the translator
   nullable-inference fix OR a no-op `unwrap(self)->Self` on the atomic types, then map.
-- **12-corpus error baseline** (current working tree w/ wave-3 I/O; `tools/<name>_check.sh`):
-  trim 184 · jaligner 53 · jahmm 398 · varscan 53 · fastq 53 · bjaaprop 98 · vcf 441
-  · bjalign 593 · bioformats 15 · jhlabs 1324 · jsoup 2569 · jts 5546  (**= 11327**).
-  (Pre-wave-3 committed baseline was **11346**.)
+- **12-corpus error baseline** (current working tree w/ type-frontier 1+2+3a+3b; `tools/<name>_check.sh`):
+  trim 169 · jaligner 50 · jahmm 392 · varscan 53 · fastq 53 · bjaaprop 97 · vcf 427
+  · bjalign 590 · bioformats 15 · jhlabs 1313 · jsoup 2517 · jts 5438  (**= 11114**).
+  (pre-frontier wave-4 **11284**; wave-3 committed **11327**; pre-wave-3 **11346**.)
 - **Clone-marker baseline** (`grep -rho 'validate added clone'` over fresh translation):
   trim 469 · jaligner 121 · jahmm 214 · varscan 890 · fastq 38 · bjaaprop 421 · vcf 379
   · bjalign 404 · bioformats 982 · jhlabs 966 · jsoup 1611 · jts 4409  (**= 10904**).
