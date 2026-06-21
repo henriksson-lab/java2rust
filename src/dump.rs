@@ -1641,31 +1641,64 @@ impl<'a> RustDumpVisitor<'a> {
             .is_some_and(|s| self.struct_impls_trait(&s, trait_simple))
     }
 
+    /// Resolve a type *node* to a `Type` through the full `TypeResolver` (so it
+    /// consults the Tier-2 `coll_elem` map — what `self.ty` does for expressions).
+    fn type_of_type_node(&self, typ: NodeId) -> crate::types::Type {
+        crate::types::TypeResolver::with_coll_elem(
+            self.arena,
+            &*self.id,
+            self.link,
+            self.current_class_fqn.clone(),
+            Some(self.collection_elem_map()),
+        )
+        .type_of_node(typ)
+    }
+
+    /// B4: the single `Type -> Rust-type-string` renderer. Collections render with
+    /// their element (`Vec<T>`/`HashMap<K,V>`/…); a `Named` resolves through
+    /// `stub_type_name` (generic args dropped, mirroring the prior `rust_type_of`
+    /// and `visit_class_type`'s arg-drop for non-generic Rust types); `Unknown`
+    /// renders as the stub placeholder so a nesting type stays valid.
+    fn ty_to_rust_string(&self, t: &crate::types::Type) -> String {
+        use crate::types::{Prim, Type};
+        match t {
+            Type::Prim(p) => match p {
+                Prim::I8 => "i8",
+                Prim::I16 => "i16",
+                Prim::I32 => "i32",
+                Prim::I64 => "i64",
+                Prim::Usize => "usize",
+                Prim::F32 => "f32",
+                Prim::F64 => "f64",
+                Prim::Bool => "bool",
+                Prim::Char => "char",
+            }
+            .to_string(),
+            Type::Str => "String".to_string(),
+            Type::Vec(e) => format!("Vec<{}>", self.ty_to_rust_string(e)),
+            Type::Map(k, v) => format!(
+                "std::collections::HashMap<{}, {}>",
+                self.ty_to_rust_string(k),
+                self.ty_to_rust_string(v)
+            ),
+            Type::Set(e) => format!("std::collections::HashSet<{}>", self.ty_to_rust_string(e)),
+            Type::Opt(e) => format!("Option<{}>", self.ty_to_rust_string(e)),
+            Type::Named { path, .. } => self.stub_type_name(path),
+            Type::TraitObj(s) => format!("Box<dyn {s}>"),
+            Type::Param(s) => s.clone(),
+            Type::Var(_) | Type::Unknown => crate::stubs::UNKNOWN.to_string(),
+        }
+    }
+
     /// The Rust type string for a type node (primitives, mapped/linked class
     /// types, array element type), for stub return-type inference. `None` for
-    /// `void`/unknown.
+    /// `void`/unknown. (A4) Backed by the `TypeResolver` + the `ty_to_rust_string`
+    /// renderer, so a raw collection's stub-return element agrees with the field
+    /// type (it consults `coll_elem`, which the old AST-only shadow did not).
     fn rust_type_of(&self, typ: NodeId) -> Option<String> {
-        match self.arena.kind(typ) {
-            Node::PrimitiveType { kind } => Some(
-                match kind {
-                    PrimitiveKind::Boolean => "bool",
-                    PrimitiveKind::Byte => "i8",
-                    PrimitiveKind::Char => "char",
-                    PrimitiveKind::Double => "f64",
-                    PrimitiveKind::Float => "f32",
-                    PrimitiveKind::Int => "i32",
-                    PrimitiveKind::Long => "i64",
-                    PrimitiveKind::Short => "i16",
-                }
-                .to_string(),
-            ),
-            Node::ClassOrInterfaceType { name, .. } => Some(self.stub_type_name(name)),
-            // Preserve array dimensions: `byte[]` -> `Vec<i8>`, not `i8`.
-            Node::ReferenceType { typ, array_count } => {
-                let inner = self.rust_type_of(*typ)?;
-                Some((0..*array_count).fold(inner, |t, _| format!("Vec<{t}>")))
-            }
-            _ => None,
+        match self.type_of_type_node(typ) {
+            crate::types::Type::Unknown => None,
+            t => Some(self.ty_to_rust_string(&t)),
         }
     }
 

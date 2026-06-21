@@ -7,6 +7,13 @@ treatment, error vs. net-zero vs. cleanup, and risk. **All code changes must pas
 usual gate: 12 corpora + tests + golden 42/42 + compilecheck 110/110 + 0 warnings,
 zero per-corpus regression.** Baseline at audit time: **10865**.
 
+> **STATUS (2026-06-21): all A/B/C items resolved. Total 10865 → 10856 (−9), zero
+> per-corpus regression, all gates green.** Wins: A4 −3, B6 −4, B3 −2. NO-GO: A1
+> (+68, reverted). Net-zero consolidations kept: A2/A3, B1, B2, B4, B7, C1/C2/C3.
+> Deferred: B5 (approximation net-zero; full form now unblocked by B4's renderer).
+> New direction parked: **in-place idiomatic IO** (`docs/in-place-io-prototype.md`,
+> behind the use-site-borrow frontier). Per-item write-ups inline below.
+
 ## 0. Orientation for a fresh session (read this first)
 
 - **Read before starting:** `SEMANTICS.md` (the type-system model — this plan cites its
@@ -91,11 +98,13 @@ zero per-corpus regression.** Baseline at audit time: **10865**.
    `*.toHexString/valueOf/getProperty→String`, `Collections.empty*/singleton*→Vec/
    HashMap/HashSet`, numeric `compare/sum→i32`. Aids further `.len()`/`.chars()` chaining.
 
-4. **`rust_type_of` → renderer-backed (MED; also a refactor, see B4).** `dump.rs:1638`
-   is a line-for-line shadow of `TypeResolver::type_of_node` but does NOT consult the
-   Tier-2 `coll_elem` map → a raw-collection stub-return type can disagree with the
-   rendered field type (a latent U1 drift). Backing it with `type_of_node` fixes that
-   *and* de-dupes. Blocked only by the missing `Ty→Rust-string` renderer (B4).
+4. **`rust_type_of` → renderer-backed — ✅ DONE (2026-06-21), −3 errors (with B4).**
+   Replaced the AST-only shadow with `type_of_type_node` (full `TypeResolver`, so it
+   consults `coll_elem`) + `ty_to_rust_string` (B4). **Measured: total 10859→10856 (trim
+   −1, vcf −2), ZERO regression**; gates green. The win: a raw collection's stub-return
+   now renders `Vec<Elem>` (was bare `Vec`, an E0107 source) agreeing with the field type,
+   and boxed primitives resolve (`Integer`→`i32`). `Named` still drops generic args via
+   `stub_type_name` (matches the prior behavior + `visit_class_type`'s arg-drop).
 
 ## B. Net-zero generalizations (the "patterns instead of many edits" the user asked for)
 
@@ -171,13 +180,16 @@ family.
    - Optional new placeholder `${N:disp}` (char-vec-aware stringify) would let `append`
      migrate too; lower value.
 
-4. **A single `Ty → Rust-string` renderer (MED, foundational).** None exists — the
-   "Rust-string" derivers (`rust_type_of`, `infer_expr_rust_type`, `infer_call_ret_type`,
-   `java_simple_to_rust_static`) all hand-roll fragments of it. One renderer + backing
-   these by `self.ty()`/`type_of_node` kills the parallel derivations (enables A4) and
-   lets `infer_expr_rust_type` (stub param types) benefit from chain/cast/`new` typing.
-   Caveat: the `recv_type_name` NameExpr/FieldAccess arms must STAY AST-name-based
-   (routing `Named` flips `receiver_is_user_type` — measured regression, P1).
+4. **A single `Ty → Rust-string` renderer — ✅ DONE (2026-06-21), landed with A4.**
+   Added `ty_to_rust_string(&Type) -> String` (`dump.rs`, near `rust_type_of`): the one
+   renderer covering every `Type` variant (collections with elements, `Named` via
+   `stub_type_name`, `Unknown`→placeholder). `rust_type_of` is now backed by it (A4, −3).
+   **Remaining de-dup (optional follow-up):** `infer_expr_rust_type`,
+   `infer_call_ret_type`, `java_simple_to_rust_static` could also route through it (each a
+   separate measured slice; would let `infer_expr_rust_type` benefit from chain/cast/`new`
+   typing, and unblocks the full B5). **P1 caveat still stands:** do NOT route the
+   `recv_type_name` NameExpr/FieldAccess arms through the renderer (a `Named` render there
+   flips `receiver_is_user_type` — measured regression).
 
 5. **Front the `append/charAt/substring → String` name-guess with `self.ty(call)` —
    ⏸ DEFERRED behind B4 (investigated 2026-06-21).** The useful form returns the
