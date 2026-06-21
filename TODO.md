@@ -189,6 +189,54 @@ disambiguates `new`/`new_2`); (ii) path/string args bounded by `ToString` (not
 `Unknown` — all `Display`). See §4.2b for the full recipe + remaining gotchas.
 
 ## 4. Open work — in dependency/priority order
+
+### 4.0 TOP PRIORITIES (postmortem-audit-derived, 2026-06-21 — see `formetoread.md`)
+
+These sit at the very top, **after the multithreading item**. Five parallel audits of
+the documented NO-GOs against `SEMANTICS.md` found most failures were *mis-sequenced*
+(consumer landed before its source-of-truth) or *wrong-representation*, not wrong-idea;
+two cross-cutting roots: `N` (nullability) is not one reconciled fact, and any cross-site
+*contract* needs unification not a per-site guess.
+
+0. **Multithreading (PLACEHOLDER — define this).** Java concurrency strategy
+   (threads / `synchronized` / `java.util.concurrent.atomic.*`). **Gates move #2:**
+   if real thread-safety is wanted, atomics must map to `Arc`/`std::sync::atomic`, NOT
+   `Cell<T>`; if single-threaded translation is accepted (corpora are), `Cell<T>` is
+   correct. *Added as a stub at the user's request — flesh out the actual scope.*
+   **DECISION (user, 2026-06-21): translation fidelity wins — if multithreading support
+   ever gets in the way of proper translation, DROP multithreading.** So when in doubt,
+   prefer the single-threaded representation (e.g. `Cell<T>` for atomics, drop
+   `synchronized`) over contorting the output to preserve thread-safety.
+
+1. **Add a nullability flag to `runtime_method_ret` [HIGHEST LEVERAGE].** Mark
+   `Matcher.group → Opt(Str)` etc.; the resolver wraps the result in `Type::Opt` when
+   flagged. Near-one-line per the regex audit; the *same* mechanism (N⇔source-of-truth)
+   clears **atomics-(i)** and re-enables **A1** — one change unblocks three documented
+   failures. Re-wire the parked `regex.rs` after. Measure jsoup + all-12.
+2. **Atomics → `Cell<T>`** (own-typed, `&self` accessors returning the resolved
+   primitive — fixes the **U1** render/resolver disagreement) instead of the carrier.
+   *Gated by item 0 (multithreading).* Measure trim/jsoup (the +14/+1 regressors).
+3. **Capability-gate the `Map → HashMap` alias** — consult the §8.4 `eq_hash_capable`
+   of the key; alias only when capable, else stub/`BTreeMap` (or derive `Hash` on
+   synthesized enum keys). Fixes EnumMap (+13 jahmm). Measure jahmm.
+4. **Widen the resolver `toString() → Str`** (it always returns String in Java; today
+   only typed so for `Str`/`None` receivers, `types.rs` ~559). Then re-do the B3
+   String-value-ops migration (or get the same effect generally via ANF hoisting).
+   Watch the P1 category-ripple + stub-shape ripple; measure all-12.
+5. **Borrowed-returns — local error-subset only.** NOT the signature flip (CLOSED for
+   clones, §3 below). Coordinate the borrow depth of `return cond?a:b` arms via the
+   `cmp_borrow` machinery, owned-return preserved — harvests the safe part of the −48
+   without caller ripple. Measure.
+6. **Frontier (Tier-2 unification) — don't retry per-site.** B4 stub-param unification
+   (stub sig = an all-sites/U1 contract); PQ/EnumSet raw-generic element inference +
+   §8 shadow-safe `map_type_name`. Genuinely need the §9 frontier.
+
+**Normalization note (user hypothesis, audit-confirmed but bounded):** Java-side
+ANF/canonicalization pre-empts the *source-shape* class (B3/B5 chained-receiver typing,
+IO stacking) but NOT the dominant `N`-cluster / cross-site-contract class. Secondary
+lever; see `SEMANTICS.md §2.1`.
+
+### 4.1 (prior open work)
 1. **Clone-pattern audit (task #40) — IN PROGRESS, the active lever.** A 6-agent
    parallel audit (all 12 corpora) converged on ONE root pattern with the most
    leverage: **a nullable read emitted in a borrow-only use-site should borrow through

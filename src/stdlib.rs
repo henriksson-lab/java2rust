@@ -415,11 +415,16 @@ pub fn runtime_method_overload(java_type: &str, name: &str, arity: usize) -> Opt
 /// [`crate::types::TypeResolver`] records for a `Random`-typed value, NOT the
 /// `JavaRandom` runtime struct), the Java method name, and arity. Lets the
 /// tracker type a chained call whose receiver is a runtime carrier
-/// (`rng.nextInt() ...`, `fmt.format(x).length()`). Conservative: only entries
-/// with a certain, non-nullable Rust result are listed (nullable results like
-/// `BufferedReader.readLine` are omitted until the nullable overlay lands).
+/// (`rng.nextInt() ...`, `fmt.format(x).length()`). A **nullable** runtime return
+/// is expressed directly as an `"Option<T>"` ret string — the resolver's
+/// `parse_rust_type` lowers it to `Type::Opt`, so the §5 overlay sees the truth
+/// (e.g. `BufferedReader.readLine` → `Option<String>`; `Matcher.group` likewise
+/// when the regex runtime is wired). No flag needed: the type string *is* the
+/// overlay carrier. Keep entries conservative — a wrong `ret` is worse than `None`.
 pub fn runtime_method_ret(java_type: &str, name: &str, arity: usize) -> Option<&'static str> {
     Some(match (java_type, name, arity) {
+        // Nullable: `readLine()` returns the next line or null at EOF → `Option`.
+        ("BufferedReader" | "Reader" | "LineNumberReader", "readLine", 0) => "Option<String>",
         ("Random", "nextInt", _) => "i32",
         ("Random", "nextLong", 0) => "i64",
         ("Random", "nextDouble", 0) => "f64",

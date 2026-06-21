@@ -113,9 +113,24 @@ pub struct LinkIndex {
     /// *every* map key on each resolve miss — O(map) per call, which made a
     /// large project (Bio-Formats) pathologically slow. Built once on first use.
     nested_index: std::sync::OnceLock<std::collections::HashMap<String, Vec<String>>>,
+    /// The synthesized-enum routing map (`variant rust_path → (enumKind path,
+    /// variant name, is_root)`), built once from the (project-global) symbol map.
+    /// Lives here, not per-dumper, because it depends only on `LinkIndex` +
+    /// crate-mode and was otherwise recomputed for *every file* — O(roots·types·
+    /// depth) per file, the dominant translate cost on a large multi-file crate
+    /// (jts). The dumper supplies the builder (it needs `crate_relativize`).
+    enum_info: std::sync::OnceLock<std::collections::HashMap<String, (String, String, bool)>>,
 }
 
 impl LinkIndex {
+    /// The shared, lazily-built enum-routing cache (populated by the dumper's
+    /// `enum_info_map` on first access; see the field doc).
+    pub fn enum_info_cache(
+        &self,
+    ) -> &std::sync::OnceLock<std::collections::HashMap<String, (String, String, bool)>> {
+        &self.enum_info
+    }
+
     pub fn is_empty(&self) -> bool {
         self.map.types.is_empty()
     }

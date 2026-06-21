@@ -196,15 +196,18 @@ pub struct RustDumpVisitor<'a> {
     /// Per base name, the overloaded members as (arity, emitted-name), so a
     /// self-call can pick the arity-matching overload.
     overload_by_arity: std::collections::HashMap<String, Vec<(usize, String)>>,
-    /// R4: every hierarchy member's `rust_path` → (its `<Root>Kind` enum path,
-    /// this member's variant name, is-root). Built once; drives slot routing
-    /// (root slots → enum), construction-wrap, cast-extract, and instanceof.
-    slot_enum_cache: std::sync::OnceLock<std::collections::HashMap<String, (String, String, bool)>>,
     /// Tier-2: per-file inferred element `Type` for RAW collection declarations,
     /// keyed by the declaration's type-node id. Built once (lazily) from
     /// `.add`/initializer evidence; shared with the resolver so render and
     /// `type_of` agree on the element.
     collection_elem: std::cell::OnceCell<std::rc::Rc<std::collections::HashMap<NodeId, crate::types::Type>>>,
+    /// Per-unit index `name → all non-assign-target `NameExpr` read nodes`, built
+    /// once. Lets `is_movable_last_use`/`foreach_iterable_movable_local` count a
+    /// name's reads by scanning only *that name's* occurrences (k ≪ n) instead of
+    /// the whole arena per call — turning an O(reads·nodes) (O(n²)) hot path into
+    /// O(n) build + O(k·depth) query. Same `is_descendant_of` filter ⇒ identical
+    /// output.
+    name_reads: std::cell::OnceCell<std::rc::Rc<std::collections::HashMap<String, Vec<NodeId>>>>,
 }
 
 impl<'a> RustDumpVisitor<'a> {
@@ -254,7 +257,7 @@ impl<'a> RustDumpVisitor<'a> {
             overload_name: std::collections::HashMap::new(),
             overload_by_arity: std::collections::HashMap::new(),
             collection_elem: std::cell::OnceCell::new(),
-            slot_enum_cache: std::sync::OnceLock::new(),
+            name_reads: std::cell::OnceCell::new(),
         }
     }
 
@@ -922,7 +925,9 @@ impl<'a> RustDumpVisitor<'a> {
     /// every member of every synthesizable hierarchy. Drives slot routing,
     /// construction-wrap, cast-extract, and instanceof.
     fn enum_info_map(&self) -> &std::collections::HashMap<String, (String, String, bool)> {
-        self.slot_enum_cache.get_or_init(|| {
+        // Shared across all file-dumpers via `LinkIndex` (built once per project),
+        // not per-dumper — this map depends only on the symbol map + crate-mode.
+        self.link.enum_info_cache().get_or_init(|| {
             let mut m = std::collections::HashMap::new();
             if self.link.is_empty() {
                 return m;
@@ -2231,19 +2236,7 @@ impl<'a> RustDumpVisitor<'a> {
             return false;
         }
         // (b) exactly one textual read of `name` in the method.
-        let mut reads = 0usize;
-        for i in 0..self.arena.node_count() {
-            let n = NodeId(i as u32);
-            if let Node::NameExpr { name: nm } = self.arena.kind(n) {
-                if *nm == name && self.is_descendant_of(n, method) && !self.is_assign_target(n) {
-                    reads += 1;
-                    if reads > 1 {
-                        return false;
-                    }
-                }
-            }
-        }
-        reads == 1
+        self.name_read_once_in(&name, method)
     }
 
     /// A foreach iterable that is a movable last-use LOCAL — an owned local read
@@ -2283,19 +2276,7 @@ impl<'a> RustDumpVisitor<'a> {
             return false;
         }
         // Exactly one textual read of `name` in the method (this foreach use).
-        let mut reads = 0usize;
-        for i in 0..self.arena.node_count() {
-            let n = NodeId(i as u32);
-            if let Node::NameExpr { name: nm } = self.arena.kind(n) {
-                if *nm == name && self.is_descendant_of(n, method) && !self.is_assign_target(n) {
-                    reads += 1;
-                    if reads > 1 {
-                        return false;
-                    }
-                }
-            }
-        }
-        reads == 1
+        self.name_read_once_in(&name, method)
     }
 
     /// The enclosing method/constructor declaration node, if any.
@@ -6131,6 +6112,45 @@ impl<'a> RustDumpVisitor<'a> {
     /// resolver this dumper creates, so a raw `List` field and its uses agree.
     fn collection_elem_map(&self) -> std::rc::Rc<std::collections::HashMap<NodeId, crate::types::Type>> {
         self.collection_elem.get_or_init(|| std::rc::Rc::new(self.infer_collection_elems())).clone()
+    }
+
+    /// The per-unit `name → non-assign-target read nodes` index (built once).
+    fn name_reads(&self) -> std::rc::Rc<std::collections::HashMap<String, Vec<NodeId>>> {
+        self.name_reads
+            .get_or_init(|| {
+                let mut m: std::collections::HashMap<String, Vec<NodeId>> = std::collections::HashMap::new();
+                for i in 0..self.arena.node_count() {
+                    let n = NodeId(i as u32);
+                    if let Node::NameExpr { name } = self.arena.kind(n) {
+                        if !self.is_assign_target(n) {
+                            m.entry(name.clone()).or_default().push(n);
+                        }
+                    }
+                }
+                std::rc::Rc::new(m)
+            })
+            .clone()
+    }
+
+    /// Whether `name` has exactly one non-assign-target read within `method`'s
+    /// subtree — via the precomputed index (scans only that name's occurrences),
+    /// short-circuiting at the 2nd match. Same `is_descendant_of` semantics as the
+    /// old per-call full-arena scan; the callers only ever test "== 1".
+    fn name_read_once_in(&self, name: &str, method: NodeId) -> bool {
+        let reads_map = self.name_reads();
+        let Some(nodes) = reads_map.get(name) else {
+            return false;
+        };
+        let mut reads = 0usize;
+        for &n in nodes {
+            if self.is_descendant_of(n, method) {
+                reads += 1;
+                if reads > 1 {
+                    return false;
+                }
+            }
+        }
+        reads == 1
     }
 
     /// Tier-2 Phase 1 inference: for each RAW arity-1 collection declaration in
