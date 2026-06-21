@@ -31,10 +31,22 @@ landing small, **measured** changes.
   `this.`-FieldAccessExpr arms. This root-cause fix feeds `self.ty` everywhere (dispatch,
   coercion, the null-fold now catches `this.field`), hence the broad win. Validated: golden
   42/42, compilecheck 110/110, tests 0-fail, 0 warnings; jts/jsoup crates built fully.
-  NEXT: the spurious **`.unwrap()` on concrete fields** (E0599) should now be largely
-  addressable with `self.ty` (which resolves `this.field`) — fold/omit the nullable-read unwrap
-  (dump.rs sites 2694, 3169, 3221, 3292/3297/3299, 5029/5031) when the value type is concrete
-  non-Option. Re-mine the E0599 histogram to confirm what's left.
+  **`.unwrap()`-on-concrete cluster — NO-GO via `self.ty` (measured +2503, reverted).** Gating
+  the nullable-read unwrap on `self.ty(id)` being concrete is FUNDAMENTALLY WRONG: `self.ty`
+  returns the BASE type (e.g. `Str`) for a nullable LOCAL/PARAM too, even though it's emitted
+  `Option<String>` — so "concrete" ≠ "not an Option", and the gate broke every nullable local/
+  param read. The only reliable "is this emitted as `Option`?" signal is the dumper's `nullable`
+  flag (`self.nullable` for locals, `FieldSym.nullable` for fields) — already used. The residual
+  failures (`unwrap`/`is_some` on concrete `String`/`Vec`/`Attributes`, ~32) are the SPECIFIC
+  cases where the read's nullable flag is TRUE but emission is concrete; fixing them needs the
+  nullability analysis itself made consistent (a field/value flagged nullable must be emitted
+  `Option<T>`, OR removed from the nullable set when emitted concrete) — NOT a `self.ty` gate.
+  NOTE: the committed null-fold uses `self.ty`-concrete safely only because null-comparisons on
+  nullable locals are rare AND `this.field` resolves nullable fields to `Opt` via
+  `resolve_self_field_type`; do not generalize that pattern to unwrap.
+  Other tractable levers from the E0599 histogram: `entry_set` on HashMap (18 — but Map.Entry→
+  tuple was a prior NO-GO), `to_array` on Vec (9), collection `size`/`add` on user collection
+  types. The big standalone cluster remains raw-collection **E0107** (~1000 jts).
   Two cheap experiments this session were NO-GO (kept guarded/parked): atomics mapping, and
   re-enabling chained-receiver stub recording (jts +9).
 - **UNCOMMITTED on tree (type-frontier Phases 1+2+3a+3b): errors 11284→11114 (−170!), ZERO
