@@ -1683,8 +1683,8 @@ impl<'a> RustDumpVisitor<'a> {
                 // Preserve prior behavior for a chained method-call receiver:
                 // before return-type tracking, `callee_recv_type` returned `None`
                 // here (→ no stub). Recording a stub against the newly-resolved
-                // receiver type can change stub shapes and regress previously-
-                // compiling stub calls, so keep stub recording off this path.
+                // receiver type changes stub shapes and regresses (jts +9, vs
+                // fastq/jsoup −3 — measured NO-GO), so keep stub recording off it.
                 if matches!(self.arena.kind(s), Node::MethodCallExpr { .. }) {
                     return;
                 }
@@ -4616,6 +4616,23 @@ impl<'a> RustDumpVisitor<'a> {
             let r_null = matches!(self.arena.kind(right), Node::NullLiteralExpr);
             if l_null ^ r_null {
                 let other = if l_null { right } else { left };
+                // If the non-null operand has a KNOWN concrete (non-`Option`,
+                // non-`Unknown`) Rust type, it can never be null — fold to a
+                // constant rather than emitting `.is_some()`/`.is_none()` on a
+                // non-`Option` type (E0599). Genuinely nullable values resolve to
+                // `Option` (or `Unknown`) and keep the Option check. Mirrors the
+                // `getClass()`-idiom constant fold below.
+                let ty = self.ty(other);
+                let never_null = !matches!(
+                    ty,
+                    crate::types::Type::Opt(_) | crate::types::Type::Unknown
+                );
+                if never_null {
+                    self.print_java_comment(id, arg);
+                    self.printer
+                        .print(if matches!(op, BinaryOp::Equals) { "false" } else { "true" });
+                    return;
+                }
                 self.print_java_comment(id, arg);
                 let saved = self.expect_option;
                 self.expect_option = true;

@@ -458,15 +458,24 @@ impl<'a> TypeResolver<'a> {
             Node::NameExpr { name } => self
                 .decl_type_node(name, expr)
                 .map(|t| self.type_of_node(t))
+                // Not a local/param: a bare reference to a field of the current
+                // class (or an inherited one) — resolve via the symbol map.
+                .or_else(|| self.resolve_self_field_type(name))
                 .unwrap_or(Type::Unknown),
             Node::FieldAccessExpr { scope, field, .. } => self
                 .decl_type_node(field, expr)
                 .map(|t| self.type_of_node(t))
                 // A cross-class static field (`Other.field`): the symbol map
                 // stores its Java simple type in `FieldSym::rust_type`.
-                .unwrap_or_else(|| {
-                    self.static_field_type(*scope, field).unwrap_or(Type::Unknown)
-                }),
+                .or_else(|| self.static_field_type(*scope, field))
+                // `this.field` / `self.field`: resolve the member against the
+                // current class's fields (decl_type_node misses member components).
+                .or_else(|| {
+                    matches!(self.arena.kind(*scope), Node::ThisExpr { .. })
+                        .then(|| self.resolve_self_field_type(field))
+                        .flatten()
+                })
+                .unwrap_or(Type::Unknown),
             _ => Type::Unknown,
         }
     }
@@ -608,6 +617,34 @@ impl<'a> TypeResolver<'a> {
         while let Some(ty) = t {
             if let Some(ret) = lookup_method_ret(ty, name, arity) {
                 return Some(ret);
+            }
+            match ty.parent.as_deref() {
+                Some(p) if !seen.contains(&p) => {
+                    seen.push(p);
+                    t = self.link.lookup(p);
+                }
+                _ => break,
+            }
+        }
+        None
+    }
+
+    /// The type of a `this.field` / bare-`field` member of the current class,
+    /// resolved against the symbol map (walking the parent chain). `decl_type_node`
+    /// only resolves free lexical names (locals/params), not a member component of
+    /// a `this.field` access nor an inherited field, so those return `Unknown`
+    /// without this. A `nullable` field yields `Option<T>` so a null-comparison
+    /// keeps its `is_some`/`is_none` check rather than folding to a constant.
+    fn resolve_self_field_type(&self, field: &str) -> Option<Type> {
+        let mut t = self.link.lookup(self.current_class.as_deref()?);
+        let mut seen: Vec<&str> = Vec::new();
+        while let Some(ty) = t {
+            if let Some(f) = ty.fields.get(field).or_else(|| ty.static_fields.get(field)) {
+                if f.rust_type.is_empty() {
+                    return None;
+                }
+                let base = parse_java_type(&f.rust_type);
+                return Some(if f.nullable { Type::Opt(Box::new(base)) } else { base });
             }
             match ty.parent.as_deref() {
                 Some(p) if !seen.contains(&p) => {

@@ -18,6 +18,25 @@ landing small, **measured** changes.
   `no-commit-prompts` (**the user commits; never offer to commit**).
 
 ## 1. Current state
+- **UNCOMMITTED on tree (2 increments on top of committed `014edf0`): errors 11114→10865
+  (−249), ZERO per-corpus regression.** Both from the nullable/type-resolution frontier:
+  • **null-comparison fold (−98):** Java `x != null`/`x == null` always lowered to
+  `.is_some()`/`.is_none()` → E0599 when `x` resolves concrete (non-`Option`). Fold to a
+  constant when `self.ty(x)` is concrete non-Option/non-Unknown (dump.rs ~4617).
+  • **`this.field` type resolution (−151; jts −67, jsoup −58, jhlabs −24):** `TypeResolver`
+  returned `Unknown` for `this.field`/inherited/bare-field member reads (`decl_type_node` only
+  resolves free lexical names). Added `resolve_self_field_type` (types.rs — walks current_class
+  + parents in the symbol map; returns `Option<T>` when `FieldSym.nullable` so a nullable field
+  keeps its null-check, concrete otherwise) and wired it into `compute_type_of`'s NameExpr +
+  `this.`-FieldAccessExpr arms. This root-cause fix feeds `self.ty` everywhere (dispatch,
+  coercion, the null-fold now catches `this.field`), hence the broad win. Validated: golden
+  42/42, compilecheck 110/110, tests 0-fail, 0 warnings; jts/jsoup crates built fully.
+  NEXT: the spurious **`.unwrap()` on concrete fields** (E0599) should now be largely
+  addressable with `self.ty` (which resolves `this.field`) — fold/omit the nullable-read unwrap
+  (dump.rs sites 2694, 3169, 3221, 3292/3297/3299, 5029/5031) when the value type is concrete
+  non-Option. Re-mine the E0599 histogram to confirm what's left.
+  Two cheap experiments this session were NO-GO (kept guarded/parked): atomics mapping, and
+  re-enabling chained-receiver stub recording (jts +9).
 - **UNCOMMITTED on tree (type-frontier Phases 1+2+3a+3b): errors 11284→11114 (−170!), ZERO
   per-corpus regression** (jts −104, jsoup −35, jhlabs −11, trim −9, vcf −5, jaligner −3,
   bjalign −2, jahmm −1). Method-call RETURN-TYPE tracking. The rich `TypeResolver`
@@ -90,10 +109,10 @@ landing small, **measured** changes.
   blocker: atomic FIELDS emit concrete (`pub x: JavaAtomicBoolean`) yet read-flagged nullable
   → spurious `.clone().unwrap()` on the concrete type (trim +14); needs the translator
   nullable-inference fix OR a no-op `unwrap(self)->Self` on the atomic types, then map.
-- **12-corpus error baseline** (current working tree w/ type-frontier 1+2+3a+3b; `tools/<name>_check.sh`):
-  trim 169 · jaligner 50 · jahmm 392 · varscan 53 · fastq 53 · bjaaprop 97 · vcf 427
-  · bjalign 590 · bioformats 15 · jhlabs 1313 · jsoup 2517 · jts 5438  (**= 11114**).
-  (pre-frontier wave-4 **11284**; wave-3 committed **11327**; pre-wave-3 **11346**.)
+- **12-corpus error baseline** (working tree w/ null-fold + this.field resolution; `tools/<name>_check.sh`):
+  trim 169 · jaligner 48 · jahmm 390 · varscan 53 · fastq 49 · bjaaprop 91 · vcf 422
+  · bjalign 552 · bioformats 15 · jhlabs 1283 · jsoup 2440 · jts 5353  (**= 10865**).
+  (committed type-frontier **11114**; pre-frontier wave-4 **11284**; wave-3 **11327**; pre-wave-3 **11346**.)
 - **Clone-marker baseline** (`grep -rho 'validate added clone'` over fresh translation):
   trim 469 · jaligner 121 · jahmm 214 · varscan 890 · fastq 38 · bjaaprop 421 · vcf 379
   · bjalign 404 · bioformats 982 · jhlabs 966 · jsoup 1611 · jts 4409  (**= 10904**).
