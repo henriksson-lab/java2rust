@@ -142,13 +142,45 @@ e.m(args): method_call_type(recv, m, args)   (below)
 String-returning String methods, boxed-number unboxing, `Math` float fns…);
 (2) a **project/linked** method's recorded return type when the receiver is
 `Named` (via the symbol map, walking the `parent` chain — §8); (3) a self/inherited
-call. Else `Unknown`.
+call; (4) **a stdlib/runtime-type return table** `[have]` — the `ret` column on
+`stdlib::StdRule` plus `stdlib::runtime_method_ret(java_type, name, arity)` (keyed
+on the *Java* type name, e.g. `Random.nextInt→i32`, `Matcher.group→String`), so a
+chained call on a runtime carrier types its result. Else `Unknown`. The receiver is
+typed **recursively** (`type_of(scope)`), so the resolver already handles arbitrary
+chains `a.foo().bar()` — the only thing it lacked was the return facts above.
+
+**Pattern P1 — one resolver, consulted not re-derived `[have, the −170 lever]`.**
+There are effectively *two* type systems: the rich recursive `TypeResolver` (this
+section) and the *shallow* dispatch helpers in `dump.rs` (`recv_type_name`,
+`callee_recv_type`) used to key the bespoke method handlers and linked-callee
+resolution. The shallow helpers historically only resolved `NameExpr`/`FieldAccess`/
+`new` receivers — **not a method-call receiver** — so dispatch/rewrites silently
+failed on chains. The fix was *not* a third inference path but to **route the shallow
+helpers through `TypeResolver`** for the cases they couldn't handle (a `MethodCallExpr`
+receiver → `self.ty(recv)` → simple name). Before adding new type machinery, check
+whether the rich resolver simply isn't being *consulted* at a dispatch site. Caveat:
+routing a `Named` (user-type) result flips `receiver_is_user_type` and changes
+dispatch — measured a regression — so the shallow `recv_type_name` fallback is
+**String-only** (the high-value, low-risk case); the linked-callee path
+(`callee_recv_type`) may use the full `Named` result because it only resolves a
+signature, it doesn't gate the stdlib/user rewrite split.
 
 **Overload resolution [have].** A scoped call resolves to the receiver type's
 method keyed `name#arity`; when several overloads share an arity, pick by
 *argument-type score* over the candidates (collection-vs-scalar shape must match),
 unique best wins, ties fall back to the base overload. *(Resolving by base overload
 unconditionally was a bug — it mis-targeted every shared-arity overload.)*
+
+**Member-field resolution `[have]`.** `name x : Γ(x)` covers locals/params (via
+`type_tracker`'s lexical resolution). A reference to a **field** — bare `field`,
+`this.field`, or an *inherited* field — is NOT a free lexical name, so the lexical
+path returns `None`; it is resolved instead against the symbol map by walking the
+current class + `parent` chain (`resolve_self_field_type`). This was a silent
+`Unknown` gap; closing it (typing `this.field` correctly) was a large win (−151)
+because `type_of` feeds dispatch, coercion, and the null overlay everywhere. The
+field's recorded nullability (`FieldSym.nullable`) is honoured here: a nullable
+field resolves to `Opt(T)` so the §5 overlays see the truth (do NOT return the bare
+`T` for a nullable field — it would mis-fold null-comparisons, §5).
 
 The `Ty` query methods (`numeric_rust`, `category`, `is_char`, `elem`,
 `map_value`, …) are how codegen consults a resolved type; they are the single
@@ -165,7 +197,8 @@ declarations (fields, locals, params, returns, array elements). Lowering:
 slot of underlying ⟦T⟧ with N=nullable     ⟼  Option<⟦T⟧>
 value v into a nullable slot                ⟼  Some(v) / None        (emit_into_option)
 read of a nullable value in a plain pos.    ⟼  v.clone().unwrap()
-x == null / x != null                       ⟼  x.is_none() / x.is_some()
+x == null / x != null  (x : Option)         ⟼  x.is_none() / x.is_some()
+x == null / x != null  (x : concrete)       ⟼  false / true          (fold — see N2)
 ```
 
 **Invariant N1 (all-sites).** Wrapping and unwrapping are dual and must be applied
@@ -174,6 +207,29 @@ write without unwrapping the read, or vice versa) *adds* `E0308`. Field nullabil
 is resolved against the class's own field set (`this.field`), **shadow-safe** (a
 same-named param must not be consulted). Inherited-field and inherited-getter
 nullability resolve via the symbol-map `parent` chain.
+
+**Null-comparison fold (N2) `[have]`.** A `==`/`!=`-against-`null` whose other
+operand resolves (`type_of`) to a *concrete* (non-`Option`, non-`Unknown`) `Ty`
+can never be null → fold to `true`/`false` rather than emit `.is_some()`/`.is_none()`
+on a non-`Option` (E0599). Found by mining the E0599 histogram; −98. Safe because a
+genuinely-nullable operand resolves to `Opt` (or `Unknown`) and keeps the check —
+*provided* member fields resolve their nullability into `Opt` (§4 member-field rule).
+
+**Caveat N3 — `Ty` is the underlying type; it does NOT carry the `N` overlay.**
+`type_of` returns the *base* `Ty` (e.g. `Str`), the same for a nullable local
+`String x` (emitted `Option<String>`) and a non-null one. Therefore `type_of`-
+concreteness is a sound discriminator **only where a wrong fold is still type-correct**
+(N2: folding a comparison to a bool is always well-typed). It is **NOT** sound for
+deciding whether to emit the nullable-read `.unwrap()` / `.as_ref().unwrap()`: that
+fires on *every* nullable read incl. locals/params, where `Ty`-concrete does not mean
+"not `Option`-wrapped" — gating the unwrap on `type_of`-concrete dropped unwraps on
+real `Option` locals and **regressed +2503** (measured NO-GO). The only sound signal
+for "is this emitted as `Option`?" is the `N` flag itself (`self.nullable` for
+locals, `FieldSym.nullable` for fields). The residual `unwrap`/`is_some`-on-concrete
+failures (~32) are exactly the sites where `N`-says-nullable but emission is concrete;
+the fix is to make `N` and emission **consistent at the source** (N1) — a flagged-
+nullable value must be emitted `Option<T>`, or removed from `N` when emitted concrete
+— never a `type_of` gate at the read.
 
 ---
 
@@ -457,6 +513,15 @@ co-occur at a slot must compose at that slot.
   this project hit was a violation of this.*
 - **U1 — render/resolver agreement.** Whatever type a slot renders as, `type_of`
   of its uses must agree. Achieved by a shared map, never by two independent guesses.
+- **N3 — overlays are not in `Ty`.** `type_of` returns the *underlying* type; it does
+  not encode the nullability (`Option`) or ownership (`&`) overlay. A rewrite may use
+  `type_of`-shape to gate a decision *only* when being wrong is still well-typed
+  (e.g. folding a null-comparison to a bool); it must NOT use it to decide whether a
+  value is `Option`-wrapped (use the `N` flag) or borrowed. Violating this regresses
+  hard (the unwrap-via-`type_of` +2503).
+- **P1 — consult the resolver, don't re-derive.** A dispatch/codegen site that needs
+  an expression's type should route through `TypeResolver`, not a shallow per-node
+  derivation. Two parallel type derivations drift (§4 P1).
 - **Acyclicity** (§8.2) and **cycle-guarded walks** are mandatory.
 - **No structural rewrites for borrowing** (§6).
 
@@ -482,6 +547,11 @@ order:
    `Map<_,Object>`; `Box<dyn Any>` fallback.
 6. **Generic trait objects** `[gap]` — `Box<dyn Tr<S,C>>` object-safety/arity, the
    one area both R2 and R4 defer.
+7. **Nullability `N`/emission consistency (§5 N3)** `[gap]` — reconcile the `N`
+   fixpoint with what field/local emission actually produces, so a flagged-nullable
+   value is always emitted `Option<T>` (or dropped from `N` when emitted concrete).
+   Closes the residual `unwrap`/`is_some`-on-concrete cluster (~32) at its source —
+   no per-read `type_of` gate (which is unsound, N3). Tractable, high-leverage next.
 
 The model also explains the *non*-goals: we never infer borrows, never reject
 programs, and never replace `Unknown` with something less capable. The single
