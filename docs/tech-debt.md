@@ -36,7 +36,22 @@ zero per-corpus regression.** Baseline at audit time: **10865**.
 
 ## A. Error-reducing (do first — these cut errors)
 
-1. **Null-fold gate: `self.ty` → `expr_nullable` (HIGH, low risk).**
+1. **Null-fold gate: `self.ty` → `expr_nullable` — ❌ NO-GO (measured 2026-06-21).**
+   Implemented exactly as prescribed and measured all 12 corpora: **REGRESSES, total
+   +68** (jaligner +1, jahmm +1, jhlabs +6, jsoup +49, jts +11; others flat). Reverted
+   (NO-GO comment left at `dump.rs:4619`). Root cause: the *only* behavior change is the
+   cell `(self.ty concrete ∧ expr_nullable)` flipping a compiling constant-fold into
+   `.is_some()/.is_none()`. For the many locals/params whose `nullable` flag is TRUE yet
+   whose emission is **concrete** (the ~32 is_some/unwrap-on-concrete inconsistency — e.g.
+   `is_none()` on a concrete `FormatFactory` in jaligner) that produces E0599. There is
+   **no error-reducing cell**: the fold→Option-check change is purely *semantic* (it fixes
+   a wrongly-folded null comparison, which already compiled), so by construction it can
+   only keep-flat or regress under the error gate. A1 cannot land until the nullability
+   analysis is made consistent (nullable-flagged ⇒ emitted `Option<T>`, the TODO.md §1 /
+   tier-2 frontier). The original prescription's "should *gain*" hypothesis is falsified.
+
+   *(original prescription, kept for the frontier follow-up:)*
+   **Null-fold gate: `self.ty` → `expr_nullable` (HIGH, low risk).**
    `dump.rs:4625-4629` gates the `x ==/!= null` fold on `self.ty(other)==Opt`, but
    `self.ty` carries the `N` overlay for *fields only* (via `resolve_self_field_type`),
    NEVER for locals/params (N3). So a nullable local/param resolves concrete and folds
@@ -48,7 +63,22 @@ zero per-corpus regression.** Baseline at audit time: **10865**.
    §12-item-7 prescription ("the only sound signal is `N`"). Sound because slot
    emitters gate on the same `N`. Re-mine E0599 after.
 
-2. **Add a `ret` column to `static_rule` (MED).** `static_rule` entries are all
+2. **Add a `ret` column to `static_rule` — ✅ DONE / net-zero (2026-06-21).**
+   Implemented: backfilled certain-type `ret` on the static entries (A3) and wired
+   `method_call_type` (`types.rs` ~607) to consult `static_rule(cls,name,arity).ret` for
+   class-name (`NameExpr`) receivers. **Measured all 12 corpora: every corpus identical
+   to baseline (10865 = 10865), zero regression.** Tests/golden/compilecheck green, 0
+   warnings. The wiring *fires and is correct* — verified on a synthetic:
+   `Collections.singletonList(x).size()` types, and `NumberFormat.getInstance().format(d)
+   .trim()` now resolves `.format()`→String→`.trim()` precisely (the intended chain win).
+   It nets **zero error reduction** here only because these static-factory chains are
+   rare / already-compiling in the corpus set — the doc's "cuts errors" expectation didn't
+   materialize. **Kept as net-zero infrastructure**: it's foundational for B3 (string-ops
+   table migration consults `ret`) and B5 (front name-guess with `self.ty`), and improves
+   resolver precision generally. Carve-out left to stubs: multi-arg `Arrays.asList(a,b,c)`.
+
+   *(original prescription:)*
+   **Add a `ret` column to `static_rule` (MED).** `static_rule` entries are all
    `ret:None`; `TypeResolver` can't type a chained static factory result, so
    `Collections.singletonList(x).get(0)`, `Arrays.asList(a).size()`,
    `NumberFormat.getInstance().format(x)` type as `Unknown` at the chain. Add `ret`
@@ -86,16 +116,44 @@ family.
    in the dispatcher; relocate behind a `stdlib` fn. Mechanical, net-zero.
 
 3. **Bespoke → `StdRule` table migrations (HIGH net-zero, biggest is free today).**
-   - **String search family** (`startsWith`/`endsWith`/`indexOf(1)`/`lastIndexOf(1)`/
+   - **String search family — ✅ DONE (2026-06-21), −2 errors (better than net-zero!).**
+     `startsWith`/`endsWith`/`indexOf(1)`/`lastIndexOf(1)`/`split(1|2)` migrated to
+     `instance_rule("String", …)` with `${0:str}` (byte-identical to the old
+     `emit_string_pattern`) + `ret` (`bool`/`i32`/`Vec`). Removed the 5 bespoke arms and
+     the now-dead `emit_str_arg`. **Measured: total 10865→10863 (fastq −1, jsoup −1), ZERO
+     regression**; tests/golden 42/42/compilecheck 110/110/0 warnings green; added the
+     `string_search_family_routes_by_category` coverage test. The win is the `ret` the
+     bespoke arms lacked (now `s.indexOf(x)` types `i32`, fixing 2 downstream chains). The
+     category gate (`recv_category=="String"`) preserves the `("List","indexOf",1)`
+     element-search disambiguation. NOTE the bespoke arms had a *broader* gate (no
+     category check → also fired for `Object.toString().startsWith(..)` Unknown receivers,
+     coercing the arg); that gap exists post-migration (such a call now emits an uncoerced
+     arg) but does NOT occur breakingly in the 12 corpora — net win stands. The 2-arg
+     `indexOf`/`lastIndexOf` keep their bespoke offset logic.
+
+     *(original prescription:)*
+     **String search family** (`startsWith`/`endsWith`/`indexOf(1)`/`lastIndexOf(1)`/
      `split(1|2)`, `dump.rs:5723-5796`) → `instance_rule("String", …)` using the EXISTING
      `${0:str}` placeholder; category-keyed disambiguation vs the `("List","indexOf",1)`
      complement already exists. No new machinery — the largest available net-zero migration.
    - **Optional/stream zero-branch arms** (`orElse`/`orElseGet`/`reduce`/`findFirst`/
      `findAny`/`mapTo*`/`toArray`/`stream`/`count`/`sum`) → table (pure templates).
-   - **String value ops** (`trim`/`toCharArray`/`substring`/`charAt`/`equalsIgnoreCase`),
-     **Map ops** (`containsKey`/`keySet`) → table with `ret`.
-   - **`Optional.of/ofNullable/empty`, `IntStream.range/rangeClosed`** → `static_rule`,
-     eliminating `try_emit_optional_static`/`try_emit_int_range` entirely.
+   - **String value ops** (`trim`/`toCharArray`/`substring`/`charAt`/`equalsIgnoreCase`) →
+     ❌ **NO-GO (measured 2026-06-21, +7: bjaaprop +3, vcf +1, jsoup +3; reverted).** Their
+     default emission is a NON-existent method (`.substring`/`.char_at`/`.equals_ignore_case`)
+     so the bespoke arms' broader no-category gate (which catches Unknown receivers like
+     `x.toString().substring(1)`) can't be narrowed to `recv_category=="String"` without
+     E0599 on those sites. Blocked on the resolver typing such chain receivers as `String`.
+     **Map ops** (`containsKey`/`keySet`) → table with `ret` (not yet attempted).
+   - **`Optional.of/ofNullable/empty`, `IntStream.range/rangeClosed`** → `static_rule` —
+     ✅ **DONE (2026-06-21), net-zero.** Added 4 `static_rule` entries (`ret:None` — the
+     `Some/None`/`Range` results aren't simple named types) and DELETED
+     `try_emit_optional_static` + `try_emit_int_range` (~44 lines) and their two call
+     sites; `try_emit_stdlib`'s static path now handles them (verified nothing between the
+     old call sites and it matches a static `Optional`/`IntStream` receiver). **All 12
+     corpora flat (10863), zero regression**; gates green; added the
+     `optional_and_stream_static_factories` coverage test. Lowest-risk migration because
+     it's class-name-keyed, not Unknown-receiver-gated (the slice-2 failure mode).
    Gate: assert each migrated arm's receiver gate == the `recv_category` key (String:
    `Type::Str ⇔ category String`); extend the table coverage test. Arms that branch on a
    node (`collect`/`filter`/`append`/`add`/`get`/`put`) stay bespoke — justified.
@@ -127,6 +185,23 @@ family.
    expand byte-identically (measure generated output).
 
 ## C. Dead-code cleanup
+
+**✅ C1+C2+C3 all DONE (2026-06-21), net-zero.** All 12 corpora identical to baseline
+(10865 = 10865, zero regression); tests/golden 42/42/compilecheck 110/110/0 warnings green.
+- **C1:** dropped `include_str!("runtime/atomic.rs")` from the `JAVA_RUNTIME` concat
+  (`crate_layout.rs`); kept the `include!` in `java_runtime_compiles` (still compile-checked,
+  verified by `cargo test`). Comments updated there + at `dump.rs` map_type_name.
+- **C2:** added `strip_cfg_test_mods()` (`crate_layout.rs`), applied at `java_runtime.rs`
+  write time — strips the 8 per-fragment `#[cfg(test)] mod tests{…}` (brace-balanced) from
+  the shipped text. Verified on a generated crate: 0 `cfg(test)` / 0 `mod tests`, braces
+  balanced, runtime compiles. Fragments keep their tests for `java_runtime_compiles`.
+- **C3:** removed the dead `StdRule.mutates` field (set by `r`/`rm`/`rr`, read nowhere; the
+  operational `&mut` signal is `id_tracker::is_mutating_method`). Kept `rm` as a
+  self-documenting alias for mutating table entries. `name_mutates` + its subset coverage
+  test retained (the `name_mutates` vs rm-entries drift on putAll/removeAll/retainAll is a
+  separate, behavioral concern — left untouched; `name_mutates` is test-only).
+
+*(original prescriptions:)*
 
 1. **`atomic.rs` is shipped-but-unreachable (~7.4 KB/crate).** Nothing maps it
    (`map_type_name` has only the parked comment). **Keep it in the `java_runtime_compiles`

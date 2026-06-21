@@ -2,9 +2,9 @@
 //!
 //! These assert the *shape* of the emitted Rust for representative table
 //! entries; `tools/compilecheck.sh` additionally compiles a snippet per entry
-//! with `rustc`. The final test cross-checks that the table's `mutates` flag
-//! never drifts from the borrow analyzer's mutation list — the two together are
-//! the single source of truth for `&mut` inference on stdlib calls.
+//! with `rustc`. The final test cross-checks that `name_mutates` never drifts
+//! from the borrow analyzer's mutation list (`is_mutating_method`) — together the
+//! single source of truth for `&mut` inference on stdlib calls.
 
 use java2rust_rs::convert;
 
@@ -48,6 +48,26 @@ fn string_gap_methods() {
 }
 
 #[test]
+fn string_search_family_routes_by_category() {
+    // Migrated from bespoke arms to `instance_rule("String", …)`; the arg is
+    // coerced to `&str` via `${0:str}` (`&(..)[..]`), or stays a `char`.
+    let out = body("class A { boolean f(String s) { return s.startsWith(\">\"); } }");
+    assert!(out.contains(".starts_with(&(\">\".to_string())[..])"), "startsWith:\n{out}");
+    let out = body("class A { boolean f(String s) { return s.endsWith(\"x\"); } }");
+    assert!(out.contains(".ends_with(&(\"x\".to_string())[..])"), "endsWith:\n{out}");
+    let out = body("class A { int f(String s) { return s.indexOf(\"y\"); } }");
+    assert!(out.contains(".find(&(\"y\".to_string())[..]).map(|i| i as i32).unwrap_or(-1)"), "indexOf:\n{out}");
+    let out = body("class A { int f(String s) { return s.lastIndexOf(\"z\"); } }");
+    assert!(out.contains(".rfind(&(\"z\".to_string())[..]).map(|i| i as i32).unwrap_or(-1)"), "lastIndexOf:\n{out}");
+    // A `char` arg stays a char pattern (not slice-coerced).
+    let out = body("class A { int f(String s, char c) { return s.indexOf(c); } }");
+    assert!(out.contains(".find((c))"), "indexOf(char):\n{out}");
+    // split drops its limit arg; both arities collapse to the same rewrite.
+    let out = body("class A { String[] f(String s) { return s.split(\",\"); } }");
+    assert!(out.contains(".split(&(\",\".to_string())[..]).map(|x| x.to_string()).collect::<Vec<_>>()"), "split:\n{out}");
+}
+
+#[test]
 fn collection_methods_route_by_category() {
     // List.indexOf is an element search (not the String `.find`).
     let out = body(
@@ -59,6 +79,19 @@ fn collection_methods_route_by_category() {
         "import java.util.Map; class A { int g(Map<Integer, Integer> m, int k) { return m.getOrDefault(k, 0); } }",
     );
     assert!(out.contains(".cloned().unwrap_or(0)"), "{out}");
+}
+
+#[test]
+fn optional_and_stream_static_factories() {
+    // Migrated from bespoke `try_emit_optional_static` / `try_emit_int_range`.
+    let out = body("import java.util.Optional; class A { Optional<String> f() { return Optional.of(\"x\"); } }");
+    assert!(out.contains("Some(\"x\".to_string())"), "Optional.of:\n{out}");
+    let out = body("import java.util.Optional; class A { Optional<String> f() { return Optional.empty(); } }");
+    assert!(out.contains("None"), "Optional.empty:\n{out}");
+    let out = body("import java.util.stream.IntStream; class A { void f() { IntStream.range(0, 5); } }");
+    assert!(out.contains("((0)..(5))"), "IntStream.range:\n{out}");
+    let out = body("import java.util.stream.IntStream; class A { void f() { IntStream.rangeClosed(0, 5); } }");
+    assert!(out.contains("((0)..=(5))"), "IntStream.rangeClosed:\n{out}");
 }
 
 #[test]

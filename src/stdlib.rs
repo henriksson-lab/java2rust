@@ -21,13 +21,12 @@
 //! concatenation, the `JavaIter` shim) stay as bespoke code in `dump.rs`; only
 //! the table-able ones live here.
 
-/// One rewrite rule: a template plus whether the call mutates its receiver
-/// (mirrored against [`crate::id_tracker::is_mutating_method`], which is what
-/// actually drives `&mut` inference — the flag here documents the table and is
-/// cross-checked by the coverage test).
+/// One rewrite rule: a template, plus the Rust type it produces. `&mut`
+/// inference is driven operationally by [`crate::id_tracker::is_mutating_method`]
+/// (cross-checked against [`name_mutates`] by the coverage test); the table marks
+/// mutating entries only via the [`rm`] constructor, for source readability.
 pub struct StdRule {
     pub template: &'static str,
-    pub mutates: bool,
     /// The Rust type this rewrite *produces*, as a simple name the type tracker
     /// understands (`"String"`, `"i32"`, `"bool"`, `"Vec"`, …), or `None` when
     /// the result type is left to context inference. Consulted by
@@ -38,14 +37,17 @@ pub struct StdRule {
 }
 
 const fn r(template: &'static str) -> StdRule {
-    StdRule { template, mutates: false, ret: None }
+    StdRule { template, ret: None }
 }
+/// A rule whose call mutates its receiver. Structurally identical to [`r`] — the
+/// distinct name documents, at the table's call site, which entries mutate (the
+/// operational `&mut` signal is [`crate::id_tracker::is_mutating_method`]).
 const fn rm(template: &'static str) -> StdRule {
-    StdRule { template, mutates: true, ret: None }
+    StdRule { template, ret: None }
 }
 /// Non-mutating rule that also records its produced Rust type.
 const fn rr(template: &'static str, ret: &'static str) -> StdRule {
-    StdRule { template, mutates: false, ret: Some(ret) }
+    StdRule { template, ret: Some(ret) }
 }
 
 /// Instance-method rewrite for a normalized receiver *category* (`String`,
@@ -87,6 +89,32 @@ pub fn instance_rule(cat: &str, name: &str, arity: usize) -> Option<StdRule> {
         // would otherwise emit a non-existent `to_lower_case`).
         ("String", "toLowerCase", 1) => rr("${recv}.to_lowercase()", "String"),
         ("String", "toUpperCase", 1) => rr("${recv}.to_uppercase()", "String"),
+        // String search family (migrated from the bespoke `try_emit_known_method`
+        // arms). `${0:str}` is exactly the old `emit_string_pattern` coercion
+        // (char stays a char, else `&(..)[..]`). The category gate (`recv_category
+        // == "String"`) is what previously disambiguated `indexOf`/`lastIndexOf`
+        // from the `("List", …)` element-search complement. `split`'s limit arg is
+        // dropped (Rust `.split` already keeps trailing empties).
+        ("String", "startsWith", 1) => rr("${recv}.starts_with(${0:str})", "bool"),
+        ("String", "endsWith", 1) => rr("${recv}.ends_with(${0:str})", "bool"),
+        ("String", "indexOf", 1) => {
+            rr("${recv}.find(${0:str}).map(|i| i as i32).unwrap_or(-1)", "i32")
+        }
+        ("String", "lastIndexOf", 1) => {
+            rr("${recv}.rfind(${0:str}).map(|i| i as i32).unwrap_or(-1)", "i32")
+        }
+        ("String", "split", 1) | ("String", "split", 2) => {
+            rr("${recv}.split(${0:str}).map(|x| x.to_string()).collect::<Vec<_>>()", "Vec")
+        }
+        // NO-GO (measured 2026-06-21): migrating the String *value* ops
+        // (`trim`/`charAt`/`substring`/`toCharArray`/`equalsIgnoreCase`) here
+        // REGRESSES (+7: bjaaprop +3, vcf +1, jsoup +3). Unlike the search family
+        // above (whose default emission `.starts_with` etc. are real `str`
+        // methods), these default-emit to NON-existent methods (`.substring`,
+        // `.char_at`, `.equals_ignore_case`) on the Unknown-category receivers the
+        // bespoke arms (no category gate) used to catch — e.g.
+        // `x.toString().substring(1)`. They stay bespoke in `try_emit_known_method`
+        // until the receiver of such chains types as `String` (resolver work).
 
         // ---- Map ----
         ("Map", "getOrDefault", 2) => r("${recv}.get(&(${0})).cloned().unwrap_or(${1})"),
@@ -123,41 +151,43 @@ pub fn instance_rule(cat: &str, name: &str, arity: usize) -> Option<StdRule> {
 pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
     Some(match (cls, name, arity) {
         // ---- Character (predicates + case, ASCII semantics) ----
-        ("Character", "isDigit", 1) => r("(${0}).is_ascii_digit()"),
-        ("Character", "isLetter", 1) => r("(${0}).is_alphabetic()"),
-        ("Character", "isLetterOrDigit", 1) => r("(${0}).is_alphanumeric()"),
-        ("Character", "isAlphabetic", 1) => r("(${0}).is_alphabetic()"),
-        ("Character", "isWhitespace", 1) => r("(${0}).is_whitespace()"),
-        ("Character", "isSpaceChar", 1) => r("(${0}).is_whitespace()"),
-        ("Character", "isUpperCase", 1) => r("(${0}).is_uppercase()"),
-        ("Character", "isLowerCase", 1) => r("(${0}).is_lowercase()"),
-        ("Character", "toUpperCase", 1) => r("(${0}).to_ascii_uppercase()"),
-        ("Character", "toLowerCase", 1) => r("(${0}).to_ascii_lowercase()"),
+        ("Character", "isDigit", 1) => rr("(${0}).is_ascii_digit()", "bool"),
+        ("Character", "isLetter", 1) => rr("(${0}).is_alphabetic()", "bool"),
+        ("Character", "isLetterOrDigit", 1) => rr("(${0}).is_alphanumeric()", "bool"),
+        ("Character", "isAlphabetic", 1) => rr("(${0}).is_alphabetic()", "bool"),
+        ("Character", "isWhitespace", 1) => rr("(${0}).is_whitespace()", "bool"),
+        ("Character", "isSpaceChar", 1) => rr("(${0}).is_whitespace()", "bool"),
+        ("Character", "isUpperCase", 1) => rr("(${0}).is_uppercase()", "bool"),
+        ("Character", "isLowerCase", 1) => rr("(${0}).is_lowercase()", "bool"),
+        ("Character", "toUpperCase", 1) => rr("(${0}).to_ascii_uppercase()", "char"),
+        ("Character", "toLowerCase", 1) => rr("(${0}).to_ascii_lowercase()", "char"),
         ("Character", "getNumericValue", 1) => {
-            r("((${0}).to_digit(10).map(|__d| __d as i32).unwrap_or(-1))")
+            rr("((${0}).to_digit(10).map(|__d| __d as i32).unwrap_or(-1))", "i32")
         }
         ("Character", "digit", 2) => {
-            r("((${0}).to_digit((${1}) as u32).map(|__d| __d as i32).unwrap_or(-1))")
+            rr("((${0}).to_digit((${1}) as u32).map(|__d| __d as i32).unwrap_or(-1))", "i32")
         }
-        ("Character", "toString", 1) => r("(${0}).to_string()"),
+        ("Character", "toString", 1) => rr("(${0}).to_string()", "String"),
 
         // ---- Objects ---- (nullability-entangled members like isNull/nonNull
         // are intentionally omitted; passthrough/identity forms only.)
-        ("Objects", "toString", 1) => r("(${0}).to_string()"),
+        ("Objects", "toString", 1) => rr("(${0}).to_string()", "String"),
         // Identity, but produce an owned value (a `&String` arg in a returned
         // position needs to own); `:move` clones only non-Copy borrows.
         ("Objects", "requireNonNull", 1) => r("(${0:move})"),
         ("Objects", "requireNonNull", 2) => r("(${0:move})"),
         // null-safe equality, best-effort as `==` (both sides same value type).
-        ("Objects", "equals", 2) => r("(${0} == ${1})"),
+        ("Objects", "equals", 2) => rr("(${0} == ${1})", "bool"),
 
         // ---- Integer / Long radix + compare ----
-        ("Integer" | "Long", "toHexString", 1) => r("format!(\"{:x}\", ${0})"),
-        ("Integer" | "Long", "toBinaryString", 1) => r("format!(\"{:b}\", ${0})"),
-        ("Integer" | "Long", "toOctalString", 1) => r("format!(\"{:o}\", ${0})"),
-        // sign of the comparison (-1/0/1), portably.
+        ("Integer" | "Long", "toHexString", 1) => rr("format!(\"{:x}\", ${0})", "String"),
+        ("Integer" | "Long", "toBinaryString", 1) => rr("format!(\"{:b}\", ${0})", "String"),
+        ("Integer" | "Long", "toOctalString", 1) => rr("format!(\"{:o}\", ${0})", "String"),
+        // sign of the comparison (-1/0/1), portably. `compare` always returns
+        // `int` regardless of operand type, so `i32` is certain (unlike
+        // `sum`/`max`/`min`, which are operand-typed -> left `None`).
         ("Integer" | "Long" | "Double" | "Float", "compare", 2) => {
-            r("((${0} > ${1}) as i32 - (${0} < ${1}) as i32)")
+            rr("((${0} > ${1}) as i32 - (${0} < ${1}) as i32)", "i32")
         }
         ("Integer" | "Long" | "Double" | "Float", "max", 2) => r("(${0}).max(${1})"),
         ("Integer" | "Long" | "Double" | "Float", "min", 2) => r("(${0}).min(${1})"),
@@ -166,46 +196,48 @@ pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
         // ---- System (non-print statics; print routes elsewhere) ----
         ("System", "exit", 1) => r("std::process::exit((${0}) as i32)"),
         ("System", "gc", 0) => r("()"),
-        ("System", "currentTimeMillis", 0) => r(
+        ("System", "currentTimeMillis", 0) => rr(
             "(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|__d| __d.as_millis() as i64).unwrap_or(0))",
+            "i64",
         ),
-        ("System", "nanoTime", 0) => r(
+        ("System", "nanoTime", 0) => rr(
             "(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|__d| __d.as_nanos() as i64).unwrap_or(0))",
+            "i64",
         ),
         // Java system properties have no portable Rust analog; best-effort via the
         // environment (compiles + reasonable for the common `user.dir`/`os.name`).
-        ("System", "getProperty", 1) => r("std::env::var(&(${0})).unwrap_or_default()"),
-        ("System", "getProperty", 2) => r("std::env::var(&(${0})).unwrap_or(${1})"),
+        ("System", "getProperty", 1) => rr("std::env::var(&(${0})).unwrap_or_default()", "String"),
+        ("System", "getProperty", 2) => rr("std::env::var(&(${0})).unwrap_or(${1})", "String"),
 
         // ---- Arrays (value-producing forms; mutating sort/fill deferred —
         // they need the arg passed `&mut` + Ord, which static-arg borrow doesn't
         // yet give) ----
-        ("Arrays", "equals", 2) => r("(${0} == ${1})"),
+        ("Arrays", "equals", 2) => rr("(${0} == ${1})", "bool"),
         ("Arrays", "copyOfRange", 3) => {
-            r("(${0})[(${1}) as usize..(${2}) as usize].to_vec()")
+            rr("(${0})[(${1}) as usize..(${2}) as usize].to_vec()", "Vec")
         }
         // `copyOf(arr, n)` — length-`n` copy (truncate / `Default`-pad).
         ("Arrays", "copyOf", 2) => {
-            r("crate::java_runtime::java_array_copy_of(&(${0}), (${1}) as i64)")
+            rr("crate::java_runtime::java_array_copy_of(&(${0}), (${1}) as i64)", "Vec")
         }
         // `asList(arr)` — a `Vec` view of the array (the common 1-arg form;
         // the N-scalar overload is left to the stub).
-        ("Arrays", "asList", 1) => r("(${0}).to_vec()"),
+        ("Arrays", "asList", 1) => rr("(${0}).to_vec()", "Vec"),
         // `binarySearch(arr, key)` — JDK miss = -(insertion)-1.
         ("Arrays", "binarySearch", 2) => {
-            r("crate::java_runtime::java_binary_search(&(${0}), &(${1}))")
+            rr("crate::java_runtime::java_binary_search(&(${0}), &(${1}))", "i32")
         }
 
         // ---- Collections (value-producing / identity forms) ----
-        ("Collections", "emptyList", 0) => r("Vec::new()"),
-        ("Collections", "emptySet", 0) => r("std::collections::HashSet::new()"),
-        ("Collections", "emptyMap", 0) => r("std::collections::HashMap::new()"),
-        ("Collections", "singletonList", 1) => r("vec![${0}]"),
+        ("Collections", "emptyList", 0) => rr("Vec::new()", "Vec"),
+        ("Collections", "emptySet", 0) => rr("std::collections::HashSet::new()", "HashSet"),
+        ("Collections", "emptyMap", 0) => rr("std::collections::HashMap::new()", "HashMap"),
+        ("Collections", "singletonList", 1) => rr("vec![${0}]", "Vec"),
         ("Collections", "singletonMap", 2) => {
-            r("{ let mut __m = std::collections::HashMap::new(); __m.insert(${0}, ${1}); __m }")
+            rr("{ let mut __m = std::collections::HashMap::new(); __m.insert(${0}, ${1}); __m }", "HashMap")
         }
         ("Collections", "singleton", 1) => {
-            r("{ let mut __s = std::collections::HashSet::new(); __s.insert(${0}); __s }")
+            rr("{ let mut __s = std::collections::HashSet::new(); __s.insert(${0}); __s }", "HashSet")
         }
         // `unmodifiable*`/`synchronized*` drop the wrapper -> identity passthrough.
         ("Collections", "unmodifiableList", 1)
@@ -218,24 +250,35 @@ pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
 
         // ---- NumberFormat static factories (mapped runtime type; the locale
         // overload is dropped — formatting uses the C locale) ----
+        // `ret` is the *Java* type name (`"NumberFormat"`) so a chained
+        // `.format(x)` resolves via `runtime_method_ret("NumberFormat",…)`.
         ("NumberFormat", "getInstance", 0) | ("NumberFormat", "getInstance", 1) => {
-            r("crate::java_runtime::JavaNumberFormat::get_instance()")
+            rr("crate::java_runtime::JavaNumberFormat::get_instance()", "NumberFormat")
         }
         ("NumberFormat", "getNumberInstance", 0) | ("NumberFormat", "getNumberInstance", 1) => {
-            r("crate::java_runtime::JavaNumberFormat::get_number_instance()")
+            rr("crate::java_runtime::JavaNumberFormat::get_number_instance()", "NumberFormat")
         }
         ("NumberFormat", "getIntegerInstance", 0) | ("NumberFormat", "getIntegerInstance", 1) => {
-            r("crate::java_runtime::JavaNumberFormat::get_integer_instance()")
+            rr("crate::java_runtime::JavaNumberFormat::get_integer_instance()", "NumberFormat")
         }
         ("NumberFormat", "getPercentInstance", 0) | ("NumberFormat", "getPercentInstance", 1) => {
-            r("crate::java_runtime::JavaNumberFormat::get_percent_instance()")
+            rr("crate::java_runtime::JavaNumberFormat::get_percent_instance()", "NumberFormat")
         }
         ("DecimalFormatSymbols", "getInstance", 0) | ("DecimalFormatSymbols", "getInstance", 1) => {
-            r("crate::java_runtime::JavaDecimalFormatSymbols::get_instance()")
+            rr("crate::java_runtime::JavaDecimalFormatSymbols::get_instance()", "DecimalFormatSymbols")
         }
 
+        // ---- Optional / stream static factories (migrated from the bespoke
+        // `try_emit_optional_static` / `try_emit_int_range`). `ret` left `None`:
+        // the results (`Some(x)`/`None`/a `Range`) aren't simple named types, and
+        // the bespoke handlers typed them the same (via context). ----
+        ("Optional", "of", 1) | ("Optional", "ofNullable", 1) => r("Some(${0})"),
+        ("Optional", "empty", 0) => r("None"),
+        ("IntStream" | "LongStream", "range", 2) => r("((${0})..(${1}))"),
+        ("IntStream" | "LongStream", "rangeClosed", 2) => r("((${0})..=(${1}))"),
+
         // ---- String static ----
-        ("String", "valueOf", 1) => r("(${0}).to_string()"),
+        ("String", "valueOf", 1) => rr("(${0}).to_string()", "String"),
 
         _ => return None,
     })

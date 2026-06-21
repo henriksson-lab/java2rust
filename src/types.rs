@@ -604,6 +604,21 @@ impl<'a> TypeResolver<'a> {
                 return parse_rust_type(ret);
             }
         }
+        // A static call on a stdlib class (`Collections.singletonList(x)`,
+        // `Arrays.asList(a)`, `NumberFormat.getInstance()`): consult the static
+        // table's `ret`, keyed on the scope's class name. Only fires on an exact
+        // `(class, name, arity)` entry carrying a certain return type, so a
+        // same-named value receiver can't spuriously match. Additive — reached
+        // only when none of the arms above typed the call.
+        if let Some(s) = scope {
+            if let Node::NameExpr { name: cls } = self.arena.kind(s) {
+                if let Some(crate::stdlib::StdRule { ret: Some(ret), .. }) =
+                    crate::stdlib::static_rule(cls, name, args.len())
+                {
+                    return parse_rust_type(ret);
+                }
+            }
+        }
         Type::Unknown
     }
 

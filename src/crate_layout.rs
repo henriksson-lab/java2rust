@@ -1072,7 +1072,11 @@ fn read_trait_sigs(file: &Path, trait_name: &str) -> Vec<(String, String, Vec<St
 /// at compile time from real `.rs` fragments under `src/runtime/` (rustfmt-able,
 /// no string-escaping). `header.rs` MUST come first so its inner attributes
 /// (`//!`, `#![allow(dead_code)]`) lead the emitted file. Keep this list in sync
-/// with the `java_runtime_compiles` test module below.
+/// with the `java_runtime_compiles` test module below — EXCEPT `atomic.rs`, which
+/// is compile-checked there but deliberately NOT shipped here: nothing maps the
+/// atomic types yet (`map_type_name` has only the parked comment), so pasting it
+/// into every generated crate is ~7.4 KB of dead weight. Re-add this line when the
+/// atomics mapping lands (see SEMANTICS §12-item-7 / `dump.rs` map_type_name).
 const JAVA_RUNTIME: &str = concat!(
     include_str!("runtime/header.rs"),
     include_str!("runtime/iter.rs"),
@@ -1080,7 +1084,6 @@ const JAVA_RUNTIME: &str = concat!(
     include_str!("runtime/bitset.rs"),
     include_str!("runtime/random.rs"),
     include_str!("runtime/string_tokenizer.rs"),
-    include_str!("runtime/atomic.rs"),
     include_str!("runtime/decimal_format.rs"),
     include_str!("runtime/io_read.rs"),
     include_str!("runtime/io_write.rs"),
@@ -1091,8 +1094,10 @@ const JAVA_RUNTIME: &str = concat!(
 /// Compile-check the runtime fragments as part of the translator's own
 /// `cargo build`/`cargo test` (a broken fragment otherwise surfaces only when a
 /// generated corpus is built). `include!` pastes the tokens so they are
-/// type-checked here. Mirror the `concat!` list above (header excluded — its
-/// inner attributes are illegal inside an inline `mod`).
+/// type-checked here. Mirrors the `concat!` list above (header excluded — its
+/// inner attributes are illegal inside an inline `mod`) PLUS `atomic.rs`, which is
+/// kept compile-checked here so it stays sound for the atomics-mapping
+/// resurrection even though it's no longer shipped in `JAVA_RUNTIME`.
 #[cfg(test)]
 mod java_runtime_compiles {
     #![allow(dead_code)]
@@ -1109,6 +1114,53 @@ mod java_runtime_compiles {
     include!("runtime/util.rs");
 }
 
+/// Remove `#[cfg(test)]`-gated items (the per-fragment `mod tests {…}`) from the
+/// shipped runtime text. A generated crate is built without `--cfg test`, so these
+/// modules never compile there — they're ~13 KB of inert source pasted into every
+/// crate. They stay in the `src/runtime/*.rs` fragments, where the
+/// `java_runtime_compiles` module compile-checks and runs them. Assumes each gated
+/// item is brace-delimited (`mod …{}` — true for every current fragment) and that
+/// `#[cfg(test)]` never appears inside a string/comment in a fragment (verified).
+fn strip_cfg_test_mods(src: &str) -> String {
+    const NEEDLE: &str = "#[cfg(test)]";
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(pos) = rest.find(NEEDLE) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + NEEDLE.len()..];
+        // Drop from the attribute through the end of the following brace-balanced
+        // item body. If there's no body, bail conservatively (keep the remainder).
+        let Some(open) = after.find('{') else {
+            out.push_str(after);
+            return out;
+        };
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, c) in after[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match end {
+            Some(e) => rest = &after[e..],
+            None => {
+                out.push_str(after);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Generate the `mod` tree (`lib.rs` at the root, `mod.rs` in each subdir) and a
 /// `Cargo.toml`, turning the emitted files into one crate rooted at `out_root`.
 pub fn finish_crate(out_root: &Path) -> std::io::Result<()> {
@@ -1116,7 +1168,10 @@ pub fn finish_crate(out_root: &Path) -> std::io::Result<()> {
     // map to this). It owns a snapshot of the collection so reads never conflict
     // with the source; `next`/`previous` return `Option<T>` so the nullable
     // machinery can unwrap in raw contexts and keep `Option` in `?:`/null ones.
-    std::fs::write(out_root.join("java_runtime.rs"), JAVA_RUNTIME)?;
+    std::fs::write(
+        out_root.join("java_runtime.rs"),
+        strip_cfg_test_mods(JAVA_RUNTIME),
+    )?;
     merge_colliding_modules(out_root)?;
     gen_mod_file(out_root, true)?;
     let name = out_root

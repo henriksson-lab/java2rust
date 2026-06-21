@@ -4622,6 +4622,21 @@ impl<'a> RustDumpVisitor<'a> {
                 // non-`Option` type (E0599). Genuinely nullable values resolve to
                 // `Option` (or `Unknown`) and keep the Option check. Mirrors the
                 // `getClass()`-idiom constant fold below.
+                //
+                // NO-GO (measured 2026-06): gating this on `!expr_nullable(other)`
+                // (the `N` overlay) instead of `self.ty`-concrete — the SEMANTICS
+                // §12-item-7 prescription (docs/tech-debt.md A1) — REGRESSES
+                // (total +68; jaligner +1, jahmm +1, jhlabs +6, jsoup +49,
+                // jts +11). The only behavior change is `(self.ty concrete ∧
+                // expr_nullable)` flipping a compiling constant-fold into
+                // `.is_some()/.is_none()`; for the many locals/params whose
+                // `nullable` flag is TRUE yet whose emission is concrete (the ~32
+                // is_some/unwrap-on-concrete inconsistency, e.g. `is_none` on a
+                // concrete `FormatFactory`) that yields E0599. There is NO
+                // error-reducing cell — the fold→Option-check fix is purely
+                // semantic. Real fix needs the nullability analysis made
+                // consistent (nullable-flagged ⇒ emitted `Option<T>`) first; see
+                // TODO.md §1 and the tier2 frontier.
                 let ty = self.ty(other);
                 let never_null = !matches!(
                     ty,
@@ -5089,12 +5104,10 @@ impl<'a> RustDumpVisitor<'a> {
             if self.try_emit_boxed_static(scope, &name, &args, arg) {
                 return;
             }
-            if self.try_emit_int_range(scope, &name, &args, arg) {
-                return;
-            }
-            if self.try_emit_optional_static(scope, &name, &args, arg) {
-                return;
-            }
+            // `Optional.of/ofNullable/empty` and `IntStream/LongStream.range/
+            // rangeClosed` are now `static_rule` entries (handled by
+            // `try_emit_stdlib` below — nothing between here and there matches a
+            // static `Optional`/`IntStream` receiver).
             if self.try_emit_string_format(scope, &name, &args, arg) {
                 return;
             }
@@ -5254,51 +5267,6 @@ impl<'a> RustDumpVisitor<'a> {
     }
 
     /// `Optional.of(x)` -> `Some(x)`, `Optional.empty()` -> `None`.
-    fn try_emit_optional_static(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
-        let Some(s) = scope else { return false };
-        if !matches!(self.arena.kind(s), Node::NameExpr { name } if name == "Optional") {
-            return false;
-        }
-        match (name, args.len()) {
-            ("of", 1) | ("ofNullable", 1) => {
-                self.printer.print("Some(");
-                self.visit(args[0], arg);
-                self.printer.print(")");
-                true
-            }
-            ("empty", 0) => {
-                self.printer.print("None");
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// `IntStream.range(a, b)` -> `((a)..(b))`, `rangeClosed` -> `..=`.
-    fn try_emit_int_range(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
-        let Some(s) = scope else { return false };
-        let is_intstream = matches!(
-            self.arena.kind(s),
-            Node::NameExpr { name } if name == "IntStream" || name == "LongStream"
-        );
-        if !is_intstream || args.len() != 2 {
-            return false;
-        }
-        let sep = match name {
-            "range" => "..",
-            "rangeClosed" => "..=",
-            _ => return false,
-        };
-        self.printer.print("((");
-        self.visit(args[0], arg);
-        self.printer.print(")");
-        self.printer.print(sep);
-        self.printer.print("(");
-        self.visit(args[1], arg);
-        self.printer.print("))");
-        true
-    }
-
     /// `String.format("%d ...", a, ...)` -> `format!("{} ...", a, ...)`.
     fn try_emit_string_format(&mut self, scope: Option<NodeId>, name: &str, args: &[NodeId], arg: Arg) -> bool {
         let Some(s) = scope else { return false };
@@ -5720,8 +5688,9 @@ impl<'a> RustDumpVisitor<'a> {
                 true
             }
             // ---- more String ops (arg is a String -> &str) ----
-            ("startsWith", 1) => self.emit_str_arg(recv, "starts_with", args[0], arg),
-            ("endsWith", 1) => self.emit_str_arg(recv, "ends_with", args[0], arg),
+            // NOTE: `startsWith`/`endsWith`/`indexOf(1)`/`lastIndexOf(1)`/`split`
+            // migrated to `instance_rule("String", …)` (category-gated). The 2-arg
+            // `indexOf`/`lastIndexOf` keep their bespoke offset logic below.
             ("replace", 2) => {
                 // `str::replace(from: Pattern, to: &str)`. `from` may be a char or
                 // a String (char-aware pattern); `to` coerces to `&str`. (Java's
@@ -5732,38 +5701,6 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(", &(");
                 self.visit(args[1], arg);
                 self.printer.print(").to_string())");
-                true
-            }
-            // `split(regex)` and `split(regex, limit)` -> `Vec<String>`. The limit
-            // is dropped: Java's `-1`/`<=0` keeps trailing empties, which Rust's
-            // `.split()` already does. (Pattern treated as literal, not regex.)
-            ("split", 1) | ("split", 2) => {
-                self.visit(recv, arg);
-                self.printer.print(".split(");
-                self.emit_string_pattern(args[0], arg);
-                self.printer.print(").map(|x| x.to_string()).collect::<Vec<_>>()");
-                true
-            }
-            // String index-of (a `&str`/char search). Gated away from
-            // collections, whose `indexOf(elem)` is an element search handled by
-            // the stdlib table (`.iter().position(..)`).
-            ("indexOf", 1)
-                if !matches!(self.recv_category(recv), Some("List" | "Set" | "Map" | "Option")) =>
-            {
-                self.visit(recv, arg);
-                self.printer.print(".find(");
-                self.emit_string_pattern(args[0], arg);
-                self.printer.print(").map(|i| i as i32).unwrap_or(-1)");
-                true
-            }
-            ("lastIndexOf", 1)
-                if !matches!(self.recv_category(recv), Some("List" | "Set" | "Map" | "Option")) =>
-            {
-                // Byte index ~ char index for ASCII (the bioinformatics norm).
-                self.visit(recv, arg);
-                self.printer.print(".rfind(");
-                self.emit_string_pattern(args[0], arg);
-                self.printer.print(").map(|i| i as i32).unwrap_or(-1)");
                 true
             }
             // `String.indexOf(pat, fromIndex)` -> search the suffix from
@@ -5985,18 +5922,6 @@ impl<'a> RustDumpVisitor<'a> {
         self.printer.print(&format!(".{method}(("));
         self.visit(n, arg);
         self.printer.print(") as usize)");
-        true
-    }
-
-    /// `recv.<method>(&(arg)[..])` — for String methods taking a `&str`. The
-    /// `&(..)[..]` slice form coerces both a `String` and an existing `&str`
-    /// (e.g. a `&'static str` constant) to `&str`, where `.as_str()` would be
-    /// the unstable `str::as_str` on the latter.
-    fn emit_str_arg(&mut self, recv: NodeId, method: &str, s: NodeId, arg: Arg) -> bool {
-        self.visit(recv, arg);
-        self.printer.print(&format!(".{method}("));
-        self.emit_string_pattern(s, arg);
-        self.printer.print(")");
         true
     }
 
@@ -8227,6 +8152,9 @@ pub fn map_type_name(name: &str) -> &str {
         | "PrintStream" => "crate::java_runtime::JavaWriter",
         "StringWriter" => "crate::java_runtime::JavaStringWriter",
         // `java.util.concurrent.atomic.*` (src/runtime/atomic.rs) — STILL PARKED.
+        // Because nothing maps these types, `atomic.rs` is NO LONGER shipped in the
+        // `JAVA_RUNTIME` concat (crate_layout.rs) — it's kept only in the
+        // `java_runtime_compiles` compile-check so it stays sound for resurrection.
         // Re-tried 2026-06 with a no-op `unwrap(&self)->Self` overlay: mapping still
         // regresses (trim +14, jsoup +1) with a DIFFERENT root cause than the
         // documented `.clone().unwrap()` one: `expected bool, found JavaAtomicBoolean`
