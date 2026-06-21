@@ -1,560 +1,489 @@
-# Type semantics of the Java→Rust translator
+# Type semantics of the Java→Rust translator (formal)
 
-A semi-formal specification of how the translator assigns, propagates, and lowers
-types. The goal is not full rigor but a *shared model* precise enough to (a) say
-what each pass is responsible for, (b) state the invariants every type-dependent
-rewrite must preserve, and (c) make the remaining work fall out as "what the model
-requires but we don't yet compute."
+A formal model of how types are assigned, propagated, and lowered. It exists to make
+three things checkable: what each pass computes, the invariants every type-dependent
+rewrite must preserve, and which open work is *forced* by the model.
 
-Status legend in the text: **[have]** implemented; **[partial]** implemented for a
-subset; **[gap]** required by the model, not yet built.
-
----
-
-## 0. Orientation
-
-The translator is **not** a type checker that rejects programs; it is a
-*best-effort lowering* of already-valid Java into Rust that should compile. Every
-type decision is therefore governed by one meta-rule:
-
-> **M0 (best-effort + capable bottom).** When a type cannot be determined, resolve
-> it to `Unknown` — a *capable* placeholder (it implements `Clone`, `Default`,
-> `PartialEq/Eq/Hash/Ord`, `Display`, `Iterator`, and arithmetic ops, and coerces
-> widely). Callers fall back to their existing behaviour rather than guess. Being
-> capable, `Unknown` rarely *causes* an error; replacing it with a less-capable
-> concrete type can *introduce* errors. (Empirically: collapsing toward `Unknown`
-> is safe; splitting it into distinct bare types regressed — see §11 *Lessons*.)
+Status tags: **[have]** built · **[partial]** subset · **[gap]** required, not built.
+Section numbers and invariant labels (M0, N1–N3, R1/R2, U1/U2, P1) are stable — code
+comments cite them.
 
 ---
 
-## 1. Domains
+## 0. Meta-rule
 
-- `J` — Java source types (syntactic: `int`, `String`, `List<Foo>`, `Foo[]`,
-  `Map<K,V>`, type variables, `Object`, nested/qualified names).
-- `R` — Rust surface types (`i32`, `String`, `Vec<T>`, `HashMap<K,V>`,
-  `Box<dyn Tr>`, `Option<T>`, user paths, `crate::…::Unknown`).
-- `Ty` — the internal type IR (`src/types.rs::Type`), the common currency between
-  resolution and codegen:
+The translator is a *total, best-effort lowering* of valid Java to compilable Rust,
+**not** a type checker — it never rejects. Hence:
 
-```
-Ty ::= Prim(i8|i16|i32|i64|usize|f32|f64|bool|char)
-     | Str
-     | Vec(Ty) | Set(Ty) | Map(Ty,Ty) | Opt(Ty)
-     | Named { path, args:[Ty] }     -- a user/stub struct or enum
-     | TraitObj(name)                -- Box<dyn Trait>
-     | Param(name)                   -- a generic type parameter
-     | Var(u32)                      -- a unification variable (Tier 2)
-     | Unknown                       -- bottom (M0)
-```
-
-`Ty` deliberately omits two things, handled as **orthogonal overlays** (§5, §6):
-nullability (`Option`-ness) and ownership (`&`/`&mut`). `Ty` is the *underlying*
-type; the overlays decide how it is wrapped at a given site.
-
-**Lattice.** `Unknown` is bottom. There is no general subtyping order on `Named`
-(Rust has no struct subtyping — this single fact drives §7). `Var(α)` is an
-unresolved leaf that the Tier-2 solver replaces with a ground `Ty` or `Unknown`.
+> **M0 (capable bottom).** Undetermined types resolve to `Unknown = ⊥`, a *capable*
+> placeholder (impls `Clone, Default, PartialEq/Eq/Hash/Ord, Display, Iterator`,
+> arithmetic; coerces widely). `⊥` rarely *causes* an error; replacing it with a
+> less-capable concrete type can *introduce* one. So the resolver is **monotone
+> upward from ⊥ only on unambiguous evidence** (§9 U2); collapsing toward `⊥` is
+> safe, splitting it is not (measured, §11).
 
 ---
 
-## 2. Pipeline & who decides what
-
-For each compilation unit (`src/lib.rs::translate`):
+## 1. Domains & lattice
 
 ```
-parse → id_tracker::run → type_tracker::run → nullability::analyze → [borrow] → dump
+J  ::=  Java source types  (int, String, List<Foo>, Foo[], Map<K,V>, X, Object, pkg.Outer.Inner)
+R  ::=  Rust surface types (i32, String, Vec<T>, HashMap<K,V>, Box<dyn Tr>, Option<T>, paths, …::Unknown)
+τ ∈ Ty ::=  Prim(i8|i16|i32|i64|usize|f32|f64|bool|char)
+        |  Str | Vec(τ) | Set(τ) | Map(τ,τ) | Opt(τ)
+        |  Named{path, args:[τ]}      -- user/stub struct or enum
+        |  TraitObj(name)             -- Box<dyn Trait>
+        |  Param(name)                -- generic parameter
+        |  Var(α)                     -- Tier-2 unification variable
+        |  Unknown                    -- ⊥
 ```
 
-and, in `--crate` mode, a project-wide pre-pass `crate_layout::build_project_map`
-runs first, producing the **symbol map** that all units link against (§8).
+`Ty` is the common currency of resolution and codegen (`src/types.rs`). It is the
+**underlying** type: it deliberately omits the two **overlays** — nullability
+(`Option`-ness, §5) and ownership (`&`/`&mut`, §6) — which are decided per *site*,
+not stored in the type (invariant **N3**).
 
-| pass | decides |
-|---|---|
-| `parse` | AST (`Arena`) |
-| `id_tracker` | name resolution, declarations, imports/package |
-| `type_tracker` | declared types of locals/fields (the `Γ` environment) |
-| `nullability` | the `N(·)` overlay: which declarations are nullable (§5) |
-| `borrow` | the ownership overlay: which params are `&`/`&mut` (§6) |
-| `crate_layout` | the symbol map: per-type `rust_path`, `parent`, `interfaces`, fields, methods, the `dispatched` set, eq/hash capability (§8, §9) |
-| `dump` + `TypeResolver` | ground typing `Γ ⊢ e : Ty` (§4) and lowering to `R` (§3) |
-
-**Tiers.** Type determination is two-tiered:
-- **Tier 1 — deterministic ground resolution** `[have]`: `TypeResolver::type_of`
-  computes a ground `Ty` from declared types + literals + a fixed set of stdlib/
-  method-return rules. No guessing; unknowns are `Unknown`.
-- **Tier 2 — unification** `[partial]`: type *variables* for positions Tier 1
-  leaves unknown (collection elements, stub returns), equality constraints from
-  dataflow, union-find solve. The substrate exists; see §10.
+**Lattice (Ty, ⊑).** `⊥ = Unknown`; `Var(α)` is a free leaf the solver (§9) maps to a
+ground `τ` or `⊥`. There is **no subtyping order on `Named`** — Rust has no struct
+subtyping, the single fact that forces §7. Join `⊔` exists only along the
+`parent`/`interfaces` hierarchy (LUB, §9).
 
 ---
 
-## 3. Ground translation `⟦·⟧ : J → R`
+## 2. Pipeline
 
-The lowering of a *type* (used for slots: fields, params, returns, locals, type
-args). Defined compositionally; `⟦·⟧` reads the symbol map for user types.
+Per compilation unit (`src/lib.rs::translate`); `--crate` mode runs a project-wide
+symbol-map pass first (§8).
 
 ```
-⟦byte|short|int|long⟧      = i8|i16|i32|i64
-⟦float|double⟧             = f32|f64
-⟦boolean⟧ = bool   ⟦char⟧ = char
-⟦String|CharSequence⟧      = String           (param position may use &str — §6)
-⟦T[]⟧                      = Vec<⟦T⟧>          [have]
-⟦List<T>|ArrayList<T>|…⟧   = Vec<⟦T⟧>
-⟦Set<T>|…⟧                 = HashSet<⟦T⟧>      (LinkedHashSet → also HashSet)
-⟦Map<K,V>|…⟧               = HashMap<⟦K⟧,⟦V⟧>
-⟦Optional<T>⟧              = Option<⟦T⟧>
-⟦Iterator<T>⟧              = crate::java_runtime::JavaIter<⟦T⟧>
-⟦Object|Class⟧             = Unknown            (M0; see §7.4 for the real-Object gap)
-⟦interface I⟧ (owned pos)  = Box<dyn I>         [have, object-safety permitting]
-⟦interface I⟧ (behind &)   = &dyn I
-⟦class C⟧ (project/dep)    = the symbol map's rust_path for C
-⟦class C⟧ (unresolved)     = a stub Named, or Unknown (§8.3)
-⟦type var X⟧               = X (Param)
-⟦raw List / Map (no args)⟧ = Vec / HashMap with **missing** element → `E0107`
-                             unless an element is inferred (Tier 2, §10) [gap]
+build_project_map?           -- crate mode: the symbol map M (§8)
+parse        : Source → AST
+id_tracker   : AST → Names    -- resolution, imports, package
+type_tracker : AST → Γ        -- Γ : Var ⇀ Ty  (declared types of locals/fields)
+nullability  : AST → N        -- N : Decl → {nullable, nonnull}   (fixpoint, §5)
+borrow       : AST → B0        -- param &/&mut facts                (§6)
+dump         : (AST,Γ,N,B0,M) → Rust     -- typing (§4) + the render eqn (§10)
 ```
 
-**Raw-generic rule [have].** A *project* generic type used raw (`HuffmanTree` for
-`HuffmanTree<T>`) is filled with `()` placeholders to the recorded arity. A *stdlib*
-collection used raw has no arity source → bare `Vec`/`HashMap` (`E0107`) unless
-Tier 2 supplies the element. Defaulting the element to `Unknown` is **forbidden**:
-`Vec<Unknown>` cascades (every concrete element use clashes) — see §11.
+| pass | computes | §|
+|---|---|---|
+| `id_tracker` | name/decl/import resolution ||
+| `type_tracker` | `Γ` (declared slot types) ||
+| `nullability` | overlay `N` | 5 |
+| `borrow` | param ownership facts `B0` | 6 |
+| `crate_layout` | symbol map `M`: `rust_path, kind, parent, interfaces, fields, methods(ret,throws,nullable), dispatched, capability` | 8 |
+| `dump`+`TypeResolver` | `Γ ⊢ e : τ` and the lowering | 4,10 |
+
+**Two tiers of type determination.** Tier 1 (§4) is deterministic ground resolution
+(`TypeResolver::type_of`); unknowns are `⊥`. Tier 2 (§9) introduces `Var(α)` for what
+Tier 1 leaves open and solves by union-find + LUB.
+
+### 2.1 Rewrite phases (where reformulation happens)
+
+A rewrite changes the program; there are exactly two kinds, distinguished by *what*
+they change and therefore *which semantics you reason in*:
+
+| | **local / type rewrite** | **structural rewrite** |
+|---|---|---|
+| changes | one expression's type *representation* | the *statement structure* (introduce a binding, reorder, split, change a signature) |
+| examples | `Option`-wrap, `Route` enum, `&T` borrow, `s.length()`→`.len()`, N2 fold | hoist `new B(new R(f))` into `let`s; try-with-resources → drop; `?`-propagation |
+| mechanism | the render equation §10, syntax-directed at emit | a program-to-program transform with its own correctness criterion |
+| reason in | `Ty` + the overlay composition (this doc) | *source* semantics (if Java-side) or *target* semantics (if Rust-side) |
+| status | **[have]** | **[gap]** — no phase exists |
+
+**Current architecture.** Emission is a single syntax-directed pass that prints Rust
+**text** over the Java AST (`dump` + `Printer`); there is no Java-AST normalization pass
+and no Rust AST. Hence **only local rewrites are expressible**: the dumper emits an
+expression *in place* and cannot inject a preceding statement. This is exactly what §10
+models — and all it models.
+
+**Structural rewrites: pick the phase by its proof obligation.**
+- **Java→Java normalization, BEFORE the dumper [preferred].** The canonical structural
+  rewrite is **ANF/let-hoisting**: replace `outer(inner)` with `let t = inner; outer(t)`.
+  It is *source-semantics-preserving* (naming a subexpression) **and universally valid in
+  Rust** — a `let` binding owns `t`, so `outer(t)` moves it or `outer(&t)` borrows it; the
+  intermediate always has a stable owner. So ANF-hoisting **categorically dissolves the
+  stacked-constructor ownership problem** (`new BufferedReader(new FileReader(f))`) before
+  ownership is even considered, and keeps the dumper + the render equation untouched —
+  structural and type concerns stay orthogonal. (Whether a hoist is *needed* is target-
+  side, so do it everywhere-or-by-idiom-table; always-hoist is correct but verbose.)
+- **Rust-AST post-pass, AFTER the dumper [avoid].** Has the target types (knows exactly
+  when to hoist) but needs a Rust AST (we emit strings) and ownership reasoning to decide
+  hoisting ≈ reimplementing the borrow checker. Only justified once a Rust AST exists.
+- **Target-driven structural changes** (e.g. `?`-propagation, which must flip the
+  enclosing fn's return to `Result`) cannot be Java-side; they need a small target-aware
+  step — the natural host for `docs/in-place-io-prototype.md`'s stubs-then-inline pass.
+
+**The carrier escape [have].** The IO carriers (`Rc<RefCell<Box<dyn Read>>>`, §6/§3) are
+the current *avoidance* of structural rewrites: by making every wrapper **own** its inner,
+stacked construction composes without any separate binding — at the cost of non-idiomatic
+output. "Carrier types" and "no structural-rewrite phase" are one decision seen twice.
 
 ---
 
-## 4. Expression typing (Tier 1): `Γ ⊢ e : Ty`
+## 3. Type lowering `⟦·⟧ : J → R`  (slot types: fields/params/returns/locals/args)
 
-`TypeResolver::type_of` (memoized per node). Selected rules (the rest bottom out at
-`Unknown` per M0):
+Compositional; reads `M` for user types.
 
 ```
-literals:  intLit:I32  longLit:I64  dblLit:F64  charLit:Char  boolLit:Bool  strLit:Str
-name x:    Γ(x)                              (declared type via type_tracker)
-e[i]:      Ty where Γ⊢e:Vec(Ty)∨Set(Ty)     (array/list element)
-cast (T)e: ⟦T⟧                              (the cast *target*)
-new C(..): Named(C)
-e1 op e2 (arith): promote(Ty1,Ty2)           (both numeric ⇒ wider; else Unknown)
-e.m(args): method_call_type(recv, m, args)   (below)
+⟦byte|short|int|long⟧ = i8|i16|i32|i64        ⟦float|double⟧ = f32|f64
+⟦boolean⟧ = bool   ⟦char⟧ = char              ⟦String|CharSequence⟧ = String   (param: &str — §6)
+⟦T[]⟧ = Vec<⟦T⟧>                              ⟦List<T>|…⟧ = Vec<⟦T⟧>
+⟦Set<T>|…⟧ = HashSet<⟦T⟧>                     ⟦Map<K,V>|…⟧ = HashMap<⟦K⟧,⟦V⟧>
+⟦Optional<T>⟧ = Option<⟦T⟧>                   ⟦Iterator<T>⟧ = JavaIter<⟦T⟧>
+⟦Object|Class⟧ = Unknown        (M0; real-Object gap §7.4)
+⟦interface I⟧ = Box<dyn I>  (owned)  |  &dyn I  (behind &)        [object-safety permitting]
+⟦class C⟧ = M[C].rust_path   (project/dep)   |   stub Named / Unknown   (unresolved, §8.3)
+⟦X⟧ = Param(X)
+⟦raw List|Map⟧ = Vec|HashMap with element ← Tier-2 (§9), else E0107   [gap if unsolved]
 ```
 
-`method_call_type` resolves, in order: (1) a fixed stdlib reach
-(`Map.get→V`, `List.get→elem`, `Optional.get→T`, `size→i32`, `charAt→char`,
-String-returning String methods, boxed-number unboxing, `Math` float fns…);
-(2) a **project/linked** method's recorded return type when the receiver is
-`Named` (via the symbol map, walking the `parent` chain — §8); (3) a self/inherited
-call; (4) **a stdlib/runtime-type return table** `[have]` — the `ret` column on
-`stdlib::StdRule` plus `stdlib::runtime_method_ret(java_type, name, arity)` (keyed
-on the *Java* type name, e.g. `Random.nextInt→i32`, `Matcher.group→String`), so a
-chained call on a runtime carrier types its result. Else `Unknown`. The receiver is
-typed **recursively** (`type_of(scope)`), so the resolver already handles arbitrary
-chains `a.foo().bar()` — the only thing it lacked was the return facts above.
+**Raw-generic rule [have].** A raw *project* generic (`HuffmanTree` for `HuffmanTree<T>`)
+is filled with `()` to its recorded arity. A raw *stdlib* collection has no arity source
+→ element from Tier 2 or bare (`E0107`). Defaulting the element to `⊥` is **forbidden**:
+`Vec<Unknown>` cascades (every concrete element use clashes) — §11.
 
-**Pattern P1 — one resolver, consulted not re-derived `[have, the −170 lever]`.**
-There are effectively *two* type systems: the rich recursive `TypeResolver` (this
-section) and the *shallow* dispatch helpers in `dump.rs` (`recv_type_name`,
-`callee_recv_type`) used to key the bespoke method handlers and linked-callee
-resolution. The shallow helpers historically only resolved `NameExpr`/`FieldAccess`/
-`new` receivers — **not a method-call receiver** — so dispatch/rewrites silently
-failed on chains. The fix was *not* a third inference path but to **route the shallow
-helpers through `TypeResolver`** for the cases they couldn't handle (a `MethodCallExpr`
-receiver → `self.ty(recv)` → simple name). Before adding new type machinery, check
-whether the rich resolver simply isn't being *consulted* at a dispatch site. Caveat:
-routing a `Named` (user-type) result flips `receiver_is_user_type` and changes
-dispatch — measured a regression — so the shallow `recv_type_name` fallback is
-**String-only** (the high-value, low-risk case); the linked-callee path
-(`callee_recv_type`) may use the full `Named` result because it only resolves a
-signature, it doesn't gate the stdlib/user rewrite split.
-
-**Overload resolution [have].** A scoped call resolves to the receiver type's
-method keyed `name#arity`; when several overloads share an arity, pick by
-*argument-type score* over the candidates (collection-vs-scalar shape must match),
-unique best wins, ties fall back to the base overload. *(Resolving by base overload
-unconditionally was a bug — it mis-targeted every shared-arity overload.)*
-
-**Member-field resolution `[have]`.** `name x : Γ(x)` covers locals/params (via
-`type_tracker`'s lexical resolution). A reference to a **field** — bare `field`,
-`this.field`, or an *inherited* field — is NOT a free lexical name, so the lexical
-path returns `None`; it is resolved instead against the symbol map by walking the
-current class + `parent` chain (`resolve_self_field_type`). This was a silent
-`Unknown` gap; closing it (typing `this.field` correctly) was a large win (−151)
-because `type_of` feeds dispatch, coercion, and the null overlay everywhere. The
-field's recorded nullability (`FieldSym.nullable`) is honoured here: a nullable
-field resolves to `Opt(T)` so the §5 overlays see the truth (do NOT return the bare
-`T` for a nullable field — it would mis-fold null-comparisons, §5).
-
-The `Ty` query methods (`numeric_rust`, `category`, `is_char`, `elem`,
-`map_value`, …) are how codegen consults a resolved type; they are the single
-source of truth replacing the old scattered ad-hoc derivers.
+A single renderer `ρ : Ty → R` (`ty_to_rust_string`, `dump.rs`) backs every "type to
+string" need; do not hand-roll parallel derivers (invariant **P1**).
 
 ---
 
-## 5. Nullability overlay `N(·)` (orthogonal to `Ty`)
+## 4. Resolve / Tier-1 typing  `Γ ⊢ e : τ`
 
-`nullability::analyze` computes a fixpoint `N(d) ∈ {nullable, non-null}` over
-declarations (fields, locals, params, returns, array elements). Lowering:
+`TypeResolver::type_of`, memoized. Inference rules (all unlisted forms ⊢ `⊥`, M0):
 
 ```
-slot of underlying ⟦T⟧ with N=nullable     ⟼  Option<⟦T⟧>
-value v into a nullable slot                ⟼  Some(v) / None        (emit_into_option)
-read of a nullable value in a plain pos.    ⟼  v.clone().unwrap()
-x == null / x != null  (x : Option)         ⟼  x.is_none() / x.is_some()
-x == null / x != null  (x : concrete)       ⟼  false / true          (fold — see N2)
+─────────────   ──────────────   ─────────────   ──────────────
+⊢ intLit : I32   ⊢ strLit : Str   ⊢ boolLit:Bool   ⊢ charLit:Char     (…longLit,dblLit)
+
+ x:τ ∈ Γ          ⊢ e : Vec(τ)∨Set(τ)        ⊢ e1:τ1  ⊢ e2:τ2  τ1,τ2 numeric
+────────         ──────────────────         ───────────────────────────────
+⊢ x : τ           ⊢ e[i] : τ                  ⊢ e1 op e2 : promote(τ1,τ2)
+
+──────────────      ──────────────
+⊢ (T)e : ⟦T⟧         ⊢ new C(..) : Named(C)
+
+         ⊢ scope : τr      m,args
+        ────────────────────────────
+         ⊢ scope.m(args) : mret(τr,m,args)
 ```
 
-**Invariant N1 (all-sites).** Wrapping and unwrapping are dual and must be applied
-*together* across all sites of a declaration; a partial application (`Some`-wrap a
-write without unwrapping the read, or vice versa) *adds* `E0308`. Field nullability
-is resolved against the class's own field set (`this.field`), **shadow-safe** (a
-same-named param must not be consulted). Inherited-field and inherited-getter
-nullability resolve via the symbol-map `parent` chain.
+`mret` (= `method_call_type`) tries, in order: (1) fixed stdlib reach
+(`Map.get→V`, `List.get→elem`, `size→i32`, `charAt→char`, …); (2) project/linked
+return via `M`, walking `parent`; (3) self/inherited; (4) the **return tables**
+`StdRule.ret` + `runtime_method_ret(javaType,name,arity)` (keyed on the *Java* name,
+e.g. `Random.nextInt→i32`). Receivers are typed **recursively**, so chains
+`a.f().g()` resolve once the return facts exist.
 
-**Null-comparison fold (N2) `[have]`.** A `==`/`!=`-against-`null` whose other
-operand resolves (`type_of`) to a *concrete* (non-`Option`, non-`Unknown`) `Ty`
-can never be null → fold to `true`/`false` rather than emit `.is_some()`/`.is_none()`
-on a non-`Option` (E0599). Found by mining the E0599 histogram; −98. Safe because a
-genuinely-nullable operand resolves to `Opt` (or `Unknown`) and keeps the check —
-*provided* member fields resolve their nullability into `Opt` (§4 member-field rule).
+```
+mret(τr, m, args):
+  for rule in [stdlib_reach, project_ret(M), self_ret, return_tables]:
+     if (t = rule(τr,m,args)) ≠ ⊥: return t
+  return ⊥
+```
 
-**Caveat N3 — `Ty` is the underlying type; it does NOT carry the `N` overlay.**
-`type_of` returns the *base* `Ty` (e.g. `Str`), the same for a nullable local
-`String x` (emitted `Option<String>`) and a non-null one. Therefore `type_of`-
-concreteness is a sound discriminator **only where a wrong fold is still type-correct**
-(N2: folding a comparison to a bool is always well-typed). It is **NOT** sound for
-deciding whether to emit the nullable-read `.unwrap()` / `.as_ref().unwrap()`: that
-fires on *every* nullable read incl. locals/params, where `Ty`-concrete does not mean
-"not `Option`-wrapped" — gating the unwrap on `type_of`-concrete dropped unwraps on
-real `Option` locals and **regressed +2503** (measured NO-GO). The only sound signal
-for "is this emitted as `Option`?" is the `N` flag itself (`self.nullable` for
-locals, `FieldSym.nullable` for fields). The residual `unwrap`/`is_some`-on-concrete
-failures (~32) are exactly the sites where `N`-says-nullable but emission is concrete;
-the fix is to make `N` and emission **consistent at the source** (N1) — a flagged-
-nullable value must be emitted `Option<T>`, or removed from `N` when emitted concrete
-— never a `type_of` gate at the read.
+**Member fields.** `x:τ∈Γ` covers locals/params only. A bare/`this.`/inherited
+*field* is not a lexical name → resolved against `M` by walking `currentClass`+`parent`
+(`resolve_self_field_type`); a nullable field resolves to `Opt(τ)` so the overlays see
+the truth (never the bare `τ` — would misfold N2). Closing this `⊥`-gap was −151.
+
+**Overload resolution [have].** Key `name#arity`; on shared arity pick by
+argument-type score (collection-vs-scalar shape must match); unique best wins, ties →
+base overload. (Unconditional base-overload was a bug, §11.)
+
+**P1 — one resolver, consulted not re-derived.** The shallow dispatch helpers
+(`recv_type_name`, `callee_recv_type`) must route through `TypeResolver` for cases
+they can't handle (a `MethodCallExpr` receiver), not spawn a third inference path.
+Caveat: routing a `Named` result flips `receiver_is_user_type` and changes the
+stdlib-vs-user rewrite split → keep `recv_type_name`'s fallback **String-only**;
+`callee_recv_type` may use full `Named` (it only shapes a signature).
 
 ---
 
-## 6. Ownership overlay (orthogonal to `Ty`)
+## 5. Overlay `Option^{N}`  (nullability)
 
-A fixed, deliberate borrow strategy (NOT inferred lifetimes):
+`N : Decl → {nullable, nonnull}` is a fixpoint over fields/locals/params/returns/elements.
+As an operator on the rendered type, indexed by the slot's `N`:
 
 ```
-scalars / Copy types         ⟼  by value
-classes, arrays, String      ⟼  by reference (& / &mut)   in param position
-&mut                         ⟼  when the borrow analysis sees the param mutated
-String param                 ⟼  &str / &String (callee-shaped)
+Option^{nonnull}(τ)  = τ
+Option^{nullable}(τ) = Option<τ>
 ```
 
-`print_arguments_linked` shapes each argument to the callee's recorded `ParamSym`
-(`by_ref`, `mutable`, `nullable`). **We do not rewrite program structure to satisfy
-the borrow checker** — borrow seams that remain are accepted as residual errors
-(§12), not chased with ownership rewrites.
+Site lowering (ι = inject, π = project):
 
-**`.clone()` is a symptom of under-borrowing [gap — future refinement].** The
-translator inserts an owning `.clone()` at "move positions" (`emit_moved_value`:
-return / assignment-RHS / var-init / by-value arg of a non-`Copy` value). Each such
-clone is marked `/* TODO(translation): validate added clone */` (README) because it
-can break Java's by-reference aliasing or be wasted allocation. But many of these
-positions are **not actually moves** — they only *read* the value, and a read needs
-a borrow, not ownership:
-
-- **`format!`/`println!`/`write!` arguments never move** — the formatting machinery
-  takes args by shared reference (`&dyn Display`). So a format-position value needs
-  *neither* a clone *nor* an explicit `&` (the macro auto-refs); `format!("{} {}",
-  s, s)` is already correct. Any clone emitted for a format arg is *always* spurious.
-- Comparison operands, `if`/`while` conditions, and read-only method receivers
-  likewise only borrow.
-
-So the model: **own only at a genuine move** (store into an owned slot, return
-owned, pass to a by-value param); **borrow at every read.** A value used N times,
-all reads, needs zero owned copies. The current eager-clone strategy over-owns; a
-*use-site borrow analysis* (classify each use as read-borrow vs move) would
-eliminate most marked clones (and the audit burden), and likely also closes some of
-the §7.2 borrow seams (which are the same "wrong borrow shape at a use" problem).
-Under-borrowing now *forces* clones later; fixing the borrow aggressiveness is the
-root, the clones the symptom. **Investigate after the R1/Tier-2 routing work.**
-
-### Borrowed returns / explicit lifetimes [gap — investigated, staged, RISKY]
-
-Today a method returning a value derived from `self` or a param **clones** it, even
-when a borrow would do — the `&self → &T` lifetime *elision* is available but unused:
-```rust
-fn get_key(&self) -> String { self.key.clone() }     // today
-fn get_key(&self) -> &String { &self.key }           // possible (elided 'self): no clone
-fn pick<'a>(&self, o:&'a L) -> &'a String { &o.key } // explicit lifetime tied to a PARAM
 ```
-A multi-input return (`return cond ? a : b` with `a,b:&String`) is *currently an
-error* (`expected String, found &String`); `fn longer<'a>(&self,a:&'a String,
-b:&'a String)->&'a String` both fixes the error and avoids a clone. So lifetimes
-are a clone-reducer **and** an error-fixer.
+write v into nullable slot      ⟼  Some(v) / None          (ι: emit_into_option)
+read nullable in plain position ⟼  v.{as_ref()|clone()}.unwrap()   (π, borrow form per §6)
+x ==|!= null,  x:Opt            ⟼  x.is_none() / x.is_some()
+x ==|!= null,  x:concrete       ⟼  false / true            (N2 fold)
+```
 
-**The win is real but the decision is GLOBAL (ownership inference).** Changing a
-return `T → &T` ripples to every call site: a caller that needs an *owned* value now
-must clone at the call site. Net clone count is **≤** today only if call sites
-clone-on-demand — clones move from the callee (always) to *only the call sites that
-need ownership*, so read-only callers save them. The existing linker already shapes
-call sites from the symbol map (it adds `.unwrap()` for nullable returns, `.clone()`
-for by-value non-`Copy` names) — a **"borrowed return"** flag in the symbol map +
-call-site clone-on-demand reuses that machinery.
+**N1 (all-sites duality).** `π ∘ ι = id`; the wrap and the unwrap must be applied
+**together over all sites of a decl**. A one-sided application (Some-wrap a write, read
+unprojected — or vice versa) makes a site where static-type ≠ expected-type → `E0308`.
+Field nullability is resolved shadow-safe (a same-named param must not be consulted);
+inherited via `parent`.
 
-**The risk (why §6 avoided this):** returning a borrow propagates lifetime
-constraints the borrow checker enforces — a `&self.field` held across a `&mut self`
-call (`E0502`), self-referential storage, a borrow outliving its owner. This is the
-structural-borrow problem the fixed strategy sidesteps; done carelessly it
-**explodes** borrow-checker errors instead of reducing clones. So it must be a
-*measured* experiment, not an assumption.
+**N2 (null-compare fold) [have, −98].** `x ==|!= null` with `⊢ other : τ` concrete
+(`τ ∉ {Opt, ⊥}`) folds to `true`/`false` (the value can't be null) instead of emitting
+`.is_some()` on a non-`Option` (`E0599`). Sound because a genuinely-nullable operand
+resolves to `Opt`/`⊥` and keeps the check — *iff* member fields resolve nullable→`Opt`
+(§4).
 
-**Staged plan (gate each on measured error non-regression + clone reduction):**
-1. **Field getters `&self → &T`** (lifetime elided; record `ret_borrow` in the symbol
-   map; call sites clone-on-demand). Smallest, no explicit lifetimes. Measure one
-   corpus first — does the borrow checker cooperate or cascade?
-2. **Param-tied returns** `fn f<'a>(x:&'a T)->&'a U` (single input lifetime).
-3. **Multi-input** unified `'a` (fixes the `longer`-style current errors).
-Each only where the body provably returns a borrow of an input and the measured net
-(errors + clones) improves; otherwise keep the clone. Do **after** the last-use move
-slice (both touch return/emit; serialize to avoid conflicting changes).
-
-**Probe verdict [measured]: the cascade fear was UNFOUNDED for simple getters — GO.**
-A stage-1 probe (getters `return field;` → `&self → &T`) on vcf + the getter-heavy
-jts (`Geometry` hierarchy) produced **zero new borrow-checker errors** (no `E0502/
-E0515/E0505/…` cascade). So `&self.field`-held-across-`&mut self` is not the minefield
-§6 feared, at least for getters. The getter-only change is +3 (owned-use *ripple* at
-callers receiving `&T` where they need an owned value); the fix is the **call-site
-clone-on-demand** half: a `ret_borrow` flag in `MethodSym` + linker shaping — a call
-to a borrowed-return getter clones only where the *result* is used as an owned value
-(assigned to an owned slot, returned owned, by-value arg), and borrows directly at
-reads. Read-callers then drop their clones → net positive. Stage 1 = getter-borrow
-emission [have, probe] + call-site clone-on-demand [next].
-
-**Stage-1 COMPLETE measured: NO-GO for clone reduction — clones went UP.** Building
-the call-site clone-on-demand half (`ret_borrow` flag + linker shaping) and measuring
-all 12: **clones jts +316, jsoup +23** (vcf flat), and **errors −48** but **vcf +2**
-(over the guard). The decisive finding: a borrowed return moves the clone from the
-callee (**once**) to its callers (**many**); in these corpora **most callers consume
-the result by value** → they each clone → net *more* clones than the one callee clone
-removed. So **borrowed returns reduce clones only when a getter's callers predominantly
-READ the result; otherwise they increase them.** Deciding that requires whole-program
-**caller-read-dominance analysis** — the same global ownership inference the fixed
-borrow strategy deliberately avoids (§6 opening). The getter→`&T` change *does* cut
-errors (−48: it removes the borrow-seam-inducing callee clones), so it's applyable if
-*errors* are prioritized over clone-count and the vcf +2 let-binding edge (`&&T`) is
-fixed — but for the stated **clone-reduction** goal it is a dead end without the
-global caller analysis. **Conclusion: do not pursue borrowed-returns for clones
-without whole-program caller-read-dominance; the empirical clone-pattern audit is the
-better next lever** (the last-use move — a purely *local*, no-ripple clone removal —
-was the clean win; find more of those).
+**N3 (overlays ∉ Ty).** `type_of` returns the *underlying* τ — identical for a nullable
+local `String x` (emitted `Option<String>`) and a non-null one. So `τ`-concreteness is a
+sound gate **only where being wrong stays well-typed** (N2: a folded bool always type-
+checks). It is **not** sound for deciding the nullable-read projection (`.unwrap()` /
+`.as_ref().unwrap()`): that fires on every nullable read incl. locals, where
+`τ`-concrete ≠ "not Option-wrapped". The only signal for "emitted as `Option`?" is `N`
+itself. *Measured:* gating the unwrap on `τ`-concrete **+2503** (NO-GO). The residual
+`unwrap`/`is_some`-on-concrete cluster (~32) is exactly `N`-says-nullable-but-emitted-
+concrete; fix at the source (make `N` ⇔ emission, §12-item-7), never a per-read `τ` gate.
 
 ---
 
-## 7. Inheritance & polymorphism
+## 6. Overlay `Borrow`  (ownership)
 
-Java single-inheritance + interfaces, lowered two ways.
-
-### 7.1 Composition (the base representation) `[have]`
-A subclass `C extends P` becomes a struct with a `base: ⟦P⟧` field; inherited
-member access `c.f` lowers to `c.base.…f`. Method inheritance resolves up the
-symbol-map `parent` chain. This is correct for member access but **erases dynamic
-type**: a `P`-typed slot holds only the `base` struct, so `instanceof`/downcast on
-it are impossible — which §7.2 fixes for *dispatched* hierarchies.
-
-### 7.2 Sealed-hierarchy enums (R4) `[have, for dispatched hierarchies]`
-For a hierarchy whose root `P` is **dispatched** (some member is an `instanceof`/
-cast target anywhere in the project — recorded in `symbol_map.dispatched`),
-synthesize one enum per root:
+A **fixed** strategy (not inferred lifetimes). `Borrow : Ty × Pos → R`:
 
 ```
-enum PKind { C1(C1), C2(C2), …, P(P) }     -- one variant per concrete member
-impl Deref for PKind { Target = P; … }     -- base methods via deref
-impl Default, Clone, PartialEq, Eq, Hash   -- derives gated on member capability (§8.4)
+Copy/scalar               ⟼ by value
+class | array | String    ⟼ &T  (param position)        String param ⟼ &str/&String
+mutated param             ⟼ &mut T    (from B0)
 ```
 
-**Routing predicate `route(slot)`** — a slot typed as a *polymorphic supertype*
-of a dispatched hierarchy renders as the enum, not the concrete:
+`print_arguments_linked` shapes each argument to the callee's `ParamSym(by_ref,
+mutable, nullable)`. **No structural rewrites to satisfy the borrow checker** — residual
+borrow seams are accepted as errors (§12), not chased.
+
+### 6.1 Use-site borrow analysis (clone reduction)  [partial — landed slices]
+
+`.clone()` is the symptom of **under-borrowing**: the translator owns at "move
+positions" (`emit_moved_value`: return / assign-RHS / var-init / by-value arg), but
+most positions only *read* — and a read needs a borrow. The principle:
+
+> **own only at a genuine move; borrow at every read.** A value used N times, all
+> reads, needs zero owned copies.
+
+Model the decision as a per-use classifier:
 
 ```
-route(slot) = PKind      if  decl-type(slot) is a hierarchy supertype with ≥1 project subtype
-            = concrete   otherwise   (a leaf type stays concrete)
+classify : Use → { Move, ReadBorrow, MutBorrow }
+emit(Move)       = owned value     (clone iff non-Copy read out of a borrow)
+emit(ReadBorrow) = &T              (.as_ref().unwrap() for a nullable read; &expr otherwise)
+emit(MutBorrow)  = &mut T          (.as_mut())
 ```
 
-`route` is keyed by the *declared* type (via `slot_enum_name`), consulted at type
-rendering (`visit_class_type`) **and** by the resolver (so `coll.get()` etc. yield
-`PKind`). Boundary rules (the value↔slot seam):
+Verdict by parent context (those marked ✓ landed; each gated + measured):
+
+| use context | verdict | note |
+|---|---|---|
+| format!/println! arg | ReadBorrow | macro auto-refs; a clone is always spurious |
+| read-only `&self` method receiver | ReadBorrow ✓ | whitelist `is_readonly_java_method` |
+| `==`/`!=` operand | ReadBorrow ✓ | **coordination law** below |
+| index base `arr[i]` **read**, element Copy | ReadBorrow ✓ | non-Copy element NO-GO (coercion cascade) → keep clone |
+| `Map.get(k)`, Copy value | (`.copied()`) ✓ | a free copy, not a marked clone |
+| `Map.get(k)`, non-Copy, read-only receiver | ReadBorrow ✓ | `.get(&k).unwrap()` → `&V` |
+| foreach iterable: owned-temp or last-use local | Move-without-clone ✓ | consume directly; field/param keeps clone |
+| index/foreach **write** target | MutBorrow [gap] | `.as_mut()`; today clones (lost-mutation bug) |
+| store-owned / return-owned / by-value arg | Move | genuine move — keep |
+
+**Coordination law (k-ary operators).** When emitting an operator whose operands are
+compared/combined by value (`==`, `!=`), **all operands must render at the same borrow
+depth**. Borrowing one operand to `&T` while the other is owned `T` is `&T == T` →
+ill-typed. Emission: if any operand is a borrowable nullable read, render *both* as
+`&T` (nullable side `.as_ref().unwrap()`; other side `&(expr)`), giving `&T == &T`
+(needs only `T: PartialEq`, same as owned `==`). *Measured:* the uncoordinated form
+regressed +28; the coordinated form is flat.
+
+The classifier is currently a set of context predicates (`use_is_read_borrow`,
+`is_copy_index_base`, `cmp_borrow`, …); unifying them into one `classify` is the open
+refactor (§12). **Borrowed returns are CLOSED** (§6.2).
+
+### 6.2 Borrowed returns / lifetimes — CLOSED (measured NO-GO for clones)
+
+A getter `&self → &T` (elided lifetime) avoids the callee clone, but moves it to *every
+caller that consumes the result owned*. Probe: getter→`&T` produced **0** new borrow-
+checker errors and **−48 errors**, but clones **+316 jts / +23 jsoup** (callers mostly
+consume by value). Net clone reduction needs whole-program **caller-read-dominance**
+analysis — the global ownership inference the fixed strategy avoids. *Applyable only if
+errors, not clones, are the target.* Do not reopen for clone reduction.
+
+---
+
+## 7. Inheritance & polymorphism  (no `Named` subtyping → two lowerings)
+
+### 7.1 Composition `[have]`
+`C extends P` → struct with `base: ⟦P⟧`; `c.f` (inherited) → `c.base.…f`; methods
+resolve up the `parent` chain. Correct for member access but **erases dynamic type**
+(a `P`-slot holds only `base`), so `instanceof`/downcast fail — §7.2 fixes that for
+dispatched hierarchies.
+
+### 7.2 Overlay `Route` — sealed-hierarchy enums (R4) `[have, dispatched]`
+A root `P` is **dispatched** iff some member is an `instanceof`/cast target in-project
+(`M.dispatched`). For each, synthesize:
 
 ```
-construct: concrete subtype value v : C  into a routed slot   ⟼  PKind::C(v)   (wrap)
-   positions [have]: return, declarator, const-field, assignment, collection add/put,
-                     method argument, array-element assignment
-read: a read of an already-routed value (name/field/index/method-result, thru parens)
-                     is already PKind ⟼ DO NOT wrap (else double-wrap)            [have]
-instanceof C:        matches!(v, PKind::C(_) | …descendants…)                     [have]
-(C) v  (downcast):   match v { PKind::C(x) => x, _ => unreachable!() }            [have]
-method m on PKind:   base method ⟶ Deref; intermediate-only method ⟶ per-variant
-                     match-delegation (unreachable! for variants lacking it)      [partial]
+enum PKind { C1(C1), …, P(P) }   impl Deref{Target=P}   impl Default,Clone,Eq,Hash (§8.4)
 ```
 
-**Invariant R1 (no seam).** A leak (`expected C, found PKind` or the reverse)
-occurs exactly at a boundary between a *routed* and an *un-routed* position. The
-cure is **universal routing**: every position of a dispatched type — incl. arrays
-`C[]` ⟶ `Vec<PKind>` — must route, so a routed value never meets a concrete slot.
-Routing is currently universal enough for *contained* hierarchies (vcf
-`VCFHeaderLine`); a *pervasive value type* (`Coordinate`, also used in `Coordinate[]`
-and plain slots) still has residual un-routed seams `[partial]` (§12).
+`Route` is the overlay selecting the enum at polymorphic slots:
 
-**Invariant R2 (monotone wrap).** Never emit `PKind` at a slot without also wrapping
-its writes and ensuring its reads are `PKind`. Partial wrapping cascades.
+```
+Route(τ at slot) = Named(PKind)   if decl-type(slot) is a dispatched-hierarchy supertype with ≥1 project subtype
+                 = τ              otherwise   (leaf stays concrete)
+```
 
-### 7.3 Why enums (not trait objects) for closed hierarchies
-The hierarchy is closed (all subtypes in-project) and elements need value semantics
-(`Hash`/`Eq` to key a `HashSet`), which a struct enum gives and a `Box<dyn>` does
-not. Trait objects remain the tool for *open*/method-bearing supertypes `[partial]`.
+Keyed by *declared* type (`slot_enum_name`), consulted at render (`visit_class_type`)
+**and** in `type_of` (so `coll.get()` yields `PKind`). Site lowering (ι/π):
+
+```
+ι  construct v:C into routed slot  ⟼ PKind::C(v)     [have: return, decl, const, assign, add/put, arg, arr-elem]
+π  read already-routed value       ⟼ as-is           (DO NOT re-wrap → double-wrap)   [have]
+   instanceof C                    ⟼ matches!(v, PKind::C(_)|…descendants)            [have]
+   (C)v  downcast                  ⟼ match v { PKind::C(x)=>x, _=>unreachable!() }     [have]
+   method m on PKind              ⟼ base→Deref; intermediate→per-variant match        [partial]
+```
+
+**R1 (no seam).** A leak (`expected C, found PKind` or reverse) occurs *exactly* at a
+boundary between a routed and an un-routed position. Cure = **universal routing**: every
+position of a dispatched type, incl. `C[]` → `Vec<PKind>`, must route. Universal enough
+for *contained* hierarchies (vcf); a *pervasive value type* (`Coordinate`, also in
+`Coordinate[]`) has residual seams `[partial]` (§12).
+**R2 (monotone wrap).** Never render `PKind` at a slot without wrapping its writes and
+ensuring its reads are `PKind`. (Same shape as N1.)
+
+### 7.3 Why enums, not trait objects
+Closed (all subtypes in-project) + value semantics (`Hash`/`Eq` for `HashSet` keys),
+which a struct-enum gives and `Box<dyn>` does not. Trait objects remain for *open*
+supertypes `[partial]`.
 
 ### 7.4 `java.lang.Object` `[gap]`
-Currently `⟦Object⟧ = Unknown`. The genuine heterogeneous-`Object` case (a
-`Map<String,Object>` whose values are `instanceof`-dispatched) wants a *synthesized
-tagged enum* of the observed variants (no Java equivalent); the open-world fallback
-is `Box<dyn Any>` + downcast. This is the same enum machinery as §7.2 applied to a
-collected, rather than declared, hierarchy.
+`⟦Object⟧ = ⊥` today. Heterogeneous `Map<String,Object>` with `instanceof` dispatch
+wants a *synthesized* tagged enum of observed variants (§7.2 over a collected, not
+declared, hierarchy); open-world fallback `Box<dyn Any>` + downcast.
 
 ---
 
-## 8. Cross-module resolution (the symbol map)
+## 8. Symbol map `M`  (cross-module resolution)
 
-`crate_layout::build_project_map` links the project against itself; dependency maps
-merge in. `LinkIndex::resolve(name, imports, wildcards, package)` resolves a Java
-name to a `TypeSym` by: explicit import → same package → wildcard → bare FQN →
-**(5)** a *nested* type by simple name within the package (`pkg.Outer.Inner`), the
-last gated so it can't bind an unrelated dependency.
+`build_project_map` links the project to itself; dependency maps merge.
+`resolve(name,imports,wildcards,pkg)`: explicit import → same package → wildcard → FQN
+→ nested-by-simple-name within package (gated).
 
-### 8.1 `TypeSym` carries
-`rust_path`, `kind` (struct|trait|enum), `parent` (FQN), `interfaces`, generics,
-fields, static fields, methods (with recorded return types + `throws` + nullability),
-and the capability flags (§8.4).
-
-### 8.2 Parent chains are acyclic by construction
-`break_parent_cycles` severs any cyclic `parent` link at build time (a class can't
-transitively extend itself); every chain-walk (method/field/enum resolution) is
-additionally cycle-guarded. *(A cyclic chain previously hung the translator.)*
-
-### 8.3 Stubs (external/unresolved types) `[have]`
-A type not in any map becomes a stub: a capability-free one is aliased to `Unknown`
-(M0); a method/field-bearing one is a named stub struct with `Unknown`-typed members.
-
-### 8.4 Eq/Hash capability fixpoint `[have]`
-A monotone fixpoint marks each project type `partial_eq_capable` / `eq_hash_capable`:
-true iff every field (incl. the `base` chain) is comparable/hashable. A `Map`/`Set`
-field is hashable via an **order-independent fold** (mirrors Java `AbstractMap.
-hashCode`), since std maps aren't `Hash`. This lets subtypes and map-bearing value
-types get hand-written `impl Hash/Eq` (a plain derive can't), which is what makes
-the §7.2 enum keyable in a `HashSet`.
+- **8.1 `TypeSym`** carries `rust_path, kind∈{struct,trait,enum}, parent, interfaces,
+  generics, fields, statics, methods(ret,throws,nullable), capability`.
+- **8.2 Acyclicity.** `break_parent_cycles` severs cyclic `parent` at build; every
+  chain-walk is additionally cycle-guarded. (A cycle once hung the translator.)
+- **8.3 Stubs.** A type absent from `M` → stub: capability-free aliases to `⊥`;
+  method/field-bearing → named stub struct with `⊥` members.
+- **8.4 Eq/Hash capability fixpoint [have].** Monotone fixpoint marks each type
+  `partial_eq_capable`/`eq_hash_capable` iff every field (incl. `base`) is. `Map`/`Set`
+  fields hash via an order-independent fold (std maps aren't `Hash`). Enables the §7.2
+  enum to be `HashSet`-keyable.
 
 ---
 
-## 9. Tier-2 unification `[partial — substrate done, solve partial]`
+## 9. Tier-2 unification  `[partial — substrate done]`
 
-For positions Tier 1 leaves unknown — primarily **collection element types** of raw
-declarations, and stub-method returns:
-
-1. **Variables.** Assign `Var(α)` to each unknown slot (e.g. a raw collection's
-   element).
-2. **Constraints (equality).** From dataflow:
-   `coll.add(x)`/`get`/for-each ⟹ `α = Ty(x)`; `a = b` between collections ⟹
-   `elem(a) = elem(b)`; arg-pass/return ⟹ `α = elem(param/return)`; initializer
-   `new ArrayList<Foo>()` ⟹ `α = Foo`.
-3. **Solve.** Union-find; a class resolves to its ground member, joined by **LUB
-   over the `parent`/`interfaces` hierarchy** when several ground samples appear
-   (`.add(Polygon)`+`.add(LineString)` ⟹ `Geometry`, not a sample), else `Unknown`.
-4. **Apply.** A shared `slot→Ty` map consulted by **both** the renderer and the
-   resolver.
-
-**Invariant U1 (render/resolver agreement).** The inferred element MUST be applied
-at the type render *and* in `type_of` of every use (`.get`, iteration). The
-substrate (a shared map) guarantees this — *the per-declaration attempt that lacked
-it cascaded* (render said `Vec<Shape>` while `.get()` still typed `Unknown`).
-
-**Invariant U2 (monotone).** Resolve a variable to ground *only* on unambiguous
-single-LUB evidence; conflict / no evidence ⟹ stay `Unknown`/bare. Never emit a
-contested element. (Currently shipped: leaf-element locals only — §12.)
-
-**The fusion (R4 × Tier-2)** `[gap]`: when a collection's element LUB is a *dispatched*
-hierarchy root `P`, its element type is `PKind` (§7.2), so `Vec<PKind>`, `.add`
-wraps into a variant, `.get` reads the enum. This is the unification of §7.2 and §9
-into one system — blocked only by §7.2's residual non-universal routing (R1).
-
----
-
-## 10. The judgmental shape, summarized
-
-A slot's final Rust type is a composition of the overlays over the ground type:
+For positions Tier 1 leaves open (raw-collection elements, stub returns):
 
 ```
-render(slot) = Borrow( Option^{N(slot)} ( Route( Resolve(decl-type(slot)) ) ) )
+1. Var:        each unknown slot ← Var(α)
+2. Constrain:  coll.add(x)|get|foreach ⟹ α = ⊢x        a=b (colls) ⟹ elem(a)=elem(b)
+               arg/return            ⟹ α = elem(param/ret)   new ArrayList<Foo> ⟹ α=Foo
+3. Solve:      union-find; class → ground member, joined by LUB over parent/interfaces
+               (.add(Polygon)+.add(LineString) ⟹ Geometry, not a sample); else ⊥
+4. Apply:      one shared  slot→Ty  map, read by BOTH renderer and resolver
 ```
 
-where `Resolve` is Tier-1 ⊕ Tier-2 (§4, §9), `Route` is the enum overlay (§7.2),
-`Option^N` is nullability (§5), `Borrow` is ownership (§6). The overlays are
-*orthogonal* and applied in this order; each must obey its all-sites invariant
-(N1, R1/R2, U1/U2).
+**U1 (render/resolver agreement).** The inferred element MUST be applied at the render
+*and* in `type_of` of every use. Guaranteed by the shared map; a per-declaration attempt
+lacking it cascaded (render `Vec<Shape>`, `.get()` still `⊥`).
+**U2 (monotone).** Resolve a `Var` to ground only on unambiguous single-LUB evidence;
+conflict/none ⟹ stay `⊥`/bare. (Shipped: leaf-element locals only — §12.)
 
-**Composition is not optional [have].** The overlays must *nest*, not branch: a
-concrete member into a nullable routed slot is `Some(Kind::V(v))`
-(`emit_into_option_enum`) — `Option^N ∘ Route`, not "Option *or* Route". Treating
-two overlays as mutually-exclusive branches is itself a seam (it produced
-`expected Kind, found Concrete` until composed). Any pair of overlays that can
-co-occur at a slot must compose at that slot.
+**Fusion R4×Tier-2 [gap].** When an element LUB is a dispatched root `P`, the element is
+`PKind` → `Vec<PKind>`, `.add` wraps, `.get` reads the enum. Unifies §7.2 and §9; blocked
+only by §7.2's non-universal routing (R1).
 
 ---
 
-## 11. Invariants (the contract every type rewrite must keep)
+## 10. The render equation  (the central object)
 
-- **M0** — unknown ⟹ `Unknown` (capable bottom); don't downgrade `Unknown` to a
-  less-capable type without replacing *all* its capabilities.
-- **N1, R2, U2 — all-sites monotonicity.** A type-representation change (Option,
-  enum, inferred element) must update writes *and* reads together, or not fire.
-  A one-sided change cascades into more errors than it fixes. *Every measured NO-GO
-  this project hit was a violation of this.*
-- **U1 — render/resolver agreement.** Whatever type a slot renders as, `type_of`
-  of its uses must agree. Achieved by a shared map, never by two independent guesses.
-- **N3 — overlays are not in `Ty`.** `type_of` returns the *underlying* type; it does
-  not encode the nullability (`Option`) or ownership (`&`) overlay. A rewrite may use
-  `type_of`-shape to gate a decision *only* when being wrong is still well-typed
-  (e.g. folding a null-comparison to a bool); it must NOT use it to decide whether a
-  value is `Option`-wrapped (use the `N` flag) or borrowed. Violating this regresses
-  hard (the unwrap-via-`type_of` +2503).
-- **P1 — consult the resolver, don't re-derive.** A dispatch/codegen site that needs
-  an expression's type should route through `TypeResolver`, not a shallow per-node
-  derivation. Two parallel type derivations drift (§4 P1).
-- **Acyclicity** (§8.2) and **cycle-guarded walks** are mandatory.
-- **No structural rewrites for borrowing** (§6).
+A slot's Rust type is the **composition of the four overlays over the ground type**:
+
+```
+render(slot)  =  Borrow ∘ Option^{N(slot)} ∘ Route ∘ Resolve  (decl-type(slot))
+                 └──§6──┘ └─────§5─────┘   └─§7.2─┘ └§4⊕§9┘
+```
+
+The overlays are **orthogonal endofunctions** (each = identity unless its condition
+holds) applied in this fixed order; each obeys its own all-sites invariant.
+
+**Composition is not branching [have].** Where two overlays co-occur they must *nest*:
+a concrete member into a nullable routed slot is `Some(PKind::C(v))` =
+`(Option^N ∘ Route)(v)`, via `emit_into_option_enum` — **not** "Option *or* Route".
+Treating co-occurring overlays as mutually-exclusive branches is itself a seam.
 
 ---
 
-## 12. What the model requires but we don't yet compute (⇒ the roadmap)
+## 11. Invariants & lessons
 
-Reading the model top-down, the **gaps** are exactly the open work, in dependency
-order:
+**The contract** (every type rewrite must keep; each is a face of one law —
+*a representation change must be applied uniformly across all sites of a value*):
 
-1. **Universal routing (R1)** `[partial]` — route *every* position of a dispatched
-   type, incl. arrays `C[]` ⟶ `Vec<CKind>` and the borrow seams (`&CKind` vs
-   `&C`). This is the current blocker: it closes R4's residual leaks for pervasive
-   value types AND is the precondition for the fusion.
-2. **R4 × Tier-2 fusion (§9)** `[gap]` — once routing is universal, a
-   `List<Geometry>` becomes `Vec<GeometryKind>`. Unblocks the bulk of the
-   hierarchy-typed-collection errors (the JTS `E0107` mass).
-3. **Full Tier-2 solve (§9)** `[partial]` — cross-slot union-find (field↔param↔
-   return↔local) + LUB, beyond the shipped leaf-local slice.
-4. **Intermediate-method delegation (§7.2)** `[partial]` — generate enum methods
-   for supertype APIs not covered by `Deref`.
-5. **Real `Object` (§7.4)** `[gap]` — synthesized variant-enum for heterogeneous
-   `Map<_,Object>`; `Box<dyn Any>` fallback.
-6. **Generic trait objects** `[gap]` — `Box<dyn Tr<S,C>>` object-safety/arity, the
-   one area both R2 and R4 defer.
-7. **Nullability `N`/emission consistency (§5 N3)** `[gap]` — reconcile the `N`
-   fixpoint with what field/local emission actually produces, so a flagged-nullable
-   value is always emitted `Option<T>` (or dropped from `N` when emitted concrete).
-   Closes the residual `unwrap`/`is_some`-on-concrete cluster (~32) at its source —
-   no per-read `type_of` gate (which is unsound, N3). Tractable, high-leverage next.
+| id | statement |
+|---|---|
+| M0 | unknown ⟹ `⊥` (capable); never downgrade `⊥` to a less-capable type |
+| N1,R2,U2 | **all-sites monotonicity**: update writes *and* reads together, or don't fire |
+| U1 | render(slot) and `type_of`(its uses) agree — via the shared map, never two guesses |
+| N3 | overlays ∉ `Ty`: gate on `type_of`-shape only where being wrong stays well-typed |
+| P1 | consult the one resolver; don't spawn a parallel derivation |
+| §6 | no structural rewrites for borrowing; coordination law for k-ary ops |
+| §8.2 | acyclic `parent` + cycle-guarded walks |
 
-The model also explains the *non*-goals: we never infer borrows, never reject
-programs, and never replace `Unknown` with something less capable. The single
-through-line of the remaining work is **make every type decision consistent across
-all sites of a value** — N1/R1/R2/U1/U2 are five faces of that one requirement, and
-Tier-2 unification with universal routing is its general form.
+**Measured NO-GOs** (each violated all-sites or N3; kept as a fence):
+
+| change | result | why |
+|---|---|---|
+| unwrap gated on `type_of`-concrete | **+2503** | N3: `τ`-concrete ≠ not-Option for locals |
+| N2 fold gated on `expr_nullable` not `τ` | +68 | surfaces `N`≠emission inconsistency as `E0599` |
+| borrowed returns (for clones) | clones +339 | callers consume owned; needs global analysis (§6.2) |
+| uncoordinated `==` operand borrow | +28 | `&T == T` (coordination law) |
+| unconditional index-base borrow | +7 | non-Copy element coercion cascade (→ Copy-gate) |
+| `Vec<Unknown>` default element | cascades | every concrete element use clashes (§3) |
+| split `⊥` into bare distinct types | regressed | M0 |
+
+**Measured wins** (the lever each pulled): member-field `type_of` (−151) · method-return
+tables (−170) · N2 fold (−98) · over-wrap fix (−1586) · overload-by-arg-score (−361) ·
+use-site borrow slices (clones −708, this frontier).
+
+---
+
+## 12. Roadmap (gaps = what the model demands but we don't compute)
+
+In dependency order:
+
+1. **Universal routing (R1)** `[partial]` — route *every* position of a dispatched type
+   (incl. `C[]`→`Vec<CKind>`, borrow seams `&CKind`). Closes R4's pervasive-value leaks;
+   precondition for the fusion.
+2. **R4×Tier-2 fusion (§9)** `[gap]` — `List<Geometry>` → `Vec<GeometryKind>`. Unblocks
+   the JTS `E0107` mass.
+3. **Full Tier-2 solve (§9)** `[partial]` — cross-slot union-find (field↔param↔return↔
+   local) + LUB beyond the leaf-local slice.
+4. **`N` ⇔ emission consistency (§5 N3)** `[gap]` — a flagged-nullable value always
+   emitted `Option<T>` (or dropped from `N`). Closes the ~32 unwrap-on-concrete cluster
+   at the source. *Tractable, high-leverage.*
+5. **Unified `classify` (§6.1)** `[partial]` — one use-site classifier + the MutBorrow
+   write-target form (`.as_mut()`, a real lost-mutation bug). Unblocks in-place IO
+   (a `Box<dyn BufRead>` reader is a MutBorrow local — see `docs/in-place-io-prototype.md`).
+6. **Intermediate-method delegation (§7.2)** `[partial]` — enum methods for supertype
+   APIs not covered by `Deref`.
+7. **Real `Object` (§7.4)** `[gap]` · **generic trait objects** `[gap]` (`Box<dyn Tr<S,C>>`).
+
+**Non-goals** (the model forbids): infer borrows, reject programs, downgrade `⊥`. The
+single through-line: *make every type decision consistent across all sites of a value* —
+N1/R1/R2/U1/U2 are five faces of it; universal routing + Tier-2 unification is its general
+form.

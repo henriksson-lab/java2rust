@@ -184,12 +184,18 @@ family.
    Added `ty_to_rust_string(&Type) -> String` (`dump.rs`, near `rust_type_of`): the one
    renderer covering every `Type` variant (collections with elements, `Named` via
    `stub_type_name`, `Unknown`→placeholder). `rust_type_of` is now backed by it (A4, −3).
-   **Remaining de-dup (optional follow-up):** `infer_expr_rust_type`,
-   `infer_call_ret_type`, `java_simple_to_rust_static` could also route through it (each a
-   separate measured slice; would let `infer_expr_rust_type` benefit from chain/cast/`new`
-   typing, and unblocks the full B5). **P1 caveat still stands:** do NOT route the
-   `recv_type_name` NameExpr/FieldAccess arms through the renderer (a `Named` render there
-   flips `receiver_is_user_type` — measured regression).
+   **De-dup of the other derivers:**
+   - `infer_expr_rust_type` — ❌ **NO-GO (measured 2026-06-21).** Routing its `_` arm
+     through `self.ty` + the renderer (typing chains/casts/`new`/field-access instead of
+     `Unknown`) REGRESSES **vcf +2** (jaligner −2, bjaaprop −1; net −1, but a per-corpus
+     regression). The broadened stub-PARAM types change stub signatures (the documented
+     shape sensitivity — cf. the chained-receiver stub-recording NO-GO). Reverted; kept
+     shallow (NO-GO comment at the `_` arm).
+   - `infer_call_ret_type` already routes through the now-renderer-backed `rust_type_of`.
+   - `java_simple_to_rust_static` (a tiny name→prim map) — not pursued: low duplication,
+     and it feeds the same shape-sensitive stub-param path.
+   **P1 caveat still stands:** do NOT route the `recv_type_name` NameExpr/FieldAccess arms
+   through the renderer (a `Named` render there flips `receiver_is_user_type` — regression).
 
 5. **Front the `append/charAt/substring → String` name-guess with `self.ty(call)` —
    ⏸ DEFERRED behind B4 (investigated 2026-06-21).** The useful form returns the

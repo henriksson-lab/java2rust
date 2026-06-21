@@ -68,3 +68,29 @@ first (reusable beyond IO), then flip the Reader family `map_type_name` →
 `Box<dyn BufRead>` + idiomatic ctors + the `read_line` helper, and measure. Until the
 borrow frontier exists, the carrier is the pragmatic emission. The spike
 (`/tmp/io_spike.rs`) is the compile-verified target to translate toward.
+
+## Alternative direction — stubs + a separate inlining pass (proposed, TO DISCUSS)
+
+User's proposal (2026-06-21), not yet decided: rather than translate IO **directly**
+to idiomatic `std::io` (the carrier or the in-place flip above), **separate the two
+concerns**:
+
+1. **Stubs first.** Let the IO types fall back to the existing opaque-stub mechanism
+   (`stub_<pkg>.rs`: `pub struct X{}` + `unimplemented!()` methods). They COMPILE
+   immediately with no carrier machinery — "make it type-check" is decoupled from
+   "make it do real work."
+2. **A separate stub-inlining mechanism.** A distinct pass that replaces a stub
+   type/method with an idiomatic inline Rust implementation — general, NOT IO-specific,
+   reusable across the whole stdlib surface (ties into memory `stdlib-stub-implementation`
+   and the [[in-place-translation-preference]]).
+
+**Why this may be better:** the carrier approach couples *what type* with *how it's
+implemented*; stubs + inlining decouples them. The translation core only ever emits
+stubs (uniform, simple); idiomatic-ness becomes an orthogonal, incrementally-applied
+substitution pass. It also sidesteps the borrow-frontier blocker for *getting it to
+compile* (stubs need no `&mut`/`?` discipline) and lets the idiomatic work proceed
+independently. **Open questions for the discussion:** how the inlining pass binds a
+stub call to its idiomatic impl (name/signature mapping); whether inlined IO still
+needs the borrow-mode access + `Result` propagation (likely yes, but now isolated to
+the inlining pass, not the core); and how this relates to the existing runtime-carrier
+types already shipped (`io_read.rs`/`io_write.rs` — keep, or migrate to inlined stubs?).

@@ -102,6 +102,12 @@ pub struct RustDumpVisitor<'a> {
     /// When true, the value being emitted feeds an `Option<T>` slot, so a
     /// nullable read is kept as-is (no `.unwrap()`).
     expect_option: bool,
+    /// When true, a nullable non-Copy read borrows through the Option
+    /// (`.as_ref().unwrap()` → `&T`) instead of cloning. Set by `visit_binary`
+    /// while emitting the operands of an `==`/`!=` whose other operand is also
+    /// borrowed, so the comparison is `&T == &T` (no clone) — slice (c) operand
+    /// coordination. Takes priority over the last-use move so both sides match.
+    cmp_borrow: bool,
     /// When true, string literals are emitted raw (`"x"`, not `"x".to_string()`)
     /// — used for `match` patterns.
     raw_string: bool,
@@ -219,6 +225,7 @@ impl<'a> RustDumpVisitor<'a> {
             nullable,
             elem_nullable: None,
             expect_option: false,
+            cmp_borrow: false,
             raw_string: false,
             link,
             mut_borrow_params: std::collections::HashSet::new(),
@@ -1318,6 +1325,13 @@ impl<'a> RustDumpVisitor<'a> {
                 .decl_java_type_name(name, e)
                 .map(|t| self.stub_type_name(&t))
                 .unwrap_or_else(|| crate::stubs::UNKNOWN.into()),
+            // B4 de-dup NO-GO (measured 2026-06-21): routing the `_` arm through
+            // `self.ty` + `ty_to_rust_string` (so chains/casts/`new`/field-access
+            // get typed instead of `Unknown`) REGRESSES vcf +2 (jaligner −2,
+            // bjaaprop −1, vcf +2 — net −1 but a per-corpus regression). The
+            // broadened stub-PARAM types change stub signatures (the documented
+            // shape sensitivity). Kept shallow; the renderer stays used by
+            // `rust_type_of` (A4) only.
             _ => crate::stubs::UNKNOWN.into(),
         }
     }
@@ -2232,6 +2246,58 @@ impl<'a> RustDumpVisitor<'a> {
         reads == 1
     }
 
+    /// A foreach iterable that is a movable last-use LOCAL — an owned local read
+    /// exactly once (this foreach), whose foreach is NOT nested in an outer loop —
+    /// so the loop can MOVE it (drop the clone) instead of cloning. Mirrors
+    /// `is_movable_last_use` but tests the *foreach* (not the iterable) for an
+    /// enclosing loop: the iterable's own parent IS the foreach, which would
+    /// otherwise trip `within_loop_of`.
+    fn foreach_iterable_movable_local(&self, iterable: NodeId) -> bool {
+        let Node::NameExpr { name } = self.arena.kind(iterable) else {
+            return false;
+        };
+        let name = name.clone();
+        // A local: decl's grandparent is a `VariableDeclarationExpr` (a param's
+        // parent is `Parameter`; a field's grandparent is `FieldDeclaration`).
+        let Some((_, decl)) = self.id.find_declaration_node_for(self.arena, &name, iterable) else {
+            return false;
+        };
+        let is_local = self
+            .arena
+            .parent(decl)
+            .and_then(|p| self.arena.parent(p))
+            .map(|gp| matches!(self.arena.kind(gp), Node::VariableDeclarationExpr { .. }))
+            .unwrap_or(false);
+        if !is_local {
+            return false;
+        }
+        let Some(method) = self.enclosing_callable(iterable) else {
+            return false;
+        };
+        // The foreach itself must not be inside an OUTER loop, else the local is
+        // moved on the first outer iteration and gone on the next.
+        let Some(foreach) = self.arena.parent(iterable) else {
+            return false;
+        };
+        if self.within_loop_of(foreach, method) {
+            return false;
+        }
+        // Exactly one textual read of `name` in the method (this foreach use).
+        let mut reads = 0usize;
+        for i in 0..self.arena.node_count() {
+            let n = NodeId(i as u32);
+            if let Node::NameExpr { name: nm } = self.arena.kind(n) {
+                if *nm == name && self.is_descendant_of(n, method) && !self.is_assign_target(n) {
+                    reads += 1;
+                    if reads > 1 {
+                        return false;
+                    }
+                }
+            }
+        }
+        reads == 1
+    }
+
     /// The enclosing method/constructor declaration node, if any.
     fn enclosing_callable(&self, mut n: NodeId) -> Option<NodeId> {
         loop {
@@ -2281,14 +2347,70 @@ impl<'a> RustDumpVisitor<'a> {
     }
 
     /// A use-site that only needs to *borrow* the value — currently just a
-    /// read-only method receiver. (Index-base `arr[i]` was investigated as a
-    /// borrow site too — `x.as_ref().unwrap()[i]` — and gives a large clone win,
-    /// but for a non-Copy element struct read in a numeric-coercion context it
-    /// reshuffles/leaks type-coercion errors (jhlabs +3, jts +4); the bad cases
-    /// can't be told from the ~500 good ones by a local predicate — they need
-    /// element-Copy-type + coercion-context info. Parked; see TODO §4.1 slice b.)
+    /// read-only method receiver.
+    ///
+    /// **Slice (c) NO-GO (measured 2026-06-21):** also borrowing `==`/`!=`
+    /// operands (`x.as_ref().unwrap()` instead of `.clone().unwrap()`) REGRESSES
+    /// (vcf +13, jts +15; bjalign −1). Borrowing ONE operand yields `&T == <owned
+    /// T>`, which does not compile unless the *other* operand is also borrowed —
+    /// and a local use-site predicate can't coordinate both operands' borrow
+    /// shapes (it's per-node; it doesn't control the binary-op emission). So slice
+    /// (c) is NOT type-info-free: it needs `visit_binary` to emit a *consistent*
+    /// borrow shape for both sides (e.g. `&a == &b`, or deref the borrow) — the
+    /// operand-coordination the use-site-borrow plan's typed `classify_use` must
+    /// own. Condition positions (`if`/`while`) are `bool` (Copy) and were no-ops.
+    /// (Index-base `arr[i]` is parked similarly — see TODO §4.1 slice b.)
+    /// Slice (b), revived element-Copy-gated: `e` is the base of a `arr[i]` READ
+    /// whose element type is a Copy scalar (`int[]`/`float[]`/`char[]`). Borrowing
+    /// the base (`arr.as_ref().unwrap()[i]`) then copies the Copy element out of
+    /// `&Vec` — no clone. Gated to Copy because the prior unconditional attempt
+    /// regressed on NON-Copy struct elements in numeric-coercion contexts (`pts[i].x
+    /// - 1000`, jhlabs +3 / jts +4); a write target (`arr[i] = x`, `arr[i]++`) is
+    /// excluded — it needs `&mut`, not a shared borrow.
+    fn is_copy_index_base(&self, e: NodeId) -> bool {
+        let Some(p) = self.arena.parent(e) else { return false };
+        let Node::ArrayAccessExpr { name, .. } = self.arena.kind(p) else {
+            return false;
+        };
+        if *name != e {
+            return false;
+        }
+        if !matches!(self.ty(e).elem(), Some(crate::types::Type::Prim(_))) {
+            return false;
+        }
+        if self.is_assign_target(p) {
+            return false;
+        }
+        if let Some(gp) = self.arena.parent(p) {
+            if matches!(
+                self.arena.kind(gp),
+                Node::UnaryExpr {
+                    op: UnaryOp::PreIncrement
+                        | UnaryOp::PreDecrement
+                        | UnaryOp::PosIncrement
+                        | UnaryOp::PosDecrement,
+                    ..
+                }
+            ) {
+                return false;
+            }
+        }
+        true
+    }
+
     fn use_is_read_borrow(&self, e: NodeId) -> bool {
-        self.is_readonly_method_receiver(e)
+        self.is_readonly_method_receiver(e) || self.is_copy_index_base(e)
+    }
+
+    /// A nullable, non-`Copy` name read — one that, unwrapped, would otherwise be
+    /// `.clone().unwrap()` but can borrow through the Option (`.as_ref().unwrap()`
+    /// → `&T`). Used by `visit_binary` to decide whether an `==`/`!=` comparison
+    /// can be coordinated into a `&T == &T` (slice c). NameExpr only (the
+    /// `.as_ref()` lowering lives in the name-read path).
+    fn is_borrowable_nullable_read(&self, e: NodeId) -> bool {
+        matches!(self.arena.kind(e), Node::NameExpr { .. })
+            && self.is_non_copy_name(e)
+            && self.expr_nullable(e)
     }
 
     /// Is `n` inside a loop body between it and `method` (exclusive of `method`)?
@@ -3058,7 +3180,23 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(&vname);
                 self.printer.print(" in ");
                 self.visit(iterable, arg);
-                self.printer.print(".clone()/* TODO(translation): validate added clone */ ");
+                // Slice (f): an owned-temporary iterable — a fresh `new`/method-call
+                // result — is consumed by the loop directly; cloning it is wasted
+                // (nothing else aliases it). A movable last-use LOCAL is likewise
+                // moved into the loop (its only read). A field/param/multi-read
+                // iterable still clones (moving out of a binding or `&self`/`&`
+                // borrow is illegal, or would break a later use). The general
+                // `for v in &it` borrow form is NOT done — it rebinds `v` to `&T`
+                // and ripples into the body (see TODO §4.1 slice f).
+                let owned_temp = matches!(
+                    self.arena.kind(iterable),
+                    Node::MethodCallExpr { .. } | Node::ObjectCreationExpr { .. }
+                );
+                let movable = owned_temp || self.foreach_iterable_movable_local(iterable);
+                if !movable {
+                    self.printer.print(".clone()/* TODO(translation): validate added clone */");
+                }
+                self.printer.print(" ");
                 self.encapsulate_if_not_block(body, arg);
             }
             ForStmt { .. } => self.visit_for(id, arg),
@@ -3330,7 +3468,12 @@ impl<'a> RustDumpVisitor<'a> {
         // (`x.unwrap()`) rather than cloned first (§6 use-site borrow — same
         // last-use move applied to the plain-clone site in `emit_moved_value`).
         if nullable && !self.expect_option {
-            if self.is_movable_last_use(id) {
+            if self.cmp_borrow && self.is_non_copy_name(id) {
+                // Coordinated `==`/`!=` operand (slice c): borrow through the
+                // Option so the comparison is `&T == &T`. Priority over the
+                // last-use move so BOTH operands match shape.
+                self.printer.print(".as_ref().unwrap()");
+            } else if self.is_movable_last_use(id) {
                 self.printer.print(".unwrap()");
             } else if self.is_non_copy_name(id) && self.use_is_read_borrow(id) {
                 // Read-only use-site (method receiver or index base): borrow
@@ -4710,6 +4853,21 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(if matches!(op, BinaryOp::Equals) { "true" } else { "false" });
                 return;
             }
+            // Slice (c) operand coordination: when an operand is a borrowable
+            // nullable read, emit BOTH sides as `&T` (the nullable side via
+            // `.as_ref().unwrap()`, the other wrapped in `&(..)`) so the
+            // comparison is `&T == &T` — dropping the clone without the `&T == T`
+            // mismatch that a one-sided borrow caused.
+            let l_ref = self.is_borrowable_nullable_read(left);
+            let r_ref = self.is_borrowable_nullable_read(right);
+            if l_ref || r_ref {
+                self.print_java_comment(id, arg);
+                self.emit_cmp_operand_borrowed(left, l_ref, arg);
+                self.printer
+                    .print(if matches!(op, BinaryOp::Equals) { " == " } else { " != " });
+                self.emit_cmp_operand_borrowed(right, r_ref, arg);
+                return;
+            }
         }
         self.print_java_comment(id, arg);
         // Java promotes mixed-width numeric operands (`float * int` -> both
@@ -4741,6 +4899,22 @@ impl<'a> RustDumpVisitor<'a> {
         });
         self.printer.print(" ");
         self.emit_operand(right, cast_r.as_deref(), arg);
+    }
+
+    /// Emit one operand of a coordinated `==`/`!=` as `&T`: a borrowable nullable
+    /// read borrows itself (via `cmp_borrow` → `.as_ref().unwrap()`); any other
+    /// operand is wrapped in `&(..)` so both sides match shape (`&T == &T`).
+    fn emit_cmp_operand_borrowed(&mut self, e: NodeId, is_ref: bool, arg: Arg) {
+        if is_ref {
+            let saved = self.cmp_borrow;
+            self.cmp_borrow = true;
+            self.visit(e, arg);
+            self.cmp_borrow = saved;
+        } else {
+            self.printer.print("&(");
+            self.visit(e, arg);
+            self.printer.print(")");
+        }
     }
 
     /// Emit an operand, optionally cast to `cast` (`(<expr> as <cast>)`).
@@ -5584,11 +5758,33 @@ impl<'a> RustDumpVisitor<'a> {
                     Some("Map" | "HashMap" | "LinkedHashMap" | "TreeMap")
                 );
                 if is_map {
-                    // Map.get(k) -> value by clone (panics if absent, ~ Java null deref).
+                    // Map.get(k) -> value (panics if absent, ~ Java null deref).
+                    // Slice (g): a Copy value type uses `.copied()` — a free copy,
+                    // not a marked clone (−232 markers). A non-Copy value borrows
+                    // (`&V`) when the get-call is consumed in a read-only context (a
+                    // whitelisted `&self` method receiver — `map.get(k).equals(..)`,
+                    // `.length()`, …), so the `.cloned()` is unnecessary (the use
+                    // autorefs `&V`); otherwise it clones to own the value.
+                    let copy_val = matches!(
+                        self.ty(recv).map_value(),
+                        Some(crate::types::Type::Prim(_))
+                    );
+                    let borrow = !copy_val
+                        && self
+                            .arena
+                            .parent(recv)
+                            .map(|c| self.use_is_read_borrow(c))
+                            .unwrap_or(false);
                     self.visit(recv, arg);
                     self.printer.print(".get(&(");
                     self.visit(args[0], arg);
-                    self.printer.print(")).cloned()/* TODO(translation): validate added clone */.unwrap()");
+                    if copy_val {
+                        self.printer.print(")).copied().unwrap()");
+                    } else if borrow {
+                        self.printer.print(")).unwrap()");
+                    } else {
+                        self.printer.print(")).cloned()/* TODO(translation): validate added clone */.unwrap()");
+                    }
                 } else {
                     // List.get(i) -> indexed element (cloned to own it).
                     self.visit(recv, arg);
