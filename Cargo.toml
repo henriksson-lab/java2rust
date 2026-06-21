@@ -22,10 +22,11 @@ cafebabe = "0.9.0"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 # Used only by the `java_runtime_compiles` test module (crate_layout.rs), which
-# `include!`s `src/runtime/zip.rs` (the java.util.zip runtime fragment backed by
-# flate2) and must type-check.
+# `include!`s the runtime fragments `src/runtime/zip.rs` (flate2) and
+# `src/runtime/regex.rs` (regex) and must type-check them.
 [dev-dependencies]
 flate2 = "1"
+regex = "1"
 
 [[bin]]
 name = "java2rust-rs"

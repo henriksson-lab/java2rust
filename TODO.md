@@ -208,11 +208,22 @@ two cross-cutting roots: `N` (nullability) is not one reconciled fact, and any c
    prefer the single-threaded representation (e.g. `Cell<T>` for atomics, drop
    `synchronized`) over contorting the output to preserve thread-safety.
 
-1. **Add a nullability flag to `runtime_method_ret` [HIGHEST LEVERAGE].** Mark
-   `Matcher.group → Opt(Str)` etc.; the resolver wraps the result in `Type::Opt` when
-   flagged. Near-one-line per the regex audit; the *same* mechanism (N⇔source-of-truth)
-   clears **atomics-(i)** and re-enables **A1** — one change unblocks three documented
-   failures. Re-wire the parked `regex.rs` after. Measure jsoup + all-12.
+1. **Nullability on `runtime_method_ret` + regex — ✅ DONE (2026-06-22), net-zero,
+   zero regression.** Mechanism: nullable runtime returns are just `"Option<T>"` ret
+   strings (`parse_rust_type` lowers them — no flag/signature change); `readLine →
+   Option<String>` landed. **Regex LANDED** (the parked patch resurrected — both its
+   blockers were fixed this session: return-type tracking + the `Option<T>` mechanism):
+   `src/runtime/regex.rs` (regex crate, 9 unit tests), `map_type_name` Pattern/Matcher,
+   `static_rule` compile/quote/matches, `runtime_method_ret` Matcher/Pattern returns,
+   `runtime_method_overload` group/start/end(1)+split(2), Cargo `regex="1"` (dev + gen).
+   All 12 flat at 10855 (jsoup 2438 — the parked +13 is GONE; net-zero on error count
+   because jsoup's regex already compiled as no-op stubs — the win is real regex behavior
+   vs `unimplemented!()`). **Remaining refinement (future):** `Matcher.group(n) →
+   Option<String>` (nullable) needs `group_1 -> Option` in the runtime AND chained-
+   `.group(n).m()` unwrap handling (U1); today `group` returns empty-`String` (compiles,
+   folds `group(n)!=null` to a constant — semantically imperfect but error-free).
+   **atomics-(i) and A1 are NOT auto-fixed by this** — they need the §12-4 field-`N`
+   reconciliation (the synthesis conflated them); see `formetoread.md`.
 2. **Atomics → `Cell<T>`** (own-typed, `&self` accessors returning the resolved
    primitive — fixes the **U1** render/resolver disagreement) instead of the carrier.
    *Gated by item 0 (multithreading).* Measure trim/jsoup (the +14/+1 regressors).

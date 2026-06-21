@@ -277,6 +277,17 @@ pub fn static_rule(cls: &str, name: &str, arity: usize) -> Option<StdRule> {
         ("IntStream" | "LongStream", "range", 2) => r("((${0})..(${1}))"),
         ("IntStream" | "LongStream", "rangeClosed", 2) => r("((${0})..=(${1}))"),
 
+        // ---- java.util.regex.Pattern static factories (regex crate). `ret` is the
+        // Java type name so a chained `.matcher(x)`/`.split(x)` resolves. ----
+        ("Pattern", "compile", 1) => rr("crate::java_runtime::JavaPattern::compile(${0})", "Pattern"),
+        ("Pattern", "compile", 2) => {
+            rr("crate::java_runtime::JavaPattern::compile_2(${0}, ${1})", "Pattern")
+        }
+        ("Pattern", "quote", 1) => rr("crate::java_runtime::JavaPattern::quote(${0})", "String"),
+        ("Pattern", "matches", 2) => {
+            rr("crate::java_runtime::JavaPattern::matches_static(${0}, ${1})", "bool")
+        }
+
         // ---- String static ----
         ("String", "valueOf", 1) => rr("(${0}).to_string()", "String"),
 
@@ -392,6 +403,11 @@ pub fn runtime_method_overload(java_type: &str, name: &str, arity: usize) -> Opt
         ("CRC32" | "Deflater" | "Inflater", "update", 1) => ByArgVec,
         // `Random.nextInt(bound)`.
         ("Random", "nextInt", 1) => Rename("next_int_bound"),
+        // java.util.regex: `Matcher.group/start/end(n)` and `Pattern.split(_,limit)`
+        // are arity-overloaded; the 1/2-arg forms get the `_N` suffix (the 0/1-arg
+        // base keeps the bare name via default snake-case emission / short-circuit).
+        ("Matcher", "group", 1) | ("Matcher", "start", 1) | ("Matcher", "end", 1) => Suffix,
+        ("Pattern", "split", 2) => Suffix,
         // Char-writer carriers: println/print + write/append overloaded by arity;
         // the rest emitted bare so the generic String rewrites don't fire.
         (
@@ -443,6 +459,22 @@ pub fn runtime_method_ret(java_type: &str, name: &str, arity: usize) -> Option<&
         ("StringTokenizer", "hasMoreTokens", 0) => "bool",
         ("DecimalFormat", "format", _) => "String",
         ("NumberFormat", "format", _) => "String",
+        // java.util.regex (regex crate). NOTE: `Matcher.group(n)` is nullable in
+        // Java, but the runtime `group_1` returns empty-`String` for a
+        // non-participating group (not `Option`) — so the resolver MUST say
+        // `String` too (U1: render/resolver agreement). Returning `Option<String>`
+        // here without making the runtime + chain-unwrap match is a U1 violation
+        // (`.is_some()` on a `String`). Nullable-group is a future refinement
+        // (needs `group_1-> Option` AND chained-`.group(n).m()` unwrapping).
+        // `matcher`/`pattern` return the carrier Java type names so chains resolve.
+        ("Pattern", "matcher", 1) => "Matcher",
+        ("Pattern", "split", _) => "Vec",
+        ("Pattern", "pattern", 0) => "String",
+        ("Matcher", "find", 0) | ("Matcher", "matches", 0) | ("Matcher", "lookingAt", 0) => "bool",
+        ("Matcher", "group", _) => "String",
+        ("Matcher", "start", _) | ("Matcher", "end", _) | ("Matcher", "groupCount", 0) => "i32",
+        ("Matcher", "replaceAll", 1) | ("Matcher", "replaceFirst", 1) => "String",
+        ("Matcher", "pattern", 0) => "Pattern",
         _ => return None,
     })
 }

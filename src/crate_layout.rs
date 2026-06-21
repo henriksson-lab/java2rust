@@ -1092,6 +1092,7 @@ const JAVA_RUNTIME: &str = concat!(
     include_str!("runtime/io_read.rs"),
     include_str!("runtime/io_write.rs"),
     include_str!("runtime/zip.rs"),
+    include_str!("runtime/regex.rs"),
     include_str!("runtime/util.rs"),
 );
 
@@ -1116,6 +1117,7 @@ mod java_runtime_compiles {
     include!("runtime/io_read.rs");
     include!("runtime/io_write.rs");
     include!("runtime/zip.rs");
+    include!("runtime/regex.rs");
     include!("runtime/util.rs");
 }
 
@@ -1186,7 +1188,7 @@ pub fn finish_crate(out_root: &Path) -> std::io::Result<()> {
     let crate_name = sanitize_crate_name(&name);
     let cargo = format!(
         "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-         [lib]\npath = \"lib.rs\"\n\n[dependencies]\nflate2 = \"1\"\n",
+         [lib]\npath = \"lib.rs\"\n\n[dependencies]\nflate2 = \"1\"\nregex = \"1\"\n",
     );
     std::fs::write(out_root.join("Cargo.toml"), cargo)?;
     Ok(())

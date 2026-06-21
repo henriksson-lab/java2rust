@@ -8320,6 +8320,13 @@ pub fn map_type_name(name: &str) -> &str {
         "DecimalFormat" => "crate::java_runtime::JavaDecimalFormat",
         "NumberFormat" => "crate::java_runtime::JavaNumberFormat",
         "DecimalFormatSymbols" => "crate::java_runtime::JavaDecimalFormatSymbols",
+        // `java.util.regex` -> real regex via the `regex` crate (src/runtime/regex.rs).
+        // `Pattern.compile`/`quote`/`matches` route through static_rule; `matcher`/
+        // `split` and the stateful `Matcher` (find/group/matches/replaceAll/…) are
+        // inherent methods. `group(n)`/`start(n)`/`end(n)` and `Pattern.split(_,limit)`
+        // disambiguate by arity via `runtime_method_overload`.
+        "Pattern" => "crate::java_runtime::JavaPattern",
+        "Matcher" => "crate::java_runtime::JavaMatcher",
         "Optional" => "Option",
         "Integer" => "i32",
         "Long" => "i64",

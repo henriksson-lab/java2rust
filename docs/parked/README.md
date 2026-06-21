@@ -5,7 +5,16 @@ NO-GO** (per-corpus regression) and are preserved here as patches against base
 `3142580`. The runtime fragments themselves are sound — they are blocked by
 **translator-core gaps**, not by the implementations. Resurrect once those land.
 
-## `regex-pattern-matcher.patch` — `java.util.regex.Pattern`/`Matcher` (via `regex` crate)
+## `regex-pattern-matcher.patch` — ✅ RESURRECTED & LANDED (2026-06-22)
+Both translator-core blockers below were fixed this session (return-type tracking via
+`runtime_method_ret`; nullable-mapped-returns via `"Option<T>"` ret strings), so the
+patch was re-based and landed: `src/runtime/regex.rs` + full wiring, net-zero / zero
+per-corpus regression, golden 42/42, compilecheck 110/110, the 9 regex unit tests pass.
+The parked +13 is gone. This patch file is now historical. (One refinement deferred:
+`Matcher.group(n)` returns empty-`String` not `Option<String>` — see TODO.md §4.0 P1.)
+
+### original entry (historical)
+### `java.util.regex.Pattern`/`Matcher` (via `regex` crate)
 - Real runtime `src/runtime/regex.rs` (9 unit tests, lookahead→never-match fallback so
   Rust-unsupported patterns compile & run without panic), full wiring (map_type_name,
   static_rule for `compile`/`quote`/`matches`, try_emit overloads, Cargo.toml `regex="1"`).
