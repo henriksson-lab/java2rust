@@ -35,9 +35,20 @@ landing small, **measured** changes.
   nullability). GUARD: `record_missing_call` (dump.rs:1683) skips `MethodCallExpr` scopes to
   preserve prior stub shapes (the documented stub-regression trap). Validated: 715-file jts crate
   built fully; golden 42/42, compilecheck 110/110, tests 0-fail, 0 warnings.
-  Next: **P4** regex resurrect (docs/parked — chained String dispatch now works), **P5**
-  nullable-overlay (no-op `unwrap(self)->Self`) to unblock atomics, and re-try the **P3b stub
-  recording** (currently guarded off — enabling it for resolved chained receivers may help more).
+  Next (frontier work COMMITTED as `014edf0`; two follow-ups re-tried this session, both NO-GO):
+  • **P5 atomics — NO-GO (re-tried):** the no-op `unwrap(&self)->Self` overlay did NOT fix it;
+  mapping AtomicInteger/Long/Boolean still regresses (trim +14, jsoup +1) with a different root
+  cause — `expected bool, found JavaAtomicBoolean` / `expected i64, found JavaAtomicLong`: the
+  carrier flows into a primitive position WITHOUT `.get()` (the field type is inferred as the
+  primitive from `.get()` usage, but the value is the carrier). Needs value-vs-primitive
+  reconciliation. Arms still omitted (see dump.rs map_type_name comment).
+  • **P4 regex — needs manual re-wire:** `docs/parked/regex-pattern-matcher.patch` no longer
+  applies (base drifted; `git apply` rolls back). Chained String dispatch now works (3a/3b), but
+  `Matcher.group(n)` nullability (`if m.group(3) != null`) is still unsolved — re-wire by hand
+  (regex.rs + map arms + `("Matcher","group",_)=>"String"` in runtime_method_ret) AND solve the
+  null-compare, then measure jsoup. Best as a focused follow-up.
+  • Still open: re-try **P3b stub recording** (guarded off — may help more); the raw-collection
+  **E0107** cluster (jts ~1000) needs element-propagation/unification.
   Plan/risks in memory [[stdlib-stub-implementation]] / [[tier2-unification-frontier]].
 - **Prior wave-4: 3 KEEP integrated, errors 11327→11284 (−43), ZERO per-corpus regression.** 5 parallel worktree agents; integrated A+D+E (`git apply --3way`). (A) Tier-1
   templates −30 (`stdlib.rs` + new `src/runtime/util.rs`; star win: `String.toLowerCase/

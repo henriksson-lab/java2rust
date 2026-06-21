@@ -8209,13 +8209,15 @@ pub fn map_type_name(name: &str) -> &str {
         "Writer" | "OutputStreamWriter" | "BufferedWriter" | "FileWriter" | "PrintWriter"
         | "PrintStream" => "crate::java_runtime::JavaWriter",
         "StringWriter" => "crate::java_runtime::JavaStringWriter",
-        // `java.util.concurrent.atomic.*` runtime types (src/runtime/atomic.rs) now
-        // have PartialEq/Eq/Hash, but mapping still regresses (trim +14): atomic
-        // FIELDS are emitted concrete (`pub x: JavaAtomicBoolean`) yet read-flagged
-        // nullable, so a nullable read emits `.clone().unwrap()` on the concrete type
-        // (no `.unwrap()`). That's a translator nullable-inference quirk for mapped
-        // value types — fix that (or add a no-op `unwrap(self)->Self`) before mapping.
-        // Parked; see TODO/checklist. (arms intentionally omitted.)
+        // `java.util.concurrent.atomic.*` (src/runtime/atomic.rs) — STILL PARKED.
+        // Re-tried 2026-06 with a no-op `unwrap(&self)->Self` overlay: mapping still
+        // regresses (trim +14, jsoup +1) with a DIFFERENT root cause than the
+        // documented `.clone().unwrap()` one: `expected bool, found JavaAtomicBoolean`
+        // / `expected i64, found JavaAtomicLong` — the atomic carrier flows into a
+        // primitive position without `.get()` (the field's *type* is inferred as the
+        // primitive from `.get()` usage, but its *value* is the carrier). Needs
+        // value-vs-primitive reconciliation, not just an unwrap overlay. Arms
+        // intentionally omitted.
         // `java.text` number formatters -> real `format!`-based shims (a `JavaNum`
         // arg trait accepts `&f64`/i64/…; `NumberFormat.getInstance(Locale)` is
         // routed to the 0-arg `get_instance()` by a static_rule arm).
