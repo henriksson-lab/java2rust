@@ -224,12 +224,70 @@ two cross-cutting roots: `N` (nullability) is not one reconciled fact, and any c
    folds `group(n)!=null` to a constant — semantically imperfect but error-free).
    **atomics-(i) and A1 are NOT auto-fixed by this** — they need the §12-4 field-`N`
    reconciliation (the synthesis conflated them); see `formetoread.md`.
-2. **Atomics → `Cell<T>`** (own-typed, `&self` accessors returning the resolved
-   primitive — fixes the **U1** render/resolver disagreement) instead of the carrier.
-   *Gated by item 0 (multithreading).* Measure trim/jsoup (the +14/+1 regressors).
-3. **Capability-gate the `Map → HashMap` alias** — consult the §8.4 `eq_hash_capable`
-   of the key; alias only when capable, else stub/`BTreeMap` (or derive `Hash` on
-   synthesized enum keys). Fixes EnumMap (+13 jahmm). Measure jahmm.
+2. **Atomics — ✅ DONE (2026-06-22), net-zero, zero regression.** The audit AND the old
+   code comment BOTH mis-diagnosed this as nullability / value-vs-primitive / "needs §12-4
+   or Cell." The real causes were **two translator bugs**, now fixed:
+   (a) `Optional.get()→unwrap` was firing on `AtomicLong.get()` — the `("get",0)` arm was
+   UNGATED; gated it to `Opt`/`Unknown` receivers (`dump.rs`). This alone removed the
+   `.unwrap()` flood (182→170). (b) Java widens `int`→`long` at `atomicLong.addAndGet(int)`
+   — the carrier's numeric args now take `impl Into<i64>` (`runtime/atomic.rs`); removed
+   the last 2 E0308 (170→168 = baseline). Mapped `Atomic{Integer,Long,Boolean}` to the
+   existing std-atomic carrier (NO `Cell`/§12-4 needed — the carrier was never the
+   problem), added `runtime_method_ret` entries (get/arith→primitive). All 12 flat at
+   10855; atomic tests + golden 42/42 + compilecheck 110/110 green. Real atomic behavior
+   now (vs no-op stubs). The get-gate is also a general correctness fix (any concrete
+   0-arg `get()` no longer mis-unwraps).
+
+   **§12-4 field-`N`⇔emission reconciliation [still wanted — re-enables A1, NOT needed for
+   atomics].** Correction: atomics did NOT need this. §12-4 remains the path to re-land
+   A1 and close the ~32 unwrap-on-concrete cluster: unify the local `nullable` set with
+   the symbol-map `FieldSym.nullable`/inherited paths so a field's `N` and its emission are
+   ONE fact. Medium risk (N1 cascade). Task #25.
+
+   **Pre-existing bug found (separate):** a type both mapped AND stubbed emits an invalid
+   `pub struct crate::java_runtime::JavaInputStream {…}` (stub with a mapped-path name) —
+   e.g. `GZIPInputStream` in `stub_java_util_zip.rs`. In the baseline; worth a fix.
+3. **P3 — REFRAMED after reproduction (2026-06-22).** The original framing ("gate the
+   `Map→HashMap` alias") was WRONG: the alias is *always* HashMap; the problem is the
+   KEY's capability. Reproducing across corpora found the real population is in **jts**
+   (only corpus with these): `Map<Coordinate,…>` / `HashSet<CoordinateKind>` etc. where the
+   key class has **float fields** → not `Eq+Hash`. EnumMap/EnumSet (jahmm) are *stubbed*,
+   not aliased, AND their enum (`Computation`) is emitted as `type X = Unknown` (nested-enum
+   resolution gap) — so EnumMap is blocked upstream, NOT a P3 win. Split into:
+   - **P3a — ✅ DONE (2026-06-22), −25 total, ZERO regression.** Mapped `Double.{doubleToLongBits,
+     longBitsToDouble,doubleToRawLongBits}` + `Float.{floatToIntBits,intBitsToFloat,
+     floatToRawIntBits}` to Rust `(x).to_bits() as i64/i32` / `f64::from_bits((x) as u64)`
+     (the IEEE-754 reinterprets behind every hand-written `hashCode()` over float fields).
+     Also generalized `try_emit_boxed_static`'s scope match to accept FULLY-QUALIFIED
+     `java.lang.Double`/`Integer`/… (was bare-`NameExpr`-only → fell through to verbatim
+     `java.lang.Double.double_to_long_bits`, E0425). jts 5353→5329 (−24, the 8 unresolved
+     `java` paths + cascade); the qualified-scope fix also nets varscan −2, fastq −1, vcf
+     −3, jhlabs −2, jsoup −2 (qualified `java.lang.X.parseX`/`valueOf` now translate).
+     Gates: golden 42/42, compilecheck 110/110, 145 tests, 0 warnings.
+   - **P3b — ✅ DONE (2026-06-22), net −23 (jhlabs −5, jts −18), ZERO regression.** Float-
+     containing key types (`Coordinate {x,y,z: f64}`, `CoordinateKind`) now ARE `Eq+Hash`
+     via a SYNTHESIZED `to_bits` impl (Java's `doubleToLongBits` hashCode contract), so
+     `HashMap`/`HashSet` keyed on them compile. Three coordinated changes:
+     1. `crate_layout` `field_cap`: a bare primitive-float field is hashable (via synth),
+        `&& p` enforcing Rust's `Eq: PartialEq` supertrait. `field_hash_direct` keeps floats
+        `false` so float-in-container stays non-hashable.
+     2. `dump.rs` struct path: suppress the `PartialEq` *derive* when the synth will fire
+        (`will_synth_eh`), else dup-impl; `emit_synth_eq_impls` emits `PartialEq`/`Eq`/`Hash`
+        with `to_bits` for floats. Float-kind: 1 = bare `f64`, 2 = 1-D float array
+        (`Vec<f64>`, e.g. C-style `double xs[]` whose array dim is lost in the symbol map →
+        hashed/compared element-wise via `to_bits`). The hierarchy-enum path needed NO change
+        (it keys off the fixpoint `all_eh`; once `Coordinate` is capable `CoordinateKind`
+        auto-derives).
+     3. **Capability fixpoint correctness fix (`is_incomparable_runtime`):** stateful runtime
+        carriers that DON'T impl the value traits (`Random`→`JavaRandom`, atomics, IO
+        streams/readers/writers, `Thread`, `Scanner`, `StreamTokenizer`) are now marked NOT
+        `PartialEq`/`Eq`/`Hash`-capable. This was a PRE-EXISTING optimism bug (external types
+        defaulted capable) that already shipped a broken synth `== other.random_numbers` in
+        jhlabs `SparkleFilter`; fixing it removed those (the jhlabs −5) and is why P3b nets
+        negative. NB: `Matcher`/`Pattern`/`DecimalFormat` are NOT guarded — their carriers DO
+        impl the value traits (verified in `runtime/regex.rs`); guarding them regressed jsoup
+        +8 until removed. Gates: golden 42/42, compilecheck 110/110, 145 tests, 0 warnings.
+     **P3 overall: 10855 → 10807 (−48), zero per-corpus regression.**
 4. **Widen the resolver `toString() → Str`** (it always returns String in Java; today
    only typed so for `Str`/`None` receivers, `types.rs` ~559). Then re-do the B3
    String-value-ops migration (or get the same effect generally via ANF hoisting).

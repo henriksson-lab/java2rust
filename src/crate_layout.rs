@@ -187,6 +187,47 @@ fn compute_eq_capability(map: &mut SymbolMap) {
     }
 }
 
+/// Stateful Java runtime types that map to a runtime *carrier* (a RNG, regex
+/// engine, atomic cell, IO stream, …). They have no value semantics — Java uses
+/// identity `equals`/`hashCode` and the carriers don't impl `PartialEq`/`Hash` —
+/// so a struct that contains one must NOT be deemed `PartialEq`/`Eq`/`Hash`
+/// capable, else a synthesized impl emits `==`/`Hash` over a non-comparable field
+/// (E0369/E0277). Conservative: only types we KNOW are incomparable carriers.
+fn is_incomparable_runtime(s: &str) -> bool {
+    // NB: `Matcher`/`Pattern`/`DecimalFormat` are NOT here — their carriers
+    // (`JavaMatcher`/`JavaPattern`/`JavaDecimalFormat`) DO impl `PartialEq`/`Eq`/
+    // `Hash`, so they stay value-capable. Only carriers lacking those go below.
+    matches!(
+        s,
+        "Random"
+            | "AtomicInteger"
+            | "AtomicLong"
+            | "AtomicBoolean"
+            | "AtomicReference"
+            | "Thread"
+            | "Scanner"
+            | "StreamTokenizer"
+            | "InputStream"
+            | "OutputStream"
+            | "Reader"
+            | "Writer"
+            | "BufferedReader"
+            | "BufferedWriter"
+            | "InputStreamReader"
+            | "OutputStreamWriter"
+            | "FileReader"
+            | "FileWriter"
+            | "FileInputStream"
+            | "FileOutputStream"
+            | "PrintStream"
+            | "PrintWriter"
+            | "DataInputStream"
+            | "DataOutputStream"
+            | "GZIPInputStream"
+            | "GZIPOutputStream"
+    )
+}
+
 /// `(partial_eq, eq_hash)` capability of a field given its *Java* type string
 /// (`type_java_simple`, with generics). `eq_hash` here means "the dumper can
 /// hash this field": a top-level `Map`/`Set` is hashable via fold (iff elements
@@ -229,7 +270,24 @@ fn field_cap(
         }
     } else {
         let p = field_pe_bare(s, map, by_simple, pe, gparams);
-        let e = field_hash_direct(s, map, by_simple, eh, gparams);
+        // (P3b) A bare primitive-float field is hashable via a SYNTHESIZED
+        // `to_bits` impl (Java hashes doubles by `doubleToLongBits`).
+        // `field_hash_direct` keeps floats `false`, so a float *inside* a
+        // container (`Vec`/`Option`/`Map`) stays non-hashable — there `to_bits`
+        // can't be applied field-wise. Only the directly-named float field here
+        // (which `emit_synth_eq_impls` knows to `to_bits`) gets the capability.
+        // (P3b) A bare primitive-float field is hashable via a SYNTHESIZED
+        // `to_bits` impl (Java hashes doubles by `doubleToLongBits`).
+        // `field_hash_direct` keeps floats `false`, so a float *inside* a
+        // container (`Vec`/`Option`/`Map`) stays non-hashable — there `to_bits`
+        // can't be applied field-wise. Only the directly-named float field here
+        // (which `emit_synth_eq_impls` knows to `to_bits`) gets the capability.
+        // The `&& p` enforces Rust's `Eq: PartialEq` supertrait: a field that
+        // isn't `PartialEq`-capable (e.g. the runtime `JavaRandom`) must not be
+        // claimed hashable, else the synth would emit `==` over it (E0369).
+        let e = (field_hash_direct(s, map, by_simple, eh, gparams)
+            || matches!(s, "float" | "double"))
+            && p;
         (p, e)
     }
 }
@@ -261,6 +319,9 @@ fn field_hash_direct(
             _ => field_hash_direct(outer, map, by_simple, eh, gparams),
         };
     }
+    if is_incomparable_runtime(s) {
+        return false;
+    }
     match s {
         "int" | "long" | "short" | "byte" | "char" | "boolean" | "Integer" | "Long" | "Short"
         | "Byte" | "Character" | "Boolean" | "String" | "CharSequence" | "Object" => true,
@@ -288,6 +349,9 @@ fn field_pe_bare(
     pe: &std::collections::HashMap<String, bool>,
     gparams: &[String],
 ) -> bool {
+    if is_incomparable_runtime(s) {
+        return false;
+    }
     match s {
         "int" | "long" | "short" | "byte" | "char" | "boolean" | "Integer" | "Long" | "Short"
         | "Byte" | "Character" | "Boolean" | "String" | "CharSequence" | "Object" | "float"
@@ -1072,11 +1136,8 @@ fn read_trait_sigs(file: &Path, trait_name: &str) -> Vec<(String, String, Vec<St
 /// at compile time from real `.rs` fragments under `src/runtime/` (rustfmt-able,
 /// no string-escaping). `header.rs` MUST come first so its inner attributes
 /// (`//!`, `#![allow(dead_code)]`) lead the emitted file. Keep this list in sync
-/// with the `java_runtime_compiles` test module below — EXCEPT `atomic.rs`, which
-/// is compile-checked there but deliberately NOT shipped here: nothing maps the
-/// atomic types yet (`map_type_name` has only the parked comment), so pasting it
-/// into every generated crate is ~7.4 KB of dead weight. Re-add this line when the
-/// atomics mapping lands (see SEMANTICS §12-item-7 / `dump.rs` map_type_name).
+/// with the `java_runtime_compiles` test module below. (`atomic.rs` is shipped again
+/// as of 2026-06-22, when the atomics mapping landed — see `dump.rs` map_type_name.)
 const JAVA_RUNTIME: &str = concat!(
     include_str!("runtime/header.rs"),
     // Shared trait-boilerplate macros — must precede the carrier fragments that
@@ -1088,6 +1149,7 @@ const JAVA_RUNTIME: &str = concat!(
     include_str!("runtime/bitset.rs"),
     include_str!("runtime/random.rs"),
     include_str!("runtime/string_tokenizer.rs"),
+    include_str!("runtime/atomic.rs"),
     include_str!("runtime/decimal_format.rs"),
     include_str!("runtime/io_read.rs"),
     include_str!("runtime/io_write.rs"),
@@ -1100,9 +1162,7 @@ const JAVA_RUNTIME: &str = concat!(
 /// `cargo build`/`cargo test` (a broken fragment otherwise surfaces only when a
 /// generated corpus is built). `include!` pastes the tokens so they are
 /// type-checked here. Mirrors the `concat!` list above (header excluded — its
-/// inner attributes are illegal inside an inline `mod`) PLUS `atomic.rs`, which is
-/// kept compile-checked here so it stays sound for the atomics-mapping
-/// resurrection even though it's no longer shipped in `JAVA_RUNTIME`.
+/// inner attributes are illegal inside an inline `mod`).
 #[cfg(test)]
 mod java_runtime_compiles {
     #![allow(dead_code)]

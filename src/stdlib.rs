@@ -459,6 +459,16 @@ pub fn runtime_method_ret(java_type: &str, name: &str, arity: usize) -> Option<&
         ("StringTokenizer", "hasMoreTokens", 0) => "bool",
         ("DecimalFormat", "format", _) => "String",
         ("NumberFormat", "format", _) => "String",
+        // java.util.concurrent.atomic.* (src/runtime/atomic.rs) — `.get()`/arithmetic
+        // return the primitive (NOT the carrier), so chains/coercions type correctly.
+        ("AtomicInteger", "get" | "getAndIncrement" | "incrementAndGet" | "getAndDecrement"
+            | "decrementAndGet" | "getAndAdd" | "addAndGet" | "getAndSet" | "intValue", _) => "i32",
+        ("AtomicInteger", "longValue", 0) => "i64",
+        ("AtomicLong", "get" | "getAndIncrement" | "incrementAndGet" | "getAndDecrement"
+            | "decrementAndGet" | "getAndAdd" | "addAndGet" | "getAndSet" | "longValue", _) => "i64",
+        ("AtomicLong", "intValue", 0) => "i32",
+        ("AtomicBoolean", "get" | "getAndSet", _) => "bool",
+        ("AtomicInteger" | "AtomicLong" | "AtomicBoolean", "compareAndSet", 2) => "bool",
         // java.util.regex (regex crate). NOTE: `Matcher.group(n)` is nullable in
         // Java, but the runtime `group_1` returns empty-`String` for a
         // non-participating group (not `Option`) — so the resolver MUST say

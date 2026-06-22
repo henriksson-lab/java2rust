@@ -642,10 +642,12 @@ impl<'a> RustDumpVisitor<'a> {
         if !want_pe {
             return;
         }
-        // (field ident, is-top-level-map/set, is-Option-wrapped) in declaration order.
-        let mut fields: Vec<(String, bool, bool)> = Vec::new();
+        // (field ident, is-top-level-map/set, is-Option-wrapped, float-kind) in
+        // declaration order. float-kind: 0 = not a float, 1 = bare `f32`/`f64`,
+        // 2 = 1-D float array (`Vec<f64>`) — both hashed via `to_bits`.
+        let mut fields: Vec<(String, bool, bool, u8)> = Vec::new();
         if has_base {
-            fields.push(("base".to_string(), false, false));
+            fields.push(("base".to_string(), false, false, 0));
         }
         for &m in members {
             let (typ, vars) = match self.arena.kind(m) {
@@ -666,12 +668,33 @@ impl<'a> RustDumpVisitor<'a> {
                 || core.starts_with("HashSet<")
                 || core.starts_with("BTreeMap<")
                 || core.starts_with("BTreeSet<");
+            let bare_is_float = core == "f64" || core == "f32";
             for &var in &vars {
-                let array = matches!(self.arena.kind(var), Node::VariableDeclarator { array_count, .. } if *array_count > 0);
+                let dims = match self.arena.kind(var) {
+                    Node::VariableDeclarator { array_count, .. } => *array_count,
+                    _ => 0,
+                };
+                let array = dims > 0;
                 // A nullable map/set is `Option<map>` → fold via `.iter().flatten()`.
                 let opt = self.var_decl_id(var).map(|d| self.decl_nullable(d)).unwrap_or(false);
                 let is_map_set = bare_is_map_set && !array;
-                fields.push((self.field_var_name(var), is_map_set, is_map_set && opt));
+                // (P3b) Floats need `to_bits` so `Eq`/`Hash` are consistent (and
+                // total). A bare (non-array, non-null) float is kind 1; a 1-D float
+                // array (`Vec<f64>`, e.g. a C-style `double xs[]` whose array dim is
+                // lost in the symbol map → the fixpoint deems it a bare float) is
+                // kind 2, hashed element-wise.
+                let float_kind = if bare_is_float && !opt {
+                    if !array {
+                        1
+                    } else if dims == 1 {
+                        2
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                fields.push((self.field_var_name(var), is_map_set, is_map_set && opt, float_kind));
             }
         }
         // impl PartialEq
@@ -684,7 +707,18 @@ impl<'a> RustDumpVisitor<'a> {
         } else {
             let conj = fields
                 .iter()
-                .map(|(f, _, _)| format!("self.{f} == other.{f}"))
+                .map(|(f, _, _, float_kind)| {
+                    // Floats compare by `to_bits` so `Eq`/`Hash` stay consistent
+                    // (and total for `NaN`): a bare float directly, a float array
+                    // element-wise (matching the element-wise `to_bits` hash).
+                    match float_kind {
+                        1 => format!("self.{f}.to_bits() == other.{f}.to_bits()"),
+                        2 => format!(
+                            "self.{f}.iter().map(|v| v.to_bits()).eq(other.{f}.iter().map(|v| v.to_bits()))"
+                        ),
+                        _ => format!("self.{f} == other.{f}"),
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(" && ");
             self.printer.print_ln_s(&conj);
@@ -699,7 +733,7 @@ impl<'a> RustDumpVisitor<'a> {
             self.printer.indent();
             self.printer.print_ln_s("fn hash<H: std::hash::Hasher>(&self, state: &mut H) {");
             self.printer.indent();
-            for (f, is_map_set, opt) in &fields {
+            for (f, is_map_set, opt, float_kind) in &fields {
                 if *is_map_set {
                     // Order-independent fold (mirrors Java `Map`/`Set.hashCode()`),
                     // since std maps/sets don't implement `Hash`. A nullable
@@ -711,6 +745,16 @@ impl<'a> RustDumpVisitor<'a> {
                     };
                     self.printer.print_ln_s(&format!(
                         "{{ let mut __acc: u64 = 0; for __e in {iter} {{ let mut __h = std::collections::hash_map::DefaultHasher::new(); std::hash::Hash::hash(&__e, &mut __h); __acc = __acc.wrapping_add(std::hash::Hasher::finish(&__h)); }} std::hash::Hash::hash(&__acc, state); }}"
+                    ));
+                } else if *float_kind == 1 {
+                    // f32/f64 aren't `Hash`; hash the IEEE-754 bit pattern (matches
+                    // the `to_bits` equality above and Java `Double.hashCode`).
+                    self.printer
+                        .print_ln_s(&format!("std::hash::Hash::hash(&self.{f}.to_bits(), state);"));
+                } else if *float_kind == 2 {
+                    // 1-D float array: hash each element's bit pattern in order.
+                    self.printer.print_ln_s(&format!(
+                        "for __e in self.{f}.iter() {{ std::hash::Hash::hash(&__e.to_bits(), state); }}"
                     ));
                 } else {
                     self.printer.print_ln_s(&format!("std::hash::Hash::hash(&self.{f}, state);"));
@@ -3660,9 +3704,23 @@ impl<'a> RustDumpVisitor<'a> {
                 can_eq_hash &= eh;
             }
         }
+        // (P3b) The eq/hash fixpoint (crate_layout) may deem this type Eq+Hash via
+        // a SYNTHESIZED impl even when it can't `#[derive]` — notably a float field,
+        // hashed via `to_bits` (Java's `doubleToLongBits` contract). When that synth
+        // path will fire, suppress the `PartialEq` *derive*: `emit_synth_eq_impls`
+        // re-emits `PartialEq` on the same `to_bits` basis, and the two must agree
+        // (so `Eq`'s reflexivity holds for `NaN`) and not collide.
+        let cap_eh = self
+            .current_class_fqn
+            .as_deref()
+            .and_then(|f| self.link.lookup(f))
+            .map(|t| t.eq_hash_capable)
+            .unwrap_or(false);
+        let will_synth_eh = !manual_impls && combined.is_empty() && cap_eh && !can_eq_hash;
+        let derive_pe = can_partial_eq && !will_synth_eh;
         if !manual_impls {
             let mut d = String::from("Clone, Default");
-            if can_partial_eq {
+            if derive_pe {
                 d.push_str(", PartialEq");
             }
             if can_eq_hash {
@@ -3761,7 +3819,7 @@ impl<'a> RustDumpVisitor<'a> {
         // type) but whose fields are all comparable/hashable (per the
         // `crate_layout` capability fixpoint). Field-wise `==`; `Hash` folds a
         // top-level map/set order-independently (mirrors Java `Map.hashCode()`).
-        self.emit_synth_eq_impls(&name, &members, parent_rust.is_some(), can_partial_eq, can_eq_hash, manual_impls, combined.is_empty());
+        self.emit_synth_eq_impls(&name, &members, parent_rust.is_some(), derive_pe, can_eq_hash, manual_impls, combined.is_empty());
         // R4: if this struct is a project-hierarchy root, emit its `<Root>Kind`
         // tagged enum (+ Deref to the root) so supertype slots can carry subtypes.
         if let Some(root_fqn) = self.current_class_fqn.clone() {
@@ -5652,7 +5710,19 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print(")");
                 true
             }
-            ("get", 0) => self.emit_recv_method(recv, "unwrap", arg),
+            // `Optional.get()` -> `.unwrap()`. Gated to an `Option`/`Unknown`
+            // receiver: a CONCRETE non-Option type with a 0-arg `get()` (e.g.
+            // `AtomicLong.get()`, a user getter) must NOT be rewritten to `.unwrap()`
+            // (which it lacks → E0599). `Unknown` keeps the unwrap (an Optional the
+            // resolver couldn't pin).
+            ("get", 0)
+                if matches!(
+                    self.ty(recv),
+                    crate::types::Type::Opt(_) | crate::types::Type::Unknown
+                ) =>
+            {
+                self.emit_recv_method(recv, "unwrap", arg)
+            }
             // ---- reduce / sorted ----
             ("reduce", 2) => {
                 self.visit(recv, arg);
@@ -6490,13 +6560,20 @@ impl<'a> RustDumpVisitor<'a> {
         arg: Arg,
     ) -> bool {
         let Some(s) = scope else { return false };
-        let Node::NameExpr { name: cls } = self.arena.kind(s) else {
-            return false;
+        // Accept a bare `Double`, or a fully-qualified `java.lang.Double` (a
+        // `QualifiedNameExpr`/`FieldAccessExpr` whose last segment is the box name).
+        let cls: String = match self.arena.kind(s) {
+            Node::NameExpr { name } => {
+                // A local/param/field shadowing the class name is a value, not the box.
+                if self.id.find_declaration_node_for(self.arena, name, s).is_some() {
+                    return false;
+                }
+                name.clone()
+            }
+            Node::QualifiedNameExpr { name, .. } => name.clone(),
+            Node::FieldAccessExpr { field, .. } => field.clone(),
+            _ => return false,
         };
-        // A local/param/field shadowing the class name is a value, not the box.
-        if self.id.find_declaration_node_for(self.arena, cls, s).is_some() {
-            return false;
-        }
         let prim = match cls.as_str() {
             "Integer" => "i32",
             "Long" => "i64",
@@ -6547,6 +6624,33 @@ impl<'a> RustDumpVisitor<'a> {
                 self.printer.print("(");
                 self.visit(args[0], arg);
                 self.printer.print(if name == "isNaN" { ").is_nan()" } else { ").is_infinite()" });
+                true
+            }
+            // Float-bit conversions (Java's IEEE-754 reinterpret casts, the basis of
+            // hand-written `hashCode()` over float fields): `(x).to_bits()` / `from_bits`.
+            // Java returns signed long/int, so cast the bit pattern accordingly.
+            ("Double", "doubleToLongBits", 1) | ("Double", "doubleToRawLongBits", 1) => {
+                self.printer.print("((");
+                self.visit(args[0], arg);
+                self.printer.print(").to_bits() as i64)");
+                true
+            }
+            ("Double", "longBitsToDouble", 1) => {
+                self.printer.print("f64::from_bits((");
+                self.visit(args[0], arg);
+                self.printer.print(") as u64)");
+                true
+            }
+            ("Float", "floatToIntBits", 1) | ("Float", "floatToRawIntBits", 1) => {
+                self.printer.print("((");
+                self.visit(args[0], arg);
+                self.printer.print(").to_bits() as i32)");
+                true
+            }
+            ("Float", "intBitsToFloat", 1) => {
+                self.printer.print("f32::from_bits((");
+                self.visit(args[0], arg);
+                self.printer.print(") as u32)");
                 true
             }
             // X.valueOf(s)/X.toString(v) -> parse / to_string.
@@ -8295,18 +8399,18 @@ pub fn map_type_name(name: &str) -> &str {
         "Writer" | "OutputStreamWriter" | "BufferedWriter" | "FileWriter" | "PrintWriter"
         | "PrintStream" => "crate::java_runtime::JavaWriter",
         "StringWriter" => "crate::java_runtime::JavaStringWriter",
-        // `java.util.concurrent.atomic.*` (src/runtime/atomic.rs) — STILL PARKED.
-        // Because nothing maps these types, `atomic.rs` is NO LONGER shipped in the
-        // `JAVA_RUNTIME` concat (crate_layout.rs) — it's kept only in the
-        // `java_runtime_compiles` compile-check so it stays sound for resurrection.
-        // Re-tried 2026-06 with a no-op `unwrap(&self)->Self` overlay: mapping still
-        // regresses (trim +14, jsoup +1) with a DIFFERENT root cause than the
-        // documented `.clone().unwrap()` one: `expected bool, found JavaAtomicBoolean`
-        // / `expected i64, found JavaAtomicLong` — the atomic carrier flows into a
-        // primitive position without `.get()` (the field's *type* is inferred as the
-        // primitive from `.get()` usage, but its *value* is the carrier). Needs
-        // value-vs-primitive reconciliation, not just an unwrap overlay. Arms
-        // intentionally omitted.
+        // `java.util.concurrent.atomic.*` -> real carriers (src/runtime/atomic.rs),
+        // mapped 2026-06-22, net-zero. The prior +14 regression was MIS-DIAGNOSED as
+        // a nullability / value-vs-primitive problem; the real causes were two
+        // translator bugs, now fixed: (1) `Optional.get()->unwrap` fired on
+        // `AtomicLong.get()` (the `("get",0)` arm is now gated to Opt/Unknown
+        // receivers), and (2) Java widens `int`->`long` at `atomicLong.addAndGet(int)`
+        // — the carrier's numeric args now take `impl Into<i64>`. No `Cell`/§12-4
+        // needed. Single-threaded translation (the std-atomic carrier is correct;
+        // see the multithreading decision in TODO.md §4.0).
+        "AtomicInteger" => "crate::java_runtime::JavaAtomicInteger",
+        "AtomicLong" => "crate::java_runtime::JavaAtomicLong",
+        "AtomicBoolean" => "crate::java_runtime::JavaAtomicBoolean",
         // `java.text` number formatters -> real `format!`-based shims (a `JavaNum`
         // arg trait accepts `&f64`/i64/…; `NumberFormat.getInstance(Locale)` is
         // routed to the 0-arg `get_instance()` by a static_rule arm).

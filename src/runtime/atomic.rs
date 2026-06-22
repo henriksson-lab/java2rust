@@ -87,22 +87,25 @@ impl JavaAtomicLong {
     pub fn new() -> Self {
         JavaAtomicLong { v: std::sync::atomic::AtomicI64::new(0) }
     }
-    pub fn new_1(initial: i64) -> Self {
-        JavaAtomicLong { v: std::sync::atomic::AtomicI64::new(initial) }
+    // Numeric args take `impl Into<i64>` so a Java `int` widens to `long` (the JDK
+    // does this implicitly: `atomicLong.addAndGet(intVar)`).
+    pub fn new_1(initial: impl Into<i64>) -> Self {
+        JavaAtomicLong { v: std::sync::atomic::AtomicI64::new(initial.into()) }
     }
     pub fn get(&self) -> i64 {
         self.v.load(std::sync::atomic::Ordering::SeqCst)
     }
-    pub fn set(&self, n: i64) {
-        self.v.store(n, std::sync::atomic::Ordering::SeqCst)
+    pub fn set(&self, n: impl Into<i64>) {
+        self.v.store(n.into(), std::sync::atomic::Ordering::SeqCst)
     }
-    pub fn get_and_set(&self, n: i64) -> i64 {
-        self.v.swap(n, std::sync::atomic::Ordering::SeqCst)
+    pub fn get_and_set(&self, n: impl Into<i64>) -> i64 {
+        self.v.swap(n.into(), std::sync::atomic::Ordering::SeqCst)
     }
-    pub fn get_and_add(&self, d: i64) -> i64 {
-        self.v.fetch_add(d, std::sync::atomic::Ordering::SeqCst)
+    pub fn get_and_add(&self, d: impl Into<i64>) -> i64 {
+        self.v.fetch_add(d.into(), std::sync::atomic::Ordering::SeqCst)
     }
-    pub fn add_and_get(&self, d: i64) -> i64 {
+    pub fn add_and_get(&self, d: impl Into<i64>) -> i64 {
+        let d = d.into();
         self.v.fetch_add(d, std::sync::atomic::Ordering::SeqCst) + d
     }
     pub fn get_and_increment(&self) -> i64 {
@@ -117,11 +120,11 @@ impl JavaAtomicLong {
     pub fn decrement_and_get(&self) -> i64 {
         self.add_and_get(-1)
     }
-    pub fn compare_and_set(&self, expect: i64, update: i64) -> bool {
+    pub fn compare_and_set(&self, expect: impl Into<i64>, update: impl Into<i64>) -> bool {
         self.v
             .compare_exchange(
-                expect,
-                update,
+                expect.into(),
+                update.into(),
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
             )
