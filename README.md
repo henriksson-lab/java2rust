@@ -14,6 +14,8 @@ Be sure that you are aware of the pitfalls of translation before you commit to i
 unless you know it yourself, ensure you have access to someone with good amount of Rust
 programming experience.**
 
+**Text below is LLM-generated.**
+
 ## ⚠️ Translation-introduced `.clone()` — MUST be audited
 
 Java passes objects **by reference**; Rust's ownership rules do not. To bridge this,
