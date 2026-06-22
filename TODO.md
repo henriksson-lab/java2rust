@@ -288,10 +288,28 @@ two cross-cutting roots: `N` (nullability) is not one reconciled fact, and any c
         impl the value traits (verified in `runtime/regex.rs`); guarding them regressed jsoup
         +8 until removed. Gates: golden 42/42, compilecheck 110/110, 145 tests, 0 warnings.
      **P3 overall: 10855 → 10807 (−48), zero per-corpus regression.**
-4. **Widen the resolver `toString() → Str`** (it always returns String in Java; today
-   only typed so for `Str`/`None` receivers, `types.rs` ~559). Then re-do the B3
-   String-value-ops migration (or get the same effect generally via ANF hoisting).
-   Watch the P1 category-ripple + stub-shape ripple; measure all-12.
+4. **P4 — PARTIAL (2026-06-22).** Step 1 ✅: widened `toString()` to its own
+   UNCONDITIONAL arm returning `Str` (any receiver — Java's `Object.toString` contract;
+   `types.rs` ~556). **Net-neutral, zero regression, all 12 flat at 10807** — a resolver
+   correctness improvement (KEPT per the qualitative rule), but nothing consumes it to
+   change output: the `equals`/`compareTo` paths already have robust `.to_string()`
+   fallbacks, so a `x.toString().<op>` chain already compiled. Step 2 (B3 String-value-ops
+   table migration): **assessed and DECLINED — low-yield.** The existing String dispatch is
+   already defensive (E0608/E0608-safe fallbacks); migrating it to the table wouldn't cut
+   errors and risks re-hitting the +7 NO-GO. The real String/Map error mass is **stdlib
+   features**, sized as their own tasks (see roadmap below).
+
+   **Stdlib-gap roadmap (measured 2026-06-22, source occurrences across all corpora):**
+   - `entrySet()` foreach + `Entry.getKey/getValue` — **778** occurrences, the single
+     biggest lever. Needs `entrySet()→.iter()` (yields `(&K,&V)`), foreach-var typed as an
+     entry tuple, `getKey→.0`/`getValue→.1`. ENTANGLED with use-site borrow coordination
+     (task #16): `.0`/`.1` are `&K`/`&V`, rippling deref/clone into every use → do WITH the
+     borrow analysis, not ad-hoc. Highest-value next feature.
+   - `Map.merge(k,v,fn)` — **248**; `computeIfAbsent(k,fn)` — **126**. Both take lambdas →
+     not simple `${}` table rules; need lambda-body emission (`entry().or_insert_with`).
+   - `String.format(fmt,…)` non-literal/qualified-scope — needs a runtime printf-style
+     formatter (literal+bare-`String` case already handled in `try_emit_string_format`).
+   - `String.codePointAt`, `Map.entrySet` stub method name (`dump.rs` 8493) — smaller.
 5. **Borrowed-returns — local error-subset only.** NOT the signature flip (CLOSED for
    clones, §3 below). Coordinate the borrow depth of `return cond?a:b` arms via the
    `cmp_borrow` machinery, owned-return preserved — harvests the safe part of the −48

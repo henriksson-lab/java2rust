@@ -108,6 +108,12 @@ pub struct RustDumpVisitor<'a> {
     /// borrowed, so the comparison is `&T == &T` (no clone) — slice (c) operand
     /// coordination. Takes priority over the last-use move so both sides match.
     cmp_borrow: bool,
+    /// When true, a nullable non-Copy read borrows through the Option
+    /// (`.as_ref().unwrap()` → `&T`) instead of cloning. Set while emitting an
+    /// argument passed to a `&T` param, where the caller suppresses its leading
+    /// `&` (so `as_ref().unwrap()` IS the `&T`, not `&&T`) — slice (d). Like
+    /// `cmp_borrow`, takes priority over the last-use move.
+    arg_borrow: bool,
     /// When true, string literals are emitted raw (`"x"`, not `"x".to_string()`)
     /// — used for `match` patterns.
     raw_string: bool,
@@ -229,6 +235,7 @@ impl<'a> RustDumpVisitor<'a> {
             elem_nullable: None,
             expect_option: false,
             cmp_borrow: false,
+            arg_borrow: false,
             raw_string: false,
             link,
             mut_borrow_params: std::collections::HashSet::new(),
@@ -2059,17 +2066,33 @@ impl<'a> RustDumpVisitor<'a> {
         for (i, &e) in args.iter().enumerate() {
             match params.get(i) {
                 Some(p) if p.by_ref => {
-                    self.printer.print(if p.mutable { "&mut " } else { "&" });
-                    if p.nullable {
-                        let saved = self.expect_option;
-                        self.expect_option = true;
+                    // Slice (d): a plain `&T` param (non-mut, non-nullable, non-enum)
+                    // fed a borrowable nullable name borrows through the Option
+                    // (`x.as_ref().unwrap()` IS the `&T`) instead of
+                    // `&x.clone().unwrap()` — `&` suppressed, no clone. `&mut`,
+                    // `&Option<T>` and enum-wrap params keep their existing shape.
+                    if !p.mutable
+                        && !p.nullable
+                        && self.param_enum_path(p).is_none()
+                        && self.is_borrowable_nullable_read(e)
+                    {
+                        let saved = self.arg_borrow;
+                        self.arg_borrow = true;
                         self.visit(e, arg);
-                        self.expect_option = saved;
-                    } else if let Some(ep) = self.param_enum_path(p) {
-                        // A concrete arg into a `&<Root>Kind` param → wrap.
-                        self.emit_enum_wrapped(e, &ep, arg);
+                        self.arg_borrow = saved;
                     } else {
-                        self.visit(e, arg);
+                        self.printer.print(if p.mutable { "&mut " } else { "&" });
+                        if p.nullable {
+                            let saved = self.expect_option;
+                            self.expect_option = true;
+                            self.visit(e, arg);
+                            self.expect_option = saved;
+                        } else if let Some(ep) = self.param_enum_path(p) {
+                            // A concrete arg into a `&<Root>Kind` param → wrap.
+                            self.emit_enum_wrapped(e, &ep, arg);
+                        } else {
+                            self.visit(e, arg);
+                        }
                     }
                 }
                 Some(p) if p.nullable => {
@@ -2100,6 +2123,17 @@ impl<'a> RustDumpVisitor<'a> {
     /// factored out of [`print_arguments`] so it can be reused for trailing
     /// (e.g. varargs) arguments of a linked call.
     fn print_one_default_argument(&mut self, e: NodeId, arg: Arg) {
+        // Slice (d): a nullable non-Copy name passed where a `&T` is expected would
+        // otherwise be `&x.clone().unwrap()` (borrow of a cloned temporary). Borrow
+        // through the Option instead — `x.as_ref().unwrap()` IS the `&T` — and
+        // suppress the leading `&` (else `&&T`). Saves the clone; same `&T` type.
+        if !self.expect_option && self.is_borrowable_nullable_read(e) {
+            let saved = self.arg_borrow;
+            self.arg_borrow = true;
+            self.visit(e, arg);
+            self.arg_borrow = saved;
+            return;
+        }
         let mut borrowed = false;
         if let Node::NameExpr { name } = self.arena.kind(e) {
             if let Some((Some(left), _)) = self.id.find_declaration_node_for(self.arena, name, e) {
@@ -2425,6 +2459,35 @@ impl<'a> RustDumpVisitor<'a> {
 
     fn use_is_read_borrow(&self, e: NodeId) -> bool {
         self.is_readonly_method_receiver(e) || self.is_copy_index_base(e)
+    }
+
+    /// `e` is the base of a `arr[i]` **write** target — the LHS of an assignment
+    /// (`arr[i] = …`, `arr[i] += …`) or an `arr[i]++`/`--`. The store must reach the
+    /// real backing array, so a nullable base must borrow MUTABLY through the Option
+    /// (`arr.as_mut().unwrap()[i] = …`); the prior `.clone().unwrap()` wrote into a
+    /// discarded clone — a silent lost-mutation bug (§6 use-site borrow: MutBorrow).
+    /// Element Copy-ness is irrelevant here (we store, not read the element).
+    fn is_mut_borrow_index_base(&self, e: NodeId) -> bool {
+        let Some(p) = self.arena.parent(e) else { return false };
+        let Node::ArrayAccessExpr { name, .. } = self.arena.kind(p) else {
+            return false;
+        };
+        if *name != e {
+            return false;
+        }
+        if self.is_assign_target(p) {
+            return true;
+        }
+        matches!(
+            self.arena.parent(p).map(|gp| self.arena.kind(gp)),
+            Some(Node::UnaryExpr {
+                op: UnaryOp::PreIncrement
+                    | UnaryOp::PreDecrement
+                    | UnaryOp::PosIncrement
+                    | UnaryOp::PosDecrement,
+                ..
+            })
+        )
     }
 
     /// A nullable, non-`Copy` name read — one that, unwrapped, would otherwise be
@@ -3493,11 +3556,19 @@ impl<'a> RustDumpVisitor<'a> {
         // (`x.unwrap()`) rather than cloned first (§6 use-site borrow — same
         // last-use move applied to the plain-clone site in `emit_moved_value`).
         if nullable && !self.expect_option {
-            if self.cmp_borrow && self.is_non_copy_name(id) {
-                // Coordinated `==`/`!=` operand (slice c): borrow through the
-                // Option so the comparison is `&T == &T`. Priority over the
-                // last-use move so BOTH operands match shape.
+            if (self.cmp_borrow || self.arg_borrow) && self.is_non_copy_name(id) {
+                // Coordinated borrow (slice c `==`/`!=` operand, or slice d `&T`
+                // argument with the leading `&` suppressed): borrow through the
+                // Option (`&T`) instead of cloning. Priority over the last-use
+                // move so the borrow shape is the one the caller arranged for.
                 self.printer.print(".as_ref().unwrap()");
+            } else if self.is_non_copy_name(id) && self.is_mut_borrow_index_base(id) {
+                // Write-target index base (`arr[i] = …`/`arr[i]++`): borrow MUTABLY
+                // through the Option so the store reaches the real array, not a
+                // discarded clone (a silent lost-mutation bug). MUST precede the
+                // last-use move (`.unwrap()` would move the `Vec` out and write to a
+                // temporary, also losing the store). (§6 use-site borrow: MutBorrow.)
+                self.printer.print(".as_mut().unwrap()");
             } else if self.is_movable_last_use(id) {
                 self.printer.print(".unwrap()");
             } else if self.is_non_copy_name(id) && self.use_is_read_borrow(id) {
@@ -7262,15 +7333,21 @@ impl<'a> RustDumpVisitor<'a> {
         };
         self.print_java_comment(id, arg);
         self.printer.print(" ");
-        // A parameter reassigned in the body needs a `mut` binding.
-        let reassigned = matches!(self.arena.kind(vid),
-            Node::VariableDeclaratorId { name } if self.reassigned_params.contains(name));
-        if reassigned {
+        let nullable = self.decl_nullable(vid);
+        // A parameter reassigned in the body needs a `mut` binding. A nullable
+        // (by-value `Option<…>`) param mutated through an element/field write
+        // (`v[i] = …`) likewise needs `mut` so the `v.as_mut().unwrap()[i] = …`
+        // store compiles (the `&mut`-ref form below only covers the
+        // element-nullable-array case; a plain nullable `Option` is by value).
+        let needs_mut_binding = matches!(self.arena.kind(vid),
+            Node::VariableDeclaratorId { name }
+                if self.reassigned_params.contains(name)
+                    || (nullable && self.mut_borrow_params.contains(name)));
+        if needs_mut_binding {
             self.printer.print("mut ");
         }
         self.visit(vid, arg);
         self.printer.print(": ");
-        let nullable = self.decl_nullable(vid);
         if is_var_args {
             // Java varargs `T... xs` -> `xs: Vec<T>`.
             self.printer.print("Vec<");

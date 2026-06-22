@@ -553,9 +553,13 @@ impl<'a> TypeResolver<'a> {
             ("indexOf", _) | ("lastIndexOf", _) | ("compareTo", 1) | ("hashCode", 0) => {
                 return Type::Prim(Prim::I32)
             }
+            // `toString()` always yields a `String` in Java (the `Object.toString`
+            // contract), regardless of the receiver type — widen unconditionally so
+            // a chained `x.toString().substring(..)` types its String operations.
+            ("toString", 0) => return Type::Str,
             // String-returning String methods (on a String or unknown receiver).
             ("substring", _) | ("trim", 0) | ("toLowerCase", 0) | ("toUpperCase", 0)
-            | ("replace", 2) | ("strip", 0) | ("concat", 1) | ("toString", 0)
+            | ("replace", 2) | ("strip", 0) | ("concat", 1)
                 if matches!(recv, Some(Type::Str) | None) =>
             {
                 return Type::Str

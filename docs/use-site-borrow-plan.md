@@ -133,8 +133,21 @@ ONLY (never a build dir — §1 GOTCHA) **and** all-12 errors; KEEP only if clon
    is MOVED into the loop (`for s in xs`) instead of cloned. Multi-read or outer-loop
    cases keep the clone. The general `for v in &it` borrow form stays OUT (rebinds `v` to `&T` →
    ripples into the body).
-4. **(d) `&`-borrow argument** (jts P1, ~388). Medium — needs the `&`-suppression
-   coordination in `print_one_default_argument` (~1980) to avoid `&&T`.
+4. **(d) `&`-borrow argument** — ✅ **DONE (2026-06-22): errors −5 (vcf −3, jsoup −1,
+   jts −1), zero regression + clone reduction.** A nullable non-Copy name passed where a
+   `&T` is expected was `&x.clone().unwrap()` (borrow of a CLONED temporary). Added an
+   `arg_borrow` flag (mirrors `cmp_borrow`): `print_one_default_argument` detects a
+   `is_borrowable_nullable_read` arg, suppresses the leading `&`, and sets `arg_borrow` so
+   the nullable name path emits `x.as_ref().unwrap()` — which IS the `&T` (no `&&T`, no
+   clone). `arg_borrow` takes priority over the last-use move (the borrow shape the caller
+   arranged for; also keeps `x` alive vs `&x.unwrap()` consuming it). Errors went DOWN, not
+   just flat — some `&x.clone().unwrap()` sites had a Clone-bound/borrow failure the
+   `as_ref` form avoids. Applied to BOTH the unlinked default-arg path
+   (`print_one_default_argument`, −5) AND the linked `print_arguments_linked` `by_ref`
+   plain-`&T` arm (non-mut/non-nullable/non-enum, −16: trim −2, jahmm −1, bjalign −1, jts
+   −12). **Combined: errors 10807 → 10786 (−21), zero regression**; jts clones 4409→4090
+   (−319 cumulative with the as_mut slice). Gates: golden 42/42, compilecheck 110/110, 145
+   tests, 0 warnings.
 5. **(b) index-base, REVIVED with element type** — ✅ **DONE (2026-06-21): −193 clone
    markers, errors flat (zero regression).** Added `is_copy_index_base` (wired into
    `use_is_read_borrow`): the base of a `arr[i]` **READ** whose element is a Copy scalar
@@ -143,8 +156,22 @@ ONLY (never a build dir — §1 GOTCHA) **and** all-12 errors; KEEP only if clon
    unconditional attempt's jhlabs +3 / jts +4 came from non-Copy structs in
    numeric-coercion contexts — now excluded). Write targets (`arr[i] = x`, `arr[i]++`)
    excluded — they need `&mut`. **Biggest single slice** (Copy pixel/coordinate arrays).
-   Still TODO (separate): the **write-target** `.as_mut()` form (`do_hsv.clone().unwrap()[0]
-   = …`) — a real lost-mutation bug, needs `&mut`-reachability.
+6. **(MutBorrow) write-target `.as_mut()`** — ✅ **DONE (2026-06-22): a CORRECTNESS fix,
+   ZERO net errors, zero regression, 91+ silent lost-mutation bugs fixed** (jts 36, jhlabs
+   53, jahmm 2; more across all 12). A nullable array WRITE target (`arr[i] = …`,
+   `arr[i] += …`, `arr[i]++`) emitted `arr.clone().unwrap()[i] = …` — the store hit a
+   DISCARDED clone, so the mutation was silently lost (e.g. `holes[i] = ring` left `holes`
+   all-default). New `is_mut_borrow_index_base` (`dump.rs`) → the nullable name path emits
+   `.as_mut().unwrap()` (MutBorrow), placed BEFORE the last-use move (`.unwrap()` would move
+   the `Vec` out and write to a temporary, also losing it). `.as_mut()` needs a mutable
+   binding, which surfaced 4 E0596s; cleared by: (a) locals already get `let mut` via the
+   change-tracker (the array-access base is recorded under `in_assign_target`); (b) **nullable
+   by-value `Option<…>` params** mutated through an element write now get a `mut` binding
+   (`visit_parameter`: `nullable && mut_borrow_params.contains` — the `&mut`-ref path only
+   covered element-nullable arrays). NB caller-visible mutation still isn't preserved (Java
+   arrays are by-ref → a separate pre-existing `&mut`-param gap); this fixes the IN-function
+   store, which is the lost-mutation bug. Gates: golden 42/42, compilecheck 110/110, 145
+   tests, 0 warnings.
 
 **Genuinely-not-avoidable (don't chase, TODO §4.1):** `Vec`-index `[i].clone()`
 stored owned; `Validate::not_null(Some(x.clone()))` by-value sig; R4 cast-extract
