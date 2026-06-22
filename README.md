@@ -2,19 +2,29 @@
 
 This tool aims to translate Java code to Rust. The output code needs further work
 to become idiomatic Rust, and due to the stricting ownership rules of Rust, might
-not compile at all after a first pass. 
+not compile at all after a first pass. This tool is just a first step in a translation.
 
-The tool is derived from [cguz/java-to-rust](https://github.com/cguz/java-to-rust), which was used
-for inspiration. Due to differences in parsing, this code was not translated
-but the semantic mapping decisions where kept. Further rules have been introduced
-by testing the tool on large codebases relevant for bioinformatics.
+Read more about our work on Rust translation here: [henriksson-lab/rustification](https://github.com/henriksson-lab/rustification)
 
 **Note: Just because the output compiles does not mean that the translation is correct!
 Be sure that you are aware of the pitfalls of translation before you commit to it, and
 unless you know it yourself, ensure you have access to someone with good amount of Rust
 programming experience.**
 
+
+## License
+
+This crate, Java2rust, is made using LLM. Be careful with reusing code as we cannot guarantee that code has not been copied from somewhere.
+
+The original code license is hard to understand:
+* The code is inspired by [cguz/java-to-rust](https://github.com/cguz/java-to-rust), which is stated to be GPL3. 
+* But cguz/java-to-rust is in turn derived from [aschoerk/converter-page](https://github.com/aschoerk/converter-page), which is under the Apache License v2
+So the legal state of this code is uncertain
+
+Thus, consider this crate to be public domain by default, but possibly tained with GPL3 and Apache license v2
+
 **Text below is LLM-generated.**
+
 
 ## ⚠️ Translation-introduced `.clone()` — MUST be audited
 
@@ -68,19 +78,6 @@ nullability→`Option`, a fixed borrow strategy, R4 **sealed-hierarchy enums** (
 `instanceof`/downcast on a class hierarchy work), argument-type-directed overload
 resolution, a cross-file symbol map (`--link`), Tier-2 collection-element inference
 (partial), and the audited clone markers above.
-
-Read more about our work on Rust translation here: [henriksson-lab/rustification](https://github.com/henriksson-lab/rustification)
-
-## License
-
-This crate, Java2rust, is made using LLM. Be careful with reusing code as we cannot guarantee that code has not been copied from somewhere.
-
-The original code license is hard to understand:
-* The code is inspired by [cguz/java-to-rust](https://github.com/cguz/java-to-rust), which is stated to be GPL3. 
-* But cguz/java-to-rust is in turn derived from [aschoerk/converter-page](https://github.com/aschoerk/converter-page), which is under the Apache License v2
-So the legal state of this code is uncertain
-
-Thus, consider this crate to be public domain by default, but possibly tained with GPL3 and Apache license v2
 
 
 ## Using this crate (guide for LLMs)
