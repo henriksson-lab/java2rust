@@ -82,6 +82,38 @@ fn translates_methods_with_overload_suffixes() {
 }
 
 #[test]
+fn translates_same_arity_overload_call_sites() {
+    let translation = translate_source(&fixture("03-methods/OverloadSameArity.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn choose_int(&self, value: i32) -> String")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn choose_long(&self, value: i64) -> String")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn choose_string(&self, value: String) -> String")
+    );
+    assert!(translation.rust.contains("self.choose_int(1)"));
+    assert!(translation.rust.contains("self.choose_long(1i64)"));
+    assert!(
+        translation
+            .rust
+            .contains("self.choose_string(\"one\".to_string())")
+    );
+}
+
+#[test]
 fn guardrail_fixtures_emit_structured_unsupported_diagnostics() {
     let cases = [
         (
@@ -119,6 +151,7 @@ fn first_slice_generated_rust_compiles() {
         "01-expressions/ExpressionPrecedence.java",
         "02-control-flow/LoopsAndBranches.java",
         "03-methods/MethodsAndOverloads.java",
+        "03-methods/OverloadSameArity.java",
         "04-objects/SimpleClass.java",
     ];
 

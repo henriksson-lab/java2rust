@@ -41,6 +41,11 @@ impl TypeEnv {
             Stmt::EnhancedFor {
                 var_type, var_name, ..
             } => self.insert_local(var_name.clone(), var_type.clone()),
+            Stmt::Try { body, .. } => {
+                for stmt in &body.statements {
+                    self.learn_stmt(stmt);
+                }
+            }
             _ => {}
         }
     }
@@ -120,6 +125,7 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
             .or_else(|| env.field_type(name).cloned())
             .unwrap_or_else(|| JavaType::Unknown(name.clone())),
         Expr::This => JavaType::Unknown("this".to_string()),
+        Expr::Super => JavaType::Unknown("super".to_string()),
         Expr::FieldAccess(receiver, field) => {
             if field == "length" && is_length_receiver(&infer_expr_type(receiver, env)) {
                 JavaType::Primitive(PrimitiveType::Int)
@@ -148,8 +154,19 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
             &infer_expr_type(then_expr, env),
             &infer_expr_type(else_expr, env),
         ),
-        Expr::Call { name, .. } => JavaType::Unknown(name.clone()),
+        Expr::Call { name, resolved, .. } => resolved
+            .as_ref()
+            .map(|call| call.return_type.clone())
+            .unwrap_or_else(|| JavaType::Unknown(name.clone())),
         Expr::New { ty, .. } => ty.clone(),
+        Expr::Cast { ty, .. } => ty.clone(),
+        Expr::InstanceOf { .. } => JavaType::Primitive(PrimitiveType::Boolean),
+        Expr::Lambda { .. } => JavaType::Unknown("lambda".to_string()),
+        Expr::MethodReference { .. } => JavaType::Unknown("method_reference".to_string()),
+        Expr::ClassLiteral(_) => JavaType::Named {
+            name: "Class".to_string(),
+            args: Vec::new(),
+        },
         Expr::Raw(raw) => JavaType::Unknown(raw.clone()),
     }
 }

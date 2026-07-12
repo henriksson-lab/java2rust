@@ -157,6 +157,21 @@ pub enum Stmt {
         iterable: Expr,
         body: Block,
     },
+    Switch {
+        selector: Expr,
+        cases: Vec<SwitchCase>,
+    },
+    Try {
+        body: Block,
+        catches: Vec<CatchClause>,
+        finally_block: Option<Block>,
+    },
+    Throw(Expr),
+    LocalType(TypeDecl),
+    ConstructorInvocation {
+        kind: ConstructorInvocationKind,
+        args: Vec<Expr>,
+    },
     Break(Option<String>),
     Continue(Option<String>),
     Block(Block),
@@ -164,10 +179,36 @@ pub enum Stmt {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SwitchCase {
+    pub labels: Vec<SwitchLabel>,
+    pub statements: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SwitchLabel {
+    Expr(Expr),
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatchClause {
+    pub types: Vec<JavaType>,
+    pub name: String,
+    pub body: Block,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructorInvocationKind {
+    This,
+    Super,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Literal),
     Var(String),
     This,
+    Super,
     FieldAccess(Box<Expr>, String),
     ArrayAccess(Box<Expr>, Box<Expr>),
     Binary {
@@ -188,12 +229,56 @@ pub enum Expr {
         receiver: Option<Box<Expr>>,
         name: String,
         args: Vec<Expr>,
+        resolved: Option<ResolvedCall>,
     },
     New {
         ty: JavaType,
         args: Vec<Expr>,
+        body: Option<Vec<Member>>,
     },
+    Cast {
+        ty: JavaType,
+        expr: Box<Expr>,
+    },
+    InstanceOf {
+        expr: Box<Expr>,
+        ty: JavaType,
+    },
+    Lambda {
+        params: Vec<LambdaParam>,
+        body: LambdaBody,
+    },
+    MethodReference {
+        target: String,
+        method: String,
+    },
+    ClassLiteral(JavaType),
     Raw(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LambdaParam {
+    pub name: String,
+    pub ty: Option<JavaType>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LambdaBody {
+    Expr(Box<Expr>),
+    Block(Block),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCall {
+    pub rust_name: String,
+    pub kind: CallKind,
+    pub return_type: JavaType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallKind {
+    Instance,
+    Static,
 }
 
 #[derive(Debug, Clone, PartialEq)]

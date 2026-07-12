@@ -277,6 +277,21 @@ fn lower_stmt(
             crate::emit::emit_expr(&lower_expr(iterable, env)),
             crate::emit::emit_statements(&lower_block(body, &mut env.clone(), return_type), 1)
         ))),
+        Stmt::Switch { .. } => out.push(RustStmt::Raw(
+            "compile_error!(\"unsupported Java statement: switch\");".to_string(),
+        )),
+        Stmt::Try { .. } => out.push(RustStmt::Raw(
+            "compile_error!(\"unsupported Java statement: try/catch/finally\");".to_string(),
+        )),
+        Stmt::Throw(_) => out.push(RustStmt::Raw(
+            "compile_error!(\"unsupported Java statement: throw\");".to_string(),
+        )),
+        Stmt::LocalType(_) => out.push(RustStmt::Raw(
+            "compile_error!(\"unsupported Java statement: local type declaration\");".to_string(),
+        )),
+        Stmt::ConstructorInvocation { .. } => out.push(RustStmt::Raw(
+            "compile_error!(\"unsupported Java statement: constructor delegation\");".to_string(),
+        )),
         Stmt::Break(label) => out.push(RustStmt::Break(label.clone())),
         Stmt::Continue(label) => out.push(RustStmt::Continue(label.clone())),
         Stmt::Block(block) => out.push(RustStmt::Raw(format!(
@@ -298,6 +313,7 @@ fn lower_expr(expr: &Expr, env: &TypeEnv) -> RustExpr {
         Expr::Literal(lit) => RustExpr::Literal(literal_to_rust(lit)),
         Expr::Var(name) => RustExpr::Var(name.clone()),
         Expr::This => RustExpr::Var("self".to_string()),
+        Expr::Super => RustExpr::Raw("super".to_string()),
         Expr::FieldAccess(receiver, field) => {
             if field == "length" {
                 return RustExpr::Raw(format!(
@@ -358,9 +374,27 @@ fn lower_expr(expr: &Expr, env: &TypeEnv) -> RustExpr {
             receiver,
             name,
             args,
+            resolved,
         } => {
             let rust_args = args.iter().map(|arg| lower_expr(arg, env)).collect();
-            if let Some(receiver) = receiver {
+            if let Some(call) = resolved {
+                match (&call.kind, receiver) {
+                    (CallKind::Static, _) => RustExpr::Call {
+                        function: Box::new(RustExpr::Raw(format!("Self::{}", call.rust_name))),
+                        args: rust_args,
+                    },
+                    (CallKind::Instance, Some(receiver)) => RustExpr::MethodCall {
+                        receiver: Box::new(lower_expr(receiver, env)),
+                        method: call.rust_name.clone(),
+                        args: rust_args,
+                    },
+                    (CallKind::Instance, None) => RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("self".to_string())),
+                        method: call.rust_name.clone(),
+                        args: rust_args,
+                    },
+                }
+            } else if let Some(receiver) = receiver {
                 RustExpr::MethodCall {
                     receiver: Box::new(lower_expr(receiver, env)),
                     method: crate::parser::to_snake_case(name),
@@ -373,13 +407,26 @@ fn lower_expr(expr: &Expr, env: &TypeEnv) -> RustExpr {
                 }
             }
         }
-        Expr::New { ty, args } => RustExpr::Call {
+        Expr::New { ty, args, .. } => RustExpr::Call {
             function: Box::new(RustExpr::Raw(format!(
                 "{}::new",
                 crate::emit::emit_type(&java_type_to_rust(ty))
             ))),
             args: args.iter().map(|arg| lower_expr(arg, env)).collect(),
         },
+        Expr::Cast { ty: _, expr } => lower_expr(expr, env),
+        Expr::InstanceOf { .. } => {
+            RustExpr::Raw("compile_error!(\"unsupported Java expression: instanceof\")".to_string())
+        }
+        Expr::Lambda { .. } => {
+            RustExpr::Raw("compile_error!(\"unsupported Java expression: lambda\")".to_string())
+        }
+        Expr::MethodReference { .. } => RustExpr::Raw(
+            "compile_error!(\"unsupported Java expression: method reference\")".to_string(),
+        ),
+        Expr::ClassLiteral(_) => RustExpr::Raw(
+            "compile_error!(\"unsupported Java expression: class literal\")".to_string(),
+        ),
         Expr::Raw(raw) => RustExpr::Raw(raw.clone()),
     }
 }
@@ -554,6 +601,18 @@ fn stmt_mutates_self(stmt: &Stmt) -> bool {
         }
         Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::EnhancedFor { body, .. } => {
             method_mutates_self(body)
+        }
+        Stmt::Switch { cases, .. } => cases
+            .iter()
+            .any(|case| case.statements.iter().any(stmt_mutates_self)),
+        Stmt::Try {
+            body,
+            catches,
+            finally_block,
+        } => {
+            method_mutates_self(body)
+                || catches.iter().any(|catch| method_mutates_self(&catch.body))
+                || finally_block.as_ref().is_some_and(method_mutates_self)
         }
         _ => false,
     }
