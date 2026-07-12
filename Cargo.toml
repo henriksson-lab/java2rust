@@ -1,0 +1,15 @@
+[package]
+name = "new-java2rust"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "new_java2rust"
+path = "src/lib.rs"
+
+[[bin]]
+name = "new-java2rust"
+path = "src/main.rs"
+
+[dependencies]
+
