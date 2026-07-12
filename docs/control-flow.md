@@ -49,7 +49,41 @@ For labeled `continue outer` targeting an outer classic `for`, the inner site mu
 
 ## Switch
 
-Expression-like `switch` over primitives, strings, or enums should lower to `match` when fallthrough is absent. Fallthrough requires grouped arms or an explicit statement-level rewrite. Unsupported fallthrough should be diagnosed rather than silently dropped.
+Expression-like `switch` over primitives, strings, or enums should lower to `match` when fallthrough is absent. Fallthrough requires grouped arms or an explicit statement-level rewrite. Unsupported fallthrough must be diagnosed rather than silently dropped.
+
+### Statement `switch` With Fallthrough
+
+The first supported statement-switch lowering prioritizes correctness over prettiness:
+
+1. Evaluate the selector exactly once into a generated local.
+2. Create a generated `matched` boolean initialized to `false`.
+3. Enter a labeled one-shot loop representing the switch body.
+4. For each case group:
+   - If no previous group matched, compare the selector against the group's labels.
+   - Set `matched = true` when a label matches.
+   - Execute the group's statements when `matched` is true.
+5. Lower Java `break` inside the switch body to `break 'generated_switch_label`.
+6. End the one-shot loop with an unconditional break so non-breaking fallthrough leaves the switch after the last case.
+
+The generated shape is:
+
+```rust
+{
+    let __switch_value = selector;
+    let mut __switch_matched = false;
+    'java_switch: loop {
+        if !__switch_matched && (__switch_value == label_a) {
+            __switch_matched = true;
+        }
+        if __switch_matched {
+            // case statements; Java break becomes break 'java_switch
+        }
+        break 'java_switch;
+    }
+}
+```
+
+This lowering lives in `lower`. The parser only records `Stmt::Switch`; `resolve` and `types` own any later selector/type facts needed to improve the output to `match`.
 
 ## Definite Assignment
 

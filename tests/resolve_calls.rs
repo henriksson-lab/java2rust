@@ -1,4 +1,4 @@
-use new_java2rust::java_ir::{CallKind, Expr, Member, Stmt};
+use new_java2rust::java_ir::{CallKind, ConstructorInvocationKind, Expr, Member, Stmt};
 use new_java2rust::parser::parse_java_source;
 use new_java2rust::resolve::resolve_program;
 
@@ -44,6 +44,40 @@ fn resolve_annotates_same_class_overload_call_targets() {
     assert!(names.contains(&("choose_int", CallKind::Instance)));
     assert!(names.contains(&("choose_long", CallKind::Instance)));
     assert!(names.contains(&("choose_string", CallKind::Instance)));
+}
+
+#[test]
+fn resolve_annotates_same_class_constructor_delegation_targets() {
+    let source =
+        std::fs::read_to_string("examples/java/03-methods/ConstructorOverloads.java").unwrap();
+    let parsed = parse_java_source(&source);
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+
+    let ty = &resolved.program.types[0];
+    let delegations = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Constructor(constructor) => constructor.body.as_ref(),
+            _ => None,
+        })
+        .flat_map(|body| &body.statements)
+        .filter_map(|stmt| match stmt {
+            Stmt::ConstructorInvocation {
+                kind: ConstructorInvocationKind::This,
+                resolved: Some(resolved),
+                ..
+            } => Some(resolved.rust_name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(delegations, vec!["new_string_int", "new_string_int"]);
 }
 
 fn collect_calls<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {

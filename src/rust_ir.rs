@@ -9,6 +9,7 @@ pub enum RustItem {
     Impl(RustImpl),
     Function(RustFunction),
     Comment(String),
+    Raw(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

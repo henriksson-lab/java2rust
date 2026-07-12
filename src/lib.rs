@@ -22,7 +22,8 @@ pub struct Translation {
 pub fn translate_source(source: &str) -> Translation {
     let parsed = parser::parse_java_source(source);
     let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
-    let lowered = lower::lower_program(&resolved.program, resolved.diagnostics);
+    let lowered =
+        lower::lower_program_with_facts(&resolved.program, resolved.diagnostics, &resolved.facts);
     let rust = emit::emit_file(&lowered.file);
     Translation {
         rust,

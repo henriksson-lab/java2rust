@@ -29,6 +29,19 @@ pub enum Coercion {
     CloneAudit,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoweredType {
+    Java(JavaType),
+    OptionalBorrowed(Box<JavaType>),
+    VecBorrowedString,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoweredExpr {
+    pub expr: RustExpr,
+    pub actual: LoweredType,
+}
+
 pub fn plan_coercion(actual: &JavaType, slot: &Slot) -> Vec<Coercion> {
     match slot {
         Slot::Index => vec![Coercion::IndexToUsize],
@@ -45,11 +58,58 @@ pub fn plan_coercion(actual: &JavaType, slot: &Slot) -> Vec<Coercion> {
     }
 }
 
+pub fn apply_lowered_expr_to_slot(lowered: LoweredExpr, slot: &Slot) -> RustExpr {
+    match (&lowered.actual, slot) {
+        (LoweredType::Java(actual), slot) => {
+            let plan = plan_coercion(actual, slot);
+            apply_coercions(lowered.expr, &plan)
+        }
+        (LoweredType::OptionalBorrowed(actual), Slot::Assignment(target))
+        | (LoweredType::OptionalBorrowed(actual), Slot::Return(target))
+        | (LoweredType::OptionalBorrowed(actual), Slot::Argument(target))
+            if optional_target_matches(target, actual) =>
+        {
+            RustExpr::MethodCall {
+                receiver: Box::new(lowered.expr),
+                method: "cloned".to_string(),
+                args: Vec::new(),
+            }
+        }
+        (LoweredType::VecBorrowedString, Slot::Assignment(target))
+        | (LoweredType::VecBorrowedString, Slot::Return(target))
+        | (LoweredType::VecBorrowedString, Slot::Argument(target))
+            if list_string_target_matches(target) =>
+        {
+            RustExpr::Raw(format!(
+                "{}.into_iter().map(|v| v.to_string()).collect::<Vec<_>>()",
+                emit::emit_expr(&lowered.expr)
+            ))
+        }
+        _ => lowered.expr,
+    }
+}
+
 pub fn apply_coercions(mut expr: RustExpr, coercions: &[Coercion]) -> RustExpr {
     for coercion in coercions {
         expr = apply_one(expr, coercion);
     }
     expr
+}
+
+fn optional_target_matches(target: &JavaType, actual: &JavaType) -> bool {
+    matches!(
+        target,
+        JavaType::Named { name, args }
+            if name == "Optional" && args.len() == 1 && &args[0] == actual
+    )
+}
+
+fn list_string_target_matches(target: &JavaType) -> bool {
+    matches!(
+        target,
+        JavaType::Named { name, args }
+            if name == "List" && args.len() == 1 && args[0] == JavaType::String
+    )
 }
 
 pub fn rust_param_slot_type(ty: &JavaType, is_varargs: bool) -> RustType {

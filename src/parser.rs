@@ -257,12 +257,6 @@ fn parse_constructor_decl(
     source: &str,
     diagnostics: &mut DiagnosticBag,
 ) -> ConstructorDecl {
-    if has_child_kind(node, "throws") {
-        diagnostics.unsupported(
-            "unsupported_exceptions",
-            "checked exceptions are outside the first implementation slice",
-        );
-    }
     ConstructorDecl {
         name: field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string()),
         rust_name: None,
@@ -270,6 +264,7 @@ fn parse_constructor_decl(
             .child_by_field_name("parameters")
             .map(|params| parse_params_node(params, source))
             .unwrap_or_default(),
+        throws: parse_throws(node, source),
         modifiers: parse_modifiers(node, source),
         body: node
             .child_by_field_name("body")
@@ -283,12 +278,6 @@ fn parse_method_decl(
     source: &str,
     diagnostics: &mut DiagnosticBag,
 ) -> MethodDecl {
-    if has_child_kind(node, "throws") {
-        diagnostics.unsupported(
-            "unsupported_exceptions",
-            "checked exceptions are outside the first implementation slice",
-        );
-    }
     MethodDecl {
         name: field_text(node, "name", source).unwrap_or_else(|| "unknown".to_string()),
         rust_name: None,
@@ -296,6 +285,7 @@ fn parse_method_decl(
             .child_by_field_name("type")
             .map(|node| parse_type_node(node, source))
             .unwrap_or(JavaType::Void),
+        throws: parse_throws(node, source),
         params: node
             .child_by_field_name("parameters")
             .map(|params| parse_params_node(params, source))
@@ -333,6 +323,28 @@ fn parse_params_node(node: tree_sitter::Node, source: &str) -> Vec<Param> {
             })
         })
         .collect()
+}
+
+fn parse_throws(node: tree_sitter::Node, source: &str) -> Vec<JavaType> {
+    named_children(node)
+        .into_iter()
+        .find(|child| child.kind() == "throws")
+        .map(|throws| {
+            text(throws, source)
+                .trim()
+                .trim_start_matches("throws")
+                .split(',')
+                .filter_map(|part| {
+                    let part = part.trim();
+                    if part.is_empty() {
+                        None
+                    } else {
+                        Some(parse_type(part))
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_block_like(
@@ -394,15 +406,9 @@ fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut Diag
             Stmt::Continue(first_named_child(node).map(|id| text(id, source).to_string()))
         }
         "try_statement" => parse_try_node(node, source, diagnostics),
-        "throw_statement" => {
-            diagnostics.unsupported(
-                "unsupported_exceptions",
-                "throw is outside the first implementation slice",
-            );
-            first_named_child(node)
-                .map(|expr| Stmt::Throw(parse_expr_node(expr, source)))
-                .unwrap_or_else(|| Stmt::Unsupported("throw without expression".to_string()))
-        }
+        "throw_statement" => first_named_child(node)
+            .map(|expr| Stmt::Throw(parse_expr_node(expr, source)))
+            .unwrap_or_else(|| Stmt::Unsupported("throw without expression".to_string())),
         "switch_expression" | "switch_block" | "switch_statement" => {
             parse_switch_node(node, source, diagnostics)
         }
@@ -482,10 +488,6 @@ fn parse_switch_node(
     source: &str,
     diagnostics: &mut DiagnosticBag,
 ) -> Stmt {
-    diagnostics.unsupported(
-        "unsupported_switch",
-        "switch is outside the first implementation slice",
-    );
     let selector = node
         .child_by_field_name("condition")
         .map(|condition| parse_condition_node(condition, source))
@@ -543,20 +545,23 @@ fn parse_constructor_invocation(
     source: &str,
     diagnostics: &mut DiagnosticBag,
 ) -> Stmt {
-    diagnostics.unsupported(
-        "unsupported_constructor_delegation",
-        "constructor delegation is outside the first implementation slice",
-    );
     let kind = match node.child_by_field_name("constructor") {
         Some(constructor) if constructor.kind() == "super" => ConstructorInvocationKind::Super,
         _ => ConstructorInvocationKind::This,
     };
+    if matches!(kind, ConstructorInvocationKind::Super) {
+        diagnostics.unsupported(
+            "unsupported_constructor_super",
+            "super constructor delegation requires inheritance lowering",
+        );
+    }
     Stmt::ConstructorInvocation {
         kind,
         args: node
             .child_by_field_name("arguments")
             .map(|args| parse_arg_list(args, source))
             .unwrap_or_default(),
+        resolved: None,
     }
 }
 
@@ -1128,25 +1133,17 @@ fn collect_syntax_diagnostics(
             "unsupported_interface_impl",
             "interface implementation is outside the first implementation slice",
         ),
-        "throws" | "catch_clause" | "throw_statement" => diagnostics.unsupported(
+        "catch_clause" => diagnostics.unsupported(
             "unsupported_exceptions",
-            "exceptions are outside the first implementation slice",
+            "catch clauses are outside the first exception lowering slice",
         ),
         "finally_clause" => diagnostics.unsupported(
             "unsupported_finally",
             "finally blocks are outside the first implementation slice",
         ),
-        "lambda_expression" => diagnostics.unsupported(
-            "unsupported_lambda",
-            "lambdas are outside the first implementation slice",
-        ),
         "wildcard" | "wildcard_bounds" => diagnostics.unsupported(
             "unsupported_wildcard",
             "wildcards are outside the first implementation slice",
-        ),
-        "method_invocation" if text(node, source).contains(".stream(") => diagnostics.unsupported(
-            "unsupported_stream",
-            "streams are outside the first implementation slice",
         ),
         _ => {}
     }
@@ -1275,12 +1272,6 @@ fn first_named_child<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Nod
 fn field_text(node: tree_sitter::Node, field: &str, source: &str) -> Option<String> {
     node.child_by_field_name(field)
         .map(|node| text(node, source).to_string())
-}
-
-fn has_child_kind(node: tree_sitter::Node, kind: &str) -> bool {
-    named_children(node)
-        .into_iter()
-        .any(|child| child.kind() == kind)
 }
 
 fn text<'a>(node: tree_sitter::Node, source: &'a str) -> &'a str {

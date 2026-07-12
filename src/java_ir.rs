@@ -55,6 +55,7 @@ pub struct MethodDecl {
     pub name: String,
     pub rust_name: Option<String>,
     pub return_type: JavaType,
+    pub throws: Vec<JavaType>,
     pub params: Vec<Param>,
     pub modifiers: Vec<Modifier>,
     pub body: Option<Block>,
@@ -66,6 +67,7 @@ pub struct ConstructorDecl {
     pub name: String,
     pub rust_name: Option<String>,
     pub params: Vec<Param>,
+    pub throws: Vec<JavaType>,
     pub modifiers: Vec<Modifier>,
     pub body: Option<Block>,
     pub span: Span,
@@ -171,6 +173,7 @@ pub enum Stmt {
     ConstructorInvocation {
         kind: ConstructorInvocationKind,
         args: Vec<Expr>,
+        resolved: Option<ResolvedConstructor>,
     },
     Break(Option<String>),
     Continue(Option<String>),
@@ -201,6 +204,11 @@ pub struct CatchClause {
 pub enum ConstructorInvocationKind {
     This,
     Super,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConstructor {
+    pub rust_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]

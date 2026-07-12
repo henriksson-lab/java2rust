@@ -165,7 +165,7 @@ fn emits_syntax_based_wildcard_and_throws_diagnostics() {
     let wildcard = parse_java_source(&fixture("05-types/WildcardBounds.java"));
     assert!(wildcard.diagnostics.has_code("unsupported_wildcard"));
 
-    let checked = parse_java_source(&fixture("06-stdlib/CheckedException.java"));
+    let checked = parse_java_source(&fixture("06-stdlib/MultiCatch.java"));
     assert!(checked.diagnostics.has_code("unsupported_exceptions"));
 }
 

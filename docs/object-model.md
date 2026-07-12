@@ -6,6 +6,34 @@ Simple Java classes lower to Rust structs plus impl blocks. Field visibility fol
 
 Constructors lower to associated functions such as `new`. Field initializers, instance initializer blocks, constructor delegation, and `super(...)` must be represented explicitly in Java IR before Rust emission.
 
+## Constructor Delegation
+
+Same-class constructor delegation with `this(...)` is resolved before lowering:
+
+- `parser` records `Stmt::ConstructorInvocation` with kind and argument expressions only.
+- `resolve` selects the target constructor using Java argument types and records the target Rust constructor name.
+- `lower` emits a call to the resolved associated constructor rather than duplicating field initialization.
+
+For a delegation-only constructor:
+
+```java
+public ConstructorOverloads() {
+    this("empty", 0);
+}
+```
+
+emit:
+
+```rust
+pub fn new() -> ConstructorOverloads {
+    return Self::new_string_int("empty".to_string(), 0);
+}
+```
+
+If a constructor delegates with `this(...)` and then performs additional Java statements, the lowering must first create a mutable temporary from the delegated constructor, apply the remaining constructor statements against that temporary, then return it. That shape is deferred until constructor-body lowering can target an explicit receiver variable instead of implicit `self`.
+
+`super(...)` remains represented in Java IR but lowers to an explicit unsupported diagnostic until superclass state layout is implemented. The parser must not erase or rewrite it.
+
 ## Inheritance
 
 Rust has no direct class inheritance. Use one of these strategies per hierarchy:

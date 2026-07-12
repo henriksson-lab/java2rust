@@ -39,3 +39,22 @@ Borrowing is slot-sensitive:
 
 When local expression emission would create borrow conflicts or move-after-use errors, record a rewrite-needed fact instead of patching strings. Examples include nested mutating calls, temporaries whose lifetime must be extended, and aliasing created by chained lookups.
 
+## Lambda And Local Class Captures
+
+The first stream lambda slice supports only expression lambdas whose parameter is the stream item and whose body does not capture mutable Java locals. For `List<Integer>.stream().filter(...).mapToInt(...).sum()`, lowering uses borrowed iteration:
+
+- `values.iter()` produces borrowed elements.
+- `filter` receives a borrowed item reference from Rust's iterator adapter.
+- `mapToInt` dereferences the borrowed item and returns a copied primitive.
+
+No captured Java local is cloned, moved, or wrapped in this slice.
+
+Before lowering local classes, anonymous classes, or escaping lambdas:
+
+- `resolve` must record captured locals and captured `this`.
+- `types` must record whether captured locals are effectively final.
+- `lower` must choose explicit fields or closure captures from those facts.
+- Mutable captured locals require `Rc<RefCell<T>>` or a structural rewrite unless a lexical borrow is proven not to escape.
+- Captured object references must not be silently cloned; any clone must come from the clone policy above.
+
+Anonymous and local classes remain deferred until these capture facts exist.

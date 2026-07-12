@@ -37,3 +37,26 @@ Concrete lowering rules:
 ## Throws Documentation
 
 Every lowered `Result` should preserve Java `throws` provenance in docs until implementation proves the mapping is stable.
+
+## First Exception Lowering Slice
+
+The first implemented exception slice is intentionally narrow:
+
+- `parser` records declared `throws` types on methods and constructors.
+- `resolve` does not choose exception strategy; it only keeps expression and call facts available.
+- `lower` maps any method with a non-empty `throws` list to `Result<T, JavaException>`.
+- `lower` maps `throw new E(message)` to `return Err(JavaException::new("E", message));`.
+- Normal `return expr;` inside a throwing method lowers to `return Ok(expr);`.
+- `return;` inside a throwing `void` method lowers to `return Ok(());`.
+- `try`/`catch`/`finally` remains structurally represented but unsupported until result-flow rewriting is implemented.
+
+The first generated `JavaException` is a compatibility struct:
+
+```rust
+pub struct JavaException {
+    pub class_name: &'static str,
+    pub message: String,
+}
+```
+
+This is deliberately simpler than the eventual typed exception enum. It gives fallible APIs a compiling Rust surface while preserving the Java exception class name for later refinement.

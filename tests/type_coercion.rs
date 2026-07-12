@@ -1,6 +1,9 @@
-use new_java2rust::coercion::{Coercion, Slot, plan_coercion};
+use new_java2rust::coercion::{
+    Coercion, LoweredExpr, LoweredType, Slot, apply_lowered_expr_to_slot, plan_coercion,
+};
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::parser::{parse_expr, parse_type};
+use new_java2rust::rust_ir::RustExpr;
 use new_java2rust::types::{TypeEnv, infer_expr_type, is_string_concat};
 
 #[test]
@@ -54,6 +57,29 @@ fn coercion_planner_owns_index_and_widening_slots() {
             from: PrimitiveType::Int,
             to: PrimitiveType::Long
         }]
+    );
+}
+
+#[test]
+fn coercion_owns_borrowed_optional_to_owned_optional_slot() {
+    let expr = apply_lowered_expr_to_slot(
+        LoweredExpr {
+            expr: RustExpr::Raw("values.iter().next()".to_string()),
+            actual: LoweredType::OptionalBorrowed(Box::new(JavaType::String)),
+        },
+        &Slot::Return(JavaType::Named {
+            name: "Optional".to_string(),
+            args: vec![JavaType::String],
+        }),
+    );
+
+    assert_eq!(
+        expr,
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Raw("values.iter().next()".to_string())),
+            method: "cloned".to_string(),
+            args: Vec::new(),
+        }
     );
 }
 

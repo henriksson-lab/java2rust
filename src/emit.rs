@@ -15,6 +15,7 @@ fn emit_item(item: &RustItem) -> String {
         RustItem::Impl(imp) => emit_impl(imp),
         RustItem::Function(function) => emit_function(function, 0),
         RustItem::Comment(comment) => format!("// {comment}\n"),
+        RustItem::Raw(raw) => format!("{raw}\n"),
     }
 }
 

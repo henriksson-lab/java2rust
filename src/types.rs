@@ -70,6 +70,12 @@ pub fn java_type_to_rust(ty: &JavaType) -> RustType {
         JavaType::Named { name, args } if name == "Optional" && args.len() == 1 => {
             RustType::Option(Box::new(java_type_to_rust(&args[0])))
         }
+        JavaType::Named { name, .. } if name == "Integer" => RustType::I32,
+        JavaType::Named { name, .. } if name == "Long" => RustType::I64,
+        JavaType::Named { name, .. } if name == "Double" => RustType::F64,
+        JavaType::Named { name, .. } if name == "Float" => RustType::F32,
+        JavaType::Named { name, .. } if name == "Boolean" => RustType::Bool,
+        JavaType::Named { name, .. } if name == "Character" => RustType::Char,
         JavaType::Named { name, .. } => RustType::Named(name.clone()),
         JavaType::Wildcard(_) => RustType::Named("JavaObject".to_string()),
         JavaType::Unknown(raw) => RustType::Raw(raw.clone()),

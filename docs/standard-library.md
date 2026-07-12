@@ -55,3 +55,33 @@ Supported initial shapes:
 - `collect(Collectors.toMap(k, v))` -> `.map(|item| (k(item), v(item))).collect::<HashMap<_, _>>()` only when duplicate-key policy is either Java-compatible for the source or explicitly diagnosed.
 
 Unsupported stream features emit a diagnostic and may use a Java stream runtime shim rather than pretending to be a Rust iterator.
+
+## First Stream Lowering Slice
+
+The first implemented stream slice is exact-shape only:
+
+```java
+values.stream()
+    .filter(v -> v > 0)
+    .mapToInt(v -> v)
+    .sum()
+```
+
+Requirements:
+
+- The source carrier lowers to `Vec<i32>` from `List<Integer>`.
+- The chain must start with `.stream()`.
+- Supported intermediate operations are `filter(lambda)` and `mapToInt(lambda)`.
+- The terminal operation must be `sum()`.
+- Lambda bodies are lowered only for simple expression lambdas over the stream item.
+
+Lowering target:
+
+```rust
+values.iter()
+    .filter(|v| **v > 0)
+    .map(|v| *v)
+    .sum::<i32>()
+```
+
+This recognizer lives in `lower` as a stdlib-specific expression lowering rule. It must not change `parser` output, and broader stream facts should move into `stdlib`/`resolve` once more stream shapes are supported.
