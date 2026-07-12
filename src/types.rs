@@ -1,12 +1,22 @@
 use std::collections::HashMap;
 
 use crate::java_ir::{BinaryOp, Expr, JavaType, Literal, PrimitiveType, Stmt};
-use crate::rust_ir::RustType;
+use crate::representation::RepresentationPlan;
+use crate::signature::SignaturePlan;
+use crate::slot_shape::{OwnershipShape, RustSlotShape, TypeCapabilities, ViewShape};
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExprShapeContext<'a> {
+    pub signatures: Option<&'a SignaturePlan>,
+    pub representations: Option<&'a RepresentationPlan>,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct TypeEnv {
     locals: HashMap<String, JavaType>,
     fields: HashMap<String, JavaType>,
+    local_shapes: HashMap<String, RustSlotShape>,
+    field_shapes: HashMap<String, RustSlotShape>,
 }
 
 impl TypeEnv {
@@ -15,11 +25,29 @@ impl TypeEnv {
     }
 
     pub fn insert_local(&mut self, name: impl Into<String>, ty: JavaType) {
-        self.locals.insert(name.into(), ty);
+        let name = name.into();
+        self.local_shapes
+            .insert(name.clone(), RustSlotShape::for_storage(ty.clone()));
+        self.locals.insert(name, ty);
     }
 
     pub fn insert_field(&mut self, name: impl Into<String>, ty: JavaType) {
-        self.fields.insert(name.into(), ty);
+        let name = name.into();
+        self.field_shapes
+            .insert(name.clone(), RustSlotShape::for_storage(ty.clone()));
+        self.fields.insert(name, ty);
+    }
+
+    pub fn insert_local_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
+        let name = name.into();
+        self.locals.insert(name.clone(), shape.java_ty.clone());
+        self.local_shapes.insert(name, shape);
+    }
+
+    pub fn insert_field_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
+        let name = name.into();
+        self.fields.insert(name.clone(), shape.java_ty.clone());
+        self.field_shapes.insert(name, shape);
     }
 
     pub fn local_type(&self, name: &str) -> Option<&JavaType> {
@@ -28,6 +56,14 @@ impl TypeEnv {
 
     pub fn field_type(&self, name: &str) -> Option<&JavaType> {
         self.fields.get(name)
+    }
+
+    pub fn local_shape(&self, name: &str) -> Option<&RustSlotShape> {
+        self.local_shapes.get(name)
+    }
+
+    pub fn field_shape(&self, name: &str) -> Option<&RustSlotShape> {
+        self.field_shapes.get(name)
     }
 
     pub fn learn_stmt(&mut self, stmt: &Stmt) {
@@ -48,77 +84,6 @@ impl TypeEnv {
             }
             _ => {}
         }
-    }
-}
-
-pub fn java_type_to_rust(ty: &JavaType) -> RustType {
-    match ty {
-        JavaType::Void => RustType::Unit,
-        JavaType::Primitive(PrimitiveType::Boolean) => RustType::Bool,
-        JavaType::Primitive(PrimitiveType::Byte) => RustType::I8,
-        JavaType::Primitive(PrimitiveType::Short) => RustType::I16,
-        JavaType::Primitive(PrimitiveType::Char) => RustType::Char,
-        JavaType::Primitive(PrimitiveType::Int) => RustType::I32,
-        JavaType::Primitive(PrimitiveType::Long) => RustType::I64,
-        JavaType::Primitive(PrimitiveType::Float) => RustType::F32,
-        JavaType::Primitive(PrimitiveType::Double) => RustType::F64,
-        JavaType::String => RustType::String,
-        JavaType::Array(inner) => RustType::Vec(Box::new(java_type_to_rust(inner))),
-        JavaType::Named { name, args } if name == "List" && args.len() == 1 => {
-            RustType::Vec(Box::new(java_type_to_rust(&args[0])))
-        }
-        JavaType::Named { name, args } if name == "Optional" && args.len() == 1 => {
-            RustType::Option(Box::new(java_type_to_rust(&args[0])))
-        }
-        JavaType::Named { name, .. } if name == "Integer" => RustType::I32,
-        JavaType::Named { name, .. } if name == "Long" => RustType::I64,
-        JavaType::Named { name, .. } if name == "Double" => RustType::F64,
-        JavaType::Named { name, .. } if name == "Float" => RustType::F32,
-        JavaType::Named { name, .. } if name == "Boolean" => RustType::Bool,
-        JavaType::Named { name, .. } if name == "Character" => RustType::Char,
-        JavaType::Named { name, .. } => RustType::Named(name.clone()),
-        JavaType::Wildcard(_) => RustType::Named("JavaObject".to_string()),
-        JavaType::Unknown(raw) => RustType::Raw(raw.clone()),
-    }
-}
-
-pub fn rust_return_type(ty: &JavaType) -> Option<RustType> {
-    let rust = java_type_to_rust(ty);
-    if rust == RustType::Unit {
-        None
-    } else {
-        Some(rust)
-    }
-}
-
-pub fn rust_param_type(ty: &JavaType, is_varargs: bool) -> RustType {
-    if is_varargs {
-        let inner = match ty {
-            JavaType::Array(inner) => java_type_to_rust(inner),
-            _ => java_type_to_rust(ty),
-        };
-        return RustType::Ref {
-            mutable: false,
-            inner: Box::new(RustType::Slice(Box::new(inner))),
-        };
-    }
-    match ty {
-        JavaType::Array(inner) => RustType::Ref {
-            mutable: false,
-            inner: Box::new(RustType::Slice(Box::new(java_type_to_rust(inner)))),
-        },
-        JavaType::String => RustType::String,
-        _ => java_type_to_rust(ty),
-    }
-}
-
-pub fn default_rust_literal_for_java_type(ty: &JavaType) -> &'static str {
-    match ty {
-        JavaType::Primitive(PrimitiveType::Boolean) => "false",
-        JavaType::Primitive(_) => "0",
-        JavaType::String => "String::new()",
-        JavaType::Array(_) => "Vec::new()",
-        _ => "Default::default()",
     }
 }
 
@@ -143,13 +108,9 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
                 JavaType::Unknown(field.clone())
             }
         }
-        Expr::ArrayAccess(array, _) => match infer_expr_type(array, env) {
-            JavaType::Array(inner) => *inner,
-            JavaType::Named { name, mut args } if name == "List" && args.len() == 1 => {
-                args.remove(0)
-            }
-            _ => JavaType::Unknown("array_access".to_string()),
-        },
+        Expr::ArrayAccess(array, _) => RustSlotShape::conservative(infer_expr_type(array, env))
+            .sequence_element_type()
+            .unwrap_or_else(|| JavaType::Unknown("array_access".to_string())),
         Expr::Binary { op, left, right } => infer_binary_type(*op, left, right, env),
         Expr::Unary { expr, .. } => infer_expr_type(expr, env),
         Expr::Ternary {
@@ -175,6 +136,180 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
         },
         Expr::Raw(raw) => JavaType::Unknown(raw.clone()),
     }
+}
+
+pub fn infer_expr_shape(expr: &Expr, env: &TypeEnv) -> RustSlotShape {
+    infer_expr_shape_with_context(expr, env, ExprShapeContext::default())
+}
+
+pub fn infer_assignment_target_shape(expr: &Expr, env: &TypeEnv) -> Option<RustSlotShape> {
+    infer_assignment_target_shape_with_context(expr, env, ExprShapeContext::default())
+}
+
+pub fn infer_assignment_target_shape_with_context(
+    expr: &Expr,
+    env: &TypeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<RustSlotShape> {
+    match expr {
+        Expr::Var(name) => env.local_shape(name).cloned(),
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            env.field_shape(field).cloned()
+        }
+        Expr::FieldAccess(receiver, field) => infer_field_access_shape(receiver, field, env, ctx),
+        Expr::ArrayAccess(array, _) => infer_indexed_assignment_target_shape(array, env),
+        _ => None,
+    }
+}
+
+pub fn infer_stream_lambda_body_shape(expr: &Expr, default: &RustSlotShape) -> RustSlotShape {
+    if stream_lambda_body_is_borrowed_str(expr) {
+        let mut shape = RustSlotShape::conservative(JavaType::String);
+        shape.ownership = OwnershipShape::SharedBorrow;
+        shape.view = ViewShape::Str;
+        return shape;
+    }
+    default.clone()
+}
+
+pub fn infer_stream_map_to_int_shape(_expr: &Expr) -> RustSlotShape {
+    RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int))
+}
+
+pub fn infer_stream_source_element_shape(source: &Expr, env: &TypeEnv) -> Option<RustSlotShape> {
+    stream_source_element_type(source, env).map(stream_source_element_shape)
+}
+
+pub fn infer_expr_shape_with_context(
+    expr: &Expr,
+    env: &TypeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> RustSlotShape {
+    match expr {
+        Expr::Literal(lit) => RustSlotShape::conservative(literal_type(lit)),
+        Expr::Var(name) => env
+            .local_shape(name)
+            .cloned()
+            .or_else(|| env.field_shape(name).cloned())
+            .unwrap_or_else(|| RustSlotShape::conservative(JavaType::Unknown(name.clone()))),
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => env
+            .field_shape(field)
+            .cloned()
+            .unwrap_or_else(|| RustSlotShape::conservative(infer_expr_type(expr, env))),
+        Expr::FieldAccess(receiver, field) if field == "length" => RustSlotShape::conservative(
+            infer_expr_type(&Expr::FieldAccess(receiver.clone(), field.clone()), env),
+        ),
+        Expr::FieldAccess(receiver, field) => infer_field_access_shape(receiver, field, env, ctx)
+            .unwrap_or_else(|| RustSlotShape::conservative(infer_expr_type(expr, env))),
+        Expr::ArrayAccess(array, _) => infer_indexed_expr_shape(array, env, ctx),
+        Expr::Call {
+            resolved: Some(call),
+            ..
+        } => ctx
+            .signatures
+            .and_then(|signatures| {
+                signatures.method_return_shape_by_rust_name(&call.declaring_type, &call.rust_name)
+            })
+            .unwrap_or_else(|| value_shape_or_conservative(ctx, infer_expr_type(expr, env))),
+        Expr::New {
+            ty,
+            resolved: Some(resolved),
+            ..
+        } => {
+            let java_ty = if matches!(ty, JavaType::Unknown(_)) {
+                JavaType::Named {
+                    name: resolved.declaring_type.clone(),
+                    args: Vec::new(),
+                }
+            } else {
+                ty.clone()
+            };
+            value_shape_or_conservative(ctx, java_ty)
+        }
+        Expr::Cast { ty, .. } => value_shape_or_conservative(ctx, ty.clone()),
+        _ => value_shape_or_conservative(ctx, infer_expr_type(expr, env)),
+    }
+}
+
+fn value_shape_or_conservative(ctx: ExprShapeContext<'_>, java_ty: JavaType) -> RustSlotShape {
+    ctx.representations
+        .map(|representations| representations.value_shape_for_java_type(java_ty.clone()))
+        .unwrap_or_else(|| RustSlotShape::conservative(java_ty))
+}
+
+fn infer_field_access_shape(
+    receiver: &Expr,
+    field: &str,
+    env: &TypeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<RustSlotShape> {
+    let JavaType::Named { name, .. } = infer_expr_type(receiver, env) else {
+        return None;
+    };
+    ctx.signatures
+        .and_then(|signatures| signatures.field_shape(&name, field).cloned())
+}
+
+fn infer_indexed_expr_shape(
+    array: &Expr,
+    env: &TypeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> RustSlotShape {
+    let array_shape = infer_expr_shape_with_context(array, env, ctx);
+    let element_ty = sequence_element_type_from_java(&infer_expr_type(array, env))
+        .unwrap_or_else(|| JavaType::Unknown("array_access".to_string()));
+    let mut element_shape = RustSlotShape::conservative(element_ty.clone());
+
+    if (array_shape.ownership == OwnershipShape::SharedBorrow
+        || array_shape.view == ViewShape::Slice)
+        && !TypeCapabilities::conservative(&element_ty).copy
+    {
+        element_shape.ownership = OwnershipShape::SharedBorrow;
+    }
+
+    element_shape
+}
+
+fn stream_lambda_body_is_borrowed_str(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Call {
+            name,
+            args,
+            ..
+        } if name == "trim" && args.is_empty()
+    )
+}
+
+fn stream_source_element_type(source: &Expr, env: &TypeEnv) -> Option<JavaType> {
+    RustSlotShape::conservative(infer_expr_type(source, env))
+        .sequence_element_type()
+        .map(normalize_stream_element_type)
+}
+
+fn normalize_stream_element_type(ty: JavaType) -> JavaType {
+    match ty {
+        JavaType::Named { name, args } if name == "Integer" && args.is_empty() => {
+            JavaType::Primitive(PrimitiveType::Int)
+        }
+        other => other,
+    }
+}
+
+fn stream_source_element_shape(ty: JavaType) -> RustSlotShape {
+    let mut shape = RustSlotShape::conservative(ty);
+    if !shape.capabilities().copy {
+        shape.ownership = OwnershipShape::SharedBorrow;
+    }
+    shape
+}
+
+fn infer_indexed_assignment_target_shape(array: &Expr, env: &TypeEnv) -> Option<RustSlotShape> {
+    sequence_element_type_from_java(&infer_expr_type(array, env)).map(RustSlotShape::for_storage)
+}
+
+fn sequence_element_type_from_java(ty: &JavaType) -> Option<JavaType> {
+    RustSlotShape::conservative(ty.clone()).sequence_element_type()
 }
 
 pub fn is_string_concat(expr: &Expr, env: &TypeEnv) -> bool {

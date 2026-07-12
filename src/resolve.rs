@@ -22,7 +22,11 @@ pub struct ResolvedProgram {
 pub fn resolve_program(program: &Program, mut diagnostics: DiagnosticBag) -> ResolvedProgram {
     let mut program = program.clone();
     for ty in &mut program.types {
-        resolve_type(ty, &mut diagnostics);
+        assign_type_rust_names(ty, &mut diagnostics);
+    }
+    let symbols = ProgramSymbols::from_program(&program);
+    for ty in &mut program.types {
+        resolve_type_calls(ty, &symbols, &mut diagnostics);
     }
     let facts = collect_capture_facts(&program);
     ResolvedProgram {
@@ -32,7 +36,7 @@ pub fn resolve_program(program: &Program, mut diagnostics: DiagnosticBag) -> Res
     }
 }
 
-fn resolve_type(ty: &mut TypeDecl, diagnostics: &mut DiagnosticBag) {
+fn assign_type_rust_names(ty: &mut TypeDecl, diagnostics: &mut DiagnosticBag) {
     let mut method_counts: HashMap<String, usize> = HashMap::new();
     let mut ctor_count = 0usize;
     for member in &ty.members {
@@ -49,16 +53,22 @@ fn resolve_type(ty: &mut TypeDecl, diagnostics: &mut DiagnosticBag) {
         match member {
             Member::Method(method) => resolve_method(method, &method_counts),
             Member::Constructor(ctor) => resolve_constructor(ctor, ctor_count),
-            Member::Type(nested) => resolve_type(nested, diagnostics),
+            Member::Type(nested) => assign_type_rust_names(nested, diagnostics),
             Member::Unsupported { reason, .. } => {
                 diagnostics.unsupported("unsupported_member", reason.clone());
             }
             _ => {}
         }
     }
+}
 
-    let methods = collect_method_symbols(ty);
-    let constructors = collect_constructor_symbols(ty);
+fn resolve_type_calls(
+    ty: &mut TypeDecl,
+    symbols: &ProgramSymbols,
+    diagnostics: &mut DiagnosticBag,
+) {
+    let methods = symbols.methods_for(&ty.name);
+    let constructors = symbols.constructors_for(&ty.name);
     let fields = collect_field_env(ty);
     for member in &mut ty.members {
         match member {
@@ -68,7 +78,15 @@ fn resolve_type(ty: &mut TypeDecl, diagnostics: &mut DiagnosticBag) {
                     for param in &method.params {
                         env.insert_local(param.name.clone(), param.ty.clone());
                     }
-                    resolve_block_calls(body, &methods, &constructors, &mut env, diagnostics);
+                    resolve_block_calls(
+                        body,
+                        &ty.name,
+                        symbols,
+                        methods,
+                        constructors,
+                        &mut env,
+                        diagnostics,
+                    );
                 }
             }
             Member::Constructor(ctor) => {
@@ -77,9 +95,18 @@ fn resolve_type(ty: &mut TypeDecl, diagnostics: &mut DiagnosticBag) {
                     for param in &ctor.params {
                         env.insert_local(param.name.clone(), param.ty.clone());
                     }
-                    resolve_block_calls(body, &methods, &constructors, &mut env, diagnostics);
+                    resolve_block_calls(
+                        body,
+                        &ty.name,
+                        symbols,
+                        methods,
+                        constructors,
+                        &mut env,
+                        diagnostics,
+                    );
                 }
             }
+            Member::Type(nested) => resolve_type_calls(nested, symbols, diagnostics),
             _ => {}
         }
     }
@@ -102,9 +129,7 @@ fn resolve_method(method: &mut MethodDecl, counts: &HashMap<String, usize>) {
 }
 
 fn resolve_constructor(ctor: &mut ConstructorDecl, ctor_count: usize) {
-    if ctor.params.is_empty() {
-        ctor.rust_name = Some("new".to_string());
-    } else if ctor_count == 1 {
+    if ctor.params.is_empty() || ctor_count == 1 {
         ctor.rust_name = Some("new".to_string());
     } else {
         let suffix = ctor
@@ -119,6 +144,7 @@ fn resolve_constructor(ctor: &mut ConstructorDecl, ctor_count: usize) {
 
 #[derive(Debug, Clone)]
 struct MethodSymbol {
+    declaring_type: String,
     java_name: String,
     rust_name: String,
     params: Vec<Param>,
@@ -128,6 +154,7 @@ struct MethodSymbol {
 
 #[derive(Debug, Clone)]
 struct ConstructorSymbol {
+    declaring_type: String,
     rust_name: String,
     params: Vec<Param>,
 }
@@ -137,6 +164,7 @@ fn collect_method_symbols(ty: &TypeDecl) -> Vec<MethodSymbol> {
         .iter()
         .filter_map(|member| match member {
             Member::Method(method) => Some(MethodSymbol {
+                declaring_type: ty.name.clone(),
                 java_name: method.name.clone(),
                 rust_name: method
                     .rust_name
@@ -156,12 +184,55 @@ fn collect_constructor_symbols(ty: &TypeDecl) -> Vec<ConstructorSymbol> {
         .iter()
         .filter_map(|member| match member {
             Member::Constructor(ctor) => Some(ConstructorSymbol {
+                declaring_type: ty.name.clone(),
                 rust_name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
                 params: ctor.params.clone(),
             }),
             _ => None,
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProgramSymbols {
+    methods_by_type: HashMap<String, Vec<MethodSymbol>>,
+    constructors_by_type: HashMap<String, Vec<ConstructorSymbol>>,
+}
+
+impl ProgramSymbols {
+    fn from_program(program: &Program) -> Self {
+        let mut symbols = Self::default();
+        for ty in &program.types {
+            symbols.collect_type(ty);
+        }
+        symbols
+    }
+
+    fn collect_type(&mut self, ty: &TypeDecl) {
+        self.methods_by_type
+            .insert(ty.name.clone(), collect_method_symbols(ty));
+        self.constructors_by_type
+            .insert(ty.name.clone(), collect_constructor_symbols(ty));
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                self.collect_type(nested);
+            }
+        }
+    }
+
+    fn methods_for(&self, type_name: &str) -> &[MethodSymbol] {
+        self.methods_by_type
+            .get(type_name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn constructors_for(&self, type_name: &str) -> &[ConstructorSymbol] {
+        self.constructors_by_type
+            .get(type_name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
 }
 
 fn collect_field_env(ty: &TypeDecl) -> TypeEnv {
@@ -176,56 +247,92 @@ fn collect_field_env(ty: &TypeDecl) -> TypeEnv {
 
 fn resolve_block_calls(
     block: &mut Block,
+    current_type: &str,
+    symbols: &ProgramSymbols,
     methods: &[MethodSymbol],
     constructors: &[ConstructorSymbol],
     env: &mut TypeEnv,
     diagnostics: &mut DiagnosticBag,
 ) {
     for stmt in &mut block.statements {
-        resolve_stmt_calls(stmt, methods, constructors, env, diagnostics);
+        resolve_stmt_calls(
+            stmt,
+            current_type,
+            symbols,
+            methods,
+            constructors,
+            env,
+            diagnostics,
+        );
         env.learn_stmt(stmt);
     }
 }
 
 fn resolve_stmt_calls(
     stmt: &mut Stmt,
+    current_type: &str,
+    symbols: &ProgramSymbols,
     methods: &[MethodSymbol],
     constructors: &[ConstructorSymbol],
     env: &mut TypeEnv,
     diagnostics: &mut DiagnosticBag,
 ) {
     match stmt {
-        Stmt::VarDecl { initializer, .. } => {
-            if let Some(expr) = initializer {
-                resolve_expr_calls(expr, methods, env, diagnostics);
-            }
+        Stmt::VarDecl {
+            initializer: Some(expr),
+            ..
+        } => {
+            resolve_expr_calls(expr, current_type, symbols, methods, env, diagnostics);
         }
+        Stmt::VarDecl { .. } => {}
         Stmt::Assign { target, value } => {
-            resolve_expr_calls(target, methods, env, diagnostics);
-            resolve_expr_calls(value, methods, env, diagnostics);
+            resolve_expr_calls(target, current_type, symbols, methods, env, diagnostics);
+            resolve_expr_calls(value, current_type, symbols, methods, env, diagnostics);
         }
-        Stmt::Expr(expr) => resolve_expr_calls(expr, methods, env, diagnostics),
-        Stmt::Return(Some(expr)) => resolve_expr_calls(expr, methods, env, diagnostics),
+        Stmt::Expr(expr) => {
+            resolve_expr_calls(expr, current_type, symbols, methods, env, diagnostics)
+        }
+        Stmt::Return(Some(expr)) => {
+            resolve_expr_calls(expr, current_type, symbols, methods, env, diagnostics)
+        }
         Stmt::If {
             condition,
             then_block,
             else_block,
         } => {
-            resolve_expr_calls(condition, methods, env, diagnostics);
+            resolve_expr_calls(condition, current_type, symbols, methods, env, diagnostics);
             resolve_block_calls(
                 then_block,
+                current_type,
+                symbols,
                 methods,
                 constructors,
                 &mut env.clone(),
                 diagnostics,
             );
             if let Some(block) = else_block {
-                resolve_block_calls(block, methods, constructors, &mut env.clone(), diagnostics);
+                resolve_block_calls(
+                    block,
+                    current_type,
+                    symbols,
+                    methods,
+                    constructors,
+                    &mut env.clone(),
+                    diagnostics,
+                );
             }
         }
         Stmt::While { condition, body } => {
-            resolve_expr_calls(condition, methods, env, diagnostics);
-            resolve_block_calls(body, methods, constructors, &mut env.clone(), diagnostics);
+            resolve_expr_calls(condition, current_type, symbols, methods, env, diagnostics);
+            resolve_block_calls(
+                body,
+                current_type,
+                symbols,
+                methods,
+                constructors,
+                &mut env.clone(),
+                diagnostics,
+            );
         }
         Stmt::For {
             init,
@@ -235,16 +342,32 @@ fn resolve_stmt_calls(
             ..
         } => {
             for stmt in init {
-                resolve_stmt_calls(stmt, methods, constructors, env, diagnostics);
+                resolve_stmt_calls(
+                    stmt,
+                    current_type,
+                    symbols,
+                    methods,
+                    constructors,
+                    env,
+                    diagnostics,
+                );
                 env.learn_stmt(stmt);
             }
             if let Some(condition) = condition {
-                resolve_expr_calls(condition, methods, env, diagnostics);
+                resolve_expr_calls(condition, current_type, symbols, methods, env, diagnostics);
             }
             for expr in update {
-                resolve_expr_calls(expr, methods, env, diagnostics);
+                resolve_expr_calls(expr, current_type, symbols, methods, env, diagnostics);
             }
-            resolve_block_calls(body, methods, constructors, &mut env.clone(), diagnostics);
+            resolve_block_calls(
+                body,
+                current_type,
+                symbols,
+                methods,
+                constructors,
+                &mut env.clone(),
+                diagnostics,
+            );
         }
         Stmt::EnhancedFor {
             var_type,
@@ -252,22 +375,38 @@ fn resolve_stmt_calls(
             iterable,
             body,
         } => {
-            resolve_expr_calls(iterable, methods, env, diagnostics);
+            resolve_expr_calls(iterable, current_type, symbols, methods, env, diagnostics);
             let mut body_env = env.clone();
             body_env.insert_local(var_name.clone(), var_type.clone());
-            resolve_block_calls(body, methods, constructors, &mut body_env, diagnostics);
+            resolve_block_calls(
+                body,
+                current_type,
+                symbols,
+                methods,
+                constructors,
+                &mut body_env,
+                diagnostics,
+            );
         }
         Stmt::Switch { selector, cases } => {
-            resolve_expr_calls(selector, methods, env, diagnostics);
+            resolve_expr_calls(selector, current_type, symbols, methods, env, diagnostics);
             for case in cases {
                 for label in &mut case.labels {
                     if let crate::java_ir::SwitchLabel::Expr(expr) = label {
-                        resolve_expr_calls(expr, methods, env, diagnostics);
+                        resolve_expr_calls(expr, current_type, symbols, methods, env, diagnostics);
                     }
                 }
                 let mut case_env = env.clone();
                 for stmt in &mut case.statements {
-                    resolve_stmt_calls(stmt, methods, constructors, &mut case_env, diagnostics);
+                    resolve_stmt_calls(
+                        stmt,
+                        current_type,
+                        symbols,
+                        methods,
+                        constructors,
+                        &mut case_env,
+                        diagnostics,
+                    );
                     case_env.learn_stmt(stmt);
                 }
             }
@@ -277,7 +416,15 @@ fn resolve_stmt_calls(
             catches,
             finally_block,
         } => {
-            resolve_block_calls(body, methods, constructors, &mut env.clone(), diagnostics);
+            resolve_block_calls(
+                body,
+                current_type,
+                symbols,
+                methods,
+                constructors,
+                &mut env.clone(),
+                diagnostics,
+            );
             for catch in catches {
                 let mut catch_env = env.clone();
                 for ty in &catch.types {
@@ -285,6 +432,8 @@ fn resolve_stmt_calls(
                 }
                 resolve_block_calls(
                     &mut catch.body,
+                    current_type,
+                    symbols,
                     methods,
                     constructors,
                     &mut catch_env,
@@ -292,17 +441,27 @@ fn resolve_stmt_calls(
                 );
             }
             if let Some(block) = finally_block {
-                resolve_block_calls(block, methods, constructors, &mut env.clone(), diagnostics);
+                resolve_block_calls(
+                    block,
+                    current_type,
+                    symbols,
+                    methods,
+                    constructors,
+                    &mut env.clone(),
+                    diagnostics,
+                );
             }
         }
-        Stmt::Throw(expr) => resolve_expr_calls(expr, methods, env, diagnostics),
+        Stmt::Throw(expr) => {
+            resolve_expr_calls(expr, current_type, symbols, methods, env, diagnostics)
+        }
         Stmt::ConstructorInvocation {
             kind,
             args,
             resolved,
         } => {
             for arg in args.iter_mut() {
-                resolve_expr_calls(arg, methods, env, diagnostics);
+                resolve_expr_calls(arg, current_type, symbols, methods, env, diagnostics);
             }
             if matches!(kind, ConstructorInvocationKind::This) {
                 let arg_types = args
@@ -316,38 +475,50 @@ fn resolve_stmt_calls(
                 }
             }
         }
-        Stmt::Block(block) => {
-            resolve_block_calls(block, methods, constructors, &mut env.clone(), diagnostics)
-        }
+        Stmt::Block(block) => resolve_block_calls(
+            block,
+            current_type,
+            symbols,
+            methods,
+            constructors,
+            &mut env.clone(),
+            diagnostics,
+        ),
         _ => {}
     }
 }
 
 fn resolve_expr_calls(
     expr: &mut Expr,
+    current_type: &str,
+    symbols: &ProgramSymbols,
     methods: &[MethodSymbol],
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
 ) {
     match expr {
-        Expr::FieldAccess(receiver, _) => resolve_expr_calls(receiver, methods, env, diagnostics),
+        Expr::FieldAccess(receiver, _) => {
+            resolve_expr_calls(receiver, current_type, symbols, methods, env, diagnostics)
+        }
         Expr::ArrayAccess(array, index) => {
-            resolve_expr_calls(array, methods, env, diagnostics);
-            resolve_expr_calls(index, methods, env, diagnostics);
+            resolve_expr_calls(array, current_type, symbols, methods, env, diagnostics);
+            resolve_expr_calls(index, current_type, symbols, methods, env, diagnostics);
         }
         Expr::Binary { left, right, .. } => {
-            resolve_expr_calls(left, methods, env, diagnostics);
-            resolve_expr_calls(right, methods, env, diagnostics);
+            resolve_expr_calls(left, current_type, symbols, methods, env, diagnostics);
+            resolve_expr_calls(right, current_type, symbols, methods, env, diagnostics);
         }
-        Expr::Unary { expr, .. } => resolve_expr_calls(expr, methods, env, diagnostics),
+        Expr::Unary { expr, .. } => {
+            resolve_expr_calls(expr, current_type, symbols, methods, env, diagnostics)
+        }
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            resolve_expr_calls(condition, methods, env, diagnostics);
-            resolve_expr_calls(then_expr, methods, env, diagnostics);
-            resolve_expr_calls(else_expr, methods, env, diagnostics);
+            resolve_expr_calls(condition, current_type, symbols, methods, env, diagnostics);
+            resolve_expr_calls(then_expr, current_type, symbols, methods, env, diagnostics);
+            resolve_expr_calls(else_expr, current_type, symbols, methods, env, diagnostics);
         }
         Expr::Call {
             receiver,
@@ -356,10 +527,10 @@ fn resolve_expr_calls(
             resolved,
         } => {
             if let Some(receiver) = receiver {
-                resolve_expr_calls(receiver, methods, env, diagnostics);
+                resolve_expr_calls(receiver, current_type, symbols, methods, env, diagnostics);
             }
             for arg in args.iter_mut() {
-                resolve_expr_calls(arg, methods, env, diagnostics);
+                resolve_expr_calls(arg, current_type, symbols, methods, env, diagnostics);
             }
 
             if receiver.is_none()
@@ -376,11 +547,48 @@ fn resolve_expr_calls(
                     Ok(None) => {}
                     Err(message) => diagnostics.error("resolve_call_ambiguous", message),
                 }
+            } else if let Some(receiver_ty) = receiver
+                .as_deref()
+                .map(|receiver| infer_expr_type(receiver, env))
+                .and_then(|ty| match ty {
+                    JavaType::Named { name, .. } | JavaType::Unknown(name)
+                        if symbols.methods_by_type.contains_key(&name) =>
+                    {
+                        Some(name)
+                    }
+                    _ => None,
+                })
+            {
+                let arg_types = args
+                    .iter()
+                    .map(|arg| infer_expr_type(arg, env))
+                    .collect::<Vec<_>>();
+                match resolve_same_class_call(name, &arg_types, symbols.methods_for(&receiver_ty)) {
+                    Ok(Some(call)) => *resolved = Some(call),
+                    Ok(None) => {}
+                    Err(message) => diagnostics.error("resolve_call_ambiguous", message),
+                }
             }
         }
-        Expr::New { args, body, .. } => {
-            for arg in args {
-                resolve_expr_calls(arg, methods, env, diagnostics);
+        Expr::New {
+            ty,
+            args,
+            body,
+            resolved,
+        } => {
+            for arg in args.iter_mut() {
+                resolve_expr_calls(arg, current_type, symbols, methods, env, diagnostics);
+            }
+            if let JavaType::Named { name, .. } | JavaType::Unknown(name) = ty {
+                let arg_types = args
+                    .iter()
+                    .map(|arg| infer_expr_type(arg, env))
+                    .collect::<Vec<_>>();
+                match resolve_same_class_constructor(&arg_types, symbols.constructors_for(name)) {
+                    Ok(Some(constructor)) => *resolved = Some(constructor),
+                    Ok(None) => {}
+                    Err(message) => diagnostics.error("resolve_constructor_ambiguous", message),
+                }
             }
             if let Some(members) = body {
                 for member in members {
@@ -389,6 +597,8 @@ fn resolve_expr_calls(
                             if let Some(body) = &mut method.body {
                                 resolve_block_calls(
                                     body,
+                                    current_type,
+                                    symbols,
                                     methods,
                                     &[],
                                     &mut env.clone(),
@@ -400,6 +610,8 @@ fn resolve_expr_calls(
                             if let Some(body) = &mut ctor.body {
                                 resolve_block_calls(
                                     body,
+                                    current_type,
+                                    symbols,
                                     methods,
                                     &[],
                                     &mut env.clone(),
@@ -407,19 +619,31 @@ fn resolve_expr_calls(
                                 );
                             }
                         }
-                        Member::Type(ty) => resolve_type(ty, diagnostics),
+                        Member::Type(ty) => assign_type_rust_names(ty, diagnostics),
                         _ => {}
                     }
                 }
             }
         }
-        Expr::Cast { expr, .. } => resolve_expr_calls(expr, methods, env, diagnostics),
-        Expr::InstanceOf { expr, .. } => resolve_expr_calls(expr, methods, env, diagnostics),
+        Expr::Cast { expr, .. } => {
+            resolve_expr_calls(expr, current_type, symbols, methods, env, diagnostics)
+        }
+        Expr::InstanceOf { expr, .. } => {
+            resolve_expr_calls(expr, current_type, symbols, methods, env, diagnostics)
+        }
         Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(expr) => resolve_expr_calls(expr, methods, env, diagnostics),
-            LambdaBody::Block(block) => {
-                resolve_block_calls(block, methods, &[], &mut env.clone(), diagnostics)
+            LambdaBody::Expr(expr) => {
+                resolve_expr_calls(expr, current_type, symbols, methods, env, diagnostics)
             }
+            LambdaBody::Block(block) => resolve_block_calls(
+                block,
+                current_type,
+                symbols,
+                methods,
+                &[],
+                &mut env.clone(),
+                diagnostics,
+            ),
         },
         _ => {}
     }
@@ -480,6 +704,7 @@ fn resolve_same_class_call(
     };
 
     Ok(Some(ResolvedCall {
+        declaring_type: selected.declaring_type.clone(),
         rust_name: selected.rust_name.clone(),
         kind: if selected.is_static {
             CallKind::Static
@@ -544,6 +769,7 @@ fn resolve_same_class_constructor(
     };
 
     Ok(Some(ResolvedConstructor {
+        declaring_type: selected.declaring_type.clone(),
         rust_name: selected.rust_name.clone(),
     }))
 }
@@ -581,10 +807,10 @@ fn collect_capture_facts(program: &Program) -> FactSet {
         analyzer.analyze_top_level_type(ty);
     }
     FactSet {
-        notes: Vec::new(),
         captures: CaptureFacts {
             owners: analyzer.owners,
         },
+        ..FactSet::default()
     }
 }
 
@@ -748,11 +974,13 @@ impl CaptureAnalyzer {
 
     fn analyze_stmt(&mut self, stmt: &Stmt, ctx: &mut CaptureContext) {
         match stmt {
-            Stmt::VarDecl { initializer, .. } => {
-                if let Some(expr) = initializer {
-                    self.analyze_expr(expr, ctx);
-                }
+            Stmt::VarDecl {
+                initializer: Some(expr),
+                ..
+            } => {
+                self.analyze_expr(expr, ctx);
             }
+            Stmt::VarDecl { .. } => {}
             Stmt::Assign { target, value } => {
                 self.analyze_expr(target, ctx);
                 self.analyze_expr(value, ctx);
@@ -967,7 +1195,7 @@ impl CaptureAnalyzer {
     fn analyze_expr(&mut self, expr: &Expr, ctx: &mut CaptureContext) {
         match expr {
             Expr::Lambda { params, body } => self.analyze_lambda(params, body, ctx),
-            Expr::New { args, body, ty } => {
+            Expr::New { args, body, ty, .. } => {
                 for arg in args {
                     self.analyze_expr(arg, ctx);
                 }
@@ -1069,7 +1297,7 @@ impl CaptureAnalyzer {
         match expr {
             Expr::Var(name) => capture_var(name, ctx, captures),
             Expr::Lambda { params, body } => self.analyze_lambda(params, body, ctx),
-            Expr::New { ty, args, body } => {
+            Expr::New { ty, args, body, .. } => {
                 for arg in args {
                     self.collect_expr_captures(arg, ctx, captures);
                 }
@@ -1270,11 +1498,13 @@ fn collect_mutated_names_stmt(stmt: &Stmt, out: &mut HashSet<String>) {
         Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
             collect_mutated_names_expr(expr, out);
         }
-        Stmt::VarDecl { initializer, .. } => {
-            if let Some(expr) = initializer {
-                collect_mutated_names_expr(expr, out);
-            }
+        Stmt::VarDecl {
+            initializer: Some(expr),
+            ..
+        } => {
+            collect_mutated_names_expr(expr, out);
         }
+        Stmt::VarDecl { .. } => {}
         Stmt::If {
             condition,
             then_block,

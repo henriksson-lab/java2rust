@@ -4,6 +4,38 @@ use crate::java_ir::JavaType;
 pub struct FactSet {
     pub notes: Vec<String>,
     pub captures: CaptureFacts,
+    pub hierarchy_overrides: Vec<HierarchyOverride>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchyOverride {
+    pub type_name: String,
+    pub strategy: HierarchyStrategy,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HierarchyStrategy {
+    ConcreteStruct,
+    ClosedEnum {
+        enum_name: String,
+        variants: Vec<String>,
+    },
+    DynTrait {
+        trait_name: String,
+    },
+    BoxedDynTrait {
+        trait_name: String,
+    },
+    ErasedObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactProvenance {
+    ParsedSource,
+    CorpusAnalysis,
+    UserOverride,
+    ConservativeFallback,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

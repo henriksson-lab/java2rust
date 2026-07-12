@@ -2,9 +2,19 @@ use crate::diagnostics::DiagnosticBag;
 use crate::facts::{CaptureOwnerKind, FactSet};
 use crate::java_ir::*;
 use crate::rust_ir::*;
+use crate::signature::{
+    LocalPlan, ParamPlan, ReceiverPlan, SignaturePlan, default_param_plan, default_receiver_plan,
+    default_return_shape,
+};
+use crate::slot_shape::RustSlotShape;
 use crate::types::{
-    TypeEnv, default_rust_literal_for_java_type, infer_expr_type, java_type_to_rust,
-    rust_return_type,
+    ExprShapeContext, TypeEnv, infer_assignment_target_shape_with_context,
+    infer_expr_shape_with_context, infer_stream_lambda_body_shape, infer_stream_map_to_int_shape,
+    infer_stream_source_element_shape,
+};
+use crate::{
+    representation::{RepresentationPlan, RepresentationTypeEmission},
+    usage::UsageFacts,
 };
 
 #[derive(Debug, Clone)]
@@ -16,6 +26,10 @@ pub struct LoweredProgram {
 #[derive(Debug, Clone, Copy)]
 struct LowerCtx<'a> {
     facts: &'a FactSet,
+    representations: &'a RepresentationPlan,
+    signatures: &'a SignaturePlan,
+    current_local_shapes: &'a [LocalPlan],
+    current_return_shape: Option<&'a RustSlotShape>,
 }
 
 pub fn lower_program(program: &Program, diagnostics: DiagnosticBag) -> LoweredProgram {
@@ -25,10 +39,40 @@ pub fn lower_program(program: &Program, diagnostics: DiagnosticBag) -> LoweredPr
 
 pub fn lower_program_with_facts(
     program: &Program,
-    mut diagnostics: DiagnosticBag,
+    diagnostics: DiagnosticBag,
     facts: &FactSet,
 ) -> LoweredProgram {
-    let ctx = LowerCtx { facts };
+    let usage = crate::usage::analyze_usage(program);
+    let representations = crate::representation::plan_representations(program, facts);
+    let signatures = crate::signature::solve_signatures(program, &representations, &usage);
+    lower_program_with_plans(
+        program,
+        diagnostics,
+        facts,
+        &usage,
+        &representations,
+        &signatures,
+    )
+}
+
+pub fn lower_program_with_plans(
+    program: &Program,
+    mut diagnostics: DiagnosticBag,
+    facts: &FactSet,
+    _usage: &UsageFacts,
+    representations: &RepresentationPlan,
+    signatures: &SignaturePlan,
+) -> LoweredProgram {
+    for diagnostic in representations.diagnostics_for_program(program) {
+        diagnostics.unsupported(diagnostic.code, diagnostic.message);
+    }
+    let ctx = LowerCtx {
+        facts,
+        representations,
+        signatures,
+        current_local_shapes: &[],
+        current_return_shape: None,
+    };
     let mut file = RustFile::default();
     if program_uses_java_exception(program) {
         file.items.push(RustItem::Raw(java_exception_support()));
@@ -68,14 +112,11 @@ impl JavaException {
 }
 
 fn lower_type(ty: &TypeDecl, file: &mut RustFile, diagnostics: &mut DiagnosticBag, ctx: LowerCtx) {
-    if ty.extends.is_some() {
-        diagnostics.unsupported(
-            "unsupported_inheritance",
-            format!(
-                "{} uses inheritance, which is outside the first slice",
-                ty.name
-            ),
-        );
+    if let RepresentationTypeEmission::RawRustItem(item) =
+        ctx.representations.type_emission_for(&ty.name)
+    {
+        file.items.push(RustItem::Raw(item));
+        return;
     }
 
     let fields = ty
@@ -84,7 +125,8 @@ fn lower_type(ty: &TypeDecl, file: &mut RustFile, diagnostics: &mut DiagnosticBa
         .filter_map(|member| match member {
             Member::Field(field) => Some(RustField {
                 name: field.name.clone(),
-                ty: crate::coercion::rust_storage_type(&field.ty),
+                ty: field_shape_or_storage_default(ctx, &ty.name, &field.name, &field.ty)
+                    .rust_type(),
                 is_pub: false,
             }),
             _ => None,
@@ -114,39 +156,44 @@ fn lower_type(ty: &TypeDecl, file: &mut RustFile, diagnostics: &mut DiagnosticBa
 }
 
 fn lower_constructor(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> RustFunction {
-    let mut env = env_for_type(ty);
-    for param in &ctor.params {
-        env.insert_local(param.name.clone(), param.ty.clone());
+    let constructor_local_shapes = ctx.signatures.constructor_local_shapes_or_empty(ty, ctor);
+    let constructor_ctx = LowerCtx {
+        current_local_shapes: constructor_local_shapes,
+        ..ctx
+    };
+    let mut env = env_for_type(ty, ctx);
+    if let Some(signature) = ctx.signatures.constructor_signature(ty, ctor) {
+        for param in &signature.params {
+            env.insert_local_shape(param.name.clone(), param.shape.clone());
+        }
+    } else {
+        for param in &ctor.params {
+            env.insert_local(param.name.clone(), param.ty.clone());
+        }
     }
     if let Some(body) = &ctor.body
-        && let Some(function) = lower_delegating_constructor(ty, ctor, body, &env, ctx)
+        && let Some(function) = lower_delegating_constructor(ty, ctor, body, &env, constructor_ctx)
     {
         return function;
     }
     let mut assigned = Vec::new();
     if let Some(body) = &ctor.body {
         for stmt in &body.statements {
-            if let Stmt::Assign {
-                target: Expr::FieldAccess(receiver, field),
-                value,
-            } = stmt
+            if let Stmt::Assign { target, value } = stmt
+                && let Expr::FieldAccess(receiver, field) = target
                 && matches!(receiver.as_ref(), Expr::This)
             {
-                let target_ty = env
-                    .field_type(field)
-                    .cloned()
-                    .unwrap_or(JavaType::Unknown(field.clone()));
                 assigned.push((
                     field.clone(),
                     lower_expr_for_slot(
                         value,
                         &env,
-                        crate::coercion::Slot::Assignment(target_ty),
-                        ctx,
+                        assignment_slot_for_target(target, &env, constructor_ctx),
+                        constructor_ctx,
                     ),
                 ));
             }
-            env.learn_stmt(stmt);
+            learn_stmt_shapes(stmt, &mut env, constructor_ctx);
         }
     }
 
@@ -155,6 +202,8 @@ fn lower_constructor(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> Ru
         .iter()
         .filter_map(|member| match member {
             Member::Field(field) => {
+                let field_shape =
+                    field_shape_or_storage_default(ctx, &ty.name, &field.name, &field.ty);
                 let value = assigned
                     .iter()
                     .find(|(name, _)| name == &field.name)
@@ -164,12 +213,12 @@ fn lower_constructor(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> Ru
                             lower_expr_for_slot(
                                 expr,
                                 &env,
-                                crate::coercion::Slot::Assignment(field.ty.clone()),
-                                ctx,
+                                crate::coercion::Slot::Assignment(field_shape.clone()),
+                                constructor_ctx,
                             )
                         })
                     })
-                    .unwrap_or_else(|| default_expr_for_type(&field.ty));
+                    .unwrap_or_else(|| default_expr_for_shape(&field_shape));
                 Some((field.name.clone(), value))
             }
             _ => None,
@@ -178,15 +227,8 @@ fn lower_constructor(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> Ru
 
     RustFunction {
         name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
-        params: ctor
-            .params
-            .iter()
-            .map(|p| RustParam {
-                name: p.name.clone(),
-                ty: crate::coercion::rust_param_slot_type(&p.ty, p.is_varargs),
-            })
-            .collect(),
-        return_type: Some(RustType::Named(ty.name.clone())),
+        params: constructor_params(ty, ctor, constructor_ctx),
+        return_type: Some(constructor_return_type(ty, ctor, ctx)),
         body: vec![RustStmt::Return(Some(RustExpr::StructLit {
             name: ty.name.clone(),
             fields,
@@ -222,7 +264,7 @@ fn lower_delegating_constructor(
             } else if let Some(resolved) = resolved {
                 vec![RustStmt::Return(Some(RustExpr::Call {
                     function: Box::new(RustExpr::Raw(format!("Self::{}", resolved.rust_name))),
-                    args: args.iter().map(|arg| lower_expr(arg, env, ctx)).collect(),
+                    args: lower_constructor_call_args(args, env, resolved, ctx),
                 }))]
             } else {
                 vec![RustStmt::Raw(
@@ -238,75 +280,121 @@ fn lower_delegating_constructor(
 
     Some(RustFunction {
         name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
-        params: ctor
-            .params
-            .iter()
-            .map(|p| RustParam {
-                name: p.name.clone(),
-                ty: crate::coercion::rust_param_slot_type(&p.ty, p.is_varargs),
-            })
-            .collect(),
-        return_type: Some(RustType::Named(ty.name.clone())),
+        params: constructor_params(ty, ctor, ctx),
+        return_type: Some(constructor_return_type(ty, ctor, ctx)),
         body,
         is_pub: true,
         receiver: None,
     })
 }
 
+fn constructor_params(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> Vec<RustParam> {
+    constructor_param_plans(ty, ctor, ctx)
+        .into_iter()
+        .map(|param| RustParam {
+            name: param.name.clone(),
+            ty: ctx.signatures.param_rust_type(&param),
+        })
+        .collect()
+}
+
+fn constructor_return_type(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> RustType {
+    ctx.signatures
+        .constructor_return_type(ty, ctor)
+        .unwrap_or_else(|| RustType::Named(ty.name.clone()))
+}
+
+fn constructor_param_plans(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> Vec<ParamPlan> {
+    ctx.signatures
+        .constructor_param_plans(ty, ctor)
+        .map(|params| params.to_vec())
+        .unwrap_or_else(|| ctor.params.iter().map(default_param_plan).collect())
+}
+
+fn method_return_type(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> Option<RustType> {
+    method_return_shape(ty, method, ctx).map(|shape| shape.rust_type())
+}
+
+fn method_return_shape(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> Option<RustSlotShape> {
+    ctx.signatures
+        .method_return_shape(ty, method)
+        .or_else(|| default_return_shape(&method.return_type))
+}
+
+fn method_ok_type_or_unit(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> RustType {
+    method_return_type(ty, method, ctx).unwrap_or(RustType::Unit)
+}
+
+fn method_receiver(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> ReceiverPlan {
+    ctx.signatures
+        .method_receiver(ty, method)
+        .unwrap_or_else(|| default_receiver_plan(method))
+}
+
 fn lower_method(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> RustFunction {
-    let mutable_receiver = method.body.as_ref().is_some_and(method_mutates_self);
+    let method_signature = ctx.signatures.method_signature(ty, method);
+    let method_ctx = LowerCtx {
+        current_return_shape: method_signature
+            .and_then(|signature| signature.return_shape.as_ref()),
+        current_local_shapes: ctx.signatures.method_local_shapes_or_empty(ty, method),
+        ..ctx
+    };
     let mut env = if method.modifiers.contains(&Modifier::Static) {
         TypeEnv::new()
     } else {
-        env_for_type(ty)
+        env_for_type(ty, method_ctx)
     };
-    for param in &method.params {
-        env.insert_local(param.name.clone(), param.ty.clone());
+    if let Some(signature) = method_signature {
+        for param in &signature.params {
+            env.insert_local_shape(param.name.clone(), param.shape.clone());
+        }
+    } else {
+        for param in &method.params {
+            env.insert_local(param.name.clone(), param.ty.clone());
+        }
     }
     RustFunction {
         name: method
             .rust_name
             .clone()
             .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
-        params: method
-            .params
-            .iter()
-            .map(|p| RustParam {
-                name: p.name.clone(),
-                ty: crate::coercion::rust_param_slot_type(&p.ty, p.is_varargs),
+        params: ctx
+            .signatures
+            .method_param_plans(ty, method)
+            .map(|params| params.to_vec())
+            .unwrap_or_else(|| method.params.iter().map(default_param_plan).collect())
+            .into_iter()
+            .map(|param| RustParam {
+                name: param.name.clone(),
+                ty: ctx.signatures.param_rust_type(&param),
             })
             .collect(),
         return_type: if method.throws.is_empty() {
-            rust_return_type(&method.return_type)
+            method_return_type(ty, method, ctx)
         } else {
-            Some(exception_result_type(&method.return_type))
+            Some(exception_result_type(method_ok_type_or_unit(
+                ty, method, ctx,
+            )))
         },
         body: method
             .body
             .as_ref()
-            .map(|body| {
-                lower_block(
-                    body,
-                    &mut env,
-                    Some(&method.return_type),
-                    !method.throws.is_empty(),
-                    ctx,
-                )
-            })
+            .map(|body| lower_block(body, &mut env, !method.throws.is_empty(), method_ctx))
             .unwrap_or_default(),
         is_pub: true,
-        receiver: if method.modifiers.contains(&Modifier::Static) {
-            None
-        } else if mutable_receiver {
-            Some(RustReceiver::Mutable)
-        } else {
-            Some(RustReceiver::Shared)
-        },
+        receiver: lower_receiver(method_receiver(ty, method, ctx)),
     }
 }
 
-fn exception_result_type(return_type: &JavaType) -> RustType {
-    let ok_type = rust_return_type(return_type).unwrap_or(RustType::Unit);
+fn lower_receiver(receiver: ReceiverPlan) -> Option<RustReceiver> {
+    match receiver {
+        ReceiverPlan::None => None,
+        ReceiverPlan::Shared => Some(RustReceiver::Shared),
+        ReceiverPlan::Mutable => Some(RustReceiver::Mutable),
+    }
+}
+
+fn exception_result_type(ok_type: RustType) -> RustType {
     RustType::Raw(format!(
         "Result<{}, JavaException>",
         crate::emit::emit_type(&ok_type)
@@ -316,14 +404,13 @@ fn exception_result_type(return_type: &JavaType) -> RustType {
 fn lower_block(
     block: &Block,
     env: &mut TypeEnv,
-    return_type: Option<&JavaType>,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> Vec<RustStmt> {
     let mut body = Vec::new();
     for stmt in &block.statements {
-        lower_stmt(stmt, env, return_type, wrap_returns_in_ok, ctx, &mut body);
-        env.learn_stmt(stmt);
+        lower_stmt(stmt, env, wrap_returns_in_ok, ctx, &mut body);
+        learn_stmt_shapes(stmt, env, ctx);
     }
     body
 }
@@ -331,7 +418,6 @@ fn lower_block(
 fn lower_stmt(
     stmt: &Stmt,
     env: &mut TypeEnv,
-    return_type: Option<&JavaType>,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
     out: &mut Vec<RustStmt>,
@@ -341,28 +427,38 @@ fn lower_stmt(
             ty,
             name,
             initializer,
-        } => out.push(RustStmt::Let {
-            mutable: block_reassigns_name(name, stmt),
-            name: name.clone(),
-            ty: Some(java_type_to_rust(ty)),
-            value: initializer.as_ref().map(|expr| {
-                lower_expr_for_slot(
-                    expr,
-                    env,
-                    crate::coercion::Slot::Assignment(ty.clone()),
-                    ctx,
-                )
-            }),
-        }),
+        } => {
+            let target_shape = local_shape_or_storage_default(ctx, name, ty);
+            out.push(RustStmt::Let {
+                mutable: ctx
+                    .signatures
+                    .local_binding_mutability(ctx.current_local_shapes, name)
+                    .unwrap_or(false),
+                name: name.clone(),
+                ty: Some(target_shape.rust_type()),
+                value: initializer.as_ref().map(|expr| {
+                    lower_expr_for_slot(
+                        expr,
+                        env,
+                        crate::coercion::Slot::Assignment(target_shape.clone()),
+                        ctx,
+                    )
+                }),
+            })
+        }
         Stmt::Assign { target, value } => out.push(RustStmt::Assign {
             target: lower_expr(target, env, ctx),
-            value: lower_expr_for_slot(value, env, assignment_slot_for_target(target, env), ctx),
+            value: lower_expr_for_slot(
+                value,
+                env,
+                assignment_slot_for_target(target, env, ctx),
+                ctx,
+            ),
         }),
         Stmt::Expr(expr) => out.push(RustStmt::Expr(lower_expr(expr, env, ctx))),
         Stmt::Return(expr) => out.push(lower_return_stmt(
             expr.as_ref(),
             env,
-            return_type,
             wrap_returns_in_ok,
             ctx,
         )),
@@ -372,29 +468,15 @@ fn lower_stmt(
             else_block,
         } => out.push(RustStmt::If {
             condition: lower_expr_for_slot(condition, env, crate::coercion::Slot::Condition, ctx),
-            then_body: lower_block(
-                then_block,
-                &mut env.clone(),
-                return_type,
-                wrap_returns_in_ok,
-                ctx,
-            ),
+            then_body: lower_block(then_block, &mut env.clone(), wrap_returns_in_ok, ctx),
             else_body: else_block
                 .as_ref()
-                .map(|block| {
-                    lower_block(
-                        block,
-                        &mut env.clone(),
-                        return_type,
-                        wrap_returns_in_ok,
-                        ctx,
-                    )
-                })
+                .map(|block| lower_block(block, &mut env.clone(), wrap_returns_in_ok, ctx))
                 .unwrap_or_default(),
         }),
         Stmt::While { condition, body } => out.push(RustStmt::While {
             condition: lower_expr_for_slot(condition, env, crate::coercion::Slot::Condition, ctx),
-            body: lower_block(body, &mut env.clone(), return_type, wrap_returns_in_ok, ctx),
+            body: lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
         }),
         Stmt::For {
             init,
@@ -404,17 +486,11 @@ fn lower_stmt(
             label,
         } => {
             for init_stmt in init {
-                lower_stmt(init_stmt, env, return_type, wrap_returns_in_ok, ctx, out);
-                env.learn_stmt(init_stmt);
+                lower_stmt(init_stmt, env, wrap_returns_in_ok, ctx, out);
+                learn_stmt_shapes(init_stmt, env, ctx);
             }
-            let mut loop_body = lower_block_for_body(
-                body,
-                update,
-                &mut env.clone(),
-                return_type,
-                wrap_returns_in_ok,
-                ctx,
-            );
+            let mut loop_body =
+                lower_block_for_body(body, update, &mut env.clone(), wrap_returns_in_ok, ctx);
             for expr in update {
                 loop_body.push(RustStmt::Expr(lower_expr(expr, env, ctx)));
             }
@@ -444,7 +520,7 @@ fn lower_stmt(
             "for {var_name} in {}.iter() {{\n{}\n}}",
             crate::emit::emit_expr(&lower_expr(iterable, env, ctx)),
             crate::emit::emit_statements(
-                &lower_block(body, &mut env.clone(), return_type, wrap_returns_in_ok, ctx),
+                &lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
                 1
             )
         ))),
@@ -453,7 +529,6 @@ fn lower_stmt(
                 selector,
                 cases,
                 env,
-                return_type,
                 wrap_returns_in_ok,
                 ctx,
             )));
@@ -476,13 +551,7 @@ fn lower_stmt(
         Stmt::Block(block) => out.push(RustStmt::Raw(format!(
             "{{\n{}\n}}",
             crate::emit::emit_statements(
-                &lower_block(
-                    block,
-                    &mut env.clone(),
-                    return_type,
-                    wrap_returns_in_ok,
-                    ctx
-                ),
+                &lower_block(block, &mut env.clone(), wrap_returns_in_ok, ctx),
                 1
             )
         ))),
@@ -497,7 +566,6 @@ fn lower_switch(
     selector: &Expr,
     cases: &[SwitchCase],
     env: &TypeEnv,
-    return_type: Option<&JavaType>,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> String {
@@ -518,14 +586,8 @@ fn lower_switch(
         out.push_str(&format!("            {switch_matched} = true;\n"));
         out.push_str("        }\n");
         out.push_str(&format!("        if {switch_matched} {{\n"));
-        let statements = lower_switch_case_statements(
-            case,
-            switch_label,
-            env,
-            return_type,
-            wrap_returns_in_ok,
-            ctx,
-        );
+        let statements =
+            lower_switch_case_statements(case, switch_label, env, wrap_returns_in_ok, ctx);
         out.push_str(&crate::emit::emit_statements(&statements, 3));
         out.push_str("        }\n");
     }
@@ -571,7 +633,6 @@ fn lower_switch_case_statements(
     case: &SwitchCase,
     switch_label: &str,
     env: &TypeEnv,
-    return_type: Option<&JavaType>,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> Vec<RustStmt> {
@@ -579,15 +640,8 @@ fn lower_switch_case_statements(
     let mut out = Vec::new();
     for stmt in &case.statements {
         let stmt = rewrite_switch_breaks(stmt, switch_label);
-        lower_stmt(
-            &stmt,
-            &mut case_env,
-            return_type,
-            wrap_returns_in_ok,
-            ctx,
-            &mut out,
-        );
-        case_env.learn_stmt(&stmt);
+        lower_stmt(&stmt, &mut case_env, wrap_returns_in_ok, ctx, &mut out);
+        learn_stmt_shapes(&stmt, &mut case_env, ctx);
     }
     out
 }
@@ -595,16 +649,15 @@ fn lower_switch_case_statements(
 fn lower_return_stmt(
     expr: Option<&Expr>,
     env: &TypeEnv,
-    return_type: Option<&JavaType>,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> RustStmt {
     let value = expr.map(|expr| {
-        if let Some(return_type) = return_type {
+        if let Some(return_shape) = ctx.current_return_shape {
             lower_expr_for_slot(
                 expr,
                 env,
-                crate::coercion::Slot::Return(return_type.clone()),
+                crate::coercion::Slot::Return(return_shape.clone()),
                 ctx,
             )
         } else {
@@ -762,8 +815,8 @@ fn lower_expr(expr: &Expr, env: &TypeEnv, ctx: LowerCtx) -> RustExpr {
             args,
             resolved,
         } => {
-            let rust_args = args.iter().map(|arg| lower_expr(arg, env, ctx)).collect();
             if let Some(call) = resolved {
+                let rust_args = lower_call_args(args, env, call, ctx);
                 match (&call.kind, receiver) {
                     (CallKind::Static, _) => RustExpr::Call {
                         function: Box::new(RustExpr::Raw(format!("Self::{}", call.rust_name))),
@@ -781,28 +834,67 @@ fn lower_expr(expr: &Expr, env: &TypeEnv, ctx: LowerCtx) -> RustExpr {
                     },
                 }
             } else if let Some(receiver) = receiver {
+                let rust_args = args.iter().map(|arg| lower_expr(arg, env, ctx)).collect();
                 RustExpr::MethodCall {
                     receiver: Box::new(lower_expr(receiver, env, ctx)),
                     method: crate::parser::to_snake_case(name),
                     args: rust_args,
                 }
             } else {
+                let rust_args = args.iter().map(|arg| lower_expr(arg, env, ctx)).collect();
                 RustExpr::Call {
                     function: Box::new(RustExpr::Var(crate::parser::to_snake_case(name))),
                     args: rust_args,
                 }
             }
         }
-        Expr::New { ty, args, .. } => RustExpr::Call {
-            function: Box::new(RustExpr::Raw(format!(
-                "{}::new",
-                crate::emit::emit_type(&java_type_to_rust(ty))
-            ))),
-            args: args.iter().map(|arg| lower_expr(arg, env, ctx)).collect(),
-        },
-        Expr::Cast { ty: _, expr } => lower_expr(expr, env, ctx),
-        Expr::InstanceOf { .. } => {
-            RustExpr::Raw("compile_error!(\"unsupported Java expression: instanceof\")".to_string())
+        Expr::New {
+            ty, args, resolved, ..
+        } => {
+            let rust_name = resolved
+                .as_ref()
+                .map(|resolved| resolved.rust_name.as_str())
+                .unwrap_or("new");
+            let owner_type = ctx.representations.constructor_owner_type_for_new(
+                ty,
+                resolved
+                    .as_ref()
+                    .map(|resolved| resolved.declaring_type.as_str()),
+            );
+            RustExpr::Call {
+                function: Box::new(RustExpr::Raw(format!(
+                    "{}::{rust_name}",
+                    crate::emit::emit_type(&owner_type)
+                ))),
+                args: resolved
+                    .as_ref()
+                    .map(|resolved| lower_constructor_call_args(args, env, resolved, ctx))
+                    .unwrap_or_else(|| args.iter().map(|arg| lower_expr(arg, env, ctx)).collect()),
+            }
+        }
+        Expr::Cast { ty, expr } => {
+            let actual = infer_expr_shape_with_context(
+                expr,
+                env,
+                ExprShapeContext {
+                    signatures: Some(ctx.signatures),
+                    representations: Some(ctx.representations),
+                },
+            );
+            let target = ctx.representations.value_shape_for_java_type(ty.clone());
+            crate::coercion::apply_expr_to_shape(lower_expr(expr, env, ctx), &actual, &target)
+        }
+        Expr::InstanceOf { expr, ty } => {
+            let actual = infer_expr_shape_with_context(
+                expr,
+                env,
+                ExprShapeContext {
+                    signatures: Some(ctx.signatures),
+                    representations: Some(ctx.representations),
+                },
+            );
+            let target = ctx.representations.value_shape_for_java_type(ty.clone());
+            crate::coercion::apply_instanceof_check(lower_expr(expr, env, ctx), &actual, &target)
         }
         Expr::Lambda { .. } => {
             RustExpr::Raw("compile_error!(\"unsupported Java expression: lambda\")".to_string())
@@ -815,6 +907,48 @@ fn lower_expr(expr: &Expr, env: &TypeEnv, ctx: LowerCtx) -> RustExpr {
         ),
         Expr::Raw(raw) => RustExpr::Raw(raw.clone()),
     }
+}
+
+fn lower_call_args(
+    args: &[Expr],
+    env: &TypeEnv,
+    call: &ResolvedCall,
+    ctx: LowerCtx,
+) -> Vec<RustExpr> {
+    args.iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            ctx.signatures
+                .method_arg_shape_by_rust_name(&call.declaring_type, &call.rust_name, index)
+                .map(|shape| {
+                    lower_expr_for_slot(arg, env, crate::coercion::Slot::Argument(shape), ctx)
+                })
+                .unwrap_or_else(|| lower_expr(arg, env, ctx))
+        })
+        .collect()
+}
+
+fn lower_constructor_call_args(
+    args: &[Expr],
+    env: &TypeEnv,
+    resolved: &ResolvedConstructor,
+    ctx: LowerCtx,
+) -> Vec<RustExpr> {
+    args.iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            ctx.signatures
+                .constructor_arg_shape_by_rust_name(
+                    &resolved.declaring_type,
+                    &resolved.rust_name,
+                    index,
+                )
+                .map(|shape| {
+                    lower_expr_for_slot(arg, env, crate::coercion::Slot::Argument(shape), ctx)
+                })
+                .unwrap_or_else(|| lower_expr(arg, env, ctx))
+        })
+        .collect()
 }
 
 fn lower_stream_expr(
@@ -868,7 +1002,7 @@ struct StreamSource<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StreamElement {
-    ty: JavaType,
+    shape: RustSlotShape,
     value_category: StreamValueCategory,
 }
 
@@ -919,13 +1053,13 @@ fn build_stream_plan<'a>(expr: &'a Expr, env: &TypeEnv, ctx: LowerCtx) -> Option
         _ => return None,
     };
     let (source, ops) = collect_stream_chain(receiver)?;
-    let element_ty = stream_source_element_type(source, env)?;
+    let element_shape = infer_stream_source_element_shape(source, env)?;
     Some(StreamPlan {
         source: StreamSource { expr: source },
         ops,
         terminal,
         element: StreamElement {
-            ty: element_ty,
+            shape: element_shape,
             value_category: StreamValueCategory::Borrowed,
         },
     })
@@ -977,25 +1111,6 @@ fn lambda_plan(lambda: &Expr) -> Option<LambdaPlan<'_>> {
     })
 }
 
-fn stream_source_element_type(source: &Expr, env: &TypeEnv) -> Option<JavaType> {
-    match infer_expr_type(source, env) {
-        JavaType::Named { name, args } if name == "List" && args.len() == 1 => {
-            Some(normalize_stream_element_type(args[0].clone()))
-        }
-        JavaType::Array(inner) => Some(*inner),
-        _ => None,
-    }
-}
-
-fn normalize_stream_element_type(ty: JavaType) -> JavaType {
-    match ty {
-        JavaType::Named { name, args } if name == "Integer" && args.is_empty() => {
-            JavaType::Primitive(PrimitiveType::Int)
-        }
-        other => other,
-    }
-}
-
 fn lower_stream_plan(
     plan: &StreamPlan<'_>,
     env: &TypeEnv,
@@ -1005,7 +1120,7 @@ fn lower_stream_plan(
         "{}.iter()",
         crate::emit::emit_expr(&lower_expr(plan.source.expr, env, ctx))
     );
-    let mut element_actual = plan.element.ty.clone();
+    let mut element_actual = plan.element.shape.clone();
     for op in &plan.ops {
         match op {
             StreamOp::Filter(lambda) => {
@@ -1020,6 +1135,7 @@ fn lower_stream_plan(
                 ));
             }
             StreamOp::Map(lambda) => {
+                let input_shape = element_actual.clone();
                 out.push_str(&format!(
                     ".map(|{}| {})",
                     lambda.param_name,
@@ -1029,7 +1145,7 @@ fn lower_stream_plan(
                         StreamLambdaValue::BorrowedItem
                     )?
                 ));
-                element_actual = stream_lambda_body_type(lambda.body, &plan.element.ty);
+                element_actual = infer_stream_lambda_body_shape(lambda.body, &input_shape);
             }
             StreamOp::MapToPrimitive(lambda) => {
                 out.push_str(&format!(
@@ -1041,7 +1157,7 @@ fn lower_stream_plan(
                         StreamLambdaValue::BorrowedItem
                     )?
                 ));
-                element_actual = JavaType::Primitive(PrimitiveType::Int);
+                element_actual = infer_stream_map_to_int_shape(lambda.body);
             }
         }
     }
@@ -1049,27 +1165,15 @@ fn lower_stream_plan(
     let actual = match &plan.terminal {
         StreamTerminal::Sum => {
             out.push_str(".sum::<i32>()");
-            crate::coercion::LoweredType::Java(JavaType::Primitive(PrimitiveType::Int))
+            crate::coercion::LoweredType::stream_sum()
         }
         StreamTerminal::CollectToList => {
             out.push_str(".collect::<Vec<_>>()");
-            if element_actual == JavaType::String
-                && plan
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, StreamOp::Map(lambda) if stream_lambda_body_is_borrowed_string(lambda.body)))
-            {
-                crate::coercion::LoweredType::VecBorrowedString
-            } else {
-                crate::coercion::LoweredType::Java(JavaType::Named {
-                    name: "List".to_string(),
-                    args: vec![element_actual],
-                })
-            }
+            crate::coercion::LoweredType::stream_collect(element_actual)
         }
         StreamTerminal::FindFirst => {
             out.push_str(".next()");
-            crate::coercion::LoweredType::OptionalBorrowed(Box::new(element_actual))
+            crate::coercion::LoweredType::stream_find_first(element_actual)
         }
         StreamTerminal::AnyMatch(lambda) => {
             out.push_str(&format!(
@@ -1081,7 +1185,7 @@ fn lower_stream_plan(
                     StreamLambdaValue::BorrowedItem
                 )?
             ));
-            crate::coercion::LoweredType::Java(JavaType::Primitive(PrimitiveType::Boolean))
+            crate::coercion::LoweredType::stream_any_match()
         }
     };
     Some(crate::coercion::LoweredExpr {
@@ -1152,25 +1256,6 @@ fn emit_stream_lambda_receiver(
     }
 }
 
-fn stream_lambda_body_type(expr: &Expr, default: &JavaType) -> JavaType {
-    if stream_lambda_body_is_borrowed_string(expr) {
-        JavaType::String
-    } else {
-        default.clone()
-    }
-}
-
-fn stream_lambda_body_is_borrowed_string(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Call {
-            name,
-            args,
-            ..
-        } if name == "trim" && args.is_empty()
-    )
-}
-
 fn lower_expr_for_slot(
     expr: &Expr,
     env: &TypeEnv,
@@ -1180,10 +1265,21 @@ fn lower_expr_for_slot(
     if let Some(stream_expr) = lower_stream_expr(expr, env, ctx) {
         return crate::coercion::apply_lowered_expr_to_slot(stream_expr, &slot);
     }
-    let actual = infer_expr_type(expr, env);
+    if let Expr::Cast { ty, .. } = expr {
+        let actual = ctx.representations.value_shape_for_java_type(ty.clone());
+        let expr = lower_expr(expr, env, ctx);
+        return crate::coercion::apply_expr_to_slot(expr, actual, &slot);
+    }
+    let actual = infer_expr_shape_with_context(
+        expr,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+        },
+    );
     let expr = lower_expr(expr, env, ctx);
-    let plan = crate::coercion::plan_coercion(&actual, &slot);
-    crate::coercion::apply_coercions(expr, &plan)
+    crate::coercion::apply_expr_to_slot(expr, actual, &slot)
 }
 
 fn lower_string_concat(expr: &Expr, env: &TypeEnv, ctx: LowerCtx) -> Option<RustExpr> {
@@ -1230,22 +1326,13 @@ fn lower_block_for_body(
     block: &Block,
     update: &[Expr],
     env: &mut TypeEnv,
-    return_type: Option<&JavaType>,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> Vec<RustStmt> {
     let mut out = Vec::new();
     for stmt in &block.statements {
-        lower_stmt_for_body(
-            stmt,
-            update,
-            env,
-            return_type,
-            wrap_returns_in_ok,
-            ctx,
-            &mut out,
-        );
-        env.learn_stmt(stmt);
+        lower_stmt_for_body(stmt, update, env, wrap_returns_in_ok, ctx, &mut out);
+        learn_stmt_shapes(stmt, env, ctx);
     }
     out
 }
@@ -1254,7 +1341,6 @@ fn lower_stmt_for_body(
     stmt: &Stmt,
     update: &[Expr],
     env: &mut TypeEnv,
-    return_type: Option<&JavaType>,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
     out: &mut Vec<RustStmt>,
@@ -1276,29 +1362,21 @@ fn lower_stmt_for_body(
                 then_block,
                 update,
                 &mut env.clone(),
-                return_type,
                 wrap_returns_in_ok,
                 ctx,
             ),
             else_body: else_block
                 .as_ref()
                 .map(|block| {
-                    lower_block_for_body(
-                        block,
-                        update,
-                        &mut env.clone(),
-                        return_type,
-                        wrap_returns_in_ok,
-                        ctx,
-                    )
+                    lower_block_for_body(block, update, &mut env.clone(), wrap_returns_in_ok, ctx)
                 })
                 .unwrap_or_default(),
         }),
         Stmt::While { condition, body } => out.push(RustStmt::While {
             condition: lower_expr_for_slot(condition, env, crate::coercion::Slot::Condition, ctx),
-            body: lower_block(body, &mut env.clone(), return_type, wrap_returns_in_ok, ctx),
+            body: lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
         }),
-        other => lower_stmt(other, env, return_type, wrap_returns_in_ok, ctx, out),
+        other => lower_stmt(other, env, wrap_returns_in_ok, ctx, out),
     }
 }
 
@@ -1322,82 +1400,74 @@ fn binary_op_to_rust(op: BinaryOp) -> &'static str {
     }
 }
 
-fn default_expr_for_type(ty: &JavaType) -> RustExpr {
-    RustExpr::Raw(default_rust_literal_for_java_type(ty).to_string())
+fn default_expr_for_shape(shape: &RustSlotShape) -> RustExpr {
+    shape.default_expr()
 }
 
-fn env_for_type(ty: &TypeDecl) -> TypeEnv {
+fn env_for_type(ty: &TypeDecl, ctx: LowerCtx) -> TypeEnv {
     let mut env = TypeEnv::new();
     for member in &ty.members {
         if let Member::Field(field) = member {
-            env.insert_field(field.name.clone(), field.ty.clone());
+            if let Some(shape) = ctx.signatures.field_shape(&ty.name, &field.name) {
+                env.insert_field_shape(field.name.clone(), shape.clone());
+            } else {
+                env.insert_field(field.name.clone(), field.ty.clone());
+            }
         }
     }
     env
 }
 
-fn assignment_slot_for_target(target: &Expr, env: &TypeEnv) -> crate::coercion::Slot {
-    match target {
-        Expr::Var(name) => env
-            .local_type(name)
-            .cloned()
-            .map(crate::coercion::Slot::Assignment)
-            .unwrap_or(crate::coercion::Slot::Value),
-        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => env
-            .field_type(field)
-            .cloned()
-            .map(crate::coercion::Slot::Assignment)
-            .unwrap_or(crate::coercion::Slot::Value),
-        Expr::ArrayAccess(array, _) => {
-            let array_ty = infer_expr_type(array, env);
-            if let JavaType::Array(inner) = array_ty {
-                crate::coercion::Slot::Assignment(*inner)
-            } else {
-                crate::coercion::Slot::Value
+fn learn_stmt_shapes(stmt: &Stmt, env: &mut TypeEnv, ctx: LowerCtx) {
+    match stmt {
+        Stmt::VarDecl { ty, name, .. } => {
+            let shape = local_shape_or_storage_default(ctx, name, ty);
+            env.insert_local_shape(name.clone(), shape);
+        }
+        Stmt::For { init, .. } => {
+            for stmt in init {
+                learn_stmt_shapes(stmt, env, ctx);
             }
         }
-        _ => crate::coercion::Slot::Value,
+        Stmt::EnhancedFor {
+            var_type, var_name, ..
+        } => {
+            let shape = local_shape_or_storage_default(ctx, var_name, var_type);
+            env.insert_local_shape(var_name.clone(), shape);
+        }
+        Stmt::Try { body, .. } => {
+            for stmt in &body.statements {
+                learn_stmt_shapes(stmt, env, ctx);
+            }
+        }
+        _ => {}
     }
 }
 
-fn method_mutates_self(block: &Block) -> bool {
-    block.statements.iter().any(stmt_mutates_self)
+fn local_shape_or_storage_default(
+    ctx: LowerCtx,
+    local_name: &str,
+    fallback: &JavaType,
+) -> RustSlotShape {
+    ctx.signatures
+        .local_shape(ctx.current_local_shapes, local_name)
+        .cloned()
+        .unwrap_or_else(|| RustSlotShape::for_storage(fallback.clone()))
 }
 
-fn stmt_mutates_self(stmt: &Stmt) -> bool {
-    match stmt {
-        Stmt::Assign { target, .. } => target_is_self_field(target),
-        Stmt::Expr(Expr::Unary { expr, .. }) => target_is_self_field(expr),
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => {
-            method_mutates_self(then_block) || else_block.as_ref().is_some_and(method_mutates_self)
-        }
-        Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::EnhancedFor { body, .. } => {
-            method_mutates_self(body)
-        }
-        Stmt::Switch { cases, .. } => cases
-            .iter()
-            .any(|case| case.statements.iter().any(stmt_mutates_self)),
-        Stmt::Try {
-            body,
-            catches,
-            finally_block,
-        } => {
-            method_mutates_self(body)
-                || catches.iter().any(|catch| method_mutates_self(&catch.body))
-                || finally_block.as_ref().is_some_and(method_mutates_self)
-        }
-        _ => false,
-    }
-}
-
-fn target_is_self_field(expr: &Expr) -> bool {
-    matches!(expr, Expr::FieldAccess(receiver, _) if matches!(receiver.as_ref(), Expr::This))
-}
-
-fn block_reassigns_name(_name: &str, _stmt: &Stmt) -> bool {
-    true
+fn assignment_slot_for_target(
+    target: &Expr,
+    env: &TypeEnv,
+    ctx: LowerCtx,
+) -> crate::coercion::Slot {
+    infer_assignment_target_shape_with_context(
+        target,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+        },
+    )
+    .map(crate::coercion::Slot::Assignment)
+    .unwrap_or(crate::coercion::Slot::Value)
 }

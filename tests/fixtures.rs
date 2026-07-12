@@ -50,9 +50,9 @@ fn translates_simple_class_shape() {
 fn translates_expression_precedence_shape() {
     let translation = translate_source(&fixture("01-expressions/ExpressionPrecedence.java"));
     assert!(!translation.diagnostics.has_errors());
-    assert!(translation.rust.contains("let mut x: i32 = (a + (b * c));"));
-    assert!(translation.rust.contains("let mut y: i32 = ((a + b) * c);"));
-    assert!(translation.rust.contains("let mut z: i32 = (x << 1);"));
+    assert!(translation.rust.contains("let x: i32 = (a + (b * c));"));
+    assert!(translation.rust.contains("let y: i32 = ((a + b) * c);"));
+    assert!(translation.rust.contains("let z: i32 = (x << 1);"));
     assert!(
         translation
             .rust
@@ -523,7 +523,7 @@ fn guardrail_fixtures_emit_structured_unsupported_diagnostics() {
         ),
         (
             "04-objects/AnonymousInterface.java",
-            "unsupported_interface",
+            "unsupported_anonymous_class",
         ),
         ("05-types/WildcardBounds.java", "unsupported_wildcard"),
         ("06-stdlib/MultiCatch.java", "unsupported_exceptions"),

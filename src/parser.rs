@@ -16,7 +16,7 @@ pub fn parse_java_source(source: &str) -> ParsedProgram {
         };
     };
     let root = tree.root_node();
-    collect_syntax_diagnostics(root, source, &mut diagnostics);
+    collect_syntax_diagnostics(root, &mut diagnostics);
 
     ParsedProgram {
         program: Program {
@@ -115,22 +115,10 @@ fn parse_class_decl(
                     .to_string()
             })
     });
-    if extends.is_some() {
-        diagnostics.unsupported(
-            "unsupported_inheritance",
-            "inheritance is outside the first implementation slice",
-        );
-    }
     let implements = node
         .child_by_field_name("interfaces")
         .map(|interfaces| parse_type_name_list(interfaces, source))
         .unwrap_or_default();
-    if !implements.is_empty() {
-        diagnostics.unsupported(
-            "unsupported_interface_impl",
-            "interface implementation is outside the first implementation slice",
-        );
-    }
 
     let mut members = Vec::new();
     if let Some(body) = node.child_by_field_name("body") {
@@ -182,10 +170,6 @@ fn parse_interface_decl(
     source: &str,
     diagnostics: &mut DiagnosticBag,
 ) -> TypeDecl {
-    diagnostics.unsupported(
-        "unsupported_interface",
-        "interfaces are outside the first implementation slice",
-    );
     let mut members = Vec::new();
     if let Some(body) = node.child_by_field_name("body") {
         for child in named_children(body) {
@@ -893,6 +877,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
                     .into_iter()
                     .find(|child| child.kind() == "class_body")
                     .map(|body| parse_anonymous_class_body(body, source)),
+                resolved: None,
             }
         }
         "cast_expression" => Expr::Cast {
@@ -1115,24 +1100,8 @@ pub fn parse_expr(src: &str) -> Expr {
         .unwrap_or_else(|| Expr::Raw(src.to_string()))
 }
 
-fn collect_syntax_diagnostics(
-    node: tree_sitter::Node,
-    source: &str,
-    diagnostics: &mut DiagnosticBag,
-) {
+fn collect_syntax_diagnostics(node: tree_sitter::Node, diagnostics: &mut DiagnosticBag) {
     match node.kind() {
-        "interface_declaration" => diagnostics.unsupported(
-            "unsupported_interface",
-            "interfaces are outside the first implementation slice",
-        ),
-        "superclass" => diagnostics.unsupported(
-            "unsupported_inheritance",
-            "inheritance is outside the first implementation slice",
-        ),
-        "super_interfaces" => diagnostics.unsupported(
-            "unsupported_interface_impl",
-            "interface implementation is outside the first implementation slice",
-        ),
         "catch_clause" => diagnostics.unsupported(
             "unsupported_exceptions",
             "catch clauses are outside the first exception lowering slice",
@@ -1149,7 +1118,7 @@ fn collect_syntax_diagnostics(
     }
 
     for child in named_children(node) {
-        collect_syntax_diagnostics(child, source, diagnostics);
+        collect_syntax_diagnostics(child, diagnostics);
     }
 }
 

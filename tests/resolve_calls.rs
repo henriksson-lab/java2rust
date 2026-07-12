@@ -36,14 +36,18 @@ fn resolve_annotates_same_class_overload_call_targets() {
             Expr::Call {
                 resolved: Some(call),
                 ..
-            } => Some((call.rust_name.as_str(), call.kind)),
+            } => Some((
+                call.declaring_type.as_str(),
+                call.rust_name.as_str(),
+                call.kind,
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();
 
-    assert!(names.contains(&("choose_int", CallKind::Instance)));
-    assert!(names.contains(&("choose_long", CallKind::Instance)));
-    assert!(names.contains(&("choose_string", CallKind::Instance)));
+    assert!(names.contains(&("OverloadSameArity", "choose_int", CallKind::Instance)));
+    assert!(names.contains(&("OverloadSameArity", "choose_long", CallKind::Instance)));
+    assert!(names.contains(&("OverloadSameArity", "choose_string", CallKind::Instance)));
 }
 
 #[test]
@@ -72,12 +76,64 @@ fn resolve_annotates_same_class_constructor_delegation_targets() {
                 kind: ConstructorInvocationKind::This,
                 resolved: Some(resolved),
                 ..
-            } => Some(resolved.rust_name.as_str()),
+            } => Some((
+                resolved.declaring_type.as_str(),
+                resolved.rust_name.as_str(),
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(delegations, vec!["new_string_int", "new_string_int"]);
+    assert_eq!(
+        delegations,
+        vec![
+            ("ConstructorOverloads", "new_string_int"),
+            ("ConstructorOverloads", "new_string_int")
+        ]
+    );
+}
+
+#[test]
+fn resolve_annotates_new_expression_constructor_targets() {
+    let parsed = parse_java_source(
+        r#"
+class Boxed {
+    Boxed(String value) {}
+}
+
+class MakeBoxed {
+    Boxed make(String value) {
+        return new Boxed(value);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+
+    let maker = &resolved.program.types[1];
+    let body = maker
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) => method.body.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Return(Some(Expr::New {
+        resolved: Some(resolved),
+        ..
+    })) = &body.statements[0]
+    else {
+        panic!("expected resolved new expression");
+    };
+
+    assert_eq!(resolved.declaring_type, "Boxed");
+    assert_eq!(resolved.rust_name, "new");
 }
 
 fn collect_calls<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {

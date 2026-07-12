@@ -208,6 +208,7 @@ pub enum ConstructorInvocationKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedConstructor {
+    pub declaring_type: String,
     pub rust_name: String,
 }
 
@@ -243,6 +244,7 @@ pub enum Expr {
         ty: JavaType,
         args: Vec<Expr>,
         body: Option<Vec<Member>>,
+        resolved: Option<ResolvedConstructor>,
     },
     Cast {
         ty: JavaType,
@@ -278,6 +280,7 @@ pub enum LambdaBody {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedCall {
+    pub declaring_type: String,
     pub rust_name: String,
     pub kind: CallKind,
     pub return_type: JavaType,
