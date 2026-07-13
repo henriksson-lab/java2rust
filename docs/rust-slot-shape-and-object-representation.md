@@ -452,6 +452,21 @@ returned from public method
 
 Constraints should be monotonic and solved to a fixpoint because call sites and callees influence each other.
 
+Recursive Java code must not be analyzed by recursively expanding function
+bodies during lowering. Recursion is represented as finite graph edges between
+known slots, and each propagation step may only add constraints from a bounded
+domain to those slots. Direct recursion, mutual recursion, recursive
+constructors, and recursive hierarchy/capability facts should therefore
+saturate to a fixpoint or produce a finite-budget diagnostic; they must not
+create unbounded path-specific facts, fresh temporary slots, or recursively
+specialized Rust shapes.
+
+Reusable recursive analyses should use the finite saturation layer: declare the
+bounded fact domain, compute the iteration budget from the number of known slots
+and fact kinds, then call the shared saturation loop. A feature-specific module
+may count its own slots and fact kinds, but it should not own a separate
+recursive expansion strategy or local unbounded worklist policy.
+
 ## Coercion
 
 Coercion adapts actual expression shape to target slot shape.

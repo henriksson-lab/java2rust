@@ -13,7 +13,7 @@ fn fixture(path: &str) -> String {
 #[test]
 fn all_java_fixtures_are_loadable() {
     let fixtures = load_java_fixtures("examples/java").unwrap();
-    assert_eq!(fixtures.len(), 38);
+    assert_eq!(fixtures.len(), 50);
     assert!(
         fixtures
             .iter()
@@ -525,8 +525,6 @@ fn guardrail_fixtures_emit_structured_unsupported_diagnostics() {
             "04-objects/AnonymousInterface.java",
             "unsupported_anonymous_class",
         ),
-        ("05-types/WildcardBounds.java", "unsupported_wildcard"),
-        ("06-stdlib/MultiCatch.java", "unsupported_exceptions"),
     ];
 
     for (path, code) in cases {

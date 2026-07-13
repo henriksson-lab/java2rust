@@ -1,19 +1,65 @@
-use crate::diagnostics::DiagnosticBag;
-use crate::facts::{CaptureOwnerKind, FactSet};
-use crate::java_ir::*;
-use crate::rust_ir::*;
-use crate::signature::{
-    LocalPlan, ParamPlan, ReceiverPlan, SignaturePlan, default_param_plan, default_receiver_plan,
-    default_return_shape,
+use crate::access_lowering::{lower_bare_name, lower_field_access};
+use crate::call_lowering::{apply_call_target, apply_new_target_with_facts};
+use crate::call_plan::{
+    CallTargetPlan, plan_call_target, plan_new_target, resolved_call_arg_shapes,
+    resolved_constructor_arg_shapes,
 };
+use crate::coercion::{
+    actual_shape_for_slot_expr, argument_slot, assignment_slot, assignment_slot_for_target,
+    condition_slot, index_slot, return_slot,
+};
+use crate::constructor_plan::{
+    ConstructorDelegationPlan, ConstructorFieldValuePlan, plan_constructor_delegation,
+    plan_constructor_field_values,
+};
+use crate::conversion_lowering::{apply_cast_conversion_with_facts, apply_instanceof};
+use crate::conversion_plan::{plan_cast_conversion, plan_instanceof};
+use crate::diagnostics::DiagnosticBag;
+use crate::exception_lowering::{
+    exception_expr_from_new, fallback_exception_expr, java_exception_support_item, return_stmt,
+    throw_stmt,
+};
+use crate::exception_plan::{ThrowExprPlan, plan_throw_expr, program_uses_java_exception};
+use crate::expr_render::{
+    binary_expr, indexed_expr, literal_expr, raw_expr, super_expr, ternary_expr, this_expr,
+};
+use crate::expr_shape::{
+    ExprShapeContext, ShapeEnv, learn_stmt_shapes, shape_env_for_constructor, shape_env_for_method,
+};
+use crate::facts::FactSet;
+use crate::item_assembly::{
+    constructor_default_field_value_with_facts, constructor_function_shell_with_facts,
+    constructor_return_body, delegating_constructor_return_body, impl_item_for_type,
+    method_function_shell_with_facts, raw_item, struct_item_for_type_with_facts,
+};
+use crate::java_ir::*;
+use crate::loop_lowering::{assemble_for_loop, continue_with_updates};
+use crate::operator_lowering::lower_unary_expr;
+use crate::rust_ir::*;
+use crate::signature::{LocalPlan, SignaturePlan};
 use crate::slot_shape::RustSlotShape;
-use crate::types::{
-    ExprShapeContext, TypeEnv, infer_assignment_target_shape_with_context,
-    infer_expr_shape_with_context, infer_stream_lambda_body_shape, infer_stream_map_to_int_shape,
-    infer_stream_source_element_shape,
+use crate::statement_render::{
+    assignment_stmt, break_stmt, continue_stmt, expr_stmt, if_stmt, local_let_stmt_with_facts,
+    raw_stmt, render_block_stmt, render_enhanced_for, while_stmt,
+};
+use crate::stream::{StreamPlan, build_stream_plan};
+use crate::stream_lowering::render_stream_plan;
+use crate::string_concat_plan::build_string_concat_plan;
+use crate::string_concat_render::render_string_concat;
+use crate::switch_lowering::{SwitchRenderCase, render_switch, switch_case_condition};
+use crate::switch_plan::{
+    SwitchCaseLabelPlan, SwitchPlan, plan_switch, plan_switch_case, rewrite_switch_breaks,
+};
+use crate::unsupported::{
+    UnsupportedExpressionLowering, UnsupportedStatementLowering, unsupported_constructor_stmt,
+    unsupported_expression_expr, unsupported_statement_stmt,
 };
 use crate::{
-    representation::{RepresentationPlan, RepresentationTypeEmission},
+    representation::RepresentationPlan,
+    representation_lowering::{
+        RepresentationTypeEmission, trait_impl_emissions_for_type_with_facts,
+        type_emission_for_with_facts,
+    },
     usage::UsageFacts,
 };
 
@@ -44,7 +90,8 @@ pub fn lower_program_with_facts(
 ) -> LoweredProgram {
     let usage = crate::usage::analyze_usage(program);
     let representations = crate::representation::plan_representations(program, facts);
-    let signatures = crate::signature::solve_signatures(program, &representations, &usage);
+    let signatures =
+        crate::signature::solve_signatures_with_facts(program, &representations, &usage, facts);
     lower_program_with_plans(
         program,
         diagnostics,
@@ -63,8 +110,14 @@ pub fn lower_program_with_plans(
     representations: &RepresentationPlan,
     signatures: &SignaturePlan,
 ) -> LoweredProgram {
+    for diagnostic in facts.diagnostics() {
+        diagnostics.warning(diagnostic.code, diagnostic.message);
+    }
     for diagnostic in representations.diagnostics_for_program(program) {
         diagnostics.unsupported(diagnostic.code, diagnostic.message);
+    }
+    for diagnostic in signatures.diagnostics() {
+        diagnostics.warning(diagnostic.code, diagnostic.message.clone());
     }
     let ctx = LowerCtx {
         facts,
@@ -75,68 +128,33 @@ pub fn lower_program_with_plans(
     };
     let mut file = RustFile::default();
     if program_uses_java_exception(program) {
-        file.items.push(RustItem::Raw(java_exception_support()));
+        file.items.push(java_exception_support_item());
     }
     for ty in &program.types {
-        lower_type(ty, &mut file, &mut diagnostics, ctx);
+        lower_type(program, ty, &mut file, &mut diagnostics, ctx);
     }
     LoweredProgram { file, diagnostics }
 }
 
-fn program_uses_java_exception(program: &Program) -> bool {
-    program.types.iter().any(type_uses_java_exception)
-}
-
-fn type_uses_java_exception(ty: &TypeDecl) -> bool {
-    ty.members.iter().any(|member| match member {
-        Member::Method(method) => !method.throws.is_empty(),
-        Member::Constructor(constructor) => !constructor.throws.is_empty(),
-        Member::Type(ty) => type_uses_java_exception(ty),
-        _ => false,
-    })
-}
-
-fn java_exception_support() -> String {
-    r#"#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JavaException {
-    pub class_name: &'static str,
-    pub message: String,
-}
-
-impl JavaException {
-    pub fn new(class_name: &'static str, message: String) -> JavaException {
-        JavaException { class_name, message }
-    }
-}"#
-    .to_string()
-}
-
-fn lower_type(ty: &TypeDecl, file: &mut RustFile, diagnostics: &mut DiagnosticBag, ctx: LowerCtx) {
+fn lower_type(
+    program: &Program,
+    ty: &TypeDecl,
+    file: &mut RustFile,
+    diagnostics: &mut DiagnosticBag,
+    ctx: LowerCtx,
+) {
     if let RepresentationTypeEmission::RawRustItem(item) =
-        ctx.representations.type_emission_for(&ty.name)
+        type_emission_for_with_facts(ctx.representations, ty, ctx.signatures, ctx.facts)
     {
-        file.items.push(RustItem::Raw(item));
+        file.items.push(raw_item(item));
         return;
     }
 
-    let fields = ty
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Field(field) => Some(RustField {
-                name: field.name.clone(),
-                ty: field_shape_or_storage_default(ctx, &ty.name, &field.name, &field.ty)
-                    .rust_type(),
-                is_pub: false,
-            }),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    file.items.push(RustItem::Struct(RustStruct {
-        name: ty.name.clone(),
-        fields,
-    }));
+    file.items.push(struct_item_for_type_with_facts(
+        ty,
+        ctx.signatures,
+        ctx.facts,
+    ));
 
     let mut functions = Vec::new();
     for member in &ty.members {
@@ -149,92 +167,77 @@ fn lower_type(ty: &TypeDecl, file: &mut RustFile, diagnostics: &mut DiagnosticBa
             _ => {}
         }
     }
-    file.items.push(RustItem::Impl(RustImpl {
-        target: ty.name.clone(),
-        functions,
-    }));
+    file.items.push(impl_item_for_type(ty, functions));
+    for item in trait_impl_emissions_for_type_with_facts(
+        ctx.representations,
+        program,
+        ty,
+        ctx.signatures,
+        ctx.facts,
+    ) {
+        file.items.push(raw_item(item));
+    }
 }
 
 fn lower_constructor(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> RustFunction {
-    let constructor_local_shapes = ctx.signatures.constructor_local_shapes_or_empty(ty, ctor);
+    let constructor_signature = ctx.signatures.required_constructor_signature(ty, ctor);
     let constructor_ctx = LowerCtx {
-        current_local_shapes: constructor_local_shapes,
+        current_local_shapes: constructor_signature.locals.as_slice(),
         ..ctx
     };
-    let mut env = env_for_type(ty, ctx);
-    if let Some(signature) = ctx.signatures.constructor_signature(ty, ctor) {
-        for param in &signature.params {
-            env.insert_local_shape(param.name.clone(), param.shape.clone());
-        }
-    } else {
-        for param in &ctor.params {
-            env.insert_local(param.name.clone(), param.ty.clone());
-        }
-    }
+    let mut env = shape_env_for_constructor(ty, constructor_signature, ctx.signatures);
     if let Some(body) = &ctor.body
         && let Some(function) = lower_delegating_constructor(ty, ctor, body, &env, constructor_ctx)
     {
         return function;
     }
-    let mut assigned = Vec::new();
     if let Some(body) = &ctor.body {
         for stmt in &body.statements {
-            if let Stmt::Assign { target, value } = stmt
-                && let Expr::FieldAccess(receiver, field) = target
-                && matches!(receiver.as_ref(), Expr::This)
-            {
-                assigned.push((
-                    field.clone(),
-                    lower_expr_for_slot(
-                        value,
-                        &env,
-                        assignment_slot_for_target(target, &env, constructor_ctx),
-                        constructor_ctx,
-                    ),
-                ));
-            }
-            learn_stmt_shapes(stmt, &mut env, constructor_ctx);
+            learn_stmt_shapes(
+                stmt,
+                &mut env,
+                constructor_ctx.current_local_shapes,
+                constructor_ctx.signatures,
+            );
         }
     }
 
-    let fields = ty
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Field(field) => {
-                let field_shape =
-                    field_shape_or_storage_default(ctx, &ty.name, &field.name, &field.ty);
-                let value = assigned
-                    .iter()
-                    .find(|(name, _)| name == &field.name)
-                    .map(|(_, value)| value.clone())
-                    .or_else(|| {
-                        field.initializer.as_ref().map(|expr| {
-                            lower_expr_for_slot(
-                                expr,
-                                &env,
-                                crate::coercion::Slot::Assignment(field_shape.clone()),
-                                constructor_ctx,
-                            )
-                        })
-                    })
-                    .unwrap_or_else(|| default_expr_for_shape(&field_shape));
-                Some((field.name.clone(), value))
-            }
-            _ => None,
-        })
+    let fields = plan_constructor_field_values(ty, ctor.body.as_ref(), ctx.signatures)
+        .into_iter()
+        .map(|plan| lower_constructor_field_value_plan(plan, &env, constructor_ctx))
         .collect();
 
-    RustFunction {
-        name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
-        params: constructor_params(ty, ctor, constructor_ctx),
-        return_type: Some(constructor_return_type(ty, ctor, ctx)),
-        body: vec![RustStmt::Return(Some(RustExpr::StructLit {
-            name: ty.name.clone(),
-            fields,
-        }))],
-        is_pub: true,
-        receiver: None,
+    constructor_function_shell_with_facts(
+        ty,
+        ctor,
+        ctx.signatures,
+        constructor_return_body(ty, fields),
+        ctx.facts,
+    )
+}
+
+fn lower_constructor_field_value_plan(
+    plan: ConstructorFieldValuePlan<'_>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> (String, RustExpr) {
+    match plan {
+        ConstructorFieldValuePlan::Assigned {
+            field_name,
+            value,
+            shape,
+        }
+        | ConstructorFieldValuePlan::FieldInitializer {
+            field_name,
+            value,
+            shape,
+        } => (
+            field_name,
+            lower_expr_for_slot(value, env, assignment_slot(shape), ctx),
+        ),
+        ConstructorFieldValuePlan::Default { field_name, shape } => {
+            constructor_default_field_value_with_facts(field_name, shape, ctx.facts)
+        }
     }
 }
 
@@ -242,220 +245,105 @@ fn lower_delegating_constructor(
     ty: &TypeDecl,
     ctor: &ConstructorDecl,
     body: &Block,
-    env: &TypeEnv,
+    env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<RustFunction> {
-    let Some(Stmt::ConstructorInvocation {
-        kind,
-        args,
-        resolved,
-    }) = body.statements.first()
-    else {
-        return None;
-    };
+    let plan = plan_constructor_delegation(body)?;
 
-    let body = match kind {
-        ConstructorInvocationKind::This => {
-            if body.statements.len() != 1 {
-                vec![RustStmt::Raw(
-                    "compile_error!(\"unsupported Java constructor: this(...) followed by additional statements\");"
-                        .to_string(),
-                )]
-            } else if let Some(resolved) = resolved {
-                vec![RustStmt::Return(Some(RustExpr::Call {
-                    function: Box::new(RustExpr::Raw(format!("Self::{}", resolved.rust_name))),
-                    args: lower_constructor_call_args(args, env, resolved, ctx),
-                }))]
-            } else {
-                vec![RustStmt::Raw(
-                    "compile_error!(\"unresolved Java constructor delegation\");".to_string(),
-                )]
-            }
+    let body = match plan {
+        ConstructorDelegationPlan::SameClassCall { args, resolved } => {
+            delegating_constructor_return_body(
+                &resolved.rust_name,
+                lower_args_for_shapes(
+                    args,
+                    env,
+                    resolved_constructor_arg_shapes(resolved, args.len(), ctx.signatures),
+                    ctx,
+                ),
+            )
         }
-        ConstructorInvocationKind::Super => vec![RustStmt::Raw(
-            "compile_error!(\"unsupported Java constructor: super(...) requires inheritance lowering\");"
-                .to_string(),
-        )],
+        ConstructorDelegationPlan::Unsupported(kind) => vec![unsupported_constructor_stmt(kind)],
     };
 
-    Some(RustFunction {
-        name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
-        params: constructor_params(ty, ctor, ctx),
-        return_type: Some(constructor_return_type(ty, ctor, ctx)),
+    Some(constructor_function_shell_with_facts(
+        ty,
+        ctor,
+        ctx.signatures,
         body,
-        is_pub: true,
-        receiver: None,
-    })
-}
-
-fn constructor_params(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> Vec<RustParam> {
-    constructor_param_plans(ty, ctor, ctx)
-        .into_iter()
-        .map(|param| RustParam {
-            name: param.name.clone(),
-            ty: ctx.signatures.param_rust_type(&param),
-        })
-        .collect()
-}
-
-fn constructor_return_type(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> RustType {
-    ctx.signatures
-        .constructor_return_type(ty, ctor)
-        .unwrap_or_else(|| RustType::Named(ty.name.clone()))
-}
-
-fn constructor_param_plans(ty: &TypeDecl, ctor: &ConstructorDecl, ctx: LowerCtx) -> Vec<ParamPlan> {
-    ctx.signatures
-        .constructor_param_plans(ty, ctor)
-        .map(|params| params.to_vec())
-        .unwrap_or_else(|| ctor.params.iter().map(default_param_plan).collect())
-}
-
-fn method_return_type(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> Option<RustType> {
-    method_return_shape(ty, method, ctx).map(|shape| shape.rust_type())
-}
-
-fn method_return_shape(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> Option<RustSlotShape> {
-    ctx.signatures
-        .method_return_shape(ty, method)
-        .or_else(|| default_return_shape(&method.return_type))
-}
-
-fn method_ok_type_or_unit(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> RustType {
-    method_return_type(ty, method, ctx).unwrap_or(RustType::Unit)
-}
-
-fn method_receiver(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> ReceiverPlan {
-    ctx.signatures
-        .method_receiver(ty, method)
-        .unwrap_or_else(|| default_receiver_plan(method))
+        ctx.facts,
+    ))
 }
 
 fn lower_method(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> RustFunction {
-    let method_signature = ctx.signatures.method_signature(ty, method);
+    let method_signature = ctx.signatures.required_method_signature(ty, method);
     let method_ctx = LowerCtx {
-        current_return_shape: method_signature
-            .and_then(|signature| signature.return_shape.as_ref()),
-        current_local_shapes: ctx.signatures.method_local_shapes_or_empty(ty, method),
+        current_return_shape: method_signature.return_shape.as_ref(),
+        current_local_shapes: method_signature.locals.as_slice(),
         ..ctx
     };
-    let mut env = if method.modifiers.contains(&Modifier::Static) {
-        TypeEnv::new()
-    } else {
-        env_for_type(ty, method_ctx)
-    };
-    if let Some(signature) = method_signature {
-        for param in &signature.params {
-            env.insert_local_shape(param.name.clone(), param.shape.clone());
-        }
-    } else {
-        for param in &method.params {
-            env.insert_local(param.name.clone(), param.ty.clone());
-        }
-    }
-    RustFunction {
-        name: method
-            .rust_name
-            .clone()
-            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
-        params: ctx
-            .signatures
-            .method_param_plans(ty, method)
-            .map(|params| params.to_vec())
-            .unwrap_or_else(|| method.params.iter().map(default_param_plan).collect())
-            .into_iter()
-            .map(|param| RustParam {
-                name: param.name.clone(),
-                ty: ctx.signatures.param_rust_type(&param),
-            })
-            .collect(),
-        return_type: if method.throws.is_empty() {
-            method_return_type(ty, method, ctx)
-        } else {
-            Some(exception_result_type(method_ok_type_or_unit(
-                ty, method, ctx,
-            )))
-        },
-        body: method
-            .body
-            .as_ref()
-            .map(|body| lower_block(body, &mut env, !method.throws.is_empty(), method_ctx))
-            .unwrap_or_default(),
-        is_pub: true,
-        receiver: lower_receiver(method_receiver(ty, method, ctx)),
-    }
-}
-
-fn lower_receiver(receiver: ReceiverPlan) -> Option<RustReceiver> {
-    match receiver {
-        ReceiverPlan::None => None,
-        ReceiverPlan::Shared => Some(RustReceiver::Shared),
-        ReceiverPlan::Mutable => Some(RustReceiver::Mutable),
-    }
-}
-
-fn exception_result_type(ok_type: RustType) -> RustType {
-    RustType::Raw(format!(
-        "Result<{}, JavaException>",
-        crate::emit::emit_type(&ok_type)
-    ))
+    let mut env = shape_env_for_method(ty, method, method_signature, method_ctx.signatures);
+    let body = method
+        .body
+        .as_ref()
+        .map(|body| lower_block(body, &mut env, !method.throws.is_empty(), method_ctx))
+        .unwrap_or_default();
+    method_function_shell_with_facts(ty, method, ctx.signatures, body, ctx.facts)
 }
 
 fn lower_block(
     block: &Block,
-    env: &mut TypeEnv,
+    env: &mut ShapeEnv,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> Vec<RustStmt> {
     let mut body = Vec::new();
     for stmt in &block.statements {
         lower_stmt(stmt, env, wrap_returns_in_ok, ctx, &mut body);
-        learn_stmt_shapes(stmt, env, ctx);
+        learn_stmt_shapes(stmt, env, ctx.current_local_shapes, ctx.signatures);
     }
     body
 }
 
 fn lower_stmt(
     stmt: &Stmt,
-    env: &mut TypeEnv,
+    env: &mut ShapeEnv,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
     out: &mut Vec<RustStmt>,
 ) {
     match stmt {
         Stmt::VarDecl {
-            ty,
-            name,
-            initializer,
+            name, initializer, ..
         } => {
-            let target_shape = local_shape_or_storage_default(ctx, name, ty);
-            out.push(RustStmt::Let {
-                mutable: ctx
-                    .signatures
-                    .local_binding_mutability(ctx.current_local_shapes, name)
-                    .unwrap_or(false),
-                name: name.clone(),
-                ty: Some(target_shape.rust_type()),
-                value: initializer.as_ref().map(|expr| {
-                    lower_expr_for_slot(
-                        expr,
-                        env,
-                        crate::coercion::Slot::Assignment(target_shape.clone()),
-                        ctx,
-                    )
+            let local_plan = ctx
+                .signatures
+                .required_local_plan(ctx.current_local_shapes, name);
+            out.push(local_let_stmt_with_facts(
+                local_plan,
+                initializer.as_ref().map(|expr| {
+                    lower_expr_for_slot(expr, env, assignment_slot(local_plan.shape.clone()), ctx)
                 }),
-            })
+                ctx.facts,
+            ))
         }
-        Stmt::Assign { target, value } => out.push(RustStmt::Assign {
-            target: lower_expr(target, env, ctx),
-            value: lower_expr_for_slot(
+        Stmt::Assign { target, value } => out.push(assignment_stmt(
+            lower_expr(target, env, ctx),
+            lower_expr_for_slot(
                 value,
                 env,
-                assignment_slot_for_target(target, env, ctx),
+                assignment_slot_for_target(
+                    target,
+                    env,
+                    ExprShapeContext {
+                        signatures: Some(ctx.signatures),
+                        representations: Some(ctx.representations),
+                        facts: Some(ctx.facts),
+                    },
+                ),
                 ctx,
             ),
-        }),
-        Stmt::Expr(expr) => out.push(RustStmt::Expr(lower_expr(expr, env, ctx))),
+        )),
+        Stmt::Expr(expr) => out.push(expr_stmt(lower_expr(expr, env, ctx))),
         Stmt::Return(expr) => out.push(lower_return_stmt(
             expr.as_ref(),
             env,
@@ -466,18 +354,18 @@ fn lower_stmt(
             condition,
             then_block,
             else_block,
-        } => out.push(RustStmt::If {
-            condition: lower_expr_for_slot(condition, env, crate::coercion::Slot::Condition, ctx),
-            then_body: lower_block(then_block, &mut env.clone(), wrap_returns_in_ok, ctx),
-            else_body: else_block
+        } => out.push(if_stmt(
+            lower_expr_for_slot(condition, env, condition_slot(), ctx),
+            lower_block(then_block, &mut env.clone(), wrap_returns_in_ok, ctx),
+            else_block
                 .as_ref()
                 .map(|block| lower_block(block, &mut env.clone(), wrap_returns_in_ok, ctx))
                 .unwrap_or_default(),
-        }),
-        Stmt::While { condition, body } => out.push(RustStmt::While {
-            condition: lower_expr_for_slot(condition, env, crate::coercion::Slot::Condition, ctx),
-            body: lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
-        }),
+        )),
+        Stmt::While { condition, body } => out.push(while_stmt(
+            lower_expr_for_slot(condition, env, condition_slot(), ctx),
+            lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
+        )),
         Stmt::For {
             init,
             condition,
@@ -487,152 +375,101 @@ fn lower_stmt(
         } => {
             for init_stmt in init {
                 lower_stmt(init_stmt, env, wrap_returns_in_ok, ctx, out);
-                learn_stmt_shapes(init_stmt, env, ctx);
+                learn_stmt_shapes(init_stmt, env, ctx.current_local_shapes, ctx.signatures);
             }
             let mut loop_body =
                 lower_block_for_body(body, update, &mut env.clone(), wrap_returns_in_ok, ctx);
             for expr in update {
-                loop_body.push(RustStmt::Expr(lower_expr(expr, env, ctx)));
+                loop_body.push(expr_stmt(lower_expr(expr, env, ctx)));
             }
-            out.push(RustStmt::While {
-                condition: condition
-                    .as_ref()
-                    .map(|expr| {
-                        lower_expr_for_slot(expr, env, crate::coercion::Slot::Condition, ctx)
-                    })
-                    .unwrap_or_else(|| RustExpr::Literal("true".to_string())),
-                body: if label.is_some() {
-                    vec![RustStmt::Loop {
-                        label: label.clone(),
-                        body: loop_body,
-                    }]
-                } else {
-                    loop_body
-                },
-            });
+            let condition = condition
+                .as_ref()
+                .map(|expr| lower_expr_for_slot(expr, env, condition_slot(), ctx));
+            out.push(assemble_for_loop(condition, loop_body, label.clone()));
         }
         Stmt::EnhancedFor {
             var_name,
             iterable,
             body,
             ..
-        } => out.push(RustStmt::Raw(format!(
-            "for {var_name} in {}.iter() {{\n{}\n}}",
-            crate::emit::emit_expr(&lower_expr(iterable, env, ctx)),
-            crate::emit::emit_statements(
-                &lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
-                1
-            )
-        ))),
+        } => out.push(render_enhanced_for(
+            var_name,
+            &lower_expr(iterable, env, ctx),
+            &lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
+        )),
         Stmt::Switch { selector, cases } => {
-            out.push(RustStmt::Raw(lower_switch(
-                selector,
-                cases,
-                env,
-                wrap_returns_in_ok,
-                ctx,
-            )));
+            let plan = plan_switch(selector, cases);
+            out.push(raw_stmt(lower_switch(&plan, env, wrap_returns_in_ok, ctx)));
         }
-        Stmt::Try { .. } => out.push(RustStmt::Raw(
-            "compile_error!(\"unsupported Java statement: try/catch/finally\");".to_string(),
+        Stmt::Try { .. } => out.push(unsupported_statement_stmt(
+            UnsupportedStatementLowering::TryCatchFinally,
         )),
-        Stmt::Throw(expr) => out.push(RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Err".to_string())),
-            args: vec![lower_throw_expr(expr, env, ctx)],
-        }))),
-        Stmt::LocalType(_) => out.push(RustStmt::Raw(
-            "compile_error!(\"unsupported Java statement: local type declaration\");".to_string(),
+        Stmt::Throw(expr) => out.push(throw_stmt(lower_throw_expr(expr, env, ctx))),
+        Stmt::LocalType(_) => out.push(unsupported_statement_stmt(
+            UnsupportedStatementLowering::LocalTypeDeclaration,
         )),
-        Stmt::ConstructorInvocation { .. } => out.push(RustStmt::Raw(
-            "compile_error!(\"unsupported Java statement: constructor delegation\");".to_string(),
+        Stmt::ConstructorInvocation { .. } => out.push(unsupported_statement_stmt(
+            UnsupportedStatementLowering::ConstructorDelegation,
         )),
-        Stmt::Break(label) => out.push(RustStmt::Break(label.clone())),
-        Stmt::Continue(label) => out.push(RustStmt::Continue(label.clone())),
-        Stmt::Block(block) => out.push(RustStmt::Raw(format!(
-            "{{\n{}\n}}",
-            crate::emit::emit_statements(
-                &lower_block(block, &mut env.clone(), wrap_returns_in_ok, ctx),
-                1
-            )
+        Stmt::Break(label) => out.push(break_stmt(label.clone())),
+        Stmt::Continue(label) => out.push(continue_stmt(label.clone())),
+        Stmt::Block(block) => out.push(render_block_stmt(&lower_block(
+            block,
+            &mut env.clone(),
+            wrap_returns_in_ok,
+            ctx,
         ))),
-        Stmt::Unsupported(reason) => out.push(RustStmt::Raw(format!(
-            "compile_error!({:?});",
-            format!("unsupported Java statement: {reason}")
-        ))),
+        Stmt::Unsupported(reason) => out.push(unsupported_statement_stmt(
+            UnsupportedStatementLowering::ParserUnsupported(reason.clone()),
+        )),
     }
 }
 
 fn lower_switch(
-    selector: &Expr,
-    cases: &[SwitchCase],
-    env: &TypeEnv,
+    plan: &SwitchPlan<'_>,
+    env: &ShapeEnv,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> String {
-    let switch_label = "java_switch";
-    let switch_value = "__java_switch_value";
-    let switch_matched = "__java_switch_matched";
-    let mut out = String::new();
-    out.push_str("{\n");
-    out.push_str(&format!(
-        "    let {switch_value} = {};\n",
-        crate::emit::emit_expr(&lower_expr(selector, env, ctx))
-    ));
-    out.push_str(&format!("    let mut {switch_matched} = false;\n"));
-    out.push_str(&format!("    '{switch_label}: loop {{\n"));
-    for case in cases {
-        let label_condition = switch_label_condition(case, switch_value, switch_matched, env, ctx);
-        out.push_str(&format!("        if {label_condition} {{\n"));
-        out.push_str(&format!("            {switch_matched} = true;\n"));
-        out.push_str("        }\n");
-        out.push_str(&format!("        if {switch_matched} {{\n"));
-        let statements =
-            lower_switch_case_statements(case, switch_label, env, wrap_returns_in_ok, ctx);
-        out.push_str(&crate::emit::emit_statements(&statements, 3));
-        out.push_str("        }\n");
-    }
-    out.push_str(&format!("        break '{switch_label};\n"));
-    out.push_str("    }\n");
-    out.push('}');
-    out
+    let cases = plan
+        .cases
+        .iter()
+        .map(|case| SwitchRenderCase {
+            label_condition: switch_label_condition(case, plan, env, ctx),
+            statements: lower_switch_case_statements(
+                case,
+                plan.break_label,
+                env,
+                wrap_returns_in_ok,
+                ctx,
+            ),
+        })
+        .collect();
+    render_switch(plan, lower_expr(plan.selector, env, ctx), cases)
 }
 
 fn switch_label_condition(
     case: &SwitchCase,
-    switch_value: &str,
-    switch_matched: &str,
-    env: &TypeEnv,
+    plan: &SwitchPlan<'_>,
+    env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> String {
-    if case
-        .labels
-        .iter()
-        .any(|label| matches!(label, SwitchLabel::Default))
-    {
-        return format!("!{switch_matched}");
-    }
-    let comparisons = case
+    let case_plan = plan_switch_case(case);
+    let label_exprs = case_plan
         .labels
         .iter()
         .filter_map(|label| match label {
-            SwitchLabel::Expr(expr) => Some(format!(
-                "{switch_value} == {}",
-                crate::emit::emit_expr(&lower_expr(expr, env, ctx))
-            )),
-            SwitchLabel::Default => None,
+            SwitchCaseLabelPlan::Expr(expr) => Some(lower_expr(expr, env, ctx)),
+            SwitchCaseLabelPlan::Default => None,
         })
         .collect::<Vec<_>>();
-    if comparisons.is_empty() {
-        "false".to_string()
-    } else {
-        format!("!{switch_matched} && ({})", comparisons.join(" || "))
-    }
+    switch_case_condition(plan, &case_plan, label_exprs)
 }
 
 fn lower_switch_case_statements(
     case: &SwitchCase,
     switch_label: &str,
-    env: &TypeEnv,
+    env: &ShapeEnv,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> Vec<RustStmt> {
@@ -641,99 +478,43 @@ fn lower_switch_case_statements(
     for stmt in &case.statements {
         let stmt = rewrite_switch_breaks(stmt, switch_label);
         lower_stmt(&stmt, &mut case_env, wrap_returns_in_ok, ctx, &mut out);
-        learn_stmt_shapes(&stmt, &mut case_env, ctx);
+        learn_stmt_shapes(
+            &stmt,
+            &mut case_env,
+            ctx.current_local_shapes,
+            ctx.signatures,
+        );
     }
     out
 }
 
 fn lower_return_stmt(
     expr: Option<&Expr>,
-    env: &TypeEnv,
+    env: &ShapeEnv,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> RustStmt {
     let value = expr.map(|expr| {
-        if let Some(return_shape) = ctx.current_return_shape {
-            lower_expr_for_slot(
-                expr,
-                env,
-                crate::coercion::Slot::Return(return_shape.clone()),
-                ctx,
-            )
+        if let Some(slot) = return_slot(ctx.current_return_shape) {
+            lower_expr_for_slot(expr, env, slot, ctx)
         } else {
             lower_expr(expr, env, ctx)
         }
     });
-    if wrap_returns_in_ok {
-        RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Ok".to_string())),
-            args: vec![value.unwrap_or_else(|| RustExpr::Raw("()".to_string()))],
-        }))
-    } else {
-        RustStmt::Return(value)
-    }
+    return_stmt(value, wrap_returns_in_ok)
 }
 
-fn lower_throw_expr(expr: &Expr, env: &TypeEnv, ctx: LowerCtx) -> RustExpr {
-    match expr {
-        Expr::New { ty, args, .. } => {
-            let class_name = match ty {
-                JavaType::Named { name, .. } => name.clone(),
-                JavaType::Unknown(raw) => raw.clone(),
-                _ => "JavaException".to_string(),
-            };
-            let message = args
-                .first()
-                .map(|arg| lower_expr(arg, env, ctx))
-                .unwrap_or_else(|| RustExpr::Raw("String::new()".to_string()));
-            RustExpr::Call {
-                function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
-                args: vec![RustExpr::Literal(format!("{class_name:?}")), message],
-            }
+fn lower_throw_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
+    match plan_throw_expr(expr) {
+        ThrowExprPlan::NewException { class_name, args } => {
+            let args = args.iter().map(|arg| lower_expr(arg, env, ctx)).collect();
+            exception_expr_from_new(&class_name, args)
         }
-        _ => RustExpr::Call {
-            function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
-            args: vec![
-                RustExpr::Literal("\"JavaException\"".to_string()),
-                RustExpr::Raw(format!(
-                    "format!(\"{{:?}}\", {})",
-                    crate::emit::emit_expr(&lower_expr(expr, env, ctx))
-                )),
-            ],
-        },
+        ThrowExprPlan::FallbackValue(value) => fallback_exception_expr(lower_expr(value, env, ctx)),
     }
 }
 
-fn rewrite_switch_breaks(stmt: &Stmt, switch_label: &str) -> Stmt {
-    match stmt {
-        Stmt::Break(None) => Stmt::Break(Some(switch_label.to_string())),
-        Stmt::If {
-            condition,
-            then_block,
-            else_block,
-        } => Stmt::If {
-            condition: condition.clone(),
-            then_block: rewrite_switch_breaks_in_block(then_block, switch_label),
-            else_block: else_block
-                .as_ref()
-                .map(|block| rewrite_switch_breaks_in_block(block, switch_label)),
-        },
-        Stmt::Block(block) => Stmt::Block(rewrite_switch_breaks_in_block(block, switch_label)),
-        _ => stmt.clone(),
-    }
-}
-
-fn rewrite_switch_breaks_in_block(block: &Block, switch_label: &str) -> Block {
-    Block {
-        statements: block
-            .statements
-            .iter()
-            .map(|stmt| rewrite_switch_breaks(stmt, switch_label))
-            .collect(),
-    }
-}
-
-fn lower_expr(expr: &Expr, env: &TypeEnv, ctx: LowerCtx) -> RustExpr {
+fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
     if let Some(stream_expr) = lower_stream_expr(expr, env, ctx) {
         return stream_expr.expr;
     }
@@ -741,598 +522,211 @@ fn lower_expr(expr: &Expr, env: &TypeEnv, ctx: LowerCtx) -> RustExpr {
         return format_expr;
     }
     match expr {
-        Expr::Literal(lit) => RustExpr::Literal(literal_to_rust(lit)),
-        Expr::Var(name) => {
-            if env.local_type(name).is_none() && env.field_type(name).is_some() {
-                RustExpr::Field(Box::new(RustExpr::Var("self".to_string())), name.clone())
-            } else {
-                RustExpr::Var(name.clone())
-            }
-        }
-        Expr::This => RustExpr::Var("self".to_string()),
-        Expr::Super => RustExpr::Raw("super".to_string()),
-        Expr::FieldAccess(receiver, field) => {
-            if field == "length" {
-                return RustExpr::Raw(format!(
-                    "{}.len() as i32",
-                    crate::emit::emit_expr(&lower_expr(receiver, env, ctx))
-                ));
-            }
-            RustExpr::Field(Box::new(lower_expr(receiver, env, ctx)), field.clone())
-        }
-        Expr::ArrayAccess(array, index) => RustExpr::Index(
-            Box::new(lower_expr(array, env, ctx)),
-            Box::new(lower_expr_for_slot(
-                index,
-                env,
-                crate::coercion::Slot::Index,
-                ctx,
-            )),
+        Expr::Literal(lit) => literal_expr(lit),
+        Expr::Var(name) => lower_bare_name(name, env),
+        Expr::This => this_expr(),
+        Expr::Super => super_expr(),
+        Expr::FieldAccess(receiver, field) => lower_field_access(
+            receiver,
+            field,
+            env.type_env(),
+            lower_expr(receiver, env, ctx),
         ),
-        Expr::Binary { op, left, right } => RustExpr::Binary {
-            op: binary_op_to_rust(*op).to_string(),
-            left: Box::new(lower_expr(left, env, ctx)),
-            right: Box::new(lower_expr(right, env, ctx)),
-        },
-        Expr::Unary { op, expr } => match op {
-            UnaryOp::PostInc => RustExpr::Raw(format!(
-                "{} += 1",
-                crate::emit::emit_expr(&lower_expr(expr, env, ctx))
-            )),
-            UnaryOp::PostDec => RustExpr::Raw(format!(
-                "{} -= 1",
-                crate::emit::emit_expr(&lower_expr(expr, env, ctx))
-            )),
-            UnaryOp::Not => RustExpr::Unary {
-                op: "!".to_string(),
-                expr: Box::new(lower_expr(expr, env, ctx)),
-            },
-            UnaryOp::Neg => RustExpr::Unary {
-                op: "-".to_string(),
-                expr: Box::new(lower_expr(expr, env, ctx)),
-            },
-            UnaryOp::PreInc | UnaryOp::PreDec => {
-                RustExpr::Raw(crate::emit::emit_expr(&lower_expr(expr, env, ctx)))
-            }
-        },
+        Expr::ArrayAccess(array, index) => indexed_expr(
+            lower_expr(array, env, ctx),
+            lower_expr_for_slot(index, env, index_slot(), ctx),
+        ),
+        Expr::ArrayCreation {
+            element_type,
+            dimensions,
+        } => {
+            let dims = dimensions
+                .iter()
+                .map(|dim| crate::emit::emit_expr(&lower_expr(dim, env, ctx)))
+                .collect::<Vec<_>>()
+                .join("][");
+            raw_expr(&format!(
+                "/* Java array creation: {:?}[{dims}] */ Vec::new()",
+                element_type
+            ))
+        }
+        Expr::ArrayInitializer(elements) => RustExpr::Raw(format!(
+            "vec![{}]",
+            elements
+                .iter()
+                .map(|element| crate::emit::emit_expr(&lower_expr(element, env, ctx)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        Expr::Binary { op, left, right } => {
+            binary_expr(*op, lower_expr(left, env, ctx), lower_expr(right, env, ctx))
+        }
+        Expr::Unary { op, expr } => lower_unary_expr(*op, lower_expr(expr, env, ctx)),
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
-        } => RustExpr::If {
-            condition: Box::new(lower_expr_for_slot(
-                condition,
-                env,
-                crate::coercion::Slot::Condition,
-                ctx,
-            )),
-            then_expr: Box::new(lower_expr(then_expr, env, ctx)),
-            else_expr: Box::new(lower_expr(else_expr, env, ctx)),
-        },
+        } => ternary_expr(
+            lower_expr_for_slot(condition, env, condition_slot(), ctx),
+            lower_expr(then_expr, env, ctx),
+            lower_expr(else_expr, env, ctx),
+        ),
         Expr::Call {
             receiver,
             name,
             args,
             resolved,
         } => {
-            if let Some(call) = resolved {
-                let rust_args = lower_call_args(args, env, call, ctx);
-                match (&call.kind, receiver) {
-                    (CallKind::Static, _) => RustExpr::Call {
-                        function: Box::new(RustExpr::Raw(format!("Self::{}", call.rust_name))),
-                        args: rust_args,
-                    },
-                    (CallKind::Instance, Some(receiver)) => RustExpr::MethodCall {
-                        receiver: Box::new(lower_expr(receiver, env, ctx)),
-                        method: call.rust_name.clone(),
-                        args: rust_args,
-                    },
-                    (CallKind::Instance, None) => RustExpr::MethodCall {
-                        receiver: Box::new(RustExpr::Var("self".to_string())),
-                        method: call.rust_name.clone(),
-                        args: rust_args,
-                    },
-                }
-            } else if let Some(receiver) = receiver {
-                let rust_args = args.iter().map(|arg| lower_expr(arg, env, ctx)).collect();
-                RustExpr::MethodCall {
-                    receiver: Box::new(lower_expr(receiver, env, ctx)),
-                    method: crate::parser::to_snake_case(name),
-                    args: rust_args,
-                }
+            let target = plan_call_target(receiver.as_deref(), name, resolved.as_ref());
+            let rust_args = if let Some(call) = resolved {
+                lower_args_for_shapes(
+                    args,
+                    env,
+                    resolved_call_arg_shapes(call, args.len(), ctx.signatures),
+                    ctx,
+                )
             } else {
-                let rust_args = args.iter().map(|arg| lower_expr(arg, env, ctx)).collect();
-                RustExpr::Call {
-                    function: Box::new(RustExpr::Var(crate::parser::to_snake_case(name))),
-                    args: rust_args,
+                args.iter().map(|arg| lower_expr(arg, env, ctx)).collect()
+            };
+            let lowered_receiver = match &target {
+                CallTargetPlan::InstanceReceiver { receiver, .. }
+                | CallTargetPlan::FallbackReceiver { receiver, .. } => {
+                    Some(lower_expr(receiver, env, ctx))
                 }
-            }
+                _ => None,
+            };
+            apply_call_target(&target, lowered_receiver, rust_args)
         }
         Expr::New {
             ty, args, resolved, ..
         } => {
-            let rust_name = resolved
+            let target = plan_new_target(ty, resolved.as_ref(), ctx.representations);
+            let rust_args = resolved
                 .as_ref()
-                .map(|resolved| resolved.rust_name.as_str())
-                .unwrap_or("new");
-            let owner_type = ctx.representations.constructor_owner_type_for_new(
-                ty,
-                resolved
-                    .as_ref()
-                    .map(|resolved| resolved.declaring_type.as_str()),
-            );
-            RustExpr::Call {
-                function: Box::new(RustExpr::Raw(format!(
-                    "{}::{rust_name}",
-                    crate::emit::emit_type(&owner_type)
-                ))),
-                args: resolved
-                    .as_ref()
-                    .map(|resolved| lower_constructor_call_args(args, env, resolved, ctx))
-                    .unwrap_or_else(|| args.iter().map(|arg| lower_expr(arg, env, ctx)).collect()),
-            }
+                .map(|resolved| {
+                    lower_args_for_shapes(
+                        args,
+                        env,
+                        resolved_constructor_arg_shapes(resolved, args.len(), ctx.signatures),
+                        ctx,
+                    )
+                })
+                .unwrap_or_else(|| args.iter().map(|arg| lower_expr(arg, env, ctx)).collect());
+            apply_new_target_with_facts(&target, rust_args, ctx.facts)
         }
         Expr::Cast { ty, expr } => {
-            let actual = infer_expr_shape_with_context(
+            let plan = plan_cast_conversion(
                 expr,
+                ty,
                 env,
                 ExprShapeContext {
                     signatures: Some(ctx.signatures),
                     representations: Some(ctx.representations),
+                    facts: Some(ctx.facts),
                 },
             );
-            let target = ctx.representations.value_shape_for_java_type(ty.clone());
-            crate::coercion::apply_expr_to_shape(lower_expr(expr, env, ctx), &actual, &target)
+            apply_cast_conversion_with_facts(lower_expr(expr, env, ctx), &plan, ctx.facts)
         }
         Expr::InstanceOf { expr, ty } => {
-            let actual = infer_expr_shape_with_context(
+            let plan = plan_instanceof(
                 expr,
+                ty,
                 env,
                 ExprShapeContext {
                     signatures: Some(ctx.signatures),
                     representations: Some(ctx.representations),
+                    facts: Some(ctx.facts),
                 },
             );
-            let target = ctx.representations.value_shape_for_java_type(ty.clone());
-            crate::coercion::apply_instanceof_check(lower_expr(expr, env, ctx), &actual, &target)
+            apply_instanceof(lower_expr(expr, env, ctx), &plan)
         }
-        Expr::Lambda { .. } => {
-            RustExpr::Raw("compile_error!(\"unsupported Java expression: lambda\")".to_string())
+        Expr::Lambda { .. } => unsupported_expression_expr(UnsupportedExpressionLowering::Lambda),
+        Expr::MethodReference { .. } => {
+            unsupported_expression_expr(UnsupportedExpressionLowering::MethodReference)
         }
-        Expr::MethodReference { .. } => RustExpr::Raw(
-            "compile_error!(\"unsupported Java expression: method reference\")".to_string(),
-        ),
-        Expr::ClassLiteral(_) => RustExpr::Raw(
-            "compile_error!(\"unsupported Java expression: class literal\")".to_string(),
-        ),
-        Expr::Raw(raw) => RustExpr::Raw(raw.clone()),
+        Expr::ClassLiteral(_) => {
+            unsupported_expression_expr(UnsupportedExpressionLowering::ClassLiteral)
+        }
+        Expr::Raw(raw) => raw_expr(raw),
     }
 }
 
-fn lower_call_args(
+fn lower_args_for_shapes(
     args: &[Expr],
-    env: &TypeEnv,
-    call: &ResolvedCall,
+    env: &ShapeEnv,
+    shapes: Vec<RustSlotShape>,
     ctx: LowerCtx,
 ) -> Vec<RustExpr> {
     args.iter()
-        .enumerate()
-        .map(|(index, arg)| {
-            ctx.signatures
-                .method_arg_shape_by_rust_name(&call.declaring_type, &call.rust_name, index)
-                .map(|shape| {
-                    lower_expr_for_slot(arg, env, crate::coercion::Slot::Argument(shape), ctx)
-                })
-                .unwrap_or_else(|| lower_expr(arg, env, ctx))
-        })
-        .collect()
-}
-
-fn lower_constructor_call_args(
-    args: &[Expr],
-    env: &TypeEnv,
-    resolved: &ResolvedConstructor,
-    ctx: LowerCtx,
-) -> Vec<RustExpr> {
-    args.iter()
-        .enumerate()
-        .map(|(index, arg)| {
-            ctx.signatures
-                .constructor_arg_shape_by_rust_name(
-                    &resolved.declaring_type,
-                    &resolved.rust_name,
-                    index,
-                )
-                .map(|shape| {
-                    lower_expr_for_slot(arg, env, crate::coercion::Slot::Argument(shape), ctx)
-                })
-                .unwrap_or_else(|| lower_expr(arg, env, ctx))
-        })
+        .zip(shapes)
+        .map(|(arg, shape)| lower_expr_for_slot(arg, env, argument_slot(shape), ctx))
         .collect()
 }
 
 fn lower_stream_expr(
     expr: &Expr,
-    env: &TypeEnv,
+    env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<crate::coercion::LoweredExpr> {
-    let plan = build_stream_plan(expr, env, ctx)?;
+    let plan = build_stream_plan(expr, env.type_env(), ctx.facts)?;
     lower_stream_plan(&plan, env, ctx)
-}
-
-fn stream_lambdas_are_capture_free(ctx: LowerCtx) -> bool {
-    ctx.facts
-        .captures
-        .owners
-        .iter()
-        .filter(|owner| owner.kind == CaptureOwnerKind::Lambda)
-        .all(|owner| owner.captures.is_empty())
-}
-
-fn is_collectors_to_list(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Call {
-            receiver: Some(receiver),
-            name,
-            args,
-            ..
-        } if name == "toList"
-            && args.is_empty()
-            && matches!(receiver.as_ref(), Expr::Var(owner) if owner == "Collectors" || owner == "collectors")
-    )
-}
-
-#[derive(Debug, Clone, Copy)]
-enum StreamLambdaValue {
-    FilterBorrowed,
-    BorrowedItem,
-}
-
-struct StreamPlan<'a> {
-    source: StreamSource<'a>,
-    ops: Vec<StreamOp<'a>>,
-    terminal: StreamTerminal<'a>,
-    element: StreamElement,
-}
-
-struct StreamSource<'a> {
-    expr: &'a Expr,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StreamElement {
-    shape: RustSlotShape,
-    value_category: StreamValueCategory,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StreamValueCategory {
-    Borrowed,
-}
-
-enum StreamOp<'a> {
-    Filter(LambdaPlan<'a>),
-    Map(LambdaPlan<'a>),
-    MapToPrimitive(LambdaPlan<'a>),
-}
-
-enum StreamTerminal<'a> {
-    Sum,
-    CollectToList,
-    FindFirst,
-    AnyMatch(LambdaPlan<'a>),
-}
-
-struct LambdaPlan<'a> {
-    param_name: String,
-    body: &'a Expr,
-}
-
-fn build_stream_plan<'a>(expr: &'a Expr, env: &TypeEnv, ctx: LowerCtx) -> Option<StreamPlan<'a>> {
-    if !stream_lambdas_are_capture_free(ctx) {
-        return None;
-    }
-    let Expr::Call {
-        receiver: Some(receiver),
-        name,
-        args,
-        ..
-    } = expr
-    else {
-        return None;
-    };
-
-    let terminal = match name.as_str() {
-        "sum" if args.is_empty() => StreamTerminal::Sum,
-        "collect" if args.len() == 1 && is_collectors_to_list(&args[0]) => {
-            StreamTerminal::CollectToList
-        }
-        "findFirst" if args.is_empty() => StreamTerminal::FindFirst,
-        "anyMatch" if args.len() == 1 => StreamTerminal::AnyMatch(lambda_plan(&args[0])?),
-        _ => return None,
-    };
-    let (source, ops) = collect_stream_chain(receiver)?;
-    let element_shape = infer_stream_source_element_shape(source, env)?;
-    Some(StreamPlan {
-        source: StreamSource { expr: source },
-        ops,
-        terminal,
-        element: StreamElement {
-            shape: element_shape,
-            value_category: StreamValueCategory::Borrowed,
-        },
-    })
-}
-
-fn collect_stream_chain<'a>(expr: &'a Expr) -> Option<(&'a Expr, Vec<StreamOp<'a>>)> {
-    let Expr::Call {
-        receiver,
-        name,
-        args,
-        ..
-    } = expr
-    else {
-        return None;
-    };
-
-    match name.as_str() {
-        "stream" if args.is_empty() => receiver.as_deref().map(|source| (source, Vec::new())),
-        "filter" if args.len() == 1 => {
-            let (source, mut ops) = collect_stream_chain(receiver.as_deref()?)?;
-            ops.push(StreamOp::Filter(lambda_plan(&args[0])?));
-            Some((source, ops))
-        }
-        "map" if args.len() == 1 => {
-            let (source, mut ops) = collect_stream_chain(receiver.as_deref()?)?;
-            ops.push(StreamOp::Map(lambda_plan(&args[0])?));
-            Some((source, ops))
-        }
-        "mapToInt" if args.len() == 1 => {
-            let (source, mut ops) = collect_stream_chain(receiver.as_deref()?)?;
-            ops.push(StreamOp::MapToPrimitive(lambda_plan(&args[0])?));
-            Some((source, ops))
-        }
-        _ => None,
-    }
-}
-
-fn lambda_plan(lambda: &Expr) -> Option<LambdaPlan<'_>> {
-    let Expr::Lambda { params, body } = lambda else {
-        return None;
-    };
-    let param = params.first()?.name.clone();
-    let LambdaBody::Expr(body) = body else {
-        return None;
-    };
-    Some(LambdaPlan {
-        param_name: param,
-        body,
-    })
 }
 
 fn lower_stream_plan(
     plan: &StreamPlan<'_>,
-    env: &TypeEnv,
+    env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<crate::coercion::LoweredExpr> {
-    let mut out = format!(
-        "{}.iter()",
-        crate::emit::emit_expr(&lower_expr(plan.source.expr, env, ctx))
-    );
-    let mut element_actual = plan.element.shape.clone();
-    for op in &plan.ops {
-        match op {
-            StreamOp::Filter(lambda) => {
-                out.push_str(&format!(
-                    ".filter(|{}| {})",
-                    lambda.param_name,
-                    emit_stream_lambda_body(
-                        lambda.body,
-                        &lambda.param_name,
-                        StreamLambdaValue::FilterBorrowed
-                    )?
-                ));
-            }
-            StreamOp::Map(lambda) => {
-                let input_shape = element_actual.clone();
-                out.push_str(&format!(
-                    ".map(|{}| {})",
-                    lambda.param_name,
-                    emit_stream_lambda_body(
-                        lambda.body,
-                        &lambda.param_name,
-                        StreamLambdaValue::BorrowedItem
-                    )?
-                ));
-                element_actual = infer_stream_lambda_body_shape(lambda.body, &input_shape);
-            }
-            StreamOp::MapToPrimitive(lambda) => {
-                out.push_str(&format!(
-                    ".map(|{}| {})",
-                    lambda.param_name,
-                    emit_stream_lambda_body(
-                        lambda.body,
-                        &lambda.param_name,
-                        StreamLambdaValue::BorrowedItem
-                    )?
-                ));
-                element_actual = infer_stream_map_to_int_shape(lambda.body);
-            }
-        }
-    }
-
-    let actual = match &plan.terminal {
-        StreamTerminal::Sum => {
-            out.push_str(".sum::<i32>()");
-            crate::coercion::LoweredType::stream_sum()
-        }
-        StreamTerminal::CollectToList => {
-            out.push_str(".collect::<Vec<_>>()");
-            crate::coercion::LoweredType::stream_collect(element_actual)
-        }
-        StreamTerminal::FindFirst => {
-            out.push_str(".next()");
-            crate::coercion::LoweredType::stream_find_first(element_actual)
-        }
-        StreamTerminal::AnyMatch(lambda) => {
-            out.push_str(&format!(
-                ".any(|{}| {})",
-                lambda.param_name,
-                emit_stream_lambda_body(
-                    lambda.body,
-                    &lambda.param_name,
-                    StreamLambdaValue::BorrowedItem
-                )?
-            ));
-            crate::coercion::LoweredType::stream_any_match()
-        }
-    };
-    Some(crate::coercion::LoweredExpr {
-        expr: RustExpr::Raw(out),
-        actual,
-    })
-}
-
-fn emit_stream_lambda_body(expr: &Expr, param: &str, value: StreamLambdaValue) -> Option<String> {
-    match expr {
-        Expr::Literal(lit) => Some(literal_to_rust(lit)),
-        Expr::Var(name) if name == param => Some(match value {
-            StreamLambdaValue::FilterBorrowed => format!("**{param}"),
-            StreamLambdaValue::BorrowedItem => format!("*{param}"),
-        }),
-        Expr::Var(name) => Some(name.clone()),
-        Expr::Binary { op, left, right } => Some(format!(
-            "({} {} {})",
-            emit_stream_lambda_body(left, param, value)?,
-            binary_op_to_rust(*op),
-            emit_stream_lambda_body(right, param, value)?
-        )),
-        Expr::Unary { op, expr } => {
-            let op = match op {
-                UnaryOp::Not => "!",
-                UnaryOp::Neg => "-",
-                _ => return None,
-            };
-            Some(format!(
-                "{op}{}",
-                emit_stream_lambda_body(expr, param, value)?
-            ))
-        }
-        Expr::Call {
-            receiver: Some(receiver),
-            name,
-            args,
-            ..
-        } if args.is_empty() => {
-            let receiver = emit_stream_lambda_receiver(receiver, param, value)?;
-            match name.as_str() {
-                "isEmpty" => Some(format!("{receiver}.is_empty()")),
-                "length" => Some(format!("{receiver}.len() as i32")),
-                "trim" => Some(format!("{receiver}.trim()")),
-                _ => Some(format!(
-                    "{}.{}()",
-                    receiver,
-                    crate::parser::to_snake_case(name)
-                )),
-            }
-        }
-        _ => None,
-    }
-}
-
-fn emit_stream_lambda_receiver(
-    expr: &Expr,
-    param: &str,
-    value: StreamLambdaValue,
-) -> Option<String> {
-    match expr {
-        Expr::Var(name) if name == param => Some(match value {
-            StreamLambdaValue::FilterBorrowed | StreamLambdaValue::BorrowedItem => {
-                param.to_string()
-            }
-        }),
-        _ => emit_stream_lambda_body(expr, param, value),
-    }
+    render_stream_plan(plan, lower_expr(plan.source.expr, env, ctx))
 }
 
 fn lower_expr_for_slot(
     expr: &Expr,
-    env: &TypeEnv,
+    env: &ShapeEnv,
     slot: crate::coercion::Slot,
     ctx: LowerCtx,
 ) -> RustExpr {
     if let Some(stream_expr) = lower_stream_expr(expr, env, ctx) {
-        return crate::coercion::apply_lowered_expr_to_slot(stream_expr, &slot);
+        return crate::coercion::apply_lowered_expr_to_slot_with_facts(
+            stream_expr,
+            &slot,
+            ctx.facts,
+        );
     }
-    if let Expr::Cast { ty, .. } = expr {
-        let actual = ctx.representations.value_shape_for_java_type(ty.clone());
-        let expr = lower_expr(expr, env, ctx);
-        return crate::coercion::apply_expr_to_slot(expr, actual, &slot);
-    }
-    let actual = infer_expr_shape_with_context(
+    let actual = actual_shape_for_slot_expr(
         expr,
         env,
         ExprShapeContext {
             signatures: Some(ctx.signatures),
             representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
         },
     );
     let expr = lower_expr(expr, env, ctx);
-    crate::coercion::apply_expr_to_slot(expr, actual, &slot)
+    crate::coercion::apply_expr_to_slot_with_facts(expr, actual, &slot, ctx.facts)
 }
 
-fn lower_string_concat(expr: &Expr, env: &TypeEnv, ctx: LowerCtx) -> Option<RustExpr> {
-    if !crate::types::is_string_concat(expr, env) {
-        return None;
-    }
-    let mut parts = Vec::new();
-    crate::types::flatten_add(expr, &mut parts);
-    let format_string = parts
+fn lower_string_concat(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<RustExpr> {
+    let plan = build_string_concat_plan(expr, env.type_env())?;
+    let args = plan
+        .args
         .iter()
-        .map(|part| match part {
-            Expr::Literal(Literal::String(s)) => s.replace('{', "{{").replace('}', "}}"),
-            _ => "{}".to_string(),
-        })
-        .collect::<String>();
-    let args = parts
-        .iter()
-        .filter(|part| !matches!(part, Expr::Literal(Literal::String(_))))
-        .map(|part| crate::emit::emit_expr(&lower_expr(part, env, ctx)))
+        .map(|part| lower_expr(part, env, ctx))
         .collect::<Vec<_>>();
-    let mut raw = format!("format!({format_string:?}");
-    for arg in args {
-        raw.push_str(", ");
-        raw.push_str(&arg);
-    }
-    raw.push(')');
-    Some(RustExpr::Raw(raw))
-}
-
-fn literal_to_rust(lit: &Literal) -> String {
-    match lit {
-        Literal::Null => "None".to_string(),
-        Literal::Bool(value) => value.to_string(),
-        Literal::Int(value) => value.to_string(),
-        Literal::Long(value) => format!("{value}i64"),
-        Literal::Float(value) => format!("{value}f32"),
-        Literal::Double(value) => format!("{value}f64"),
-        Literal::String(value) => format!("{value:?}.to_string()"),
-        Literal::Char(value) => format!("{value:?}"),
-    }
+    Some(render_string_concat(&plan, args))
 }
 
 fn lower_block_for_body(
     block: &Block,
     update: &[Expr],
-    env: &mut TypeEnv,
+    env: &mut ShapeEnv,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
 ) -> Vec<RustStmt> {
     let mut out = Vec::new();
     for stmt in &block.statements {
         lower_stmt_for_body(stmt, update, env, wrap_returns_in_ok, ctx, &mut out);
-        learn_stmt_shapes(stmt, env, ctx);
+        learn_stmt_shapes(stmt, env, ctx.current_local_shapes, ctx.signatures);
     }
     out
 }
@@ -1340,134 +734,43 @@ fn lower_block_for_body(
 fn lower_stmt_for_body(
     stmt: &Stmt,
     update: &[Expr],
-    env: &mut TypeEnv,
+    env: &mut ShapeEnv,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
     out: &mut Vec<RustStmt>,
 ) {
     match stmt {
         Stmt::Continue(None) => {
-            for expr in update {
-                out.push(RustStmt::Expr(lower_expr(expr, env, ctx)));
-            }
-            out.push(RustStmt::Continue(None));
+            let updates = update
+                .iter()
+                .map(|expr| lower_expr(expr, env, ctx))
+                .collect::<Vec<_>>();
+            out.extend(continue_with_updates(&updates));
         }
         Stmt::If {
             condition,
             then_block,
             else_block,
-        } => out.push(RustStmt::If {
-            condition: lower_expr_for_slot(condition, env, crate::coercion::Slot::Condition, ctx),
-            then_body: lower_block_for_body(
+        } => out.push(if_stmt(
+            lower_expr_for_slot(condition, env, condition_slot(), ctx),
+            lower_block_for_body(
                 then_block,
                 update,
                 &mut env.clone(),
                 wrap_returns_in_ok,
                 ctx,
             ),
-            else_body: else_block
+            else_block
                 .as_ref()
                 .map(|block| {
                     lower_block_for_body(block, update, &mut env.clone(), wrap_returns_in_ok, ctx)
                 })
                 .unwrap_or_default(),
-        }),
-        Stmt::While { condition, body } => out.push(RustStmt::While {
-            condition: lower_expr_for_slot(condition, env, crate::coercion::Slot::Condition, ctx),
-            body: lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
-        }),
+        )),
+        Stmt::While { condition, body } => out.push(while_stmt(
+            lower_expr_for_slot(condition, env, condition_slot(), ctx),
+            lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx),
+        )),
         other => lower_stmt(other, env, wrap_returns_in_ok, ctx, out),
     }
-}
-
-fn binary_op_to_rust(op: BinaryOp) -> &'static str {
-    match op {
-        BinaryOp::Add => "+",
-        BinaryOp::Sub => "-",
-        BinaryOp::Mul => "*",
-        BinaryOp::Div => "/",
-        BinaryOp::Rem => "%",
-        BinaryOp::Shl => "<<",
-        BinaryOp::Shr => ">>",
-        BinaryOp::Eq => "==",
-        BinaryOp::Ne => "!=",
-        BinaryOp::Lt => "<",
-        BinaryOp::Le => "<=",
-        BinaryOp::Gt => ">",
-        BinaryOp::Ge => ">=",
-        BinaryOp::And => "&&",
-        BinaryOp::Or => "||",
-    }
-}
-
-fn default_expr_for_shape(shape: &RustSlotShape) -> RustExpr {
-    shape.default_expr()
-}
-
-fn env_for_type(ty: &TypeDecl, ctx: LowerCtx) -> TypeEnv {
-    let mut env = TypeEnv::new();
-    for member in &ty.members {
-        if let Member::Field(field) = member {
-            if let Some(shape) = ctx.signatures.field_shape(&ty.name, &field.name) {
-                env.insert_field_shape(field.name.clone(), shape.clone());
-            } else {
-                env.insert_field(field.name.clone(), field.ty.clone());
-            }
-        }
-    }
-    env
-}
-
-fn learn_stmt_shapes(stmt: &Stmt, env: &mut TypeEnv, ctx: LowerCtx) {
-    match stmt {
-        Stmt::VarDecl { ty, name, .. } => {
-            let shape = local_shape_or_storage_default(ctx, name, ty);
-            env.insert_local_shape(name.clone(), shape);
-        }
-        Stmt::For { init, .. } => {
-            for stmt in init {
-                learn_stmt_shapes(stmt, env, ctx);
-            }
-        }
-        Stmt::EnhancedFor {
-            var_type, var_name, ..
-        } => {
-            let shape = local_shape_or_storage_default(ctx, var_name, var_type);
-            env.insert_local_shape(var_name.clone(), shape);
-        }
-        Stmt::Try { body, .. } => {
-            for stmt in &body.statements {
-                learn_stmt_shapes(stmt, env, ctx);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn local_shape_or_storage_default(
-    ctx: LowerCtx,
-    local_name: &str,
-    fallback: &JavaType,
-) -> RustSlotShape {
-    ctx.signatures
-        .local_shape(ctx.current_local_shapes, local_name)
-        .cloned()
-        .unwrap_or_else(|| RustSlotShape::for_storage(fallback.clone()))
-}
-
-fn assignment_slot_for_target(
-    target: &Expr,
-    env: &TypeEnv,
-    ctx: LowerCtx,
-) -> crate::coercion::Slot {
-    infer_assignment_target_shape_with_context(
-        target,
-        env,
-        ExprShapeContext {
-            signatures: Some(ctx.signatures),
-            representations: Some(ctx.representations),
-        },
-    )
-    .map(crate::coercion::Slot::Assignment)
-    .unwrap_or(crate::coercion::Slot::Value)
 }

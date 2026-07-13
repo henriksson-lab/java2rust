@@ -1,4 +1,6 @@
-use new_java2rust::java_ir::{ConstructorInvocationKind, Expr, Member, Stmt, UnaryOp};
+use new_java2rust::java_ir::{
+    ConstructorInvocationKind, Expr, JavaType, Member, Modifier, Stmt, UnaryOp, WildcardBound,
+};
 use new_java2rust::parser::parse_java_source;
 
 fn fixture(path: &str) -> String {
@@ -161,12 +163,46 @@ fn parses_classic_for_loop() {
 }
 
 #[test]
-fn emits_syntax_based_wildcard_and_throws_diagnostics() {
+fn parses_wildcard_bounds_as_structured_types() {
     let wildcard = parse_java_source(&fixture("05-types/WildcardBounds.java"));
-    assert!(wildcard.diagnostics.has_code("unsupported_wildcard"));
-
-    let checked = parse_java_source(&fixture("06-stdlib/MultiCatch.java"));
-    assert!(checked.diagnostics.has_code("unsupported_exceptions"));
+    assert!(!wildcard.diagnostics.has_code("unsupported_wildcard"));
+    let ty = &wildcard.program.types[0];
+    let read_extends = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "readExtends" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(
+        &read_extends.params[0].ty,
+        JavaType::Named { name, args }
+            if name == "List"
+                && matches!(
+                    args.as_slice(),
+                    [JavaType::Wildcard(Some(WildcardBound::Extends(bound)))]
+                        if matches!(bound.as_ref(), JavaType::Named { name, .. } if name == "Number")
+                )
+    ));
+    let write_super = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "writeSuper" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(
+        &write_super.params[0].ty,
+        JavaType::Named { name, args }
+            if name == "List"
+                && matches!(
+                    args.as_slice(),
+                    [JavaType::Wildcard(Some(WildcardBound::Super(bound)))]
+                        if matches!(bound.as_ref(), JavaType::Named { name, .. } if name == "Integer")
+                )
+    ));
 }
 
 #[test]
@@ -187,6 +223,8 @@ fn parses_switch_statement_cases() {
 #[test]
 fn parses_try_catch_finally_statement() {
     let parsed = parse_java_source(&fixture("06-stdlib/TryCatchFinally.java"));
+    assert!(!parsed.diagnostics.has_code("unsupported_exceptions"));
+    assert!(!parsed.diagnostics.has_code("unsupported_finally"));
     let method = first_method(&parsed.program.types[0]);
     assert!(
         method
@@ -204,6 +242,74 @@ fn parses_try_catch_finally_statement() {
                 } if catches.len() == 1
             ))
     );
+}
+
+#[test]
+fn parses_multi_catch_types() {
+    let parsed = parse_java_source(&fixture("06-stdlib/MultiCatch.java"));
+    assert!(!parsed.diagnostics.has_code("unsupported_exceptions"));
+    let method = first_method(&parsed.program.types[0]);
+    let try_stmt = method
+        .body
+        .as_ref()
+        .unwrap()
+        .statements
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::Try { catches, .. } => catches.first(),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(try_stmt.name, "ex");
+    assert_eq!(
+        try_stmt.types,
+        vec![
+            JavaType::Named {
+                name: "NumberFormatException".to_string(),
+                args: Vec::new()
+            },
+            JavaType::Named {
+                name: "NullPointerException".to_string(),
+                args: Vec::new()
+            }
+        ]
+    );
+}
+
+#[test]
+fn parses_try_with_resources_declarations() {
+    let parsed = parse_java_source(&fixture("06-stdlib/TryWithResources.java"));
+    let method = first_method(&parsed.program.types[0]);
+    let resources = method
+        .body
+        .as_ref()
+        .unwrap()
+        .statements
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::Try { resources, .. } => Some(resources),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(resources.len(), 2);
+    assert!(matches!(
+        &resources[0],
+        Stmt::VarDecl {
+            ty: JavaType::Named { name, .. },
+            name: resource_name,
+            initializer: Some(Expr::Call { name: method, .. })
+        } if name == "BufferedReader" && resource_name == "reader" && method == "newBufferedReader"
+    ));
+    assert!(matches!(
+        &resources[1],
+        Stmt::VarDecl {
+            ty: JavaType::Named { name, .. },
+            name: resource_name,
+            initializer: Some(Expr::Call { name: method, .. })
+        } if name == "Closeable" && resource_name == "audit" && method == "open"
+    ));
 }
 
 #[test]
@@ -227,6 +333,25 @@ fn parses_interface_members_and_implements_list() {
 
     let class = &parsed.program.types[1];
     assert_eq!(class.implements, vec!["Named"]);
+}
+
+#[test]
+fn parses_sealed_interface_permits_list() {
+    let parsed = parse_java_source(
+        r#"
+sealed interface Expr permits Add, Num {}
+final class Add implements Expr {}
+final class Num implements Expr {}
+"#,
+    );
+    let interface = &parsed.program.types[0];
+
+    assert_eq!(interface.name, "Expr");
+    assert!(interface.modifiers.contains(&Modifier::Sealed));
+    assert_eq!(
+        interface.permits,
+        vec!["Add".to_string(), "Num".to_string()]
+    );
 }
 
 #[test]
@@ -270,6 +395,29 @@ fn parses_constructor_delegation() {
         })
         .unwrap();
     assert!(constructor.params.is_empty());
+}
+
+#[test]
+fn parses_super_constructor_invocation_without_parser_diagnostic() {
+    let parsed = parse_java_source(&fixture("04-objects/InheritanceAndSuper.java"));
+    assert!(!parsed.diagnostics.has_code("unsupported_constructor_super"));
+    let constructor = parsed.program.types[1]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Constructor(constructor) => Some(constructor),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(matches!(
+        constructor.body.as_ref().unwrap().statements.as_slice(),
+        [Stmt::ConstructorInvocation {
+            kind: ConstructorInvocationKind::Super,
+            args,
+            ..
+        }] if matches!(args.as_slice(), [Expr::Var(name)] if name == "count")
+    ));
 }
 
 #[test]
@@ -414,10 +562,14 @@ fn collect_stmt_fallbacks(stmt: &Stmt, out: &mut Vec<String>) {
             }
         }
         Stmt::Try {
+            resources,
             body,
             catches,
             finally_block,
         } => {
+            for resource in resources {
+                collect_stmt_fallbacks(resource, out);
+            }
             collect_block_fallbacks(body, out);
             for catch in catches {
                 collect_block_fallbacks(&catch.body, out);
@@ -548,11 +700,15 @@ fn stmt_has_unary(stmt: &Stmt, op: UnaryOp) -> bool {
                     .any(|case| case.statements.iter().any(|stmt| stmt_has_unary(stmt, op)))
         }
         Stmt::Try {
+            resources,
             body,
             catches,
             finally_block,
         } => {
-            block_has_unary(body, op)
+            resources
+                .iter()
+                .any(|resource| stmt_has_unary(resource, op))
+                || block_has_unary(body, op)
                 || catches.iter().any(|catch| block_has_unary(&catch.body, op))
                 || finally_block
                     .as_ref()
@@ -646,11 +802,13 @@ fn stmt_has_lambda(stmt: &Stmt) -> bool {
                     .any(|case| case.statements.iter().any(stmt_has_lambda))
         }
         Stmt::Try {
+            resources,
             body,
             catches,
             finally_block,
         } => {
-            block_has_lambda(body)
+            resources.iter().any(stmt_has_lambda)
+                || block_has_lambda(body)
                 || catches.iter().any(|catch| block_has_lambda(&catch.body))
                 || finally_block.as_ref().is_some_and(block_has_lambda)
         }

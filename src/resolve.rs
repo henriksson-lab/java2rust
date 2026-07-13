@@ -2,13 +2,14 @@ use std::collections::{HashMap, HashSet};
 
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
-    Capture, CaptureFacts, CaptureOrigin, CaptureOwner, CaptureOwnerKind, CaptureSource, FactSet,
-    NodeId,
+    Capture, CaptureFacts, CaptureOrigin, CaptureOwner, CaptureOwnerKind, CaptureSource,
+    ClosedHierarchyFact, FactProvenance, FactSet, NodeId, ObjectSafetyFact, ObjectSafetyViolation,
+    TypeCapabilityOverride,
 };
 use crate::java_ir::{
     Block, CallKind, ConstructorDecl, ConstructorInvocationKind, Expr, JavaType, LambdaBody,
     Member, MethodDecl, Modifier, Param, Program, ResolvedCall, ResolvedConstructor, Stmt,
-    TypeDecl,
+    TypeDecl, TypeKind,
 };
 use crate::types::{TypeEnv, infer_expr_type};
 
@@ -28,7 +29,7 @@ pub fn resolve_program(program: &Program, mut diagnostics: DiagnosticBag) -> Res
     for ty in &mut program.types {
         resolve_type_calls(ty, &symbols, &mut diagnostics);
     }
-    let facts = collect_capture_facts(&program);
+    let facts = collect_resolved_facts(&program);
     ResolvedProgram {
         program,
         diagnostics,
@@ -412,10 +413,23 @@ fn resolve_stmt_calls(
             }
         }
         Stmt::Try {
+            resources,
             body,
             catches,
             finally_block,
         } => {
+            for resource in resources {
+                resolve_stmt_calls(
+                    resource,
+                    current_type,
+                    symbols,
+                    methods,
+                    constructors,
+                    env,
+                    diagnostics,
+                );
+                env.learn_stmt(resource);
+            }
             resolve_block_calls(
                 body,
                 current_type,
@@ -801,6 +815,12 @@ fn primitive_rank(primitive: crate::java_ir::PrimitiveType) -> u8 {
     }
 }
 
+fn collect_resolved_facts(program: &Program) -> FactSet {
+    let mut facts = collect_capture_facts(program);
+    collect_type_capability_facts(program, &mut facts);
+    facts
+}
+
 fn collect_capture_facts(program: &Program) -> FactSet {
     let mut analyzer = CaptureAnalyzer::default();
     for ty in &program.types {
@@ -811,6 +831,167 @@ fn collect_capture_facts(program: &Program) -> FactSet {
             owners: analyzer.owners,
         },
         ..FactSet::default()
+    }
+}
+
+fn collect_type_capability_facts(program: &Program, facts: &mut FactSet) {
+    for ty in &program.types {
+        collect_type_capability_facts_for_type(ty, facts);
+    }
+}
+
+fn collect_type_capability_facts_for_type(ty: &TypeDecl, facts: &mut FactSet) {
+    let object_safety = (ty.kind == TypeKind::Interface).then(|| interface_object_safety_fact(ty));
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: ty.name.clone(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: ty
+                .implements
+                .iter()
+                .map(|name| JavaType::Named {
+                    name: name.clone(),
+                    args: Vec::new(),
+                })
+                .collect(),
+            extends: ty.extends.as_ref().map(|name| JavaType::Named {
+                name: name.clone(),
+                args: Vec::new(),
+            }),
+            final_type: Some(ty.modifiers.contains(&Modifier::Final)),
+            object_safe_trait: object_safety.as_ref().map(|fact| fact.object_safe),
+            provenance: FactProvenance::ParsedSource,
+        });
+    if let Some(object_safety) = object_safety {
+        facts.object_safety_facts.push(object_safety);
+    }
+    if ty.modifiers.contains(&Modifier::Sealed) && !ty.permits.is_empty() {
+        facts.closed_hierarchy_facts.push(ClosedHierarchyFact {
+            type_name: ty.name.clone(),
+            closed: true,
+            provenance: FactProvenance::ParsedSource,
+        });
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_type_capability_facts_for_type(nested, facts);
+        }
+    }
+}
+
+fn interface_object_safety_fact(ty: &TypeDecl) -> ObjectSafetyFact {
+    let mut violations = Vec::new();
+    collect_interface_object_safety_violations(ty, &mut violations);
+    ObjectSafetyFact {
+        type_name: ty.name.clone(),
+        object_safe: violations.is_empty(),
+        violations,
+        provenance: FactProvenance::ParsedSource,
+    }
+}
+
+fn collect_interface_object_safety_violations(
+    ty: &TypeDecl,
+    violations: &mut Vec<ObjectSafetyViolation>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Method(method) => {
+                push_interface_method_object_safety_violations(&ty.name, method, violations)
+            }
+            Member::Type(nested) => collect_interface_object_safety_violations(nested, violations),
+            Member::Unsupported { .. } => violations.push(ObjectSafetyViolation::UnsupportedMember),
+            Member::Field(field) => violations.push(ObjectSafetyViolation::FieldMember {
+                field_name: field.name.clone(),
+            }),
+            Member::Constructor(_) => violations.push(ObjectSafetyViolation::ConstructorMember),
+        }
+    }
+}
+
+fn push_interface_method_object_safety_violations(
+    interface_name: &str,
+    method: &MethodDecl,
+    violations: &mut Vec<ObjectSafetyViolation>,
+) {
+    if method.modifiers.contains(&Modifier::Static) {
+        violations.push(ObjectSafetyViolation::StaticMethod {
+            method_name: method.name.clone(),
+        });
+    }
+    match java_type_self_reference_kind(&method.return_type, interface_name) {
+        Some(InterfaceSelfReferenceKind::Direct) => {
+            violations.push(ObjectSafetyViolation::SelfReferentialReturn {
+                method_name: method.name.clone(),
+            });
+        }
+        Some(InterfaceSelfReferenceKind::Nested) => {
+            violations.push(ObjectSafetyViolation::NestedSelfReferentialReturn {
+                method_name: method.name.clone(),
+            });
+        }
+        None => {}
+    }
+    for param in &method.params {
+        match java_type_self_reference_kind(&param.ty, interface_name) {
+            Some(InterfaceSelfReferenceKind::Direct) => {
+                violations.push(ObjectSafetyViolation::SelfReferentialParameter {
+                    method_name: method.name.clone(),
+                    param_name: param.name.clone(),
+                });
+            }
+            Some(InterfaceSelfReferenceKind::Nested) => {
+                violations.push(ObjectSafetyViolation::NestedSelfReferentialParameter {
+                    method_name: method.name.clone(),
+                    param_name: param.name.clone(),
+                });
+            }
+            None => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterfaceSelfReferenceKind {
+    Direct,
+    Nested,
+}
+
+fn java_type_self_reference_kind(
+    java_ty: &JavaType,
+    type_name: &str,
+) -> Option<InterfaceSelfReferenceKind> {
+    match java_ty {
+        JavaType::Named { name, args } => {
+            if name == type_name {
+                Some(InterfaceSelfReferenceKind::Direct)
+            } else if args
+                .iter()
+                .any(|arg| java_type_self_reference_kind(arg, type_name).is_some())
+            {
+                Some(InterfaceSelfReferenceKind::Nested)
+            } else {
+                None
+            }
+        }
+        JavaType::Array(inner) => java_type_self_reference_kind(inner, type_name)
+            .map(|_| InterfaceSelfReferenceKind::Nested),
+        JavaType::Wildcard(Some(bound)) => match bound {
+            crate::java_ir::WildcardBound::Extends(bound)
+            | crate::java_ir::WildcardBound::Super(bound) => {
+                java_type_self_reference_kind(bound, type_name)
+                    .map(|_| InterfaceSelfReferenceKind::Nested)
+            }
+        },
+        JavaType::Void
+        | JavaType::Primitive(_)
+        | JavaType::String
+        | JavaType::Wildcard(None)
+        | JavaType::Unknown(_) => None,
     }
 }
 
@@ -1057,10 +1238,14 @@ impl CaptureAnalyzer {
                 }
             }
             Stmt::Try {
+                resources,
                 body,
                 catches,
                 finally_block,
             } => {
+                for resource in resources {
+                    self.analyze_stmt(resource, ctx);
+                }
                 self.analyze_block(body, &mut ctx.clone(), None);
                 for catch in catches {
                     let mut catch_ctx = ctx.clone();
@@ -1272,6 +1457,7 @@ impl CaptureAnalyzer {
             modifiers: Vec::new(),
             extends: None,
             implements: Vec::new(),
+            permits: Vec::new(),
             members: members.to_vec(),
             span: Default::default(),
         };

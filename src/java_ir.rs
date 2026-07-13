@@ -21,6 +21,7 @@ pub struct TypeDecl {
     pub modifiers: Vec<Modifier>,
     pub extends: Option<String>,
     pub implements: Vec<String>,
+    pub permits: Vec<String>,
     pub members: Vec<Member>,
     pub span: Span,
 }
@@ -87,6 +88,7 @@ pub enum Modifier {
     Private,
     Static,
     Final,
+    Sealed,
     Abstract,
 }
 
@@ -164,6 +166,7 @@ pub enum Stmt {
         cases: Vec<SwitchCase>,
     },
     Try {
+        resources: Vec<Stmt>,
         body: Block,
         catches: Vec<CatchClause>,
         finally_block: Option<Block>,
@@ -220,6 +223,11 @@ pub enum Expr {
     Super,
     FieldAccess(Box<Expr>, String),
     ArrayAccess(Box<Expr>, Box<Expr>),
+    ArrayCreation {
+        element_type: JavaType,
+        dimensions: Vec<Expr>,
+    },
+    ArrayInitializer(Vec<Expr>),
     Binary {
         op: BinaryOp,
         left: Box<Expr>,
@@ -327,6 +335,7 @@ pub enum BinaryOp {
 pub enum UnaryOp {
     Not,
     Neg,
+    Pos,
     PreInc,
     PreDec,
     PostInc,

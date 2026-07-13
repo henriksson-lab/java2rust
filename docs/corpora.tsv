@@ -1,0 +1,19 @@
+name	kind	local_path	java_source_path	java_files	recommended_gate_tier	notes
+old-golden-snippets	snippet	/home/mahogny/github/claude/java2rust/tests/corpus	/home/mahogny/github/claude/java2rust/tests/corpus	42	0	Old transpiler self-contained golden corpus with expected Rust outputs.
+current-fixtures	synthetic	/data/henriksson/github/claude/new_java2rust/examples/java	/data/henriksson/github/claude/new_java2rust/examples/java	38	0	Current minimized design fixtures; not a real code corpus.
+trimmomatic	real	/home/mahogny/github/claude/java2rust/testdata/trimmomatic	/home/mahogny/github/claude/java2rust/testdata/trimmomatic/src/main/java	68	1	Small real bioinformatics corpus; old repo tracks it in docs/CORPORA.tsv.
+jaligner	real	/home/mahogny/github/claude/java2rust/testdata/jaligner	/home/mahogny/github/claude/java2rust/testdata/jaligner/src/jaligner	29	1	Small alignment corpus from old SUM10 gate.
+jahmm	real	/home/mahogny/github/claude/java2rust/testdata/jahmm	/home/mahogny/github/claude/java2rust/testdata/jahmm/src	102	1	Small HMM corpus from old SUM10 gate.
+varscan	real	/home/mahogny/github/claude/java2rust/testdata/varscan	/home/mahogny/github/claude/java2rust/testdata/varscan	18	1	Small variant-calling corpus from old SUM10 gate.
+htsjdk-fastq	real-slice	/home/mahogny/github/claude/java2rust/testdata/htsjdk_fastq	/home/mahogny/github/claude/java2rust/testdata/htsjdk_fastq	8	1	Focused htsjdk FASTQ slice from old SUM10 gate.
+htsjdk-vcf	real-slice	/home/mahogny/github/claude/java2rust/testdata/htsjdk_vcf	/home/mahogny/github/claude/java2rust/testdata/htsjdk_vcf	32	1	Focused htsjdk VCF slice from old SUM10 gate.
+biojava-aaprop	real-slice	/home/mahogny/github/claude/java2rust/testdata/biojava_aaprop	/home/mahogny/github/claude/java2rust/testdata/biojava_aaprop	33	1	Focused BioJava amino-acid property slice from old SUM10 gate.
+biojava-alignment	real-slice	/home/mahogny/github/claude/java2rust/testdata/biojava_alignment	/home/mahogny/github/claude/java2rust/testdata/biojava_alignment	53	1	Focused BioJava alignment slice from old SUM10 gate.
+jhlabs	real	/home/mahogny/github/claude/java2rust/testdata/jhlabs	/home/mahogny/github/claude/java2rust/testdata/jhlabs	203	1	Image-processing corpus from old SUM10 gate.
+jsoup	real	/home/mahogny/github/claude/java2rust/testdata/jsoup	/home/mahogny/github/claude/java2rust/testdata/jsoup/src/main/java	195	2	Dedicated old-repo corpus check; useful after tier-1 parser/type gates.
+fastqc	real	/home/mahogny/github/claude/java2rust/testdata/FastQC	/home/mahogny/github/claude/java2rust/testdata/FastQC	156	2	Real bioinformatics tool; includes bundled dependency surfaces.
+bioformats	real	/home/mahogny/github/claude/java2rust/testdata/bioformats	/home/mahogny/github/claude/java2rust/testdata/bioformats	667	3	Larger dedicated old-repo corpus check.
+picard	real	/home/mahogny/github/claude/java2rust/testdata/picard	/home/mahogny/github/claude/java2rust/testdata/picard/src/main/java	737	3	Larger bioinformatics corpus with htsjdk-style dependency pressure.
+htsjdk	real	/home/mahogny/github/claude/java2rust/testdata/htsjdk	/home/mahogny/github/claude/java2rust/testdata/htsjdk/src/main/java	1222	3	Large library corpus; important for external facts and generics.
+jts	real	/home/mahogny/github/claude/java2rust/testdata/jts	/home/mahogny/github/claude/java2rust/testdata/jts/modules	1435	3	Large geometry corpus; useful for object model and numeric pressure.
+gatk	real	/home/mahogny/github/claude/java2rust/testdata/gatk	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java	2500	4	Stress corpus; keep as late gate until dependency facts and object model are mature.
