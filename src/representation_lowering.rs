@@ -1,5 +1,6 @@
 use crate::emit::emit_type;
 use crate::exception_lowering::exception_result_type;
+use crate::exception_plan::{MethodExceptionPlan, ProgramExceptionPlan};
 use crate::facts::FactSet;
 use crate::java_ir::{Member, MethodDecl, Modifier, Program, TypeDecl, TypeKind};
 use crate::representation::{ObjectRepresentation, RepresentationPlan};
@@ -57,17 +58,30 @@ pub fn type_emission_for_with_facts(
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> RepresentationTypeEmission {
+    type_emission_for_with_facts_and_exceptions(
+        representations,
+        ty,
+        signatures,
+        facts,
+        &ProgramExceptionPlan::default(),
+    )
+}
+
+pub fn type_emission_for_with_facts_and_exceptions(
+    representations: &RepresentationPlan,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+) -> RepresentationTypeEmission {
     let Some(representation) = representations.type_representation(&ty.name) else {
         return RepresentationTypeEmission::LowerAsConcreteStruct;
     };
     match &representation.representation {
         ObjectRepresentation::ConcreteStruct => RepresentationTypeEmission::LowerAsConcreteStruct,
-        ObjectRepresentation::DynTrait { trait_name }
-        | ObjectRepresentation::BoxedDynTrait { trait_name } => {
-            RepresentationTypeEmission::RawRustItem(trait_item_for_type(
-                ty, trait_name, signatures, facts,
-            ))
-        }
+        ObjectRepresentation::DynTrait { trait_name } => RepresentationTypeEmission::RawRustItem(
+            trait_item_for_type(ty, trait_name, signatures, facts, exceptions),
+        ),
         ObjectRepresentation::ClosedEnum {
             enum_name,
             variants,
@@ -85,6 +99,40 @@ pub fn type_emission_for_with_facts(
             "pub type {} = Box<dyn std::any::Any>;",
             ty.name
         )),
+    }
+}
+
+pub fn raw_type_item_for_with_facts(
+    representations: &RepresentationPlan,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+) -> Option<String> {
+    raw_type_item_for_with_facts_and_exceptions(
+        representations,
+        ty,
+        signatures,
+        facts,
+        &ProgramExceptionPlan::default(),
+    )
+}
+
+pub fn raw_type_item_for_with_facts_and_exceptions(
+    representations: &RepresentationPlan,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+) -> Option<String> {
+    match type_emission_for_with_facts_and_exceptions(
+        representations,
+        ty,
+        signatures,
+        facts,
+        exceptions,
+    ) {
+        RepresentationTypeEmission::RawRustItem(item) => Some(item),
+        RepresentationTypeEmission::LowerAsConcreteStruct => None,
     }
 }
 
@@ -110,6 +158,24 @@ pub fn trait_impl_emissions_for_type_with_facts(
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> Vec<String> {
+    trait_impl_emissions_for_type_with_facts_and_exceptions(
+        representations,
+        program,
+        ty,
+        signatures,
+        facts,
+        &ProgramExceptionPlan::default(),
+    )
+}
+
+pub fn trait_impl_emissions_for_type_with_facts_and_exceptions(
+    representations: &RepresentationPlan,
+    program: &Program,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+) -> Vec<String> {
     if ty.kind != TypeKind::Class {
         return Vec::new();
     }
@@ -124,6 +190,7 @@ pub fn trait_impl_emissions_for_type_with_facts(
                 &trait_name,
                 signatures,
                 facts,
+                exceptions,
             ))
         })
         .collect()
@@ -134,12 +201,19 @@ fn trait_item_for_type(
     trait_name: &str,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
 ) -> String {
     let methods = ty
         .members
         .iter()
         .filter_map(|member| match member {
-            Member::Method(method) => Some(trait_method_signature(ty, method, signatures, facts)),
+            Member::Method(method) => Some(trait_method_signature(
+                ty,
+                method,
+                signatures,
+                facts,
+                exceptions.method_plan(ty, method),
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -156,6 +230,7 @@ fn trait_impl_for_type(
     trait_name: &str,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
 ) -> String {
     let methods = interface
         .members
@@ -167,6 +242,7 @@ fn trait_impl_for_type(
                 interface_method,
                 signatures,
                 facts,
+                exceptions.method_plan(interface, interface_method),
             )),
             _ => None,
         })
@@ -188,8 +264,15 @@ fn trait_impl_method(
     interface_method: &MethodDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    interface_exceptions: MethodExceptionPlan,
 ) -> String {
-    let signature = trait_method_signature(interface, interface_method, signatures, facts);
+    let signature = trait_method_signature(
+        interface,
+        interface_method,
+        signatures,
+        facts,
+        interface_exceptions,
+    );
     let candidates = implementing_method_candidates(ty, interface_method);
     if candidates.is_empty() {
         return trait_impl_method_message_policy(
@@ -308,6 +391,7 @@ fn trait_method_signature(
     method: &MethodDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    exceptions: MethodExceptionPlan,
 ) -> String {
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
@@ -324,9 +408,10 @@ fn trait_method_signature(
             emit_type(&rust_type_for_slot_with_facts(&param.shape, facts))
         )
     }));
-    let return_type = trait_method_return_type(method, signatures, ty, facts)
-        .map(|ty| format!(" -> {}", emit_type(&ty)))
-        .unwrap_or_default();
+    let return_type =
+        trait_method_return_type_with_exception_plan(method, signatures, ty, facts, exceptions)
+            .map(|ty| format!(" -> {}", emit_type(&ty)))
+            .unwrap_or_default();
     let rust_name = method
         .rust_name
         .clone()
@@ -334,18 +419,19 @@ fn trait_method_signature(
     format!("    fn {rust_name}({}){return_type};", params.join(", "))
 }
 
-fn trait_method_return_type(
+fn trait_method_return_type_with_exception_plan(
     method: &MethodDecl,
     signatures: &SignaturePlan,
     ty: &TypeDecl,
     facts: &FactSet,
+    exceptions: MethodExceptionPlan,
 ) -> Option<RustType> {
     let rust_return = signatures
         .required_method_signature(ty, method)
         .return_shape
         .as_ref()
         .map(|shape| rust_type_for_slot_with_facts(shape, facts));
-    if facts.method_has_thrown_exceptions(&ty.name, &method.name) {
+    if exceptions.wrap_returns_in_result {
         Some(exception_result_type(rust_return.unwrap_or(RustType::Unit)))
     } else {
         rust_return
@@ -360,8 +446,7 @@ fn dyn_trait_name_for(
         .type_representation(interface_name)?
         .representation
     {
-        ObjectRepresentation::DynTrait { trait_name }
-        | ObjectRepresentation::BoxedDynTrait { trait_name } => Some(trait_name.clone()),
+        ObjectRepresentation::DynTrait { trait_name } => Some(trait_name.clone()),
         _ => None,
     }
 }

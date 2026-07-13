@@ -1,4 +1,5 @@
 use crate::exception_lowering::exception_result_type;
+use crate::exception_plan::MethodExceptionPlan;
 use crate::facts::FactSet;
 use crate::java_ir::{ConstructorDecl, Member, MethodDecl, Modifier, TypeDecl};
 use crate::rust_ir::{
@@ -108,13 +109,33 @@ pub fn method_function_shell_with_facts(
     body: Vec<RustStmt>,
     facts: &FactSet,
 ) -> RustFunction {
+    method_function_shell_with_facts_and_exception_plan(
+        ty,
+        method,
+        signatures,
+        body,
+        facts,
+        MethodExceptionPlan {
+            wrap_returns_in_result: false,
+        },
+    )
+}
+
+pub fn method_function_shell_with_facts_and_exception_plan(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    body: Vec<RustStmt>,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+) -> RustFunction {
     RustFunction {
         name: method
             .rust_name
             .clone()
             .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
         params: method_params(ty, method, signatures, facts),
-        return_type: method_return_type_with_exceptions(ty, method, signatures, facts),
+        return_type: method_return_type_with_exceptions(ty, method, signatures, facts, exceptions),
         body,
         is_pub: true,
         receiver: lower_receiver(method_receiver(ty, method, signatures)),
@@ -219,8 +240,9 @@ fn method_return_type_with_exceptions(
     method: &MethodDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    exceptions: MethodExceptionPlan,
 ) -> Option<RustType> {
-    if facts.method_has_thrown_exceptions(&ty.name, &method.name) {
+    if exceptions.wrap_returns_in_result {
         Some(exception_result_type(
             method_return_type_with_facts(ty, method, signatures, facts).unwrap_or(RustType::Unit),
         ))

@@ -1,25 +1,36 @@
 use std::collections::HashSet;
 
 use new_java2rust::access_lowering::{lower_bare_name, lower_field_access};
+use new_java2rust::array_lowering::render_array_expr;
+use new_java2rust::array_plan::{ArrayExprPlan, plan_array_expr};
 use new_java2rust::call_lowering::{
     apply_call_target, apply_new_target, apply_new_target_with_facts,
 };
 use new_java2rust::call_plan::{
-    CallTargetPlan, TrivialAccessorCallPlan, plan_call_target, plan_new_target,
-    plan_trivial_accessor_call, resolved_call_arg_shapes, resolved_constructor_arg_shapes,
+    ArgumentLoweringPlan, CallExprPlan, CallStatementPlan, CallTargetPlan, TrivialAccessorCallPlan,
+    plan_call_arguments, plan_call_expr, plan_call_statement, plan_call_target,
+    plan_constructor_arguments, plan_new_target, plan_trivial_accessor_call,
+    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
 };
-use new_java2rust::coercion::LoweredType;
+use new_java2rust::coercion::Coercion;
 use new_java2rust::constructor_plan::{
     ConstructorDelegationPlan, ConstructorFieldValuePlan, plan_constructor_delegation,
     plan_constructor_field_values,
 };
 use new_java2rust::conversion_lowering::{apply_cast_conversion, apply_instanceof};
-use new_java2rust::conversion_plan::{plan_cast_conversion, plan_instanceof};
+use new_java2rust::conversion_plan::{
+    InstanceOfCheck, LoweredType, plan_cast_conversion, plan_instanceof,
+};
+use new_java2rust::diagnostics::Severity;
+use new_java2rust::effective_facts::EffectiveFacts;
 use new_java2rust::exception_lowering::{
     exception_expr_from_new, exception_result_type, fallback_exception_expr,
     java_exception_support_item, new_exception_expr, return_stmt, throw_stmt,
 };
-use new_java2rust::exception_plan::{ThrowExprPlan, exception_class_name, plan_throw_expr};
+use new_java2rust::exception_plan::{
+    JavaExceptionSupportPlan, MethodExceptionPlan, ThrowExprPlan, exception_class_name,
+    plan_java_exception_support, plan_method_exceptions, plan_program_exceptions, plan_throw_expr,
+};
 use new_java2rust::expr_render::{
     binary_expr, indexed_expr, literal_expr, raw_expr, super_expr, ternary_expr, this_expr,
 };
@@ -30,16 +41,18 @@ use new_java2rust::expr_shape::{
 };
 use new_java2rust::external_facts::parse_external_facts;
 use new_java2rust::facts::{
-    AccessorInlinePolicy, ClosedHierarchyFact, ExternalApiRole, FactProvenance, FactSet,
-    FieldKey as FactFieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyEdgeFact,
-    HierarchyOverride, HierarchyStrategy, MethodEffectFact, MethodKey as FactMethodKey,
-    NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability, ReceiverMutabilityFact,
-    TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride,
+    AccessorInlinePolicy, ClosedHierarchyFact, DispatchRequirementFact, DispatchRequirementKind,
+    ExternalApiRole, FactProvenance, FactSet, FieldKey as FactFieldKey, FieldNullabilityFact,
+    FieldNullabilityProvenance, HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy,
+    MethodEffectFact, MethodKey as FactMethodKey, NullabilityState, ObjectSafetyViolation,
+    OwnedRecoveryCapability, ReceiverMutabilityFact, TrivialAccessorFact, TrivialAccessorKind,
+    TypeCapabilityOverride,
 };
 use new_java2rust::item_assembly::{
     constructor_default_field_value, constructor_function_shell, constructor_return_body,
     delegating_constructor_return_body, impl_item_for_type, method_function_shell,
-    method_function_shell_with_facts, raw_item, struct_item_for_type,
+    method_function_shell_with_facts, method_function_shell_with_facts_and_exception_plan,
+    raw_item, struct_item_for_type,
 };
 use new_java2rust::java_ir::{
     ConstructorInvocationKind, Expr, JavaType, Literal, Member, Modifier, PrimitiveType, Stmt,
@@ -47,7 +60,9 @@ use new_java2rust::java_ir::{
 };
 use new_java2rust::literal_lowering::literal_to_rust;
 use new_java2rust::loop_lowering::{assemble_for_loop, continue_with_updates};
+use new_java2rust::loop_plan::{ForBodyStmtPlan, plan_for_body_stmt};
 use new_java2rust::lower::{lower_program_with_facts, lower_program_with_plans};
+use new_java2rust::lowering_diagnostics::collect_lowering_diagnostic_plans;
 use new_java2rust::operator_lowering::{binary_op_to_rust, lower_unary_expr, stream_unary_prefix};
 use new_java2rust::parser::{parse_expr, parse_java_source};
 use new_java2rust::representation::{
@@ -57,25 +72,34 @@ use new_java2rust::representation::{
     RepresentationProvenance, TypeRepresentation, anonymous_class_diagnostic_policy,
     closed_enum_fact_policy, closed_enum_inference_policy, hierarchy_edge_diagnostic_policy,
     hierarchy_override_application_policy, hierarchy_override_validation_policy,
-    object_representation_policy, object_safety_fact_policy, plan_representations,
-    representation_dispatch_policy, representation_hierarchy_fact_policy,
+    object_hierarchy_context, object_representation_policy, object_safety_fact_policy,
+    plan_representations, representation_dispatch_policy, representation_hierarchy_fact_policy,
 };
 use new_java2rust::representation_lowering::{
     RepresentationTypeEmission, TraitImplMethodCompatibilityError, TraitImplMethodFallbackPolicy,
-    TraitImplMethodMessagePolicy, trait_impl_emissions_for_type,
+    TraitImplMethodMessagePolicy, raw_type_item_for_with_facts, trait_impl_emissions_for_type,
     trait_impl_emissions_for_type_with_facts, trait_impl_method_message_policy, type_emission_for,
     type_emission_for_with_facts,
 };
 use new_java2rust::resolve::resolve_program;
+use new_java2rust::rewrite::{
+    AssignmentConditionNormalizedShape, AssignmentInConditionPlan, ControlFlowRewritePlan,
+    MethodControlFlowPlan, NullTestKind, TailRecursiveLoopPlan, TailRecursiveNormalizedShape,
+    control_flow_rewrite_diagnostics,
+};
 use new_java2rust::rust_ir::{RustExpr, RustItem, RustReceiver, RustStmt, RustType};
 use new_java2rust::shape_projection::{
-    DispatchProjectionPolicy, EscapingRoleDispatchPolicy, SequenceElementProjectionPolicy,
+    DispatchProjectionPolicy, DispatchRequirementProjectionPolicy,
+    DispatchRequirementProjectionRole, EscapingRoleDispatchPolicy, SequenceElementProjectionPolicy,
     ShapeProjectionCapabilityPolicy, borrowed_string_content_shape, dispatch_projection_policy,
-    escaping_role_dispatch_policy, indexed_assignment_shape, indexed_assignment_shape_with_facts,
-    indexed_element_projection_policy, indexed_read_shape, indexed_read_shape_with_facts,
+    dispatch_requirement_projection_policy, escaping_role_dispatch_policy,
+    indexed_assignment_shape, indexed_assignment_shape_with_effective_facts,
+    indexed_assignment_shape_with_facts, indexed_element_projection_policy, indexed_read_shape,
+    indexed_read_shape_with_effective_facts, indexed_read_shape_with_facts,
     iteration_element_projection_policy, iteration_element_shape, param_shape_for_java_type,
     project_java_value_shape, return_shape_for_java_type, sequence_element_projection_policy,
-    shape_projection_capability_policy, storage_shape_for_java_type, value_shape_for_java_type,
+    shape_projection_capability_policy, shape_projection_capability_policy_with_effective_facts,
+    storage_shape_for_java_type, value_shape_for_java_type,
 };
 use new_java2rust::signature::{
     BindingBoundaryPolicy, ConstructorKey, ConstructorParamBoundaryPolicy, FieldBoundaryPolicy,
@@ -91,7 +115,8 @@ use new_java2rust::signature::{
     SignatureRequirementMerge, SignatureShapeRequest, SignatureSlotBaselinePolicy,
     SignatureSlotRole, SignatureViewRequirementPriorityPolicy, apply_signature_constraints,
     binding_boundary_policy, capability_diagnostics_for_signature_constraints,
-    collect_signature_constraints, conservative_boundary_constraints, constrained_receiver_plan,
+    collect_signature_constraints, conservative_boundary_constraints,
+    conservative_boundary_constraints_with_effective_facts, constrained_receiver_plan,
     constructor_param_boundary_policy, constructor_param_shape_constraints, field_boundary_policy,
     field_nullability_shape_policy, field_shape_constraints, field_shape_constraints_with_facts,
     field_shape_constraints_with_usage, local_shape_constraints, merge_dispatch_requirement_policy,
@@ -99,35 +124,50 @@ use new_java2rust::signature::{
     merge_storage_nullability_requirement_policy, merge_view_requirement_policy,
     method_param_boundary_policy, method_param_shape_constraints, method_return_boundary_policy,
     method_return_shape_constraints, receiver_constraints, receiver_constraints_with_facts,
-    receiver_constraints_with_usage, signature_boundary_constraints, signature_boundary_policy,
-    signature_boundary_representation_fact_policy, signature_boundary_representation_policy,
-    signature_capability_policy, signature_constraints_for_borrowed_content_policy,
+    receiver_constraints_with_usage, signature_boundary_constraints,
+    signature_boundary_constraints_with_effective_facts, signature_boundary_policy,
+    signature_boundary_policy_with_effective_facts, signature_boundary_representation_fact_policy,
+    signature_boundary_representation_fact_policy_with_effective_facts,
+    signature_boundary_representation_policy, signature_capability_policy,
+    signature_capability_policy_with_effective_facts,
+    signature_constraints_for_borrowed_content_policy,
     signature_dispatch_requirement_priority_policy, signature_fixpoint_iteration_budget,
     signature_fixpoint_saturation_policy, signature_member_api_boundary_policy,
-    signature_native_boundary_policy, signature_owned_recovery_capability_policy,
+    signature_native_boundary_policy, signature_native_boundary_policy_with_effective_facts,
+    signature_owned_recovery_capability_policy,
+    signature_owned_recovery_capability_policy_with_effective_facts,
     signature_owned_recovery_policy, signature_owned_recovery_policy_from_capability,
+    signature_owned_recovery_policy_with_effective_facts,
     signature_ownership_requirement_priority_policy, signature_shape_constraint_propagation_policy,
-    signature_slot_baseline_policy, signature_slot_constraint_propagation_policy,
+    signature_slot_baseline_policy, signature_slot_baseline_policy_with_effective_facts,
+    signature_slot_constraint_propagation_policy, signature_slot_dispatch_requirement_policy,
+    signature_slot_dispatch_requirement_policy_with_effective_facts,
     signature_view_requirement_priority_policy, solve_signature_constraints_to_fixpoint,
-    solve_signature_constraints_to_fixpoint_result, solve_signature_shape, solve_signatures,
-    solve_signatures_with_facts,
+    solve_signature_constraints_to_fixpoint_result, solve_signature_shape,
+    solve_signature_shape_with_facts, solve_signatures, solve_signatures_with_facts,
 };
 use new_java2rust::slot_policy::{
     BorrowedContentCapabilityPolicy, BorrowedContentPolicy, BorrowedContentTypePolicy,
     apply_borrowed_content_policy, borrowed_content_capability_policy,
-    borrowed_content_type_policy, borrowed_return_content_policy_from_param,
-    borrowed_return_shape_from_param, borrowed_return_shape_from_param_with_facts,
-    constructor_param_borrowed_content_policy, method_param_borrowed_content_policy,
+    borrowed_content_capability_policy_with_effective_facts, borrowed_content_type_policy,
+    borrowed_content_type_policy_with_effective_facts, borrowed_return_content_policy_from_param,
+    borrowed_return_content_policy_from_param_with_effective_facts,
+    borrowed_return_shape_from_param, borrowed_return_shape_from_param_with_effective_facts,
+    borrowed_return_shape_from_param_with_facts, constructor_param_borrowed_content_policy,
+    constructor_param_borrowed_content_policy_with_effective_facts,
+    method_param_borrowed_content_policy,
+    method_param_borrowed_content_policy_with_effective_facts,
     method_param_borrowed_content_policy_with_facts,
 };
 use new_java2rust::slot_render::{
     NativeJavaRustTypePolicy, NativeNamedJavaRustTypePolicy, SlotContentCapabilityPolicy,
     SlotDefaultPolicy, SlotDefaultValuePolicy, SlotNoDefaultMessagePolicy, SlotRustTypePolicy,
     SlotValueRustTypePolicy, default_expr_for_slot, default_expr_for_slot_with_facts,
-    native_java_rust_type_policy, native_named_java_rust_type_policy, rust_type_for_slot,
-    rust_type_for_slot_with_facts, slot_content_capability_policy, slot_default_policy,
-    slot_default_value_policy, slot_no_default_message_policy, slot_rust_type_policy,
-    slot_value_rust_type_policy,
+    native_java_rust_type_policy, native_java_rust_type_policy_with_effective_facts,
+    native_named_java_rust_type_policy, rust_type_for_slot, rust_type_for_slot_with_facts,
+    slot_content_capability_policy, slot_content_capability_policy_with_effective_facts,
+    slot_default_policy, slot_default_value_policy, slot_no_default_message_policy,
+    slot_rust_type_policy, slot_rust_type_policy_with_effective_facts, slot_value_rust_type_policy,
 };
 use new_java2rust::slot_shape::{
     DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, TypeCapabilities, ViewShape,
@@ -143,8 +183,9 @@ use new_java2rust::stream_lowering::{
 };
 use new_java2rust::stream_shape::{
     StreamSourceCapabilityPolicy, infer_stream_lambda_body_shape, infer_stream_map_to_int_shape,
-    infer_stream_source_element_shape, infer_stream_source_element_shape_with_facts,
-    stream_source_capability_policy,
+    infer_stream_source_element_shape, infer_stream_source_element_shape_with_effective_facts,
+    infer_stream_source_element_shape_with_facts, stream_source_capability_policy,
+    stream_source_capability_policy_with_effective_facts,
 };
 use new_java2rust::switch_lowering::{SwitchRenderCase, render_switch, switch_case_condition};
 use new_java2rust::switch_plan::{
@@ -153,11 +194,12 @@ use new_java2rust::switch_plan::{
 };
 use new_java2rust::types::{TypeEnv, list_java_type, optional_java_type, stream_element_type};
 use new_java2rust::unsupported::{
-    UnsupportedConstructorLowering, UnsupportedExpressionLowering,
-    UnsupportedLoweringMessagePolicy, UnsupportedStatementLowering,
+    UnsupportedConstructorLowering, UnsupportedDiagnosticPolicy, UnsupportedExpressionLowering,
+    UnsupportedLoweringMessagePolicy, UnsupportedMemberLowering, UnsupportedStatementLowering,
+    plan_unsupported_expression, plan_unsupported_member, plan_unsupported_statement,
     unsupported_constructor_message_policy, unsupported_expression_expr,
-    unsupported_expression_message_policy, unsupported_statement_message_policy,
-    unsupported_statement_stmt,
+    unsupported_expression_message_policy, unsupported_member_diagnostic_policy,
+    unsupported_statement_message_policy, unsupported_statement_stmt,
 };
 use new_java2rust::usage::{
     BindingUse, BindingUseFacts, CallArgumentBoundary, CallArgumentBoundaryPolicy,
@@ -863,6 +905,15 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
             element_ty: JavaType::String,
         }
     );
+    let facts = FactSet::default();
+    let effective_facts = EffectiveFacts::new(&facts);
+    assert_eq!(
+        native_java_rust_type_policy_with_effective_facts(
+            &list_java_type(JavaType::String),
+            &effective_facts,
+        ),
+        native_java_rust_type_policy(&list_java_type(JavaType::String), &facts)
+    );
     assert_eq!(
         native_named_java_rust_type_policy("ExternalId"),
         NativeNamedJavaRustTypePolicy {
@@ -997,20 +1048,32 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
             ty: RustType::String,
         }
     );
+    assert_eq!(
+        slot_rust_type_policy_with_effective_facts(&mutable_string_shape, &effective_facts),
+        slot_rust_type_policy(&mutable_string_shape, &facts)
+    );
 
     let source = include_str!("../src/slot_render.rs");
     assert!(source.contains("pub enum NativeJavaRustTypePolicy"));
     assert!(source.contains("pub fn native_java_rust_type_policy"));
+    assert!(source.contains("pub fn native_java_rust_type_policy_with_effective_facts"));
     assert!(source.contains("pub struct NativeNamedJavaRustTypePolicy"));
     assert!(source.contains("pub fn native_named_java_rust_type_policy"));
     assert!(source.contains("pub fn render_native_java_rust_type_policy"));
+    assert!(source.contains("pub fn render_native_java_rust_type_policy_with_effective_facts"));
     assert!(!source.contains("\nfn native_named_java_rust_type_policy("));
     assert!(source.contains("pub enum SlotValueRustTypePolicy"));
     assert!(source.contains("pub fn slot_value_rust_type_policy"));
+    assert!(source.contains("pub fn slot_value_rust_type_policy_with_effective_facts"));
     assert!(source.contains("pub fn render_slot_value_rust_type_policy"));
+    assert!(source.contains("pub fn render_slot_value_rust_type_policy_with_effective_facts"));
     assert!(source.contains("pub enum SlotRustTypePolicy"));
     assert!(source.contains("pub fn slot_rust_type_policy"));
+    assert!(source.contains("pub fn slot_rust_type_policy_with_effective_facts"));
     assert!(source.contains("pub fn render_slot_rust_type_policy"));
+    assert!(source.contains("EffectiveFacts::new(facts)"));
+    assert_eq!(source.matches("facts.is_string_like_type").count(), 1);
+    assert_eq!(source.matches("facts.sequence_element_type_for").count(), 1);
 }
 
 #[test]
@@ -1271,6 +1334,7 @@ fn slot_render_uses_type_capability_facts_for_string_views() {
             object_safe_trait: None,
             provenance: FactProvenance::UserOverride,
         });
+    let effective_facts = EffectiveFacts::new(&facts);
     let mut shape = RustSlotShape::conservative(external_label);
     shape.ownership = OwnershipShape::SharedBorrow;
     shape.view = ViewShape::Str;
@@ -1301,6 +1365,10 @@ fn slot_render_uses_type_capability_facts_for_string_views() {
             sequence_element: None,
         }
     );
+    assert_eq!(
+        slot_content_capability_policy_with_effective_facts(&shape.java_ty, &effective_facts),
+        slot_content_capability_policy(&shape.java_ty, &facts)
+    );
 }
 
 #[test]
@@ -1328,6 +1396,7 @@ fn slot_render_uses_type_capability_facts_for_sequence_views_and_storage() {
             object_safe_trait: None,
             provenance: FactProvenance::UserOverride,
         });
+    let effective_facts = EffectiveFacts::new(&facts);
 
     let mut slice_shape = RustSlotShape::conservative(external_ids.clone());
     slice_shape.ownership = OwnershipShape::SharedBorrow;
@@ -1377,6 +1446,13 @@ fn slot_render_uses_type_capability_facts_for_sequence_views_and_storage() {
                 args: Vec::new(),
             }),
         }
+    );
+    assert_eq!(
+        slot_content_capability_policy_with_effective_facts(
+            &storage_shape.java_ty,
+            &effective_facts,
+        ),
+        slot_content_capability_policy(&storage_shape.java_ty, &facts)
     );
 }
 
@@ -1431,15 +1507,6 @@ class Dog implements Animal {
             dispatch: DispatchShape::DynTrait {
                 trait_name: "Animal".to_string(),
             },
-        }
-    );
-    assert_eq!(
-        representation_dispatch_policy(ObjectRepresentation::BoxedDynTrait {
-            trait_name: "Animal".to_string(),
-        })
-        .dispatch,
-        DispatchShape::BoxedDynTrait {
-            trait_name: "Animal".to_string(),
         }
     );
     assert_eq!(
@@ -2079,13 +2146,6 @@ fn object_representation_policy_owns_dyn_trait_erased_fallback_matrix() {
         },
         &facts,
     );
-    let unsafe_boxed_override = object_representation_policy(
-        ObjectRepresentationRequest::BoxedDynTraitOverride {
-            type_name: "Sink".to_string(),
-            trait_name: "SinkTrait".to_string(),
-        },
-        &facts,
-    );
     let erased_override = object_representation_policy(
         ObjectRepresentationRequest::ErasedObjectOverride {
             type_name: "Sink".to_string(),
@@ -2171,19 +2231,6 @@ fn object_representation_policy_owns_dyn_trait_erased_fallback_matrix() {
             .contains("dyn trait representation for Sink")
     }));
     assert_eq!(
-        unsafe_boxed_override.representation,
-        ObjectRepresentation::ErasedObject
-    );
-    assert_eq!(
-        unsafe_boxed_override.object_safety,
-        ObjectSafetyPolicy::RejectedNonObjectSafe
-    );
-    assert!(unsafe_boxed_override.diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("boxed dyn trait representation for Sink")
-    }));
-    assert_eq!(
         erased_override.representation,
         ObjectRepresentation::ErasedObject
     );
@@ -2203,9 +2250,9 @@ class Impl implements Sink {}
     let mut plan_facts = resolved.facts.clone();
     plan_facts.extend_from(facts.clone());
     let plan = plan_representations(&resolved.program, &plan_facts);
-    let boxed_override = HierarchyOverride {
+    let dyn_override = HierarchyOverride {
         type_name: "Sink".to_string(),
-        strategy: HierarchyStrategy::BoxedDynTrait {
+        strategy: HierarchyStrategy::DynTrait {
             trait_name: "SinkTrait".to_string(),
         },
         provenance: FactProvenance::UserOverride,
@@ -2220,34 +2267,29 @@ class Impl implements Sink {}
         strategy: HierarchyStrategy::ConcreteStruct,
         provenance: FactProvenance::UserOverride,
     };
-    let boxed_policy = hierarchy_override_application_policy(&boxed_override, &plan, &plan_facts);
+    let context = object_hierarchy_context(&plan);
+    let dyn_policy = hierarchy_override_application_policy(&dyn_override, &context, &plan_facts);
     let concrete_policy =
-        hierarchy_override_application_policy(&concrete_override, &plan, &plan_facts);
+        hierarchy_override_application_policy(&concrete_override, &context, &plan_facts);
     let missing_policy =
-        hierarchy_override_application_policy(&missing_override, &plan, &plan_facts);
+        hierarchy_override_application_policy(&missing_override, &context, &plan_facts);
 
     assert_eq!(
-        boxed_policy.representation,
+        dyn_policy.representation,
         Some(ObjectRepresentation::ErasedObject)
     );
-    assert_eq!(
-        boxed_policy.provenance,
-        RepresentationProvenance::UserOverride
-    );
-    assert_eq!(boxed_policy.direct_subtypes, vec!["Impl".to_string()]);
-    assert!(boxed_policy.diagnostics.iter().any(|diagnostic| {
+    assert_eq!(dyn_policy.provenance, FactProvenance::UserOverride);
+    assert_eq!(dyn_policy.direct_subtypes, vec!["Impl".to_string()]);
+    assert!(dyn_policy.diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("boxed dyn trait representation for Sink")
+            .contains("dyn trait representation for Sink")
     }));
     assert_eq!(
         concrete_policy.representation,
         Some(ObjectRepresentation::ConcreteStruct)
     );
-    assert_eq!(
-        concrete_policy.provenance,
-        RepresentationProvenance::CorpusAnalysis
-    );
+    assert_eq!(concrete_policy.provenance, FactProvenance::CorpusAnalysis);
     assert!(concrete_policy.diagnostics.is_empty());
     assert_eq!(missing_policy.representation, None);
     assert!(missing_policy.diagnostics.iter().any(|diagnostic| {
@@ -2259,53 +2301,128 @@ class Impl implements Sink {}
 
 #[test]
 fn object_representation_policy_is_the_dyn_fallback_entrypoint() {
-    let source = include_str!("../src/representation.rs");
+    let representation_source = include_str!("../src/representation.rs");
+    let object_model_source = include_str!("../src/object_model.rs");
+    let effective_facts_source = include_str!("../src/effective_facts.rs");
+    let facts_source = include_str!("../src/facts.rs");
+    let shape_projection_source = include_str!("../src/shape_projection.rs");
 
-    assert!(source.contains("pub enum ObjectRepresentationRequest"));
-    assert!(source.contains("pub struct RepresentationLookupPolicy"));
-    assert!(source.contains("pub enum RepresentationLookupFallback"));
-    assert!(source.contains("pub struct RepresentationDispatchPolicy"));
-    assert!(source.contains("pub fn representation_dispatch_policy"));
-    assert!(source.contains("representation_lookup_policy"));
-    assert!(source.contains("ConservativeConcrete"));
-    assert!(source.contains("ConservativeErasedObject"));
-    assert!(source.contains("pub enum ObjectSafetyPolicy"));
-    assert!(source.contains("pub struct ObjectSafetyFactPolicy"));
-    assert!(source.contains("pub fn object_safety_fact_policy"));
-    assert!(source.contains("object_safety_policy_for_request"));
-    assert_eq!(source.matches("object_safe_trait_fact_for_name").count(), 1);
+    assert!(effective_facts_source.contains("pub struct EffectiveFacts"));
+    assert!(effective_facts_source.contains("pub fn object_safe_trait_fact_for_name"));
+    assert!(effective_facts_source.contains("pub fn closed_hierarchy_variants_for"));
+    assert!(effective_facts_source.contains("pub fn dispatch_requirements_for"));
+    assert!(object_model_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(object_model_source.contains("pub struct ObjectModelInput"));
+    assert!(object_model_source.contains("pub program: &'a Program"));
+    assert!(object_model_source.contains("pub facts: &'a FactSet"));
+    assert!(object_model_source.contains("pub effective_facts: &'a EffectiveFacts<'a>"));
+    assert!(object_model_source.contains("pub usage: Option<&'a UsageFacts>"));
+    assert!(object_model_source.contains("pub fn plan_object_model_from_input"));
+    assert!(object_model_source.contains("plan_object_model_with_effective_facts"));
+    assert!(representation_source.contains("ObjectModelInput"));
+    assert!(representation_source.contains("plan_object_model_from_input"));
+    assert!(representation_source.contains("usage: None"));
+    assert!(object_model_source.contains("pub strategies: BTreeMap<String, ObjectStrategyPlan>"));
+    assert!(object_model_source.contains("pub fn strategy_for(&self, root: &str)"));
+    assert!(object_model_source.contains("pub provenance: Vec<FactProvenance>"));
+    assert!(object_model_source.contains("pub fn primary_provenance(&self)"));
+    assert!(object_model_source.contains("fn add_provenance(&mut self"));
+    assert!(object_model_source.contains("pub enum ObjectRepresentationRequest"));
+    assert!(facts_source.contains("pub enum DispatchRequirementKind"));
+    assert!(facts_source.contains("pub struct DispatchRequirementFact"));
+    assert!(object_model_source.contains("pub type DispatchRequirement"));
+    assert!(object_model_source.contains("dispatch_requirements_for"));
+    assert!(object_model_source.contains("pub struct RepresentationLookupPolicy"));
+    assert!(object_model_source.contains("pub enum RepresentationLookupFallback"));
+    assert!(object_model_source.contains("pub fn object_representation_lookup_policy"));
+    assert!(!representation_source.contains("pub struct RepresentationLookupPolicy"));
+    assert!(!representation_source.contains("pub enum RepresentationLookupFallback"));
+    assert!(representation_source.contains("object_representation_lookup_policy"));
+    assert!(representation_source.contains("pub struct RepresentationDispatchPolicy"));
+    assert!(representation_source.contains("pub fn representation_dispatch_policy"));
+    assert!(representation_source.contains("representation_lookup_policy"));
+    assert!(object_model_source.contains("ConservativeConcrete"));
+    assert!(object_model_source.contains("ConservativeErasedObject"));
+    assert!(object_model_source.contains("pub enum ObjectSafetyPolicy"));
+    assert!(object_model_source.contains("pub struct ObjectSafetyFactPolicy"));
+    assert!(object_model_source.contains("pub fn object_safety_fact_policy"));
+    assert!(object_model_source.contains("object_safety_policy_for_request"));
     assert_eq!(
-        source.matches("object_safety_violation_for_name").count(),
+        object_model_source
+            .matches("object_safe_trait_fact_for_name")
+            .count(),
         1
     );
-    assert!(source.contains("ErasedObjectOverride"));
-    assert!(source.contains("object_representation_request_requires_object_safety"));
-    assert!(source.contains("has_explicit_hierarchy_override"));
-    assert!(source.contains("pub struct HierarchyOverrideValidationPolicy"));
-    assert!(source.contains("pub fn hierarchy_override_validation_policy"));
-    assert!(source.contains("pub struct HierarchyOverrideApplicationPolicy"));
-    assert!(source.contains("pub fn hierarchy_override_application_policy"));
-    assert!(source.contains("pub struct HierarchyOverrideRepresentationPolicy"));
-    assert!(source.contains("hierarchy_override_representation_policy"));
-    assert!(source.contains("pub struct RepresentationHierarchyFactPolicy"));
-    assert!(source.contains("pub fn representation_hierarchy_fact_policy"));
-    assert_eq!(source.matches("hierarchy_edges_for_type").count(), 1);
-    assert!(source.contains("pub struct ClosedEnumFactPolicy"));
-    assert!(source.contains("pub fn closed_enum_fact_policy"));
-    assert!(source.contains("pub struct ClosedEnumInferencePolicy"));
-    assert!(source.contains("pub fn closed_enum_inference_policy"));
-    assert_eq!(source.matches("closed_hierarchy_variants_for").count(), 1);
-    assert!(!source.contains("fn validate_hierarchy_override"));
-    assert!(source.contains("pub struct HierarchyEdgeDiagnosticPolicy"));
-    assert!(source.contains("pub enum HierarchyEdgeDiagnosticOutcome"));
-    assert!(source.contains("pub fn hierarchy_edge_diagnostic_policy"));
-    assert!(source.contains("render_hierarchy_edge_diagnostic_outcome"));
-    assert!(source.contains("pub struct AnonymousClassDiagnosticPolicy"));
-    assert!(source.contains("pub fn anonymous_class_diagnostic_policy"));
-    assert!(source.contains("pub fn object_representation_policy"));
-    assert!(!source.contains("interface_representation_from_facts"));
-    assert!(!source.contains("dyn_trait_representation_from_facts"));
-    assert!(!source.contains("boxed_dyn_trait_representation_from_facts"));
+    assert_eq!(
+        object_model_source
+            .matches("object_safety_violation_for_name")
+            .count(),
+        1
+    );
+    assert!(object_model_source.contains("ErasedObjectOverride"));
+    assert!(object_model_source.contains("object_representation_request_requires_object_safety"));
+    assert!(object_model_source.contains("has_explicit_hierarchy_override"));
+    assert!(object_model_source.contains("pub struct HierarchyOverrideValidationPolicy"));
+    assert!(object_model_source.contains("pub fn hierarchy_override_validation_policy"));
+    assert!(object_model_source.contains("pub struct HierarchyOverrideApplicationPolicy"));
+    assert!(object_model_source.contains("pub fn hierarchy_override_application_policy"));
+    assert!(object_model_source.contains("pub struct HierarchyOverrideRepresentationPolicy"));
+    assert!(object_model_source.contains("hierarchy_override_representation_policy"));
+    assert!(representation_source.contains("pub struct RepresentationHierarchyFactPolicy"));
+    assert!(representation_source.contains("pub fn representation_hierarchy_fact_policy"));
+    assert!(
+        representation_source.contains("representation_hierarchy_fact_policy_with_effective_facts")
+    );
+    assert!(object_model_source.contains("pub struct ObjectHierarchyEdge"));
+    assert!(object_model_source.contains("pub enum ObjectHierarchyEdgeKind"));
+    assert!(object_model_source.contains("pub struct ObjectHierarchyEdgeRepresentationPolicy"));
+    assert!(object_model_source.contains("pub fn object_hierarchy_edge_representation_policy"));
+    assert!(object_model_source.contains("hierarchy_edges: Vec<ObjectHierarchyEdge>"));
+    assert!(representation_source.contains("for edge in object_plan.hierarchy_edges"));
+    assert!(representation_source.contains("object_hierarchy_edge_representation_policy"));
+    assert!(!representation_source.contains("fn collect_hierarchy_edges("));
+    assert!(!representation_source.contains("ObjectRepresentation::ClosedEnum { .. }"));
+    assert!(effective_facts_source.contains("pub fn extends_type_for"));
+    assert!(effective_facts_source.contains("pub fn implemented_types_for"));
+    assert!(effective_facts_source.contains("pub fn hierarchy_edges_for_type"));
+    assert_eq!(
+        representation_source
+            .matches("hierarchy_edges_for_type")
+            .count(),
+        1
+    );
+    assert!(object_model_source.contains("pub struct ClosedEnumFactPolicy"));
+    assert!(object_model_source.contains("pub fn closed_enum_fact_policy"));
+    assert!(object_model_source.contains("pub struct ClosedEnumInferencePolicy"));
+    assert!(object_model_source.contains("pub fn closed_enum_inference_policy"));
+    assert_eq!(
+        object_model_source
+            .matches("closed_hierarchy_variants_for")
+            .count(),
+        1
+    );
+    assert!(!representation_source.contains("fn validate_hierarchy_override"));
+    assert!(object_model_source.contains("pub struct ObjectHierarchyEdgeDiagnosticInput"));
+    assert!(object_model_source.contains("pub struct HierarchyEdgeDiagnosticPolicy"));
+    assert!(object_model_source.contains("pub enum HierarchyEdgeDiagnosticOutcome"));
+    assert!(object_model_source.contains("pub fn object_hierarchy_edge_diagnostic_policy"));
+    assert!(representation_source.contains("ObjectHierarchyEdgeDiagnosticInput"));
+    assert!(representation_source.contains("pub fn hierarchy_edge_diagnostic_policy"));
+    assert!(representation_source.contains("object_hierarchy_edge_diagnostic_policy"));
+    assert!(!representation_source.contains("pub struct HierarchyEdgeDiagnosticPolicy"));
+    assert!(!representation_source.contains("pub enum HierarchyEdgeDiagnosticOutcome"));
+    assert!(!representation_source.contains("render_hierarchy_edge_diagnostic_outcome"));
+    assert!(representation_source.contains("pub struct AnonymousClassDiagnosticPolicy"));
+    assert!(representation_source.contains("pub fn anonymous_class_diagnostic_policy"));
+    assert!(object_model_source.contains("pub fn object_representation_policy"));
+    assert!(!facts_source.contains("HierarchyStrategy::BoxedDynTrait"));
+    assert!(!facts_source.contains("BoxedDynTrait {"));
+    assert!(!object_model_source.contains("ObjectRepresentation::BoxedDynTrait"));
+    assert!(!object_model_source.contains("ObjectRepresentationRequest::BoxedDynTraitOverride"));
+    assert!(shape_projection_source.contains("DispatchShape::BoxedDynTrait"));
+    assert!(!representation_source.contains("interface_representation_from_facts"));
+    assert!(!representation_source.contains("dyn_trait_representation_from_facts"));
+    assert!(!representation_source.contains("boxed_dyn_trait_representation_from_facts"));
 }
 
 #[test]
@@ -2485,7 +2602,7 @@ class LoggingSink implements Sink {}
         });
     facts.hierarchy_overrides.push(HierarchyOverride {
         type_name: "Sink".to_string(),
-        strategy: HierarchyStrategy::BoxedDynTrait {
+        strategy: HierarchyStrategy::DynTrait {
             trait_name: "Sink".to_string(),
         },
         provenance: FactProvenance::UserOverride,
@@ -2508,7 +2625,7 @@ class LoggingSink implements Sink {}
                 |diagnostic| diagnostic.code == "non_object_safe_trait_fallback"
                     && diagnostic
                         .message
-                        .contains("boxed dyn trait representation for Sink")
+                        .contains("dyn trait representation for Sink")
             ),
     );
 }
@@ -2796,6 +2913,15 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
         }
     );
     assert_eq!(
+        unsupported_member_diagnostic_policy(UnsupportedMemberLowering::ParserUnsupported(
+            "record component".to_string()
+        )),
+        UnsupportedDiagnosticPolicy {
+            code: "unsupported_member",
+            message: "record component".to_string(),
+        }
+    );
+    assert_eq!(
         unsupported_statement_stmt(UnsupportedStatementLowering::LocalTypeDeclaration),
         RustStmt::Raw(
             "compile_error!(\"unsupported Java statement: local type declaration\");".to_string()
@@ -2807,12 +2933,87 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
             "compile_error!(\"unsupported Java expression: method reference\")".to_string()
         )
     );
+    assert_eq!(
+        plan_unsupported_expression(&parse_expr("String::valueOf")),
+        Some(UnsupportedExpressionLowering::MethodReference)
+    );
+    assert_eq!(
+        plan_unsupported_expression(&parse_expr("String.class")),
+        Some(UnsupportedExpressionLowering::ClassLiteral)
+    );
+    assert_eq!(plan_unsupported_expression(&parse_expr("value")), None);
+    assert_eq!(
+        plan_unsupported_statement(&Stmt::Try {
+            resources: Vec::new(),
+            body: Default::default(),
+            catches: Vec::new(),
+            finally_block: None,
+        }),
+        Some(UnsupportedStatementLowering::TryCatchFinally)
+    );
+    assert_eq!(
+        plan_unsupported_statement(&Stmt::ConstructorInvocation {
+            kind: ConstructorInvocationKind::This,
+            args: Vec::new(),
+            resolved: None,
+        }),
+        Some(UnsupportedStatementLowering::ConstructorDelegation)
+    );
+    assert_eq!(
+        plan_unsupported_statement(&Stmt::Unsupported("raw parser node".to_string())),
+        Some(UnsupportedStatementLowering::ParserUnsupported(
+            "raw parser node".to_string()
+        ))
+    );
+    assert_eq!(plan_unsupported_statement(&Stmt::Break(None)), None);
+    assert_eq!(
+        plan_unsupported_member(&Member::Unsupported {
+            reason: "record component".to_string(),
+            span: Default::default(),
+        }),
+        Some(UnsupportedMemberLowering::ParserUnsupported(
+            "record component".to_string()
+        ))
+    );
+    assert_eq!(
+        plan_unsupported_member(&Member::Type(new_java2rust::java_ir::TypeDecl {
+            kind: new_java2rust::java_ir::TypeKind::Class,
+            name: "Nested".to_string(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: Vec::new(),
+            span: Default::default(),
+        })),
+        None
+    );
 
     let source = include_str!("../src/unsupported.rs");
+    let lower_source = include_str!("../src/lower.rs");
+    assert!(source.contains("pub struct UnsupportedDiagnosticPolicy"));
     assert!(source.contains("pub struct UnsupportedLoweringMessagePolicy"));
+    assert!(source.contains("pub fn plan_unsupported_expression"));
+    assert!(source.contains("pub fn plan_unsupported_member"));
+    assert!(source.contains("pub fn plan_unsupported_statement"));
+    assert!(source.contains("pub fn unsupported_member_diagnostic_policy"));
     assert!(source.contains("pub fn unsupported_constructor_message_policy"));
     assert!(source.contains("pub fn unsupported_statement_message_policy"));
     assert!(source.contains("pub fn unsupported_expression_message_policy"));
+    assert!(lower_source.contains("plan_unsupported_expression"));
+    assert!(lower_source.contains("plan_unsupported_member"));
+    assert!(lower_source.contains("plan_unsupported_statement"));
+    assert!(lower_source.contains("unsupported_member_diagnostic_policy"));
+    assert!(!lower_source.contains("UnsupportedExpressionLowering::Lambda"));
+    assert!(!lower_source.contains("UnsupportedExpressionLowering::MethodReference"));
+    assert!(!lower_source.contains("UnsupportedExpressionLowering::ClassLiteral"));
+    assert!(!lower_source.contains("UnsupportedMemberLowering::ParserUnsupported"));
+    assert!(!lower_source.contains("Member::Unsupported"));
+    assert!(!lower_source.contains("\"unsupported_member\""));
+    assert!(!lower_source.contains("UnsupportedStatementLowering::TryCatchFinally"));
+    assert!(!lower_source.contains("UnsupportedStatementLowering::LocalTypeDeclaration"));
+    assert!(!lower_source.contains("UnsupportedStatementLowering::ConstructorDelegation"));
+    assert!(!lower_source.contains("UnsupportedStatementLowering::ParserUnsupported"));
 }
 
 #[test]
@@ -2957,8 +3158,16 @@ class Num implements Expr {}
         )
     );
     assert_eq!(
+        raw_type_item_for_with_facts(&representations, expr_ty, &signatures, &facts),
+        Some("pub enum ExprValue {\n    Add(Add),\n    Num(Num),\n}".to_string())
+    );
+    assert_eq!(
         type_emission_for(&representations, add_ty, &signatures),
         RepresentationTypeEmission::LowerAsConcreteStruct
+    );
+    assert_eq!(
+        raw_type_item_for_with_facts(&representations, add_ty, &signatures, &facts),
+        None
     );
 }
 
@@ -3285,10 +3494,14 @@ fn representation_lowering_owns_dyn_trait_impl_compatibility_policy() {
     assert!(source.contains("incompatible Java interface method implementation"));
     assert!(source.contains("parameter count does not match interface"));
     assert!(source.contains("type_emission_for_with_facts"));
+    assert!(source.contains("raw_type_item_for_with_facts"));
     assert!(source.contains("trait_impl_emissions_for_type_with_facts"));
     assert!(source.contains("rust_type_for_slot_with_facts"));
     assert!(!source.contains("rust_type_for_slot(&"));
-    assert!(lower_source.contains("type_emission_for_with_facts"));
+    assert!(lower_source.contains("raw_type_item_for_with_facts"));
+    assert!(!lower_source.contains("type_emission_for_with_facts"));
+    assert!(!lower_source.contains("RepresentationTypeEmission"));
+    assert!(!lower_source.contains("RawRustItem"));
     assert!(lower_source.contains("trait_impl_emissions_for_type_with_facts"));
     assert!(!lower_source.contains("incompatible Java interface method implementation"));
 }
@@ -3337,8 +3550,9 @@ class Other {}
         provenance: FactProvenance::UserOverride,
     };
 
-    let policy = hierarchy_override_validation_policy(&override_fact, &representations);
-    let unknown_policy = hierarchy_override_validation_policy(&unknown_target, &representations);
+    let context = object_hierarchy_context(&representations);
+    let policy = hierarchy_override_validation_policy(&override_fact, &context);
+    let unknown_policy = hierarchy_override_validation_policy(&unknown_target, &context);
 
     assert_eq!(policy.type_name, "Expr");
     assert!(policy.diagnostics.iter().any(|diagnostic| {
@@ -5653,28 +5867,109 @@ class Add implements Expr {}
             projected_dispatch: DispatchShape::Concrete,
         }
     );
+    assert_eq!(
+        dispatch_requirement_projection_policy(
+            DispatchRequirementProjectionRole::Storage,
+            DispatchShape::DynTrait {
+                trait_name: "Expr".to_string(),
+            },
+            DispatchRequirementKind::NeedsOwnedPolymorphicStorage,
+        ),
+        DispatchRequirementProjectionPolicy {
+            role: DispatchRequirementProjectionRole::Storage,
+            source_dispatch: DispatchShape::DynTrait {
+                trait_name: "Expr".to_string(),
+            },
+            requirement: DispatchRequirementKind::NeedsOwnedPolymorphicStorage,
+            projected_dispatch: Some(DispatchShape::BoxedDynTrait {
+                trait_name: "Expr".to_string(),
+            }),
+        }
+    );
+    assert_eq!(
+        dispatch_requirement_projection_policy(
+            DispatchRequirementProjectionRole::Param,
+            DispatchShape::DynTrait {
+                trait_name: "Expr".to_string(),
+            },
+            DispatchRequirementKind::NeedsBorrowedTraitView,
+        )
+        .projected_dispatch,
+        Some(DispatchShape::DynTrait {
+            trait_name: "Expr".to_string(),
+        })
+    );
+    assert_eq!(
+        dispatch_requirement_projection_policy(
+            DispatchRequirementProjectionRole::Return,
+            DispatchShape::DynTrait {
+                trait_name: "Expr".to_string(),
+            },
+            DispatchRequirementKind::RejectTraitObject,
+        )
+        .projected_dispatch,
+        Some(DispatchShape::ErasedObject)
+    );
     let shape_projection_source = include_str!("../src/shape_projection.rs");
+    let effective_facts_source = include_str!("../src/effective_facts.rs");
+    assert!(shape_projection_source.contains("use crate::effective_facts::EffectiveFacts"));
     assert!(shape_projection_source.contains("pub struct DispatchProjectionPolicy"));
     assert!(shape_projection_source.contains("pub fn dispatch_projection_policy"));
     assert!(shape_projection_source.contains("pub struct EscapingRoleDispatchPolicy"));
     assert!(shape_projection_source.contains("pub fn escaping_role_dispatch_policy"));
+    assert!(shape_projection_source.contains("pub enum DispatchRequirementProjectionRole"));
+    assert!(shape_projection_source.contains("pub struct DispatchRequirementProjectionPolicy"));
+    assert!(shape_projection_source.contains("pub fn dispatch_requirement_projection_policy"));
     assert!(!shape_projection_source.contains("fn owned_dispatch_for_escaping_role"));
     assert!(shape_projection_source.contains("pub struct ShapeProjectionCapabilityPolicy"));
     assert!(shape_projection_source.contains("pub fn shape_projection_capability_policy"));
+    assert!(
+        shape_projection_source
+            .contains("pub fn shape_projection_capability_policy_with_effective_facts")
+    );
     assert!(shape_projection_source.contains("pub struct IndexedElementProjectionPolicy"));
     assert!(shape_projection_source.contains("pub fn indexed_element_projection_policy"));
+    assert!(
+        shape_projection_source
+            .contains("pub fn indexed_element_projection_policy_with_effective_facts")
+    );
+    assert!(shape_projection_source.contains("pub fn indexed_read_shape_with_effective_facts"));
+    assert!(
+        shape_projection_source.contains("pub fn indexed_assignment_shape_with_effective_facts")
+    );
     assert!(shape_projection_source.contains("pub fn iteration_element_projection_policy"));
+    assert!(
+        shape_projection_source
+            .contains("pub fn iteration_element_projection_policy_with_effective_facts")
+    );
     assert!(shape_projection_source.contains("pub struct SequenceElementProjectionPolicy"));
     assert!(shape_projection_source.contains("pub fn sequence_element_projection_policy"));
+    assert!(
+        shape_projection_source
+            .contains("pub fn sequence_element_projection_policy_with_effective_facts")
+    );
     assert!(!shape_projection_source.contains("fn sequence_element_type_with_facts"));
     assert!(shape_projection_source.contains("indexed_assignment_shape_with_facts"));
-    assert_eq!(shape_projection_source.matches("is_copy_type").count(), 1);
+    assert!(effective_facts_source.contains("pub fn is_copy_type"));
+    assert!(effective_facts_source.contains("pub fn sequence_element_type_for"));
     assert_eq!(
         shape_projection_source
-            .matches("sequence_element_type_for")
+            .matches("facts.is_copy_type")
             .count(),
         1
     );
+    assert_eq!(
+        shape_projection_source
+            .matches("facts.sequence_element_type_for")
+            .count(),
+        1
+    );
+    assert!(shape_projection_source.contains(
+        "sequence_element_projection_policy_with_effective_facts(&array_shape.java_ty, facts)"
+    ));
+    assert!(!shape_projection_source.contains(
+        "let element_ty = sequence_element_projection_policy(&array_shape.java_ty, facts)"
+    ));
     assert!(!include_str!("../src/expr_shape.rs").contains("pub fn project_java_value_shape"));
 }
 
@@ -5718,6 +6013,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             args: vec![RustExpr::Literal("1".to_string())],
         }
     );
+    assert_eq!(target.receiver_expr(), Some(&receiver));
 
     assert!(matches!(
         plan_call_target(Some(&receiver), "readName", None),
@@ -5726,6 +6022,14 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             ..
         } if rust_name == "read_name"
     ));
+    assert_eq!(
+        plan_call_target(Some(&receiver), "readName", None).receiver_expr(),
+        Some(&receiver)
+    );
+    assert_eq!(
+        plan_call_target(None, "readName", None).receiver_expr(),
+        None
+    );
 
     let parsed = parse_java_source("class Add {}");
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
@@ -5818,24 +6122,57 @@ class Uses {
         rust_name: ctor.rust_name.clone().unwrap(),
     };
 
+    let method_arg_shapes = signatures
+        .method_param_plans(ty, echo)
+        .unwrap()
+        .iter()
+        .map(|param| param.shape.clone())
+        .collect::<Vec<_>>();
+    let constructor_arg_shapes = signatures
+        .constructor_param_plans(ty, ctor)
+        .unwrap()
+        .iter()
+        .map(|param| param.shape.clone())
+        .collect::<Vec<_>>();
+
     assert_eq!(
         resolved_call_arg_shapes(&call, 1, &signatures),
-        signatures
-            .method_param_plans(ty, echo)
-            .unwrap()
-            .iter()
-            .map(|param| param.shape.clone())
-            .collect::<Vec<_>>()
+        method_arg_shapes
+    );
+    assert_eq!(
+        plan_call_arguments(Some(&call), 1, &signatures),
+        ArgumentLoweringPlan::Shaped(method_arg_shapes)
+    );
+    assert_eq!(
+        plan_call_arguments(None, 2, &signatures),
+        ArgumentLoweringPlan::Unshaped { arg_count: 2 }
     );
     assert_eq!(
         resolved_constructor_arg_shapes(&constructor, 1, &signatures),
-        signatures
-            .constructor_param_plans(ty, ctor)
-            .unwrap()
-            .iter()
-            .map(|param| param.shape.clone())
-            .collect::<Vec<_>>()
+        constructor_arg_shapes
     );
+    assert_eq!(
+        plan_constructor_arguments(Some(&constructor), 1, &signatures),
+        ArgumentLoweringPlan::Shaped(constructor_arg_shapes)
+    );
+    assert_eq!(
+        plan_constructor_arguments(None, 0, &signatures),
+        ArgumentLoweringPlan::Unshaped { arg_count: 0 }
+    );
+
+    let lower_source = include_str!("../src/lower.rs");
+    let call_plan_source = include_str!("../src/call_plan.rs");
+    assert!(call_plan_source.contains("pub enum ArgumentLoweringPlan"));
+    assert!(call_plan_source.contains("pub fn plan_call_arguments"));
+    assert!(call_plan_source.contains("pub fn plan_constructor_arguments"));
+    assert!(call_plan_source.contains("pub fn receiver_expr"));
+    assert!(!lower_source.contains("resolved_call_arg_shapes"));
+    assert!(!lower_source.contains("resolved_constructor_arg_shapes"));
+    assert!(!lower_source.contains("lower_args_for_shapes"));
+    assert!(!lower_source.contains("CallTargetPlan::InstanceReceiver"));
+    assert!(!lower_source.contains("CallTargetPlan::FallbackReceiver"));
+    assert!(lower_source.contains("lower_args_with_plan"));
+    assert!(lower_source.contains(".receiver_expr()"));
 }
 
 #[test]
@@ -5916,6 +6253,48 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
         )
         .is_none()
     );
+
+    assert!(matches!(
+        plan_call_expr(
+            Some(&receiver),
+            "getValue",
+            &[],
+            Some(&resolved_getter),
+            &facts,
+        ),
+        CallExprPlan::TrivialAccessorGetter {
+            field_name,
+            ..
+        } if field_name == "value"
+    ));
+    assert!(matches!(
+        plan_call_expr(
+            Some(&receiver),
+            "getCount",
+            &[],
+            Some(&resolved_getter),
+            &facts,
+        ),
+        CallExprPlan::Target(CallTargetPlan::InstanceReceiver {
+            rust_name: "get_value",
+            ..
+        })
+    ));
+    assert!(matches!(
+        plan_call_statement(
+            &Expr::Call {
+                receiver: None,
+                name: "setValue".to_string(),
+                args: vec![Expr::Literal(Literal::Int(7))],
+                resolved: Some(resolved_setter),
+            },
+            &facts,
+        ),
+        Some(CallStatementPlan::TrivialAccessorSetter {
+            field_name,
+            ..
+        }) if field_name == "value"
+    ));
 }
 
 #[test]
@@ -6123,41 +6502,158 @@ class Use {
 #[test]
 fn coercion_plan_owns_invalid_cast_runtime_policy() {
     let source = include_str!("../src/coercion.rs");
+    let conversion_source = include_str!("../src/conversion_plan.rs");
+    let lower_source = include_str!("../src/lower.rs");
 
-    assert!(source.contains("pub enum SyntaxSlotCoercionPolicy"));
-    assert!(source.contains("pub fn syntax_slot_coercion_policy"));
-    assert!(source.contains("pub enum DispatchCoercionPolicy"));
-    assert!(source.contains("pub fn dispatch_coercion_policy"));
-    assert!(source.contains("pub fn dispatch_coercion_policy_with_facts"));
-    assert!(source.contains("pub enum BorrowedDynToOwnedBoxedDynRecoveryPolicy"));
+    assert!(conversion_source.contains("pub enum SyntaxSlotCoercionPolicy"));
+    assert!(!source.contains("pub enum SyntaxSlotCoercionPolicy"));
+    assert!(conversion_source.contains("pub enum Slot"));
+    assert!(conversion_source.contains("pub fn assignment_slot"));
+    assert!(conversion_source.contains("pub fn argument_slot"));
+    assert!(conversion_source.contains("pub fn condition_slot"));
+    assert!(conversion_source.contains("pub fn index_slot"));
+    assert!(conversion_source.contains("pub fn assignment_slot_for_target"));
+    assert!(conversion_source.contains("pub struct AssignmentValuePlan"));
+    assert!(conversion_source.contains("pub fn assignment_value_plan_for_shape"));
+    assert!(conversion_source.contains("pub fn assignment_value_plan_for_target"));
+    assert!(conversion_source.contains("pub fn return_slot"));
+    assert!(conversion_source.contains("pub enum ReturnValuePlan"));
+    assert!(conversion_source.contains("pub fn return_value_plan"));
+    assert!(!source.contains("pub enum Slot"));
+    assert!(!source.contains("pub fn assignment_slot"));
+    assert!(!source.contains("pub fn argument_slot"));
+    assert!(!source.contains("pub fn condition_slot"));
+    assert!(!source.contains("pub fn index_slot"));
+    assert!(!source.contains("pub fn assignment_slot_for_target"));
+    assert!(!source.contains("pub struct AssignmentValuePlan"));
+    assert!(!source.contains("pub fn assignment_value_plan_for_shape"));
+    assert!(!source.contains("pub fn assignment_value_plan_for_target"));
+    assert!(!source.contains("pub fn return_slot"));
+    assert!(!source.contains("pub enum ReturnValuePlan"));
+    assert!(!source.contains("pub fn return_value_plan"));
+    assert!(lower_source.contains("return_value_plan"));
+    assert!(!lower_source.contains("return_slot"));
+    assert!(lower_source.contains("assignment_value_plan_for_shape"));
+    assert!(lower_source.contains("assignment_value_plan_for_target"));
+    assert!(!lower_source.contains("assignment_slot("));
+    assert!(!lower_source.contains("assignment_slot_for_target"));
+    assert!(conversion_source.contains("pub struct SyntaxCoercionPlan"));
+    assert!(!source.contains("pub struct SyntaxCoercionPlan"));
+    assert!(conversion_source.contains("pub fn syntax_coercion_plan"));
+    assert!(conversion_source.contains("pub fn syntax_coercion_plan_with_facts"));
+    assert!(!source.contains("pub fn syntax_coercion_plan"));
+    assert!(!source.contains("pub fn syntax_coercion_plan_with_facts"));
+    assert!(source.contains("pub fn apply_syntax_coercion_plan"));
+    assert!(source.contains("impl SyntaxCoercionPlan"));
+    assert!(source.contains("pub fn plan_coercion_with_facts"));
+    assert!(source.contains("crate::conversion_plan::syntax_coercion_plan_with_facts"));
+    assert!(
+        conversion_source.contains("SlotConversionPlan::Syntax(syntax_coercion_plan_with_facts")
+    );
+    assert!(source.contains("apply_syntax_coercion_plan(expr, plan)"));
+    assert!(conversion_source.contains("pub fn syntax_slot_coercion_policy"));
+    assert!(!source.contains("pub fn syntax_slot_coercion_policy"));
+    assert!(conversion_source.contains("pub enum DispatchCoercionPolicy"));
+    assert!(conversion_source.contains("pub fn dispatch_coercion_policy"));
+    assert!(conversion_source.contains("pub fn dispatch_coercion_policy_with_facts"));
+    assert!(conversion_source.contains("pub enum BorrowedDynToOwnedBoxedDynRecoveryPolicy"));
+    assert!(!source.contains("pub enum DispatchCoercionPolicy"));
+    assert!(!source.contains("pub fn dispatch_coercion_policy"));
+    assert!(!source.contains("pub fn dispatch_coercion_policy_with_facts"));
+    assert!(!source.contains("pub enum BorrowedDynToOwnedBoxedDynRecoveryPolicy"));
     assert!(source.contains("CloneBoxAdapterRequired"));
     assert!(source.contains("pub struct UnsupportedCoercionMessagePolicy"));
-    assert!(source.contains("pub struct CoercionContentPolicy"));
-    assert!(source.contains("pub fn coercion_content_policy"));
-    assert!(source.contains("pub struct CoercionShapeContentPolicy"));
-    assert!(source.contains("pub fn coercion_shape_content_policy"));
-    assert!(source.contains("pub struct OptionalElementTargetMatchPolicy"));
-    assert!(source.contains("pub fn optional_element_target_match_policy"));
-    assert!(source.contains("pub struct VecElementTargetMatchPolicy"));
-    assert!(source.contains("pub fn vec_element_target_match_policy"));
+    assert!(conversion_source.contains("pub struct CoercionContentPolicy"));
+    assert!(conversion_source.contains("pub fn coercion_content_policy"));
+    assert!(conversion_source.contains("pub struct CoercionShapeContentPolicy"));
+    assert!(conversion_source.contains("pub fn coercion_shape_content_policy"));
+    assert!(!source.contains("pub struct CoercionContentPolicy"));
+    assert!(!source.contains("pub fn coercion_content_policy"));
+    assert!(!source.contains("pub struct CoercionShapeContentPolicy"));
+    assert!(!source.contains("pub fn coercion_shape_content_policy"));
+    assert!(conversion_source.contains("pub struct OptionalElementTargetMatchPolicy"));
+    assert!(conversion_source.contains("pub fn optional_element_target_match_policy"));
+    assert!(!source.contains("pub struct OptionalElementTargetMatchPolicy"));
+    assert!(!source.contains("pub fn optional_element_target_match_policy"));
+    assert!(conversion_source.contains("pub struct BorrowedElementSlotAdapterPolicy"));
+    assert!(!source.contains("pub struct BorrowedElementSlotAdapterPolicy"));
+    assert!(conversion_source.contains("pub fn borrowed_element_slot_adapter_policy"));
+    assert!(!source.contains("pub fn borrowed_element_slot_adapter_policy"));
+    assert!(source.contains("fn apply_borrowed_element_slot_adapter"));
+    assert!(conversion_source.contains("pub enum SlotConversionPlan"));
+    assert!(!source.contains("pub enum SlotConversionPlan"));
+    assert!(conversion_source.contains("pub fn slot_conversion_plan"));
+    assert!(conversion_source.contains("pub fn slot_conversion_plan_with_facts"));
+    assert!(conversion_source.contains("pub fn lowered_slot_conversion_plan"));
+    assert!(conversion_source.contains("pub fn lowered_slot_conversion_plan_with_facts"));
+    assert!(!source.contains("pub fn slot_conversion_plan"));
+    assert!(!source.contains("pub fn slot_conversion_plan_with_facts"));
+    assert!(!source.contains("pub fn lowered_slot_conversion_plan"));
+    assert!(!source.contains("pub fn lowered_slot_conversion_plan_with_facts"));
+    assert!(source.contains("pub fn apply_slot_conversion_plan"));
+    assert!(source.contains("SlotConversionPlan::Shape"));
+    assert!(source.contains("SlotConversionPlan::Syntax"));
+    assert!(source.contains("SlotConversionPlan::BorrowedElement"));
+    assert!(source.contains("crate::conversion_plan::lowered_slot_conversion_plan_with_facts"));
+    assert!(source.contains("apply_slot_conversion_plan(lowered.expr, &plan)"));
+    assert!(conversion_source.contains("pub struct ShapeCoercionPlan"));
+    assert!(!source.contains("pub struct ShapeCoercionPlan"));
+    assert!(conversion_source.contains("pub fn shape_coercion_plan"));
+    assert!(conversion_source.contains("pub fn shape_coercion_plan_with_facts"));
+    assert!(!source.contains("pub fn shape_coercion_plan"));
+    assert!(!source.contains("pub fn shape_coercion_plan_with_facts"));
+    assert!(source.contains("pub fn apply_shape_coercion_plan"));
+    assert!(source.contains("impl ShapeCoercionPlan"));
+    assert!(source.contains("pub fn plan_shape_coercion_with_facts"));
+    assert!(source.contains("crate::conversion_plan::shape_coercion_plan_with_facts"));
+    assert!(source.contains("apply_shape_coercion_plan(expr, &plan)"));
+    assert!(conversion_source.contains("pub enum OptionalShapeCoercionPolicy"));
+    assert!(conversion_source.contains("pub fn optional_shape_coercion_policy"));
+    assert!(conversion_source.contains("pub fn optional_shape_coercion_policy_with_facts"));
+    assert!(conversion_source.contains("element_plan: Box<ShapeCoercionPlan>"));
+    assert!(conversion_source.contains("fn optional_element_slot_shape"));
+    assert!(!source.contains("pub enum OptionalShapeCoercionPolicy"));
+    assert!(!source.contains("pub fn optional_shape_coercion_policy"));
+    assert!(!source.contains("pub fn optional_shape_coercion_policy_with_facts"));
+    assert!(source.contains("pub fn non_identity_coercions"));
+    assert!(!source.contains("element_coercions: Vec<Coercion>"));
+    assert!(conversion_source.contains("pub struct VecElementTargetMatchPolicy"));
+    assert!(conversion_source.contains("pub fn vec_element_target_match_policy"));
+    assert!(!source.contains("pub struct VecElementTargetMatchPolicy"));
+    assert!(!source.contains("pub fn vec_element_target_match_policy"));
     assert!(source.contains("dispatch_coercion_fallback_message_policy"));
     assert!(source.contains("unsupported_dispatch_coercion"));
-    assert!(source.contains("pub enum ViewCoercionPolicy"));
-    assert!(source.contains("pub fn view_coercion_policy"));
-    assert!(source.contains("pub enum InvalidCastPolicy"));
-    assert!(source.contains("pub struct RustNominalTypeNamePolicy"));
-    assert!(source.contains("pub fn rust_nominal_type_name_policy"));
-    assert!(source.contains("pub enum RuntimeTypeTargetPolicy"));
-    assert!(source.contains("pub fn runtime_type_target_policy"));
-    assert!(source.contains("pub struct PrimitiveWideningPolicy"));
-    assert!(source.contains("pub fn primitive_widening_policy"));
-    assert!(source.contains("pub struct PrimitiveRankPolicy"));
-    assert!(source.contains("pub fn primitive_rank_policy"));
+    assert!(conversion_source.contains("pub enum ViewCoercionPolicy"));
+    assert!(conversion_source.contains("pub fn view_coercion_policy"));
+    assert!(conversion_source.contains("pub fn view_coercion_policy_with_effective_facts"));
+    assert!(!source.contains("pub enum ViewCoercionPolicy"));
+    assert!(!source.contains("pub fn view_coercion_policy"));
+    assert!(!source.contains("pub fn view_coercion_policy_with_effective_facts"));
+    assert!(conversion_source.contains("pub enum InvalidCastPolicy"));
+    assert!(!source.contains("pub enum InvalidCastPolicy"));
+    assert!(conversion_source.contains("pub struct RustNominalTypeNamePolicy"));
+    assert!(conversion_source.contains("pub fn rust_nominal_type_name_policy"));
+    assert!(conversion_source.contains("pub enum RuntimeTypeTargetPolicy"));
+    assert!(conversion_source.contains("pub fn runtime_type_target_policy"));
+    assert!(!source.contains("pub struct RustNominalTypeNamePolicy"));
+    assert!(!source.contains("pub fn rust_nominal_type_name_policy"));
+    assert!(!source.contains("pub enum RuntimeTypeTargetPolicy"));
+    assert!(!source.contains("pub fn runtime_type_target_policy"));
+    assert!(conversion_source.contains("pub struct PrimitiveWideningPolicy"));
+    assert!(conversion_source.contains("pub fn primitive_widening_policy"));
+    assert!(conversion_source.contains("pub struct PrimitiveRankPolicy"));
+    assert!(conversion_source.contains("pub fn primitive_rank_policy"));
+    assert!(!source.contains("pub struct PrimitiveWideningPolicy"));
+    assert!(!source.contains("pub fn primitive_widening_policy"));
+    assert!(!source.contains("pub struct PrimitiveRankPolicy"));
+    assert!(!source.contains("pub fn primitive_rank_policy"));
     assert!(source.contains("pub struct RustPrimitiveTypeNamePolicy"));
     assert!(source.contains("pub fn rust_primitive_type_name_policy"));
     assert!(!source.contains("fn rust_nominal_type_name("));
     assert!(!source.contains("fn option_target_matches("));
     assert!(!source.contains("fn vec_target_matches("));
+    assert!(!source.contains("fn apply_borrowed_option_element_adapter"));
+    assert!(!source.contains("fn apply_borrowed_vec_element_adapter"));
     assert!(!source.contains("fn primitive_widening("));
     assert!(!source.contains("fn primitive_rank("));
     assert!(!source.contains("fn rust_primitive_name("));
@@ -6173,15 +6669,19 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
 #[test]
 fn coercion_plan_owns_instanceof_fallback_policy() {
     let source = include_str!("../src/coercion.rs");
+    let conversion_source = include_str!("../src/conversion_plan.rs");
 
     assert!(source.contains("pub struct CoercionDiagnostic"));
-    assert!(source.contains("pub enum InstanceOfFallbackPolicy"));
+    assert!(conversion_source.contains("pub enum InstanceOfFallbackPolicy"));
+    assert!(!source.contains("pub enum InstanceOfFallbackPolicy"));
     assert!(source.contains("ErasedObjectToDynTrait"));
     assert!(source.contains("ErasedObjectToBoxedDynTrait"));
-    assert!(source.contains("pub enum InstanceOfCheck"));
+    assert!(conversion_source.contains("pub enum InstanceOfCheck"));
+    assert!(!source.contains("pub enum InstanceOfCheck"));
     assert!(source.contains("BoxedDynTraitType"));
-    assert!(source.contains("policy: InstanceOfFallbackPolicy"));
-    assert!(source.contains("plan_instanceof_check"));
+    assert!(conversion_source.contains("policy: InstanceOfFallbackPolicy"));
+    assert!(conversion_source.contains("pub fn plan_instanceof_check"));
+    assert!(!source.contains("pub fn plan_instanceof_check"));
     assert!(source.contains("unsupported_instanceof_shape"));
     assert!(source.contains("unsupported_erased_object_instanceof_dyn_trait"));
     assert!(source.contains("unsupported_erased_object_instanceof_boxed_dyn_trait"));
@@ -6193,22 +6693,44 @@ fn coercion_plan_owns_instanceof_fallback_policy() {
 #[test]
 fn coercion_plan_owns_clone_recovery_policy() {
     let source = include_str!("../src/coercion.rs");
+    let conversion_source = include_str!("../src/conversion_plan.rs");
+    let effective_facts_source = include_str!("../src/effective_facts.rs");
 
-    assert!(source.contains("pub enum CloneRecoveryPolicy"));
-    assert!(source.contains("pub enum OwnershipCoercionPolicy"));
-    assert!(source.contains("pub enum OwnershipCoercionFallbackPolicy"));
-    assert!(source.contains("pub fn ownership_coercion_policy"));
-    assert!(source.contains("pub struct CoercionOwnedRecoveryCapabilityPolicy"));
-    assert!(source.contains("pub fn coercion_owned_recovery_capability_policy"));
-    assert!(source.contains("OwnershipCoercionPolicy::RecoverOwnedCopyValue"));
+    assert!(conversion_source.contains("pub enum CloneRecoveryPolicy"));
+    assert!(conversion_source.contains("pub enum OwnershipCoercionPolicy"));
+    assert!(conversion_source.contains("pub enum OwnershipCoercionFallbackPolicy"));
+    assert!(!source.contains("pub enum CloneRecoveryPolicy"));
+    assert!(!source.contains("pub enum OwnershipCoercionPolicy"));
+    assert!(!source.contains("pub enum OwnershipCoercionFallbackPolicy"));
+    assert!(!source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(conversion_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(conversion_source.contains("pub fn ownership_coercion_policy"));
+    assert!(conversion_source.contains("ownership_coercion_policy_with_effective_facts"));
+    assert!(conversion_source.contains("pub struct CoercionOwnedRecoveryCapabilityPolicy"));
+    assert!(conversion_source.contains("pub fn coercion_owned_recovery_capability_policy"));
+    assert!(
+        conversion_source
+            .contains("coercion_owned_recovery_capability_policy_with_effective_facts")
+    );
+    assert!(!source.contains("pub fn ownership_coercion_policy"));
+    assert!(!source.contains("pub fn ownership_coercion_policy_with_effective_facts"));
+    assert!(!source.contains("pub struct CoercionOwnedRecoveryCapabilityPolicy"));
+    assert!(!source.contains("pub fn coercion_owned_recovery_capability_policy"));
+    assert!(conversion_source.contains("OwnershipCoercionPolicy::RecoverOwnedCopyValue"));
     assert!(source.contains("Coercion::CopyBorrowedValue"));
-    assert!(source.contains("OwnershipCoercionPolicy::RecoverOwnedWithClone"));
-    assert!(source.contains("BorrowedToOwnedNonCloneable"));
+    assert!(conversion_source.contains("OwnershipCoercionPolicy::RecoverOwnedWithClone"));
+    assert!(conversion_source.contains("BorrowedToOwnedNonCloneable"));
     assert!(source.contains("ownership_coercion_fallback_message_policy"));
-    assert!(source.contains("policy: CloneRecoveryPolicy"));
-    assert!(source.contains("ProvenCloneCapability"));
-    assert_eq!(source.matches("owned_recovery_capability_for").count(), 1);
-    assert!(source.contains("ownership_recovery_policy_from_capability"));
+    assert!(conversion_source.contains("policy: CloneRecoveryPolicy"));
+    assert!(conversion_source.contains("ProvenCloneCapability"));
+    assert!(effective_facts_source.contains("pub fn owned_recovery_capability_for"));
+    assert_eq!(
+        conversion_source
+            .matches("facts.owned_recovery_capability_for")
+            .count(),
+        1
+    );
+    assert!(conversion_source.contains("ownership_recovery_policy_from_capability"));
     assert!(source.contains("clone_audit_required"));
     assert!(source.contains("unsupported_ownership_coercion"));
     assert!(source.contains("unsupported_borrowed_to_owned_non_cloneable"));
@@ -6218,23 +6740,51 @@ fn coercion_plan_owns_clone_recovery_policy() {
 #[test]
 fn coercion_plan_owns_borrowed_element_recovery_fallback_policy() {
     let source = include_str!("../src/coercion.rs");
+    let conversion_source = include_str!("../src/conversion_plan.rs");
+    let effective_facts_source = include_str!("../src/effective_facts.rs");
 
-    assert!(source.contains("pub enum BorrowedElementRecoveryPolicy"));
-    assert!(source.contains("pub fn borrowed_element_recovery_policy"));
-    assert!(source.contains("pub enum BorrowedElementRecoveryFallbackPolicy"));
-    assert!(source.contains("BorrowedElementRecoveryFallbackPolicy::CompileError"));
-    assert!(source.contains("NonCloneableElement"));
-    assert!(source.contains("policy: CloneRecoveryPolicy"));
-    assert!(source.contains("borrowed_element_recovery_policy_from_capability"));
+    assert!(conversion_source.contains("pub enum BorrowedElementRecoveryPolicy"));
+    assert!(!source.contains("pub enum BorrowedElementRecoveryPolicy"));
+    assert!(conversion_source.contains("pub enum BorrowedElementCarrier"));
+    assert!(conversion_source.contains("pub struct BorrowedElementAdapterPolicy"));
+    assert!(!source.contains("pub enum BorrowedElementCarrier"));
+    assert!(!source.contains("pub struct BorrowedElementAdapterPolicy"));
+    assert!(conversion_source.contains("pub fn borrowed_element_adapter_policy"));
+    assert!(!source.contains("pub fn borrowed_element_adapter_policy"));
+    assert!(source.contains("fn apply_borrowed_element_adapter"));
+    assert!(conversion_source.contains("pub fn borrowed_element_recovery_policy"));
+    assert!(conversion_source.contains("borrowed_element_recovery_policy_with_effective_facts"));
+    assert!(conversion_source.contains("pub enum BorrowedElementRecoveryFallbackPolicy"));
+    assert!(conversion_source.contains("CompileError"));
+    assert!(conversion_source.contains("NonCloneableElement"));
+    assert!(conversion_source.contains("policy: CloneRecoveryPolicy"));
+    assert!(conversion_source.contains("borrowed_element_recovery_policy_from_capability"));
+    assert!(!source.contains("pub fn borrowed_element_recovery_policy"));
+    assert!(!source.contains("pub fn borrowed_element_recovery_policy_with_effective_facts"));
+    assert!(!source.contains("pub enum BorrowedElementRecoveryFallbackPolicy"));
     assert!(source.contains("borrowed_element_clone_audit_required"));
     assert!(source.contains("borrowed_element_recovery_fallback_message_policy"));
     assert!(source.contains("unsupported_borrowed_element_recovery"));
     assert!(source.contains("unsupported_borrowed_element_non_cloneable"));
     assert!(source.contains("render_borrowed_element_recovery_fallback_policy"));
     assert!(!source.contains("fn shape_has_string_content"));
-    assert!(source.contains("is_string_like_type"));
-    assert!(source.contains("coercion_owned_recovery_capability_policy"));
-    assert_eq!(source.matches("owned_recovery_capability_for").count(), 1);
+    assert!(conversion_source.contains("coercion_content_policy_with_effective_facts"));
+    assert!(conversion_source.contains("coercion_shape_content_policy_with_effective_facts"));
+    assert!(!source.contains("pub fn coercion_content_policy_with_effective_facts"));
+    assert!(!source.contains("pub fn coercion_shape_content_policy_with_effective_facts"));
+    assert!(conversion_source.contains("view_coercion_policy_with_effective_facts"));
+    assert!(!source.contains("pub fn view_coercion_policy_with_effective_facts"));
+    assert!(effective_facts_source.contains("pub fn is_string_like_type"));
+    assert!(conversion_source.contains("coercion_owned_recovery_capability_policy"));
+    assert!(conversion_source.contains("pub fn borrowed_element_recovery_policy("));
+    assert!(!source.contains("pub fn borrowed_element_recovery_policy("));
+    assert!(conversion_source.contains("borrowed_element_recovery_policy(element_shape, facts)"));
+    assert_eq!(
+        conversion_source
+            .matches("facts.owned_recovery_capability_for")
+            .count(),
+        1
+    );
     assert!(!source.contains(".copy"));
     assert!(!source.contains(".clone {"));
     assert!(!source.contains(".string_like"));
@@ -6265,10 +6815,22 @@ final class Num implements Expr {}
         provenance: RepresentationProvenance::ParsedSource,
         direct_subtypes: Vec::new(),
     };
-    let expr_policy = closed_enum_inference_policy("Expr", &pre_inference_expr, &resolved.facts);
-    let add_policy = closed_enum_inference_policy("Add", &pre_inference_add, &resolved.facts);
-    let expr_fact_policy = closed_enum_fact_policy("Expr", &pre_inference_expr, &resolved.facts);
-    let add_fact_policy = closed_enum_fact_policy("Add", &pre_inference_add, &resolved.facts);
+    let expr_policy = closed_enum_inference_policy(
+        "Expr",
+        &pre_inference_expr.representation,
+        &pre_inference_expr.direct_subtypes,
+        &resolved.facts,
+    );
+    let add_policy = closed_enum_inference_policy(
+        "Add",
+        &pre_inference_add.representation,
+        &pre_inference_add.direct_subtypes,
+        &resolved.facts,
+    );
+    let expr_fact_policy =
+        closed_enum_fact_policy("Expr", &pre_inference_expr.direct_subtypes, &resolved.facts);
+    let add_fact_policy =
+        closed_enum_fact_policy("Add", &pre_inference_add.direct_subtypes, &resolved.facts);
 
     assert_eq!(
         representations.representation_for(&JavaType::Named {
@@ -6301,10 +6863,7 @@ final class Num implements Expr {}
             variants: vec!["Add".to_string(), "Num".to_string()],
         })
     );
-    assert_eq!(
-        expr_policy.provenance,
-        Some(RepresentationProvenance::CorpusAnalysis)
-    );
+    assert_eq!(expr_policy.provenance, Some(FactProvenance::CorpusAnalysis));
     assert_eq!(add_policy.representation, None);
     assert_eq!(add_policy.provenance, None);
     assert_eq!(
@@ -6406,10 +6965,14 @@ boxed-dyn-trait Sink SinkTrait
                 override_fact.type_name == "Sink"
                     && matches!(
                         &override_fact.strategy,
-                        HierarchyStrategy::BoxedDynTrait { trait_name } if trait_name == "SinkTrait"
+                        HierarchyStrategy::DynTrait { trait_name } if trait_name == "SinkTrait"
                     )
             })
     );
+    assert!(parsed.facts.dispatch_requirement_facts.iter().any(|fact| {
+        fact.type_name == "Sink"
+            && fact.requirement == DispatchRequirementKind::NeedsOwnedPolymorphicStorage
+    }));
 }
 
 #[test]
@@ -6763,6 +7326,13 @@ class Dog implements Animal {}
         }
     );
     assert_eq!(
+        cast_plan.coercion.coercions(),
+        vec![Coercion::WrapClosedEnum {
+            enum_name: "AnimalValue".to_string(),
+            variant_name: "Dog".to_string(),
+        }]
+    );
+    assert_eq!(
         apply_cast_conversion(RustExpr::Var("dog".to_string()), &cast_plan),
         RustExpr::Raw("AnimalValue::Dog(dog)".to_string())
     );
@@ -6773,6 +7343,13 @@ class Dog implements Animal {}
     };
     let instanceof_plan = plan_instanceof(&parse_expr("animal"), &dog_ty, &env, ctx);
     assert_eq!(
+        instanceof_plan.check,
+        InstanceOfCheck::ClosedEnumVariant {
+            enum_name: "AnimalValue".to_string(),
+            variant_name: "Dog".to_string(),
+        }
+    );
+    assert_eq!(
         apply_instanceof(RustExpr::Var("animal".to_string()), &instanceof_plan),
         RustExpr::Raw("matches!(animal, AnimalValue::Dog(_))".to_string())
     );
@@ -6781,11 +7358,45 @@ class Dog implements Animal {}
 #[test]
 fn conversion_plan_does_not_render_rust_expressions() {
     let source = include_str!("../src/conversion_plan.rs");
+    let lowering_source = include_str!("../src/conversion_lowering.rs");
 
     assert!(!source.contains("rust_ir"));
     assert!(!source.contains("RustExpr"));
     assert!(!source.contains("apply_expr_to_shape"));
     assert!(!source.contains("apply_instanceof_check"));
+    assert!(source.contains("pub struct ShapeCoercionPlan"));
+    assert!(source.contains("pub struct SyntaxCoercionPlan"));
+    assert!(source.contains("pub enum InstanceOfCheck"));
+    assert!(source.contains("pub struct BorrowedElementSlotAdapterPolicy"));
+    assert!(source.contains("pub coercion: ShapeCoercionPlan"));
+    assert!(source.contains("pub check: InstanceOfCheck"));
+    assert!(source.contains("pub enum LoweredType"));
+    assert!(source.contains("pub enum SlotConversionPlan"));
+    assert!(source.contains("pub struct SlotExprConversionPlan"));
+    assert!(source.contains("pub struct LoweredSlotExprConversionPlan"));
+    assert!(source.contains("pub conversion: SlotConversionPlan"));
+    assert!(source.contains("pub fn actual_shape_for_slot_expr"));
+    assert!(source.contains("pub fn plan_slot_conversion"));
+    assert!(source.contains("pub fn plan_lowered_slot_conversion"));
+    assert!(source.contains("shape_coercion_plan_with_facts"));
+    assert!(source.contains("plan_instanceof_check"));
+    assert!(source.contains("slot_conversion_plan_with_facts"));
+    assert!(source.contains("lowered_slot_conversion_plan_with_facts"));
+    assert!(lowering_source.contains("apply_shape_coercion_plan(expr, &plan.coercion)"));
+    assert!(lowering_source.contains("render_instanceof_check(expr, &plan.check)"));
+    assert!(lowering_source.contains("pub fn apply_slot_expr_conversion"));
+    assert!(lowering_source.contains("pub fn apply_lowered_slot_expr_conversion"));
+    assert!(!lowering_source.contains("FactSet"));
+    assert!(!lowering_source.contains("plan_slot_conversion"));
+    assert!(!lowering_source.contains("plan_lowered_slot_conversion"));
+    assert!(!lowering_source.contains("slot_conversion_plan_with_facts"));
+    assert!(!lowering_source.contains("lowered_slot_conversion_plan_with_facts"));
+    assert!(!lowering_source.contains("apply_expr_to_shape_with_facts"));
+    assert!(!lowering_source.contains("plan_instanceof_check"));
+
+    let coercion_source = include_str!("../src/coercion.rs");
+    assert!(!coercion_source.contains("pub enum LoweredType"));
+    assert!(!coercion_source.contains("pub fn actual_shape_for_slot_expr"));
 }
 
 #[test]
@@ -7115,6 +7726,159 @@ fn signature_shape_request_centralizes_role_base_shape_and_constraints() {
 }
 
 #[test]
+fn signature_slot_dispatch_requirements_project_through_representation_dispatch() {
+    let animal = JavaType::Named {
+        name: "Animal".to_string(),
+        args: Vec::new(),
+    };
+    let mut facts = FactSet::default();
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "Animal".to_string(),
+            requirement: DispatchRequirementKind::NeedsOwnedPolymorphicStorage,
+            provenance: FactProvenance::ParsedSource,
+        });
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "Animal".to_string(),
+            requirement: DispatchRequirementKind::NeedsBorrowedTraitView,
+            provenance: FactProvenance::ParsedSource,
+        });
+    let source_dispatch = DispatchShape::DynTrait {
+        trait_name: "AnimalApi".to_string(),
+    };
+    let effective_facts = EffectiveFacts::new(&facts);
+
+    let storage_policy = signature_slot_dispatch_requirement_policy(
+        &animal,
+        SignatureSlotRole::Storage,
+        source_dispatch.clone(),
+        &facts,
+    );
+    let return_policy = signature_slot_dispatch_requirement_policy_with_effective_facts(
+        &animal,
+        SignatureSlotRole::Return,
+        source_dispatch.clone(),
+        &effective_facts,
+    );
+    let param_policy = signature_slot_dispatch_requirement_policy(
+        &animal,
+        SignatureSlotRole::Param { is_varargs: false },
+        source_dispatch.clone(),
+        &facts,
+    );
+
+    assert_eq!(
+        storage_policy.constraints,
+        vec![SignatureConstraint::RequiredDispatch(
+            DispatchShape::BoxedDynTrait {
+                trait_name: "AnimalApi".to_string(),
+            }
+        )]
+    );
+    assert_eq!(return_policy.constraints, storage_policy.constraints);
+    assert_eq!(
+        param_policy.constraints,
+        vec![SignatureConstraint::RequiredDispatch(source_dispatch)]
+    );
+
+    let signature_source = include_str!("../src/signature.rs");
+    assert!(signature_source.contains("dispatch_requirement_projection_policy"));
+    assert!(signature_source.contains("fn dispatch_requirement_projection_role"));
+    assert!(!signature_source.contains(
+        "(DispatchRequirementKind::NeedsOwnedPolymorphicStorage, SignatureSlotRole::Storage)"
+    ));
+}
+
+#[test]
+fn signature_solver_consumes_slot_dispatch_requirement_facts_without_rechoosing_object_strategy() {
+    let parsed = parse_java_source(
+        r#"
+class ExternalThing {}
+class Use {
+    ExternalThing value;
+
+    ExternalThing id(ExternalThing input) {
+        return input;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "ExternalThing".to_string(),
+            requirement: DispatchRequirementKind::NeedsUnknownRuntimeObject,
+            provenance: FactProvenance::CorpusAnalysis,
+        });
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+    let use_ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Use")
+        .unwrap();
+    let id_method = use_ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "id" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        representations.dispatch_for(&JavaType::Named {
+            name: "ExternalThing".to_string(),
+            args: Vec::new(),
+        }),
+        DispatchShape::Concrete
+    );
+    assert_eq!(
+        signatures.field_shape("Use", "value").unwrap().dispatch,
+        DispatchShape::ErasedObject
+    );
+    assert_eq!(
+        signatures.method_param_plans(use_ty, id_method).unwrap()[0]
+            .shape
+            .dispatch,
+        DispatchShape::ErasedObject
+    );
+    assert_eq!(
+        signatures
+            .method_signature(use_ty, id_method)
+            .unwrap()
+            .return_shape
+            .as_ref()
+            .unwrap()
+            .dispatch,
+        DispatchShape::ErasedObject
+    );
+
+    let direct_shape = solve_signature_shape_with_facts(
+        &representations,
+        SignatureShapeRequest {
+            java_ty: JavaType::Named {
+                name: "ExternalThing".to_string(),
+                args: Vec::new(),
+            },
+            role: SignatureSlotRole::Storage,
+            constraints: Vec::new(),
+        },
+        &facts,
+    )
+    .unwrap();
+    assert_eq!(direct_shape.dispatch, DispatchShape::ErasedObject);
+}
+
+#[test]
 fn signature_constraint_merge_is_order_independent_for_boundary_fallbacks() {
     let mut conservative_then_borrowed =
         conservative_boundary_constraints(&JavaType::String, &FactSet::default());
@@ -7323,6 +8087,7 @@ fn signature_owned_recovery_policy_classifies_capability_proofs() {
         SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
         SignatureConstraint::RequiredOwnership(OwnershipShape::SharedBorrow),
     ];
+    let effective_facts = EffectiveFacts::new(&facts);
 
     assert_eq!(
         signature_owned_recovery_capability_policy(&copy, &facts),
@@ -7339,6 +8104,13 @@ fn signature_owned_recovery_policy_classifies_capability_proofs() {
                 java_ty: explicit_clone.clone(),
             },
         }
+    );
+    assert_eq!(
+        signature_owned_recovery_capability_policy_with_effective_facts(
+            &explicit_clone,
+            &effective_facts,
+        ),
+        signature_owned_recovery_capability_policy(&explicit_clone, &facts)
     );
     assert_eq!(
         signature_owned_recovery_capability_policy(&external, &facts),
@@ -7362,8 +8134,24 @@ fn signature_owned_recovery_policy_classifies_capability_proofs() {
         SignatureOwnedRecoveryPolicy::ProvenByCopy
     );
     assert_eq!(
+        signature_owned_recovery_policy_with_effective_facts(
+            &copy,
+            &owned_recovery_constraints,
+            &effective_facts,
+        ),
+        signature_owned_recovery_policy(&copy, &owned_recovery_constraints, &facts)
+    );
+    assert_eq!(
         signature_owned_recovery_policy(&explicit_clone, &owned_recovery_constraints, &facts),
         SignatureOwnedRecoveryPolicy::ProvenByExplicitClone
+    );
+    assert_eq!(
+        signature_owned_recovery_policy_with_effective_facts(
+            &explicit_clone,
+            &owned_recovery_constraints,
+            &effective_facts,
+        ),
+        signature_owned_recovery_policy(&explicit_clone, &owned_recovery_constraints, &facts)
     );
     assert_eq!(
         signature_owned_recovery_policy(
@@ -7382,8 +8170,14 @@ fn signature_owned_recovery_policy_classifies_capability_proofs() {
     assert!(source.contains("pub enum SignatureOwnedRecoveryPolicy"));
     assert!(source.contains("pub struct SignatureOwnedRecoveryCapabilityPolicy"));
     assert!(source.contains("pub fn signature_owned_recovery_capability_policy"));
+    assert!(source.contains("signature_owned_recovery_capability_policy_with_effective_facts"));
     assert!(source.contains("pub fn signature_owned_recovery_policy"));
-    assert_eq!(source.matches("owned_recovery_capability_for").count(), 1);
+    assert!(source.contains("pub fn signature_owned_recovery_policy_with_effective_facts"));
+    assert!(source.contains("signature_owned_recovery_policy_with_effective_facts(java_ty, constraints, &effective_facts)"));
+    assert!(source.contains(
+        "signature_owned_recovery_capability_policy_with_effective_facts(java_ty, facts)"
+    ));
+    assert!(source.contains("use crate::effective_facts::EffectiveFacts"));
 }
 
 #[test]
@@ -7888,6 +8682,16 @@ class ExternalLabel {}
 
     let default_shell = method_function_shell(ty, method, &signatures, body.clone());
     let fact_shell = method_function_shell_with_facts(ty, method, &signatures, body, &facts);
+    let planned_shell = method_function_shell_with_facts_and_exception_plan(
+        ty,
+        method,
+        &signatures,
+        vec![RustStmt::Return(Some(RustExpr::Literal("0".to_string())))],
+        &facts,
+        MethodExceptionPlan {
+            wrap_returns_in_result: false,
+        },
+    );
 
     assert_eq!(
         default_shell.params[0].ty,
@@ -7903,6 +8707,7 @@ class ExternalLabel {}
             inner: Box::new(RustType::Raw("str".to_string())),
         }
     );
+    assert_eq!(planned_shell.return_type, fact_shell.return_type);
 }
 
 #[test]
@@ -8030,6 +8835,14 @@ fn lowering_consumes_solved_plans_without_choosing_shape_axes() {
         assert!(!source.contains("dispatch_for"));
         assert!(!source.contains("representation_for"));
     }
+
+    let lower_source = include_str!("../src/lower.rs");
+    assert!(lower_source.contains("plan_slot_conversion"));
+    assert!(lower_source.contains("plan_lowered_slot_conversion"));
+    assert!(lower_source.contains("apply_slot_expr_conversion"));
+    assert!(lower_source.contains("apply_lowered_slot_expr_conversion"));
+    assert!(!lower_source.contains("coercion::apply_expr_to_slot_with_facts"));
+    assert!(!lower_source.contains("coercion::apply_lowered_expr_to_slot_with_facts"));
 }
 
 #[test]
@@ -8294,10 +9107,21 @@ class ListUse {
             _ => None,
         })
         .unwrap();
+    let effective_facts = EffectiveFacts::new(&resolved.facts);
 
     assert_eq!(
         method_param_borrowed_content_policy(ty, method("len"), &method("len").params[0], &usage),
         Some(BorrowedContentPolicy::string_like_view())
+    );
+    assert_eq!(
+        method_param_borrowed_content_policy_with_effective_facts(
+            ty,
+            method("len"),
+            &method("len").params[0],
+            &usage,
+            &effective_facts,
+        ),
+        method_param_borrowed_content_policy(ty, method("len"), &method("len").params[0], &usage)
     );
     assert_eq!(
         borrowed_content_capability_policy(&JavaType::String, &resolved.facts),
@@ -8308,11 +9132,22 @@ class ListUse {
         }
     );
     assert_eq!(
+        borrowed_content_capability_policy_with_effective_facts(
+            &JavaType::String,
+            &effective_facts
+        ),
+        borrowed_content_capability_policy(&JavaType::String, &resolved.facts)
+    );
+    assert_eq!(
         borrowed_content_type_policy(&JavaType::String, &resolved.facts),
         BorrowedContentTypePolicy {
             java_ty: JavaType::String,
             policy: Some(BorrowedContentPolicy::string_like_view()),
         }
+    );
+    assert_eq!(
+        borrowed_content_type_policy_with_effective_facts(&JavaType::String, &effective_facts),
+        borrowed_content_type_policy(&JavaType::String, &resolved.facts)
     );
     assert_eq!(
         method_param_borrowed_content_policy(ty, method("id"), &method("id").params[0], &usage),
@@ -8321,6 +9156,16 @@ class ListUse {
     assert_eq!(
         constructor_param_borrowed_content_policy(ty, ctor, &ctor.params[0], &usage),
         Some(BorrowedContentPolicy::string_like_view())
+    );
+    assert_eq!(
+        constructor_param_borrowed_content_policy_with_effective_facts(
+            ty,
+            ctor,
+            &ctor.params[0],
+            &usage,
+            &effective_facts,
+        ),
+        constructor_param_borrowed_content_policy(ty, ctor, &ctor.params[0], &usage)
     );
     assert_eq!(
         method_param_shape_constraints(
@@ -8356,6 +9201,26 @@ class ListUse {
         Some(BorrowedContentPolicy::string_like_view())
     );
     assert_eq!(
+        borrowed_return_content_policy_from_param_with_effective_facts(
+            ty,
+            method("id"),
+            &usage,
+            &effective_facts,
+        ),
+        borrowed_return_content_policy_from_param(ty, method("id"), &usage)
+    );
+    assert_eq!(
+        borrowed_return_shape_from_param_with_effective_facts(
+            ty,
+            method("id"),
+            &representations,
+            &usage,
+            &effective_facts,
+        )
+        .unwrap(),
+        return_shape,
+    );
+    assert_eq!(
         method_return_shape_constraints(ty, method("id"), &usage, &resolved.facts),
         signature_constraints_for_borrowed_content_policy(BorrowedContentPolicy::string_like_view())
     );
@@ -8378,6 +9243,10 @@ class ListUse {
             java_ty: list_java_string.clone(),
             policy: Some(BorrowedContentPolicy::sequence_like_view()),
         }
+    );
+    assert_eq!(
+        borrowed_content_type_policy_with_effective_facts(&list_java_string, &effective_facts),
+        borrowed_content_type_policy(&list_java_string, &resolved.facts)
     );
     assert_eq!(
         borrowed_content_type_policy(&JavaType::Primitive(PrimitiveType::Int), &resolved.facts),
@@ -8404,6 +9273,21 @@ class ListUse {
             &usage,
         ),
         Some(BorrowedContentPolicy::sequence_like_view())
+    );
+    assert_eq!(
+        method_param_borrowed_content_policy_with_effective_facts(
+            list_ty,
+            list_method("empty"),
+            &list_method("empty").params[0],
+            &usage,
+            &effective_facts,
+        ),
+        method_param_borrowed_content_policy(
+            list_ty,
+            list_method("empty"),
+            &list_method("empty").params[0],
+            &usage,
+        )
     );
     assert_eq!(
         method_param_shape_constraints(
@@ -9796,8 +10680,29 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         signature_boundary_representation_fact_policy(&wildcard_object, &facts);
     let enum_override_representation_fact_policy =
         signature_boundary_representation_fact_policy(&enum_overridden_object, &facts);
+    let effective_facts = EffectiveFacts::new(&facts);
+    let interface_effective_representation_fact_policy =
+        signature_boundary_representation_fact_policy_with_effective_facts(
+            &animal,
+            &effective_facts,
+        );
+    let effective_public_copy = signature_boundary_policy_with_effective_facts(
+        SignatureBoundaryKind::PublicApi,
+        &external_id,
+        &effective_facts,
+    );
+    let effective_escaping_object = signature_boundary_policy_with_effective_facts(
+        SignatureBoundaryKind::EscapingStorage,
+        &animal,
+        &effective_facts,
+    );
+    let effective_native_copy =
+        signature_native_boundary_policy_with_effective_facts(&external_id, &effective_facts);
 
     assert_eq!(public_copy.kind, SignatureBoundaryKind::PublicApi);
+    assert_eq!(effective_public_copy, public_copy);
+    assert_eq!(effective_escaping_object, escaping_object);
+    assert_eq!(effective_native_copy, native_copy_policy);
     assert_eq!(
         native_representation_fact_policy,
         SignatureBoundaryRepresentationFactPolicy {
@@ -9811,6 +10716,10 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
             java_ty: animal.clone(),
             object_representation_facts: true,
         }
+    );
+    assert_eq!(
+        interface_effective_representation_fact_policy,
+        interface_representation_fact_policy
     );
     assert_eq!(
         unknown_representation_fact_policy,
@@ -9976,6 +10885,17 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
             SignatureBoundaryFallback::ConservativeNative,
             &external_id,
             &facts,
+        ),
+        vec![
+            SignatureConstraint::RequiredOwnership(OwnershipShape::CopyValue),
+            SignatureConstraint::RequiredView(ViewShape::Native),
+        ]
+    );
+    assert_eq!(
+        signature_boundary_constraints_with_effective_facts(
+            SignatureBoundaryFallback::ConservativeNative,
+            &external_id,
+            &effective_facts,
         ),
         vec![
             SignatureConstraint::RequiredOwnership(OwnershipShape::CopyValue),
@@ -10434,12 +11354,16 @@ fn signature_boundary_policy_is_the_single_boundary_constraint_entrypoint() {
     assert!(source.contains("EscapingNativeStorage"));
     assert!(source.contains("pub fn signature_boundary_policy"));
     assert!(source.contains("pub fn signature_boundary_representation_fact_policy"));
+    assert!(source.contains("signature_boundary_representation_fact_policy_with_effective_facts"));
     assert!(source.contains("pub fn signature_boundary_representation_policy"));
-    assert_eq!(source.matches("has_object_representation_facts").count(), 1);
+    assert!(source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(source.contains("pub fn signature_boundary_policy_with_effective_facts"));
     assert!(source.contains("pub fn signature_native_boundary_policy"));
-    assert!(source.contains("signature_capability_policy(java_ty, facts)"));
-    assert!(source.contains("fn signature_boundary_fallback"));
+    assert!(source.contains("pub fn signature_native_boundary_policy_with_effective_facts"));
+    assert!(source.contains("signature_capability_policy_with_effective_facts(java_ty, facts)"));
+    assert!(source.contains("fn signature_boundary_fallback_with_effective_facts"));
     assert!(source.contains("pub fn signature_boundary_constraints"));
+    assert!(source.contains("pub fn signature_boundary_constraints_with_effective_facts"));
     assert!(!source.contains("fn boundary_type_has_object_representation"));
     assert!(!source.contains("fn native_boundary_constraints"));
     assert!(source.contains("pub struct BindingBoundaryPolicy"));
@@ -11146,34 +12070,258 @@ class ExternalUse {
     let slot_render_source = include_str!("../src/slot_render.rs");
     let signature_source = include_str!("../src/signature.rs");
     let representation_source = include_str!("../src/representation.rs");
+    let object_model_source = include_str!("../src/object_model.rs");
+    let facts_source = include_str!("../src/facts.rs");
+    let effective_facts_source = include_str!("../src/effective_facts.rs");
     assert!(slot_policy_source.contains("pub struct BorrowedContentCapabilityPolicy"));
     assert!(slot_policy_source.contains("pub fn borrowed_content_capability_policy"));
+    assert!(slot_policy_source.contains("borrowed_content_capability_policy_with_effective_facts"));
     assert!(slot_policy_source.contains("pub struct BorrowedContentTypePolicy"));
     assert!(slot_policy_source.contains("pub fn borrowed_content_type_policy"));
+    assert!(slot_policy_source.contains("borrowed_content_type_policy_with_effective_facts"));
+    assert!(
+        slot_policy_source
+            .contains("pub fn method_param_borrowed_content_policy_with_effective_facts")
+    );
+    assert!(
+        slot_policy_source
+            .contains("pub fn constructor_param_borrowed_content_policy_with_effective_facts")
+    );
+    assert!(
+        slot_policy_source
+            .contains("pub fn borrowed_return_content_policy_from_param_with_effective_facts")
+    );
+    assert!(
+        slot_policy_source.contains("pub fn borrowed_return_shape_from_param_with_effective_facts")
+    );
+    assert!(slot_policy_source.contains("use crate::effective_facts::EffectiveFacts"));
     assert!(!slot_policy_source.contains("fn borrowed_content_policy_for_type"));
     assert!(!slot_policy_source.contains("fn can_borrow_content"));
-    assert_eq!(slot_policy_source.matches("is_string_like_type").count(), 1);
     assert_eq!(
         slot_policy_source
-            .matches("sequence_element_type_for")
+            .matches("borrowed_content_type_policy(&")
             .count(),
-        1
+        0
     );
+    assert!(effective_facts_source.contains("pub fn is_string_like_type"));
+    assert!(effective_facts_source.contains("pub fn sequence_element_type_for"));
     assert!(!slot_policy_source.contains(".string_like"));
-    assert!(slot_render_source.contains("is_string_like_type"));
+    assert!(slot_render_source.contains("slot_content_capability_policy_with_effective_facts"));
+    assert!(slot_render_source.contains("use crate::effective_facts::EffectiveFacts"));
     assert!(!slot_render_source.contains("TypeCapabilities::conservative"));
     assert!(!slot_render_source.contains(".string_like"));
-    assert!(signature_source.contains("owned_recovery_capability_for"));
+    assert!(
+        signature_source
+            .contains("signature_owned_recovery_capability_policy_with_effective_facts")
+    );
+    assert!(signature_source.contains("signature_capability_policy_with_effective_facts"));
     assert!(signature_source.contains("signature_owned_recovery_policy_from_capability"));
-    assert!(signature_source.contains("has_object_representation_facts"));
+    assert!(facts_source.contains("pub enum DispatchRequirementKind"));
+    assert!(facts_source.contains("pub struct DispatchRequirementFact"));
+    assert!(effective_facts_source.contains("pub struct EffectiveFacts"));
+    assert!(effective_facts_source.contains("pub fn has_object_representation_facts"));
+    assert!(effective_facts_source.contains("pub fn owned_recovery_capability_for"));
+    assert!(effective_facts_source.contains("pub fn is_copy_type"));
+    assert!(effective_facts_source.contains("pub fn closed_hierarchy_variants_for"));
+    assert!(effective_facts_source.contains("pub fn object_safe_trait_fact_for_name"));
     assert!(!signature_source.contains("capabilities.copy"));
     assert!(!signature_source.contains("capabilities.clone"));
     assert!(!signature_source.contains("type_capability_overrides_for"));
-    assert!(representation_source.contains("object_safe_trait_fact_for_name"));
+    assert!(object_model_source.contains("object_safe_trait_fact_for_name"));
     assert!(representation_source.contains("hierarchy_edges_for_type"));
-    assert!(representation_source.contains("closed_hierarchy_variants_for"));
+    assert!(object_model_source.contains("closed_hierarchy_variants_for"));
     assert!(!representation_source.contains("type_capabilities_for"));
     assert!(!representation_source.contains("type_capability_overrides"));
+}
+
+#[test]
+fn effective_fact_precedence_queries_are_audited_by_consumer_module() {
+    fn assert_count(source_name: &str, source: &str, needle: &str, expected: usize) {
+        assert_eq!(
+            source.matches(needle).count(),
+            expected,
+            "{source_name} should contain {expected} occurrence(s) of {needle:?}"
+        );
+    }
+
+    let object_model_source = include_str!("../src/object_model.rs");
+    let representation_source = include_str!("../src/representation.rs");
+    let signature_source = include_str!("../src/signature.rs");
+    let shape_projection_source = include_str!("../src/shape_projection.rs");
+    let slot_policy_source = include_str!("../src/slot_policy.rs");
+    let slot_render_source = include_str!("../src/slot_render.rs");
+    let stream_shape_source = include_str!("../src/stream_shape.rs");
+    let coercion_source = include_str!("../src/coercion.rs");
+    let conversion_plan_source = include_str!("../src/conversion_plan.rs");
+    let semantic_analysis_source = include_str!("../src/semantic_analysis.rs");
+    let facts_source = include_str!("../src/facts.rs");
+    let effective_facts_source = include_str!("../src/effective_facts.rs");
+
+    assert!(effective_facts_source.contains("TypeCapabilities::conservative"));
+    assert!(effective_facts_source.contains("pub struct EffectiveFact<T>"));
+    assert!(effective_facts_source.contains("pub provenance: FactProvenance"));
+    assert!(effective_facts_source.contains("fn fact_precedence_key"));
+    assert!(effective_facts_source.contains("FactProvenance::UserOverride => 3"));
+    assert!(effective_facts_source.contains("fn apply_type_capability_override"));
+    assert!(effective_facts_source.contains("pub fn type_capabilities_for"));
+    assert!(effective_facts_source.contains("object_safe_trait_fact_for_name_with_provenance"));
+    assert!(effective_facts_source.contains("closed_hierarchy_fact_for_name_with_provenance"));
+    assert!(effective_facts_source.contains("pub fn object_safety_fact_for_name"));
+    assert!(!facts_source.contains("fn apply_type_capability_override"));
+    assert!(facts_source.contains("EffectiveFacts::new(self).type_capabilities_for(java_ty)"));
+    assert!(
+        facts_source.contains("EffectiveFacts::new(self).owned_recovery_capability_for(java_ty)")
+    );
+
+    assert!(object_model_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(object_model_source.contains("plan_object_model_with_effective_facts"));
+    assert_count(
+        "object_model",
+        object_model_source,
+        "facts.hierarchy_edges_for_type",
+        1,
+    );
+    assert_count("object_model", object_model_source, "extends_type_for", 1);
+    assert_count(
+        "object_model",
+        object_model_source,
+        "implemented_types_for",
+        1,
+    );
+    assert_count(
+        "object_model",
+        object_model_source,
+        "closed_hierarchy_fact_for_name",
+        1,
+    );
+    assert_count(
+        "object_model",
+        object_model_source,
+        "object_safe_trait_fact_for_name",
+        1,
+    );
+
+    assert!(representation_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(
+        representation_source.contains("representation_hierarchy_fact_policy_with_effective_facts")
+    );
+    assert_count(
+        "representation",
+        representation_source,
+        "extends_type_for",
+        1,
+    );
+    assert_count(
+        "representation",
+        representation_source,
+        "implemented_types_for",
+        1,
+    );
+    assert_count(
+        "representation",
+        representation_source,
+        "hierarchy_edges_for_type",
+        1,
+    );
+
+    assert!(signature_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(
+        signature_source
+            .contains("signature_owned_recovery_capability_policy_with_effective_facts")
+    );
+    assert!(
+        signature_source
+            .contains("signature_boundary_representation_fact_policy_with_effective_facts")
+    );
+    assert!(signature_source.contains("signature_capability_policy_with_effective_facts"));
+    assert_count(
+        "signature",
+        signature_source,
+        "owned_recovery_capability_for",
+        1,
+    );
+    assert_count(
+        "signature",
+        signature_source,
+        "has_object_representation_facts",
+        1,
+    );
+    assert_count("signature", signature_source, "is_copy_type", 1);
+
+    assert!(shape_projection_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(
+        shape_projection_source.contains("shape_projection_capability_policy_with_effective_facts")
+    );
+    assert_count(
+        "shape_projection",
+        shape_projection_source,
+        "is_copy_type",
+        1,
+    );
+    assert_count(
+        "shape_projection",
+        shape_projection_source,
+        "sequence_element_type_for",
+        1,
+    );
+
+    assert!(slot_policy_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(slot_policy_source.contains("borrowed_content_capability_policy_with_effective_facts"));
+    assert_count("slot_policy", slot_policy_source, "is_string_like_type", 1);
+    assert_count(
+        "slot_policy",
+        slot_policy_source,
+        "sequence_element_type_for",
+        1,
+    );
+
+    assert!(slot_render_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(slot_render_source.contains("slot_content_capability_policy_with_effective_facts"));
+    assert_count("slot_render", slot_render_source, "is_string_like_type", 1);
+    assert_count(
+        "slot_render",
+        slot_render_source,
+        "sequence_element_type_for",
+        1,
+    );
+
+    assert!(stream_shape_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(stream_shape_source.contains("stream_source_capability_policy_with_effective_facts"));
+    assert_count(
+        "stream_shape",
+        stream_shape_source,
+        "sequence_element_type_for",
+        1,
+    );
+
+    assert!(!coercion_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(conversion_plan_source.contains("use crate::effective_facts::EffectiveFacts"));
+    assert!(conversion_plan_source.contains("coercion_content_policy_with_effective_facts"));
+    assert!(conversion_plan_source.contains("coercion_shape_content_policy_with_effective_facts"));
+    assert!(
+        conversion_plan_source
+            .contains("coercion_owned_recovery_capability_policy_with_effective_facts")
+    );
+    assert_count("coercion", coercion_source, "is_string_like_type", 0);
+    assert_count(
+        "conversion_plan",
+        conversion_plan_source,
+        "is_string_like_type",
+        1,
+    );
+    assert_count(
+        "conversion_plan",
+        conversion_plan_source,
+        "owned_recovery_capability_for",
+        1,
+    );
+
+    assert_count(
+        "semantic_analysis",
+        semantic_analysis_source,
+        "reachable_hierarchy_edges_for_type",
+        1,
+    );
 }
 
 #[test]
@@ -11218,8 +12366,13 @@ fn signature_capability_policy_owns_copy_baseline_constraints() {
 
     let copy_policy = signature_capability_policy(&external_id, &facts);
     let non_copy_policy = signature_capability_policy(&external_handle, &facts);
+    let effective_facts = EffectiveFacts::new(&facts);
 
-    assert_eq!(copy_policy.java_ty, external_id);
+    assert_eq!(copy_policy.java_ty, external_id.clone());
+    assert_eq!(
+        signature_capability_policy_with_effective_facts(&external_id, &effective_facts),
+        copy_policy
+    );
     assert_eq!(
         copy_policy.capability_ownership,
         Some(OwnershipShape::CopyValue)
@@ -11230,9 +12383,17 @@ fn signature_capability_policy_owns_copy_baseline_constraints() {
             OwnershipShape::CopyValue,
         )]
     );
-    assert_eq!(non_copy_policy.java_ty, external_handle);
+    assert_eq!(non_copy_policy.java_ty, external_handle.clone());
+    assert_eq!(
+        signature_capability_policy_with_effective_facts(&external_handle, &effective_facts),
+        non_copy_policy
+    );
     assert_eq!(non_copy_policy.capability_ownership, None);
     assert!(non_copy_policy.constraints.is_empty());
+
+    let source = include_str!("../src/signature.rs");
+    assert!(source.contains("pub fn signature_capability_policy_with_effective_facts"));
+    assert_eq!(source.matches("is_copy_type").count(), 1);
 }
 
 #[test]
@@ -11260,6 +12421,7 @@ fn signature_slot_baseline_policy_composes_capability_and_boundary_constraints()
             object_safe_trait: None,
             provenance: FactProvenance::UserOverride,
         });
+    let effective_facts = EffectiveFacts::new(&facts);
 
     assert_eq!(
         signature_slot_baseline_policy(&external_id, None, &facts),
@@ -11275,9 +12437,22 @@ fn signature_slot_baseline_policy_composes_capability_and_boundary_constraints()
             )],
         }
     );
+    assert_eq!(
+        signature_slot_baseline_policy_with_effective_facts(&external_id, None, &effective_facts),
+        signature_slot_baseline_policy(&external_id, None, &facts)
+    );
 
     let boundary_constraints =
         conservative_boundary_constraints(&external_handle, &FactSet::default());
+    let default_facts = FactSet::default();
+    let default_effective_facts = EffectiveFacts::new(&default_facts);
+    assert_eq!(
+        conservative_boundary_constraints_with_effective_facts(
+            &external_handle,
+            &default_effective_facts,
+        ),
+        boundary_constraints
+    );
     assert_eq!(
         signature_slot_baseline_policy(
             &external_handle,
@@ -11296,6 +12471,7 @@ fn signature_slot_baseline_policy_composes_capability_and_boundary_constraints()
     let source = include_str!("../src/signature.rs");
     assert!(source.contains("pub struct SignatureSlotBaselinePolicy"));
     assert!(source.contains("pub fn signature_slot_baseline_policy"));
+    assert!(source.contains("pub fn signature_slot_baseline_policy_with_effective_facts"));
     assert!(!source.contains("fn signature_slot_baseline_constraints("));
 }
 
@@ -11978,7 +13154,16 @@ fn indexed_shape_uses_type_capability_facts_for_copy_elements() {
             sequence_element: None,
         }
     );
+    let effective_facts = EffectiveFacts::new(&facts);
+    assert_eq!(
+        shape_projection_capability_policy_with_effective_facts(&external_id, &effective_facts),
+        shape_projection_capability_policy(&external_id, &facts),
+    );
     let projected_shape = indexed_read_shape_with_facts(&values_shape, &facts);
+    assert_eq!(
+        indexed_read_shape_with_effective_facts(&values_shape, &effective_facts),
+        projected_shape,
+    );
 
     let mut env = ShapeEnv::new();
     env.insert_local_shape("values", values_shape);
@@ -12119,6 +13304,15 @@ fn indexed_shape_uses_sequence_like_capability_facts() {
 
     let read_shape = indexed_read_shape_with_facts(&values_shape, &facts);
     let assignment_shape = indexed_assignment_shape_with_facts(&values_shape, &facts).unwrap();
+    let effective_facts = EffectiveFacts::new(&facts);
+    assert_eq!(
+        indexed_read_shape_with_effective_facts(&values_shape, &effective_facts),
+        read_shape,
+    );
+    assert_eq!(
+        indexed_assignment_shape_with_effective_facts(&values_shape, &effective_facts).unwrap(),
+        assignment_shape,
+    );
 
     assert_eq!(read_shape.java_ty, external_id);
     assert_eq!(read_shape.ownership, OwnershipShape::SharedBorrow);
@@ -12352,7 +13546,11 @@ fn trivial_accessor_detection_is_not_a_lowering_special_case() {
     assert!(semantic_source.contains("trivial_getter_fact"));
     assert!(semantic_source.contains("trivial_setter_fact"));
     assert!(call_plan_source.contains("plan_trivial_accessor_call"));
-    assert!(lower_source.contains("plan_trivial_accessor_call"));
+    assert!(call_plan_source.contains("plan_call_expr"));
+    assert!(call_plan_source.contains("plan_call_statement"));
+    assert!(!lower_source.contains("plan_trivial_accessor_call"));
+    assert!(lower_source.contains("plan_call_expr"));
+    assert!(lower_source.contains("plan_call_statement"));
     assert!(!lower_source.contains("trivial_accessor_for"));
     assert!(!lower_source.contains("trivial_getter_field_for"));
     assert!(!lower_source.contains("trivial_setter_field_for"));
@@ -12371,6 +13569,62 @@ fn semantic_analysis_owns_exception_classification_and_catch_facts() {
     let item_assembly_source = include_str!("../src/item_assembly.rs");
     let lower_source = include_str!("../src/lower.rs");
     let representation_lowering_source = include_str!("../src/representation_lowering.rs");
+    let parsed = parse_java_source(
+        r#"
+class ThrowsValue {
+    int read() throws IOException {
+        return 1;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let mut exception_facts = resolved.facts.clone();
+    exception_facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: ty.name.clone(),
+            method_name: method.name.clone(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Unknown("IOException".to_string())],
+        provenance: FactProvenance::ParsedSource,
+    });
+
+    assert_eq!(
+        plan_java_exception_support(&resolved.program, &exception_facts),
+        JavaExceptionSupportPlan {
+            emit_support_item: true
+        }
+    );
+    assert_eq!(
+        plan_method_exceptions(ty, method, &exception_facts),
+        MethodExceptionPlan {
+            wrap_returns_in_result: true
+        }
+    );
+    let program_exception_plan = plan_program_exceptions(&resolved.program, &exception_facts);
+    assert_eq!(
+        program_exception_plan.support,
+        JavaExceptionSupportPlan {
+            emit_support_item: true
+        }
+    );
+    assert_eq!(
+        program_exception_plan.method_plan(ty, method),
+        MethodExceptionPlan {
+            wrap_returns_in_result: true
+        }
+    );
 
     assert!(semantic_source.contains("collect_exception_facts"));
     assert!(semantic_source.contains("collect_catch_facts"));
@@ -12379,7 +13633,16 @@ fn semantic_analysis_owns_exception_classification_and_catch_facts() {
     assert!(semantic_source.contains("catch_assignable_from_types"));
     assert!(semantic_source.contains("classify_exception_type"));
     assert!(exception_plan_source.contains("program_uses_java_exception_with_facts"));
-    assert!(lower_source.contains("program_uses_java_exception_with_facts(program, facts)"));
+    assert!(exception_plan_source.contains("pub struct JavaExceptionSupportPlan"));
+    assert!(exception_plan_source.contains("pub struct MethodExceptionPlan"));
+    assert!(exception_plan_source.contains("pub struct ProgramExceptionPlan"));
+    assert!(exception_plan_source.contains("pub fn plan_java_exception_support"));
+    assert!(exception_plan_source.contains("pub fn plan_method_exceptions"));
+    assert!(exception_plan_source.contains("pub fn plan_program_exceptions"));
+    assert!(lower_source.contains("let exceptions = plan_program_exceptions(program, facts)"));
+    assert!(lower_source.contains("exceptions.support.emit_support_item"));
+    assert!(lower_source.contains("method_ctx.exceptions.method_plan"));
+    assert!(lower_source.contains("method_function_shell_with_facts_and_exception_plan"));
     assert!(!exception_lowering_source.contains("RuntimeException"));
     assert!(!exception_lowering_source.contains("ExceptionKind"));
     assert!(!exception_plan_source.contains("RuntimeException"));
@@ -12388,9 +13651,17 @@ fn semantic_analysis_owns_exception_classification_and_catch_facts() {
     assert!(!item_assembly_source.contains("method.throws"));
     assert!(!lower_source.contains("method.throws"));
     assert!(!representation_lowering_source.contains("method.throws"));
-    assert!(item_assembly_source.contains("method_has_thrown_exceptions"));
-    assert!(lower_source.contains("method_has_thrown_exceptions"));
-    assert!(representation_lowering_source.contains("method_has_thrown_exceptions"));
+    assert!(!lower_source.contains("program_uses_java_exception_with_facts"));
+    assert!(!lower_source.contains("method_has_thrown_exceptions"));
+    assert!(!lower_source.contains("plan_method_exceptions"));
+    assert!(!item_assembly_source.contains("method_has_thrown_exceptions"));
+    assert!(!representation_lowering_source.contains("method_has_thrown_exceptions"));
+    assert!(item_assembly_source.contains("MethodExceptionPlan"));
+    assert!(representation_lowering_source.contains("MethodExceptionPlan"));
+    assert!(representation_lowering_source.contains("ProgramExceptionPlan"));
+    assert!(!item_assembly_source.contains("plan_method_exceptions"));
+    assert!(!representation_lowering_source.contains("plan_method_exceptions"));
+    assert!(exception_plan_source.contains("method_has_thrown_exceptions"));
 }
 
 #[test]
@@ -12425,13 +13696,90 @@ fn control_flow_normalization_plans_are_owned_before_lowering() {
 fn lowering_consumes_control_flow_plans_only_as_pending_diagnostics() {
     let lower_source = include_str!("../src/lower.rs");
     let semantic_source = include_str!("../src/semantic_analysis.rs");
+    let rewrite_source = include_str!("../src/rewrite.rs");
+    let lowering_diagnostics_source = include_str!("../src/lowering_diagnostics.rs");
+    let parsed = parse_java_source("class Parser { int next() { return 1; } }");
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let facts = FactSet::default();
+    let representations = plan_representations(&resolved.program, &facts);
+    let signatures = solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &analyze_usage(&resolved.program),
+        &facts,
+    );
+    let plans = vec![MethodControlFlowPlan {
+        method: FactMethodKey {
+            type_name: "Parser".to_string(),
+            method_name: "next".to_string(),
+        },
+        rewrites: vec![
+            ControlFlowRewritePlan::AssignmentInCondition(AssignmentInConditionPlan {
+                local_name: "token".to_string(),
+                source_call: "read()".to_string(),
+                null_test: NullTestKind::NotNull,
+                normalized_shape: AssignmentConditionNormalizedShape::LoopAssignThenBreak,
+            }),
+            ControlFlowRewritePlan::TailRecursiveLoop(TailRecursiveLoopPlan {
+                method_name: "next".to_string(),
+                arg_count: 1,
+                normalized_shape: TailRecursiveNormalizedShape::LoopWithParameterReassignment,
+            }),
+        ],
+    }];
+    let diagnostics = control_flow_rewrite_diagnostics(&plans);
+    let lowering_diagnostics = collect_lowering_diagnostic_plans(
+        &resolved.program,
+        &facts,
+        &representations,
+        &signatures,
+        &plans,
+    );
+
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(diagnostics[0].code, "control_flow_rewrite_pending");
+    assert_eq!(
+        diagnostics[0].message,
+        "Parser::next requires assignment-in-condition normalization before idiomatic lowering"
+    );
+    assert_eq!(diagnostics[1].code, "control_flow_rewrite_pending");
+    assert_eq!(
+        diagnostics[1].message,
+        "Parser::next requires tail-recursive loop normalization before idiomatic lowering"
+    );
+    assert_eq!(
+        lowering_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "control_flow_rewrite_pending")
+            .map(|diagnostic| diagnostic.severity)
+            .collect::<Vec<_>>(),
+        vec![Severity::Unsupported, Severity::Unsupported]
+    );
 
     assert!(lower_source.contains("lower_program_with_semantic_plans"));
-    assert!(lower_source.contains("push_control_flow_plan_diagnostics"));
-    assert!(lower_source.contains("control_flow_rewrite_pending"));
+    assert!(lower_source.contains("collect_lowering_diagnostic_plans"));
+    assert!(!lower_source.contains("push_control_flow_plan_diagnostics"));
+    assert!(!lower_source.contains("control_flow_rewrite_diagnostics"));
+    assert!(lowering_diagnostics_source.contains("pub struct LoweringDiagnosticPlan"));
+    assert!(lowering_diagnostics_source.contains("pub fn collect_lowering_diagnostic_plans"));
+    assert!(lowering_diagnostics_source.contains(".diagnostics()"));
+    assert!(lowering_diagnostics_source.contains("Severity::Warning"));
+    assert!(lowering_diagnostics_source.contains("Severity::Unsupported"));
+    assert!(lowering_diagnostics_source.contains("diagnostics_for_program(program)"));
+    assert!(lowering_diagnostics_source.contains("signatures"));
+    assert!(lowering_diagnostics_source.contains("control_flow_rewrite_diagnostics"));
+    assert!(rewrite_source.contains("pub struct ControlFlowRewriteDiagnostic"));
+    assert!(rewrite_source.contains("pub fn control_flow_rewrite_diagnostics"));
+    assert!(rewrite_source.contains("control_flow_rewrite_pending"));
     assert!(semantic_source.contains("collect_control_flow_plans"));
     assert!(!lower_source.contains("assignment_in_condition_plan("));
     assert!(!lower_source.contains("tail_recursive_loop_plan("));
+    assert!(!lower_source.contains("facts.diagnostics()"));
+    assert!(!lower_source.contains("diagnostics_for_program(program)"));
+    assert!(!lower_source.contains("signatures.diagnostics()"));
+    assert!(!lower_source.contains("control_flow_rewrite_pending"));
+    assert!(!lower_source.contains("requires assignment-in-condition normalization"));
+    assert!(!lower_source.contains("requires tail-recursive loop normalization"));
 }
 
 #[test]
@@ -12521,17 +13869,20 @@ fn stream_source_element_shape_is_inferred_before_lowering() {
 #[test]
 fn types_own_stream_source_element_java_semantics() {
     let stream_shape_source = include_str!("../src/stream_shape.rs");
+    let effective_facts_source = include_str!("../src/effective_facts.rs");
     let boxed_int_list = list_java_type(JavaType::Named {
         name: "Integer".to_string(),
         args: Vec::new(),
     });
+    let facts = FactSet::default();
+    let effective_facts = EffectiveFacts::new(&facts);
 
     assert_eq!(
         stream_element_type(&boxed_int_list),
         Some(JavaType::Primitive(PrimitiveType::Int))
     );
     assert_eq!(
-        stream_source_capability_policy(&boxed_int_list, &FactSet::default()),
+        stream_source_capability_policy(&boxed_int_list, &facts),
         StreamSourceCapabilityPolicy {
             source_ty: boxed_int_list.clone(),
             capability_element: Some(JavaType::Named {
@@ -12540,21 +13891,28 @@ fn types_own_stream_source_element_java_semantics() {
             }),
         }
     );
+    assert_eq!(
+        stream_source_capability_policy_with_effective_facts(&boxed_int_list, &effective_facts),
+        stream_source_capability_policy(&boxed_int_list, &facts)
+    );
     assert!(!stream_shape_source.contains("sequence_element_type("));
+    assert!(stream_shape_source.contains("use crate::effective_facts::EffectiveFacts"));
     assert!(stream_shape_source.contains("pub struct StreamSourceCapabilityPolicy"));
     assert!(stream_shape_source.contains("pub fn stream_source_capability_policy"));
-    assert!(stream_shape_source.contains("sequence_element_type_for"));
+    assert!(stream_shape_source.contains("stream_source_capability_policy_with_effective_facts"));
+    assert!(effective_facts_source.contains("pub fn sequence_element_type_for"));
     assert!(!stream_shape_source.contains("name == \"Integer\""));
     assert!(!stream_shape_source.contains("OwnershipShape"));
     assert!(!stream_shape_source.contains("ownership ="));
-    assert!(stream_shape_source.contains("iteration_element_shape"));
+    assert!(stream_shape_source.contains("iteration_element_shape_with_effective_facts"));
     assert_eq!(
         stream_shape_source
-            .matches("sequence_element_type_for")
+            .matches("facts.sequence_element_type_for")
             .count(),
         1
     );
     assert!(stream_shape_source.contains("infer_stream_source_element_shape_with_facts"));
+    assert!(stream_shape_source.contains("infer_stream_source_element_shape_with_effective_facts"));
     assert!(!stream_shape_source.contains("fn stream_source_element_type("));
 }
 
@@ -12585,6 +13943,12 @@ fn stream_source_element_shape_uses_type_capability_facts() {
     let default_shape = infer_stream_source_element_shape(&parse_expr("values"), &env).unwrap();
     let fact_shape =
         infer_stream_source_element_shape_with_facts(&parse_expr("values"), &env, &facts).unwrap();
+    let effective_shape = infer_stream_source_element_shape_with_effective_facts(
+        &parse_expr("values"),
+        &env,
+        &EffectiveFacts::new(&facts),
+    )
+    .unwrap();
 
     assert_eq!(
         default_shape,
@@ -12594,6 +13958,7 @@ fn stream_source_element_shape_uses_type_capability_facts() {
         fact_shape,
         iteration_element_shape(external_id.clone(), &facts)
     );
+    assert_eq!(effective_shape, fact_shape);
     assert_eq!(default_shape.java_ty, external_id);
     assert_eq!(default_shape.ownership, OwnershipShape::SharedBorrow);
     assert_eq!(fact_shape.ownership, OwnershipShape::Owned);
@@ -12857,6 +14222,13 @@ fn statement_render_renders_local_types_with_facts() {
 #[test]
 fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates() {
     let body = vec![RustStmt::Expr(RustExpr::Var("body".to_string()))];
+    let update_exprs = vec![parse_expr("i++")];
+    let then_block = new_java2rust::java_ir::Block {
+        statements: vec![Stmt::Break(None)],
+    };
+    let else_block = new_java2rust::java_ir::Block {
+        statements: vec![Stmt::Continue(Some("outer".to_string()))],
+    };
     assert_eq!(
         assemble_for_loop(None, body.clone(), Some("outer".to_string())),
         RustStmt::While {
@@ -12874,6 +14246,52 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
             RustStmt::Continue(None),
         ]
     );
+    assert_eq!(
+        plan_for_body_stmt(&Stmt::Continue(None), &update_exprs),
+        ForBodyStmtPlan::ContinueWithUpdates {
+            updates: update_exprs.as_slice()
+        }
+    );
+    assert_eq!(
+        plan_for_body_stmt(
+            &Stmt::If {
+                condition: parse_expr("ready"),
+                then_block: then_block.clone(),
+                else_block: Some(else_block.clone()),
+            },
+            &update_exprs,
+        ),
+        ForBodyStmtPlan::If {
+            condition: &parse_expr("ready"),
+            then_block: &then_block,
+            else_block: Some(&else_block),
+        }
+    );
+    assert_eq!(
+        plan_for_body_stmt(
+            &Stmt::While {
+                condition: parse_expr("ready"),
+                body: then_block.clone(),
+            },
+            &update_exprs,
+        ),
+        ForBodyStmtPlan::While {
+            condition: &parse_expr("ready"),
+            body: &then_block,
+        }
+    );
+
+    let plan_source = include_str!("../src/loop_plan.rs");
+    let lowering_source = include_str!("../src/loop_lowering.rs");
+    let lower_source = include_str!("../src/lower.rs");
+    assert!(plan_source.contains("pub enum ForBodyStmtPlan"));
+    assert!(plan_source.contains("pub fn plan_for_body_stmt"));
+    assert!(!plan_source.contains("RustStmt"));
+    assert!(!plan_source.contains("RustExpr"));
+    assert!(lowering_source.contains("continue_with_updates"));
+    assert!(lower_source.contains("plan_for_body_stmt"));
+    assert!(lower_source.contains("ForBodyStmtPlan::ContinueWithUpdates"));
+    assert!(!lower_source.contains("Stmt::Continue(None)"));
 }
 
 #[test]
@@ -12919,6 +14337,75 @@ fn expr_render_owns_basic_rust_expression_shells() {
             else_expr: Box::new(RustExpr::Var("no".to_string())),
         }
     );
+}
+
+#[test]
+fn array_plan_and_lowering_own_java_array_fallbacks_before_orchestrator() {
+    let creation_expr = parse_expr("new int[rows][cols]");
+    let initializer_expr = parse_expr("{1, 2}");
+
+    let Some(ArrayExprPlan::Creation {
+        element_type,
+        dimensions,
+    }) = plan_array_expr(&creation_expr)
+    else {
+        panic!("expected array creation plan");
+    };
+    assert_eq!(element_type, &JavaType::Primitive(PrimitiveType::Int));
+    assert_eq!(dimensions.len(), 2);
+
+    let Some(initializer_plan @ ArrayExprPlan::Initializer { elements }) =
+        plan_array_expr(&initializer_expr)
+    else {
+        panic!("expected array initializer plan");
+    };
+    assert_eq!(elements.len(), 2);
+    assert_eq!(
+        initializer_plan.child_exprs(),
+        elements,
+        "array plan exposes child expressions without rendering them"
+    );
+    assert_eq!(plan_array_expr(&parse_expr("value")), None);
+
+    assert_eq!(
+        render_array_expr(
+            &ArrayExprPlan::Creation {
+                element_type: &JavaType::Primitive(PrimitiveType::Int),
+                dimensions,
+            },
+            vec![
+                RustExpr::Var("rows".to_string()),
+                RustExpr::Var("cols".to_string()),
+            ],
+        ),
+        RustExpr::Raw(
+            "/* Java array creation: Primitive(Int)[rows][cols] */ Vec::new()".to_string()
+        )
+    );
+    assert_eq!(
+        render_array_expr(
+            &initializer_plan,
+            vec![
+                RustExpr::Literal("1".to_string()),
+                RustExpr::Literal("2".to_string()),
+            ],
+        ),
+        RustExpr::Raw("vec![1, 2]".to_string())
+    );
+
+    let plan_source = include_str!("../src/array_plan.rs");
+    let lowering_source = include_str!("../src/array_lowering.rs");
+    let lower_source = include_str!("../src/lower.rs");
+    assert!(!plan_source.contains("rust_ir"));
+    assert!(!plan_source.contains("RustExpr"));
+    assert!(!plan_source.contains("emit_expr"));
+    assert!(lowering_source.contains("emit_expr"));
+    assert!(lowering_source.contains("Java array creation"));
+    assert!(lower_source.contains("plan_array_expr"));
+    assert!(lower_source.contains("render_array_expr"));
+    assert!(!lower_source.contains("crate::emit::emit_expr"));
+    assert!(!lower_source.contains("Java array creation:"));
+    assert!(!lower_source.contains("vec![{}]"));
 }
 
 #[test]
@@ -13010,6 +14497,15 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
             "name".to_string()
         )
     );
+
+    let access_lowering_source = include_str!("../src/access_lowering.rs");
+    let member_plan_source = include_str!("../src/member_access_plan.rs");
+    assert!(member_plan_source.contains("pub struct JavaMemberAccessPolicy"));
+    assert!(member_plan_source.contains("pub enum JavaMemberAccessKind"));
+    assert!(member_plan_source.contains("pub fn java_member_access_policy"));
+    assert!(member_plan_source.contains("MemberAccessOp::LenAsI32"));
+    assert!(!access_lowering_source.contains("\"length\""));
+    assert!(!access_lowering_source.contains("infer_member_access_type"));
 }
 
 #[test]
@@ -13071,13 +14567,16 @@ fn stream_plan_does_not_render_rust_iterator_chains() {
 }
 
 #[test]
-fn coercion_owns_stream_collect_actual_shape_selection() {
+fn conversion_plan_owns_stream_collect_actual_shape_selection() {
     let stream_source = include_str!("../src/stream.rs");
     let coercion_source = include_str!("../src/coercion.rs");
+    let conversion_source = include_str!("../src/conversion_plan.rs");
 
-    assert!(coercion_source.contains("collected_sequence_from_element_shape"));
+    assert!(conversion_source.contains("collected_sequence_from_element_shape"));
+    assert!(!coercion_source.contains("collected_sequence_from_element_shape"));
     assert!(!stream_source.contains("OwnershipShape"));
     assert!(!stream_source.contains("list_java_type"));
+    assert!(stream_source.contains("use crate::conversion_plan::LoweredType"));
     assert!(stream_source.contains("LoweredType::collected_sequence_from_element_shape"));
 }
 

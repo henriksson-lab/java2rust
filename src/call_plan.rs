@@ -26,10 +26,28 @@ pub enum CallTargetPlan<'a> {
     },
 }
 
+impl<'a> CallTargetPlan<'a> {
+    pub fn receiver_expr(&self) -> Option<&'a Expr> {
+        match self {
+            CallTargetPlan::InstanceReceiver { receiver, .. }
+            | CallTargetPlan::FallbackReceiver { receiver, .. } => Some(receiver),
+            CallTargetPlan::StaticSelf { .. }
+            | CallTargetPlan::InstanceSelf { .. }
+            | CallTargetPlan::FallbackFree { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewTargetPlan<'a> {
     pub owner_shape: RustSlotShape,
     pub rust_name: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArgumentLoweringPlan {
+    Shaped(Vec<RustSlotShape>),
+    Unshaped { arg_count: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +57,24 @@ pub enum TrivialAccessorCallPlan<'a> {
         field_name: String,
     },
     Setter {
+        receiver: Option<&'a Expr>,
+        field_name: String,
+        value: &'a Expr,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallExprPlan<'a> {
+    TrivialAccessorGetter {
+        receiver: Option<&'a Expr>,
+        field_name: String,
+    },
+    Target(CallTargetPlan<'a>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallStatementPlan<'a> {
+    TrivialAccessorSetter {
         receiver: Option<&'a Expr>,
         field_name: String,
         value: &'a Expr,
@@ -72,6 +108,51 @@ pub fn plan_trivial_accessor_call<'a>(
             })
         }
         _ => None,
+    }
+}
+
+pub fn plan_call_expr<'a>(
+    receiver: Option<&'a Expr>,
+    name: &'a str,
+    args: &'a [Expr],
+    resolved: Option<&'a ResolvedCall>,
+    facts: &FactSet,
+) -> CallExprPlan<'a> {
+    if let Some(TrivialAccessorCallPlan::Getter {
+        receiver,
+        field_name,
+    }) = plan_trivial_accessor_call(receiver, name, args, resolved, facts)
+    {
+        return CallExprPlan::TrivialAccessorGetter {
+            receiver,
+            field_name,
+        };
+    }
+
+    CallExprPlan::Target(plan_call_target(receiver, name, resolved))
+}
+
+pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallStatementPlan<'a>> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = expr
+    else {
+        return None;
+    };
+    match plan_trivial_accessor_call(receiver.as_deref(), name, args, resolved.as_ref(), facts)? {
+        TrivialAccessorCallPlan::Setter {
+            receiver,
+            field_name,
+            value,
+        } => Some(CallStatementPlan::TrivialAccessorSetter {
+            receiver,
+            field_name,
+            value,
+        }),
+        TrivialAccessorCallPlan::Getter { .. } => None,
     }
 }
 
@@ -142,6 +223,18 @@ pub fn resolved_call_arg_shapes(
         .collect()
 }
 
+pub fn plan_call_arguments(
+    resolved: Option<&ResolvedCall>,
+    arg_count: usize,
+    signatures: &SignaturePlan,
+) -> ArgumentLoweringPlan {
+    resolved
+        .map(|call| {
+            ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures))
+        })
+        .unwrap_or(ArgumentLoweringPlan::Unshaped { arg_count })
+}
+
 pub fn resolved_constructor_arg_shapes(
     constructor: &ResolvedConstructor,
     arg_count: usize,
@@ -156,4 +249,20 @@ pub fn resolved_constructor_arg_shapes(
             )
         })
         .collect()
+}
+
+pub fn plan_constructor_arguments(
+    resolved: Option<&ResolvedConstructor>,
+    arg_count: usize,
+    signatures: &SignaturePlan,
+) -> ArgumentLoweringPlan {
+    resolved
+        .map(|constructor| {
+            ArgumentLoweringPlan::Shaped(resolved_constructor_arg_shapes(
+                constructor,
+                arg_count,
+                signatures,
+            ))
+        })
+        .unwrap_or(ArgumentLoweringPlan::Unshaped { arg_count })
 }

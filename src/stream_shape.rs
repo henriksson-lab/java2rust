@@ -1,6 +1,9 @@
+use crate::effective_facts::EffectiveFacts;
 use crate::facts::FactSet;
 use crate::java_ir::{Expr, JavaType, PrimitiveType};
-use crate::shape_projection::{borrowed_string_content_shape, iteration_element_shape};
+use crate::shape_projection::{
+    borrowed_string_content_shape, iteration_element_shape_with_effective_facts,
+};
 use crate::slot_shape::RustSlotShape;
 use crate::stdlib::is_borrowed_string_view_method;
 use crate::types::{TypeEnv, infer_expr_type, stream_element_type};
@@ -14,6 +17,14 @@ pub struct StreamSourceCapabilityPolicy {
 pub fn stream_source_capability_policy(
     source_ty: &JavaType,
     facts: &FactSet,
+) -> StreamSourceCapabilityPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    stream_source_capability_policy_with_effective_facts(source_ty, &effective_facts)
+}
+
+pub fn stream_source_capability_policy_with_effective_facts(
+    source_ty: &JavaType,
+    facts: &EffectiveFacts,
 ) -> StreamSourceCapabilityPolicy {
     StreamSourceCapabilityPolicy {
         source_ty: source_ty.clone(),
@@ -41,8 +52,17 @@ pub fn infer_stream_source_element_shape_with_facts(
     env: &TypeEnv,
     facts: &FactSet,
 ) -> Option<RustSlotShape> {
-    stream_source_element_type_with_facts(source, env, facts)
-        .map(|ty| iteration_element_shape(ty, facts))
+    let effective_facts = EffectiveFacts::new(facts);
+    infer_stream_source_element_shape_with_effective_facts(source, env, &effective_facts)
+}
+
+pub fn infer_stream_source_element_shape_with_effective_facts(
+    source: &Expr,
+    env: &TypeEnv,
+    facts: &EffectiveFacts,
+) -> Option<RustSlotShape> {
+    stream_source_element_type_with_effective_facts(source, env, facts)
+        .map(|ty| iteration_element_shape_with_effective_facts(ty, facts))
 }
 
 fn stream_lambda_body_is_borrowed_str(expr: &Expr) -> bool {
@@ -56,12 +76,12 @@ fn stream_lambda_body_is_borrowed_str(expr: &Expr) -> bool {
     )
 }
 
-fn stream_source_element_type_with_facts(
+fn stream_source_element_type_with_effective_facts(
     source: &Expr,
     env: &TypeEnv,
-    facts: &FactSet,
+    facts: &EffectiveFacts,
 ) -> Option<JavaType> {
     let source_ty = infer_expr_type(source, env);
-    let capability = stream_source_capability_policy(&source_ty, facts);
+    let capability = stream_source_capability_policy_with_effective_facts(&source_ty, facts);
     stream_element_type(&source_ty).or(capability.capability_element)
 }

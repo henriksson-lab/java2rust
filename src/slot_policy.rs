@@ -1,3 +1,4 @@
+use crate::effective_facts::EffectiveFacts;
 use crate::facts::FactSet;
 use crate::java_ir::{ConstructorDecl, JavaType, MethodDecl, Modifier, Param, TypeDecl};
 use crate::representation::RepresentationPlan;
@@ -53,6 +54,14 @@ pub fn borrowed_content_capability_policy(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> BorrowedContentCapabilityPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    borrowed_content_capability_policy_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn borrowed_content_capability_policy_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> BorrowedContentCapabilityPolicy {
     BorrowedContentCapabilityPolicy {
         java_ty: java_ty.clone(),
         string_content: facts.is_string_like_type(java_ty),
@@ -76,13 +85,30 @@ pub fn method_param_borrowed_content_policy_with_facts(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Option<BorrowedContentPolicy> {
+    let effective_facts = EffectiveFacts::new(facts);
+    method_param_borrowed_content_policy_with_effective_facts(
+        ty,
+        method,
+        param,
+        usage,
+        &effective_facts,
+    )
+}
+
+pub fn method_param_borrowed_content_policy_with_effective_facts(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    param: &Param,
+    usage: &UsageFacts,
+    facts: &EffectiveFacts<'_>,
+) -> Option<BorrowedContentPolicy> {
     if method.modifiers.contains(&Modifier::Public) {
         return None;
     }
     if method_param_allows_borrowed_content(ty, method, param, usage, facts)
         || method_return_allows_borrowed_param_content(ty, method, param, usage, facts)
     {
-        borrowed_content_type_policy(&param.ty, facts).policy
+        borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy
     } else {
         None
     }
@@ -110,8 +136,25 @@ pub fn constructor_param_borrowed_content_policy_with_facts(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Option<BorrowedContentPolicy> {
+    let effective_facts = EffectiveFacts::new(facts);
+    constructor_param_borrowed_content_policy_with_effective_facts(
+        ty,
+        ctor,
+        param,
+        usage,
+        &effective_facts,
+    )
+}
+
+pub fn constructor_param_borrowed_content_policy_with_effective_facts(
+    ty: &TypeDecl,
+    ctor: &ConstructorDecl,
+    param: &Param,
+    usage: &UsageFacts,
+    facts: &EffectiveFacts<'_>,
+) -> Option<BorrowedContentPolicy> {
     if ctor.modifiers.contains(&Modifier::Public)
-        || borrowed_content_type_policy(&param.ty, facts)
+        || borrowed_content_type_policy_with_effective_facts(&param.ty, facts)
             .policy
             .is_none()
     {
@@ -123,7 +166,7 @@ pub fn constructor_param_borrowed_content_policy_with_facts(
         rust_name,
     })?;
     if usage_allows_borrowed_content(ctor_usage, &param.name) {
-        borrowed_content_type_policy(&param.ty, facts).policy
+        borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy
     } else {
         None
     }
@@ -173,9 +216,24 @@ pub fn borrowed_return_content_policy_from_param_with_facts(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Option<BorrowedContentPolicy> {
+    let effective_facts = EffectiveFacts::new(facts);
+    borrowed_return_content_policy_from_param_with_effective_facts(
+        ty,
+        method,
+        usage,
+        &effective_facts,
+    )
+}
+
+pub fn borrowed_return_content_policy_from_param_with_effective_facts(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    usage: &UsageFacts,
+    facts: &EffectiveFacts<'_>,
+) -> Option<BorrowedContentPolicy> {
     method.params.iter().find_map(|param| {
         if method_return_allows_borrowed_param_content(ty, method, param, usage, facts) {
-            borrowed_content_type_policy(&param.ty, facts).policy
+            borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy
         } else {
             None
         }
@@ -189,13 +247,30 @@ pub fn borrowed_return_shape_from_param_with_facts(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Option<RustSlotShape> {
+    let effective_facts = EffectiveFacts::new(facts);
+    borrowed_return_shape_from_param_with_effective_facts(
+        ty,
+        method,
+        representations,
+        usage,
+        &effective_facts,
+    )
+}
+
+pub fn borrowed_return_shape_from_param_with_effective_facts(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    representations: &RepresentationPlan,
+    usage: &UsageFacts,
+    facts: &EffectiveFacts<'_>,
+) -> Option<RustSlotShape> {
     let param = method.params.iter().find(|param| {
         method_return_allows_borrowed_param_content(ty, method, param, usage, facts)
     })?;
     let mut shape = value_shape_for_java_type(representations, param.ty.clone());
     apply_borrowed_content_policy(
         &mut shape,
-        borrowed_return_content_policy_from_param_with_facts(ty, method, usage, facts)?,
+        borrowed_return_content_policy_from_param_with_effective_facts(ty, method, usage, facts)?,
     );
     Some(shape)
 }
@@ -204,7 +279,15 @@ pub fn borrowed_content_type_policy(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> BorrowedContentTypePolicy {
-    let capability = borrowed_content_capability_policy(java_ty, facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    borrowed_content_type_policy_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn borrowed_content_type_policy_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> BorrowedContentTypePolicy {
+    let capability = borrowed_content_capability_policy_with_effective_facts(java_ty, facts);
     let policy = if capability.string_content {
         Some(BorrowedContentPolicy::string_like_view())
     } else if capability.sequence_element.is_some() {
@@ -223,9 +306,9 @@ fn method_param_allows_borrowed_content(
     method: &MethodDecl,
     param: &Param,
     usage: &UsageFacts,
-    facts: &FactSet,
+    facts: &EffectiveFacts<'_>,
 ) -> bool {
-    if borrowed_content_type_policy(&param.ty, facts)
+    if borrowed_content_type_policy_with_effective_facts(&param.ty, facts)
         .policy
         .is_none()
     {
@@ -245,12 +328,12 @@ fn method_return_allows_borrowed_param_content(
     method: &MethodDecl,
     param: &Param,
     usage: &UsageFacts,
-    facts: &FactSet,
+    facts: &EffectiveFacts<'_>,
 ) -> bool {
-    if borrowed_content_type_policy(&param.ty, facts)
+    if borrowed_content_type_policy_with_effective_facts(&param.ty, facts)
         .policy
         .is_none()
-        || borrowed_content_type_policy(&method.return_type, facts)
+        || borrowed_content_type_policy_with_effective_facts(&method.return_type, facts)
             .policy
             .is_none()
         || method.modifiers.contains(&Modifier::Public)

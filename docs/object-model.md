@@ -1,5 +1,10 @@
 # Object Model
 
+The hierarchy strategy algorithm is specified in
+`docs/object-model-strategy-algorithm-plan.md`. That document defines which
+object-model, slot-shape, and conversion decisions are co-solved and why the
+translator uses finite typed solvers rather than one general constraint solver.
+
 ## Classes
 
 Simple Java classes lower to Rust structs plus impl blocks. Field visibility follows Java visibility when possible, but private fields should stay private unless tests or generated sibling modules need an accessor.

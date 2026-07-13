@@ -1,3 +1,4 @@
+use crate::java_ir::{Expr, Member, Stmt};
 use crate::rust_ir::{RustExpr, RustStmt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +24,18 @@ pub enum UnsupportedExpressionLowering {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsupportedMemberLowering {
+    ParserUnsupported(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedLoweringMessagePolicy {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedDiagnosticPolicy {
+    pub code: &'static str,
     pub message: String,
 }
 
@@ -47,6 +59,38 @@ pub fn unsupported_statement_stmt(kind: UnsupportedStatementLowering) -> RustStm
 
 pub fn unsupported_expression_expr(kind: UnsupportedExpressionLowering) -> RustExpr {
     unsupported_expression_message_policy(kind).compile_error_expr()
+}
+
+pub fn plan_unsupported_expression(expr: &Expr) -> Option<UnsupportedExpressionLowering> {
+    match expr {
+        Expr::Lambda { .. } => Some(UnsupportedExpressionLowering::Lambda),
+        Expr::MethodReference { .. } => Some(UnsupportedExpressionLowering::MethodReference),
+        Expr::ClassLiteral(_) => Some(UnsupportedExpressionLowering::ClassLiteral),
+        _ => None,
+    }
+}
+
+pub fn plan_unsupported_statement(stmt: &Stmt) -> Option<UnsupportedStatementLowering> {
+    match stmt {
+        Stmt::Try { .. } => Some(UnsupportedStatementLowering::TryCatchFinally),
+        Stmt::LocalType(_) => Some(UnsupportedStatementLowering::LocalTypeDeclaration),
+        Stmt::ConstructorInvocation { .. } => {
+            Some(UnsupportedStatementLowering::ConstructorDelegation)
+        }
+        Stmt::Unsupported(reason) => Some(UnsupportedStatementLowering::ParserUnsupported(
+            reason.clone(),
+        )),
+        _ => None,
+    }
+}
+
+pub fn plan_unsupported_member(member: &Member) -> Option<UnsupportedMemberLowering> {
+    match member {
+        Member::Unsupported { reason, .. } => {
+            Some(UnsupportedMemberLowering::ParserUnsupported(reason.clone()))
+        }
+        _ => None,
+    }
 }
 
 pub fn unsupported_constructor_message_policy(
@@ -73,6 +117,15 @@ pub fn unsupported_expression_message_policy(
     }
 }
 
+pub fn unsupported_member_diagnostic_policy(
+    kind: UnsupportedMemberLowering,
+) -> UnsupportedDiagnosticPolicy {
+    UnsupportedDiagnosticPolicy {
+        code: "unsupported_member",
+        message: member_message(kind),
+    }
+}
+
 fn constructor_message(kind: UnsupportedConstructorLowering) -> String {
     match kind {
         UnsupportedConstructorLowering::ThisWithTrailingStatements => {
@@ -84,6 +137,12 @@ fn constructor_message(kind: UnsupportedConstructorLowering) -> String {
         UnsupportedConstructorLowering::SuperRequiresInheritanceLowering => {
             "unsupported Java constructor: super(...) requires inheritance lowering".to_string()
         }
+    }
+}
+
+fn member_message(kind: UnsupportedMemberLowering) -> String {
+    match kind {
+        UnsupportedMemberLowering::ParserUnsupported(reason) => reason,
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::effective_facts::EffectiveFacts;
 use crate::facts::FactSet;
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::rust_ir::{RustExpr, RustType};
@@ -84,12 +85,30 @@ pub fn rust_type_for_slot(shape: &RustSlotShape) -> RustType {
 }
 
 pub fn rust_type_for_slot_with_facts(shape: &RustSlotShape, facts: &FactSet) -> RustType {
-    render_slot_rust_type_policy(&slot_rust_type_policy(shape, facts))
+    let effective_facts = EffectiveFacts::new(facts);
+    rust_type_for_slot_with_effective_facts(shape, &effective_facts)
+}
+
+pub fn rust_type_for_slot_with_effective_facts(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+) -> RustType {
+    render_slot_rust_type_policy(&slot_rust_type_policy_with_effective_facts(shape, facts))
 }
 
 pub fn slot_rust_type_policy(shape: &RustSlotShape, facts: &FactSet) -> SlotRustTypePolicy {
-    let viewed =
-        render_slot_value_rust_type_policy(&slot_value_rust_type_policy(shape, facts), facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    slot_rust_type_policy_with_effective_facts(shape, &effective_facts)
+}
+
+pub fn slot_rust_type_policy_with_effective_facts(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+) -> SlotRustTypePolicy {
+    let viewed = render_slot_value_rust_type_policy_with_effective_facts(
+        &slot_value_rust_type_policy_with_effective_facts(shape, facts),
+        facts,
+    );
 
     match shape.ownership {
         OwnershipShape::Owned | OwnershipShape::CopyValue => {
@@ -104,7 +123,15 @@ pub fn slot_value_rust_type_policy(
     shape: &RustSlotShape,
     facts: &FactSet,
 ) -> SlotValueRustTypePolicy {
-    let content = slot_content_capability_policy(&shape.java_ty, facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    slot_value_rust_type_policy_with_effective_facts(shape, &effective_facts)
+}
+
+pub fn slot_value_rust_type_policy_with_effective_facts(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+) -> SlotValueRustTypePolicy {
+    let content = slot_content_capability_policy_with_effective_facts(&shape.java_ty, facts);
     match (&shape.view, &shape.dispatch, &shape.java_ty) {
         (ViewShape::DynTraitView, DispatchShape::DynTrait { trait_name }, _) => {
             SlotValueRustTypePolicy::DynTraitView {
@@ -164,6 +191,14 @@ pub fn render_slot_value_rust_type_policy(
     policy: &SlotValueRustTypePolicy,
     facts: &FactSet,
 ) -> RustType {
+    let effective_facts = EffectiveFacts::new(facts);
+    render_slot_value_rust_type_policy_with_effective_facts(policy, &effective_facts)
+}
+
+pub fn render_slot_value_rust_type_policy_with_effective_facts(
+    policy: &SlotValueRustTypePolicy,
+    facts: &EffectiveFacts<'_>,
+) -> RustType {
     match policy {
         SlotValueRustTypePolicy::ClosedEnum { enum_name } => RustType::Named(enum_name.clone()),
         SlotValueRustTypePolicy::BoxedDynTrait { trait_name }
@@ -178,11 +213,11 @@ pub fn render_slot_value_rust_type_policy(
             RustType::Raw(format!("dyn {trait_name}"))
         }
         SlotValueRustTypePolicy::NativeDispatch { java_ty } => {
-            rust_type_for_java_type_with_facts(java_ty, facts)
+            rust_type_for_java_type_with_effective_facts(java_ty, facts)
         }
         SlotValueRustTypePolicy::StringView => RustType::Raw("str".to_string()),
         SlotValueRustTypePolicy::SliceView { element_ty } => RustType::Slice(Box::new(
-            rust_type_for_java_type_with_facts(element_ty, facts),
+            rust_type_for_java_type_with_effective_facts(element_ty, facts),
         )),
     }
 }
@@ -192,10 +227,26 @@ pub fn default_expr_for_slot(shape: &RustSlotShape) -> RustExpr {
 }
 
 pub fn default_expr_for_slot_with_facts(shape: &RustSlotShape, facts: &FactSet) -> RustExpr {
-    render_slot_default_policy(&slot_default_policy(shape, facts))
+    let effective_facts = EffectiveFacts::new(facts);
+    default_expr_for_slot_with_effective_facts(shape, &effective_facts)
+}
+
+pub fn default_expr_for_slot_with_effective_facts(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+) -> RustExpr {
+    render_slot_default_policy(&slot_default_policy_with_effective_facts(shape, facts))
 }
 
 pub fn slot_default_policy(shape: &RustSlotShape, facts: &FactSet) -> SlotDefaultPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    slot_default_policy_with_effective_facts(shape, &effective_facts)
+}
+
+pub fn slot_default_policy_with_effective_facts(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+) -> SlotDefaultPolicy {
     match &shape.dispatch {
         DispatchShape::ClosedEnum { enum_name } => {
             return SlotDefaultPolicy::NoDefaultForClosedEnum {
@@ -216,12 +267,20 @@ pub fn slot_default_policy(shape: &RustSlotShape, facts: &FactSet) -> SlotDefaul
         DispatchShape::Concrete => {}
     }
     SlotDefaultPolicy::Value {
-        policy: slot_default_value_policy(shape, facts),
+        policy: slot_default_value_policy_with_effective_facts(shape, facts),
     }
 }
 
 pub fn slot_default_value_policy(shape: &RustSlotShape, facts: &FactSet) -> SlotDefaultValuePolicy {
-    let content = slot_content_capability_policy(&shape.java_ty, facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    slot_default_value_policy_with_effective_facts(shape, &effective_facts)
+}
+
+pub fn slot_default_value_policy_with_effective_facts(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+) -> SlotDefaultValuePolicy {
+    let content = slot_content_capability_policy_with_effective_facts(&shape.java_ty, facts);
     match (&shape.ownership, &shape.view, &shape.java_ty) {
         (OwnershipShape::SharedBorrow, ViewShape::Str, _) if content.string_content => {
             SlotDefaultValuePolicy::EmptyStringView
@@ -293,11 +352,32 @@ pub fn rust_type_for_java_type(ty: &JavaType) -> RustType {
 }
 
 pub fn rust_type_for_java_type_with_facts(ty: &JavaType, facts: &FactSet) -> RustType {
-    render_native_java_rust_type_policy(&native_java_rust_type_policy(ty, facts), facts)
+    let effective_facts = EffectiveFacts::new(facts);
+    rust_type_for_java_type_with_effective_facts(ty, &effective_facts)
+}
+
+pub fn rust_type_for_java_type_with_effective_facts(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> RustType {
+    render_native_java_rust_type_policy_with_effective_facts(
+        &native_java_rust_type_policy_with_effective_facts(ty, facts),
+        facts,
+    )
 }
 
 pub fn native_java_rust_type_policy(ty: &JavaType, facts: &FactSet) -> NativeJavaRustTypePolicy {
-    if let Some(element_ty) = slot_content_capability_policy(ty, facts).sequence_element {
+    let effective_facts = EffectiveFacts::new(facts);
+    native_java_rust_type_policy_with_effective_facts(ty, &effective_facts)
+}
+
+pub fn native_java_rust_type_policy_with_effective_facts(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> NativeJavaRustTypePolicy {
+    if let Some(element_ty) =
+        slot_content_capability_policy_with_effective_facts(ty, facts).sequence_element
+    {
         return NativeJavaRustTypePolicy::Sequence { element_ty };
     }
     if let Some(element_ty) = optional_element_type(ty) {
@@ -343,6 +423,14 @@ pub fn slot_content_capability_policy(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> SlotContentCapabilityPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    slot_content_capability_policy_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn slot_content_capability_policy_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> SlotContentCapabilityPolicy {
     SlotContentCapabilityPolicy {
         java_ty: java_ty.clone(),
         string_content: facts.is_string_like_type(java_ty),
@@ -372,12 +460,20 @@ pub fn render_native_java_rust_type_policy(
     policy: &NativeJavaRustTypePolicy,
     facts: &FactSet,
 ) -> RustType {
+    let effective_facts = EffectiveFacts::new(facts);
+    render_native_java_rust_type_policy_with_effective_facts(policy, &effective_facts)
+}
+
+pub fn render_native_java_rust_type_policy_with_effective_facts(
+    policy: &NativeJavaRustTypePolicy,
+    facts: &EffectiveFacts<'_>,
+) -> RustType {
     match policy {
         NativeJavaRustTypePolicy::Sequence { element_ty } => RustType::Vec(Box::new(
-            rust_type_for_java_type_with_facts(element_ty, facts),
+            rust_type_for_java_type_with_effective_facts(element_ty, facts),
         )),
         NativeJavaRustTypePolicy::Optional { element_ty } => RustType::Option(Box::new(
-            rust_type_for_java_type_with_facts(element_ty, facts),
+            rust_type_for_java_type_with_effective_facts(element_ty, facts),
         )),
         NativeJavaRustTypePolicy::Direct { ty } => ty.clone(),
         NativeJavaRustTypePolicy::Named { name } => RustType::Named(name.clone()),

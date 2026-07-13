@@ -1,9 +1,9 @@
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
-    ClosedHierarchyFact, ExternalApiEffectFact, ExternalApiRole, FactProvenance, FactSet, FieldKey,
-    FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy,
-    NullabilityState, ObjectSafetyFact, ObjectSafetyViolation, ReceiverMutabilityFact,
-    TypeCapabilityOverride,
+    ClosedHierarchyFact, DispatchRequirementFact, DispatchRequirementKind, ExternalApiEffectFact,
+    ExternalApiRole, FactProvenance, FactSet, FieldKey, FieldNullabilityFact,
+    FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy, NullabilityState,
+    ObjectSafetyFact, ObjectSafetyViolation, ReceiverMutabilityFact, TypeCapabilityOverride,
 };
 use crate::java_ir::JavaType;
 use crate::parser::parse_type;
@@ -66,11 +66,18 @@ pub fn parse_external_facts(source: &str) -> ExternalFactsParse {
             ["boxed-dyn-trait", type_name, trait_name] => {
                 facts.hierarchy_overrides.push(HierarchyOverride {
                     type_name: (*type_name).to_string(),
-                    strategy: HierarchyStrategy::BoxedDynTrait {
+                    strategy: HierarchyStrategy::DynTrait {
                         trait_name: (*trait_name).to_string(),
                     },
                     provenance: FactProvenance::UserOverride,
-                })
+                });
+                facts
+                    .dispatch_requirement_facts
+                    .push(DispatchRequirementFact {
+                        type_name: (*type_name).to_string(),
+                        requirement: DispatchRequirementKind::NeedsOwnedPolymorphicStorage,
+                        provenance: FactProvenance::UserOverride,
+                    });
             }
             ["erased-object", type_name] => facts.hierarchy_overrides.push(HierarchyOverride {
                 type_name: (*type_name).to_string(),

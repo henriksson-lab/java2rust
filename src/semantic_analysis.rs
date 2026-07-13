@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
-    AccessorInlinePolicy, CatchFact, ControlFlowFact, ControlFlowFactKind, ExceptionFact,
-    ExceptionKind, ExternalApiEffectFact, ExternalApiRole, FactProvenance, FactSet, FieldKey,
-    FieldNullabilityFact, FieldNullabilityProvenance, MethodEffectFact, MethodKey,
-    NullabilityState, ReceiverMutabilityFact, RecursionFact, RecursionKind, TrivialAccessorFact,
-    TrivialAccessorKind,
+    AccessorInlinePolicy, CatchFact, ControlFlowFact, ControlFlowFactKind, DispatchRequirementFact,
+    DispatchRequirementKind, ExceptionFact, ExceptionKind, ExternalApiEffectFact, ExternalApiRole,
+    FactProvenance, FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
+    MethodEffectFact, MethodKey, NullabilityState, ReceiverMutabilityFact, RecursionFact,
+    RecursionKind, TrivialAccessorFact, TrivialAccessorKind,
 };
 use crate::java_ir::{
     BinaryOp, Block, ConstructorDecl, ConstructorInvocationKind, Expr, FieldDecl, JavaType,
@@ -89,6 +89,7 @@ pub fn analyze_program_with_config(
     }
     collect_method_effect_facts(program, &usage, &mut facts);
     collect_recursion_facts(program, &mut facts);
+    collect_dispatch_requirement_facts(program, &mut facts);
     let control_flow_plans = if config.enable_control_flow_facts {
         collect_control_flow_facts(program, &mut facts);
         collect_control_flow_plans(program)
@@ -695,6 +696,243 @@ fn collect_type_recursion_facts(ty: &TypeDecl, facts: &mut FactSet) {
                 provenance: FactProvenance::ParsedSource,
             });
         }
+    }
+}
+
+fn collect_dispatch_requirement_facts(program: &Program, facts: &mut FactSet) {
+    for ty in &program.types {
+        collect_type_dispatch_requirement_facts(ty, facts);
+    }
+}
+
+fn collect_type_dispatch_requirement_facts(ty: &TypeDecl, facts: &mut FactSet) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => {
+                if let Some(initializer) = &field.initializer {
+                    collect_dispatch_requirement_facts_from_expr(initializer, facts);
+                }
+            }
+            Member::Method(method) => {
+                if let Some(body) = &method.body {
+                    collect_dispatch_requirement_facts_from_block(body, facts);
+                }
+            }
+            Member::Constructor(ctor) => {
+                if let Some(body) = &ctor.body {
+                    collect_dispatch_requirement_facts_from_block(body, facts);
+                }
+            }
+            Member::Type(nested) => collect_type_dispatch_requirement_facts(nested, facts),
+            Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn collect_dispatch_requirement_facts_from_block(block: &Block, facts: &mut FactSet) {
+    for stmt in &block.statements {
+        collect_dispatch_requirement_facts_from_stmt(stmt, facts);
+    }
+}
+
+fn collect_dispatch_requirement_facts_from_stmts(stmts: &[Stmt], facts: &mut FactSet) {
+    for stmt in stmts {
+        collect_dispatch_requirement_facts_from_stmt(stmt, facts);
+    }
+}
+
+fn collect_dispatch_requirement_facts_from_stmt(stmt: &Stmt, facts: &mut FactSet) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => {
+            if let Some(initializer) = initializer {
+                collect_dispatch_requirement_facts_from_expr(initializer, facts);
+            }
+        }
+        Stmt::Assign { target, value } => {
+            collect_dispatch_requirement_facts_from_expr(target, facts);
+            collect_dispatch_requirement_facts_from_expr(value, facts);
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            collect_dispatch_requirement_facts_from_expr(expr, facts);
+        }
+        Stmt::Return(None) => {}
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_dispatch_requirement_facts_from_expr(condition, facts);
+            collect_dispatch_requirement_facts_from_block(then_block, facts);
+            if let Some(else_block) = else_block {
+                collect_dispatch_requirement_facts_from_block(else_block, facts);
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_dispatch_requirement_facts_from_expr(condition, facts);
+            collect_dispatch_requirement_facts_from_block(body, facts);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            collect_dispatch_requirement_facts_from_stmts(init, facts);
+            if let Some(condition) = condition {
+                collect_dispatch_requirement_facts_from_expr(condition, facts);
+            }
+            for expr in update {
+                collect_dispatch_requirement_facts_from_expr(expr, facts);
+            }
+            collect_dispatch_requirement_facts_from_block(body, facts);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_dispatch_requirement_facts_from_expr(iterable, facts);
+            collect_dispatch_requirement_facts_from_block(body, facts);
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_dispatch_requirement_facts_from_expr(selector, facts);
+            for case in cases {
+                for label in &case.labels {
+                    if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                        collect_dispatch_requirement_facts_from_expr(expr, facts);
+                    }
+                }
+                collect_dispatch_requirement_facts_from_stmts(&case.statements, facts);
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            collect_dispatch_requirement_facts_from_stmts(resources, facts);
+            collect_dispatch_requirement_facts_from_block(body, facts);
+            for catch in catches {
+                collect_dispatch_requirement_facts_from_block(&catch.body, facts);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_dispatch_requirement_facts_from_block(finally_block, facts);
+            }
+        }
+        Stmt::LocalType(ty) => collect_type_dispatch_requirement_facts(ty, facts),
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_dispatch_requirement_facts_from_expr(arg, facts);
+            }
+        }
+        Stmt::Block(block) => collect_dispatch_requirement_facts_from_block(block, facts),
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_dispatch_requirement_facts_from_expr(expr: &Expr, facts: &mut FactSet) {
+    match expr {
+        Expr::Cast { ty, expr } => {
+            push_dispatch_requirement_fact(facts, ty, DispatchRequirementKind::NeedsDowncast);
+            collect_dispatch_requirement_facts_from_expr(expr, facts);
+        }
+        Expr::InstanceOf { expr, ty } => {
+            push_dispatch_requirement_fact(facts, ty, DispatchRequirementKind::NeedsInstanceof);
+            collect_dispatch_requirement_facts_from_expr(expr, facts);
+        }
+        Expr::FieldAccess(receiver, _) => {
+            collect_dispatch_requirement_facts_from_expr(receiver, facts);
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_dispatch_requirement_facts_from_expr(array, facts);
+            collect_dispatch_requirement_facts_from_expr(index, facts);
+        }
+        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+            for expr in dimensions {
+                collect_dispatch_requirement_facts_from_expr(expr, facts);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_dispatch_requirement_facts_from_expr(left, facts);
+            collect_dispatch_requirement_facts_from_expr(right, facts);
+        }
+        Expr::Unary { expr, .. } => collect_dispatch_requirement_facts_from_expr(expr, facts),
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_dispatch_requirement_facts_from_expr(condition, facts);
+            collect_dispatch_requirement_facts_from_expr(then_expr, facts);
+            collect_dispatch_requirement_facts_from_expr(else_expr, facts);
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_dispatch_requirement_facts_from_expr(receiver, facts);
+            }
+            for arg in args {
+                collect_dispatch_requirement_facts_from_expr(arg, facts);
+            }
+        }
+        Expr::New { args, body, .. } => {
+            for arg in args {
+                collect_dispatch_requirement_facts_from_expr(arg, facts);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    if let Member::Method(method) = member
+                        && let Some(body) = &method.body
+                    {
+                        collect_dispatch_requirement_facts_from_block(body, facts);
+                    }
+                }
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => {
+                collect_dispatch_requirement_facts_from_expr(expr, facts);
+            }
+            crate::java_ir::LambdaBody::Block(block) => {
+                collect_dispatch_requirement_facts_from_block(block, facts);
+            }
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn push_dispatch_requirement_fact(
+    facts: &mut FactSet,
+    java_ty: &JavaType,
+    requirement: DispatchRequirementKind,
+) {
+    let Some(type_name) = dispatch_requirement_type_name(java_ty) else {
+        return;
+    };
+    if facts.dispatch_requirement_facts.iter().any(|fact| {
+        fact.type_name == type_name
+            && fact.requirement == requirement
+            && fact.provenance == FactProvenance::ParsedSource
+    }) {
+        return;
+    }
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: type_name.to_string(),
+            requirement,
+            provenance: FactProvenance::ParsedSource,
+        });
+}
+
+fn dispatch_requirement_type_name(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::String => Some("String"),
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name.as_str()),
+        _ => None,
     }
 }
 

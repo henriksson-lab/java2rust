@@ -1,4 +1,4 @@
-use crate::coercion::LoweredType;
+use crate::conversion_plan::LoweredType;
 use crate::facts::{CaptureOwnerKind, FactSet};
 use crate::java_ir::{Expr, JavaType, LambdaBody, PrimitiveType};
 use crate::slot_shape::RustSlotShape;

@@ -2,10 +2,12 @@ use std::fs;
 use std::path::Path;
 
 use new_java2rust::facts::{
-    ControlFlowFactKind, ExceptionKind, ExternalApiEffectFact, ExternalApiRole, FactProvenance,
-    NullabilityState, ReceiverMutabilityFact, RecursionKind, TrivialAccessorKind,
+    ControlFlowFactKind, DispatchRequirementKind, ExceptionKind, ExternalApiEffectFact,
+    ExternalApiRole, FactProvenance, NullabilityState, ReceiverMutabilityFact, RecursionKind,
+    TrivialAccessorKind,
 };
 use new_java2rust::java_ir::JavaType;
+use new_java2rust::object_model::plan_object_model;
 use new_java2rust::rewrite::{
     AssignmentConditionNormalizedShape, ControlFlowRewritePlan, NullTestKind,
     TailRecursiveNormalizedShape,
@@ -34,6 +36,65 @@ fn analyze(source: &str) -> semantic_analysis::SemanticFacts {
         &resolved.facts,
         &new_java2rust::facts::FactSet::default(),
     )
+}
+
+#[test]
+fn records_dispatch_requirements_for_instanceof_and_casts() {
+    let source = r#"
+interface Animal {}
+class Dog implements Animal {}
+class Use {
+    boolean isDog(Animal animal) {
+        return animal instanceof Dog;
+    }
+    Dog asDog(Animal animal) {
+        return (Dog) animal;
+    }
+}
+"#;
+    let parsed = parser::parse_java_source(source);
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = semantic_analysis::analyze_program(
+        &resolved.program,
+        &resolved.facts,
+        &new_java2rust::facts::FactSet::default(),
+    );
+
+    assert_eq!(
+        semantic.facts.dispatch_requirements_for("Dog"),
+        vec![
+            DispatchRequirementKind::NeedsInstanceof,
+            DispatchRequirementKind::NeedsDowncast,
+        ]
+    );
+    assert_eq!(
+        semantic.facts.dispatch_requirement_facts_for("Dog").len(),
+        2
+    );
+
+    let object_plan = plan_object_model(&resolved.program, &semantic.facts);
+    let dog = object_plan.strategy_for("Dog").unwrap();
+    assert_eq!(
+        dog.requirements,
+        vec![
+            DispatchRequirementKind::NeedsInstanceof,
+            DispatchRequirementKind::NeedsDowncast,
+        ]
+    );
+}
+
+#[test]
+fn dispatch_requirement_producer_ignores_primitive_cast_targets() {
+    let source = r#"
+class Use {
+    int asInt(long value) {
+        return (int) value;
+    }
+}
+"#;
+    let semantic = analyze(source);
+
+    assert!(semantic.facts.dispatch_requirement_facts.is_empty());
 }
 
 fn analyze_with_config(

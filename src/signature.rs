@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::effective_facts::EffectiveFacts;
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
-    CaptureOrigin, CaptureSource, FactSet, NullabilityState, OwnedRecoveryCapability,
-    ReceiverMutabilityFact,
+    CaptureOrigin, CaptureSource, DispatchRequirementKind, FactSet, NullabilityState,
+    OwnedRecoveryCapability, ReceiverMutabilityFact,
 };
 use crate::java_ir::{
     Block, ConstructorDecl, Expr, FieldDecl, JavaType, MethodDecl, Modifier, Param, Program, Stmt,
@@ -11,8 +12,9 @@ use crate::java_ir::{
 };
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
-    apply_required_dispatch, apply_required_ownership, apply_required_view,
-    param_shape_for_java_type, return_shape_for_java_type, storage_shape_for_java_type,
+    DispatchRequirementProjectionRole, apply_required_dispatch, apply_required_ownership,
+    apply_required_view, dispatch_requirement_projection_policy, param_shape_for_java_type,
+    return_shape_for_java_type, storage_shape_for_java_type,
 };
 use crate::slot_policy::{
     BorrowedContentKind, BorrowedContentPolicy,
@@ -165,6 +167,15 @@ pub struct SignatureSlotBaselinePolicy {
     pub boundary_kind: Option<SignatureBoundaryKind>,
     pub capability_constraints: Vec<SignatureConstraint>,
     pub boundary_constraints: Vec<SignatureConstraint>,
+    pub constraints: Vec<SignatureConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureSlotDispatchRequirementPolicy {
+    pub java_ty: JavaType,
+    pub role: SignatureSlotRole,
+    pub source_dispatch: DispatchShape,
+    pub requirements: Vec<DispatchRequirementKind>,
     pub constraints: Vec<SignatureConstraint>,
 }
 
@@ -1998,6 +2009,15 @@ pub fn signature_owned_recovery_policy(
     constraints: &[SignatureConstraint],
     facts: &FactSet,
 ) -> SignatureOwnedRecoveryPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_owned_recovery_policy_with_effective_facts(java_ty, constraints, &effective_facts)
+}
+
+pub fn signature_owned_recovery_policy_with_effective_facts(
+    java_ty: &JavaType,
+    constraints: &[SignatureConstraint],
+    facts: &EffectiveFacts<'_>,
+) -> SignatureOwnedRecoveryPolicy {
     let merged = MergedSignatureConstraints::from_constraints(constraints);
     if !merged.conflicts().iter().any(|conflict| {
         conflict.axis == SignatureConstraintAxis::Owner
@@ -2009,13 +2029,22 @@ pub fn signature_owned_recovery_policy(
     }) {
         return SignatureOwnedRecoveryPolicy::NotRequired;
     }
-    let capability = signature_owned_recovery_capability_policy(java_ty, facts);
+    let capability =
+        signature_owned_recovery_capability_policy_with_effective_facts(java_ty, facts);
     signature_owned_recovery_policy_from_capability(capability.recovery)
 }
 
 pub fn signature_owned_recovery_capability_policy(
     java_ty: &JavaType,
     facts: &FactSet,
+) -> SignatureOwnedRecoveryCapabilityPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_owned_recovery_capability_policy_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn signature_owned_recovery_capability_policy_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
 ) -> SignatureOwnedRecoveryCapabilityPolicy {
     SignatureOwnedRecoveryCapabilityPolicy {
         java_ty: java_ty.clone(),
@@ -2073,7 +2102,7 @@ fn build_signature_plan_from_constraints(
         ..SignaturePlan::default()
     };
     for ty in &program.types {
-        collect_type_signatures(ty, representations, constraints, &mut plan);
+        collect_type_signatures(ty, representations, constraints, facts, &mut plan);
     }
     plan
 }
@@ -2293,6 +2322,7 @@ fn collect_type_signatures(
     ty: &TypeDecl,
     representations: &RepresentationPlan,
     constraints: &SignatureConstraintState,
+    facts: &FactSet,
     plan: &mut SignaturePlan,
 ) {
     for member in &ty.members {
@@ -2309,7 +2339,7 @@ fn collect_type_signatures(
                     .unwrap_or_else(field_shape_constraints);
                 plan.fields.insert(
                     field_key,
-                    constrained_field_shape(&field.ty, representations, &field_constraints),
+                    constrained_field_shape(&field.ty, representations, &field_constraints, facts),
                 );
             }
             crate::java_ir::Member::Method(method) => {
@@ -2330,14 +2360,14 @@ fn collect_type_signatures(
                                     .and_then(|constraints| constraints.params.get(index))
                                     .cloned()
                                     .unwrap_or_default();
-                                constrained_param_plan(param, representations, &constraints)
+                                constrained_param_plan(param, representations, &constraints, facts)
                             })
                             .collect(),
                         return_shape: {
                             let constraints = method_constraints
                                 .map(|constraints| constraints.return_constraints.clone())
                                 .unwrap_or_default();
-                            constrained_return_shape(method, representations, &constraints)
+                            constrained_return_shape(method, representations, &constraints, facts)
                         },
                         locals: method
                             .body
@@ -2349,6 +2379,7 @@ fn collect_type_signatures(
                                     method_constraints
                                         .map(|constraints| constraints.locals.as_slice())
                                         .unwrap_or(&[]),
+                                    facts,
                                 )
                             })
                             .unwrap_or_default(),
@@ -2378,7 +2409,7 @@ fn collect_type_signatures(
                                     .and_then(|constraints| constraints.params.get(index))
                                     .cloned()
                                     .unwrap_or_default();
-                                constrained_param_plan(param, representations, &constraints)
+                                constrained_param_plan(param, representations, &constraints, facts)
                             })
                             .collect(),
                         locals: ctor
@@ -2391,6 +2422,7 @@ fn collect_type_signatures(
                                     constructor_constraints
                                         .map(|constraints| constraints.locals.as_slice())
                                         .unwrap_or(&[]),
+                                    facts,
                                 )
                             })
                             .unwrap_or_default(),
@@ -2398,7 +2430,7 @@ fn collect_type_signatures(
                 );
             }
             crate::java_ir::Member::Type(nested) => {
-                collect_type_signatures(nested, representations, constraints, plan);
+                collect_type_signatures(nested, representations, constraints, facts, plan);
             }
             crate::java_ir::Member::Unsupported { .. } => {}
         }
@@ -2439,7 +2471,20 @@ pub fn conservative_boundary_constraints(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
-    signature_boundary_policy(SignatureBoundaryKind::UnknownApi, java_ty, facts).constraints
+    let effective_facts = EffectiveFacts::new(facts);
+    conservative_boundary_constraints_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn conservative_boundary_constraints_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> Vec<SignatureConstraint> {
+    signature_boundary_policy_with_effective_facts(
+        SignatureBoundaryKind::UnknownApi,
+        java_ty,
+        facts,
+    )
+    .constraints
 }
 
 pub fn signature_boundary_policy(
@@ -2447,21 +2492,31 @@ pub fn signature_boundary_policy(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> SignatureBoundaryPolicy {
-    let fallback = signature_boundary_fallback(kind, java_ty, facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_boundary_policy_with_effective_facts(kind, java_ty, &effective_facts)
+}
+
+pub fn signature_boundary_policy_with_effective_facts(
+    kind: SignatureBoundaryKind,
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> SignatureBoundaryPolicy {
+    let fallback = signature_boundary_fallback_with_effective_facts(kind, java_ty, facts);
     SignatureBoundaryPolicy {
         kind,
         java_ty: java_ty.clone(),
-        constraints: signature_boundary_constraints(fallback, java_ty, facts),
+        constraints: signature_boundary_constraints_with_effective_facts(fallback, java_ty, facts),
         fallback,
     }
 }
 
-fn signature_boundary_fallback(
+fn signature_boundary_fallback_with_effective_facts(
     kind: SignatureBoundaryKind,
     java_ty: &JavaType,
-    facts: &FactSet,
+    facts: &EffectiveFacts<'_>,
 ) -> SignatureBoundaryFallback {
-    let representation_policy = signature_boundary_representation_policy(java_ty, facts);
+    let representation_policy =
+        signature_boundary_representation_policy_with_effective_facts(java_ty, facts);
     match kind {
         SignatureBoundaryKind::PublicApi | SignatureBoundaryKind::UnknownApi => {
             if representation_policy.preserve_object_representation {
@@ -2484,7 +2539,16 @@ pub fn signature_boundary_representation_policy(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> SignatureBoundaryRepresentationPolicy {
-    let fact_policy = signature_boundary_representation_fact_policy(java_ty, facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_boundary_representation_policy_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn signature_boundary_representation_policy_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> SignatureBoundaryRepresentationPolicy {
+    let fact_policy =
+        signature_boundary_representation_fact_policy_with_effective_facts(java_ty, facts);
     SignatureBoundaryRepresentationPolicy {
         java_ty: java_ty.clone(),
         preserve_object_representation: matches!(
@@ -2498,6 +2562,14 @@ pub fn signature_boundary_representation_fact_policy(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> SignatureBoundaryRepresentationFactPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_boundary_representation_fact_policy_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn signature_boundary_representation_fact_policy_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> SignatureBoundaryRepresentationFactPolicy {
     SignatureBoundaryRepresentationFactPolicy {
         java_ty: java_ty.clone(),
         object_representation_facts: facts.has_object_representation_facts(java_ty),
@@ -2509,16 +2581,25 @@ pub fn signature_boundary_constraints(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_boundary_constraints_with_effective_facts(fallback, java_ty, &effective_facts)
+}
+
+pub fn signature_boundary_constraints_with_effective_facts(
+    fallback: SignatureBoundaryFallback,
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> Vec<SignatureConstraint> {
     match fallback {
         SignatureBoundaryFallback::ConservativeNative => {
-            signature_native_boundary_policy(java_ty, facts).constraints
+            signature_native_boundary_policy_with_effective_facts(java_ty, facts).constraints
         }
         SignatureBoundaryFallback::PreserveObjectRepresentation => Vec::new(),
         SignatureBoundaryFallback::PreserveObjectRepresentationEscapingStorage => {
             vec![SignatureConstraint::StorageSlot]
         }
         SignatureBoundaryFallback::EscapingNativeStorage => {
-            signature_native_boundary_policy(java_ty, facts).constraints
+            signature_native_boundary_policy_with_effective_facts(java_ty, facts).constraints
         }
     }
 }
@@ -2527,7 +2608,15 @@ pub fn signature_native_boundary_policy(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> SignatureNativeBoundaryPolicy {
-    let capability = signature_capability_policy(java_ty, facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_native_boundary_policy_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn signature_native_boundary_policy_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> SignatureNativeBoundaryPolicy {
+    let capability = signature_capability_policy_with_effective_facts(java_ty, facts);
     let owner_requirement = capability
         .capability_ownership
         .unwrap_or_else(|| conservative_ownership(java_ty));
@@ -2546,6 +2635,14 @@ pub fn signature_capability_policy(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> SignatureCapabilityPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_capability_policy_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn signature_capability_policy_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> SignatureCapabilityPolicy {
     let capability_ownership = facts
         .is_copy_type(java_ty)
         .then_some(OwnershipShape::CopyValue);
@@ -2561,9 +2658,21 @@ pub fn signature_slot_baseline_policy(
     boundary_kind: Option<SignatureBoundaryKind>,
     facts: &FactSet,
 ) -> SignatureSlotBaselinePolicy {
-    let capability_constraints = signature_capability_policy(java_ty, facts).constraints;
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_slot_baseline_policy_with_effective_facts(java_ty, boundary_kind, &effective_facts)
+}
+
+pub fn signature_slot_baseline_policy_with_effective_facts(
+    java_ty: &JavaType,
+    boundary_kind: Option<SignatureBoundaryKind>,
+    facts: &EffectiveFacts<'_>,
+) -> SignatureSlotBaselinePolicy {
+    let capability_constraints =
+        signature_capability_policy_with_effective_facts(java_ty, facts).constraints;
     let boundary_constraints = boundary_kind
-        .map(|kind| signature_boundary_policy(kind, java_ty, facts).constraints)
+        .map(|kind| {
+            signature_boundary_policy_with_effective_facts(kind, java_ty, facts).constraints
+        })
         .unwrap_or_default();
     let mut constraints = capability_constraints.clone();
     push_unique_signature_constraints(&mut constraints, &boundary_constraints);
@@ -2573,6 +2682,88 @@ pub fn signature_slot_baseline_policy(
         capability_constraints,
         boundary_constraints,
         constraints,
+    }
+}
+
+pub fn signature_slot_dispatch_requirement_policy(
+    java_ty: &JavaType,
+    role: SignatureSlotRole,
+    source_dispatch: DispatchShape,
+    facts: &FactSet,
+) -> SignatureSlotDispatchRequirementPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_slot_dispatch_requirement_policy_with_effective_facts(
+        java_ty,
+        role,
+        source_dispatch,
+        &effective_facts,
+    )
+}
+
+pub fn signature_slot_dispatch_requirement_policy_with_effective_facts(
+    java_ty: &JavaType,
+    role: SignatureSlotRole,
+    source_dispatch: DispatchShape,
+    facts: &EffectiveFacts<'_>,
+) -> SignatureSlotDispatchRequirementPolicy {
+    let requirements = java_type_name_for_signature_dispatch(java_ty)
+        .map(|type_name| facts.dispatch_requirements_for(type_name))
+        .unwrap_or_default();
+    let constraints = signature_slot_dispatch_requirement_constraints(
+        role,
+        source_dispatch.clone(),
+        &requirements,
+    );
+    SignatureSlotDispatchRequirementPolicy {
+        java_ty: java_ty.clone(),
+        role,
+        source_dispatch,
+        requirements,
+        constraints,
+    }
+}
+
+fn signature_slot_dispatch_requirement_constraints(
+    role: SignatureSlotRole,
+    source_dispatch: DispatchShape,
+    requirements: &[DispatchRequirementKind],
+) -> Vec<SignatureConstraint> {
+    let mut constraints = Vec::new();
+    let projection_role = dispatch_requirement_projection_role(role);
+    for requirement in requirements {
+        if let Some(dispatch) = dispatch_requirement_projection_policy(
+            projection_role,
+            source_dispatch.clone(),
+            *requirement,
+        )
+        .projected_dispatch
+        {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[SignatureConstraint::RequiredDispatch(dispatch)],
+            );
+        }
+    }
+    constraints
+}
+
+fn dispatch_requirement_projection_role(
+    role: SignatureSlotRole,
+) -> DispatchRequirementProjectionRole {
+    match role {
+        SignatureSlotRole::Param { .. } => DispatchRequirementProjectionRole::Param,
+        SignatureSlotRole::Return => DispatchRequirementProjectionRole::Return,
+        SignatureSlotRole::Storage => DispatchRequirementProjectionRole::Storage,
+    }
+}
+
+fn java_type_name_for_signature_dispatch(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::String => Some("String"),
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => {
+            None
+        }
     }
 }
 
@@ -2795,8 +2986,9 @@ fn constrained_param_plan(
     param: &Param,
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
+    facts: &FactSet,
 ) -> ParamPlan {
-    let shape = solve_signature_shape(
+    let shape = solve_signature_shape_with_facts(
         representations,
         SignatureShapeRequest {
             java_ty: param.ty.clone(),
@@ -2805,6 +2997,7 @@ fn constrained_param_plan(
             },
             constraints: constraints.to_vec(),
         },
+        facts,
     )
     .expect("parameter signature shape is always present");
     param_plan_with_shape(param, shape)
@@ -2814,6 +3007,35 @@ pub fn solve_signature_shape(
     representations: &RepresentationPlan,
     request: SignatureShapeRequest,
 ) -> Option<RustSlotShape> {
+    solve_signature_shape_with_extra_constraints(representations, request, Vec::new())
+}
+
+pub fn solve_signature_shape_with_facts(
+    representations: &RepresentationPlan,
+    request: SignatureShapeRequest,
+    facts: &FactSet,
+) -> Option<RustSlotShape> {
+    let source_dispatch = representations.dispatch_for(&request.java_ty);
+    let dispatch_policy = signature_slot_dispatch_requirement_policy(
+        &request.java_ty,
+        request.role,
+        source_dispatch,
+        facts,
+    );
+    solve_signature_shape_with_extra_constraints(
+        representations,
+        request,
+        dispatch_policy.constraints,
+    )
+}
+
+fn solve_signature_shape_with_extra_constraints(
+    representations: &RepresentationPlan,
+    request: SignatureShapeRequest,
+    extra_constraints: Vec<SignatureConstraint>,
+) -> Option<RustSlotShape> {
+    let mut all_constraints = request.constraints.clone();
+    push_unique_signature_constraints(&mut all_constraints, &extra_constraints);
     let constraints = MergedSignatureConstraints::from_constraints(&request.constraints);
     let base_shape = if constraints.requires_storage_slot() {
         Some(storage_shape_for_java_type(
@@ -2836,6 +3058,7 @@ pub fn solve_signature_shape(
             )),
         }
     };
+    let constraints = MergedSignatureConstraints::from_constraints(&all_constraints);
     base_shape.map(|shape| constraints.apply_to_shape(shape))
 }
 
@@ -3237,14 +3460,16 @@ fn constrained_field_shape(
     java_ty: &JavaType,
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
+    facts: &FactSet,
 ) -> RustSlotShape {
-    solve_signature_shape(
+    solve_signature_shape_with_facts(
         representations,
         SignatureShapeRequest {
             java_ty: java_ty.clone(),
             role: SignatureSlotRole::Storage,
             constraints: constraints.to_vec(),
         },
+        facts,
     )
     .expect("field signature shape is always present")
 }
@@ -3625,9 +3850,16 @@ fn collect_local_plans_from_constraints(
     block: &crate::java_ir::Block,
     representations: &RepresentationPlan,
     constraints: &[LocalConstraintSet],
+    facts: &FactSet,
 ) -> Vec<LocalPlan> {
     let mut locals = Vec::new();
-    collect_local_plans_from_stmts(&block.statements, representations, constraints, &mut locals);
+    collect_local_plans_from_stmts(
+        &block.statements,
+        representations,
+        constraints,
+        facts,
+        &mut locals,
+    );
     locals
 }
 
@@ -3635,6 +3867,7 @@ fn collect_local_plans_from_stmts(
     statements: &[crate::java_ir::Stmt],
     representations: &RepresentationPlan,
     constraints: &[LocalConstraintSet],
+    facts: &FactSet,
     locals: &mut Vec<LocalPlan>,
 ) {
     use crate::java_ir::Stmt;
@@ -3646,14 +3879,16 @@ fn collect_local_plans_from_stmts(
                     ty,
                     representations,
                     local_constraints_for(constraints, name),
+                    facts,
                 ));
             }
             Stmt::For { init, body, .. } => {
-                collect_local_plans_from_stmts(init, representations, constraints, locals);
+                collect_local_plans_from_stmts(init, representations, constraints, facts, locals);
                 collect_local_plans_from_stmts(
                     &body.statements,
                     representations,
                     constraints,
+                    facts,
                     locals,
                 );
             }
@@ -3668,11 +3903,13 @@ fn collect_local_plans_from_stmts(
                     var_type,
                     representations,
                     local_constraints_for(constraints, var_name),
+                    facts,
                 ));
                 collect_local_plans_from_stmts(
                     &body.statements,
                     representations,
                     constraints,
+                    facts,
                     locals,
                 );
             }
@@ -3685,6 +3922,7 @@ fn collect_local_plans_from_stmts(
                     &then_block.statements,
                     representations,
                     constraints,
+                    facts,
                     locals,
                 );
                 if let Some(else_block) = else_block {
@@ -3692,6 +3930,7 @@ fn collect_local_plans_from_stmts(
                         &else_block.statements,
                         representations,
                         constraints,
+                        facts,
                         locals,
                     );
                 }
@@ -3701,6 +3940,7 @@ fn collect_local_plans_from_stmts(
                     &body.statements,
                     representations,
                     constraints,
+                    facts,
                     locals,
                 );
             }
@@ -3710,6 +3950,7 @@ fn collect_local_plans_from_stmts(
                         &case.statements,
                         representations,
                         constraints,
+                        facts,
                         locals,
                     );
                 }
@@ -3717,11 +3958,18 @@ fn collect_local_plans_from_stmts(
             Stmt::Try {
                 resources, body, ..
             } => {
-                collect_local_plans_from_stmts(resources, representations, constraints, locals);
+                collect_local_plans_from_stmts(
+                    resources,
+                    representations,
+                    constraints,
+                    facts,
+                    locals,
+                );
                 collect_local_plans_from_stmts(
                     &body.statements,
                     representations,
                     constraints,
+                    facts,
                     locals,
                 );
             }
@@ -3764,8 +4012,29 @@ fn local_shape_constraints_with_usage(
     usage: Option<&MethodUsageFacts>,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
+    let effective_facts = EffectiveFacts::new(facts);
+    local_shape_constraints_with_usage_and_effective_facts(
+        name,
+        java_ty,
+        mutated,
+        usage,
+        facts,
+        &effective_facts,
+    )
+}
+
+fn local_shape_constraints_with_usage_and_effective_facts(
+    name: &str,
+    java_ty: &JavaType,
+    mutated: &HashSet<String>,
+    usage: Option<&MethodUsageFacts>,
+    facts: &FactSet,
+    effective_facts: &EffectiveFacts<'_>,
+) -> Vec<SignatureConstraint> {
     let mut constraints = local_shape_constraints(name, mutated);
-    constraints.extend(signature_capability_policy(java_ty, facts).constraints);
+    constraints.extend(
+        signature_capability_policy_with_effective_facts(java_ty, effective_facts).constraints,
+    );
     if let Some(binding) = usage.and_then(|usage| usage.bindings.get(name)) {
         push_unique_signature_constraints(
             &mut constraints,
@@ -3776,7 +4045,10 @@ fn local_shape_constraints_with_usage(
         .and_then(|usage| usage.bindings.get(name))
         .and_then(|binding| binding_boundary_policy(binding).kind)
     {
-        constraints.extend(signature_boundary_policy(kind, java_ty, facts).constraints);
+        constraints.extend(
+            signature_boundary_policy_with_effective_facts(kind, java_ty, effective_facts)
+                .constraints,
+        );
     }
     constraints
 }
@@ -3827,17 +4099,19 @@ fn local_plan(
     java_ty: &JavaType,
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
+    facts: &FactSet,
 ) -> LocalPlan {
     LocalPlan {
         name: name.to_string(),
         java_ty: java_ty.clone(),
-        shape: solve_signature_shape(
+        shape: solve_signature_shape_with_facts(
             representations,
             SignatureShapeRequest {
                 java_ty: java_ty.clone(),
                 role: SignatureSlotRole::Storage,
                 constraints: constraints.to_vec(),
             },
+            facts,
         )
         .expect("local signature shape is always present"),
         binding_mutable: signature_constraints_require_mutable_binding(constraints),
@@ -4130,14 +4404,16 @@ fn constrained_return_shape(
     method: &MethodDecl,
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
+    facts: &FactSet,
 ) -> Option<RustSlotShape> {
-    solve_signature_shape(
+    solve_signature_shape_with_facts(
         representations,
         SignatureShapeRequest {
             java_ty: method.return_type.clone(),
             role: SignatureSlotRole::Return,
             constraints: constraints.to_vec(),
         },
+        facts,
     )
 }
 

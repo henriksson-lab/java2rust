@@ -1,4 +1,5 @@
-use crate::facts::FactSet;
+use crate::effective_facts::EffectiveFacts;
+use crate::facts::{DispatchRequirementKind, FactSet};
 use crate::java_ir::JavaType;
 use crate::representation::RepresentationPlan;
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
@@ -36,9 +37,32 @@ pub struct EscapingRoleDispatchPolicy {
     pub projected_dispatch: DispatchShape,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchRequirementProjectionRole {
+    Param,
+    Return,
+    Storage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchRequirementProjectionPolicy {
+    pub role: DispatchRequirementProjectionRole,
+    pub source_dispatch: DispatchShape,
+    pub requirement: DispatchRequirementKind,
+    pub projected_dispatch: Option<DispatchShape>,
+}
+
 pub fn shape_projection_capability_policy(
     java_ty: &JavaType,
     facts: &FactSet,
+) -> ShapeProjectionCapabilityPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    shape_projection_capability_policy_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn shape_projection_capability_policy_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts,
 ) -> ShapeProjectionCapabilityPolicy {
     ShapeProjectionCapabilityPolicy {
         java_ty: java_ty.clone(),
@@ -203,12 +227,46 @@ pub fn escaping_role_dispatch_policy(dispatch: DispatchShape) -> EscapingRoleDis
     }
 }
 
+pub fn dispatch_requirement_projection_policy(
+    role: DispatchRequirementProjectionRole,
+    source_dispatch: DispatchShape,
+    requirement: DispatchRequirementKind,
+) -> DispatchRequirementProjectionPolicy {
+    let projected_dispatch = match (requirement, role) {
+        (
+            DispatchRequirementKind::NeedsOwnedPolymorphicStorage,
+            DispatchRequirementProjectionRole::Storage | DispatchRequirementProjectionRole::Return,
+        ) => Some(escaping_role_dispatch_policy(source_dispatch.clone()).projected_dispatch),
+        (
+            DispatchRequirementKind::NeedsBorrowedTraitView,
+            DispatchRequirementProjectionRole::Param,
+        ) => Some(source_dispatch.clone()),
+        (DispatchRequirementKind::NeedsUnknownRuntimeObject, _)
+        | (DispatchRequirementKind::RejectTraitObject, _) => Some(DispatchShape::ErasedObject),
+        _ => None,
+    };
+    DispatchRequirementProjectionPolicy {
+        role,
+        source_dispatch,
+        requirement,
+        projected_dispatch,
+    }
+}
+
 pub fn indexed_read_shape(array_shape: &RustSlotShape) -> RustSlotShape {
     indexed_read_shape_with_facts(array_shape, &FactSet::default())
 }
 
 pub fn iteration_element_shape(element_ty: JavaType, facts: &FactSet) -> RustSlotShape {
-    let policy = iteration_element_projection_policy(element_ty, facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    iteration_element_shape_with_effective_facts(element_ty, &effective_facts)
+}
+
+pub fn iteration_element_shape_with_effective_facts(
+    element_ty: JavaType,
+    facts: &EffectiveFacts,
+) -> RustSlotShape {
+    let policy = iteration_element_projection_policy_with_effective_facts(element_ty, facts);
     let mut shape = RustSlotShape::conservative(policy.element_ty);
     shape.ownership = policy.ownership;
     shape
@@ -218,10 +276,19 @@ pub fn indexed_read_shape_with_facts(
     array_shape: &RustSlotShape,
     facts: &FactSet,
 ) -> RustSlotShape {
-    let element_ty = sequence_element_projection_policy(&array_shape.java_ty, facts)
-        .element_ty
-        .unwrap_or_else(|| JavaType::Unknown("array_access".to_string()));
-    let policy = indexed_element_projection_policy(
+    let effective_facts = EffectiveFacts::new(facts);
+    indexed_read_shape_with_effective_facts(array_shape, &effective_facts)
+}
+
+pub fn indexed_read_shape_with_effective_facts(
+    array_shape: &RustSlotShape,
+    facts: &EffectiveFacts,
+) -> RustSlotShape {
+    let element_ty =
+        sequence_element_projection_policy_with_effective_facts(&array_shape.java_ty, facts)
+            .element_ty
+            .unwrap_or_else(|| JavaType::Unknown("array_access".to_string()));
+    let policy = indexed_element_projection_policy_with_effective_facts(
         element_ty,
         array_shape.ownership,
         &array_shape.view,
@@ -239,7 +306,22 @@ pub fn indexed_element_projection_policy(
     container_view: &ViewShape,
     facts: &FactSet,
 ) -> IndexedElementProjectionPolicy {
-    let capability = shape_projection_capability_policy(&element_ty, facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    indexed_element_projection_policy_with_effective_facts(
+        element_ty,
+        container_ownership,
+        container_view,
+        &effective_facts,
+    )
+}
+
+pub fn indexed_element_projection_policy_with_effective_facts(
+    element_ty: JavaType,
+    container_ownership: OwnershipShape,
+    container_view: &ViewShape,
+    facts: &EffectiveFacts,
+) -> IndexedElementProjectionPolicy {
+    let capability = shape_projection_capability_policy_with_effective_facts(&element_ty, facts);
     let projected_ownership = if capability.value_semantics {
         OwnershipShape::CopyValue
     } else if container_ownership == OwnershipShape::SharedBorrow
@@ -259,7 +341,15 @@ pub fn iteration_element_projection_policy(
     element_ty: JavaType,
     facts: &FactSet,
 ) -> IndexedElementProjectionPolicy {
-    let capability = shape_projection_capability_policy(&element_ty, facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    iteration_element_projection_policy_with_effective_facts(element_ty, &effective_facts)
+}
+
+pub fn iteration_element_projection_policy_with_effective_facts(
+    element_ty: JavaType,
+    facts: &EffectiveFacts,
+) -> IndexedElementProjectionPolicy {
+    let capability = shape_projection_capability_policy_with_effective_facts(&element_ty, facts);
     let projected_ownership = if capability.value_semantics {
         RustSlotShape::conservative(element_ty.clone()).ownership
     } else {
@@ -279,7 +369,15 @@ pub fn indexed_assignment_shape_with_facts(
     array_shape: &RustSlotShape,
     facts: &FactSet,
 ) -> Option<RustSlotShape> {
-    sequence_element_projection_policy(&array_shape.java_ty, facts)
+    let effective_facts = EffectiveFacts::new(facts);
+    indexed_assignment_shape_with_effective_facts(array_shape, &effective_facts)
+}
+
+pub fn indexed_assignment_shape_with_effective_facts(
+    array_shape: &RustSlotShape,
+    facts: &EffectiveFacts,
+) -> Option<RustSlotShape> {
+    sequence_element_projection_policy_with_effective_facts(&array_shape.java_ty, facts)
         .element_ty
         .map(RustSlotShape::for_storage)
 }
@@ -288,7 +386,15 @@ pub fn sequence_element_projection_policy(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> SequenceElementProjectionPolicy {
-    let capability = shape_projection_capability_policy(java_ty, facts);
+    let effective_facts = EffectiveFacts::new(facts);
+    sequence_element_projection_policy_with_effective_facts(java_ty, &effective_facts)
+}
+
+pub fn sequence_element_projection_policy_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts,
+) -> SequenceElementProjectionPolicy {
+    let capability = shape_projection_capability_policy_with_effective_facts(java_ty, facts);
     SequenceElementProjectionPolicy {
         java_ty: capability.java_ty,
         element_ty: capability.sequence_element,
