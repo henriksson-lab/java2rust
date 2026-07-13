@@ -28,6 +28,7 @@ pub mod representation_lowering;
 pub mod resolve;
 pub mod rewrite;
 pub mod rust_ir;
+pub mod semantic_analysis;
 pub mod shape_projection;
 pub mod signature;
 pub mod slot_policy;
@@ -62,20 +63,29 @@ pub fn translate_source(source: &str) -> Translation {
 pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Translation {
     let parsed = parser::parse_java_source(source);
     let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
-    let mut facts = resolved.facts.clone();
-    facts.extend_from(external_facts.clone());
-    let usage = usage::analyze_usage(&resolved.program);
-    let representations = representation::plan_representations(&resolved.program, &facts);
-    let signatures =
-        signature::solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
-    let lowered = lower::lower_program_with_plans(
+    let semantic =
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, external_facts);
+    let representations = representation::plan_representations(&resolved.program, &semantic.facts);
+    let signatures = signature::solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let mut lowered = lower::lower_program_with_semantic_plans(
         &resolved.program,
         resolved.diagnostics,
-        &facts,
-        &usage,
+        &semantic.facts,
+        &semantic.usage,
         &representations,
         &signatures,
+        &semantic.control_flow_plans,
     );
+    for diagnostic in semantic.diagnostics {
+        lowered
+            .diagnostics
+            .warning(diagnostic.code, diagnostic.message);
+    }
     let rust = emit::emit_file(&lowered.file);
     Translation {
         rust,

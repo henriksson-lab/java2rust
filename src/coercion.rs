@@ -496,6 +496,7 @@ pub fn plan_shape_coercion_with_facts(
         plan.extend(view_coercions);
         return plan;
     }
+    plan.extend(optional_shape_coercion_policy(actual, target).coercions());
     plan.extend(ownership_coercion_policy(actual, target, facts).coercions());
     if let Some(policy) = primitive_widening_policy(&actual.java_ty, &target.java_ty)
         && policy.widens
@@ -509,6 +510,45 @@ pub fn plan_shape_coercion_with_facts(
         plan.push(Coercion::Identity);
     }
     plan
+}
+
+pub fn optional_shape_coercion_policy(
+    actual: &RustSlotShape,
+    target: &RustSlotShape,
+) -> OptionalShapeCoercionPolicy {
+    if actual.dispatch != target.dispatch || actual.view != target.view {
+        return OptionalShapeCoercionPolicy::NoChange;
+    }
+    if target
+        .optional_element_type()
+        .is_some_and(|element_ty| element_ty == actual.java_ty)
+    {
+        OptionalShapeCoercionPolicy::Wrap
+    } else if actual
+        .optional_element_type()
+        .is_some_and(|element_ty| element_ty == target.java_ty)
+    {
+        OptionalShapeCoercionPolicy::Unwrap
+    } else {
+        OptionalShapeCoercionPolicy::NoChange
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionalShapeCoercionPolicy {
+    Wrap,
+    Unwrap,
+    NoChange,
+}
+
+impl OptionalShapeCoercionPolicy {
+    pub fn coercions(self) -> Vec<Coercion> {
+        match self {
+            OptionalShapeCoercionPolicy::Wrap => vec![Coercion::WrapOption],
+            OptionalShapeCoercionPolicy::Unwrap => vec![Coercion::UnwrapOption],
+            OptionalShapeCoercionPolicy::NoChange => Vec::new(),
+        }
+    }
 }
 
 pub fn coercion_content_policy(java_ty: &JavaType, facts: &FactSet) -> CoercionContentPolicy {

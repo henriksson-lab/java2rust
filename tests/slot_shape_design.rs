@@ -5,8 +5,8 @@ use new_java2rust::call_lowering::{
     apply_call_target, apply_new_target, apply_new_target_with_facts,
 };
 use new_java2rust::call_plan::{
-    CallTargetPlan, plan_call_target, plan_new_target, resolved_call_arg_shapes,
-    resolved_constructor_arg_shapes,
+    CallTargetPlan, TrivialAccessorCallPlan, plan_call_target, plan_new_target,
+    plan_trivial_accessor_call, resolved_call_arg_shapes, resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::LoweredType;
 use new_java2rust::constructor_plan::{
@@ -30,8 +30,11 @@ use new_java2rust::expr_shape::{
 };
 use new_java2rust::external_facts::parse_external_facts;
 use new_java2rust::facts::{
-    ClosedHierarchyFact, FactProvenance, FactSet, HierarchyEdgeFact, HierarchyOverride,
-    HierarchyStrategy, ObjectSafetyViolation, OwnedRecoveryCapability, TypeCapabilityOverride,
+    AccessorInlinePolicy, ClosedHierarchyFact, ExternalApiRole, FactProvenance, FactSet,
+    FieldKey as FactFieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyEdgeFact,
+    HierarchyOverride, HierarchyStrategy, MethodEffectFact, MethodKey as FactMethodKey,
+    NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability, ReceiverMutabilityFact,
+    TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride,
 };
 use new_java2rust::item_assembly::{
     constructor_default_field_value, constructor_function_shell, constructor_return_body,
@@ -90,12 +93,13 @@ use new_java2rust::signature::{
     binding_boundary_policy, capability_diagnostics_for_signature_constraints,
     collect_signature_constraints, conservative_boundary_constraints, constrained_receiver_plan,
     constructor_param_boundary_policy, constructor_param_shape_constraints, field_boundary_policy,
-    field_shape_constraints, field_shape_constraints_with_facts,
+    field_nullability_shape_policy, field_shape_constraints, field_shape_constraints_with_facts,
     field_shape_constraints_with_usage, local_shape_constraints, merge_dispatch_requirement_policy,
     merge_ownership_requirement_policy, merge_signature_boundary_kind_policy,
-    merge_view_requirement_policy, method_param_boundary_policy, method_param_shape_constraints,
-    method_return_boundary_policy, method_return_shape_constraints, receiver_constraints,
-    signature_boundary_constraints, signature_boundary_policy,
+    merge_storage_nullability_requirement_policy, merge_view_requirement_policy,
+    method_param_boundary_policy, method_param_shape_constraints, method_return_boundary_policy,
+    method_return_shape_constraints, receiver_constraints, receiver_constraints_with_facts,
+    receiver_constraints_with_usage, signature_boundary_constraints, signature_boundary_policy,
     signature_boundary_representation_fact_policy, signature_boundary_representation_policy,
     signature_capability_policy, signature_constraints_for_borrowed_content_policy,
     signature_dispatch_requirement_priority_policy, signature_fixpoint_iteration_budget,
@@ -158,9 +162,9 @@ use new_java2rust::unsupported::{
 use new_java2rust::usage::{
     BindingUse, BindingUseFacts, CallArgumentBoundary, CallArgumentBoundaryPolicy,
     CallResultBoundaryPolicy, ConstructorInvocationBoundaryPolicy, FieldUse,
-    MethodApiBoundaryPolicy, analyze_usage, call_argument_boundary_policy,
-    call_result_boundary_policy, constructor_invocation_boundary_policy,
-    method_api_boundary_policy,
+    MethodApiBoundaryPolicy, analyze_usage, analyze_usage_with_facts,
+    call_argument_boundary_policy, call_result_boundary_policy,
+    constructor_invocation_boundary_policy, method_api_boundary_policy,
 };
 use new_java2rust::{emit, translate_source, translate_source_with_facts};
 
@@ -5391,9 +5395,23 @@ class Holder {
         },
         provenance: FactProvenance::UserOverride,
     });
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "Maker".to_string(),
+            method_name: "make".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Named {
+            name: "Exception".to_string(),
+            args: Vec::new(),
+        }],
+        provenance: FactProvenance::ParsedSource,
+    });
     let usage = analyze_usage(&resolved.program);
     let representations = plan_representations(&resolved.program, &facts);
-    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
     let expr_java_ty = JavaType::Named {
         name: "Expr".to_string(),
         args: Vec::new(),
@@ -5821,6 +5839,86 @@ class Uses {
 }
 
 #[test]
+fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
+    let receiver = Expr::Var("other".to_string());
+    let value = Expr::Literal(Literal::Int(7));
+    let resolved_getter = new_java2rust::java_ir::ResolvedCall {
+        declaring_type: "Bean".to_string(),
+        rust_name: "get_value".to_string(),
+        return_type: JavaType::Primitive(PrimitiveType::Int),
+        kind: new_java2rust::java_ir::CallKind::Instance,
+    };
+    let resolved_setter = new_java2rust::java_ir::ResolvedCall {
+        declaring_type: "Bean".to_string(),
+        rust_name: "set_value".to_string(),
+        return_type: JavaType::Void,
+        kind: new_java2rust::java_ir::CallKind::Instance,
+    };
+    let mut facts = FactSet::default();
+    facts.trivial_accessor_facts.push(TrivialAccessorFact {
+        method: FactMethodKey {
+            type_name: "Bean".to_string(),
+            method_name: "getValue".to_string(),
+        },
+        kind: TrivialAccessorKind::Getter {
+            field: FactFieldKey {
+                type_name: "Bean".to_string(),
+                field_name: "value".to_string(),
+            },
+        },
+        inline_policy: AccessorInlinePolicy::PreserveApi,
+        provenance: FactProvenance::ParsedSource,
+    });
+    facts.trivial_accessor_facts.push(TrivialAccessorFact {
+        method: FactMethodKey {
+            type_name: "Bean".to_string(),
+            method_name: "setValue".to_string(),
+        },
+        kind: TrivialAccessorKind::Setter {
+            field: FactFieldKey {
+                type_name: "Bean".to_string(),
+                field_name: "value".to_string(),
+            },
+            param_name: "value".to_string(),
+            fluent: false,
+        },
+        inline_policy: AccessorInlinePolicy::PreserveApi,
+        provenance: FactProvenance::ParsedSource,
+    });
+
+    assert!(matches!(
+        plan_trivial_accessor_call(
+            Some(&receiver),
+            "getValue",
+            &[],
+            Some(&resolved_getter),
+            &facts,
+        ),
+        Some(TrivialAccessorCallPlan::Getter {
+            field_name,
+            ..
+        }) if field_name == "value"
+    ));
+    assert!(matches!(
+        plan_trivial_accessor_call(None, "setValue", &[value], Some(&resolved_setter), &facts),
+        Some(TrivialAccessorCallPlan::Setter {
+            field_name,
+            ..
+        }) if field_name == "value"
+    ));
+    assert!(
+        plan_trivial_accessor_call(
+            Some(&receiver),
+            "getCount",
+            &[],
+            Some(&resolved_getter),
+            &facts
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn throwing_method_result_ok_type_uses_planned_return_shape() {
     let parsed = parse_java_source(
         r#"
@@ -5845,9 +5943,23 @@ class Maker {
         },
         provenance: FactProvenance::UserOverride,
     });
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "Maker".to_string(),
+            method_name: "make".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Named {
+            name: "Exception".to_string(),
+            args: Vec::new(),
+        }],
+        provenance: FactProvenance::ParsedSource,
+    });
     let usage = analyze_usage(&resolved.program);
     let representations = plan_representations(&resolved.program, &facts);
-    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
     let maker = resolved
         .program
         .types
@@ -6458,6 +6570,61 @@ object-safety-violation Pack nested-self-param unpack values
             },
         ]
     );
+}
+
+#[test]
+fn external_facts_parser_ingests_external_api_effect_overrides() {
+    let parsed = parse_external_facts(
+        r#"
+external-api getValue * getter read-only
+external-api setValue ExternalCounter setter mutates-receiver
+"#,
+    );
+
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let getter = parsed.facts.external_api_effect_for("getValue").unwrap();
+    assert_eq!(getter.method_name, "getValue");
+    assert_eq!(getter.receiver_type, None);
+    assert_eq!(getter.role, ExternalApiRole::Getter);
+    assert_eq!(getter.receiver_mutability, ReceiverMutabilityFact::ReadOnly);
+    assert_eq!(getter.provenance, FactProvenance::UserOverride);
+
+    let setter = parsed
+        .facts
+        .external_api_effect_for_receiver(Some("ExternalCounter"), "setValue")
+        .unwrap();
+    assert_eq!(setter.receiver_type.as_deref(), Some("ExternalCounter"));
+    assert_eq!(setter.role, ExternalApiRole::Setter);
+    assert_eq!(
+        setter.receiver_mutability,
+        ReceiverMutabilityFact::MutatesReceiver
+    );
+    assert_eq!(setter.provenance, FactProvenance::UserOverride);
+}
+
+#[test]
+fn external_facts_parser_ingests_field_nullability_overrides() {
+    let parsed = parse_external_facts(
+        r#"
+field-nullability User name definitely-non-null
+field-nullability Cache.value maybe-null
+"#,
+    );
+
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert_eq!(
+        parsed.facts.field_nullability_for("User", "name"),
+        Some(NullabilityState::DefinitelyNonNull)
+    );
+    assert_eq!(
+        parsed.facts.field_nullability_for("Cache", "value"),
+        Some(NullabilityState::MaybeNull)
+    );
+    assert!(parsed.facts.field_nullability_facts.iter().any(|fact| {
+        fact.field.type_name == "User"
+            && fact.field.field_name == "name"
+            && fact.provenance == FieldNullabilityProvenance::ExternalOverride
+    }));
 }
 
 #[test]
@@ -7777,6 +7944,46 @@ class ExternalLabel {}
 }
 
 #[test]
+fn method_effect_facts_drive_exception_result_shell_and_return_wrapping() {
+    let source = r#"
+class EffectOnlyThrows {
+    int read() {
+        return 7;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "EffectOnlyThrows".to_string(),
+            method_name: "read".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Named {
+            name: "IOException".to_string(),
+            args: Vec::new(),
+        }],
+        provenance: FactProvenance::UserOverride,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn read(&self) -> Result<i32, JavaException>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("return Ok(7);"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn item_assembly_return_type_wrappers_delegate_to_fact_aware_rendering() {
     let source = include_str!("../src/item_assembly.rs");
 
@@ -7910,13 +8117,20 @@ class Counter {
         let method = method_for(name);
         signatures.method_receiver(ty, method).unwrap()
     };
+    let method_usage = |name: &str| {
+        usage.methods.get(&new_java2rust::usage::UsageMethodKey {
+            type_name: "Counter".to_string(),
+            method_name: name.to_string(),
+        })
+    };
 
     assert_eq!(receiver_for("get"), ReceiverPlan::Shared);
     assert_eq!(receiver_for("set"), ReceiverPlan::Mutable);
     assert_eq!(receiver_for("id"), ReceiverPlan::None);
     assert_eq!(receiver_constraints(method_for("get")), Vec::new());
+    assert_eq!(receiver_constraints(method_for("set")), Vec::new());
     assert_eq!(
-        receiver_constraints(method_for("set")),
+        receiver_constraints_with_usage(method_for("set"), method_usage("set")),
         vec![ReceiverConstraint::MutableReceiver]
     );
     assert_eq!(
@@ -7943,6 +8157,53 @@ class Counter {
         signatures
             .method_receiver(&wrong_type, get_method)
             .is_none()
+    );
+}
+
+#[test]
+fn method_effect_fact_can_drive_receiver_mutability_without_body_reanalysis() {
+    let parsed = parse_java_source(
+        r#"
+class Counter {
+    int get() {
+        return 1;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "Counter".to_string(),
+            method_name: "get".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_nullability: NullabilityState::Unknown,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    let usage = analyze_usage_with_facts(&resolved.program, &facts);
+    let representations = plan_representations(&resolved.program, &facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "get" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        receiver_constraints_with_facts(ty, method, &facts),
+        vec![ReceiverConstraint::MutableReceiver]
+    );
+    assert_eq!(
+        signatures.method_receiver(ty, method),
+        Some(ReceiverPlan::Mutable)
     );
 }
 
@@ -10362,7 +10623,7 @@ class ProtectedApi {
     expected_field.extend(expected.clone());
 
     assert_eq!(
-        field_shape_constraints_with_facts(field, &resolved.facts),
+        field_shape_constraints_with_facts(ty, field, &resolved.facts),
         expected_field
     );
     assert_eq!(
@@ -10376,6 +10637,100 @@ class ProtectedApi {
     assert_eq!(
         method_return_shape_constraints(ty, method, &usage, &resolved.facts),
         expected
+    );
+}
+
+#[test]
+fn field_nullability_shape_policy_optionalizes_only_nullable_reference_storage() {
+    let parsed = parse_java_source(
+        r#"
+class NullFields {
+    String maybe;
+    String proven;
+    int count;
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let ty = &resolved.program.types[0];
+    let field = |name: &str| {
+        ty.members
+            .iter()
+            .find_map(|member| match member {
+                Member::Field(field) if field.name == name => Some(field),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let mut facts = resolved.facts.clone();
+    facts.field_nullability_facts.push(FieldNullabilityFact {
+        field: FactFieldKey {
+            type_name: "NullFields".to_string(),
+            field_name: "maybe".to_string(),
+        },
+        state: NullabilityState::MaybeNull,
+        provenance: FieldNullabilityProvenance::ConservativeFallback,
+    });
+    facts.field_nullability_facts.push(FieldNullabilityFact {
+        field: FactFieldKey {
+            type_name: "NullFields".to_string(),
+            field_name: "proven".to_string(),
+        },
+        state: NullabilityState::DefinitelyNonNull,
+        provenance: FieldNullabilityProvenance::ConstructorAssignments,
+    });
+
+    assert_eq!(
+        field_nullability_shape_policy(ty, field("maybe"), &facts).constraints,
+        vec![SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::MaybeNull
+        )]
+    );
+    assert_eq!(
+        merge_storage_nullability_requirement_policy(
+            Some(NullabilityState::DefinitelyNonNull),
+            NullabilityState::MaybeNull,
+        )
+        .kept,
+        NullabilityState::MaybeNull
+    );
+
+    let maybe_shape = solve_signature_shape(
+        &representations,
+        SignatureShapeRequest {
+            java_ty: field("maybe").ty.clone(),
+            role: SignatureSlotRole::Storage,
+            constraints: field_shape_constraints_with_facts(ty, field("maybe"), &facts),
+        },
+    )
+    .unwrap();
+    let proven_shape = solve_signature_shape(
+        &representations,
+        SignatureShapeRequest {
+            java_ty: field("proven").ty.clone(),
+            role: SignatureSlotRole::Storage,
+            constraints: field_shape_constraints_with_facts(ty, field("proven"), &facts),
+        },
+    )
+    .unwrap();
+    let primitive_shape = solve_signature_shape(
+        &representations,
+        SignatureShapeRequest {
+            java_ty: field("count").ty.clone(),
+            role: SignatureSlotRole::Storage,
+            constraints: vec![SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull,
+            )],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(maybe_shape.java_ty, optional_java_type(JavaType::String));
+    assert_eq!(proven_shape.java_ty, JavaType::String);
+    assert_eq!(
+        primitive_shape.java_ty,
+        JavaType::Primitive(PrimitiveType::Int)
     );
 }
 
@@ -10414,11 +10769,11 @@ class PublicFields {
     };
 
     assert_eq!(
-        field_shape_constraints_with_facts(exposed, &resolved.facts),
+        field_shape_constraints_with_facts(ty, exposed, &resolved.facts),
         expected_public
     );
     assert_eq!(
-        field_shape_constraints_with_facts(internal, &resolved.facts),
+        field_shape_constraints_with_facts(ty, internal, &resolved.facts),
         field_shape_constraints()
     );
 
@@ -11086,9 +11441,9 @@ class BoundaryCapabilityUse {
     let copy_constraint = SignatureConstraint::RequiredOwnership(OwnershipShape::CopyValue);
 
     assert!(
-        field_shape_constraints_with_facts(field, &facts).contains(&copy_constraint),
+        field_shape_constraints_with_facts(ty, field, &facts).contains(&copy_constraint),
         "{:?}",
-        field_shape_constraints_with_facts(field, &facts)
+        field_shape_constraints_with_facts(ty, field, &facts)
     );
     assert!(
         constructor_param_shape_constraints(ty, ctor, &ctor.params[0], &usage, &facts)
@@ -11961,6 +12316,122 @@ fn cast_shape_is_owned_by_type_inference_not_lowering() {
     assert_eq!(shape.java_ty, JavaType::String);
     assert_eq!(shape.ownership, OwnershipShape::Owned);
     assert_eq!(shape.view, ViewShape::Native);
+}
+
+#[test]
+fn semantic_facts_own_nullability_and_external_api_heuristics_before_lowering() {
+    let lower_source = include_str!("../src/lower.rs");
+    let signature_source = include_str!("../src/signature.rs");
+    let semantic_source = include_str!("../src/semantic_analysis.rs");
+
+    assert!(semantic_source.contains("collect_field_nullability_facts"));
+    assert!(semantic_source.contains("FiniteSaturationPolicy"));
+    assert!(semantic_source.contains("SaturationStep"));
+    assert!(semantic_source.contains("collect_external_api_effect_facts"));
+    assert!(semantic_source.contains("collect_method_effect_facts"));
+    assert!(semantic_source.contains("method_receiver_mutability_effect"));
+    assert!(semantic_source.contains("method_return_nullability_effect"));
+    assert!(signature_source.contains("method_effect_for"));
+    assert!(signature_source.contains("receiver_constraints_with_facts"));
+    assert!(signature_source.contains("return_nullability"));
+    assert!(signature_source.contains("external_receiver_binding_constraints"));
+    assert!(!signature_source.contains("block_mutates_self"));
+    assert!(!signature_source.contains("stmt_mutates_self"));
+    assert!(!lower_source.contains("field_nullability_for"));
+    assert!(!lower_source.contains("external_api_effect_for"));
+    assert!(!lower_source.contains("starts_with(\"set\")"));
+    assert!(!lower_source.contains("starts_with(\"get\")"));
+}
+
+#[test]
+fn trivial_accessor_detection_is_not_a_lowering_special_case() {
+    let lower_source = include_str!("../src/lower.rs");
+    let call_plan_source = include_str!("../src/call_plan.rs");
+    let semantic_source = include_str!("../src/semantic_analysis.rs");
+
+    assert!(semantic_source.contains("trivial_getter_fact"));
+    assert!(semantic_source.contains("trivial_setter_fact"));
+    assert!(call_plan_source.contains("plan_trivial_accessor_call"));
+    assert!(lower_source.contains("plan_trivial_accessor_call"));
+    assert!(!lower_source.contains("trivial_accessor_for"));
+    assert!(!lower_source.contains("trivial_getter_field_for"));
+    assert!(!lower_source.contains("trivial_setter_field_for"));
+    assert!(!include_str!("../src/signature.rs").contains("trivial_accessor_for"));
+    assert!(!include_str!("../src/signature.rs").contains("trivial_getter_field_for"));
+    assert!(!include_str!("../src/signature.rs").contains("trivial_setter_field_for"));
+    assert!(!lower_source.contains("getValue"));
+    assert!(!lower_source.contains("setValue"));
+}
+
+#[test]
+fn semantic_analysis_owns_exception_classification_and_catch_facts() {
+    let semantic_source = include_str!("../src/semantic_analysis.rs");
+    let exception_lowering_source = include_str!("../src/exception_lowering.rs");
+    let exception_plan_source = include_str!("../src/exception_plan.rs");
+    let item_assembly_source = include_str!("../src/item_assembly.rs");
+    let lower_source = include_str!("../src/lower.rs");
+    let representation_lowering_source = include_str!("../src/representation_lowering.rs");
+
+    assert!(semantic_source.contains("collect_exception_facts"));
+    assert!(semantic_source.contains("collect_catch_facts"));
+    assert!(semantic_source.contains("collect_method_effect_facts"));
+    assert!(semantic_source.contains("method_thrown_exception_types"));
+    assert!(semantic_source.contains("catch_assignable_from_types"));
+    assert!(semantic_source.contains("classify_exception_type"));
+    assert!(exception_plan_source.contains("program_uses_java_exception_with_facts"));
+    assert!(lower_source.contains("program_uses_java_exception_with_facts(program, facts)"));
+    assert!(!exception_lowering_source.contains("RuntimeException"));
+    assert!(!exception_lowering_source.contains("ExceptionKind"));
+    assert!(!exception_plan_source.contains("RuntimeException"));
+    assert!(!exception_plan_source.contains("ExceptionKind"));
+    assert!(!exception_plan_source.contains("method.throws"));
+    assert!(!item_assembly_source.contains("method.throws"));
+    assert!(!lower_source.contains("method.throws"));
+    assert!(!representation_lowering_source.contains("method.throws"));
+    assert!(item_assembly_source.contains("method_has_thrown_exceptions"));
+    assert!(lower_source.contains("method_has_thrown_exceptions"));
+    assert!(representation_lowering_source.contains("method_has_thrown_exceptions"));
+}
+
+#[test]
+fn semantic_diagnostics_are_plumbed_through_translation_boundary() {
+    let lib_source = include_str!("../src/lib.rs");
+    let semantic_source = include_str!("../src/semantic_analysis.rs");
+
+    assert!(semantic_source.contains("SemanticDiagnostic"));
+    assert!(semantic_source.contains("semantic_external_api_effect_budget_exhausted"));
+    assert!(lib_source.contains("for diagnostic in semantic.diagnostics"));
+    assert!(lib_source.contains(".warning(diagnostic.code, diagnostic.message)"));
+}
+
+#[test]
+fn control_flow_normalization_plans_are_owned_before_lowering() {
+    let semantic_source = include_str!("../src/semantic_analysis.rs");
+    let rewrite_source = include_str!("../src/rewrite.rs");
+    let lower_source = include_str!("../src/lower.rs");
+
+    assert!(rewrite_source.contains("pub struct MethodControlFlowPlan"));
+    assert!(rewrite_source.contains("AssignmentInConditionPlan"));
+    assert!(rewrite_source.contains("TailRecursiveLoopPlan"));
+    assert!(semantic_source.contains("collect_control_flow_plans"));
+    assert!(semantic_source.contains("assignment_in_condition_plan"));
+    assert!(semantic_source.contains("tail_recursive_loop_plan"));
+    assert!(!lower_source.contains("AssignmentInConditionPlan"));
+    assert!(!lower_source.contains("TailRecursiveLoopPlan"));
+    assert!(!lower_source.contains("LoopWithParameterReassignment"));
+}
+
+#[test]
+fn lowering_consumes_control_flow_plans_only_as_pending_diagnostics() {
+    let lower_source = include_str!("../src/lower.rs");
+    let semantic_source = include_str!("../src/semantic_analysis.rs");
+
+    assert!(lower_source.contains("lower_program_with_semantic_plans"));
+    assert!(lower_source.contains("push_control_flow_plan_diagnostics"));
+    assert!(lower_source.contains("control_flow_rewrite_pending"));
+    assert!(semantic_source.contains("collect_control_flow_plans"));
+    assert!(!lower_source.contains("assignment_in_condition_plan("));
+    assert!(!lower_source.contains("tail_recursive_loop_plan("));
 }
 
 #[test]

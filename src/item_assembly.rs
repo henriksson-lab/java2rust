@@ -220,12 +220,12 @@ fn method_return_type_with_exceptions(
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> Option<RustType> {
-    if method.throws.is_empty() {
-        method_return_type_with_facts(ty, method, signatures, facts)
-    } else {
+    if facts.method_has_thrown_exceptions(&ty.name, &method.name) {
         Some(exception_result_type(
             method_return_type_with_facts(ty, method, signatures, facts).unwrap_or(RustType::Unit),
         ))
+    } else {
+        method_return_type_with_facts(ty, method, signatures, facts)
     }
 }
 

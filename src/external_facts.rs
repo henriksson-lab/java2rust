@@ -1,7 +1,9 @@
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
-    ClosedHierarchyFact, FactProvenance, FactSet, HierarchyOverride, HierarchyStrategy,
-    ObjectSafetyFact, ObjectSafetyViolation, TypeCapabilityOverride,
+    ClosedHierarchyFact, ExternalApiEffectFact, ExternalApiRole, FactProvenance, FactSet, FieldKey,
+    FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy,
+    NullabilityState, ObjectSafetyFact, ObjectSafetyViolation, ReceiverMutabilityFact,
+    TypeCapabilityOverride,
 };
 use crate::java_ir::JavaType;
 use crate::parser::parse_type;
@@ -293,6 +295,51 @@ pub fn parse_external_facts(source: &str) -> ExternalFactsParse {
                             .collect(),
                     ));
             }
+            [
+                "external-api",
+                method_name,
+                receiver_type,
+                role,
+                receiver_mutability,
+            ] => {
+                push_external_api_effect_fact(
+                    &mut facts,
+                    &mut diagnostics,
+                    line_index,
+                    method_name,
+                    receiver_type,
+                    role,
+                    receiver_mutability,
+                );
+            }
+            ["field-nullability", type_name, field_name, state] => {
+                push_field_nullability_fact(
+                    &mut facts,
+                    &mut diagnostics,
+                    line_index,
+                    type_name,
+                    field_name,
+                    state,
+                );
+            }
+            ["field-nullability", field_path, state] => {
+                if let Some((type_name, field_name)) = field_path.split_once('.') {
+                    push_field_nullability_fact(
+                        &mut facts,
+                        &mut diagnostics,
+                        line_index,
+                        type_name,
+                        field_name,
+                        state,
+                    );
+                } else {
+                    push_external_fact_error(
+                        &mut diagnostics,
+                        line_index,
+                        "field-nullability path must be Type.field",
+                    );
+                }
+            }
             _ => push_external_fact_error(&mut diagnostics, line_index, "unrecognized fact line"),
         }
     }
@@ -312,6 +359,98 @@ fn parse_bool(value: &str) -> Option<bool> {
         "false" | "no" | "open" => Some(false),
         _ => None,
     }
+}
+
+fn parse_external_api_role(value: &str) -> Option<ExternalApiRole> {
+    match value {
+        "getter" => Some(ExternalApiRole::Getter),
+        "boolean-getter" => Some(ExternalApiRole::BooleanGetter),
+        "setter" => Some(ExternalApiRole::Setter),
+        "mutator" => Some(ExternalApiRole::Mutator),
+        "fluent-mutator" => Some(ExternalApiRole::FluentMutator),
+        "indexed-getter" => Some(ExternalApiRole::IndexedGetter),
+        "indexed-setter" => Some(ExternalApiRole::IndexedSetter),
+        "unknown" => Some(ExternalApiRole::Unknown),
+        _ => None,
+    }
+}
+
+fn parse_receiver_mutability(value: &str) -> Option<ReceiverMutabilityFact> {
+    match value {
+        "read-only" => Some(ReceiverMutabilityFact::ReadOnly),
+        "mutates-receiver" => Some(ReceiverMutabilityFact::MutatesReceiver),
+        "unknown" => Some(ReceiverMutabilityFact::Unknown),
+        _ => None,
+    }
+}
+
+fn parse_receiver_type(value: &str) -> Option<String> {
+    match value {
+        "*" | "any" | "global" => None,
+        _ => Some(value.to_string()),
+    }
+}
+
+fn parse_nullability_state(value: &str) -> Option<NullabilityState> {
+    match value {
+        "definitely-non-null" | "non-null" => Some(NullabilityState::DefinitelyNonNull),
+        "maybe-null" | "nullable" => Some(NullabilityState::MaybeNull),
+        "definitely-null" | "null" => Some(NullabilityState::DefinitelyNull),
+        "unknown" => Some(NullabilityState::Unknown),
+        _ => None,
+    }
+}
+
+fn push_external_api_effect_fact(
+    facts: &mut FactSet,
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    method_name: &str,
+    receiver_type: &str,
+    role: &str,
+    receiver_mutability: &str,
+) {
+    let Some(role) = parse_external_api_role(role) else {
+        push_external_fact_error(diagnostics, line_index, "invalid external API role");
+        return;
+    };
+    let Some(receiver_mutability) = parse_receiver_mutability(receiver_mutability) else {
+        push_external_fact_error(
+            diagnostics,
+            line_index,
+            "invalid external API receiver mutability",
+        );
+        return;
+    };
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: method_name.to_string(),
+        receiver_type: parse_receiver_type(receiver_type),
+        role,
+        receiver_mutability,
+        provenance: FactProvenance::UserOverride,
+    });
+}
+
+fn push_field_nullability_fact(
+    facts: &mut FactSet,
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    type_name: &str,
+    field_name: &str,
+    state: &str,
+) {
+    let Some(state) = parse_nullability_state(state) else {
+        push_external_fact_error(diagnostics, line_index, "invalid field nullability state");
+        return;
+    };
+    facts.field_nullability_facts.push(FieldNullabilityFact {
+        field: FieldKey {
+            type_name: type_name.to_string(),
+            field_name: field_name.to_string(),
+        },
+        state,
+        provenance: FieldNullabilityProvenance::ExternalOverride,
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

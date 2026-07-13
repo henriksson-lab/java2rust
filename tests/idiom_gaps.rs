@@ -176,7 +176,11 @@ fn documents_java_bean_getter_setter_naming_gap() {
     assert!(
         translation.rust.contains("pub fn get_value")
             && translation.rust.contains("pub fn set_value")
-            && translation.rust.contains("self.get_value()"),
+            && translation.rust.contains("pub fn copy_from(&mut self")
+            && translation.rust.contains("self.value = other.value")
+            && translation.rust.contains("return self.value;")
+            && !translation.rust.contains("self.get_value()")
+            && !translation.rust.contains("self.set_value("),
         "{}",
         translation.rust
     );
@@ -584,7 +588,7 @@ fn documents_external_getter_setter_mutability_gap() {
     assert!(
         translation.rust.contains("counter.get_value()")
             && translation.rust.contains("counter.set_value(")
-            && !translation.rust.contains("counter: &mut"),
+            && translation.rust.contains("counter: &mut ExternalCounter"),
         "{}",
         translation.rust
     );
@@ -610,7 +614,7 @@ fn documents_external_indexed_accessors_gap() {
     assert!(
         translation.rust.contains("table.get(row, column)")
             && translation.rust.contains("table.set(row, column, value)")
-            && !translation.rust.contains("table: &mut"),
+            && translation.rust.contains("table: &mut ExternalTable"),
         "{}",
         translation.rust
     );

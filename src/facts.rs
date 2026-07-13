@@ -12,6 +12,190 @@ pub struct FactSet {
     pub closed_hierarchy_facts: Vec<ClosedHierarchyFact>,
     pub object_safety_facts: Vec<ObjectSafetyFact>,
     pub type_capability_overrides: Vec<TypeCapabilityOverride>,
+    pub field_nullability_facts: Vec<FieldNullabilityFact>,
+    pub trivial_accessor_facts: Vec<TrivialAccessorFact>,
+    pub external_api_effect_facts: Vec<ExternalApiEffectFact>,
+    pub method_effect_facts: Vec<MethodEffectFact>,
+    pub recursion_facts: Vec<RecursionFact>,
+    pub control_flow_facts: Vec<ControlFlowFact>,
+    pub exception_facts: Vec<ExceptionFact>,
+    pub catch_facts: Vec<CatchFact>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FactKind {
+    Capture,
+    HierarchyOverride,
+    ClosedHierarchy,
+    ObjectSafety,
+    TypeCapability,
+    FieldNullability,
+    TrivialAccessor,
+    MethodEffect,
+    ExternalApiEffect,
+    ControlFlow,
+    ExceptionHierarchy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeKey {
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldKey {
+    pub type_name: String,
+    pub field_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MethodKey {
+    pub type_name: String,
+    pub method_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConstructorKey {
+    pub type_name: String,
+    pub rust_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullabilityState {
+    DefinitelyNonNull,
+    MaybeNull,
+    DefinitelyNull,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldNullabilityProvenance {
+    ConstructorAssignments,
+    FieldInitializer,
+    MethodAssignment,
+    ExternalOverride,
+    ConservativeFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldNullabilityFact {
+    pub field: FieldKey,
+    pub state: NullabilityState,
+    pub provenance: FieldNullabilityProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrivialAccessorKind {
+    Getter {
+        field: FieldKey,
+    },
+    Setter {
+        field: FieldKey,
+        param_name: String,
+        fluent: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessorInlinePolicy {
+    PreserveApi,
+    InlineCandidate,
+    AnalyzeOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrivialAccessorFact {
+    pub method: MethodKey,
+    pub kind: TrivialAccessorKind,
+    pub inline_policy: AccessorInlinePolicy,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverMutabilityFact {
+    ReadOnly,
+    MutatesReceiver,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalApiRole {
+    Getter,
+    BooleanGetter,
+    Setter,
+    Mutator,
+    FluentMutator,
+    IndexedGetter,
+    IndexedSetter,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalApiEffectFact {
+    pub method_name: String,
+    pub receiver_type: Option<String>,
+    pub role: ExternalApiRole,
+    pub receiver_mutability: ReceiverMutabilityFact,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodEffectFact {
+    pub method: MethodKey,
+    pub receiver_mutability: ReceiverMutabilityFact,
+    pub return_nullability: NullabilityState,
+    pub thrown: Vec<JavaType>,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecursionKind {
+    Direct,
+    Mutual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecursionFact {
+    pub method: MethodKey,
+    pub calls: MethodKey,
+    pub kind: RecursionKind,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlFlowFactKind {
+    AssignmentInCondition,
+    TailRecursiveSelfCall,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlFlowFact {
+    pub method: MethodKey,
+    pub kind: ControlFlowFactKind,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExceptionKind {
+    Checked,
+    Unchecked,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionFact {
+    pub type_name: String,
+    pub kind: ExceptionKind,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatchFact {
+    pub method: MethodKey,
+    pub clause_index: usize,
+    pub types: Vec<JavaType>,
+    pub assignable_from: Vec<JavaType>,
+    pub provenance: FactProvenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +374,199 @@ impl FactSet {
         self.object_safety_facts.extend(other.object_safety_facts);
         self.type_capability_overrides
             .extend(other.type_capability_overrides);
+        self.field_nullability_facts
+            .extend(other.field_nullability_facts);
+        self.trivial_accessor_facts
+            .extend(other.trivial_accessor_facts);
+        self.external_api_effect_facts
+            .extend(other.external_api_effect_facts);
+        self.method_effect_facts.extend(other.method_effect_facts);
+        self.recursion_facts.extend(other.recursion_facts);
+        self.control_flow_facts.extend(other.control_flow_facts);
+        self.exception_facts.extend(other.exception_facts);
+        self.catch_facts.extend(other.catch_facts);
+    }
+
+    pub fn field_nullability_for(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<NullabilityState> {
+        self.field_nullability_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                fact.field.type_name == type_name
+                    && fact.field.field_name == field_name
+                    && fact.provenance == FieldNullabilityProvenance::ExternalOverride
+            })
+            .or_else(|| {
+                self.field_nullability_facts.iter().rev().find(|fact| {
+                    fact.field.type_name == type_name && fact.field.field_name == field_name
+                })
+            })
+            .map(|fact| fact.state)
+    }
+
+    pub fn trivial_accessor_for(
+        &self,
+        type_name: &str,
+        method_name: &str,
+    ) -> Option<&TrivialAccessorFact> {
+        self.trivial_accessor_facts.iter().rev().find(|fact| {
+            fact.method.type_name == type_name && fact.method.method_name == method_name
+        })
+    }
+
+    pub fn trivial_getter_field_for(
+        &self,
+        type_name: &str,
+        method_name: &str,
+    ) -> Option<&FieldKey> {
+        self.trivial_accessor_for(type_name, method_name)
+            .and_then(|fact| match &fact.kind {
+                TrivialAccessorKind::Getter { field } => Some(field),
+                TrivialAccessorKind::Setter { .. } => None,
+            })
+    }
+
+    pub fn trivial_setter_field_for(
+        &self,
+        type_name: &str,
+        method_name: &str,
+    ) -> Option<&FieldKey> {
+        self.trivial_accessor_for(type_name, method_name)
+            .and_then(|fact| match &fact.kind {
+                TrivialAccessorKind::Setter { field, .. } => Some(field),
+                TrivialAccessorKind::Getter { .. } => None,
+            })
+    }
+
+    pub fn external_api_effect_for(&self, method_name: &str) -> Option<&ExternalApiEffectFact> {
+        self.external_api_effect_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                fact.method_name == method_name && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.external_api_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| fact.method_name == method_name)
+            })
+    }
+
+    pub fn external_api_effect_for_receiver(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+    ) -> Option<&ExternalApiEffectFact> {
+        self.external_api_effect_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                fact.method_name == method_name
+                    && fact.receiver_type.as_deref() == receiver_type
+                    && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.external_api_effect_facts.iter().rev().find(|fact| {
+                    fact.method_name == method_name
+                        && fact.receiver_type.is_none()
+                        && fact.provenance == FactProvenance::UserOverride
+                })
+            })
+            .or_else(|| {
+                self.external_api_effect_facts.iter().rev().find(|fact| {
+                    fact.method_name == method_name
+                        && fact.receiver_type.as_deref() == receiver_type
+                })
+            })
+            .or_else(|| {
+                self.external_api_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| fact.method_name == method_name && fact.receiver_type.is_none())
+            })
+    }
+
+    pub fn recursion_facts_for(&self, type_name: &str, method_name: &str) -> Vec<&RecursionFact> {
+        self.recursion_facts
+            .iter()
+            .filter(|fact| {
+                fact.method.type_name == type_name && fact.method.method_name == method_name
+            })
+            .collect()
+    }
+
+    pub fn method_effect_for(
+        &self,
+        type_name: &str,
+        method_name: &str,
+    ) -> Option<&MethodEffectFact> {
+        self.method_effect_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                fact.method.type_name == type_name
+                    && fact.method.method_name == method_name
+                    && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.method_effect_facts.iter().rev().find(|fact| {
+                    fact.method.type_name == type_name && fact.method.method_name == method_name
+                })
+            })
+    }
+
+    pub fn method_has_thrown_exceptions(&self, type_name: &str, method_name: &str) -> bool {
+        self.method_effect_for(type_name, method_name)
+            .is_some_and(|fact| !fact.thrown.is_empty())
+    }
+
+    pub fn has_method_effects(&self) -> bool {
+        self.method_effect_facts.iter().any(|fact| {
+            fact.receiver_mutability != ReceiverMutabilityFact::Unknown
+                || fact.return_nullability != NullabilityState::Unknown
+                || !fact.thrown.is_empty()
+        })
+    }
+
+    pub fn has_method_throw_effects(&self) -> bool {
+        self.method_effect_facts
+            .iter()
+            .any(|fact| !fact.thrown.is_empty())
+    }
+
+    pub fn has_control_flow_fact(
+        &self,
+        type_name: &str,
+        method_name: &str,
+        kind: ControlFlowFactKind,
+    ) -> bool {
+        self.control_flow_facts.iter().any(|fact| {
+            fact.method.type_name == type_name
+                && fact.method.method_name == method_name
+                && fact.kind == kind
+        })
+    }
+
+    pub fn exception_kind_for(&self, type_name: &str) -> Option<ExceptionKind> {
+        self.exception_facts
+            .iter()
+            .rev()
+            .find(|fact| fact.type_name == type_name)
+            .map(|fact| fact.kind)
+    }
+
+    pub fn catch_facts_for(&self, type_name: &str, method_name: &str) -> Vec<&CatchFact> {
+        self.catch_facts
+            .iter()
+            .filter(|fact| {
+                fact.method.type_name == type_name && fact.method.method_name == method_name
+            })
+            .collect()
     }
 
     pub fn type_capabilities_for(&self, java_ty: &JavaType) -> TypeCapabilities {

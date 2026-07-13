@@ -275,6 +275,103 @@ Consumers:
   representation, and ownership rules allow it.
 - API emission may still keep wrapper methods for public Java surfaces.
 
+### Accessor Elimination And Ownership
+
+Removing trivial accessors from internal analysis helps Rust implementation, but
+only if it is represented as facts and plans rather than text-level method
+deletion.
+
+The key reason is that trivial getters and setters otherwise hide the true slot
+being read or written. If `getName()` remains an opaque call, ownership and
+lifetime analysis must reason about a method return. If it is known to be a read
+of field `name`, the same field-slot rules used for direct `this.name` access
+can decide whether the Rust surface should be `String`, `&String`, `&str`,
+`Option<T>`, `Rc<T>`, `Box<dyn Trait>`, or another shape. Likewise, a trivial
+setter should be seen as a write to the backing field before field nullability,
+receiver mutability, and struct layout are solved.
+
+Responsibilities:
+
+- `semantic_analysis` detects trivial accessor bodies and records
+  `TrivialAccessorFact`.
+- `usage` expands calls to proven trivial accessors into the same field-read and
+  field-write uses produced by direct field access.
+- `signature` and field-shape planning consume those field uses. They do not
+  need separate JavaBean-specific rules.
+- `call_plan` decides whether a call site may be emitted as direct field access,
+  a wrapper method call, or left opaque.
+- `lower` consumes the call plan. It must not match names like `getX` or `setX`
+  directly.
+- Public/protected Java accessors remain available as Rust wrapper methods
+  unless representation planning proves they are not part of the translated API.
+
+This means accessor elimination should be an internal normalization layer, not
+an API-destroying source rewrite. A public Java method can still be emitted as:
+
+```rust
+pub fn get_name(&self) -> &str {
+    self.name.as_str()
+}
+```
+
+while internal translated call sites use `self.name` directly when the solved
+slot shape supports that. The wrapper delegates to the solved field shape; the
+field shape is not chosen to satisfy the wrapper.
+
+### Accessor Normalization Policy
+
+Trivial getter/setter removal is useful for Rust ownership and lifetime
+planning, but only after it has been split into two separate decisions:
+
+- Semantic normalization: proven trivial getters and setters are treated as
+  reads and writes of the backing field for usage, nullability, receiver
+  mutability, and slot-shape solving.
+- API preservation: the original Java methods remain available to emission and
+  can still become Rust wrapper methods when visibility, trait/interface
+  contracts, framework conventions, or user policy require them.
+
+The semantic layer must therefore not physically delete methods from Java IR.
+It records `TrivialAccessorFact` plus an accessor inline/preserve policy. Later
+planning stages decide whether each call site uses direct field access, a
+wrapper method, or an opaque call. This keeps ownership decisions attached to
+the field slot instead of to every accessor-shaped call.
+
+This matters for struct layout. If all internal reads of `getFoo()` are known
+to be reads of field `foo`, then `signature` can solve one shape for `foo`
+using the same constraints as direct field access: borrowed view, owned value,
+optional storage, shared pointer, dynamic trait object, enum projection, or
+other representation choices. The solved field shape then drives any generated
+wrapper signature. For example, a public getter may return `&str` because
+`foo` is stored as `String`; the field is not forced into a getter-specific
+shape.
+
+Setter normalization has the same rule in the opposite direction. A trivial
+`setFoo(value)` contributes a write constraint to field `foo`, so constructor
+definite-assignment, non-null field proof, receiver mutability, and ownership
+transfer are all solved at the field slot. Public setters can still be emitted
+as wrappers, but their Rust receiver and parameter types are derived from the
+field-write plan rather than from JavaBean naming.
+
+External or unresolved accessor-shaped calls follow the same contract. Name
+heuristics may create external API effect facts, and user overrides may replace
+those guesses, but downstream stages consume only facts and plans. They do not
+repeat getter/setter string matching.
+
+Accessor-normalization acceptance:
+
+- Trivial accessor facts are consumed by field-use analysis before signature
+  solving.
+- Internal calls to proven trivial accessors can be planned as field access
+  without deleting the original methods.
+- Public API wrappers are preserved unless a representation/API policy removes
+  them explicitly.
+- No module outside semantic analysis or call planning performs JavaBean name
+  recognition.
+- Struct field shapes are solved from field-slot constraints, not from the
+  surface signatures of trivial accessor methods.
+- Generated accessor wrappers adapt to the solved field shape instead of
+  forcing the field shape.
+
 Acceptance:
 
 - Trivial getter and setter facts are present for the JavaBean fixture.

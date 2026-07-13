@@ -93,7 +93,10 @@ pub fn infer_assignment_target_shape_with_context(
     ctx: ExprShapeContext<'_>,
 ) -> Option<RustSlotShape> {
     match expr {
-        Expr::Var(name) => env.local_shape(name).cloned(),
+        Expr::Var(name) => env
+            .local_shape(name)
+            .cloned()
+            .or_else(|| env.field_shape(name).cloned()),
         Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
             env.field_shape(field).cloned()
         }

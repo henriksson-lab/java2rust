@@ -68,3 +68,45 @@ used as capability values.
 mapping must fall back to erased object representation. These reasons are
 consumed by representation policy diagnostics; lowering and coercion should not
 inspect interface syntax to rediscover them.
+
+## External API Effects
+
+```text
+external-api getValue * getter read-only
+external-api setValue ExternalCounter setter mutates-receiver
+external-api get ExternalList indexed-getter read-only
+external-api put ExternalMap indexed-setter mutates-receiver
+```
+
+`external-api METHOD RECEIVER ROLE MUTABILITY` records a user override for an
+untranslated or unresolved library call. `RECEIVER` is a Java type name, or `*`
+for a global method-name fact. Receiver-specific facts are preferred over global
+facts for matching receiver types.
+
+Supported roles are `getter`, `boolean-getter`, `setter`, `mutator`,
+`fluent-mutator`, `indexed-getter`, `indexed-setter`, and `unknown`.
+
+Supported receiver mutability values are `read-only`, `mutates-receiver`, and
+`unknown`.
+
+These facts feed semantic analysis and signature planning. Downstream lowering
+must consume the facts and plans rather than adding new name heuristics for
+external getters, setters, or mutators.
+
+## Field Nullability
+
+```text
+field-nullability User name definitely-non-null
+field-nullability Cache.value maybe-null
+field-nullability Node.parent unknown
+```
+
+`field-nullability TYPE FIELD STATE` and `field-nullability TYPE.FIELD STATE`
+record user overrides for Java field storage nullability. Supported states are
+`definitely-non-null`, `maybe-null`, `definitely-null`, and `unknown`.
+Aliases `non-null`, `nullable`, and `null` are accepted.
+
+External field-nullability facts override constructor and method proofs. This
+allows corpus-level or user-provided knowledge to force Rust storage to direct
+`T`, `Option<T>`, or an unknown conservative shape through the same fact query
+used by signature planning.

@@ -345,10 +345,10 @@ fn trait_method_return_type(
         .return_shape
         .as_ref()
         .map(|shape| rust_type_for_slot_with_facts(shape, facts));
-    if method.throws.is_empty() {
-        rust_return
-    } else {
+    if facts.method_has_thrown_exceptions(&ty.name, &method.name) {
         Some(exception_result_type(rust_return.unwrap_or(RustType::Unit)))
+    } else {
+        rust_return
     }
 }
 

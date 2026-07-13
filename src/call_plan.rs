@@ -1,3 +1,4 @@
+use crate::facts::{FactSet, TrivialAccessorKind};
 use crate::java_ir::{CallKind, Expr, JavaType, ResolvedCall, ResolvedConstructor};
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::value_shape_for_java_type;
@@ -29,6 +30,49 @@ pub enum CallTargetPlan<'a> {
 pub struct NewTargetPlan<'a> {
     pub owner_shape: RustSlotShape,
     pub rust_name: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrivialAccessorCallPlan<'a> {
+    Getter {
+        receiver: Option<&'a Expr>,
+        field_name: String,
+    },
+    Setter {
+        receiver: Option<&'a Expr>,
+        field_name: String,
+        value: &'a Expr,
+    },
+}
+
+pub fn plan_trivial_accessor_call<'a>(
+    receiver: Option<&'a Expr>,
+    name: &str,
+    args: &'a [Expr],
+    resolved: Option<&ResolvedCall>,
+    facts: &FactSet,
+) -> Option<TrivialAccessorCallPlan<'a>> {
+    let resolved = resolved?;
+    if resolved.kind != CallKind::Instance {
+        return None;
+    }
+    let accessor = facts.trivial_accessor_for(&resolved.declaring_type, name)?;
+    match &accessor.kind {
+        TrivialAccessorKind::Getter { field } if args.is_empty() => {
+            Some(TrivialAccessorCallPlan::Getter {
+                receiver,
+                field_name: field.field_name.clone(),
+            })
+        }
+        TrivialAccessorKind::Setter { field, .. } if args.len() == 1 => {
+            Some(TrivialAccessorCallPlan::Setter {
+                receiver,
+                field_name: field.field_name.clone(),
+                value: &args[0],
+            })
+        }
+        _ => None,
+    }
 }
 
 pub fn plan_call_target<'a>(

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::facts::{FactSet, TrivialAccessorKind};
 use crate::java_ir::{
     ConstructorInvocationKind, Expr, JavaType, Member, Modifier, Program, ResolvedCall,
     ResolvedConstructor, Stmt, TypeDecl,
@@ -31,6 +32,7 @@ pub struct MethodUsageFacts {
     pub constructor_call_sites: Vec<ConstructorCallSiteUse>,
     pub returned_call_results: Vec<ReturnedCallResultUse>,
     pub field_uses: Vec<FieldUse>,
+    pub mutates_self: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +55,10 @@ pub enum BindingUse {
     PassedToCall {
         name: String,
         arg_index: usize,
+        boundary: CallArgumentBoundary,
+    },
+    ReceiverForCall {
+        name: String,
         boundary: CallArgumentBoundary,
     },
     StoredInField {
@@ -134,14 +140,18 @@ pub struct MethodApiBoundaryPolicy {
 }
 
 pub fn analyze_usage(program: &Program) -> UsageFacts {
+    analyze_usage_with_facts(program, &FactSet::default())
+}
+
+pub fn analyze_usage_with_facts(program: &Program, semantic_facts: &FactSet) -> UsageFacts {
     let mut facts = UsageFacts::default();
     for ty in &program.types {
-        analyze_type_usage(ty, &mut facts);
+        analyze_type_usage(ty, &mut facts, semantic_facts);
     }
     facts
 }
 
-fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts) {
+fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &FactSet) {
     let internal_methods = internal_method_names(ty);
     let field_names = field_names(ty);
     for member in &ty.members {
@@ -160,7 +170,14 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts) {
                 }
                 if let Some(body) = &method.body {
                     for stmt in &body.statements {
-                        analyze_stmt(stmt, &mut method_facts, &internal_methods, &field_names);
+                        analyze_stmt(
+                            stmt,
+                            &mut method_facts,
+                            &ty.name,
+                            &internal_methods,
+                            &field_names,
+                            semantic_facts,
+                        );
                     }
                 }
                 facts.methods.insert(
@@ -185,7 +202,14 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts) {
                 }
                 if let Some(body) = &ctor.body {
                     for stmt in &body.statements {
-                        analyze_stmt(stmt, &mut ctor_facts, &internal_methods, &field_names);
+                        analyze_stmt(
+                            stmt,
+                            &mut ctor_facts,
+                            &ty.name,
+                            &internal_methods,
+                            &field_names,
+                            semantic_facts,
+                        );
                     }
                 }
                 facts.constructors.insert(
@@ -196,7 +220,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts) {
                     ctor_facts,
                 );
             }
-            Member::Type(nested) => analyze_type_usage(nested, facts),
+            Member::Type(nested) => analyze_type_usage(nested, facts, semantic_facts),
             _ => {}
         }
     }
@@ -235,8 +259,10 @@ pub fn method_api_boundary_policy(modifiers: &[Modifier]) -> MethodApiBoundaryPo
 fn analyze_stmt(
     stmt: &Stmt,
     facts: &mut MethodUsageFacts,
+    current_type: &str,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
+    semantic_facts: &FactSet,
 ) {
     match stmt {
         Stmt::VarDecl {
@@ -272,12 +298,20 @@ fn analyze_stmt(
                         },
                     );
                 }
-                analyze_expr(initializer, facts, internal_methods, field_names);
+                analyze_expr(
+                    initializer,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
         }
         Stmt::Assign { target, value } => {
             if let Expr::Var(name) = target {
                 if is_unshadowed_field_name(facts, field_names, name) {
+                    facts.mutates_self = true;
                     if let Some(policy) = call_result_boundary_policy(value, internal_methods) {
                         facts.field_uses.push(FieldUse::AssignedFromCall {
                             field_name: name.clone(),
@@ -310,6 +344,9 @@ fn analyze_stmt(
                 }
             }
             if let Expr::FieldAccess(_, field_name) = target {
+                if target_is_this_field(target) {
+                    facts.mutates_self = true;
+                }
                 if let Some(policy) = call_result_boundary_policy(value, internal_methods) {
                     facts.field_uses.push(FieldUse::AssignedFromCall {
                         field_name: field_name.clone(),
@@ -319,8 +356,22 @@ fn analyze_stmt(
                 }
                 analyze_stored_expr(value, facts, field_name);
             }
-            analyze_expr(target, facts, internal_methods, field_names);
-            analyze_expr(value, facts, internal_methods, field_names);
+            analyze_expr(
+                target,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
+            analyze_expr(
+                value,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
         }
         Stmt::Return(Some(expr)) => {
             if let Expr::Var(name) = expr {
@@ -340,29 +391,83 @@ fn analyze_stmt(
                     field_name: field_name.clone(),
                 });
             }
-            analyze_return_expr(expr, facts, internal_methods, field_names);
+            analyze_return_expr(
+                expr,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
         }
         Stmt::Return(None) => {}
-        Stmt::Expr(expr) => analyze_expr(expr, facts, internal_methods, field_names),
+        Stmt::Expr(expr) => {
+            if expr_mutates_self_field(expr, facts, field_names) {
+                facts.mutates_self = true;
+            }
+            analyze_expr(
+                expr,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
+        }
         Stmt::If {
             condition,
             then_block,
             else_block,
         } => {
-            analyze_expr(condition, facts, internal_methods, field_names);
+            analyze_expr(
+                condition,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
             for stmt in &then_block.statements {
-                analyze_stmt(stmt, facts, internal_methods, field_names);
+                analyze_stmt(
+                    stmt,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
             if let Some(else_block) = else_block {
                 for stmt in &else_block.statements {
-                    analyze_stmt(stmt, facts, internal_methods, field_names);
+                    analyze_stmt(
+                        stmt,
+                        facts,
+                        current_type,
+                        internal_methods,
+                        field_names,
+                        semantic_facts,
+                    );
                 }
             }
         }
         Stmt::While { condition, body } => {
-            analyze_expr(condition, facts, internal_methods, field_names);
+            analyze_expr(
+                condition,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
             for stmt in &body.statements {
-                analyze_stmt(stmt, facts, internal_methods, field_names);
+                analyze_stmt(
+                    stmt,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
         }
         Stmt::For {
@@ -373,48 +478,132 @@ fn analyze_stmt(
             ..
         } => {
             for stmt in init {
-                analyze_stmt(stmt, facts, internal_methods, field_names);
+                analyze_stmt(
+                    stmt,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
             if let Some(condition) = condition {
-                analyze_expr(condition, facts, internal_methods, field_names);
+                analyze_expr(
+                    condition,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
             for expr in update {
-                analyze_expr(expr, facts, internal_methods, field_names);
+                analyze_expr(
+                    expr,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
             for stmt in &body.statements {
-                analyze_stmt(stmt, facts, internal_methods, field_names);
+                analyze_stmt(
+                    stmt,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
-            analyze_expr(iterable, facts, internal_methods, field_names);
+            analyze_expr(
+                iterable,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
             for stmt in &body.statements {
-                analyze_stmt(stmt, facts, internal_methods, field_names);
+                analyze_stmt(
+                    stmt,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
         }
         Stmt::Switch { selector, cases } => {
-            analyze_expr(selector, facts, internal_methods, field_names);
+            analyze_expr(
+                selector,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
             for case in cases {
                 for stmt in &case.statements {
-                    analyze_stmt(stmt, facts, internal_methods, field_names);
+                    analyze_stmt(
+                        stmt,
+                        facts,
+                        current_type,
+                        internal_methods,
+                        field_names,
+                        semantic_facts,
+                    );
                 }
             }
         }
         Stmt::Block(block) => {
             for stmt in &block.statements {
-                analyze_stmt(stmt, facts, internal_methods, field_names);
+                analyze_stmt(
+                    stmt,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
         }
         Stmt::Try {
             resources, body, ..
         } => {
             for resource in resources {
-                analyze_stmt(resource, facts, internal_methods, field_names);
+                analyze_stmt(
+                    resource,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
             for stmt in &body.statements {
-                analyze_stmt(stmt, facts, internal_methods, field_names);
+                analyze_stmt(
+                    stmt,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
         }
-        Stmt::Throw(expr) => analyze_expr(expr, facts, internal_methods, field_names),
+        Stmt::Throw(expr) => analyze_expr(
+            expr,
+            facts,
+            current_type,
+            internal_methods,
+            field_names,
+            semantic_facts,
+        ),
         Stmt::ConstructorInvocation {
             kind,
             args,
@@ -430,13 +619,22 @@ fn analyze_stmt(
             for (arg_index, arg) in args.iter().enumerate() {
                 record_call_arg_use(
                     facts,
+                    current_type,
                     field_names,
+                    semantic_facts,
                     arg,
                     "constructor",
                     arg_index,
                     policy.boundary,
                 );
-                analyze_expr(arg, facts, internal_methods, field_names);
+                analyze_expr(
+                    arg,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
         }
         Stmt::LocalType(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
@@ -482,26 +680,48 @@ pub fn call_result_boundary_policy(
 fn analyze_expr(
     expr: &Expr,
     facts: &mut MethodUsageFacts,
+    current_type: &str,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
+    semantic_facts: &FactSet,
 ) {
-    analyze_expr_with_context(expr, facts, internal_methods, field_names, false);
+    analyze_expr_with_context(
+        expr,
+        facts,
+        current_type,
+        internal_methods,
+        field_names,
+        semantic_facts,
+        false,
+    );
 }
 
 fn analyze_return_expr(
     expr: &Expr,
     facts: &mut MethodUsageFacts,
+    current_type: &str,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
+    semantic_facts: &FactSet,
 ) {
-    analyze_expr_with_context(expr, facts, internal_methods, field_names, true);
+    analyze_expr_with_context(
+        expr,
+        facts,
+        current_type,
+        internal_methods,
+        field_names,
+        semantic_facts,
+        true,
+    );
 }
 
 fn analyze_expr_with_context(
     expr: &Expr,
     facts: &mut MethodUsageFacts,
+    current_type: &str,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
+    semantic_facts: &FactSet,
     result_returned: bool,
 ) {
     match expr {
@@ -511,7 +731,14 @@ fn analyze_expr_with_context(
             {
                 record_use(facts, name, BindingUse::ContentRead);
             }
-            analyze_expr(receiver, facts, internal_methods, field_names);
+            analyze_expr(
+                receiver,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
         }
         Expr::Call {
             receiver,
@@ -521,6 +748,16 @@ fn analyze_expr_with_context(
             ..
         } => {
             let policy = call_argument_boundary_policy(receiver.as_deref(), name, internal_methods);
+            record_trivial_accessor_call_use(
+                facts,
+                current_type,
+                receiver.as_deref(),
+                name,
+                args,
+                resolved.as_ref(),
+                semantic_facts,
+                result_returned,
+            );
             facts.call_sites.push(CallSiteUse {
                 name: name.clone(),
                 arg_count: args.len(),
@@ -534,31 +771,113 @@ fn analyze_expr_with_context(
             {
                 record_use(facts, binding, BindingUse::ContentRead);
             }
+            if !is_content_read_method(name)
+                && let Some(receiver) = receiver
+                && let Expr::Var(binding) = receiver.as_ref()
+            {
+                record_use(
+                    facts,
+                    binding,
+                    BindingUse::ReceiverForCall {
+                        name: name.clone(),
+                        boundary: policy.boundary,
+                    },
+                );
+            }
             for (arg_index, arg) in args.iter().enumerate() {
-                record_call_arg_use(facts, field_names, arg, name, arg_index, policy.boundary);
-                analyze_expr(arg, facts, internal_methods, field_names);
+                record_call_arg_use(
+                    facts,
+                    current_type,
+                    field_names,
+                    semantic_facts,
+                    arg,
+                    name,
+                    arg_index,
+                    policy.boundary,
+                );
+                analyze_expr(
+                    arg,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
             if let Some(receiver) = receiver {
-                analyze_expr(receiver, facts, internal_methods, field_names);
+                analyze_expr(
+                    receiver,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
         }
         Expr::Binary { left, right, .. } => {
-            analyze_expr(left, facts, internal_methods, field_names);
-            analyze_expr(right, facts, internal_methods, field_names);
+            analyze_expr(
+                left,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
+            analyze_expr(
+                right,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
         }
-        Expr::Cast { expr, .. } => {
-            analyze_expr_with_context(expr, facts, internal_methods, field_names, result_returned)
-        }
-        Expr::Unary { expr, .. } | Expr::InstanceOf { expr, .. } => {
-            analyze_expr(expr, facts, internal_methods, field_names)
-        }
+        Expr::Cast { expr, .. } => analyze_expr_with_context(
+            expr,
+            facts,
+            current_type,
+            internal_methods,
+            field_names,
+            semantic_facts,
+            result_returned,
+        ),
+        Expr::Unary { expr, .. } | Expr::InstanceOf { expr, .. } => analyze_expr(
+            expr,
+            facts,
+            current_type,
+            internal_methods,
+            field_names,
+            semantic_facts,
+        ),
         Expr::ArrayAccess(array, index) => {
-            analyze_expr(array, facts, internal_methods, field_names);
-            analyze_expr(index, facts, internal_methods, field_names);
+            analyze_expr(
+                array,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
+            analyze_expr(
+                index,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
         }
         Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
-                analyze_expr(expr, facts, internal_methods, field_names);
+                analyze_expr(
+                    expr,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
         }
         Expr::Ternary {
@@ -566,19 +885,30 @@ fn analyze_expr_with_context(
             then_expr,
             else_expr,
         } => {
-            analyze_expr(condition, facts, internal_methods, field_names);
+            analyze_expr(
+                condition,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
             analyze_expr_with_context(
                 then_expr,
                 facts,
+                current_type,
                 internal_methods,
                 field_names,
+                semantic_facts,
                 result_returned,
             );
             analyze_expr_with_context(
                 else_expr,
                 facts,
+                current_type,
                 internal_methods,
                 field_names,
+                semantic_facts,
                 result_returned,
             );
         }
@@ -586,13 +916,22 @@ fn analyze_expr_with_context(
             for (arg_index, arg) in args.iter().enumerate() {
                 record_call_arg_use(
                     facts,
+                    current_type,
                     field_names,
+                    semantic_facts,
                     arg,
                     "new",
                     arg_index,
                     CallArgumentBoundary::Unknown,
                 );
-                analyze_expr(arg, facts, internal_methods, field_names);
+                analyze_expr(
+                    arg,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
             }
         }
         Expr::Lambda { .. } => {}
@@ -636,12 +975,23 @@ fn record_returned_call_result_use(
 
 fn record_call_arg_use(
     facts: &mut MethodUsageFacts,
+    current_type: &str,
     field_names: &HashSet<String>,
+    semantic_facts: &FactSet,
     arg: &Expr,
     call_name: &str,
     arg_index: usize,
     boundary: CallArgumentBoundary,
 ) {
+    if let Some(field_name) = trivial_getter_self_field(arg, current_type, semantic_facts) {
+        facts.field_uses.push(FieldUse::PassedToCall {
+            field_name,
+            name: call_name.to_string(),
+            arg_index,
+            boundary,
+        });
+        return;
+    }
     match arg {
         Expr::Var(name) if is_unshadowed_field_name(facts, field_names, name) => {
             facts.field_uses.push(FieldUse::PassedToCall {
@@ -669,6 +1019,102 @@ fn record_call_arg_use(
             });
         }
         _ => {}
+    }
+}
+
+fn record_trivial_accessor_call_use(
+    facts: &mut MethodUsageFacts,
+    current_type: &str,
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&ResolvedCall>,
+    semantic_facts: &FactSet,
+    result_returned: bool,
+) {
+    let Some(accessor) =
+        trivial_accessor_for_self_call(current_type, receiver, name, resolved, semantic_facts)
+    else {
+        return;
+    };
+    match &accessor.kind {
+        TrivialAccessorKind::Getter { field } if args.is_empty() && result_returned => {
+            facts.field_uses.push(FieldUse::Returned {
+                field_name: field.field_name.clone(),
+            });
+        }
+        TrivialAccessorKind::Setter { field, .. } if args.len() == 1 => {
+            facts.mutates_self = true;
+            analyze_stored_expr(&args[0], facts, &field.field_name);
+        }
+        _ => {}
+    }
+}
+
+fn trivial_getter_self_field(
+    expr: &Expr,
+    current_type: &str,
+    semantic_facts: &FactSet,
+) -> Option<String> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = expr
+    else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let accessor = trivial_accessor_for_self_call(
+        current_type,
+        receiver.as_deref(),
+        name,
+        resolved.as_ref(),
+        semantic_facts,
+    )?;
+    match &accessor.kind {
+        TrivialAccessorKind::Getter { field } => Some(field.field_name.clone()),
+        TrivialAccessorKind::Setter { .. } => None,
+    }
+}
+
+fn trivial_accessor_for_self_call<'a>(
+    current_type: &str,
+    receiver: Option<&Expr>,
+    name: &str,
+    resolved: Option<&ResolvedCall>,
+    semantic_facts: &'a FactSet,
+) -> Option<&'a crate::facts::TrivialAccessorFact> {
+    if !receiver.is_none_or(|receiver| matches!(receiver, Expr::This)) {
+        return None;
+    }
+    if !resolved
+        .as_ref()
+        .is_none_or(|resolved| resolved.declaring_type == current_type)
+    {
+        return None;
+    }
+    semantic_facts.trivial_accessor_for(current_type, name)
+}
+
+fn target_is_this_field(expr: &Expr) -> bool {
+    matches!(expr, Expr::FieldAccess(receiver, _) if matches!(receiver.as_ref(), Expr::This))
+}
+
+fn expr_mutates_self_field(
+    expr: &Expr,
+    facts: &MethodUsageFacts,
+    field_names: &HashSet<String>,
+) -> bool {
+    match expr {
+        Expr::Unary { expr, .. } => match expr.as_ref() {
+            Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
+            target => target_is_this_field(target),
+        },
+        _ => false,
     }
 }
 

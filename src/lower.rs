@@ -1,8 +1,8 @@
 use crate::access_lowering::{lower_bare_name, lower_field_access};
 use crate::call_lowering::{apply_call_target, apply_new_target_with_facts};
 use crate::call_plan::{
-    CallTargetPlan, plan_call_target, plan_new_target, resolved_call_arg_shapes,
-    resolved_constructor_arg_shapes,
+    CallTargetPlan, TrivialAccessorCallPlan, plan_call_target, plan_new_target,
+    plan_trivial_accessor_call, resolved_call_arg_shapes, resolved_constructor_arg_shapes,
 };
 use crate::coercion::{
     actual_shape_for_slot_expr, argument_slot, assignment_slot, assignment_slot_for_target,
@@ -19,7 +19,9 @@ use crate::exception_lowering::{
     exception_expr_from_new, fallback_exception_expr, java_exception_support_item, return_stmt,
     throw_stmt,
 };
-use crate::exception_plan::{ThrowExprPlan, plan_throw_expr, program_uses_java_exception};
+use crate::exception_plan::{
+    ThrowExprPlan, plan_throw_expr, program_uses_java_exception_with_facts,
+};
 use crate::expr_render::{
     binary_expr, indexed_expr, literal_expr, raw_expr, super_expr, ternary_expr, this_expr,
 };
@@ -35,6 +37,7 @@ use crate::item_assembly::{
 use crate::java_ir::*;
 use crate::loop_lowering::{assemble_for_loop, continue_with_updates};
 use crate::operator_lowering::lower_unary_expr;
+use crate::rewrite::{ControlFlowRewritePlan, MethodControlFlowPlan};
 use crate::rust_ir::*;
 use crate::signature::{LocalPlan, SignaturePlan};
 use crate::slot_shape::RustSlotShape;
@@ -104,11 +107,31 @@ pub fn lower_program_with_facts(
 
 pub fn lower_program_with_plans(
     program: &Program,
+    diagnostics: DiagnosticBag,
+    facts: &FactSet,
+    _usage: &UsageFacts,
+    representations: &RepresentationPlan,
+    signatures: &SignaturePlan,
+) -> LoweredProgram {
+    lower_program_with_semantic_plans(
+        program,
+        diagnostics,
+        facts,
+        _usage,
+        representations,
+        signatures,
+        &[],
+    )
+}
+
+pub fn lower_program_with_semantic_plans(
+    program: &Program,
     mut diagnostics: DiagnosticBag,
     facts: &FactSet,
     _usage: &UsageFacts,
     representations: &RepresentationPlan,
     signatures: &SignaturePlan,
+    control_flow_plans: &[MethodControlFlowPlan],
 ) -> LoweredProgram {
     for diagnostic in facts.diagnostics() {
         diagnostics.warning(diagnostic.code, diagnostic.message);
@@ -119,6 +142,7 @@ pub fn lower_program_with_plans(
     for diagnostic in signatures.diagnostics() {
         diagnostics.warning(diagnostic.code, diagnostic.message.clone());
     }
+    push_control_flow_plan_diagnostics(control_flow_plans, &mut diagnostics);
     let ctx = LowerCtx {
         facts,
         representations,
@@ -127,13 +151,39 @@ pub fn lower_program_with_plans(
         current_return_shape: None,
     };
     let mut file = RustFile::default();
-    if program_uses_java_exception(program) {
+    if program_uses_java_exception_with_facts(program, facts) {
         file.items.push(java_exception_support_item());
     }
     for ty in &program.types {
         lower_type(program, ty, &mut file, &mut diagnostics, ctx);
     }
     LoweredProgram { file, diagnostics }
+}
+
+fn push_control_flow_plan_diagnostics(
+    control_flow_plans: &[MethodControlFlowPlan],
+    diagnostics: &mut DiagnosticBag,
+) {
+    for plan in control_flow_plans {
+        for rewrite in &plan.rewrites {
+            match rewrite {
+                ControlFlowRewritePlan::AssignmentInCondition(_) => diagnostics.unsupported(
+                    "control_flow_rewrite_pending",
+                    format!(
+                        "{}::{} requires assignment-in-condition normalization before idiomatic lowering",
+                        plan.method.type_name, plan.method.method_name
+                    ),
+                ),
+                ControlFlowRewritePlan::TailRecursiveLoop(_) => diagnostics.unsupported(
+                    "control_flow_rewrite_pending",
+                    format!(
+                        "{}::{} requires tail-recursive loop normalization before idiomatic lowering",
+                        plan.method.type_name, plan.method.method_name
+                    ),
+                ),
+            }
+        }
+    }
 }
 
 fn lower_type(
@@ -282,10 +332,13 @@ fn lower_method(ty: &TypeDecl, method: &MethodDecl, ctx: LowerCtx) -> RustFuncti
         ..ctx
     };
     let mut env = shape_env_for_method(ty, method, method_signature, method_ctx.signatures);
+    let wrap_returns_in_ok = method_ctx
+        .facts
+        .method_has_thrown_exceptions(&ty.name, &method.name);
     let body = method
         .body
         .as_ref()
-        .map(|body| lower_block(body, &mut env, !method.throws.is_empty(), method_ctx))
+        .map(|body| lower_block(body, &mut env, wrap_returns_in_ok, method_ctx))
         .unwrap_or_default();
     method_function_shell_with_facts(ty, method, ctx.signatures, body, ctx.facts)
 }
@@ -343,7 +396,13 @@ fn lower_stmt(
                 ctx,
             ),
         )),
-        Stmt::Expr(expr) => out.push(expr_stmt(lower_expr(expr, env, ctx))),
+        Stmt::Expr(expr) => {
+            if let Some(stmt) = lower_trivial_accessor_expr_stmt(expr, env, ctx) {
+                out.push(stmt);
+            } else {
+                out.push(expr_stmt(lower_expr(expr, env, ctx)));
+            }
+        }
         Stmt::Return(expr) => out.push(lower_return_stmt(
             expr.as_ref(),
             env,
@@ -514,6 +573,58 @@ fn lower_throw_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
     }
 }
 
+fn lower_trivial_accessor_expr_stmt(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustStmt> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = expr
+    else {
+        return None;
+    };
+    let TrivialAccessorCallPlan::Setter {
+        receiver,
+        field_name,
+        value,
+    } = plan_trivial_accessor_call(
+        receiver.as_deref(),
+        name,
+        args,
+        resolved.as_ref(),
+        ctx.facts,
+    )?
+    else {
+        return None;
+    };
+    Some(assignment_stmt(
+        lower_accessor_field(receiver, &field_name, env, ctx),
+        lower_expr(value, env, ctx),
+    ))
+}
+
+fn lower_accessor_field(
+    receiver: Option<&Expr>,
+    field_name: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> RustExpr {
+    receiver
+        .map(|receiver| {
+            lower_field_access(
+                receiver,
+                field_name,
+                env.type_env(),
+                lower_expr(receiver, env, ctx),
+            )
+        })
+        .unwrap_or_else(|| lower_bare_name(field_name, env))
+}
+
 fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
     if let Some(stream_expr) = lower_stream_expr(expr, env, ctx) {
         return stream_expr.expr;
@@ -577,6 +688,18 @@ fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
             args,
             resolved,
         } => {
+            if let Some(TrivialAccessorCallPlan::Getter {
+                receiver,
+                field_name,
+            }) = plan_trivial_accessor_call(
+                receiver.as_deref(),
+                name,
+                args,
+                resolved.as_ref(),
+                ctx.facts,
+            ) {
+                return lower_accessor_field(receiver, &field_name, env, ctx);
+            }
             let target = plan_call_target(receiver.as_deref(), name, resolved.as_ref());
             let rust_args = if let Some(call) = resolved {
                 lower_args_for_shapes(

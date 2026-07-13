@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
-use crate::facts::{CaptureOrigin, CaptureSource, FactSet, OwnedRecoveryCapability};
+use crate::facts::{
+    CaptureOrigin, CaptureSource, FactSet, NullabilityState, OwnedRecoveryCapability,
+    ReceiverMutabilityFact,
+};
 use crate::java_ir::{
     Block, ConstructorDecl, Expr, FieldDecl, JavaType, MethodDecl, Modifier, Param, Program, Stmt,
     TypeDecl, UnaryOp,
@@ -20,6 +23,7 @@ use crate::slot_policy::{
 use crate::slot_shape::{
     DispatchShape, OwnershipShape, RustSlotShape, ViewShape, conservative_ownership,
 };
+use crate::types::{optional_element_type, optional_java_type};
 use crate::usage::{
     BindingUse, BindingUseFacts, CallArgumentBoundary, FieldUse, MethodUsageFacts,
     UsageConstructorKey, UsageFacts, UsageMethodKey,
@@ -94,6 +98,7 @@ pub enum SignatureConstraint {
     RequiredOwnership(OwnershipShape),
     RequiredView(ViewShape),
     RequiredDispatch(DispatchShape),
+    RequiredStorageNullability(NullabilityState),
     MutableBinding,
     StorageSlot,
 }
@@ -163,6 +168,14 @@ pub struct SignatureSlotBaselinePolicy {
     pub constraints: Vec<SignatureConstraint>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldNullabilityShapePolicy {
+    pub type_name: String,
+    pub field_name: String,
+    pub nullability: Option<NullabilityState>,
+    pub constraints: Vec<SignatureConstraint>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureConstraintPropagationKind {
     ShapeOnly,
@@ -186,6 +199,7 @@ pub struct MergedSignatureConstraints {
     required_owner: Option<OwnershipShape>,
     slot_view_req: Option<ViewShape>,
     slot_dispatch_req: Option<DispatchShape>,
+    storage_nullability_req: Option<NullabilityState>,
     mutable_binding: bool,
     storage_slot: bool,
     conflicts: Vec<SignatureConstraintConflict>,
@@ -289,6 +303,7 @@ pub enum SignatureConstraintAxis {
     Owner,
     View,
     Dispatch,
+    Nullability,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2400,6 +2415,16 @@ pub fn method_param_shape_constraints(
     let boundary_kind = method_param_boundary_policy(ty, method, param, usage).kind;
     let mut constraints =
         signature_slot_baseline_policy(&param.ty, boundary_kind, facts).constraints;
+    if let Some(method_usage) = usage.methods.get(&UsageMethodKey {
+        type_name: ty.name.clone(),
+        method_name: method.name.clone(),
+    }) && let Some(binding) = method_usage.bindings.get(&param.name)
+    {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &external_receiver_binding_constraints(binding, facts),
+        );
+    }
     if boundary_kind.is_none() {
         constraints.extend(
             method_param_borrowed_content_policy_with_facts(ty, method, param, usage, facts)
@@ -2746,6 +2771,16 @@ pub fn constructor_param_shape_constraints(
     let boundary_kind = constructor_param_boundary_policy(ty, ctor, param, usage).kind;
     let mut constraints =
         signature_slot_baseline_policy(&param.ty, boundary_kind, facts).constraints;
+    if let Some(ctor_usage) = usage.constructors.get(&UsageConstructorKey {
+        type_name: ty.name.clone(),
+        rust_name: constructor_rust_name(ctor),
+    }) && let Some(binding) = ctor_usage.bindings.get(&param.name)
+    {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &external_receiver_binding_constraints(binding, facts),
+        );
+    }
     if boundary_kind.is_none() {
         constraints.extend(
             constructor_param_borrowed_content_policy_with_facts(ty, ctor, param, usage, facts)
@@ -2821,6 +2856,9 @@ impl MergedSignatureConstraints {
     }
 
     pub fn apply_to_shape(&self, mut shape: RustSlotShape) -> RustSlotShape {
+        if let Some(nullability) = self.storage_nullability_req {
+            apply_required_storage_nullability(&mut shape, nullability);
+        }
         if let Some(requirement) = &self.slot_dispatch_req {
             apply_required_dispatch(&mut shape, requirement.clone());
         }
@@ -2881,6 +2919,20 @@ impl MergedSignatureConstraints {
                         axis: SignatureConstraintAxis::Dispatch,
                         kept: SignatureConstraint::RequiredDispatch(merge.kept),
                         rejected: SignatureConstraint::RequiredDispatch(rejected),
+                    });
+                }
+            }
+            SignatureConstraint::RequiredStorageNullability(requirement) => {
+                let merge = merge_storage_nullability_requirement_policy(
+                    self.storage_nullability_req,
+                    *requirement,
+                );
+                self.storage_nullability_req = Some(merge.kept);
+                if let Some(rejected) = merge.rejected {
+                    self.conflicts.push(SignatureConstraintConflict {
+                        axis: SignatureConstraintAxis::Nullability,
+                        kept: SignatureConstraint::RequiredStorageNullability(merge.kept),
+                        rejected: SignatureConstraint::RequiredStorageNullability(rejected),
                     });
                 }
             }
@@ -3023,6 +3075,59 @@ pub fn signature_dispatch_requirement_priority_policy(
     SignatureDispatchRequirementPriorityPolicy { requirement, rank }
 }
 
+pub fn merge_storage_nullability_requirement_policy(
+    current: Option<NullabilityState>,
+    next: NullabilityState,
+) -> SignatureRequirementMerge<NullabilityState> {
+    let Some(current) = current else {
+        return SignatureRequirementMerge {
+            kept: next,
+            rejected: None,
+        };
+    };
+    if current == next {
+        return SignatureRequirementMerge {
+            kept: current,
+            rejected: None,
+        };
+    }
+    if storage_nullability_requirement_rank(current) >= storage_nullability_requirement_rank(next) {
+        SignatureRequirementMerge {
+            kept: current,
+            rejected: Some(next),
+        }
+    } else {
+        SignatureRequirementMerge {
+            kept: next,
+            rejected: Some(current),
+        }
+    }
+}
+
+fn storage_nullability_requirement_rank(requirement: NullabilityState) -> usize {
+    match requirement {
+        NullabilityState::MaybeNull => 40,
+        NullabilityState::DefinitelyNull => 30,
+        NullabilityState::Unknown => 20,
+        NullabilityState::DefinitelyNonNull => 10,
+    }
+}
+
+fn apply_required_storage_nullability(shape: &mut RustSlotShape, nullability: NullabilityState) {
+    if matches!(nullability, NullabilityState::DefinitelyNonNull)
+        || !java_type_can_be_null(&shape.java_ty)
+        || optional_element_type(&shape.java_ty).is_some()
+    {
+        return;
+    }
+    shape.java_ty = optional_java_type(shape.java_ty.clone());
+    shape.type_identity = crate::slot_shape::TypeIdentity::from_java_type(shape.java_ty.clone());
+}
+
+fn java_type_can_be_null(java_ty: &JavaType) -> bool {
+    !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void)
+}
+
 fn signature_constraints_require_mutable_binding(constraints: &[SignatureConstraint]) -> bool {
     MergedSignatureConstraints::from_constraints(constraints).requires_mutable_binding()
 }
@@ -3032,10 +3137,15 @@ pub fn field_shape_constraints() -> Vec<SignatureConstraint> {
 }
 
 pub fn field_shape_constraints_with_facts(
+    ty: &TypeDecl,
     field: &FieldDecl,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
     let mut constraints = field_shape_constraints();
+    push_unique_signature_constraints(
+        &mut constraints,
+        &field_nullability_shape_policy(ty, field, facts).constraints,
+    );
     push_unique_signature_constraints(
         &mut constraints,
         &signature_slot_baseline_policy(
@@ -3050,13 +3160,30 @@ pub fn field_shape_constraints_with_facts(
     constraints
 }
 
+pub fn field_nullability_shape_policy(
+    ty: &TypeDecl,
+    field: &FieldDecl,
+    facts: &FactSet,
+) -> FieldNullabilityShapePolicy {
+    let nullability = facts.field_nullability_for(&ty.name, &field.name);
+    FieldNullabilityShapePolicy {
+        type_name: ty.name.clone(),
+        field_name: field.name.clone(),
+        nullability,
+        constraints: nullability
+            .map(SignatureConstraint::RequiredStorageNullability)
+            .into_iter()
+            .collect(),
+    }
+}
+
 pub fn field_shape_constraints_with_usage(
     ty: &TypeDecl,
     field: &FieldDecl,
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
-    let mut constraints = field_shape_constraints_with_facts(field, facts);
+    let mut constraints = field_shape_constraints_with_facts(ty, field, facts);
     if let Some(kind) = field_boundary_policy(ty, field, usage).kind {
         push_unique_signature_constraints(
             &mut constraints,
@@ -3150,6 +3277,10 @@ fn collect_type_signature_constraints(
             }
             crate::java_ir::Member::Method(method) => {
                 let captured = captured_binding_names_for_method(facts, &ty.name, &method.name);
+                let method_usage = usage.methods.get(&UsageMethodKey {
+                    type_name: ty.name.clone(),
+                    method_name: method.name.clone(),
+                });
                 constraints.methods.insert(
                     MethodKey {
                         type_name: ty.name.clone(),
@@ -3183,10 +3314,6 @@ fn collect_type_signature_constraints(
                             ty, method, usage, facts,
                         ),
                         locals: {
-                            let method_usage = usage.methods.get(&UsageMethodKey {
-                                type_name: ty.name.clone(),
-                                method_name: method.name.clone(),
-                            });
                             method
                                 .body
                                 .as_ref()
@@ -3200,7 +3327,12 @@ fn collect_type_signature_constraints(
                                 })
                                 .unwrap_or_default()
                         },
-                        receiver: receiver_constraints(method),
+                        receiver: receiver_constraints_with_facts_or_usage(
+                            ty,
+                            method,
+                            method_usage,
+                            facts,
+                        ),
                     },
                 );
             }
@@ -3634,6 +3766,12 @@ fn local_shape_constraints_with_usage(
 ) -> Vec<SignatureConstraint> {
     let mut constraints = local_shape_constraints(name, mutated);
     constraints.extend(signature_capability_policy(java_ty, facts).constraints);
+    if let Some(binding) = usage.and_then(|usage| usage.bindings.get(name)) {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &external_receiver_binding_constraints(binding, facts),
+        );
+    }
     if let Some(kind) = usage
         .and_then(|usage| usage.bindings.get(name))
         .and_then(|binding| binding_boundary_policy(binding).kind)
@@ -3641,6 +3779,47 @@ fn local_shape_constraints_with_usage(
         constraints.extend(signature_boundary_policy(kind, java_ty, facts).constraints);
     }
     constraints
+}
+
+pub fn external_receiver_binding_constraints(
+    binding: &BindingUseFacts,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let mut constraints = Vec::new();
+    for usage in &binding.uses {
+        let BindingUse::ReceiverForCall {
+            name,
+            boundary: CallArgumentBoundary::Unknown,
+        } = usage
+        else {
+            continue;
+        };
+        let receiver_type = external_api_receiver_type_key(&binding.java_ty);
+        if facts
+            .external_api_effect_for_receiver(receiver_type, name)
+            .is_some_and(|effect| {
+                effect.receiver_mutability == ReceiverMutabilityFact::MutatesReceiver
+            })
+        {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[SignatureConstraint::RequiredOwnership(
+                    OwnershipShape::MutableBorrow,
+                )],
+            );
+        }
+    }
+    constraints
+}
+
+fn external_api_receiver_type_key(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } => Some(name.as_str()),
+        JavaType::String => Some("String"),
+        JavaType::Array(_) => Some("Array"),
+        JavaType::Unknown(name) => Some(name.as_str()),
+        JavaType::Void | JavaType::Primitive(_) | JavaType::Wildcard(_) => None,
+    }
 }
 
 fn local_plan(
@@ -3830,11 +4009,46 @@ pub fn default_receiver_plan(method: &MethodDecl) -> ReceiverPlan {
 }
 
 pub fn receiver_constraints(method: &MethodDecl) -> Vec<ReceiverConstraint> {
+    receiver_constraints_with_usage(method, None)
+}
+
+pub fn receiver_constraints_with_usage(
+    method: &MethodDecl,
+    usage: Option<&MethodUsageFacts>,
+) -> Vec<ReceiverConstraint> {
     let mut constraints = Vec::new();
     if method.modifiers.contains(&Modifier::Static) {
         constraints.push(ReceiverConstraint::StaticReceiver);
     }
-    if method.body.as_ref().is_some_and(block_mutates_self) {
+    if usage.is_some_and(|usage| usage.mutates_self) {
+        constraints.push(ReceiverConstraint::MutableReceiver);
+    }
+    constraints
+}
+
+pub fn receiver_constraints_with_facts(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    facts: &FactSet,
+) -> Vec<ReceiverConstraint> {
+    receiver_constraints_with_facts_or_usage(ty, method, None, facts)
+}
+
+fn receiver_constraints_with_facts_or_usage(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    usage: Option<&MethodUsageFacts>,
+    facts: &FactSet,
+) -> Vec<ReceiverConstraint> {
+    let mut constraints = Vec::new();
+    if method.modifiers.contains(&Modifier::Static) {
+        constraints.push(ReceiverConstraint::StaticReceiver);
+    }
+    if let Some(effect) = facts.method_effect_for(&ty.name, &method.name) {
+        if effect.receiver_mutability == ReceiverMutabilityFact::MutatesReceiver {
+            constraints.push(ReceiverConstraint::MutableReceiver);
+        }
+    } else if usage.is_some_and(|usage| usage.mutates_self) {
         constraints.push(ReceiverConstraint::MutableReceiver);
     }
     constraints
@@ -3850,44 +4064,6 @@ pub fn constrained_receiver_plan(constraints: &[ReceiverConstraint]) -> Receiver
     }
 }
 
-fn block_mutates_self(block: &Block) -> bool {
-    block.statements.iter().any(stmt_mutates_self)
-}
-
-fn stmt_mutates_self(stmt: &Stmt) -> bool {
-    match stmt {
-        Stmt::Assign { target, .. } => target_is_self_field(target),
-        Stmt::Expr(Expr::Unary { expr, .. }) => target_is_self_field(expr),
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => block_mutates_self(then_block) || else_block.as_ref().is_some_and(block_mutates_self),
-        Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::EnhancedFor { body, .. } => {
-            block_mutates_self(body)
-        }
-        Stmt::Switch { cases, .. } => cases
-            .iter()
-            .any(|case| case.statements.iter().any(stmt_mutates_self)),
-        Stmt::Try {
-            resources,
-            body,
-            catches,
-            finally_block,
-        } => {
-            resources.iter().any(stmt_mutates_self)
-                || block_mutates_self(body)
-                || catches.iter().any(|catch| block_mutates_self(&catch.body))
-                || finally_block.as_ref().is_some_and(block_mutates_self)
-        }
-        _ => false,
-    }
-}
-
-fn target_is_self_field(expr: &Expr) -> bool {
-    matches!(expr, Expr::FieldAccess(receiver, _) if matches!(receiver.as_ref(), Expr::This))
-}
-
 pub fn method_return_shape_constraints(
     ty: &TypeDecl,
     method: &MethodDecl,
@@ -3897,6 +4073,17 @@ pub fn method_return_shape_constraints(
     let boundary_kind = method_return_boundary_policy(ty, method, usage).kind;
     let mut constraints =
         signature_slot_baseline_policy(&method.return_type, boundary_kind, facts).constraints;
+    if !matches!(method.return_type, JavaType::Void)
+        && let Some(effect) = facts.method_effect_for(&ty.name, &method.name)
+        && effect.return_nullability != NullabilityState::Unknown
+    {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &[SignatureConstraint::RequiredStorageNullability(
+                effect.return_nullability,
+            )],
+        );
+    }
     if boundary_kind.is_none() {
         constraints.extend(
             borrowed_return_content_policy_from_param_with_facts(ty, method, usage, facts)
