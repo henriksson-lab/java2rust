@@ -279,7 +279,7 @@ pub fn object_strategy_for_type_with_effective_facts(
 ) -> ObjectStrategyPlan {
     let requirements = facts.dispatch_requirements_for(&ty.name);
     let (strategy, diagnostics) = match ty.kind {
-        TypeKind::Class => (ObjectRepresentation::ConcreteStruct, Vec::new()),
+        TypeKind::Class | TypeKind::Record => (ObjectRepresentation::ConcreteStruct, Vec::new()),
         TypeKind::Interface
             if has_explicit_hierarchy_override_in_effective_facts(facts, &ty.name) =>
         {

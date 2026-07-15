@@ -92,6 +92,7 @@ fn parse_top_level_types(
             "class_declaration" => types.push(parse_class_decl(node, source, diagnostics)),
             "interface_declaration" => types.push(parse_interface_decl(node, source, diagnostics)),
             "enum_declaration" => types.push(parse_enum_decl(node, source, diagnostics)),
+            "record_declaration" => types.push(parse_record_decl(node, source, diagnostics)),
             "annotation_type_declaration" => {
                 types.push(parse_annotation_type_decl(node, source, diagnostics));
             }
@@ -166,6 +167,9 @@ fn parse_class_decl(
                 "enum_declaration" => {
                     members.push(Member::Type(parse_enum_decl(child, source, diagnostics)));
                 }
+                "record_declaration" => {
+                    members.push(Member::Type(parse_record_decl(child, source, diagnostics)));
+                }
                 "annotation_type_declaration" => {
                     members.push(Member::Type(parse_annotation_type_decl(
                         child,
@@ -181,6 +185,8 @@ fn parse_class_decl(
     TypeDecl {
         kind: TypeKind::Class,
         name,
+        type_params: parse_type_parameter_names(node, source),
+        type_param_bounds: parse_type_parameter_bounds(node, source),
         modifiers: parse_modifiers(node, source),
         extends,
         implements,
@@ -222,6 +228,9 @@ fn parse_interface_decl(
                 "enum_declaration" => {
                     members.push(Member::Type(parse_enum_decl(child, source, diagnostics)));
                 }
+                "record_declaration" => {
+                    members.push(Member::Type(parse_record_decl(child, source, diagnostics)));
+                }
                 "annotation_type_declaration" => {
                     members.push(Member::Type(parse_annotation_type_decl(
                         child,
@@ -234,14 +243,29 @@ fn parse_interface_decl(
         }
     }
 
+    let mut super_interfaces = node
+        .child_by_field_name("interfaces")
+        .map(|interfaces| parse_type_name_list(interfaces, source))
+        .or_else(|| {
+            named_children(node)
+                .into_iter()
+                .find(|child| child.kind() == "extends_interfaces")
+                .map(|interfaces| parse_type_name_list(interfaces, source))
+        })
+        .unwrap_or_default();
+    let extends = super_interfaces.first().cloned();
+    if !super_interfaces.is_empty() {
+        super_interfaces.remove(0);
+    }
+
     TypeDecl {
         kind: TypeKind::Interface,
         name: field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string()),
+        type_params: parse_type_parameter_names(node, source),
+        type_param_bounds: parse_type_parameter_bounds(node, source),
         modifiers: parse_modifiers(node, source),
-        extends: node
-            .child_by_field_name("interfaces")
-            .and_then(|interfaces| parse_type_name_list(interfaces, source).into_iter().next()),
-        implements: Vec::new(),
+        extends,
+        implements: super_interfaces,
         permits: parse_permits(node, source),
         members,
         span: span(node),
@@ -253,14 +277,65 @@ fn parse_enum_decl(
     source: &str,
     diagnostics: &mut DiagnosticBag,
 ) -> TypeDecl {
+    let name = field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string());
     let mut members = Vec::new();
+    if let Some(body) = node.child_by_field_name("body") {
+        for child in named_children(body) {
+            parse_enum_member_node(child, &name, source, diagnostics, &mut members);
+        }
+    }
+
+    TypeDecl {
+        kind: TypeKind::Enum,
+        name,
+        type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
+        modifiers: parse_modifiers(node, source),
+        extends: None,
+        implements: node
+            .child_by_field_name("interfaces")
+            .map(|interfaces| parse_type_name_list(interfaces, source))
+            .unwrap_or_default(),
+        permits: Vec::new(),
+        members,
+        span: span(node),
+    }
+}
+
+fn parse_record_decl(
+    node: tree_sitter::Node,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
+) -> TypeDecl {
+    let name = field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string());
+    let components = node
+        .child_by_field_name("parameters")
+        .map(|params| parse_params_node(params, source))
+        .unwrap_or_default();
+    let mut members = components
+        .iter()
+        .flat_map(|component| record_component_members(component, node))
+        .collect::<Vec<_>>();
+    let mut has_constructor = false;
+
     if let Some(body) = node.child_by_field_name("body") {
         for child in named_children(body) {
             match child.kind() {
                 "field_declaration" => members.extend(parse_field_decl(child, source)),
                 "constructor_declaration" => {
+                    has_constructor = true;
                     members.push(Member::Constructor(parse_constructor_decl(
                         child,
+                        source,
+                        diagnostics,
+                    )));
+                }
+                "compact_constructor_declaration" => {
+                    has_constructor = true;
+                    members.push(Member::Constructor(record_canonical_constructor_decl(
+                        &name,
+                        &components,
+                        Some(child),
                         source,
                         diagnostics,
                     )));
@@ -285,6 +360,9 @@ fn parse_enum_decl(
                 "enum_declaration" => {
                     members.push(Member::Type(parse_enum_decl(child, source, diagnostics)));
                 }
+                "record_declaration" => {
+                    members.push(Member::Type(parse_record_decl(child, source, diagnostics)));
+                }
                 "annotation_type_declaration" => {
                     members.push(Member::Type(parse_annotation_type_decl(
                         child,
@@ -296,10 +374,21 @@ fn parse_enum_decl(
             }
         }
     }
+    if !has_constructor {
+        members.push(Member::Constructor(record_canonical_constructor_decl(
+            &name,
+            &components,
+            None,
+            source,
+            diagnostics,
+        )));
+    }
 
     TypeDecl {
-        kind: TypeKind::Enum,
-        name: field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string()),
+        kind: TypeKind::Record,
+        name,
+        type_params: parse_type_parameter_names(node, source),
+        type_param_bounds: parse_type_parameter_bounds(node, source),
         modifiers: parse_modifiers(node, source),
         extends: None,
         implements: node
@@ -310,6 +399,134 @@ fn parse_enum_decl(
         members,
         span: span(node),
     }
+}
+
+fn record_component_members(component: &Param, node: tree_sitter::Node) -> Vec<Member> {
+    let field = Member::Field(FieldDecl {
+        name: component.name.clone(),
+        ty: component.ty.clone(),
+        modifiers: vec![Modifier::Private, Modifier::Final],
+        initializer: None,
+        span: span(node),
+    });
+    let accessor = Member::Method(MethodDecl {
+        name: component.name.clone(),
+        rust_name: None,
+        type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
+        return_type: component.ty.clone(),
+        throws: Vec::new(),
+        params: Vec::new(),
+        modifiers: vec![Modifier::Public],
+        body: None,
+        span: span(node),
+    });
+    vec![field, accessor]
+}
+
+fn record_canonical_constructor_decl(
+    record_name: &str,
+    components: &[Param],
+    node: Option<tree_sitter::Node>,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
+) -> ConstructorDecl {
+    ConstructorDecl {
+        name: record_name.to_string(),
+        rust_name: None,
+        type_params: node
+            .map(|node| parse_type_parameter_names(node, source))
+            .unwrap_or_default(),
+        type_param_bounds: node
+            .map(|node| parse_type_parameter_bounds(node, source))
+            .unwrap_or_default(),
+        params: components.to_vec(),
+        throws: node
+            .map(|node| parse_throws(node, source))
+            .unwrap_or_default(),
+        modifiers: node
+            .map(|node| parse_modifiers(node, source))
+            .unwrap_or_else(|| vec![Modifier::Public]),
+        body: node
+            .and_then(|node| node.child_by_field_name("body"))
+            .map(|body| parse_block_like(body, source, diagnostics)),
+        span: node.map(span).unwrap_or_default(),
+    }
+}
+
+fn parse_enum_member_node(
+    node: tree_sitter::Node,
+    enum_name: &str,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
+    members: &mut Vec<Member>,
+) {
+    match node.kind() {
+        "enum_constant" => {
+            if let Some(field) = parse_enum_constant_decl(&node, enum_name, source) {
+                members.push(Member::Field(field));
+            }
+        }
+        "field_declaration" => members.extend(parse_field_decl(node, source)),
+        "constructor_declaration" => {
+            members.push(Member::Constructor(parse_constructor_decl(
+                node,
+                source,
+                diagnostics,
+            )));
+        }
+        "method_declaration" => {
+            members.push(Member::Method(parse_method_decl(node, source, diagnostics)));
+        }
+        "class_declaration" => {
+            members.push(Member::Type(parse_class_decl(node, source, diagnostics)));
+        }
+        "interface_declaration" => {
+            members.push(Member::Type(parse_interface_decl(
+                node,
+                source,
+                diagnostics,
+            )));
+        }
+        "enum_declaration" => {
+            members.push(Member::Type(parse_enum_decl(node, source, diagnostics)));
+        }
+        "record_declaration" => {
+            members.push(Member::Type(parse_record_decl(node, source, diagnostics)));
+        }
+        "annotation_type_declaration" => {
+            members.push(Member::Type(parse_annotation_type_decl(
+                node,
+                source,
+                diagnostics,
+            )));
+        }
+        "enum_body_declarations" => {
+            for child in named_children(node) {
+                parse_enum_member_node(child, enum_name, source, diagnostics, members);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_enum_constant_decl(
+    node: &tree_sitter::Node,
+    enum_name: &str,
+    source: &str,
+) -> Option<FieldDecl> {
+    let name = field_text(*node, "name", source)
+        .or_else(|| first_named_child(*node).map(|child| text(child, source).to_string()))?;
+    Some(FieldDecl {
+        name: to_snake_case(&name),
+        ty: JavaType::Named {
+            name: enum_name.to_string(),
+            args: Vec::new(),
+        },
+        modifiers: vec![Modifier::Public, Modifier::Static, Modifier::Final],
+        initializer: None,
+        span: span(*node),
+    })
 }
 
 fn parse_annotation_type_decl(
@@ -339,6 +556,8 @@ fn parse_annotation_type_decl(
     TypeDecl {
         kind: TypeKind::Interface,
         name: field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string()),
+        type_params: Vec::new(),
+        type_param_bounds: Vec::new(),
         modifiers: parse_modifiers(node, source),
         extends: None,
         implements: Vec::new(),
@@ -380,6 +599,8 @@ fn parse_constructor_decl(
     ConstructorDecl {
         name: field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string()),
         rust_name: None,
+        type_params: parse_type_parameter_names(node, source),
+        type_param_bounds: parse_type_parameter_bounds(node, source),
         params: node
             .child_by_field_name("parameters")
             .map(|params| parse_params_node(params, source))
@@ -401,6 +622,8 @@ fn parse_method_decl(
     MethodDecl {
         name: field_text(node, "name", source).unwrap_or_else(|| "unknown".to_string()),
         rust_name: None,
+        type_params: parse_type_parameter_names(node, source),
+        type_param_bounds: parse_type_parameter_bounds(node, source),
         return_type: node
             .child_by_field_name("type")
             .map(|node| parse_type_node(node, source))
@@ -419,7 +642,7 @@ fn parse_method_decl(
 }
 
 fn parse_params_node(node: tree_sitter::Node, source: &str) -> Vec<Param> {
-    named_children(node)
+    let params = named_children(node)
         .into_iter()
         .filter(|child| matches!(child.kind(), "formal_parameter" | "spread_parameter"))
         .filter_map(|param| {
@@ -435,6 +658,11 @@ fn parse_params_node(node: tree_sitter::Node, source: &str) -> Vec<Param> {
                     }
                     ty
                 })
+                .or_else(|| {
+                    is_varargs
+                        .then(|| varargs_type_from_param_text(text(param, source)))
+                        .flatten()
+                })
                 .unwrap_or_else(|| JavaType::Unknown(name.clone()));
             Some(Param {
                 name: to_snake_case(&name),
@@ -442,7 +670,60 @@ fn parse_params_node(node: tree_sitter::Node, source: &str) -> Vec<Param> {
                 is_varargs,
             })
         })
+        .collect::<Vec<_>>();
+    if params.is_empty()
+        || (text(node, source).contains("...") && !params.iter().any(|p| p.is_varargs))
+    {
+        let fallback = parse_params_text_fallback(text(node, source));
+        if fallback.len() > params.len() {
+            fallback
+        } else {
+            params
+        }
+    } else {
+        params
+    }
+}
+
+fn parse_params_text_fallback(params_text: &str) -> Vec<Param> {
+    let params_text = params_text
+        .trim()
+        .strip_prefix('(')
+        .and_then(|text| text.strip_suffix(')'))
+        .unwrap_or(params_text)
+        .trim();
+    if params_text.is_empty() {
+        return Vec::new();
+    }
+
+    params_text
+        .split(',')
+        .filter_map(parse_param_text_fallback)
         .collect()
+}
+
+fn parse_param_text_fallback(param_text: &str) -> Option<Param> {
+    let mut param_text = param_text.trim();
+    while let Some(rest) = param_text.strip_prefix("final ") {
+        param_text = rest.trim_start();
+    }
+    let (type_text, name) = param_text.rsplit_once(char::is_whitespace)?;
+    let is_varargs = type_text.contains("...");
+    let ty = if is_varargs {
+        varargs_type_from_param_text(type_text)?
+    } else {
+        parse_type_text(type_text)
+    };
+    Some(Param {
+        name: to_snake_case(name.trim()),
+        ty,
+        is_varargs,
+    })
+}
+
+fn varargs_type_from_param_text(param_text: &str) -> Option<JavaType> {
+    let type_text = param_text.split("...").next()?.trim();
+    (!type_text.is_empty()).then(|| JavaType::Array(Box::new(parse_type_text(type_text))))
 }
 
 fn parse_throws(node: tree_sitter::Node, source: &str) -> Vec<JavaType> {
@@ -479,7 +760,7 @@ fn parse_block_like(
             "statement" => {
                 if let Some(stmt) = first_named_child(child) {
                     if !is_empty_statement_kind(stmt.kind()) {
-                        statements.push(parse_stmt_node(stmt, source, diagnostics));
+                        statements.extend(parse_stmt_nodes(stmt, source, diagnostics));
                     }
                 }
             }
@@ -501,14 +782,26 @@ fn parse_block_like(
             | "class_declaration"
             | "interface_declaration"
             | "enum_declaration"
+            | "record_declaration"
             | "annotation_type_declaration"
             | "explicit_constructor_invocation" => {
-                statements.push(parse_stmt_node(child, source, diagnostics));
+                statements.extend(parse_stmt_nodes(child, source, diagnostics));
             }
             _ => {}
         }
     }
     Block { statements }
+}
+
+fn parse_stmt_nodes(
+    node: tree_sitter::Node,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
+) -> Vec<Stmt> {
+    match node.kind() {
+        "local_variable_declaration" => parse_local_var_decls(node, source),
+        _ => vec![parse_stmt_node(node, source, diagnostics)],
+    }
 }
 
 fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut DiagnosticBag) -> Stmt {
@@ -544,6 +837,7 @@ fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut Diag
         "class_declaration" => Stmt::LocalType(parse_class_decl(node, source, diagnostics)),
         "interface_declaration" => Stmt::LocalType(parse_interface_decl(node, source, diagnostics)),
         "enum_declaration" => Stmt::LocalType(parse_enum_decl(node, source, diagnostics)),
+        "record_declaration" => Stmt::LocalType(parse_record_decl(node, source, diagnostics)),
         "annotation_type_declaration" => {
             Stmt::LocalType(parse_annotation_type_decl(node, source, diagnostics))
         }
@@ -589,7 +883,7 @@ fn parse_try_resources(node: tree_sitter::Node, source: &str) -> Vec<Stmt> {
     named_children(node)
         .into_iter()
         .flat_map(|child| match child.kind() {
-            "local_variable_declaration" => vec![parse_local_var_decl(child, source)],
+            "local_variable_declaration" => parse_local_var_decls(child, source),
             "resource" => parse_resource_node(child, source),
             "identifier" | "field_access" => vec![Stmt::Expr(parse_expr_node(child, source))],
             _ => Vec::new(),
@@ -604,7 +898,7 @@ fn parse_resource_node(node: tree_sitter::Node, source: &str) -> Vec<Stmt> {
     named_children(node)
         .into_iter()
         .flat_map(|child| match child.kind() {
-            "local_variable_declaration" => vec![parse_local_var_decl(child, source)],
+            "local_variable_declaration" => parse_local_var_decls(child, source),
             "identifier" | "field_access" => vec![Stmt::Expr(parse_expr_node(child, source))],
             _ => Vec::new(),
         })
@@ -698,11 +992,11 @@ fn parse_switch_group(
             "statement" => {
                 if let Some(stmt) = first_named_child(child) {
                     if !is_empty_statement_kind(stmt.kind()) {
-                        statements.push(parse_stmt_node(stmt, source, diagnostics));
+                        statements.extend(parse_stmt_nodes(stmt, source, diagnostics));
                     }
                 }
             }
-            _ => statements.push(parse_stmt_node(child, source, diagnostics)),
+            _ => statements.extend(parse_stmt_nodes(child, source, diagnostics)),
         }
     }
     SwitchCase { labels, statements }
@@ -765,22 +1059,38 @@ fn parse_expr_statement(node: tree_sitter::Node, source: &str) -> Stmt {
 }
 
 fn parse_local_var_decl(node: tree_sitter::Node, source: &str) -> Stmt {
+    parse_local_var_decls(node, source)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Stmt::Unsupported("local variable without declarator".to_string()))
+}
+
+fn parse_local_var_decls(node: tree_sitter::Node, source: &str) -> Vec<Stmt> {
     let ty = node
         .child_by_field_name("type")
         .map(|node| parse_type_node(node, source))
         .unwrap_or_else(|| JavaType::Unknown("local".to_string()));
-    let Some(declarator) = field_children(node, "declarator").into_iter().next() else {
-        return Stmt::Unsupported("local variable without declarator".to_string());
-    };
-    let name = field_text(declarator, "name", source).unwrap_or_else(|| "unknown".to_string());
-    let initializer = declarator
-        .child_by_field_name("value")
-        .map(|value| parse_expr_node(value, source));
-    Stmt::VarDecl {
-        ty,
-        name: to_snake_case(&name),
-        initializer,
+    let declarators = field_children(node, "declarator");
+    if declarators.is_empty() {
+        return vec![Stmt::Unsupported(
+            "local variable without declarator".to_string(),
+        )];
     }
+    declarators
+        .into_iter()
+        .map(|declarator| {
+            let name =
+                field_text(declarator, "name", source).unwrap_or_else(|| "unknown".to_string());
+            let initializer = declarator
+                .child_by_field_name("value")
+                .map(|value| parse_expr_node(value, source));
+            Stmt::VarDecl {
+                ty: ty.clone(),
+                name: to_snake_case(&name),
+                initializer,
+            }
+        })
+        .collect()
 }
 
 fn parse_if_node(node: tree_sitter::Node, source: &str, diagnostics: &mut DiagnosticBag) -> Stmt {
@@ -819,11 +1129,11 @@ fn parse_while_node(
 fn parse_for_node(node: tree_sitter::Node, source: &str, diagnostics: &mut DiagnosticBag) -> Stmt {
     let init = field_children(node, "init")
         .into_iter()
-        .map(|init| {
+        .flat_map(|init| {
             if init.kind() == "local_variable_declaration" {
-                parse_local_var_decl(init, source)
+                parse_local_var_decls(init, source)
             } else {
-                Stmt::Expr(parse_expr_node(init, source))
+                vec![Stmt::Expr(parse_expr_node(init, source))]
             }
         })
         .collect();
@@ -881,14 +1191,14 @@ fn statement_as_block(
         first_named_child(node)
             .filter(|stmt| !is_empty_statement_kind(stmt.kind()))
             .map(|stmt| Block {
-                statements: vec![parse_stmt_node(stmt, source, diagnostics)],
+                statements: parse_stmt_nodes(stmt, source, diagnostics),
             })
             .unwrap_or_default()
     } else if is_empty_statement_kind(node.kind()) {
         Block::default()
     } else {
         Block {
-            statements: vec![parse_stmt_node(node, source, diagnostics)],
+            statements: parse_stmt_nodes(node, source, diagnostics),
         }
     }
 }
@@ -928,7 +1238,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "string_literal" => {
             Expr::Literal(Literal::String(parse_string_literal(text(node, source))))
         }
-        "character_literal" => Expr::Raw(text(node, source).to_string()),
+        "character_literal" => Expr::Literal(Literal::Char(parse_char_literal(text(node, source)))),
         "field_access" => {
             let object = node
                 .child_by_field_name("object")
@@ -984,7 +1294,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
                 .map(|n| parse_expr_node(n, source));
             match (left, right) {
                 (Some(left), Some(right)) => Expr::Binary {
-                    op: BinaryOp::Add,
+                    op: BinaryOp::Assign,
                     left: Box::new(left),
                     right: Box::new(right),
                 },
@@ -1078,11 +1388,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             }
         }
         "cast_expression" => Expr::Cast {
-            ty: field_children(node, "type")
-                .into_iter()
-                .next()
-                .map(|ty| parse_type_node(ty, source))
-                .unwrap_or_else(|| JavaType::Unknown("cast".to_string())),
+            ty: parse_cast_type_node(node, source),
             expr: Box::new(
                 node.child_by_field_name("value")
                     .map(|value| parse_expr_node(value, source))
@@ -1129,6 +1435,27 @@ fn parse_array_creation_expr(node: tree_sitter::Node, source: &str) -> Expr {
     }
 }
 
+fn parse_cast_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
+    let field_ty = field_children(node, "type")
+        .into_iter()
+        .next()
+        .map(|ty| parse_type_node(ty, source));
+    let cast_text = text(node, source).trim();
+    if let Some(close) = cast_text.find(')') {
+        let ty_text = cast_text
+            .get(1..close)
+            .map(str::trim)
+            .filter(|text| !text.is_empty());
+        if let Some(ty_text) = ty_text {
+            let parsed = parse_type_text(ty_text);
+            if matches!(parsed, JavaType::Array(_)) || field_ty.is_none() {
+                return parsed;
+            }
+        }
+    }
+    field_ty.unwrap_or_else(|| JavaType::Unknown("cast".to_string()))
+}
+
 fn parse_array_initializer_elements(node: tree_sitter::Node, source: &str) -> Vec<Expr> {
     named_children(node)
         .into_iter()
@@ -1165,6 +1492,13 @@ fn parse_anonymous_class_body(node: tree_sitter::Node, source: &str) -> Vec<Memb
             }
             "interface_declaration" => {
                 members.push(Member::Type(parse_interface_decl(
+                    child,
+                    source,
+                    &mut diagnostics,
+                )));
+            }
+            "record_declaration" => {
+                members.push(Member::Type(parse_record_decl(
                     child,
                     source,
                     &mut diagnostics,
@@ -1232,6 +1566,7 @@ fn parse_method_reference_node(node: tree_sitter::Node, source: &str) -> Expr {
 fn parse_arg_list(node: tree_sitter::Node, source: &str) -> Vec<Expr> {
     named_children(node)
         .into_iter()
+        .filter(|arg| !matches!(arg.kind(), "line_comment" | "block_comment"))
         .map(|arg| parse_expr_node(arg, source))
         .collect()
 }
@@ -1245,7 +1580,10 @@ fn parse_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
 }
 
 fn parse_type_text(src: &str) -> JavaType {
-    let src = src.trim();
+    let mut src = src.trim();
+    while let Some(rest) = src.strip_prefix("final ") {
+        src = rest.trim_start();
+    }
     if let Some(inner) = src.strip_suffix("[]") {
         return JavaType::Array(Box::new(parse_type_text(inner)));
     }
@@ -1273,6 +1611,14 @@ fn parse_type_text(src: &str) -> JavaType {
                 )))));
             }
             if let Some(open) = src.find('<') {
+                if let Some(close) = matching_angle_close(src, open)
+                    && let Some(inner_suffix) = src
+                        .get(close + 1..)
+                        .and_then(|suffix| suffix.strip_prefix('.'))
+                    && !inner_suffix.trim().is_empty()
+                {
+                    return parse_type_text(inner_suffix.trim());
+                }
                 let name = src[..open]
                     .trim()
                     .rsplit('.')
@@ -1378,6 +1724,20 @@ fn parse_string_literal(src: &str) -> String {
         .replace("\\\"", "\"")
 }
 
+fn parse_char_literal(src: &str) -> char {
+    let inner = src.trim().trim_start_matches('\'').trim_end_matches('\'');
+    match inner {
+        "\\n" => '\n',
+        "\\r" => '\r',
+        "\\t" => '\t',
+        "\\0" => '\0',
+        "\\'" => '\'',
+        "\\\"" => '"',
+        "\\\\" => '\\',
+        _ => inner.chars().next().unwrap_or('\0'),
+    }
+}
+
 fn parse_binary_op(src: &str) -> Option<BinaryOp> {
     Some(match src {
         "+" => BinaryOp::Add,
@@ -1385,6 +1745,9 @@ fn parse_binary_op(src: &str) -> Option<BinaryOp> {
         "*" => BinaryOp::Mul,
         "/" => BinaryOp::Div,
         "%" => BinaryOp::Rem,
+        "&" => BinaryOp::BitAnd,
+        "|" => BinaryOp::BitOr,
+        "^" => BinaryOp::BitXor,
         "<<" => BinaryOp::Shl,
         ">>" | ">>>" => BinaryOp::Shr,
         "==" => BinaryOp::Eq,
@@ -1435,6 +1798,76 @@ fn parse_permits(node: tree_sitter::Node, source: &str) -> Vec<String> {
         })
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+fn parse_type_parameter_names(node: tree_sitter::Node, source: &str) -> Vec<String> {
+    let Some(type_params) = declared_type_parameters_text(node, source) else {
+        return Vec::new();
+    };
+    let Some(open) = type_params.find('<') else {
+        return Vec::new();
+    };
+    let Some(close) = matching_angle_close(type_params, open) else {
+        return Vec::new();
+    };
+
+    split_top_level_commas(&type_params[open + 1..close])
+        .into_iter()
+        .filter_map(|part| {
+            part.split_whitespace()
+                .next()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn parse_type_parameter_bounds(node: tree_sitter::Node, source: &str) -> Vec<Option<JavaType>> {
+    let Some(type_params) = declared_type_parameters_text(node, source) else {
+        return Vec::new();
+    };
+    let Some(open) = type_params.find('<') else {
+        return Vec::new();
+    };
+    let Some(close) = matching_angle_close(type_params, open) else {
+        return Vec::new();
+    };
+
+    split_top_level_commas(&type_params[open + 1..close])
+        .into_iter()
+        .map(|part| {
+            part.split_once(" extends ")
+                .map(|(_, bound)| parse_type_text(bound.split('&').next().unwrap_or(bound).trim()))
+        })
+        .collect()
+}
+
+fn declared_type_parameters_text<'a>(node: tree_sitter::Node, source: &'a str) -> Option<&'a str> {
+    if node.kind() == "type_parameters" {
+        return Some(text(node, source));
+    }
+    named_children(node)
+        .into_iter()
+        .find(|child| child.kind() == "type_parameters")
+        .map(|child| text(child, source))
+}
+
+fn matching_angle_close(src: &str, open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, ch) in src[open..].char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn collect_type_names(node: tree_sitter::Node, source: &str, out: &mut Vec<String>) {

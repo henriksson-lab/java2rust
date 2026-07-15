@@ -3,11 +3,15 @@ use crate::rust_ir::RustExpr;
 
 pub fn binary_op_to_rust(op: BinaryOp) -> &'static str {
     match op {
+        BinaryOp::Assign => "=",
         BinaryOp::Add => "+",
         BinaryOp::Sub => "-",
         BinaryOp::Mul => "*",
         BinaryOp::Div => "/",
         BinaryOp::Rem => "%",
+        BinaryOp::BitAnd => "&",
+        BinaryOp::BitOr => "|",
+        BinaryOp::BitXor => "^",
         BinaryOp::Shl => "<<",
         BinaryOp::Shr => ">>",
         BinaryOp::Eq => "==",

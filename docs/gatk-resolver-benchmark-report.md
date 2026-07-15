@@ -1,0 +1,23172 @@
+# GATK Resolver Benchmark Report
+
+Command:
+
+```text
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This benchmark parses, resolves, and runs semantic fact analysis. It does not
+run representation planning, signature solving, lowering, or Rust emission.
+
+## Baseline
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	226
+semantic_diagnostics	0
+unresolved_method_calls	65938
+external_api_explained_method_calls	0
+unexplained_method_calls	65938
+unresolved_constructors	8317
+unresolved_constructor_delegations	0
+unresolved_field_accesses	14021
+external_api_guesses	28396
+total_facts	147895
+top_unresolved_targets
+MethodCall	get	2835
+MethodCall	size	1990
+MethodCall	add	1959
+MethodCall	nonNull	1657
+MethodCall	stream	1596
+MethodCall	getStart	1215
+MethodCall	equals	1155
+MethodCall	format	1093
+MethodCall	put	1076
+MethodCall	getContig	877
+MethodCall	isEmpty	852
+MethodCall	info	632
+MethodCall	append	578
+MethodCall	forEach	479
+MethodCall	length	476
+MethodCall	addAll	424
+MethodCall	getName	324
+MethodCall	write	323
+MethodCall	getClass	316
+FieldAccess	UNKNOWN_VALUE_STRING	86
+```
+
+## After Receiver-Specific External API Facts
+
+This run adds receiver-specific external API facts for unresolved calls and
+classifies common collection, map, and core object methods through generalized
+standard-library policy. The raw unresolved method-call count is unchanged
+because the dependency sources are still absent. The useful design metric is
+that most unresolved method calls are now explained by external API facts before
+signature solving and lowering.
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	226
+semantic_diagnostics	0
+unresolved_method_calls	65938
+external_api_explained_method_calls	58942
+unexplained_method_calls	6996
+unresolved_constructors	8317
+unresolved_constructor_delegations	0
+unresolved_field_accesses	14021
+external_api_guesses	35638
+total_facts	155137
+top_unresolved_targets
+MethodCall	get	2835
+MethodCall	size	1990
+MethodCall	add	1959
+MethodCall	nonNull	1657
+MethodCall	stream	1596
+MethodCall	getStart	1215
+MethodCall	equals	1155
+MethodCall	format	1093
+MethodCall	put	1076
+MethodCall	getContig	877
+MethodCall	isEmpty	852
+MethodCall	info	632
+MethodCall	append	578
+MethodCall	forEach	479
+MethodCall	length	476
+MethodCall	addAll	424
+MethodCall	getName	324
+MethodCall	write	323
+MethodCall	getClass	316
+FieldAccess	UNKNOWN_VALUE_STRING	86
+```
+
+## Interpretation
+
+The largest unresolved classes are not GATK-specific. They are mostly generic
+Java/JDK or library-surface patterns:
+
+- collection and map operations: `get`, `size`, `add`, `put`, `isEmpty`,
+  `addAll`
+- stream/iteration operations: `stream`, `forEach`
+- core object/string/class operations: `equals`, `format`, `length`,
+  `getClass`
+- logger or writer APIs: `info`, `append`, `write`
+- domain getters: `getStart`, `getContig`, `getName`
+
+The receiver-specific external API slice reduced unexplained method calls from
+`65938` to `6996`. The next implementation slice should focus on the remaining
+unexplained method categories, especially static utility methods such as
+`String.format`/`Objects.nonNull`, logger/writer side effects, and domain getter
+return facts.
+
+## After Static Utility and Side-Effect API Facts
+
+This run adds generalized facts for known static utility calls, logger/writer
+side effects that do not require mutable receivers, and inherited `Object`
+methods on `this`/`super`. It also adds a `top_unexplained_method_targets`
+section so the next iteration is driven by the remaining unexplained categories
+rather than raw unresolved totals.
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	226
+semantic_diagnostics	0
+unresolved_method_calls	65938
+external_api_explained_method_calls	58965
+unexplained_method_calls	6973
+unresolved_constructors	8317
+unresolved_constructor_delegations	0
+unresolved_field_accesses	14021
+external_api_guesses	35717
+external_api_return_nullability_facts	0
+total_facts	155216
+top_unresolved_targets
+MethodCall	get	2835
+MethodCall	size	1990
+MethodCall	add	1959
+MethodCall	nonNull	1657
+MethodCall	stream	1596
+MethodCall	getStart	1215
+MethodCall	equals	1155
+MethodCall	format	1093
+MethodCall	put	1076
+MethodCall	getContig	877
+MethodCall	isEmpty	852
+MethodCall	info	632
+MethodCall	append	578
+MethodCall	forEach	479
+MethodCall	length	476
+MethodCall	addAll	424
+MethodCall	getName	324
+MethodCall	write	323
+MethodCall	getClass	316
+FieldAccess	UNKNOWN_VALUE_STRING	86
+top_unexplained_method_targets
+MethodCall	getStart	129
+MethodCall	getValue	124
+MethodCall	equals	122
+MethodCall	get	120
+MethodCall	write	116
+MethodCall	getHeaderForReads	115
+MethodCall	getKey	108
+MethodCall	getContig	102
+MethodCall	add	100
+MethodCall	getMessage	83
+MethodCall	getEnd	81
+MethodCall	getName	80
+MethodCall	append	62
+MethodCall	format	54
+MethodCall	getBestAvailableSequenceDictionary	41
+MethodCall	newLine	32
+MethodCall	getInheritance	31
+MethodCall	getVersion	31
+MethodCall	getOperator	23
+MethodCall	getMetadata	19
+```
+
+The next slice should focus on generalized domain getter return/nullability
+facts and writer-like output APIs. The tests should use small interfaces such
+as `Locatable`, `HeaderProvider`, `MessageCarrier`, and `LineWriter`, not GATK
+class names.
+
+## After External API Return Nullability Facts
+
+This run adds a return-nullability axis to `ExternalApiEffectFact`. Known
+boolean, size/length, equality, and static utility APIs can now produce
+`DefinitelyNonNull` return facts, while general domain getters stay
+conservatively `Unknown` until user or corpus facts prove more.
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	226
+semantic_diagnostics	0
+unresolved_method_calls	65938
+external_api_explained_method_calls	58965
+unexplained_method_calls	6973
+unresolved_constructors	8317
+unresolved_constructor_delegations	0
+unresolved_field_accesses	14021
+external_api_guesses	35717
+external_api_return_nullability_facts	4990
+total_facts	155216
+top_unresolved_targets
+MethodCall	get	2835
+MethodCall	size	1990
+MethodCall	add	1959
+MethodCall	nonNull	1657
+MethodCall	stream	1596
+MethodCall	getStart	1215
+MethodCall	equals	1155
+MethodCall	format	1093
+MethodCall	put	1076
+MethodCall	getContig	877
+MethodCall	isEmpty	852
+MethodCall	info	632
+MethodCall	append	578
+MethodCall	forEach	479
+MethodCall	length	476
+MethodCall	addAll	424
+MethodCall	getName	324
+MethodCall	write	323
+MethodCall	getClass	316
+FieldAccess	UNKNOWN_VALUE_STRING	86
+top_unexplained_method_targets
+MethodCall	getStart	129
+MethodCall	getValue	124
+MethodCall	equals	122
+MethodCall	get	120
+MethodCall	write	116
+MethodCall	getHeaderForReads	115
+MethodCall	getKey	108
+MethodCall	getContig	102
+MethodCall	add	100
+MethodCall	getMessage	83
+MethodCall	getEnd	81
+MethodCall	getName	80
+MethodCall	append	62
+MethodCall	format	54
+MethodCall	getBestAvailableSequenceDictionary	41
+MethodCall	newLine	32
+MethodCall	getInheritance	31
+MethodCall	getVersion	31
+MethodCall	getOperator	23
+MethodCall	getMetadata	19
+```
+
+## After Inherited Receiverless API Facts
+
+This run treats unresolved receiverless non-static calls as current-type
+inherited API calls. This covers framework and superclass hooks such as
+`getHeaderForReads()` without adding GATK-specific names. Known receiverless
+static utilities such as `nonNull(value)` remain receiverless static facts.
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	226
+semantic_diagnostics	0
+unresolved_method_calls	65938
+external_api_explained_method_calls	60580
+unexplained_method_calls	5358
+unresolved_constructors	8317
+unresolved_constructor_delegations	0
+unresolved_field_accesses	14021
+external_api_guesses	37133
+external_api_return_nullability_facts	5071
+total_facts	156632
+top_unresolved_targets
+MethodCall	get	2835
+MethodCall	size	1990
+MethodCall	add	1959
+MethodCall	nonNull	1657
+MethodCall	stream	1596
+MethodCall	getStart	1215
+MethodCall	equals	1155
+MethodCall	format	1093
+MethodCall	put	1076
+MethodCall	getContig	877
+MethodCall	isEmpty	852
+MethodCall	info	632
+MethodCall	append	578
+MethodCall	forEach	479
+MethodCall	length	476
+MethodCall	addAll	424
+MethodCall	getName	324
+MethodCall	write	323
+MethodCall	getClass	316
+FieldAccess	UNKNOWN_VALUE_STRING	86
+top_unexplained_method_targets
+MethodCall	getValue	123
+MethodCall	equals	122
+MethodCall	getStart	117
+MethodCall	write	115
+MethodCall	get	111
+MethodCall	getKey	108
+MethodCall	add	99
+MethodCall	getContig	94
+MethodCall	getEnd	83
+MethodCall	getMessage	83
+MethodCall	getName	80
+MethodCall	toString	71
+MethodCall	append	62
+MethodCall	getLength	58
+MethodCall	format	54
+MethodCall	newLine	32
+MethodCall	group	24
+MethodCall	getOperator	23
+MethodCall	serialize	17
+MethodCall	create	15
+```
+
+The remaining unexplained calls are increasingly receiver-type inference
+problems for chained calls, generic entries, external writer-like values, and
+unresolved call return types. The next slice should improve Java type facts for
+external call results or generic container entries rather than adding
+GATK-specific method names.
+
+## After Current-Type `super` Receiver Facts
+
+This run records unresolved `super.method()` and `this.field`/`super.field`
+receiver facts as the current object type instead of the literal unknown token
+`super`. The semantic fact layer already models explicit `super` calls through
+the current type, so this keeps resolver facts and semantic facts aligned.
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	226
+semantic_diagnostics	0
+unresolved_method_calls	65665
+external_api_explained_method_calls	60589
+unexplained_method_calls	5076
+unresolved_constructors	8317
+unresolved_constructor_delegations	0
+unresolved_field_accesses	14021
+external_api_guesses	36878
+external_api_return_nullability_facts	5018
+total_facts	156104
+top_unresolved_targets
+MethodCall	get	2835
+MethodCall	size	1990
+MethodCall	add	1958
+MethodCall	nonNull	1657
+MethodCall	stream	1596
+MethodCall	getStart	1215
+MethodCall	equals	1127
+MethodCall	format	1093
+MethodCall	put	1076
+MethodCall	getContig	877
+MethodCall	isEmpty	852
+MethodCall	info	632
+MethodCall	append	578
+MethodCall	forEach	479
+MethodCall	length	476
+MethodCall	addAll	424
+MethodCall	getName	324
+MethodCall	write	320
+MethodCall	getClass	316
+FieldAccess	UNKNOWN_VALUE_STRING	86
+top_unexplained_method_targets
+MethodCall	getValue	123
+MethodCall	getStart	117
+MethodCall	write	112
+MethodCall	get	111
+MethodCall	getKey	108
+MethodCall	add	97
+MethodCall	getContig	94
+MethodCall	getMessage	83
+MethodCall	getEnd	82
+MethodCall	getName	80
+MethodCall	append	62
+MethodCall	getLength	58
+MethodCall	format	54
+MethodCall	length	45
+MethodCall	newLine	32
+MethodCall	equals	28
+MethodCall	group	24
+MethodCall	getOperator	23
+MethodCall	contains	21
+MethodCall	create	15
+```
+
+The next slice should add benchmark detail for receiver-type mismatch classes
+or improve Java type facts for chained external calls and generic container
+entries. The regression tests should use minimized synthetic classes such
+as `List<T>`, `Map<K, V>`, `Logger`, or `Builder`, not GATK class names.
+
+## After Canonical External Receiver Keys
+
+This run adds receiver-type classification to the benchmark report and
+canonicalizes external receiver keys by stripping Java declaration modifiers
+such as `final`. It also classifies writer-line methods such as `newLine` as
+side-effecting read-only external APIs. This removes modifier spelling from the
+fact identity without adding corpus-specific class names.
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	226
+semantic_diagnostics	0
+unresolved_method_calls	65665
+external_api_explained_method_calls	60687
+unexplained_method_calls	4978
+unresolved_constructors	8317
+unresolved_constructor_delegations	0
+unresolved_field_accesses	14021
+external_api_guesses	36878
+external_api_return_nullability_facts	5018
+total_facts	156104
+top_unresolved_targets
+MethodCall	get	2835
+MethodCall	size	1990
+MethodCall	add	1958
+MethodCall	nonNull	1657
+MethodCall	stream	1596
+MethodCall	getStart	1215
+MethodCall	equals	1127
+MethodCall	format	1093
+MethodCall	put	1076
+MethodCall	getContig	877
+MethodCall	isEmpty	852
+MethodCall	info	632
+MethodCall	append	578
+MethodCall	forEach	479
+MethodCall	length	476
+MethodCall	addAll	424
+MethodCall	getName	324
+MethodCall	write	320
+MethodCall	getClass	316
+FieldAccess	UNKNOWN_VALUE_STRING	86
+top_unexplained_method_targets
+MethodCall	getValue	123
+MethodCall	getStart	117
+MethodCall	get	111
+MethodCall	getKey	108
+MethodCall	add	97
+MethodCall	getContig	94
+MethodCall	getEnd	87
+MethodCall	getMessage	83
+MethodCall	getName	80
+MethodCall	append	62
+MethodCall	getLength	58
+MethodCall	format	54
+MethodCall	length	45
+MethodCall	addAll	40
+MethodCall	write	33
+MethodCall	equals	28
+MethodCall	group	24
+MethodCall	getOperator	23
+MethodCall	contains	21
+MethodCall	create	15
+top_unexplained_method_receivers
+getValue	Entry	106
+getKey	Entry	100
+format	String	54
+append	StringBuilder	50
+getLength	CigarElement	49
+add	List	38
+group	Matcher	24
+equals	String	23
+getOperator	CigarElement	23
+length	Allele	20
+getAbsolutePath	File	17
+getBytes	String	17
+write	Writer	16
+get	List	15
+create	allele	14
+get	Map	14
+getContig	Locatable	14
+getSequenceLength	SAMSequenceRecord	14
+contains	String	11
+toUri	Path	11
+```
+
+The receiver breakdown now shows the next high-value category: generic
+`Entry<K, V>` APIs such as `getKey` and `getValue`. That should be handled as
+generic container/member type facts, not as GATK-specific method names.
+
+## After Seeding External API Facts From Resolver Targets
+
+This run lets semantic analysis seed external API effect facts from structured
+resolver unresolved-target facts. The AST walk still produces facts from local
+type inference, but resolver facts now provide a second input path when receiver
+types are known in unresolved call facts. This is especially important for
+generic entry values, chained calls, lambdas, and cases where local expression
+walking lacks enough context.
+
+The change is general: it uses the existing receiver type, method name, arity,
+standard-library policy, finite budget, and duplicate suppression. It does not
+special-case GATK names.
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	226
+semantic_diagnostics	0
+unresolved_method_calls	65665
+external_api_explained_method_calls	65658
+unexplained_method_calls	7
+unresolved_constructors	8317
+unresolved_constructor_delegations	0
+unresolved_field_accesses	14021
+external_api_guesses	40200
+external_api_return_nullability_facts	5456
+total_facts	159426
+top_unresolved_targets
+MethodCall	get	2835
+MethodCall	size	1990
+MethodCall	add	1958
+MethodCall	nonNull	1657
+MethodCall	stream	1596
+MethodCall	getStart	1215
+MethodCall	equals	1127
+MethodCall	format	1093
+MethodCall	put	1076
+MethodCall	getContig	877
+MethodCall	isEmpty	852
+MethodCall	info	632
+MethodCall	append	578
+MethodCall	forEach	479
+MethodCall	length	476
+MethodCall	addAll	424
+MethodCall	getName	324
+MethodCall	write	320
+MethodCall	getClass	316
+FieldAccess	UNKNOWN_VALUE_STRING	86
+top_unexplained_method_targets
+MethodCall	getBytes	2
+MethodCall	logBeta	2
+MethodCall	getContig	1
+MethodCall	getEnd	1
+MethodCall	getStart	1
+top_unexplained_method_receivers
+getBytes	*	2
+logBeta	*	2
+getContig	*	1
+getEnd	*	1
+getStart	*	1
+```
+
+The remaining unexplained method calls have no receiver type (`*`) in resolver
+facts, so the next resolver work should classify why those receiver types are
+missing. Constructor and field-access unresolved counts are now the larger
+remaining benchmark categories.
+
+## After Constructor And Field Breakdown
+
+This run adds benchmark-only breakdowns for unresolved constructors and field
+accesses. The raw counts are unchanged, but the report now exposes the next
+high-volume categories directly instead of hiding them under method-heavy
+`top_unresolved_targets`.
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	226
+semantic_diagnostics	0
+unresolved_method_calls	65665
+external_api_explained_method_calls	65658
+unexplained_method_calls	7
+unresolved_constructors	8317
+unresolved_constructor_delegations	0
+unresolved_field_accesses	14021
+external_api_guesses	40200
+external_api_return_nullability_facts	5456
+total_facts	159426
+top_unresolved_constructor_targets
+ConstructorCall	ArrayList	930
+ConstructorCall	GATKException	557
+ConstructorCall	UserException	409
+ConstructorCall	IllegalArgumentException	341
+ConstructorCall	SimpleInterval	335
+ConstructorCall	HashSet	195
+ConstructorCall	BadInput	182
+ConstructorCall	LinkedHashMap	133
+ConstructorCall	StringBuilder	103
+ConstructorCall	LinkedHashSet	85
+ConstructorCall	VCFInfoHeaderLine	67
+ConstructorCall	BadArgumentValue	58
+ConstructorCall	ShouldNeverReachHereException	50
+ConstructorCall	RuntimeException	43
+ConstructorCall	OutputStreamWriter	38
+ConstructorCall	FeatureDataSource	26
+ConstructorCall	FeatureContext	24
+ConstructorCall	Tuple2	23
+ConstructorCall	BufferedWriter	18
+ConstructorCall	SAMRecordToGATKReadAdapter	17
+top_unresolved_field_targets
+FieldAccess	referenceSpan	181
+FieldAccess	StructuralVariantAnnotationType	98
+FieldAccess	out	90
+FieldAccess	UNKNOWN_VALUE_STRING	86
+FieldAccess	POSITIVE	54
+FieldAccess	CODON_LENGTH	52
+FieldAccess	NO_CALL	51
+FieldAccess	HET	47
+FieldAccess	region	42
+FieldAccess	regionWithLowerCoordOnContig	40
+FieldAccess	HOM_REF	39
+FieldAccess	Integer	39
+FieldAccess	assemblyResult	39
+FieldAccess	read	39
+FieldAccess	HOM_VAR	37
+FieldAccess	binaryCodec	36
+FieldAccess	VariantClassification	35
+FieldAccess	likelihoodArgs	35
+FieldAccess	bins	34
+FieldAccess	regionWithHigherCoordOnContig	34
+top_unresolved_field_receivers
+referenceSpan	AlignmentInterval	124
+StructuralVariantAnnotationType	g_a_t_k_s_v_v_c_f_constants	98
+out	system	90
+UNKNOWN_VALUE_STRING	funcotator_constants	86
+CODON_LENGTH	amino_acid	52
+HET	genotype_type	47
+String	v_c_f_header_line_type	44
+NO_CALL	allele	43
+region	CallRegionContext	42
+regionWithLowerCoordOnContig	SimpleChimera	40
+HOM_REF	genotype_type	39
+assemblyResult	CallRegionContext	39
+HOM_VAR	genotype_type	37
+POSITIVE	strand	36
+binaryCodec	SAMRecordSparkCodec	36
+regionWithHigherCoordOnContig	SimpleChimera	34
+VariantClassification	gencode_funcotation	33
+likelihoodArgs	HaplotypeCallerArgumentCollection	29
+endInAssembledContig	AlignmentInterval	28
+startInAssembledContig	AlignmentInterval	28
+```
+
+The constructor breakdown suggests the next semantic slice should distinguish
+source-unresolved constructors from external-library constructors. The field
+breakdown suggests a later slice should separate static external constants from
+missed source fields.
+
+## After Source Field Resolution And External Field Facts
+
+This run adds resolver-owned source field lookup for direct fields, static
+fields, and inherited fields through known `extends` edges. It also adds
+semantic external-field facts for unresolved field accesses whose receiver type
+is not part of the translated source corpus.
+
+The tests added for this slice use small invented classes. They check that
+source fields do not become unresolved facts, while missing library fields and
+constants are explained by external-field facts without hiding unresolved source
+field mistakes.
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	226
+semantic_diagnostics	0
+unresolved_method_calls	65665
+external_api_explained_method_calls	65658
+unexplained_method_calls	7
+unresolved_constructors	8317
+external_api_explained_constructors	8253
+unexplained_constructors	64
+unresolved_constructor_delegations	0
+unresolved_field_accesses	9803
+external_api_explained_field_accesses	9056
+unexplained_field_accesses	747
+external_api_guesses	40200
+external_constructor_guesses	5785
+external_field_guesses	4937
+external_api_return_nullability_facts	5456
+total_facts	165930
+top_unresolved_targets
+MethodCall	get	2835
+MethodCall	size	1990
+MethodCall	add	1958
+MethodCall	nonNull	1657
+MethodCall	stream	1596
+MethodCall	getStart	1215
+MethodCall	equals	1127
+MethodCall	format	1093
+MethodCall	put	1076
+MethodCall	getContig	877
+MethodCall	isEmpty	852
+MethodCall	validateArg	638
+MethodCall	info	632
+MethodCall	append	578
+MethodCall	forEach	479
+MethodCall	addAll	424
+MethodCall	getName	324
+MethodCall	write	320
+MethodCall	getClass	316
+FieldAccess	UNKNOWN_VALUE_STRING	86
+top_unexplained_method_targets
+MethodCall	getBytes	2
+MethodCall	logBeta	2
+MethodCall	getContig	1
+MethodCall	getEnd	1
+MethodCall	getStart	1
+top_unexplained_method_receivers
+getBytes	*	2
+logBeta	*	2
+getContig	*	1
+getEnd	*	1
+getStart	*	1
+top_unresolved_constructor_targets
+ConstructorCall	ArrayList	930
+ConstructorCall	GATKException	557
+ConstructorCall	UserException	409
+ConstructorCall	IllegalArgumentException	341
+ConstructorCall	SimpleInterval	335
+ConstructorCall	HashSet	195
+ConstructorCall	BadInput	182
+ConstructorCall	LinkedHashMap	133
+ConstructorCall	StringBuilder	103
+ConstructorCall	LinkedHashSet	85
+ConstructorCall	VCFInfoHeaderLine	67
+ConstructorCall	BadArgumentValue	58
+ConstructorCall	ShouldNeverReachHereException	50
+ConstructorCall	RuntimeException	43
+ConstructorCall	OutputStreamWriter	38
+ConstructorCall	FeatureDataSource	26
+ConstructorCall	FeatureContext	24
+ConstructorCall	Tuple2	23
+ConstructorCall	BufferedWriter	18
+ConstructorCall	SAMRecordToGATKReadAdapter	17
+top_unexplained_constructor_targets
+ConstructorCall	Serializer	14
+ConstructorCall	BooleanAccumulator	4
+ConstructorCall	AssemblyTooComplexException	2
+ConstructorCall	BestEndAlignmentsAccumulator	2
+ConstructorCall	GenotypeAlleleCounts	2
+ConstructorCall	ScoredHaplotype	2
+ConstructorCall	WalkDataFactory	2
+ConstructorCall	ARE	1
+ConstructorCall	AlleleLengthComparator	1
+ConstructorCall	AlleleLikelihoods	1
+ConstructorCall	AltAndTotalReadCounts	1
+ConstructorCall	BestPairAlignmentsAccumulator	1
+ConstructorCall	CommandLineArgumentValidatorMain	1
+ConstructorCall	Dirichlet	1
+ConstructorCall	GATKDuplicationMetrics	1
+ConstructorCall	GATKReadComparator	1
+ConstructorCall	GCContentAnnotator	1
+ConstructorCall	GenBankCatalogFormat	1
+ConstructorCall	HaplotypeComparator	1
+ConstructorCall	HistogramGenerator	1
+top_unresolved_field_targets
+FieldAccess	referenceSpan	169
+FieldAccess	length	148
+FieldAccess	StructuralVariantAnnotationType	98
+FieldAccess	out	90
+FieldAccess	UNKNOWN_VALUE_STRING	86
+FieldAccess	POSITIVE	54
+FieldAccess	CODON_LENGTH	52
+FieldAccess	NO_CALL	51
+FieldAccess	HET	47
+FieldAccess	String	45
+FieldAccess	S	44
+FieldAccess	Integer	43
+FieldAccess	HOM_REF	39
+FieldAccess	_2	38
+FieldAccess	HOM_VAR	37
+FieldAccess	regionWithLowerCoordOnContig	36
+FieldAccess	VariantClassification	35
+FieldAccess	likelihoodArgs	35
+FieldAccess	regionWithHigherCoordOnContig	30
+FieldAccess	pythonArg	25
+top_unexplained_field_targets
+FieldAccess	COLUMNS	33
+FieldAccess	SNP	11
+FieldAccess	POLY	10
+FieldAccess	INDEL	8
+FieldAccess	MONO	8
+FieldAccess	attributeValue	8
+FieldAccess	this	7
+FieldAccess	CNV	6
+FieldAccess	CONTIG	6
+FieldAccess	Compatibility	6
+FieldAccess	REPORT_TYPE_ATTRIBUTE_KEY	6
+FieldAccess	COHORT	5
+FieldAccess	MutectStatsColumn	5
+FieldAccess	PHASE_01	5
+FieldAccess	logger	5
+FieldAccess	minVQSLod	5
+FieldAccess	numKnown	5
+FieldAccess	numNovel	5
+FieldAccess	ALL	4
+FieldAccess	C	4
+top_unresolved_field_receivers
+referenceSpan	AlignmentInterval	121
+StructuralVariantAnnotationType	g_a_t_k_s_v_v_c_f_constants	98
+out	system	90
+UNKNOWN_VALUE_STRING	funcotator_constants	86
+CODON_LENGTH	amino_acid	52
+HET	genotype_type	47
+String	v_c_f_header_line_type	44
+NO_CALL	allele	43
+Integer	v_c_f_header_line_type	42
+S	cigar_operator	40
+HOM_REF	genotype_type	39
+HOM_VAR	genotype_type	37
+POSITIVE	strand	36
+regionWithLowerCoordOnContig	SimpleChimera	36
+VariantClassification	gencode_funcotation	33
+regionWithHigherCoordOnContig	SimpleChimera	30
+standardArgs	HaplotypeCallerArgumentCollection	30
+likelihoodArgs	HaplotypeCallerArgumentCollection	29
+Aggregation	do_c_output_type	21
+FileType	do_c_output_type	21
+top_unexplained_field_receivers
+POLY	site_status	10
+MONO	site_status	8
+attributeValue	ReportType	8
+SNP	type_	7
+this	sample_list	7
+Compatibility	compatibility_record	6
+CNV	type_	5
+COHORT	RunMode	5
+INDEL	type_	5
+MutectStatsColumn	mutect_stats	5
+PHASE_01	phase_group	5
+logger	EvaluateInfoFieldConcordance	5
+minVQSLod	VQSLODTranche	5
+numKnown	VQSLODTranche	5
+numNovel	VQSLODTranche	5
+ALL	validation_type	4
+C	base	4
+DEL	supported_type	4
+FILTERED	site_status	4
+G	base	4
+```
+
+Interpretation:
+
+- Source field lookup reduced raw unresolved field accesses from `14021` to
+  `9803`.
+- External-field facts explain `9056` of those `9803` field accesses without
+  hard-coding GATK names.
+- The remaining `747` unexplained field accesses are now a smaller resolver or
+  parser/modeling target. The top rows suggest enum constants, parser-spelled
+  synthetic names, nested/source type ownership, and remaining source field
+  ownership issues.
+
+## After Enum Constants And Enum Body Fields
+
+This run parses Java enum constants as source-owned static final fields and
+parses enum body declarations through the enum declaration path. The resolver
+can then treat `EnumType.VALUE`, enum instance fields, and chained enum
+constant field access as source members instead of unresolved external fields.
+
+The regression test uses a small `SiteStatus` enum with constants, a public
+field, constructor state, and chained `SiteStatus.POLY.label` access. No GATK
+type names are used in the test.
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1500
+parser_diagnostics	0
+resolver_diagnostics	228
+semantic_diagnostics	0
+unresolved_method_calls	65939
+external_api_explained_method_calls	65932
+unexplained_method_calls	7
+unresolved_constructors	8348
+external_api_explained_constructors	8284
+unexplained_constructors	64
+unresolved_constructor_delegations	0
+unresolved_field_accesses	9181
+external_api_explained_field_accesses	9043
+unexplained_field_accesses	138
+external_api_guesses	40350
+external_constructor_guesses	5803
+external_field_guesses	4921
+external_api_return_nullability_facts	5490
+total_facts	167425
+top_unresolved_targets
+MethodCall	get	2845
+MethodCall	size	1991
+MethodCall	add	1958
+MethodCall	nonNull	1678
+MethodCall	stream	1599
+MethodCall	getStart	1215
+MethodCall	equals	1138
+MethodCall	format	1098
+MethodCall	put	1077
+MethodCall	getContig	877
+MethodCall	isEmpty	852
+MethodCall	validateArg	638
+MethodCall	info	632
+MethodCall	append	578
+MethodCall	forEach	479
+MethodCall	addAll	427
+MethodCall	getName	323
+MethodCall	write	321
+MethodCall	getClass	316
+FieldAccess	UNKNOWN_VALUE_STRING	86
+top_unexplained_method_targets
+MethodCall	getBytes	2
+MethodCall	logBeta	2
+MethodCall	getContig	1
+MethodCall	getEnd	1
+MethodCall	getStart	1
+top_unexplained_method_receivers
+getBytes	*	2
+logBeta	*	2
+getContig	*	1
+getEnd	*	1
+getStart	*	1
+top_unresolved_constructor_targets
+ConstructorCall	ArrayList	930
+ConstructorCall	GATKException	558
+ConstructorCall	UserException	412
+ConstructorCall	IllegalArgumentException	353
+ConstructorCall	SimpleInterval	335
+ConstructorCall	HashSet	195
+ConstructorCall	BadInput	184
+ConstructorCall	LinkedHashMap	133
+ConstructorCall	StringBuilder	103
+ConstructorCall	LinkedHashSet	85
+ConstructorCall	VCFInfoHeaderLine	67
+ConstructorCall	BadArgumentValue	58
+ConstructorCall	ShouldNeverReachHereException	50
+ConstructorCall	RuntimeException	43
+ConstructorCall	OutputStreamWriter	38
+ConstructorCall	FeatureDataSource	26
+ConstructorCall	FeatureContext	24
+ConstructorCall	Tuple2	23
+ConstructorCall	BufferedWriter	18
+ConstructorCall	SAMRecordToGATKReadAdapter	17
+top_unexplained_constructor_targets
+ConstructorCall	Serializer	14
+ConstructorCall	BooleanAccumulator	4
+ConstructorCall	AssemblyTooComplexException	2
+ConstructorCall	BestEndAlignmentsAccumulator	2
+ConstructorCall	GenotypeAlleleCounts	2
+ConstructorCall	ScoredHaplotype	2
+ConstructorCall	WalkDataFactory	2
+ConstructorCall	ARE	1
+ConstructorCall	AlleleLengthComparator	1
+ConstructorCall	AlleleLikelihoods	1
+ConstructorCall	AltAndTotalReadCounts	1
+ConstructorCall	BestPairAlignmentsAccumulator	1
+ConstructorCall	CommandLineArgumentValidatorMain	1
+ConstructorCall	Dirichlet	1
+ConstructorCall	GATKDuplicationMetrics	1
+ConstructorCall	GATKReadComparator	1
+ConstructorCall	GCContentAnnotator	1
+ConstructorCall	GenBankCatalogFormat	1
+ConstructorCall	HaplotypeComparator	1
+ConstructorCall	HistogramGenerator	1
+top_unresolved_field_targets
+FieldAccess	referenceSpan	169
+FieldAccess	length	148
+FieldAccess	StructuralVariantAnnotationType	98
+FieldAccess	out	90
+FieldAccess	UNKNOWN_VALUE_STRING	86
+FieldAccess	POSITIVE	56
+FieldAccess	CODON_LENGTH	52
+FieldAccess	HET	47
+FieldAccess	NO_CALL	47
+FieldAccess	String	45
+FieldAccess	S	44
+FieldAccess	Integer	43
+FieldAccess	HOM_REF	39
+FieldAccess	_2	38
+FieldAccess	HOM_VAR	37
+FieldAccess	regionWithLowerCoordOnContig	36
+FieldAccess	VariantClassification	35
+FieldAccess	likelihoodArgs	35
+FieldAccess	regionWithHigherCoordOnContig	30
+FieldAccess	Aggregation	21
+top_unexplained_field_targets
+FieldAccess	this	15
+FieldAccess	Compatibility	6
+FieldAccess	MutectStatsColumn	5
+FieldAccess	dataSourceIsB37	5
+FieldAccess	logger	5
+FieldAccess	minVQSLod	5
+FieldAccess	numKnown	5
+FieldAccess	numNovel	5
+FieldAccess	version	5
+FieldAccess	knownTiTv	4
+FieldAccess	novelTiTv	4
+FieldAccess	READ_PAIRS_EXAMINED	3
+FieldAccess	READ_PAIR_DUPLICATES	3
+FieldAccess	SECONDARY_OR_SUPPLEMENTARY_RDS	3
+FieldAccess	UNMAPPED_READS	3
+FieldAccess	UNPAIRED_READS_EXAMINED	3
+FieldAccess	UNPAIRED_READ_DUPLICATES	3
+FieldAccess	accessibleTruthSites	3
+FieldAccess	callsAtTruthSites	3
+FieldAccess	file	3
+top_unresolved_field_receivers
+referenceSpan	AlignmentInterval	121
+StructuralVariantAnnotationType	g_a_t_k_s_v_v_c_f_constants	98
+UNKNOWN_VALUE_STRING	funcotator_constants	92
+out	system	90
+CODON_LENGTH	amino_acid	52
+HET	genotype_type	47
+String	v_c_f_header_line_type	44
+NO_CALL	allele	43
+Integer	v_c_f_header_line_type	42
+S	cigar_operator	40
+HOM_REF	genotype_type	39
+POSITIVE	strand	38
+HOM_VAR	genotype_type	37
+regionWithLowerCoordOnContig	SimpleChimera	36
+VariantClassification	gencode_funcotation	33
+regionWithHigherCoordOnContig	SimpleChimera	30
+standardArgs	HaplotypeCallerArgumentCollection	30
+likelihoodArgs	HaplotypeCallerArgumentCollection	29
+Aggregation	do_c_output_type	21
+FileType	do_c_output_type	21
+top_unexplained_field_receivers
+this	sample_list	7
+Compatibility	compatibility_record	6
+MutectStatsColumn	mutect_stats	5
+logger	EvaluateInfoFieldConcordance	5
+minVQSLod	VQSLODTranche	5
+numKnown	VQSLODTranche	5
+numNovel	VQSLODTranche	5
+knownTiTv	VQSLODTranche	4
+novelTiTv	VQSLODTranche	4
+this	allele_likelihoods	4
+READ_PAIRS_EXAMINED	GATKDuplicationMetrics	3
+READ_PAIR_DUPLICATES	GATKDuplicationMetrics	3
+SECONDARY_OR_SUPPLEMENTARY_RDS	GATKDuplicationMetrics	3
+UNMAPPED_READS	GATKDuplicationMetrics	3
+UNPAIRED_READS_EXAMINED	GATKDuplicationMetrics	3
+UNPAIRED_READ_DUPLICATES	GATKDuplicationMetrics	3
+accessibleTruthSites	VQSLODTranche	3
+callsAtTruthSites	VQSLODTranche	3
+AllelicCountTableColumn	allelic_count_collection	2
+ESTIMATED_LIBRARY_SIZE	GATKDuplicationMetrics	2
+```
+
+Interpretation:
+
+- Unexplained field accesses dropped from `747` to `138`.
+- Raw unresolved field accesses dropped from `9803` to `9181`.
+- Parsing enum body declarations exposes more real code to resolution, which
+  increased raw unresolved method calls and constructors slightly and moved
+  `files_resolved_without_errors` from `1502` to `1500`. That is useful signal,
+  not a lowering issue; the next diagnostic slice should classify the two new
+  resolver errors and decide whether they are parser, resolver, or external API
+  fact gaps.
+
+## After Diagnostic Breakdown, Qualified This, And Nested Type Members
+
+This run adds benchmark diagnostic summaries, resolves Java qualified-this
+receiver expressions such as `Outer.this`, and treats source nested types as
+source-owned static members for resolver purposes. The latter lets chains like
+`Outer.NestedEnum.VALUE` flow through the same source-member resolution path as
+fields and enum constants.
+
+The new tests use invented classes:
+
+- ambiguous overload calls for resolver diagnostic summaries
+- `QualifiedOuter.this.outerHook()` for qualified-this receiver typing
+- `OuterRecord.Compatibility.COMPATIBLE` for nested enum constant access
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1500
+parser_diagnostics	0
+resolver_diagnostics	228
+semantic_diagnostics	0
+unresolved_method_calls	65924
+external_api_explained_method_calls	65917
+unexplained_method_calls	7
+unresolved_constructors	8348
+external_api_explained_constructors	8284
+unexplained_constructors	64
+unresolved_constructor_delegations	0
+unresolved_field_accesses	9380
+external_api_explained_field_accesses	9043
+unexplained_field_accesses	337
+external_api_guesses	40340
+external_constructor_guesses	5803
+external_field_guesses	4921
+external_api_return_nullability_facts	5490
+total_facts	167599
+top_unexplained_method_targets
+MethodCall	getBytes	2
+MethodCall	logBeta	2
+MethodCall	getContig	1
+MethodCall	getEnd	1
+MethodCall	getStart	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "List", args: [Named { name: "Contig", args: [] }] }]	5
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Double)), Unknown("lambda")]	3
+resolve_call_ambiguous	no overload of createGenomeLoc matches argument types [Unknown("getContig"), Unknown("getStart"), Unknown("getEnd"), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of setColumn matches argument types [String, Unknown("format")]	3
+top_unexplained_constructor_targets
+ConstructorCall	Serializer	14
+ConstructorCall	BooleanAccumulator	4
+ConstructorCall	AssemblyTooComplexException	2
+ConstructorCall	BestEndAlignmentsAccumulator	2
+ConstructorCall	GenotypeAlleleCounts	2
+ConstructorCall	ScoredHaplotype	2
+ConstructorCall	WalkDataFactory	2
+top_unexplained_field_targets
+FieldAccess	minVisitNum	13
+FieldAccess	attributes	11
+FieldAccess	flowOrder	11
+FieldAccess	seq	9
+FieldAccess	ref	8
+FieldAccess	loc	7
+FieldAccess	rightMotif	7
+FieldAccess	attributeValue	6
+FieldAccess	start	6
+FieldAccess	dataSourceIsB37	5
+FieldAccess	logger	5
+FieldAccess	minVQSLod	5
+FieldAccess	numKnown	5
+FieldAccess	numNovel	5
+top_unexplained_field_receivers
+minVisitNum	WalkData	13
+attributes	LocalContext	11
+flowOrder	LocalContext	10
+seq	Cache	9
+loc	Splice	7
+ref	LocalContext	7
+rightMotif	LocalContext	7
+attributeValue	ReportType	6
+start	Cache	6
+logger	EvaluateInfoFieldConcordance	5
+minVQSLod	VQSLODTranche	5
+numKnown	VQSLODTranche	5
+numNovel	VQSLODTranche	5
+```
+
+Interpretation:
+
+- Qualified-this handling removed the `FieldAccess this` category and reduced
+  unexplained fields from `138` to `123` before the nested-type slice.
+- Nested type source-member handling correctly stops treating source nested
+  type ownership as an external field. That exposes more source-field gaps:
+  the final unexplained field count is `337`.
+- The next source-field slice should focus on why source fields on nested/local
+  types such as `WalkData`, `LocalContext`, `Cache`, and `Splice` are still
+  recorded as unresolved. The diagnostic slice should focus on unresolved call
+  result typing for `toString`, `format`, and similar APIs before overload
+  matching.
+
+## After Source Field Split And Snake Case Receiver Collision Fix
+
+This run adds a benchmark split for unexplained field accesses whose receiver
+is a known source type versus a non-source receiver. It also fixes resolver
+field access classification when a local variable's Rust-style snake_case name
+matches the snake_case key for a Java type owner, such as `walkData` versus
+`WalkData`.
+
+The regression tests are synthetic:
+
+- fields on source nested class instances
+- fields on later-declared nested class instances
+- fields on resolved call results
+- a local receiver whose snake_case spelling collides with a type owner key
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1500
+parser_diagnostics	0
+resolver_diagnostics	228
+semantic_diagnostics	0
+unresolved_method_calls	65924
+external_api_explained_method_calls	65917
+unexplained_method_calls	7
+unresolved_constructors	8348
+external_api_explained_constructors	8284
+unexplained_constructors	64
+unresolved_constructor_delegations	0
+unresolved_field_accesses	9151
+external_api_explained_field_accesses	9043
+unexplained_field_accesses	108
+unexplained_source_field_accesses	102
+unexplained_non_source_field_accesses	6
+external_api_guesses	40340
+external_constructor_guesses	5803
+external_field_guesses	4921
+external_api_return_nullability_facts	5490
+total_facts	167370
+top_unexplained_field_targets
+FieldAccess	dataSourceIsB37	5
+FieldAccess	logger	5
+FieldAccess	minVQSLod	5
+FieldAccess	numKnown	5
+FieldAccess	numNovel	5
+FieldAccess	version	5
+FieldAccess	knownTiTv	4
+FieldAccess	novelTiTv	4
+FieldAccess	READ_PAIRS_EXAMINED	3
+FieldAccess	READ_PAIR_DUPLICATES	3
+FieldAccess	SECONDARY_OR_SUPPLEMENTARY_RDS	3
+FieldAccess	UNMAPPED_READS	3
+FieldAccess	UNPAIRED_READS_EXAMINED	3
+FieldAccess	UNPAIRED_READ_DUPLICATES	3
+FieldAccess	accessibleTruthSites	3
+FieldAccess	callsAtTruthSites	3
+FieldAccess	file	3
+FieldAccess	ESTIMATED_LIBRARY_SIZE	2
+FieldAccess	KEY	2
+FieldAccess	LIBRARY	2
+top_unexplained_field_receivers
+logger	EvaluateInfoFieldConcordance	5
+minVQSLod	VQSLODTranche	5
+numKnown	VQSLODTranche	5
+numNovel	VQSLODTranche	5
+knownTiTv	VQSLODTranche	4
+novelTiTv	VQSLODTranche	4
+READ_PAIRS_EXAMINED	GATKDuplicationMetrics	3
+READ_PAIR_DUPLICATES	GATKDuplicationMetrics	3
+SECONDARY_OR_SUPPLEMENTARY_RDS	GATKDuplicationMetrics	3
+UNMAPPED_READS	GATKDuplicationMetrics	3
+UNPAIRED_READS_EXAMINED	GATKDuplicationMetrics	3
+UNPAIRED_READ_DUPLICATES	GATKDuplicationMetrics	3
+accessibleTruthSites	VQSLODTranche	3
+callsAtTruthSites	VQSLODTranche	3
+ESTIMATED_LIBRARY_SIZE	GATKDuplicationMetrics	2
+KEY	*	2
+LIBRARY	GATKDuplicationMetrics	2
+PERCENT_DUPLICATION	GATKDuplicationMetrics	2
+READ_PAIR_OPTICAL_DUPLICATES	GATKDuplicationMetrics	2
+UNMAPPED	Array	2
+```
+
+Interpretation:
+
+- Unexplained field accesses dropped from `337` to `108`.
+- The source/non-source split shows `102` of the remaining `108` are source
+  receiver gaps, so the next field slice should stay in resolver/source symbol
+  handling rather than external API facts.
+- The former top rows for nested data holder classes (`WalkData`,
+  `LocalContext`, `Cache`, `Splice`) disappeared from the top unexplained list.
+- The next likely field issue is inherited source fields, for example
+  `VQSLODTranche` fields inherited from its superclass, plus a small number of
+  non-source constants or array sentinel fields.
+
+## After Package-Scoped Cross-File Source Symbols
+
+This run changes `resolver-bench` from isolated-file resolution to package-
+scoped source-symbol resolution. The benchmark now parses the corpus, builds a
+source symbol table per Java package, and resolves each file against the symbol
+table for its package. Method lookup now follows source `extends` edges, as
+field lookup already did.
+
+The regression tests are synthetic and intentionally not GATK-specific:
+
+- cross-file inherited source fields
+- cross-file inherited source methods
+- same simple class name in different packages must not collide
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1378
+parser_diagnostics	0
+resolver_diagnostics	735
+semantic_diagnostics	0
+unresolved_method_calls	61095
+external_api_explained_method_calls	61088
+unexplained_method_calls	7
+unresolved_constructors	7601
+external_api_explained_constructors	7534
+unexplained_constructors	67
+unresolved_constructor_delegations	0
+unresolved_field_accesses	6367
+external_api_explained_field_accesses	6276
+unexplained_field_accesses	91
+unexplained_source_field_accesses	85
+unexplained_non_source_field_accesses	6
+external_api_guesses	37300
+external_constructor_guesses	5174
+external_field_guesses	3514
+external_api_return_nullability_facts	5282
+total_facts	153934
+top_unexplained_method_targets
+MethodCall	getBytes	2
+MethodCall	logBeta	2
+MethodCall	getContig	1
+MethodCall	getEnd	1
+MethodCall	getStart	1
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of serialize for argument types [Named { name: "Kryo", args: [] }, Named { name: "Output", args: [] }]	33
+resolve_call_ambiguous	ambiguous overload of emitln for argument types [String]	25
+resolve_call_ambiguous	ambiguous overload of hashCode for argument types []	20
+resolve_call_ambiguous	ambiguous overload of toString for argument types []	17
+resolve_call_ambiguous	no overload of validateArg matches argument types [Primitive(Boolean), Unknown("lambda")]	16
+resolve_call_ambiguous	ambiguous overload of equals for argument types [Named { name: "Object", args: [] }]	15
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	15
+top_unexplained_field_targets
+FieldAccess	COHORT	5
+FieldAccess	dataSourceIsB37	5
+FieldAccess	logger	5
+FieldAccess	version	5
+FieldAccess	LIBRARY	3
+FieldAccess	READ_PAIRS_EXAMINED	3
+FieldAccess	READ_PAIR_DUPLICATES	3
+FieldAccess	SECONDARY_OR_SUPPLEMENTARY_RDS	3
+FieldAccess	UNMAPPED_READS	3
+FieldAccess	UNPAIRED_READS_EXAMINED	3
+FieldAccess	UNPAIRED_READ_DUPLICATES	3
+FieldAccess	enclosingRead	3
+FieldAccess	offset	3
+FieldAccess	seenAnySecondOfPair	3
+top_unexplained_field_receivers
+COHORT	RunMode	5
+logger	EvaluateInfoFieldConcordance	5
+READ_PAIRS_EXAMINED	GATKDuplicationMetrics	3
+READ_PAIR_DUPLICATES	GATKDuplicationMetrics	3
+SECONDARY_OR_SUPPLEMENTARY_RDS	GATKDuplicationMetrics	3
+UNMAPPED_READS	GATKDuplicationMetrics	3
+UNPAIRED_READS_EXAMINED	GATKDuplicationMetrics	3
+UNPAIRED_READ_DUPLICATES	GATKDuplicationMetrics	3
+enclosingRead	Insert	3
+offset	Insert	3
+seenAnySecondOfPair	HistogramGenerator	3
+```
+
+Interpretation:
+
+- Cross-file source symbols reduced unresolved method calls from `65924` to
+  `61095`, constructors from `8348` to `7601`, and field accesses from `9151`
+  to `6367`.
+- Unexplained field accesses dropped from `108` to `91`; source-field gaps
+  dropped from `102` to `85`.
+- The package-scoped index avoids the severe global simple-name collision seen
+  in the first attempted cross-file run.
+- Resolver diagnostics still increased from `228` to `735`. That is not an
+  external API issue; cross-file lookup now exposes source overload/type
+  inference gaps that isolated-file resolution hid. The next resolver slice
+  should focus on overload candidate filtering, generic substitutions, and
+  unknown call-result typing before broadening external facts.
+
+## After Override Filtering And Lambda Functional Interface Matching
+
+This pair of resolver slices addresses the first diagnostics exposed by
+cross-file source symbols.
+
+The first slice filters overridden superclass methods from hierarchy lookup by
+Java method signature, so an override and its superclass declaration do not
+become an artificial ambiguous overload. The second slice treats lambda
+expressions as assignable to source functional interfaces and to known external
+functional interfaces such as `Supplier`, `DoubleUnaryOperator`, `Runnable`,
+and `Comparator`.
+
+The regression tests are synthetic and intentionally not GATK-specific:
+
+- overriding source method beats the superclass method
+- lambda argument selects a source functional-interface overload
+- lambda argument selects a known external functional-interface overload
+
+After override filtering:
+
+```text
+files_resolved_without_errors	1432
+resolver_diagnostics	443
+unresolved_method_calls	61095
+unresolved_constructors	7601
+unresolved_field_accesses	6367
+unexplained_field_accesses	91
+```
+
+After lambda functional-interface matching:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1436
+parser_diagnostics	0
+resolver_diagnostics	410
+semantic_diagnostics	0
+unresolved_method_calls	61095
+external_api_explained_method_calls	61088
+unexplained_method_calls	7
+unresolved_constructors	7601
+external_api_explained_constructors	7534
+unexplained_constructors	67
+unresolved_constructor_delegations	0
+unresolved_field_accesses	6367
+external_api_explained_field_accesses	6276
+unexplained_field_accesses	91
+unexplained_source_field_accesses	85
+unexplained_non_source_field_accesses	6
+external_api_guesses	37078
+external_constructor_guesses	5174
+external_field_guesses	3514
+external_api_return_nullability_facts	5231
+total_facts	153712
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	15
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	12
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "List", args: [Named { name: "Contig", args: [] }] }]	5
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+resolve_call_ambiguous	no overload of nonNull matches argument types [Array(Primitive(Int)), String]	4
+resolve_call_ambiguous	no overload of nonNull matches argument types [Named { name: "SAMSequenceDictionary", args: [] }, String]	4
+resolve_call_ambiguous	no overload of nonNull matches argument types [String, String]	4
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("getInterval"), Unknown("_1")]	4
+```
+
+Interpretation:
+
+- Override filtering reduced resolver diagnostics from `735` to `443` without
+  changing raw unresolved/external explanation counts.
+- Lambda functional-interface matching reduced resolver diagnostics from `443`
+  to `410` and removed the previous top `validateArg(..., lambda)` and
+  `applyToArray(..., lambda)` categories.
+- The remaining top diagnostics are now dominated by unresolved call-result
+  types (`toString`, `format`, getter chains, tuple fields) and constructor
+  argument typing. The next resolver slice should improve call-result typing
+  before overload matching instead of adding lowering rules.
+
+## After Known External Call Result Typing
+
+This resolver/type-inference slice adds a standard-library return-type policy
+for known Java methods used as unresolved call arguments. It lets type
+inference classify common Java/JDK call results before overload matching,
+without adding lowering rules.
+
+Covered generalized cases include:
+
+- `value.toString()` as `String`
+- `String.format(...)` as `String`
+- object methods such as `equals`, `hashCode`, and `getClass`
+- simple content accessors such as `charAt`, `getBytes`, and `toByteArray`
+
+The regression tests are synthetic and intentionally not GATK-specific:
+
+- `toString()` selects a `String` overload
+- `String.format(...)` selects a `String` overload
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1445
+parser_diagnostics	0
+resolver_diagnostics	383
+semantic_diagnostics	0
+unresolved_method_calls	61095
+external_api_explained_method_calls	61088
+unexplained_method_calls	7
+unresolved_constructors	7601
+external_api_explained_constructors	7534
+unexplained_constructors	67
+unresolved_constructor_delegations	0
+unresolved_field_accesses	6367
+external_api_explained_field_accesses	6276
+unexplained_field_accesses	91
+unexplained_source_field_accesses	85
+unexplained_non_source_field_accesses	6
+external_api_guesses	37047
+external_constructor_guesses	5111
+external_field_guesses	3514
+external_api_return_nullability_facts	5228
+total_facts	153618
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	15
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	12
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "List", args: [Named { name: "Contig", args: [] }] }]	5
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+resolve_call_ambiguous	no overload of nonNull matches argument types [Array(Primitive(Int)), String]	4
+resolve_call_ambiguous	no overload of nonNull matches argument types [Named { name: "SAMSequenceDictionary", args: [] }, String]	4
+resolve_call_ambiguous	no overload of nonNull matches argument types [String, String]	4
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("getInterval"), Unknown("_1")]	4
+```
+
+Interpretation:
+
+- Known external call-result typing reduced resolver diagnostics from `410` to
+  `383`.
+- The remaining `Unknown("toString")` and `Unknown("format")` rows are not
+  all simple external call-result cases; several involve source method lookup,
+  receiver chains, or unresolved static owners. The next slice should make
+  source/static call-result inference reusable rather than broadening ad hoc
+  stdlib guesses.
+
+## After Domain Getter Typing And Generic Method Substitution
+
+This pair of resolver/type-inference slices addresses the next benchmark-backed
+call-result typing gaps.
+
+The first slice adds conservative external domain getter result typing for
+common location-like methods such as `getContig`, `getStart`, and `getEnd`.
+The second slice adds local generic-method substitution in resolver overload
+selection: source method type variables such as `T` can accept concrete
+reference arguments, and the resolved return type is substituted from the
+argument type. This handles utility methods shaped like `<T> T nonNull(T,
+String)`.
+
+The regression tests are synthetic and intentionally not GATK-specific:
+
+- external location-like getters select `String, int, int` overloads
+- `nonNull(value, message)` returns the first argument type for overload
+  matching
+- source generic passthrough methods substitute the concrete return type
+
+After domain getter typing:
+
+```text
+files_resolved_without_errors	1446
+resolver_diagnostics	378
+unresolved_method_calls	61095
+unresolved_constructors	7601
+unresolved_field_accesses	6367
+```
+
+After generic method substitution:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1459
+parser_diagnostics	0
+resolver_diagnostics	289
+semantic_diagnostics	0
+unresolved_method_calls	61093
+external_api_explained_method_calls	61086
+unexplained_method_calls	7
+unresolved_constructors	7601
+external_api_explained_constructors	7534
+unexplained_constructors	67
+unresolved_constructor_delegations	0
+unresolved_field_accesses	6367
+external_api_explained_field_accesses	6276
+unexplained_field_accesses	91
+unexplained_source_field_accesses	85
+unexplained_non_source_field_accesses	6
+external_api_guesses	36990
+external_constructor_guesses	5067
+external_field_guesses	3514
+external_api_return_nullability_facts	5201
+total_facts	153515
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	15
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	12
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "List", args: [Named { name: "Contig", args: [] }] }]	5
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("getInterval"), Unknown("_1")]	4
+resolve_call_ambiguous	no overload of setColumn matches argument types [String, Unknown("format")]	3
+resolve_call_ambiguous	no overload of trimAlleles matches argument types [Unknown("make"), Primitive(Boolean), Primitive(Boolean)]	3
+```
+
+Interpretation:
+
+- Domain getter typing reduced resolver diagnostics from `383` to `378`.
+- Generic method substitution reduced resolver diagnostics from `376` to
+  `289` and removed the recurring `nonNull(..., message)` overload rows from
+  the top diagnostics.
+- Remaining diagnostics are now mostly constructor argument typing, chained
+  unresolved source/external getters, and unresolved `toString`/`format` shapes
+  that are not simple call-result fallback cases.
+
+## After Source Hierarchy Assignability And Field-Access Argument Typing
+
+This resolver slice addresses two general constructor/call argument typing
+gaps exposed by GATK without adding GATK-specific names:
+
+- source class/interface hierarchy assignability through `extends` and
+  `implements`, including source types implementing external interfaces
+- resolver-local field-access result typing for overload and constructor
+  argument selection, using the source symbol table
+
+The rules stay in `resolve`: lowering does not infer Java hierarchy or source
+field types. The regression tests are synthetic and intentionally not
+corpus-specific:
+
+- constructor overload selection through a directly implemented interface
+- constructor overload selection through a transitive source hierarchy
+- constructor overload selection from a source field-access argument
+
+After source hierarchy assignability:
+
+```text
+files_resolved_without_errors	1463
+resolver_diagnostics	273
+external_api_guesses	36986
+external_constructor_guesses	5067
+total_facts	153511
+```
+
+After source field-access argument typing:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1469
+parser_diagnostics	0
+resolver_diagnostics	255
+semantic_diagnostics	0
+unresolved_method_calls	61092
+external_api_explained_method_calls	61085
+unexplained_method_calls	7
+unresolved_constructors	7601
+external_api_explained_constructors	7534
+unexplained_constructors	67
+unresolved_constructor_delegations	0
+unresolved_field_accesses	6367
+external_api_explained_field_accesses	6276
+unexplained_field_accesses	91
+unexplained_source_field_accesses	85
+unexplained_non_source_field_accesses	6
+external_api_guesses	36980
+external_constructor_guesses	5042
+external_field_guesses	3514
+external_api_return_nullability_facts	5201
+total_facts	153479
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	15
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	12
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "List", args: [Named { name: "Contig", args: [] }] }]	5
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("getInterval"), Unknown("_1")]	4
+resolve_call_ambiguous	no overload of setColumn matches argument types [String, Unknown("format")]	3
+resolve_call_ambiguous	no overload of trimAlleles matches argument types [Unknown("make"), Primitive(Boolean), Primitive(Boolean)]	3
+```
+
+Interpretation:
+
+- Source hierarchy assignability reduced resolver diagnostics from `289` to
+  `273`.
+- Resolver-local field-access argument typing reduced diagnostics from `273`
+  to `255`.
+- The repeated `Unknown("reference")` and `Unknown("features")` rows remain at
+  the top, which means some occurrences are not simple source field-access
+  cases. The next resolver slice should classify whether those values come
+  from tuple fields, parser name binding gaps, generic constructor inference,
+  or unresolved external/source call results.
+
+## After Import-Aware Source Symbols And External Boolean Return Typing
+
+This resolver benchmark slice makes the corpus source-symbol table closer to
+Java classpath visibility:
+
+- each file resolves against source types from its own package
+- explicit source imports add the imported type's package peers, so member
+  declarations such as imported `Alignment.span: Span` can resolve `Span`
+  members
+- wildcard source imports add all source types in the imported package
+
+This is intentionally implemented in the resolver benchmark/source-symbol
+assembly, not in lowering. The generalized tests use neutral packages and
+verify that imported source types expose cross-package fields and methods.
+
+The slice also adds external boolean return typing for common Java/JDK-shaped
+predicate calls such as `containsKey`, `contains`, `isEmpty`, `hasNext`,
+`startsWith`, `endsWith`, `allMatch`, `anyMatch`, and `noneMatch`. That rule
+lives in `stdlib` external API typing and is covered by a synthetic overload
+test.
+
+After import-aware source symbols and chained source receiver typing, before
+external boolean return typing:
+
+```text
+files_resolved_without_errors	1207
+resolver_diagnostics	964
+unresolved_method_calls	47099
+unresolved_constructors	4569
+unresolved_field_accesses	3147
+external_api_guesses	28665
+external_constructor_guesses	3026
+external_field_guesses	1635
+total_facts	121024
+```
+
+After external boolean return typing:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1237
+parser_diagnostics	0
+resolver_diagnostics	870
+semantic_diagnostics	0
+unresolved_method_calls	47099
+external_api_explained_method_calls	47092
+unexplained_method_calls	7
+unresolved_constructors	4569
+external_api_explained_constructors	4494
+unexplained_constructors	75
+unresolved_constructor_delegations	0
+unresolved_field_accesses	3147
+external_api_explained_field_accesses	3051
+unexplained_field_accesses	96
+unexplained_source_field_accesses	84
+unexplained_non_source_field_accesses	12
+external_api_guesses	28612
+external_constructor_guesses	3026
+external_field_guesses	1635
+external_api_return_nullability_facts	4439
+total_facts	120971
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [String, Named { name: "IOException", args: [] }]	38
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	17
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	14
+resolve_call_ambiguous	no overload of join matches argument types [String, Named { name: "Set", args: [String] }]	12
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "GATKRead", args: [] }]	10
+resolve_call_ambiguous	no overload of getDouble matches argument types [Named { name: "ParameterTableColumn", args: [] }]	9
+resolve_call_ambiguous	no overload of isPositive matches argument types [Named { name: "Integer", args: [] }, String]	9
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Primitive(Int), Primitive(Double)]	9
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Primitive(Int), Primitive(Int)]	8
+```
+
+Interpretation:
+
+- Import-aware source symbols cut unresolved method calls from `61092` to
+  `47099`, unresolved constructors from `7601` to `4569`, and unresolved field
+  accesses from `6320` to `3147`.
+- The tradeoff is intentional visibility: many calls that were previously
+  treated as external fallbacks now resolve far enough to expose stricter source
+  overload/type gaps, so resolver diagnostics rise from `255` to `870`.
+- External boolean return typing reduces the newly exposed diagnostics from
+  `964` to `870`.
+- The next high-leverage work should target exposed source overload gaps:
+  Java exception constructor assignability (`Throwable`/`Exception` causes),
+  generic collection/string join assignability, boxed primitive compatibility,
+  and multi-argument table-like `set/get` overloads.
+
+## After Core Java Assignability And Overload Scoring
+
+This resolver slice adds stable Java assignability facts for:
+
+- boxed primitive wrappers such as `Integer` and `Double`
+- unboxing plus primitive widening during overload matching
+- core Java exception hierarchy edges such as `IOException -> Exception ->
+  Throwable`
+- small stable reference hierarchy edges such as `String -> CharSequence` and
+  boxed numerics -> `Number`
+
+It also replaces the previous boolean "assignable or not" overload choice with
+a resolver-owned score for applicable overloads. Exact matches beat
+boxing/unboxing, narrower primitive widening beats wider primitive widening,
+and general reference upcasts remain less specific. This keeps Java overload
+resolution in `resolve` rather than pushing the choice into later Rust shape or
+lowering code.
+
+The generalized tests added for this slice cover:
+
+- `IOException` selecting a constructor parameter typed as `Throwable`
+- boxed `Integer` selecting an `int` overload
+- benchmark diagnostic rendering using a genuinely ambiguous reference
+  overload instead of Java numeric widening
+
+After core Java assignability, before overload scoring:
+
+```text
+files_resolved_without_errors	1272
+resolver_diagnostics	778
+external_api_guesses	28601
+total_facts	120960
+```
+
+After overload scoring:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1275
+parser_diagnostics	0
+resolver_diagnostics	762
+semantic_diagnostics	0
+unresolved_method_calls	47099
+external_api_explained_method_calls	47092
+unexplained_method_calls	7
+unresolved_constructors	4569
+external_api_explained_constructors	4494
+unexplained_constructors	75
+unresolved_constructor_delegations	0
+unresolved_field_accesses	3147
+external_api_explained_field_accesses	3051
+unexplained_field_accesses	96
+unexplained_source_field_accesses	84
+unexplained_non_source_field_accesses	12
+external_api_guesses	28596
+external_constructor_guesses	3026
+external_field_guesses	1635
+external_api_return_nullability_facts	4435
+total_facts	120955
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	17
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	14
+resolve_call_ambiguous	no overload of join matches argument types [String, Named { name: "Set", args: [String] }]	12
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "VariantContext", args: [] }]	11
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "GATKRead", args: [] }]	10
+resolve_call_ambiguous	no overload of getDouble matches argument types [Named { name: "ParameterTableColumn", args: [] }]	9
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Primitive(Int), Primitive(Double)]	9
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Primitive(Int), Primitive(Int)]	8
+resolve_call_ambiguous	no overload of get matches argument types [Named { name: "AltSiteRecordTableColumn", args: [] }]	7
+resolve_call_ambiguous	no overload of getInt matches argument types [Named { name: "BasicValidationResultTableColumn", args: [] }]	7
+```
+
+Interpretation:
+
+- Core Java exception assignability removed the previous top
+  `String, IOException` constructor row.
+- Overload scoring removed the exposed `isPositive(Integer, String)` top row.
+- Resolver diagnostics moved from `870` to `778` with core assignability, then
+  to `762` with scoring.
+- Remaining high-volume categories now point at generic collection/interface
+  assignability (`String.join` with `Set<String>`), table-like enum column APIs,
+  external/source call result typing, and the still-unclassified
+  `reference/features` constructor argument source.
+
+## After Generic Interface And Source Enum Assignability
+
+This resolver slice adds two general Java assignability rules:
+
+- known collection interfaces preserve their single element type through
+  superinterfaces, so `Set<String>` can match
+  `Iterable<? extends CharSequence>` without a `String.join` special case
+- source enum declarations are assignable to `Enum<?>`, so table-like APIs that
+  accept enum column identifiers resolve through normal overload selection
+
+The responsibility split remains:
+
+- `stdlib` owns stable raw JDK hierarchy facts such as `Set -> Collection ->
+  Iterable`
+- `resolve` owns overload scoring, wildcard bounds, generic argument
+  compatibility, and source enum kind checks
+- lowering receives resolved calls and does not infer these Java rules from
+  method names
+
+The generalized tests added for this slice cover:
+
+- collection superinterface generic assignability with invented overloads using
+  `Set<String>` and `Iterable<? extends CharSequence>`
+- source enum assignability to an `Enum<?>` API overload, using neutral
+  `Column`/`Row` types rather than GATK table classes
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1297
+parser_diagnostics	0
+resolver_diagnostics	658
+semantic_diagnostics	0
+unresolved_method_calls	47099
+external_api_explained_method_calls	47092
+unexplained_method_calls	7
+unresolved_constructors	4569
+external_api_explained_constructors	4494
+unexplained_constructors	75
+unresolved_constructor_delegations	0
+unresolved_field_accesses	3147
+external_api_explained_field_accesses	3051
+unexplained_field_accesses	96
+unexplained_source_field_accesses	84
+unexplained_non_source_field_accesses	12
+external_api_guesses	28551
+external_constructor_guesses	3026
+external_field_guesses	1635
+external_api_return_nullability_facts	4435
+total_facts	120910
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	17
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	14
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "VariantContext", args: [] }]	11
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "GATKRead", args: [] }]	10
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Primitive(Int), Primitive(Double)]	9
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Primitive(Int), Primitive(Int)]	8
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("getAbsolutePath"), String]	6
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("getLeft"), String]	5
+```
+
+Interpretation:
+
+- Files resolved without diagnostics moved from `1275` to `1297`.
+- Resolver diagnostics moved from `762` to `658`.
+- The prior top `String.join(... Set<String>)`, `getDouble(EnumColumn)`,
+  `getInt(EnumColumn)`, and `get(EnumColumn)` categories disappeared from the
+  top diagnostics through general type rules rather than corpus-specific
+  branches.
+- The next high-leverage categories are external/source call result typing
+  (`toString`, `getLeft`, `getAbsolutePath`) and table-like multi-argument
+  `set` overloads.
+
+## After Typed External Call Result Chains
+
+This resolver slice makes unresolved external call results usable as argument
+types during overload selection. The rule is general:
+
+- `resolve` asks a typed external-return helper before falling back to
+  `Unknown(methodName)` for unresolved calls
+- `stdlib` owns external API result shapes, including:
+  - object-style `toString() -> String`
+  - `File.getAbsolutePath() -> String`
+  - `Pair<L, R>.getLeft()/getRight()` and `Map.Entry<K, V>.getKey()/getValue()`
+  - `Map<K, V>.get(...) -> V`
+  - `List<T>.get(...) -> T`
+
+The generalized tests added for this slice cover:
+
+- an unresolved external call followed by `toString()` selecting a `String`
+  overload
+- `nonNull(file).getAbsolutePath()` selecting a `String` constructor overload
+- `Pair<String, Integer>.getLeft()` selecting a `String` overload
+- `Map<String, Pair<String, Integer>>.get(...).getLeft()` selecting a `String`
+  overload
+- `Map<String, ExternalStatus>.get(...).toString()` selecting a `String`
+  overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1303
+parser_diagnostics	0
+resolver_diagnostics	632
+semantic_diagnostics	0
+unresolved_method_calls	46846
+external_api_explained_method_calls	46826
+unexplained_method_calls	20
+unresolved_constructors	4569
+external_api_explained_constructors	4494
+unexplained_constructors	75
+unresolved_constructor_delegations	0
+unresolved_field_accesses	3081
+external_api_explained_field_accesses	2982
+unexplained_field_accesses	99
+unexplained_source_field_accesses	87
+unexplained_non_source_field_accesses	12
+external_api_guesses	28498
+external_constructor_guesses	3024
+external_field_guesses	1600
+external_api_return_nullability_facts	4439
+total_facts	120501
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	17
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	14
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "VariantContext", args: [] }]	11
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "GATKRead", args: [] }]	10
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Primitive(Int), Primitive(Double)]	9
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Primitive(Int), Primitive(Int)]	8
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), String, String]	5
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `658` to `632`.
+- `getAbsolutePath` disappeared from top constructor diagnostics.
+- `Unknown("getLeft")` rows became typed `String` rows, which is progress:
+  the resolver now understands the generic accessor result, and the remaining
+  failure belongs to table-like `set` overload compatibility rather than pair
+  accessor typing.
+- The next high-leverage work is table/indexed setter overloads and tuple-style
+  field access (`_1`, `_2`) rather than more `getLeft` special cases.
+
+## After Object Setter Boxing And Tuple Field Typing
+
+This resolver slice addresses two general Java/library rules exposed by the
+GATK table and Spark/Scala usage:
+
+- primitive arguments may box and then widen to reference supertypes such as
+  `Object`, so table APIs like `set(Object, String, Object)` can accept
+  primitive row IDs and values
+- pair-like external records expose typed positional fields/accessors, including
+  Scala-style `Tuple2<A, B>._1`, `Tuple2<A, B>._2`, `_1()`, and `_2()`
+
+The responsibility split remains:
+
+- `resolve` owns Java overload scoring and boxing/reference conversion costs
+- `stdlib` owns stable external API shapes for tuple/pair fields and accessors
+- later lowering receives typed/resolved calls and does not infer tuple or
+  table semantics from emitted Rust context
+
+The generalized tests added for this slice cover:
+
+- `set(Object, String, Object)` selected for `(int, String, byte)` through
+  boxing-to-reference conversion
+- `Tuple2<String, Integer>._1/_2` selecting a `(String, int)` overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1306
+parser_diagnostics	0
+resolver_diagnostics	583
+semantic_diagnostics	0
+unresolved_method_calls	46841
+external_api_explained_method_calls	46821
+unexplained_method_calls	20
+unresolved_constructors	4569
+external_api_explained_constructors	4494
+unexplained_constructors	75
+unresolved_constructor_delegations	0
+unresolved_field_accesses	3010
+external_api_explained_field_accesses	2911
+unexplained_field_accesses	99
+unexplained_source_field_accesses	87
+unexplained_non_source_field_accesses	12
+external_api_guesses	28490
+external_constructor_guesses	3024
+external_field_guesses	1566
+external_api_return_nullability_facts	4439
+total_facts	120383
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	17
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	14
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "VariantContext", args: [] }]	11
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "GATKRead", args: [] }]	10
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("isEmpty"), String]	4
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "SVInterval", args: [] }, Unknown("_1")]	4
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `632` to `583`.
+- Files resolved without diagnostics moved from `1303` to `1306`.
+- The top `set(... int/int/double)` and `set(... String/String/primitive)`
+  rows disappeared through general overload scoring rather than table-specific
+  branches.
+- Tuple `_1`/`_2` disappeared from the top unresolved field targets, reducing
+  unresolved field accesses from `3081` to `3010`.
+- Remaining high-value rows are now unresolved chained call result typing
+  (`toString`, `isEmpty`, `_1` in constructor arguments) and constructor
+  generic/type-variable inference rather than table setter compatibility.
+
+## After Source Generic Receiver Return Substitution
+
+This resolver slice handles a narrow but important source-generic pattern:
+when a source method is invoked on a receiver with exactly one actual generic
+argument, unresolved uppercase return type variables are substituted with that
+receiver argument.
+
+The motivating corpus shape is equivalent to:
+
+```java
+Entry<Tuple2<Boolean, V>> entry;
+new StrandedInterval(entry.getInterval(), entry.getValue()._1());
+```
+
+`Entry<T>.getValue()` previously resolved as returning `T`, so the subsequent
+tuple accessor stayed `Unknown("_1")`. The resolver now substitutes the actual
+receiver argument for this single-parameter generic case before member access
+typing.
+
+The generalized test added for this slice covers:
+
+- `Entry<Tuple2<Boolean, String>>.getValue()._1()` used as a constructor
+  argument, with a neutral `OrientedSpan(Span, boolean)` target
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1306
+parser_diagnostics	0
+resolver_diagnostics	578
+semantic_diagnostics	0
+unresolved_method_calls	46835
+external_api_explained_method_calls	46814
+unexplained_method_calls	21
+unresolved_constructors	4569
+external_api_explained_constructors	4494
+unexplained_constructors	75
+unresolved_constructor_delegations	0
+unresolved_field_accesses	3009
+external_api_explained_field_accesses	2910
+unexplained_field_accesses	99
+unexplained_source_field_accesses	87
+unexplained_non_source_field_accesses	12
+external_api_guesses	28479
+external_constructor_guesses	3024
+external_field_guesses	1565
+external_api_return_nullability_facts	4439
+total_facts	120364
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	17
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	14
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "VariantContext", args: [] }]	11
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "GATKRead", args: [] }]	10
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("isEmpty"), String]	4
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+resolve_call_ambiguous	no overload of setColumn matches argument types [String, Unknown("format")]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `583` to `578`.
+- The previous `no constructor matches argument types [Named { name:
+  "SVInterval", args: [] }, Unknown("_1")]` top row disappeared.
+- This is deliberately not a full multi-parameter generic-class solver. The
+  rule is constrained to one-argument source receivers until the IR records
+  declared type parameter order.
+- The next high-value unresolved constructor rows are `reference/features`
+  getter typing and source/external constructor compatibility for
+  `VariantContext` and `GATKRead`.
+
+## After Source Functional Interface Lambda Body Target Typing
+
+This resolver slice handles source target-typed lambda bodies. The resolver
+previously walked lambda bodies before overload selection had identified the
+target functional interface, so lambda parameters such as `reference` and
+`features` were treated as unresolved names inside constructor arguments.
+
+The resolver now:
+
+- leaves untyped lambda bodies deferred during the initial expression walk
+- selects the target overload using the existing `Unknown("lambda")` functional
+  interface match
+- looks up the selected source functional interface's single abstract method
+- resolves the lambda body again with lambda parameter names inserted into a
+  lambda-local type environment
+
+This stays in the resolver because it is Java target typing. Lowering and
+slot-shape planning should receive resolved calls/constructors or structured
+unresolved facts, not infer lambda parameter types from emitted code.
+
+The generalized test added for this slice covers:
+
+- a neutral `RegionCallback.apply(Reference, FeatureSet)` lambda whose body
+  calls an overloaded `Result(Reference, Span)` / `Result(FeatureSet, Span)`
+  constructor
+
+The test intentionally avoids GATK names while preserving the corpus failure
+shape: a target-typed callback parameter is used as a constructor argument in a
+lambda body.
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1346
+parser_diagnostics	0
+resolver_diagnostics	469
+semantic_diagnostics	0
+unresolved_method_calls	42606
+external_api_explained_method_calls	42591
+unexplained_method_calls	15
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2724
+external_api_explained_field_accesses	2631
+unexplained_field_accesses	93
+unexplained_source_field_accesses	81
+unexplained_non_source_field_accesses	12
+external_api_guesses	29144
+external_constructor_guesses	2894
+external_field_guesses	1379
+external_api_return_nullability_facts	4495
+total_facts	115985
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "VariantContext", args: [] }]	11
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "GATKRead", args: [] }]	10
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("reference"), Named { name: "SimpleInterval", args: [] }]	6
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("isEmpty"), String]	4
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("features"), Named { name: "SimpleInterval", args: [] }]	4
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+resolve_call_ambiguous	no overload of setColumn matches argument types [String, Unknown("format")]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `578` to `469`.
+- Files resolved without resolver diagnostics moved from `1306` to `1346`.
+- The repeated `Unknown("reference")` row moved from `17` to `6`.
+- The repeated `Unknown("features")` row moved from `14` to `4`.
+- Unresolved method calls, constructor calls, and field accesses also dropped
+  because resolving target-typed lambda bodies lets nested calls and member
+  accesses contribute more accurate facts.
+- The remaining `reference/features` rows likely involve callback shapes not
+  covered by this source-interface rule yet: external functional interfaces,
+  inherited/generic callback signatures, or source-symbol gaps. Those should be
+  handled as separate resolver or external-fact slices, not by adding
+  GATK-specific constructor branches.
+
+## After Inherited Source Field Method Environments
+
+This resolver slice handles bare field names inherited from source
+superclasses. The benchmark exposed constructor argument types such as
+`Unknown("reference")` and `Unknown("features")` in walker methods that call:
+
+```java
+new ReferenceContext(reference, interval);
+new FeatureContext(features, interval);
+```
+
+The missing rule was not specific to those names. Methods were seeded with
+fields declared directly on the current class, but not with fields inherited
+from source superclasses. Java permits unqualified inherited field access in
+instance methods, so the resolver must include visible hierarchy fields in the
+method type environment before overload and constructor selection.
+
+The resolver now:
+
+- keeps field hierarchy traversal in `ProgramSymbols`, next to method hierarchy
+  traversal
+- seeds each method/constructor body environment with current and inherited
+  source fields
+- keeps current-class fields ahead of superclass fields when names shadow
+- leaves `TypeEnv` as a simple local/field binding store rather than teaching
+  it hierarchy lookup
+
+The generalized test added for this slice covers:
+
+- `ChildTraversal extends BaseTraversal`, where inherited bare fields
+  `reference` and `features` are used to select overloaded
+  `ReferenceContext(Reference, Span)` and `FeatureContext(FeatureStore, Span)`
+  constructors
+
+The test intentionally uses neutral traversal/context names rather than GATK
+classes.
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1352
+parser_diagnostics	0
+resolver_diagnostics	454
+semantic_diagnostics	0
+unresolved_method_calls	42543
+external_api_explained_method_calls	42528
+unexplained_method_calls	15
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2691
+external_api_explained_field_accesses	2584
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29306
+external_constructor_guesses	2891
+external_field_guesses	1354
+external_api_return_nullability_facts	4497
+total_facts	116023
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "VariantContext", args: [] }]	11
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "GATKRead", args: [] }]	10
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_call_ambiguous	no overload of getValues matches argument types [Named { name: "List", args: [Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }] }]	5
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("containsAll"), String]	5
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("isEmpty"), String]	4
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+resolve_call_ambiguous	no overload of setColumn matches argument types [String, Unknown("format")]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `469` to `454`.
+- Files resolved without resolver diagnostics moved from `1346` to `1352`.
+- The previous top `Unknown("reference")` and `Unknown("features")`
+  constructor rows disappeared from the top diagnostics.
+- Unresolved field accesses moved from `2724` to `2691`, because inherited
+  bare fields are now typed before later resolution stages.
+- The next high-leverage rows are now constructor compatibility for source or
+  external domain types such as `VariantContext` and `GATKRead`, plus unknown
+  chained call results such as `toString`, `containsAll`, `isEmpty`, and
+  `format`.
+
+## After Interface Extends And External Locatable Assignability
+
+This resolver slice handles Java interface-superinterface edges and a small
+known external hierarchy fact for location-like APIs.
+
+The benchmark exposed constructor failures for calls shaped like:
+
+```java
+new SimpleInterval(locatableThing);
+```
+
+where the constructor accepts `Locatable`, but the argument type is either a
+source interface that extends `Locatable` or a common external domain type such
+as `VariantContext`. The missing rules were general:
+
+- tree-sitter-java represents interface superinterfaces as
+  `extends_interfaces`; the parser now records those edges
+- source interface inheritance participates in the same finite subtype lookup
+  used for class `extends` and `implements`
+- known external hierarchy facts can say that selected external domain types
+  are assignable to `Locatable`
+
+The generalized tests added for this slice cover:
+
+- `interface ReadRecord extends Locatable` selecting a constructor overload
+  that accepts `Locatable`
+- an external `VariantContext` argument selecting a `Locatable` constructor
+  overload
+- parser coverage for `interface Child extends Left, Right`
+
+The tests avoid GATK names except for the external `VariantContext` fact, which
+is documented as an external library fact rather than a core resolver branch.
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1363
+parser_diagnostics	0
+resolver_diagnostics	425
+semantic_diagnostics	0
+unresolved_method_calls	42528
+external_api_explained_method_calls	42513
+unexplained_method_calls	15
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2690
+external_api_explained_field_accesses	2583
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29290
+external_constructor_guesses	2891
+external_field_guesses	1353
+external_api_return_nullability_facts	4497
+total_facts	115990
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("toString")]	7
+resolve_call_ambiguous	no overload of set matches argument types [Primitive(Int), Unknown("toString")]	6
+resolve_call_ambiguous	no overload of getValues matches argument types [Named { name: "List", args: [Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }] }]	5
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("containsAll"), String]	5
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("toString")]	4
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("isEmpty"), String]	4
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+resolve_call_ambiguous	no overload of setColumn matches argument types [String, Unknown("format")]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `454` to `425`.
+- Files resolved without resolver diagnostics moved from `1352` to `1363`.
+- The previous top constructor rows for `VariantContext` and `GATKRead`
+  disappeared from the top diagnostics.
+- This stays in parser/resolver/std-library facts. Lowering does not learn
+  about `Locatable` or constructor names.
+
+## After Receiver-Agnostic External Method Return Typing
+
+This resolver and semantic-fact slice handles known Java method return types
+whose result does not depend on the concrete receiver type.
+
+The benchmark exposed repeated overload failures with argument types such as
+`Unknown("toString")`. Several of those came from static boxed-primitive calls
+such as:
+
+```java
+Long.toString(value)
+Integer.toString(value)
+Double.toString(value)
+```
+
+The missing rules were general Java library facts:
+
+- boxed primitive class names need canonicalization after parser identifier
+  normalization, so `Long` parsed as a receiver key like `long` still maps to
+  `Long`
+- static boxed-primitive `toString(value)` returns `String`
+- known receiver-agnostic methods such as `toString` and `getBytes` can be
+  explained as external API facts even when the receiver type is unavailable
+- arbitrary unknown receiverless calls remain unexplained
+
+The generalized tests added for this slice cover:
+
+- overload selection through `Long.toString(value)` using neutral
+  `setColumn(int, String)` / `setColumn(String, int)` overloads
+- semantic external API explanation for a `toString` unresolved target with no
+  receiver type, plus a negative check that `unknownTransform` is still not
+  explained
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1364
+parser_diagnostics	0
+resolver_diagnostics	408
+semantic_diagnostics	0
+unresolved_method_calls	42524
+external_api_explained_method_calls	42521
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2690
+external_api_explained_field_accesses	2583
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29296
+external_constructor_guesses	2891
+external_field_guesses	1353
+external_api_return_nullability_facts	5036
+total_facts	115992
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of getValues matches argument types [Named { name: "List", args: [Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }] }]	5
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("containsAll"), String]	5
+resolve_call_ambiguous	no overload of setColumn matches argument types [Primitive(Int), Unknown("format")]	4
+resolve_call_ambiguous	no overload of setColumn matches argument types [String, Unknown("format")]	4
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("isEmpty"), String]	4
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of stream matches argument types [Named { name: "ReadPileup", args: [] }]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `425` to `408`.
+- Files resolved without resolver diagnostics moved from `1363` to `1364`.
+- Unexplained method calls moved from `15` to `3`.
+- `Unknown("toString")` disappeared from the top resolver diagnostics.
+- The next design-relevant resolver categories are now `format` static typing
+  through normalized class receivers, collection predicate results such as
+  `containsAll` / `isEmpty`, and generic/external collection-like overloads
+  such as `getValues`.
+
+## After Formatter And Collection Predicate External API Typing
+
+This resolver and semantic-fact slice handles two common external API shapes
+that appeared in the top GATK diagnostics:
+
+- formatter instance calls such as `DecimalFormat.format(value)` returning
+  `String`
+- collection/string utility predicates such as `containsAll(...)` and
+  `StringUtils.isEmpty(value)` returning `boolean`
+
+The missing rules were general external API facts, not GATK table-output
+special cases:
+
+- `DecimalFormat`, `NumberFormat`, `DateFormat`, `MessageFormat`, and `Format`
+  receivers have read-only `format(...) -> String` behavior
+- collection `containsAll(...)` is a read-only boolean predicate
+- parsed static receiver keys such as `string_utils` canonicalize to
+  `StringUtils`
+- `StringUtils.isEmpty(value)` is a read-only boolean static utility
+
+The generalized tests added for this slice cover:
+
+- overload selection through `formatter.format(value)` using neutral
+  `setColumn(int, String)` / `setColumn(String, int)` overloads
+- overload selection through `available.containsAll(required)`,
+  `!required.isEmpty()`, and `!StringUtils.isEmpty(name)` using neutral
+  `validateArg(boolean, String)` / `validateArg(String, String)` overloads
+- semantic external API facts for `DecimalFormat.format`, `List.containsAll`,
+  and `StringUtils.isEmpty`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1373
+parser_diagnostics	0
+resolver_diagnostics	385
+semantic_diagnostics	0
+unresolved_method_calls	42516
+external_api_explained_method_calls	42513
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2690
+external_api_explained_field_accesses	2583
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29282
+external_constructor_guesses	2891
+external_field_guesses	1353
+external_api_return_nullability_facts	5077
+total_facts	115970
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of getValues matches argument types [Named { name: "List", args: [Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }] }]	5
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of stream matches argument types [Named { name: "ReadPileup", args: [] }]	3
+resolve_call_ambiguous	no overload of sum matches argument types [Unknown("getAD")]	3
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("containsVertex"), Unknown("lambda")]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "Path", args: [] }, Unknown("getMessage"), Named { name: "IOException", args: [] }]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("getString")]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `408` to `385`.
+- Files resolved without resolver diagnostics moved from `1364` to `1373`.
+- The formatter-specific `Unknown("format")` rows disappeared from the top
+  diagnostics after the formatter receiver rule.
+- The collection/static utility predicate rows
+  `Unknown("containsAll")` and `Unknown("isEmpty")` disappeared from the top
+  diagnostics after the predicate rule.
+- The next high-leverage category is now generic/external collection-like
+  overloads such as `getValues(List<FeatureInput<VariantContext>>)` and source
+  or external method result typing such as `fastqToPhred`, `getAD`, and
+  `getMessage`.
+
+## After Nested Generic Method Type Variable Matching
+
+This resolver slice handles nested method type variables inside generic
+parameter types. The benchmark exposed source overload failures for calls
+shaped like:
+
+```java
+featureContext.getValues(listOfFeatureInputs)
+```
+
+where the source API has overloads equivalent to:
+
+```java
+<T> List<T> getValues(FeatureInput<T> input)
+<T> List<T> getValues(Collection<FeatureInput<T>> inputs)
+```
+
+and the argument is `List<FeatureInput<VariantContext>>`. The missing rule was
+not specific to `FeatureContext` or `VariantContext`: generic argument matching
+accepted a method type variable when it was the whole target type, but not when
+it appeared nested inside another generic type such as `FeatureInput<T>`.
+
+The resolver now:
+
+- structurally matches same-owner generic arguments during overload scoring
+- treats nested method type variables as compatible with non-primitive actual
+  types
+- keeps return-type substitution in the resolver using the existing
+  method-type substitution path
+
+The generalized test added for this slice covers:
+
+- a neutral `FeatureLookup` with `getValues(FeatureInput<T>)` and
+  `getValues(Collection<FeatureInput<T>>)` overloads
+- a call with `List<FeatureInput<Record>>`
+- verification that the collection overload is selected and the return type is
+  substituted to `List<Record>`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1379
+parser_diagnostics	0
+resolver_diagnostics	374
+semantic_diagnostics	0
+unresolved_method_calls	42516
+external_api_explained_method_calls	42513
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2690
+external_api_explained_field_accesses	2583
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29271
+external_constructor_guesses	2891
+external_field_guesses	1353
+external_api_return_nullability_facts	5077
+total_facts	115959
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of stream matches argument types [Named { name: "ReadPileup", args: [] }]	3
+resolve_call_ambiguous	no overload of sum matches argument types [Unknown("getAD")]	3
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("containsVertex"), Unknown("lambda")]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "Path", args: [] }, Unknown("getMessage"), Named { name: "IOException", args: [] }]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("getString")]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `385` to `374`.
+- Files resolved without resolver diagnostics moved from `1373` to `1379`.
+- The previous top `getValues(List<FeatureInput<VariantContext>>)` row
+  disappeared from the top diagnostics.
+- This is resolver-owned Java generic matching. It does not add GATK-specific
+  method names or any lowering behavior.
+
+## After Throwable `getMessage` External API Typing
+
+This external API slice handles Java exception message access. The benchmark
+exposed constructor overload failures shaped like:
+
+```java
+new SomeInputFailure(path, error.getMessage(), error)
+```
+
+where `error` is an `IOException` or another known throwable type. The missing
+rule was general Java API knowledge:
+
+- known throwable receivers have `getMessage() -> String`
+- the receiver is read-only
+- the return nullability is `MaybeNull`, because Java allows throwable messages
+  to be absent
+
+The generalized tests added for this slice cover:
+
+- constructor overload selection using `IOException.getMessage()` as a
+  `String` argument
+- semantic external API facts for `IOException.getMessage` with read-only
+  receiver mutability and maybe-null return
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1380
+parser_diagnostics	0
+resolver_diagnostics	369
+semantic_diagnostics	0
+unresolved_method_calls	42516
+external_api_explained_method_calls	42513
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2690
+external_api_explained_field_accesses	2583
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29271
+external_constructor_guesses	2891
+external_field_guesses	1353
+external_api_return_nullability_facts	5120
+total_facts	115959
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("getString")]	5
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("isPresent"), String]	4
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of stream matches argument types [Named { name: "ReadPileup", args: [] }]	3
+resolve_call_ambiguous	no overload of sum matches argument types [Unknown("getAD")]	3
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("containsVertex"), Unknown("lambda")]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `374` to `369`.
+- Files resolved without resolver diagnostics moved from `1379` to `1380`.
+- The previous constructor row with `[Named { name: "Path", ... },
+  Unknown("getMessage"), Named { name: "IOException", ... }]` disappeared from
+  the top diagnostics.
+- This stays in the external API fact/std-library model. Lowering does not
+  special-case exception messages.
+
+## After Optional `isPresent` External API Typing
+
+This external API slice handles Java Optional presence checks. The benchmark
+exposed overload failures shaped like:
+
+```java
+validateArg(optionalValue.isPresent(), "message")
+```
+
+where the target overload expects a boolean. The missing rule was general JDK
+API knowledge:
+
+- `Optional<T>.isPresent() -> boolean`
+- primitive optionals such as `OptionalInt.isPresent() -> boolean`
+- the receiver is read-only
+- the return is definitely non-null because Java booleans are primitive values
+
+The generalized tests added for this slice cover:
+
+- overload selection using `Optional<String>.isPresent()` and
+  `OptionalInt.isPresent()` as boolean arguments
+- semantic external API facts for `Optional.isPresent` and
+  `OptionalInt.isPresent` with read-only receiver mutability and definitely
+  non-null return
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1383
+parser_diagnostics	0
+resolver_diagnostics	362
+semantic_diagnostics	0
+unresolved_method_calls	42516
+external_api_explained_method_calls	42513
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2690
+external_api_explained_field_accesses	2583
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29267
+external_constructor_guesses	2891
+external_field_guesses	1353
+external_api_return_nullability_facts	5120
+total_facts	115955
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Unknown("getString")]	5
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of stream matches argument types [Named { name: "ReadPileup", args: [] }]	3
+resolve_call_ambiguous	no overload of sum matches argument types [Unknown("getAD")]	3
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("containsVertex"), Unknown("lambda")]	3
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("isNonReference"), String]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `369` to `362`.
+- Files resolved without resolver diagnostics moved from `1380` to `1383`.
+- The previous `validateArg` row with `[Unknown("isPresent"), String]`
+  disappeared from the top diagnostics.
+- This is a std-library/external API fact. Lowering does not special-case
+  Optional presence checks.
+
+## After External `getString` Result Typing
+
+This external API slice handles string lookup APIs such as config objects,
+result rows, and JSON-like objects. The benchmark exposed constructor overload
+failures shaped like:
+
+```java
+new SomeInterval(obj.getString("activeSpan"))
+```
+
+where the target constructor expects a `String`. The missing rule was general
+external API knowledge:
+
+- receiver-qualified `getString(...)` returns `String`
+- the receiver is read-only
+- return nullability remains `Unknown`, because external lookup APIs differ on
+  whether missing values return null or throw
+
+The generalized tests added for this slice cover:
+
+- constructor overload selection using neutral `ConfigObject.getString(String)`
+  and `ResultRow.getString(int)` receivers
+- semantic external API facts for those receivers as read-only getters with
+  conservative return nullability
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1384
+parser_diagnostics	0
+resolver_diagnostics	357
+semantic_diagnostics	0
+unresolved_method_calls	42516
+external_api_explained_method_calls	42513
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2690
+external_api_explained_field_accesses	2583
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29267
+external_constructor_guesses	2891
+external_field_guesses	1353
+external_api_return_nullability_facts	5120
+total_facts	115955
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("fastqToPhred")]	3
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of stream matches argument types [Named { name: "ReadPileup", args: [] }]	3
+resolve_call_ambiguous	no overload of sum matches argument types [Unknown("getAD")]	3
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("containsVertex"), Unknown("lambda")]	3
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("isNonReference"), String]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `362` to `357`.
+- Files resolved without resolver diagnostics moved from `1383` to `1384`.
+- The previous constructor row with `[Unknown("getString")]` disappeared from
+  the top diagnostics.
+- The rule is receiver-qualified external API typing. Lowering does not
+  special-case JSON, result-set, or config APIs.
+
+## After Argument-Sensitive External Return Typing
+
+This external API slice handles same-name, same-arity external methods whose
+return type depends on the argument type. The benchmark exposed failures shaped
+like:
+
+```java
+stats.add(SAMUtils.fastqToPhred((char) q))
+read.setBaseQualities(SAMUtils.fastqToPhred(encodedQualities))
+```
+
+The missing rule was not just `fastqToPhred`. The resolver and general type
+inference only had an arity-based external return query, so any external API
+with argument-shaped return semantics had to collapse to one type or remain
+unknown.
+
+The std-library/external API model now has an argument-sensitive return query:
+
+- `fastqToPhred(char-like) -> int`
+- `fastqToPhred(string-like) -> byte[]`
+- the call is a read-only conversion/getter
+- the return is definitely non-null for these primitive/array conversion cases
+
+The generalized tests added for this slice cover:
+
+- overload selection using a neutral `QualityCodec.fastqToPhred(char)` call as
+  an `int` argument
+- overload selection using `QualityCodec.fastqToPhred(String)` as a `byte[]`
+  argument
+- semantic external API facts for the neutral conversion API as read-only and
+  definitely non-null
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1386
+parser_diagnostics	0
+resolver_diagnostics	353
+semantic_diagnostics	0
+unresolved_method_calls	42516
+external_api_explained_method_calls	42513
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2690
+external_api_explained_field_accesses	2583
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29082
+external_constructor_guesses	2890
+external_field_guesses	1353
+external_api_return_nullability_facts	5087
+total_facts	115769
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of stream matches argument types [Named { name: "ReadPileup", args: [] }]	3
+resolve_call_ambiguous	no overload of sum matches argument types [Unknown("getAD")]	3
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("containsVertex"), Unknown("lambda")]	3
+resolve_call_ambiguous	no overload of validateArg matches argument types [Unknown("isNonReference"), String]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `357` to `353`.
+- Files resolved without resolver diagnostics moved from `1384` to `1386`.
+- The previous `add` row with `[Unknown("fastqToPhred")]` disappeared from the
+  top diagnostics.
+- The infrastructure change is general: external return typing can now consider
+  receiver type, method name, and argument types before resolver/lowering sees
+  the call.
+
+## After Structural External Predicate Typing
+
+This external API slice handles Java-style boolean predicate naming. The
+benchmark exposed overload failures shaped like:
+
+```java
+validateArg(graph.containsVertex(vertex), () -> "message")
+validateArg(allele.isNonReference(), "message")
+```
+
+The missing rule was structural, not GATK-specific:
+
+- no-arg JavaBean predicates shaped as `isX()` or `hasX()` return boolean
+- one-arg predicates shaped as `containsX(value)` return boolean
+- these calls are read-only boolean getters
+- boolean returns are definitely non-null
+
+The generalized tests added for this slice cover neutral external receivers:
+
+- `GraphLike.containsVertex(Vertex)` feeding a boolean overload
+- `Marker.isNonReference()` feeding a boolean overload
+- `Marker.hasCoverage()` feeding a boolean overload
+- semantic external API facts for these names as read-only boolean getters
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1398
+parser_diagnostics	0
+resolver_diagnostics	326
+semantic_diagnostics	0
+unresolved_method_calls	42516
+external_api_explained_method_calls	42513
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2690
+external_api_explained_field_accesses	2583
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29067
+external_constructor_guesses	2890
+external_field_guesses	1353
+external_api_return_nullability_facts	4908
+total_facts	115754
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of stream matches argument types [Named { name: "ReadPileup", args: [] }]	3
+resolve_call_ambiguous	no overload of sum matches argument types [Unknown("getAD")]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of createFuncotationsHelper matches argument types [Named { name: "VariantContext", args: [] }, Unknown("getReference"), Named { name: "ReferenceContext", args: [] }, Named { name: "List", args: [Named { name: "GencodeGtfTranscriptFeature", args: [] }] }]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `353` to `326`.
+- Files resolved without resolver diagnostics moved from `1386` to `1398`.
+- The previous `containsVertex` and `isNonReference` validation rows
+  disappeared from the top diagnostics.
+- The rule lives in the std-library/external API fact model and return-typing
+  policy. Lowering does not special-case graph or allele APIs.
+
+## After External Count Array Getter Typing
+
+This external API slice handles compact acronym getters that represent numeric
+count arrays. The benchmark exposed failures shaped like:
+
+```java
+MathUtils.sum(genotype.getAD())
+```
+
+where the utility overload expects a numeric array. The missing rule was an
+external return type for a conventional count-array getter:
+
+- receiver-qualified `getAD() -> int[]`
+- the receiver is read-only
+- return nullability remains conservative through the generic getter policy
+
+The generalized tests added for this slice cover:
+
+- a neutral `DepthRecord.getAD()` feeding an overloaded `sum(int[])`
+- semantic external API facts for `DepthRecord.getAD` as a read-only getter
+  with unknown nullability
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1399
+parser_diagnostics	0
+resolver_diagnostics	323
+semantic_diagnostics	0
+unresolved_method_calls	42516
+external_api_explained_method_calls	42513
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2684
+external_api_explained_field_accesses	2577
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29065
+external_constructor_guesses	2890
+external_field_guesses	1349
+external_api_return_nullability_facts	4908
+total_facts	115742
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "File", args: [] }, Named { name: "FileNotFoundException", args: [] }]	4
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of stream matches argument types [Named { name: "ReadPileup", args: [] }]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `326` to `323`.
+- Files resolved without resolver diagnostics moved from `1398` to `1399`.
+- The previous `MathUtils.sum` row with `[Unknown("getAD")]` disappeared from
+  the top diagnostics.
+- This remains an external return-type fact consumed by resolver/type
+  inference. Lowering does not special-case genotype or count-array APIs.
+
+## After JDK IOException Subclass Assignability
+
+This resolver slice handles standard checked-exception hierarchy edges during
+overload and constructor applicability. The benchmark exposed constructor
+failures shaped like:
+
+```java
+new CouldNotCreateOutputFile(file, fileNotFoundException)
+```
+
+where a constructor overload accepts `IOException` but the catch variable is a
+`FileNotFoundException`. The missing rule was a general JDK subtype edge, not a
+GATK-specific constructor rule:
+
+- `FileNotFoundException` is a known throwable type
+- `EOFException` is a known throwable type
+- both are assignable to `IOException`
+- both are assignable through `IOException` to `Exception` and `Throwable`
+
+The generalized test added for this slice uses neutral wrapper classes:
+
+- `WrappedInputFailure(File, IOException)` is selected for an actual
+  `FileNotFoundException` argument over a competing `(File, String)` overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1407
+parser_diagnostics	0
+resolver_diagnostics	307
+semantic_diagnostics	0
+unresolved_method_calls	42516
+external_api_explained_method_calls	42513
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2684
+external_api_explained_field_accesses	2577
+unexplained_field_accesses	107
+unexplained_source_field_accesses	95
+unexplained_non_source_field_accesses	12
+external_api_guesses	29065
+external_constructor_guesses	2890
+external_field_guesses	1349
+external_api_return_nullability_facts	4910
+total_facts	115742
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_call_ambiguous	no overload of stream matches argument types [Named { name: "ReadPileup", args: [] }]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of createFuncotationsHelper matches argument types [Named { name: "VariantContext", args: [] }, Unknown("getReference"), Named { name: "ReferenceContext", args: [] }, Named { name: "List", args: [Named { name: "GencodeGtfTranscriptFeature", args: [] }] }]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `323` to `307`.
+- Files resolved without resolver diagnostics moved from `1399` to `1407`.
+- The previous top constructor row with `[File, FileNotFoundException]`
+  disappeared from the top diagnostics.
+- The rule lives in known Java subtype facts consumed by resolver applicability
+  scoring. Lowering does not special-case GATK exception wrappers.
+
+## After Generic Source Interface Name Normalization
+
+This parser/resolver slice handles source classes that implement generic
+interfaces. The benchmark exposed overload failures shaped like:
+
+```java
+Utils.stream(readPileup)
+```
+
+where `ReadPileup` declares `implements Iterable<PileupElement>` and the source
+overload accepts `Iterable<T>`. The missing rule was not specific to streams or
+pileups: `TypeDecl.implements` stores source hierarchy edges as names, so
+generic interface declarations must be normalized to their raw type name before
+the resolver's hierarchy walk.
+
+The generalized test added for this slice uses neutral classes:
+
+- `ElementGroup implements Iterable<Element>`
+- `stream(Iterable<T>)` is selected over an unrelated `stream(String)` overload
+  for an `ElementGroup` argument
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1419
+parser_diagnostics	0
+resolver_diagnostics	285
+semantic_diagnostics	0
+unresolved_method_calls	42065
+external_api_explained_method_calls	42062
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2687
+external_api_explained_field_accesses	2582
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28702
+external_constructor_guesses	2890
+external_field_guesses	1353
+external_api_return_nullability_facts	4889
+total_facts	114935
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of getBasesReverseComplement matches argument types [Unknown("getBases")]	3
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+resolve_call_ambiguous	no overload of add matches argument types [Primitive(Int)]	2
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `307` to `285`.
+- Files resolved without resolver diagnostics moved from `1407` to `1419`.
+- The previous `stream(ReadPileup)` row disappeared from the top diagnostics.
+- The rule belongs at the parser/resolver boundary: source hierarchy edge names
+  are normalized before resolver assignability. Lowering does not special-case
+  `Utils.stream` or `ReadPileup`.
+
+## After External Byte-Array Getter And Transform Typing
+
+This external API slice handles byte-sequence getters and transforms. The
+benchmark exposed overload failures shaped like:
+
+```java
+ReadUtils.getBasesReverseComplement(allele.getBases())
+```
+
+where the nested getter result was unknown, preventing overload resolution for
+the static byte-array transform. The generalized rule is:
+
+- no-arg byte-sequence getters such as `getBases`, `getReadBases`, and
+  `getBaseQualities` return `byte[]`
+- `getBasesReverseComplement(byte[])` returns `byte[]`
+- byte-sequence getters are read-only getter facts with conservative
+  nullability
+- byte-sequence transforms that allocate or derive a result are read-only getter
+  facts with definitely non-null return nullability
+
+The generalized tests added for this slice use neutral external types:
+
+- `ExternalSequence.getBases()` feeds
+  `ReadUtils.getBasesReverseComplement(byte[])`
+- the transformed result selects an `acceptBytes(byte[])` overload over an
+  unrelated `acceptBytes(String)` overload
+- semantic facts record both calls as read-only getter effects
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1426
+parser_diagnostics	0
+resolver_diagnostics	275
+semantic_diagnostics	0
+unresolved_method_calls	42065
+external_api_explained_method_calls	42062
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2662
+external_api_explained_field_accesses	2557
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28699
+external_constructor_guesses	2890
+external_field_guesses	1341
+external_api_return_nullability_facts	4889
+total_facts	114895
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of shard matches argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "GATKRead", args: [] }] }, Named { name: "Class", args: [] }, Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "List", args: [Named { name: "ShardBoundary", args: [] }] }, Primitive(Int), Primitive(Boolean)]	3
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+resolve_call_ambiguous	no overload of add matches argument types [Primitive(Int)]	2
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of bestAllelesBreakingTies matches argument types [Unknown("getSampleName")]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `285` to `275`.
+- Files resolved without resolver diagnostics moved from `1419` to `1426`.
+- The previous `getBasesReverseComplement` row with `[Unknown("getBases")]`
+  disappeared from the top diagnostics.
+- The rule lives in external API return typing and external method-effect
+  facts. Lowering does not special-case read, allele, haplotype, or reference
+  APIs.
+
+## After Raw Generic Actual Assignability
+
+This resolver slice handles raw generic actuals passed to parameterized generic
+parameters. The benchmark exposed overload failures shaped like:
+
+```java
+SparkSharder.shard(ctx, reads, GATKRead.class, sequenceDictionary, intervalShards, readShardSize, shuffle)
+```
+
+where the source overload expects a parameterized `Class<L>` but class literals
+are currently inferred as raw `Class`. Java allows this as an unchecked raw-to-
+parameterized conversion, so overload applicability should score it as a
+conservative match rather than rejecting the candidate.
+
+The generalized test added for this slice uses neutral Spark-like names:
+
+- a static generic method accepts `Rdd<L>`, `Class<L>`, and `List<B>`
+- the call passes a raw `Class` value
+- resolver selects the generic overload and substitutes `L` into the return type
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1432
+parser_diagnostics	0
+resolver_diagnostics	263
+semantic_diagnostics	0
+unresolved_method_calls	42065
+external_api_explained_method_calls	42062
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2662
+external_api_explained_field_accesses	2557
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28695
+external_constructor_guesses	2890
+external_field_guesses	1341
+external_api_return_nullability_facts	4889
+total_facts	114891
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_constructor_ambiguous	no constructor matches argument types [Named { name: "T", args: [] }]	3
+resolve_call_ambiguous	no overload of add matches argument types [Primitive(Int)]	2
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of arrayMax matches argument types [Unknown("getPL")]	2
+resolve_call_ambiguous	no overload of bestAllelesBreakingTies matches argument types [Unknown("getSampleName")]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `275` to `263`.
+- Files resolved without resolver diagnostics moved from `1426` to `1432`.
+- The previous `shard(...)` row disappeared from the top diagnostics.
+- The rule lives in generic argument applicability scoring. Lowering does not
+  special-case Spark or class literals.
+
+## After Structural Reference Type-Variable Assignability
+
+This resolver slice handles constructor arguments whose static type is a Java
+method type variable, such as:
+
+```java
+<T extends Locatable> SimpleInterval make(T feature) {
+    return new SimpleInterval(feature);
+}
+```
+
+The benchmark exposed this as `SimpleInterval(T)` and
+`SimpleInterval(GencodeGtfTranscriptFeature)`. The generalized rules are:
+
+- known structural external targets such as `Locatable` can accept method type
+  variable actuals conservatively
+- source hierarchy walks can compose with known external supertypes, so a source
+  class extending a known external `Feature` can be treated as `Locatable`
+- constructor diagnostics now include the target constructor type, making
+  benchmark categories actionable
+
+The generalized tests added for this slice cover:
+
+- `new TargetInterval(T)` inside a `<T extends Locatable>` method
+- `TranscriptFeature extends Feature` passed to a constructor accepting
+  `Locatable`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1435
+parser_diagnostics	0
+resolver_diagnostics	258
+semantic_diagnostics	0
+unresolved_method_calls	42065
+external_api_explained_method_calls	42062
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2662
+external_api_explained_field_accesses	2557
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28698
+external_constructor_guesses	2890
+external_field_guesses	1341
+external_api_return_nullability_facts	4889
+total_facts	114894
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Named { name: "SVDUSTFilteredKmerizer", args: [] }]	2
+resolve_call_ambiguous	no overload of add matches argument types [Primitive(Int)]	2
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of bestAllelesBreakingTies matches argument types [Unknown("getSampleName")]	2
+resolve_call_ambiguous	no overload of createFuncotationsHelper matches argument types [Named { name: "VariantContext", args: [] }, Unknown("getReference"), Named { name: "ReferenceContext", args: [] }, Named { name: "List", args: [Named { name: "GencodeGtfTranscriptFeature", args: [] }] }]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `263` to `258`.
+- Files resolved without resolver diagnostics moved from `1432` to `1435`.
+- The previous `SimpleInterval(T)` and `SimpleInterval(Gencode...)` top rows
+  disappeared.
+- The rule lives in resolver assignability and stdlib external hierarchy facts.
+  Lowering does not infer locatable or feature relationships.
+
+## After Source Hierarchy Distance Scoring
+
+This resolver slice handles overload specificity when a source type directly
+implements one interface and also matches a broader external superinterface.
+The benchmark exposed this as:
+
+```java
+Utils.stream(new SVDUSTFilteredKmerizer(...))
+```
+
+where the receiver is directly an `Iterator<T>` but can also be viewed as an
+`Iterable<T>` through known Java library relationships. The direct source
+interface overload should win.
+
+The generalized test added for this slice uses neutral stream factory names:
+
+- `ElementIterator implements Iterator<Element>`
+- overloaded `stream(Iterator<T>)` and `stream(Iterable<T>)`
+- resolver selects the direct `Iterator` overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1438
+parser_diagnostics	0
+resolver_diagnostics	252
+semantic_diagnostics	0
+unresolved_method_calls	42065
+external_api_explained_method_calls	42062
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2662
+external_api_explained_field_accesses	2557
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28695
+external_constructor_guesses	2890
+external_field_guesses	1341
+external_api_return_nullability_facts	4889
+total_facts	114891
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of add matches argument types [Primitive(Int)]	2
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of allMatch matches argument types [Array(Primitive(Double)), Unknown("method_reference")]	2
+resolve_call_ambiguous	no overload of arrayMax matches argument types [Unknown("getPL")]	2
+resolve_call_ambiguous	no overload of bestAllelesBreakingTies matches argument types [Unknown("getSampleName")]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `258` to `252`.
+- Files resolved without resolver diagnostics moved from `1435` to `1438`.
+- The previous `stream(SVDUSTFilteredKmerizer)` ambiguity disappeared.
+- The rule lives in resolver overload scoring by source-hierarchy distance.
+  Lowering does not special-case iterators or stream factories.
+
+## After Generic Receiver Substitution And JDK Singleton Collection Returns
+
+This slice handles two related resolver inputs exposed by the benchmark:
+
+- source generic receiver methods must apply the receiver's class type
+  arguments to candidate parameter types before overload matching
+- JDK collection factory methods such as `Collections.singletonList(x)` must
+  provide argument-sensitive external return shapes
+
+The benchmark exposed these as:
+
+```java
+values.add(1)
+new Traversal(Collections.singletonList(...))
+```
+
+The generalized rules are:
+
+- Java IR records declared type parameter names on source types.
+- Resolver method symbols carry the owning type parameters.
+- Resolver overload scoring substitutes receiver-owned type parameters, such
+  as `Box<Integer>.add(E)` becoming `add(Integer)`, before applying boxing and
+  assignability.
+- Method-local type variables remain independent from receiver-owned type
+  variables.
+- `Collections.singletonList(T)`, `Collections.singleton(T)`, and
+  `Collections.singletonMap(K, V)` are modeled as external API return facts
+  producing `List<T>`, `Set<T>`, and `Map<K, V>`.
+
+The generalized tests added for this slice cover:
+
+- `Box<Integer>.add(1)` resolving through receiver generic substitution and
+  primitive boxing
+- a method-local `<T>` call on `Box<Integer>` staying method-local rather than
+  being substituted from the receiver
+- constructor overload selection from `Collections.singletonList(name)` as
+  `List<String>`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1442
+parser_diagnostics	0
+resolver_diagnostics	248
+semantic_diagnostics	0
+unresolved_method_calls	42058
+external_api_explained_method_calls	42053
+unexplained_method_calls	5
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2662
+external_api_explained_field_accesses	2557
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28686
+external_constructor_guesses	2889
+external_field_guesses	1341
+external_api_return_nullability_facts	5086
+total_facts	114874
+top_unexplained_method_targets
+MethodCall	getSequenceDictionary	2
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of allMatch matches argument types [Array(Primitive(Double)), Unknown("method_reference")]	2
+resolve_call_ambiguous	no overload of arrayMax matches argument types [Unknown("getPL")]	2
+resolve_call_ambiguous	no overload of bestAllelesBreakingTies matches argument types [Unknown("getSampleName")]	2
+resolve_call_ambiguous	no overload of createFuncotationsHelper matches argument types [Named { name: "VariantContext", args: [] }, Unknown("getReference"), Named { name: "ReferenceContext", args: [] }, Named { name: "List", args: [Named { name: "GencodeGtfTranscriptFeature", args: [] }] }]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `252` to `248`.
+- Files resolved without resolver diagnostics moved from `1438` to `1442`.
+- The previous `add(int)` top row disappeared.
+- The previous `Traversal(Collections.singletonList(...))` top row
+  disappeared.
+- The rule lives in Java IR, resolver overload applicability, and stdlib
+  external API facts. Lowering does not special-case `add`, `Traversal`, or any
+  GATK class.
+- Remaining risk: method declarations still do not explicitly store method type
+  parameter declarations or bounds. This slice avoids substituting method-local
+  variables from receiver type arguments, but bounded method type inference
+  remains a future resolver task.
+
+## After Method Reference Functional Interface Target Typing
+
+This resolver slice handles method references as target-typed functional
+interface arguments. The benchmark exposed this as:
+
+```java
+allMatch(doubleArray, SomeOwner::predicate)
+```
+
+where the overload expects a primitive functional interface such as
+`DoublePredicate`, but expression type inference reports the method reference
+as an unknown expression shape. Java resolves method references from the target
+functional interface, so overload applicability should treat method references
+like lambdas for functional-interface parameters.
+
+The generalized rules are:
+
+- `Unknown("method_reference")` is assignable to source functional interfaces
+  during resolver overload scoring.
+- `Unknown("method_reference")` is assignable to known external functional
+  interfaces during resolver overload scoring.
+- Known primitive predicate interfaces include `DoublePredicate`,
+  `IntPredicate`, and `LongPredicate`.
+- Lowering still owns unsupported method-reference rendering; this slice only
+  resolves overload targets and facts before lowering.
+
+The generalized tests added for this slice cover:
+
+- a method reference passed to a source `MessageSupplier` overload
+- a method reference passed to a known external `DoublePredicate` overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1445
+parser_diagnostics	0
+resolver_diagnostics	237
+semantic_diagnostics	0
+unresolved_method_calls	42058
+external_api_explained_method_calls	42053
+unexplained_method_calls	5
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2662
+external_api_explained_field_accesses	2557
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28679
+external_constructor_guesses	2889
+external_field_guesses	1341
+external_api_return_nullability_facts	5086
+total_facts	114867
+top_unexplained_method_targets
+MethodCall	getSequenceDictionary	2
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of arrayMax matches argument types [Unknown("getPL")]	2
+resolve_call_ambiguous	no overload of bestAllelesBreakingTies matches argument types [Unknown("getSampleName")]	2
+resolve_call_ambiguous	no overload of createFuncotationsHelper matches argument types [Named { name: "VariantContext", args: [] }, Unknown("getReference"), Named { name: "ReferenceContext", args: [] }, Named { name: "List", args: [Named { name: "GencodeGtfTranscriptFeature", args: [] }] }]	2
+resolve_call_ambiguous	no overload of createVCFWriter matches argument types [Unknown("common_type")]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `248` to `237`.
+- Files resolved without resolver diagnostics moved from `1442` to `1445`.
+- The previous `allMatch(double[], method_reference)` top row disappeared.
+- The rule lives in resolver target typing and stdlib known functional
+  interface facts. Lowering does not special-case `allMatch`, method-reference
+  owners, or GATK classes.
+- Remaining risk: this does not yet validate method-reference arity or return
+  compatibility against the target functional interface method. It is an
+  applicability rule matching the existing lambda policy, not full Java method
+  reference resolution.
+
+## After External Domain Getter Return Typing
+
+This external API slice handles recurring zero-argument getter return shapes
+that were feeding unknown values into overload resolution. The benchmark
+exposed these as:
+
+```java
+arrayMax(genotype.getPL())
+bestAllelesBreakingTies(record.getSampleName())
+processCommentLine(columns, reader.getLineNumber())
+qualToProb(genotype.getGQ())
+set(name, read.getBaseString())
+isFrameshift(variant.getReference(), allele)
+remap(variant.getAlleles())
+validateArg(record.hasAttribute("score"), message)
+```
+
+The generalized rules are:
+
+- known sequence/sample name getters return `String`
+- known coordinate/count getters return `int`
+- known likelihood/count-vector getters return `int[]`
+- known allele getters return `Allele`
+- known allele-list getters return `List<Allele>`
+- `hasAttribute(x)` is a boolean predicate
+
+The tests use neutral receiver types such as `ExternalRead`,
+`ExternalGenotype`, `ExternalVariant`, and `ExternalRecord`; production policy
+does not recognize GATK class names.
+
+The generalized tests added for this slice cover:
+
+- `getSampleName`, `getBaseString`, `getGQ`, and `getLineNumber` selecting
+  string/int overloads
+- `getPL`, `getReference`, and `getAlleles` selecting `int[]`, `Allele`, and
+  `List<Allele>` overloads
+- `hasAttribute(String)` selecting a boolean validation overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1452
+parser_diagnostics	0
+resolver_diagnostics	215
+semantic_diagnostics	0
+unresolved_method_calls	42054
+external_api_explained_method_calls	42049
+unexplained_method_calls	5
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2661
+external_api_explained_field_accesses	2556
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28593
+external_constructor_guesses	2888
+external_field_guesses	1340
+external_api_return_nullability_facts	5043
+total_facts	114774
+top_unexplained_method_targets
+MethodCall	getSequenceDictionary	2
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of createVCFWriter matches argument types [Unknown("common_type")]	2
+resolve_call_ambiguous	no overload of getOptionalIntAttribute matches argument types [Named { name: "GATKRead", args: [] }, Unknown("name")]	2
+resolve_call_ambiguous	no overload of getOptionalIntAttribute matches argument types [Named { name: "SAMRecord", args: [] }, Unknown("name")]	2
+resolve_call_ambiguous	no overload of setAttribute matches argument types [String, Unknown("common_type")]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `237` to `215`.
+- Files resolved without resolver diagnostics moved from `1445` to `1452`.
+- The previous `arrayMax(getPL)`, `bestAllelesBreakingTies(getSampleName)`,
+  `createFuncotationsHelper(... getReference ...)`, `isFrameshift(getReference,
+  Allele)`, `processCommentLine(... getLineNumber)`, `qualToProb(getGQ)`,
+  `remap(getAlleles)`, `set(... getBaseString)`, and
+  `validateArg(hasAttribute, String)` top rows disappeared.
+- The rule lives in stdlib external API return/effect facts. Resolver consumes
+  these facts through the existing external return type query. Lowering does
+  not special-case getter names or GATK classes.
+- Remaining risk: return nullability for some object getters is still
+  conservative. This slice types the value for overload resolution but does not
+  prove whether `String`, `Allele`, or `List<Allele>` getters are nullable.
+
+## After Resolver Ternary Common Types And External List/Quality Factories
+
+This slice handles three related resolver inputs that were feeding unknown
+argument types into overload resolution:
+
+- ternary expressions where both branches have a useful Java least-upper-bound
+- `Arrays.asList(...)` as a typed `List<T>` factory
+- `phredToFastq(...)` as the inverse string-producing quality conversion of
+  `fastqToPhred(...)`
+
+The benchmark exposed these as:
+
+```java
+createVCFWriter(flag ? outputFile : null)
+setAttribute(name, QualityCodec.phredToFastq(value))
+new Traversal(Arrays.asList(...), factory)
+```
+
+The generalized rules are:
+
+- resolver expression typing computes ternary common types from resolved branch
+  types before overload scoring
+- `null` plus a reference branch keeps the reference branch type
+- compatible branch types use resolver assignability
+- known collection family branches can common to `List<T>`, `Set<T>`,
+  `Collection<T>`, `Iterable<T>`, `Map<K,V>`, or `Object`
+- `Arrays.asList(T...)` returns `List<T>` where `T` is derived from the
+  argument shape
+- `phredToFastq(int-like)` and `phredToFastq(byte[])` return `String`
+
+The generalized tests added for this slice cover:
+
+- a nullable string ternary selecting a `String` overload
+- an `ArrayList<String>`/`LinkedList<String>` ternary selecting a `List<String>`
+  overload
+- `Arrays.asList(first, second)` selecting a `List<String>` constructor
+- `phredToFastq(int)` and `phredToFastq(byte[])` selecting `String` overloads
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1457
+parser_diagnostics	0
+resolver_diagnostics	203
+semantic_diagnostics	0
+unresolved_method_calls	42053
+external_api_explained_method_calls	42048
+unexplained_method_calls	5
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2661
+external_api_explained_field_accesses	2556
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28588
+external_constructor_guesses	2888
+external_field_guesses	1340
+external_api_return_nullability_facts	5051
+total_facts	114768
+top_unexplained_method_targets
+MethodCall	getSequenceDictionary	2
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of expandWithinContig matches argument types [Primitive(Int), Unknown("getSequenceDictionary")]	2
+resolve_call_ambiguous	no overload of getOptionalIntAttribute matches argument types [Named { name: "GATKRead", args: [] }, Unknown("name")]	2
+resolve_call_ambiguous	no overload of getOptionalIntAttribute matches argument types [Named { name: "SAMRecord", args: [] }, Unknown("name")]	2
+resolve_call_ambiguous	no overload of trimAlleles matches argument types [Unknown("make"), Primitive(Boolean), Primitive(Boolean)]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `215` to `203`.
+- Files resolved without resolver diagnostics moved from `1452` to `1457`.
+- The previous `createVCFWriter(common_type)`, `setAttribute(String,
+  common_type)`, `setAttribute(String, phredToFastq)`, and constructor
+  `Arrays.asList(...)` rows disappeared or were reclassified.
+- The rule lives in resolver expression typing and stdlib external API return
+  facts. Lowering does not special-case ternaries, VCF writers, traversals,
+  arrays factories, quality codecs, or GATK classes.
+- Remaining risk: ternary common typing is still an approximation. It does not
+  compute the full Java least-upper-bound for arbitrary generic/interface
+  combinations; it handles the finite cases needed by resolver overload
+  scoring without moving ownership or lowering decisions into the resolver.
+
+## External sequence dictionaries and enum-like constants
+
+This slice handles two external API facts that appeared in the next benchmark
+diagnostics:
+
+- `getSequenceDictionary()` and `getSequenceDictionaryForDrivingVariants()`
+  return `SAMSequenceDictionary`
+- htsjdk `CigarOperator` static constants have type `CigarOperator`
+
+The benchmark exposed these as:
+
+```java
+span.expandWithinContig(padding, header.getSequenceDictionary())
+countClippedBases(cigar, CigarOperator.HARD_CLIP)
+```
+
+The generalized rules are:
+
+- sequence-dictionary getters are external return-type facts, not lowering
+  branches
+- static enum-like constants are external field facts keyed by receiver type
+- snake-case static receiver identifiers such as `cigar_operator` are
+  canonicalized at the external API boundary before field typing
+- resolver overload scoring consumes those facts without learning
+  htsjdk-specific overload rules
+
+The generalized tests added for this slice cover:
+
+- a neutral external header whose `getSequenceDictionary()` result selects a
+  `SAMSequenceDictionary` overload
+- a neutral `CigarOperator.HARD_CLIP` static constant selecting a
+  `CigarOperator` overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1462
+parser_diagnostics	0
+resolver_diagnostics	195
+semantic_diagnostics	0
+unresolved_method_calls	42053
+external_api_explained_method_calls	42050
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2412
+external_api_explained_field_accesses	2307
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28583
+external_constructor_guesses	2875
+external_field_guesses	1211
+external_api_return_nullability_facts	5051
+total_facts	114372
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of getOptionalIntAttribute matches argument types [Named { name: "GATKRead", args: [] }, Unknown("name")]	2
+resolve_call_ambiguous	no overload of getOptionalIntAttribute matches argument types [Named { name: "SAMRecord", args: [] }, Unknown("name")]	2
+resolve_call_ambiguous	no overload of trimAlleles matches argument types [Unknown("make"), Primitive(Boolean), Primitive(Boolean)]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `203` to `195`.
+- Files resolved without resolver diagnostics moved from `1457` to `1462`.
+- `getSequenceDictionary` disappeared from unexplained method targets.
+- The previous `expandWithinContig(..., Unknown("getSequenceDictionary"))`
+  diagnostic disappeared from the top resolver diagnostics.
+- Unresolved field accesses moved from `2661` to `2412`, mostly by explaining
+  enum-like static constants as external fields.
+- The rule lives in stdlib external API facts and resolver member-access
+  typing. Lowering does not special-case sequence dictionaries, CigarOperator,
+  htsjdk, or GATK classes.
+
+## External enum `name()` and SAM tag constants
+
+This slice handles an external enum pattern that appeared in the next benchmark
+diagnostics:
+
+- `SAMTag` static constants have type `SAMTag`
+- known external enum receivers have `name()` as a non-null `String` getter
+
+The benchmark exposed this as:
+
+```java
+ReadUtils.getOptionalIntAttribute(read, SAMTag.NM.name())
+```
+
+The generalized rules are:
+
+- enum-like external constants are field facts keyed by receiver type
+- `Enum.name()` is modeled as a getter return fact only for known external enum
+  receiver types
+- the getter role and non-null return nullability are semantic facts, not
+  lowering rules
+- resolver overload scoring consumes the resulting `String` type without
+  learning anything about `ReadUtils` or optional integer attributes
+
+The generalized tests added for this slice cover:
+
+- a fact-level test proving `SAMTag.NM.name()` is a read-only, definitely
+  non-null string getter
+- a resolver test where `SAMTag.NM.name()` selects a `String` overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1464
+parser_diagnostics	0
+resolver_diagnostics	187
+semantic_diagnostics	0
+unresolved_method_calls	42053
+external_api_explained_method_calls	42050
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2357
+external_api_explained_field_accesses	2252
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28602
+external_constructor_guesses	2875
+external_field_guesses	1184
+external_api_return_nullability_facts	5073
+total_facts	114309
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of median matches argument types [Unknown("toArray")]	4
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of get matches argument types [Unknown("v_a_r_i_a_n_t_t_y_p_e_c_o_l_u_m_n_n_a_m_e")]	2
+resolve_call_ambiguous	no overload of trimAlleles matches argument types [Unknown("make"), Primitive(Boolean), Primitive(Boolean)]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `195` to `187`.
+- Files resolved without resolver diagnostics moved from `1462` to `1464`.
+- The previous `getOptionalIntAttribute(..., Unknown("name"))` rows
+  disappeared from top resolver diagnostics.
+- Unresolved field accesses moved from `2412` to `2357` by explaining `SAMTag`
+  constants as external fields.
+- The rule lives in stdlib external API facts and semantic external method
+  policy. Lowering does not special-case SAM tags, GATK reads, SAM records, or
+  optional integer attributes.
+
+## Primitive array utility `toArray`
+
+This slice handles Guava-style primitive array utility conversions that
+appeared in the next benchmark diagnostics:
+
+- `Ints.toArray(collection)` returns `int[]`
+- `Doubles.toArray(collection)` returns `double[]`
+- the same external API model covers `Booleans`, `Bytes`, `Shorts`, `Chars`,
+  `Longs`, and `Floats`
+
+The benchmark exposed this as:
+
+```java
+MathUtils.median(Ints.toArray(values))
+```
+
+The generalized rules are:
+
+- primitive array utility classes are static external API owners
+- `toArray(collection)` return type is argument-sensitive by owner, producing a
+  primitive array
+- primitive utility `toArray` is a read-only, definitely non-null getter fact
+- parser preserves static utility receivers as identifier expressions; resolver
+  and stdlib facts handle the canonical owner typing
+- overload scoring consumes the array type without adding `MathUtils` or
+  `median` special cases
+
+The generalized tests added for this slice cover:
+
+- parser shape for static utility method receivers
+- resolver overload selection from `Ints.toArray(...)` and
+  `Doubles.toArray(...)`
+- semantic external API role and nullability facts for primitive array
+  utility `toArray`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1468
+parser_diagnostics	0
+resolver_diagnostics	183
+semantic_diagnostics	0
+unresolved_method_calls	42053
+external_api_explained_method_calls	42050
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2357
+external_api_explained_field_accesses	2252
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28598
+external_constructor_guesses	2875
+external_field_guesses	1184
+external_api_return_nullability_facts	5087
+total_facts	114305
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of addToFeatureSources matches argument types [Primitive(Int), Named { name: "FeatureInput", args: [Named { name: "VariantContext", args: [] }] }, Named { name: "Class", args: [] }, Primitive(Int), Primitive(Int), Named { name: "GenomicsDBOptions", args: [] }]	2
+resolve_call_ambiguous	no overload of get matches argument types [Unknown("v_a_r_i_a_n_t_t_y_p_e_c_o_l_u_m_n_n_a_m_e")]	2
+resolve_call_ambiguous	no overload of trimAlleles matches argument types [Unknown("make"), Primitive(Boolean), Primitive(Boolean)]	2
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `187` to `183`.
+- Files resolved without resolver diagnostics moved from `1464` to `1468`.
+- The previous `median(Unknown("toArray"))` top diagnostic disappeared.
+- The rule lives in parser shape tests plus stdlib external API facts. Lowering
+  does not special-case primitive utility owners, `MathUtils`, or `median`.
+
+## Class literal generic target types and external feature hierarchy
+
+This slice handles class literal typing for wildcard-bounded `Class`
+parameters:
+
+- `T.class` is typed as `Class<T>` instead of raw `Class`
+- external feature-like types such as `VariantContext` are known subtypes of
+  `Feature`
+
+The benchmark exposed this as:
+
+```java
+features.addToFeatureSources(0, featureInput, VariantContext.class, ..., options)
+new FeatureDataSource<>(featureInput, lookahead, VariantContext.class, ..., options)
+```
+
+The generalized rules are:
+
+- class-literal target typing belongs in Java type inference and resolver
+  expression typing
+- wildcard-bounded generic assignability remains resolver-owned
+- external hierarchy edges such as `VariantContext <: Feature` live in stdlib
+  known Java subtype facts
+- overload and constructor resolution consume these facts without adding
+  `FeatureManager`, `FeatureDataSource`, or GATK-specific branches
+
+The generalized tests added for this slice cover:
+
+- source-declared `VariantRecord implements Feature` passed as
+  `Class<? extends Feature>`
+- external `VariantContext` passed as `Class<? extends Feature>` through known
+  external feature hierarchy facts
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1471
+parser_diagnostics	0
+resolver_diagnostics	180
+semantic_diagnostics	0
+unresolved_method_calls	42053
+external_api_explained_method_calls	42050
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2357
+external_api_explained_field_accesses	2252
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28596
+external_constructor_guesses	2883
+external_field_guesses	1184
+external_api_return_nullability_facts	5087
+total_facts	114311
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of get matches argument types [Unknown("v_a_r_i_a_n_t_t_y_p_e_c_o_l_u_m_n_n_a_m_e")]	2
+resolve_call_ambiguous	no overload of trimAlleles matches argument types [Unknown("make"), Primitive(Boolean), Primitive(Boolean)]	2
+resolve_call_ambiguous	no overload of add matches argument types [Unknown("getOrDefault"), Named { name: "TableFuncotation", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `183` to `180`.
+- Files resolved without resolver diagnostics moved from `1468` to `1471`.
+- The previous `addToFeatureSources(..., Class<VariantContext>, ...)` and
+  `FeatureDataSource(..., Class<VariantContext>, ...)` rows disappeared from
+  top resolver diagnostics.
+- The rule lives in Java type inference, resolver expression typing, and stdlib
+  external subtype facts. Lowering does not special-case class literals,
+  FeatureManager, FeatureDataSource, or GATK variant inputs.
+
+## Generic map `getOrDefault` value typing
+
+This external API slice handles the JDK `Map<K, V>.getOrDefault(key, default)`
+return type. The benchmark exposed this as an overload-resolution failure where
+the first argument came from an unresolved `getOrDefault` call:
+
+```text
+no overload of add matches argument types [Unknown("getOrDefault"), TableFuncotation]
+```
+
+The generalized rules are:
+
+- a generic map receiver returns its value type `V` for both `get(key)` and
+  `getOrDefault(key, defaultValue)`
+- `getOrDefault` is a read-only map getter in the external API effect model
+- overload resolution consumes the typed result before lowering
+- lowering does not special-case `getOrDefault`, table funcotations, or any GATK
+  class
+
+The generalized tests added for this slice cover:
+
+- overload selection from a neutral `Map<String, String>.getOrDefault(...)`
+  value passed into overloaded `add(...)`
+- semantic external API facts classifying `Map.getOrDefault` as a read-only
+  getter with conservative return nullability
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1472
+parser_diagnostics	0
+resolver_diagnostics	179
+semantic_diagnostics	0
+unresolved_method_calls	42053
+external_api_explained_method_calls	42050
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2357
+external_api_explained_field_accesses	2252
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28593
+external_constructor_guesses	2883
+external_field_guesses	1184
+external_api_return_nullability_facts	5087
+total_facts	114308
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of get matches argument types [Unknown("v_a_r_i_a_n_t_t_y_p_e_c_o_l_u_m_n_n_a_m_e")]	2
+resolve_call_ambiguous	no overload of trimAlleles matches argument types [Unknown("make"), Primitive(Boolean), Primitive(Boolean)]	2
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("getPeriod")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `180` to `179`.
+- Files resolved without resolver diagnostics moved from `1471` to `1472`.
+- The previous `add(Unknown("getOrDefault"), TableFuncotation)` top diagnostic
+  disappeared.
+- The rule lives in stdlib external API return typing and semantic external API
+  policy. It does not add any GATK-specific production branch.
+
+## Enclosing source field typing in nested classes
+
+This resolver slice handles Java nested classes that refer to fields declared
+on an enclosing source class. The benchmark exposed this as static string
+column constants passed into overloaded APIs from nested reader classes:
+
+```text
+no overload of get matches argument types [Unknown("v_a_r_i_a_n_t_t_y_p_e_c_o_l_u_m_n_n_a_m_e")]
+```
+
+The generalized rules are:
+
+- the resolver records an enclosing-type edge for nested source types
+- the method/constructor field environment includes visible fields from
+  enclosing source types after current-type fields
+- unqualified references to enclosing source constants therefore have their
+  declared Java type before overload resolution
+- this is resolver-owned Java scope/type behavior, not an external API fact and
+  not a lowering rule
+
+The generalized test added for this slice covers:
+
+- a neutral `RecordTable.Reader` nested class passing an enclosing
+  `private static final String` field into overloaded `accept(...)`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1474
+parser_diagnostics	0
+resolver_diagnostics	164
+semantic_diagnostics	0
+unresolved_method_calls	42039
+external_api_explained_method_calls	42036
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2346
+external_api_explained_field_accesses	2241
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28597
+external_constructor_guesses	2883
+external_field_guesses	1176
+external_api_return_nullability_facts	5089
+total_facts	114279
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of trimAlleles matches argument types [Unknown("make"), Primitive(Boolean), Primitive(Boolean)]	2
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("getPeriod")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `179` to `164`.
+- Files resolved without resolver diagnostics moved from `1472` to `1474`.
+- The previous `get(Unknown("v_a_r_i_a_n_t_t_y_p_e_c_o_l_u_m_n_n_a_m_e"))`
+  top diagnostic disappeared.
+- Unresolved method calls dropped from `42053` to `42039`; unresolved field
+  accesses dropped from `2357` to `2346` because enclosing constants no longer
+  seed unknown expressions.
+- The rule lives in resolver symbol/scope typing. It does not add any
+  GATK-specific production branch.
+
+## External builder `make()` product typing
+
+This external API slice handles a common Java builder convention where
+`XBuilder.make()` returns an `X`. The benchmark exposed this as overload
+resolution failures when a builder product was passed directly into a source
+method:
+
+```text
+no overload of trimAlleles matches argument types [Unknown("make"), Primitive(Boolean), Primitive(Boolean)]
+```
+
+The generalized rules are:
+
+- a zero-argument `make()` call on an external receiver whose simple type name
+  ends with `Builder` returns the receiver name without the `Builder` suffix
+- the same call is classified as a read-only external getter with conservative
+  return nullability
+- overload resolution consumes the product type before lowering
+- lowering does not special-case `VariantContextBuilder`, `trimAlleles`, or any
+  GATK class
+
+The generalized tests added for this slice cover:
+
+- overload selection from a neutral `WidgetBuilder.make()` call passed into
+  overloaded `consume(...)`
+- semantic external API facts classifying builder `make()` as a read-only
+  getter with unknown nullability
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1475
+parser_diagnostics	0
+resolver_diagnostics	161
+semantic_diagnostics	0
+unresolved_method_calls	42039
+external_api_explained_method_calls	42036
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2346
+external_api_explained_field_accesses	2241
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28595
+external_constructor_guesses	2883
+external_field_guesses	1176
+external_api_return_nullability_facts	5089
+total_facts	114277
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("getPeriod")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of binaryReader matches argument types [Named { name: "FileInputStream", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `164` to `161`.
+- Files resolved without resolver diagnostics moved from `1474` to `1475`.
+- The previous `trimAlleles(Unknown("make"), boolean, boolean)` top diagnostic
+  disappeared.
+- A separate `calculatePosteriorProbs(Unknown("make"), ...)` row remains,
+  which likely involves a different builder/product shape or receiver typing
+  path.
+- The rule lives in stdlib external API return typing and semantic external API
+  policy. It does not add any GATK-specific production branch.
+
+## External builder fluent mutator return typing
+
+This external API slice handles chained Java builder calls where a mutating
+builder method returns the builder itself before a terminal `make()` call. The
+benchmark exposed this as another builder product passed into overload
+resolution, but the receiver of `make()` was the result of a fluent mutator:
+
+```java
+PosteriorProbabilitiesUtils.calculatePosteriorProbs(
+    vcb.genotypes(gb.make()).make(), VCpriors, numRefSamplesForPrior, options)
+```
+
+The generalized rules are:
+
+- nonzero-argument calls on an external receiver whose simple type name ends
+  with `Builder` return the same builder type when they are not object methods,
+  getters, or boolean predicates
+- those calls are classified as fluent mutators with receiver mutation facts
+- terminal `make()` then consumes the recovered builder receiver type and
+  returns the builder product type from the previous slice
+- lowering does not special-case `VariantContextBuilder`, `GenotypeBuilder`,
+  `genotypes`, `calculatePosteriorProbs`, or any GATK class
+
+The generalized tests added for this slice cover:
+
+- overload selection from a neutral
+  `WidgetBuilder.withPart(part).make()` call passed into overloaded
+  `consume(...)`
+- semantic external API facts classifying builder fluent mutators as mutating
+  receiver facts
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1477
+parser_diagnostics	0
+resolver_diagnostics	159
+semantic_diagnostics	0
+unresolved_method_calls	42039
+external_api_explained_method_calls	42036
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2346
+external_api_explained_field_accesses	2241
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28526
+external_constructor_guesses	2883
+external_field_guesses	1176
+external_api_return_nullability_facts	5088
+total_facts	114208
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("getPeriod")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of binaryReader matches argument types [Named { name: "FileInputStream", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `161` to `159`.
+- Files resolved without resolver diagnostics moved from `1475` to `1477`.
+- The previous
+  `calculatePosteriorProbs(Unknown("make"), List<VariantContext>, int, options)`
+  row disappeared.
+- External API guesses dropped from `28595` to `28526`, because the fluent
+  mutator chain now has explicit builder return facts instead of unresolved
+  unknown-call facts.
+- The rule lives in stdlib external API return typing and semantic external API
+  policy. It does not add any GATK-specific production branch.
+
+## External `toPath()` return typing
+
+This external API slice handles Java path-like objects that expose `toPath()`.
+The benchmark exposed this as overload-resolution failures where path-producing
+calls were passed directly into source APIs:
+
+```text
+no overload of createCommonSAMWriter matches argument types [Unknown("toPath"), Unknown("toPath"), SAMFileHeader, boolean, boolean, boolean]
+no overload of createCommonSAMWriterFromFactory matches argument types [SAMFileWriterFactory, Unknown("toPath"), Unknown("toPath"), SAMFileHeader, boolean]
+no overload of createVCFWriter matches argument types [Unknown("toPath")]
+```
+
+The generalized rules are:
+
+- zero-argument external `toPath()` returns a `Path`
+- `toPath()` is classified as a read-only external getter with conservative
+  return nullability
+- overload resolution consumes the `Path` type before lowering
+- lowering does not special-case GATK writer helpers or any concrete path
+  wrapper class
+
+The generalized tests added for this slice cover:
+
+- overload selection from neutral `File.toPath()` and
+  `ExternalPathSource.toPath()` calls passed into overloaded `open(...)`
+- semantic external API facts classifying `toPath()` as a read-only getter
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1480
+parser_diagnostics	0
+resolver_diagnostics	154
+semantic_diagnostics	0
+unresolved_method_calls	42039
+external_api_explained_method_calls	42036
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2346
+external_api_explained_field_accesses	2241
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28521
+external_constructor_guesses	2883
+external_field_guesses	1176
+external_api_return_nullability_facts	5088
+total_facts	114203
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("getPeriod")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of binaryReader matches argument types [Named { name: "FileInputStream", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `159` to `154`.
+- Files resolved without resolver diagnostics moved from `1477` to `1480`.
+- The previous `createCommonSAMWriter(... Unknown("toPath") ...)`,
+  `createCommonSAMWriterFromFactory(... Unknown("toPath") ...)`, and
+  `createVCFWriter(Unknown("toPath"))` rows disappeared.
+- External API guesses dropped from `28526` to `28521`, because `toPath()` now
+  has an explicit external API effect instead of remaining an unknown call.
+- The rule lives in stdlib external API return typing and semantic external API
+  policy. It does not add any GATK-specific production branch.
+
+## Java `String.split(...)` result typing
+
+This external/JDK API slice handles Java string splitting. The benchmark
+exposed this as a constructor overload failure where a string-array result was
+still unknown:
+
+```text
+no overload of create matches argument types [Unknown("split"), String]
+```
+
+The generalized rules are:
+
+- `String.split(regex)` and `String.split(regex, limit)` return `String[]`
+- `split(...)` is classified as a read-only external getter
+- the returned array is non-null
+- overload resolution consumes the array type before lowering
+- lowering does not special-case any corpus codec or factory method
+
+The generalized tests added for this slice cover:
+
+- constructor overload selection from a neutral `line.split(",")` result
+- semantic external API facts classifying `String.split(",", -1)` as a
+  read-only getter with non-null return
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1481
+parser_diagnostics	0
+resolver_diagnostics	153
+semantic_diagnostics	0
+unresolved_method_calls	42039
+external_api_explained_method_calls	42036
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2346
+external_api_explained_field_accesses	2241
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28520
+external_constructor_guesses	2883
+external_field_guesses	1176
+external_api_return_nullability_facts	5155
+total_facts	114202
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("getPeriod")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of binaryReader matches argument types [Named { name: "FileInputStream", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `154` to `153`.
+- Files resolved without resolver diagnostics moved from `1480` to `1481`.
+- The previous `create(Unknown("split"), String)` row disappeared.
+- External API guesses dropped from `28521` to `28520`.
+- External return nullability facts increased because `String.split(...)` is now
+  modeled as a non-null JDK array-producing method.
+- The rule lives in stdlib external API return typing and semantic external API
+  policy. It does not add any corpus-specific production branch.
+
+## External numeric domain getter typing
+
+This external API slice extends the existing domain-getter model for numeric
+values. The benchmark exposed several overload-resolution failures where
+integer-valued external getters were still unknown:
+
+```text
+no overload of append matches argument types [Unknown("getPeriod")]
+no overload of calculatePosteriorProbs matches argument types [..., Unknown("getMaxPloidy"), boolean]
+no overload of expandWithinContig matches argument types [int, Unknown("getSequenceLength")]
+```
+
+The generalized rules are:
+
+- zero-argument `getPeriod()` and `getSequenceLength()` return `int`
+- one-argument `getMaxPloidy(default)` returns `int`
+- the calls are read-only external getter facts with conservative return
+  nullability
+- overload resolution consumes the numeric type before lowering
+- lowering does not special-case interval, variant, or sequence classes
+
+The generalized tests added for this slice cover:
+
+- overload selection from neutral `RepeatLocus.getPeriod()`,
+  `SequenceRecord.getSequenceLength()`, and
+  `VariantRecord.getMaxPloidy(default)` calls
+- semantic external API facts classifying those calls as read-only getters
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1482
+parser_diagnostics	0
+resolver_diagnostics	151
+semantic_diagnostics	0
+unresolved_method_calls	42038
+external_api_explained_method_calls	42035
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2346
+external_api_explained_field_accesses	2241
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28519
+external_constructor_guesses	2883
+external_field_guesses	1176
+external_api_return_nullability_facts	5155
+total_facts	114200
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("getMask")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of binaryReader matches argument types [Named { name: "FileInputStream", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `153` to `151`.
+- Files resolved without resolver diagnostics moved from `1481` to `1482`.
+- The previous `append(Unknown("getPeriod"))`,
+  `calculatePosteriorProbs(... Unknown("getMaxPloidy") ...)`, and
+  `expandWithinContig(int, Unknown("getSequenceLength"))` rows disappeared.
+- Unresolved method calls and external API guesses each dropped by one because
+  one of the getter calls is now resolved rather than guessed as an unknown
+  external boundary.
+- The rule lives in stdlib external API return typing and semantic external API
+  policy. It does not add any corpus-specific production branch.
+
+## Java numeric constant field typing
+
+This resolver/external API slice handles standard Java numeric wrapper
+constants such as `Integer.MAX_VALUE`, `Double.NaN`, and
+`Double.POSITIVE_INFINITY`. The benchmark exposed these as unknown field-access
+arguments in overload resolution:
+
+```text
+no overload of getAttributeAsDoubleArray matches argument types [..., Unknown("MAX_VALUE")]
+no overload of getAttributeAsDoubleArray matches argument types [..., Unknown("NaN")]
+no overload of getAttributeAsDoubleArray matches argument types [..., Unknown("POSITIVE_INFINITY")]
+```
+
+The generalized rules are:
+
+- `Byte.MIN_VALUE` / `Byte.MAX_VALUE` are `byte`
+- `Short.MIN_VALUE` / `Short.MAX_VALUE` are `short`
+- `Integer.MIN_VALUE` / `Integer.MAX_VALUE` are `int`
+- `Long.MIN_VALUE` / `Long.MAX_VALUE` are `long`
+- `Float.MIN_VALUE`, `Float.MAX_VALUE`, `Float.NaN`, and float infinities are
+  `float`
+- `Double.MIN_VALUE`, `Double.MAX_VALUE`, `Double.NaN`, and double infinities
+  are `double`
+- resolver overload selection consumes these field types before lowering
+- lowering does not special-case numeric constants or corpus call sites
+
+The generalized test added for this slice covers neutral overload selection
+from integral and floating numeric constants.
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1486
+parser_diagnostics	0
+resolver_diagnostics	147
+semantic_diagnostics	0
+unresolved_method_calls	42038
+external_api_explained_method_calls	42035
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2116
+external_api_explained_field_accesses	2011
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28515
+external_constructor_guesses	2883
+external_field_guesses	1046
+external_api_return_nullability_facts	5155
+total_facts	113836
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor TableColumnCollection: no constructor matches argument types [String]	2
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of append matches argument types [Unknown("getMask")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `151` to `147`.
+- Files resolved without resolver diagnostics moved from `1482` to `1486`.
+- The previous `MAX_VALUE`, `NaN`, and `POSITIVE_INFINITY` argument rows
+  disappeared from top diagnostics.
+- Unresolved field accesses dropped from `2346` to `2116`, and external field
+  guesses dropped from `1176` to `1046`, because many numeric constants now
+  have known field types instead of conservative unknown field facts.
+- The rule lives in stdlib external field typing. It does not add any
+  corpus-specific production branch.
+
+## Long-valued domain getter and binary string conversion
+
+This external API slice extends the numeric domain getter model to long-valued
+fields and a common Java static conversion. The benchmark exposed the chain as
+two consecutive overload failures:
+
+```text
+no overload of append matches argument types [Unknown("getMask")]
+no overload of append matches argument types [Unknown("toBinaryString")]
+```
+
+The generalized rules are:
+
+- zero-argument `getMask()` returns `long`
+- `Long.toBinaryString(long)` returns `String`
+- both calls are read-only external API facts
+- `Long.toBinaryString(long)` has definitely non-null return nullability
+- overload resolution consumes both types before lowering
+- lowering does not special-case table writers, masks, or binary formatting
+
+The generalized tests added for this slice extend the neutral numeric-domain
+getter fixture to cover:
+
+- `append(record.getMask())` selecting a `long` overload
+- `append(Long.toBinaryString(record.getMask()))` selecting a `String` overload
+- semantic external API facts for `getMask()` and `Long.toBinaryString(...)`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1486
+parser_diagnostics	0
+resolver_diagnostics	146
+semantic_diagnostics	0
+unresolved_method_calls	42035
+external_api_explained_method_calls	42032
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2116
+external_api_explained_field_accesses	2011
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28514
+external_constructor_guesses	2883
+external_field_guesses	1046
+external_api_return_nullability_facts	5156
+total_facts	113832
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor TableColumnCollection: no constructor matches argument types [String]	2
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of binaryReader matches argument types [Named { name: "FileInputStream", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `147` to `146`.
+- Unresolved method calls moved from `42038` to `42035`.
+- External API guesses dropped from `28515` to `28514`.
+- External return nullability facts increased by one for
+  `Long.toBinaryString(long)`.
+- The previous `append(Unknown("getMask"))` row disappeared, and the exposed
+  `append(Unknown("toBinaryString"))` row also disappeared after modeling the
+  static conversion.
+- The rule lives in stdlib external API return typing and semantic external API
+  policy. It does not add any corpus-specific production branch.
+
+## JDK byte-stream hierarchy assignability
+
+This resolver/external hierarchy slice handles standard Java stream subtype
+relationships. The benchmark exposed the missing edge as an overload failure:
+
+```text
+no overload of binaryReader matches argument types [Named { name: "FileInputStream", args: [] }]
+```
+
+The generalized rules are:
+
+- known `InputStream` implementations such as `FileInputStream`,
+  `ByteArrayInputStream`, `BufferedInputStream`, `DataInputStream`,
+  `ObjectInputStream`, `FilterInputStream`, `PushbackInputStream`, and
+  `SequenceInputStream` are assignable to `InputStream`
+- known `OutputStream` implementations such as `FileOutputStream`,
+  `ByteArrayOutputStream`, `BufferedOutputStream`, `DataOutputStream`,
+  `ObjectOutputStream`, `FilterOutputStream`, and `PrintStream` are assignable
+  to `OutputStream`
+- overload resolution consumes those hierarchy facts before lowering
+- lowering does not special-case binary readers, file streams, or corpus calls
+
+The generalized test added for this slice uses neutral overloads:
+
+- `consume(FileInputStream)` selects `consume(InputStream)`
+- `write(BufferedOutputStream)` selects `write(OutputStream)`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1486
+parser_diagnostics	0
+resolver_diagnostics	144
+semantic_diagnostics	0
+unresolved_method_calls	42035
+external_api_explained_method_calls	42032
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2116
+external_api_explained_field_accesses	2011
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28513
+external_constructor_guesses	2883
+external_field_guesses	1046
+external_api_return_nullability_facts	5156
+total_facts	113831
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor TableColumnCollection: no constructor matches argument types [String]	2
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `146` to `144`.
+- External API guesses dropped from `28514` to `28513`.
+- The previous `binaryReader(FileInputStream)` row disappeared from top
+  diagnostics.
+- The rule lives in resolver assignability through stdlib external hierarchy
+  facts. It does not add any corpus-specific production branch.
+
+## Arrays.copyOfRange return typing
+
+This external/JDK API slice handles `Arrays.copyOfRange(array, from, to)` as an
+argument-sensitive array utility. The benchmark exposed the missing return type
+as overload failures where byte-array arguments were still unknown:
+
+```text
+no overload of getNumTandemRepeatUnits matches argument types [Array(Primitive(Byte)), Unknown("copyOfRange"), Array(Primitive(Byte))]
+no overload of getNumTandemRepeatUnits matches argument types [Named { name: "Allele", args: [] }, Named { name: "List", args: [Named { name: "Allele", args: [] }] }, Unknown("copyOfRange")]
+```
+
+The generalized rules are:
+
+- `Arrays.copyOfRange(T[], int, int)` returns `T[]`
+- primitive arrays preserve their primitive element type, such as `byte[]`
+- object arrays preserve their element type, such as `String[]`
+- the call is a read-only static external API fact
+- the return value is definitely non-null
+- overload resolution consumes the returned array type before lowering
+- lowering does not special-case tandem-repeat code, alleles, or corpus calls
+
+The generalized tests added for this slice cover:
+
+- `Arrays.copyOfRange(byte[], int, int)` selecting a `byte[]` overload
+- `Arrays.copyOfRange(String[], int, int)` selecting a `String[]` overload
+- semantic external API facts classifying `Arrays.copyOfRange` as a read-only,
+  definitely non-null getter-style utility
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1487
+parser_diagnostics	0
+resolver_diagnostics	141
+semantic_diagnostics	0
+unresolved_method_calls	42035
+external_api_explained_method_calls	42032
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2116
+external_api_explained_field_accesses	2011
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28512
+external_constructor_guesses	2882
+external_field_guesses	1046
+external_api_return_nullability_facts	5205
+total_facts	113829
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor TableColumnCollection: no constructor matches argument types [String]	2
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `144` to `141`.
+- Files resolved without resolver diagnostics moved from `1486` to `1487`.
+- External API guesses dropped from `28513` to `28512`.
+- External constructor guesses dropped from `2883` to `2882`, likely because
+  one file now resolves far enough that a previously guessed downstream
+  constructor path is no longer reached as an unresolved boundary.
+- External return nullability facts increased because `Arrays.copyOfRange(...)`
+  is now modeled as definitely non-null.
+- The previous `copyOfRange` overload rows disappeared from top diagnostics.
+- The rule lives in stdlib external API return typing and semantic external API
+  policy. It does not add any corpus-specific production branch.
+
+## Zero-argument string-named getter return typing
+
+This external API slice generalizes string-valued JavaBean-style getters whose
+names carry the result kind. The benchmark exposed the missing return type as:
+
+```text
+no overload of getGenomicsDBPath matches argument types [Unknown("getRawInputString")]
+```
+
+The generalized rules are:
+
+- zero-argument external getters named `get*String` return `String`
+- examples include `getRawInputString()` and `getDisplayString()`
+- the call remains a read-only getter fact
+- return nullability stays conservative unknown unless a more specific API
+  model proves non-null
+- overload resolution consumes the returned `String` before lowering
+- lowering does not special-case path helpers, genomics APIs, or corpus calls
+
+The generalized tests added for this slice cover:
+
+- `getRawInputString()` selecting a `String` overload
+- `getDisplayString()` selecting a `String` overload
+- semantic external API facts classifying both calls as read-only getter facts
+  with conservative unknown nullability
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1489
+parser_diagnostics	0
+resolver_diagnostics	138
+semantic_diagnostics	0
+unresolved_method_calls	42035
+external_api_explained_method_calls	42032
+unexplained_method_calls	3
+unresolved_constructors	4355
+external_api_explained_constructors	4281
+unexplained_constructors	74
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2116
+external_api_explained_field_accesses	2011
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28510
+external_constructor_guesses	2880
+external_field_guesses	1046
+external_api_return_nullability_facts	5204
+total_facts	113825
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor TableColumnCollection: no constructor matches argument types [String]	2
+resolve_constructor_ambiguous	constructor TableColumnCollection: no constructor matches argument types [Unknown("union")]	2
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Unknown("dirichlet_params"), Unknown("method_reference")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `141` to `138`.
+- Files resolved without resolver diagnostics moved from `1487` to `1489`.
+- External API guesses dropped from `28512` to `28510`.
+- External constructor guesses dropped from `2882` to `2880`, likely because
+  two files now resolve far enough that downstream constructor boundaries are
+  no longer guessed.
+- The previous `getGenomicsDBPath(Unknown("getRawInputString"))` row
+  disappeared from top diagnostics.
+- The rule lives in stdlib external API return typing and semantic external API
+  policy. It does not add any corpus-specific production branch.
+
+## Java varargs parameter parsing and overload applicability
+
+This parser/resolver slice handles Java varargs as a general method and
+constructor applicability rule. The benchmark exposed the gap through
+source-defined table-column constructors:
+
+```text
+constructor TableColumnCollection: no constructor matches argument types [String]
+```
+
+The underlying source constructors are ordinary Java overloads:
+
+```text
+TableColumnCollection(Iterable<String> names)
+TableColumnCollection(String... names)
+TableColumnCollection(Object... names)
+```
+
+The generalized rules are:
+
+- varargs parameters are parsed as `T[]` parameters with `is_varargs = true`
+- parser fallback recovers varargs params when tree-sitter does not expose the
+  usual `type` field for a parameter node
+- resolver candidate collection accepts expanded varargs calls with
+  `arg_count >= fixed_param_count`
+- resolver scoring first tries fixed array invocation, then expanded element
+  invocation with a small varargs penalty
+- more specific varargs element types beat broader ones, so `String...` wins
+  over `Object...` for string arguments
+- the rule applies to constructors and methods
+- lowering does not special-case table columns or generated constructor names
+
+The generalized tests added for this slice cover:
+
+- parser representation for `String...` and `Object...`
+- constructor resolution for `new ColumnNames("sample")`
+- constructor resolution for `new ColumnNames("sample", "count")`
+- method resolution for `record("sample")`
+- method resolution for `record("sample", "count")`
+- overload preference for `String...` over `Object...`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1495
+parser_diagnostics	0
+resolver_diagnostics	124
+semantic_diagnostics	0
+unresolved_method_calls	41934
+external_api_explained_method_calls	41931
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2092
+external_api_explained_field_accesses	1987
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28375
+external_constructor_guesses	2870
+external_field_guesses	1033
+external_api_return_nullability_facts	5204
+total_facts	113530
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor TableColumnCollection: no constructor matches argument types [Unknown("union")]	2
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+resolve_call_ambiguous	no overload of checkNames matches argument types [Unknown("clone"), Unknown("method_reference")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `138` to `124`.
+- Files resolved without resolver diagnostics moved from `1489` to `1495`.
+- Unresolved method calls dropped from `42035` to `41934`.
+- Unresolved constructors dropped from `4355` to `4343`.
+- Unresolved field accesses dropped from `2116` to `2092`.
+- External API guesses dropped from `28510` to `28375`.
+- The previous `TableColumnCollection(String)` top diagnostic disappeared.
+- The remaining `TableColumnCollection(Unknown("union"))` row is a separate
+  return-type fact gap for list/set union helpers, not a constructor varargs
+  issue.
+
+## Collection Union External API Slice
+
+This external API slice handles collection union helpers as argument-sensitive
+static utility methods. The benchmark exposed the gap through
+`TableColumnCollection` overload resolution after varargs were fixed:
+
+```text
+constructor TableColumnCollection: no constructor matches argument types [Unknown("union")]
+```
+
+The generalized rules are:
+
+- `ListUtils.union(List<T>, List<T>)` returns `List<T>`
+- `Sets.union(Set<T>, Set<T>)` returns `Set<T>`
+- if both inputs expose incompatible element types, the result falls back to
+  `Object` rather than a corpus-specific type
+- both calls are read-only static external API getter facts
+- both calls are definitely non-null external return facts
+- static utility receiver names are canonicalized before fact lookup, so
+  parser-normalized names and source-style names share the same fact
+- lowering does not special-case table-column constructors, GATK collection
+  names, or any downstream call site
+
+The generalized tests added for this slice cover:
+
+- constructor overload resolution for `ListUtils.union(left, right)` passed as
+  a `List<String>`
+- constructor overload resolution for `Sets.union(left, right)` passed as a
+  `Set<String>`
+- semantic external API facts for both utilities as read-only non-null getters
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1497
+parser_diagnostics	0
+resolver_diagnostics	122
+semantic_diagnostics	0
+unresolved_method_calls	41934
+external_api_explained_method_calls	41931
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2092
+external_api_explained_field_accesses	1987
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28375
+external_constructor_guesses	2870
+external_field_guesses	1033
+external_api_return_nullability_facts	5217
+total_facts	113530
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of align matches argument types [Unknown("collect")]	1
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+resolve_call_ambiguous	no overload of checkNames matches argument types [Unknown("clone"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of checkNames matches argument types [Unknown("toArray"), Unknown("method_reference")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `124` to `122`.
+- Files resolved without resolver diagnostics moved from `1495` to `1497`.
+- External API return nullability facts moved from `5204` to `5217` because
+  union calls now produce explicit non-null return facts.
+- The previous top `TableColumnCollection(Unknown("union"))` diagnostic
+  disappeared.
+- The next high-leverage failures are now stream/container terminal typing
+  (`Unknown("collect")`), lambda target typing, method references, and array
+  clone/toArray return typing.
+
+## Stream Collect External API Slice
+
+This external API/type fact slice handles common Java stream collection
+terminals without moving stream lowering responsibilities into the resolver.
+The benchmark exposed the gap as overload failures where a collected stream
+result was still typed as `Unknown("collect")`.
+
+The generalized rules are:
+
+- `Collection<T>.stream()`, `List<T>.stream()`, and `Set<T>.stream()` return
+  `Stream<T>`
+- `Stream<T>.filter(...)`, `distinct()`, and `sorted()` preserve `Stream<T>`
+- `Collectors.toList()` returns a collector whose result shape is `List<T>`
+- `Collectors.toSet()` returns a collector whose result shape is `Set<T>`
+- `Stream<T>.collect(Collector<..., R>)` returns `R`, with collector element
+  placeholders substituted from the stream element
+- collection stream calls, stream-preserving calls, collectors, and collect
+  terminals are read-only external getter facts with definitely non-null
+  return facts
+- static utility receiver names include `Collectors` canonicalization
+- lowering does not special-case any GATK stream call or decide ownership for
+  iterator output
+
+The generalized tests added for this slice cover:
+
+- constructor overload resolution for `names.stream().collect(Collectors.toList())`
+- constructor overload resolution for
+  `names.stream().filter(...).collect(Collectors.toList())`
+- constructor overload resolution for `names.stream().collect(Collectors.toSet())`
+- semantic external API facts for `List.stream`, `Set.stream`,
+  `Stream.collect`, `Collectors.toList`, and `Collectors.toSet`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1499
+parser_diagnostics	0
+resolver_diagnostics	120
+semantic_diagnostics	0
+unresolved_method_calls	41934
+external_api_explained_method_calls	41931
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2092
+external_api_explained_field_accesses	1987
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28513
+external_constructor_guesses	2870
+external_field_guesses	1033
+external_api_return_nullability_facts	6171
+total_facts	113668
+top_unexplained_method_targets
+MethodCall	logBeta	2
+MethodCall	getMetadata	1
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+resolve_call_ambiguous	no overload of checkNames matches argument types [Unknown("clone"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of checkNames matches argument types [Unknown("toArray"), Unknown("method_reference")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `122` to `120`.
+- Files resolved without resolver diagnostics moved from `1497` to `1499`.
+- External API guesses moved from `28375` to `28513` because stream and
+  collector calls now become explicit external facts instead of remaining
+  unclassified.
+- External API return nullability facts moved from `5217` to `6171`.
+- Some `Unknown("collect")` diagnostics remain; these are now tied to stream
+  `map`, method references, lambda target typing, and collector shapes that
+  need body-aware type inference rather than a static collector fact alone.
+
+## Array Clone And Collection ToArray Slice
+
+This stdlib/type fact slice handles Java array and collection conversion
+methods that preserve or produce array shape. The benchmark exposed the gap as
+overload failures where `clone()` and `toArray()` were still unknown:
+
+```text
+resolve_call_ambiguous	no overload of checkNames matches argument types [Unknown("clone"), Unknown("method_reference")]
+resolve_call_ambiguous	no overload of checkNames matches argument types [Unknown("toArray"), Unknown("method_reference")]
+```
+
+The generalized rules are:
+
+- `array.clone()` returns the same Java array type as the receiver
+- `Collection<T>.toArray(T[])` returns the supplied array type
+- `Collection<T>.toArray()` returns `Object[]`
+- array clone and collection toArray are read-only external getter facts
+- array clone and collection toArray have definitely non-null return facts
+- lowering does not special-case validator or column-name call sites
+
+The generalized tests added for this slice cover:
+
+- overload resolution from `byte[].clone()` and `String[].clone()`
+- overload resolution from `List<String>.toArray(new String[0])`
+- overload resolution from no-arg `Collection<Object>.toArray()`
+- semantic external API facts for `Array.clone`, `List.toArray`, and
+  `Collection.toArray`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1499
+parser_diagnostics	0
+resolver_diagnostics	118
+semantic_diagnostics	0
+unresolved_method_calls	41934
+external_api_explained_method_calls	41931
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2092
+external_api_explained_field_accesses	1987
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28511
+external_constructor_guesses	2870
+external_field_guesses	1033
+external_api_return_nullability_facts	6224
+total_facts	113666
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of loadFastaDictionary matches argument types [Named { name: "final InputStream", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `120` to `118`.
+- The previous `checkNames(Unknown("clone"), method_reference)` and
+  `checkNames(Unknown("toArray"), method_reference)` diagnostics disappeared.
+- The remaining `method_reference` failures need callable target typing rather
+  than array conversion return typing.
+
+## Declaration Modifier Type Assignability Slice
+
+This resolver/stdlib slice handles Java declaration modifiers that leaked into
+type names, such as `final InputStream`. The benchmark exposed this as:
+
+```text
+resolve_call_ambiguous	no overload of loadFastaDictionary matches argument types [Named { name: "final InputStream", args: [] }]
+```
+
+The generalized rule is:
+
+- known Java subtype checks strip declaration modifiers such as `final`,
+  `volatile`, and `transient` from both actual and target type names before
+  comparing known hierarchy edges
+- the normalization is in the stdlib/type assignability policy, not in a
+  special call-site rule
+
+The generalized test added for this slice covers:
+
+- overload resolution from a `final InputStream` parameter to an `InputStream`
+  overload instead of a `String` overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1500
+parser_diagnostics	0
+resolver_diagnostics	116
+semantic_diagnostics	0
+unresolved_method_calls	41934
+external_api_explained_method_calls	41931
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2092
+external_api_explained_field_accesses	1987
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28510
+external_constructor_guesses	2870
+external_field_guesses	1033
+external_api_return_nullability_facts	6224
+total_facts	113665
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "LinkedHashMap", args: [] }, Unknown("UNSPECIFIED_ALTERNATE_ALLELE"), String, Unknown("null")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `118` to `116`.
+- Files resolved without resolver diagnostics moved from `1499` to `1500`.
+- The previous `loadFastaDictionary(final InputStream)` row disappeared.
+- The next meaningful resolver/type work is lambda body and method-reference
+  target typing, stream `map` result typing, bitwise expression typing, and
+  source/static constant field typing.
+
+## Bitwise Binary Expression Slice
+
+This parser/type/resolver slice handles Java bitwise binary expressions as
+structured numeric expressions. The benchmark exposed the gap as an overload
+failure where byte masks were previously raw/unknown expression text:
+
+```text
+resolve_call_ambiguous	no overload of matchToMatchProb matches argument types [Unknown("insQual & 0xFF"), Unknown("delQual & 0xFF")]
+```
+
+The generalized rules are:
+
+- parse Java `&`, `|`, and `^` as structured `BinaryOp` variants
+- render those operators through the operator lowering table
+- infer Java integral binary expression type for bitwise operators
+- `long` participates as `long`; otherwise bitwise integral expressions
+  promote to `int`
+- resolver overload selection consumes the inferred numeric type before
+  lowering
+
+The generalized tests added for this slice cover:
+
+- parser representation for `(left & 0xFF) | (right ^ 3)`
+- overload resolution from bitwise byte expressions to an `int, int` overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1502
+parser_diagnostics	0
+resolver_diagnostics	111
+semantic_diagnostics	0
+unresolved_method_calls	41944
+external_api_explained_method_calls	41941
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2106
+external_api_explained_field_accesses	2001
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28513
+external_constructor_guesses	2870
+external_field_guesses	1042
+external_api_return_nullability_facts	6225
+total_facts	113703
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of nonNull matches argument types [Primitive(Boolean), String]	2
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `116` to `111`.
+- Files resolved without resolver diagnostics moved from `1500` to `1502`.
+- The previous bitwise `matchToMatchProb(...)` row disappeared.
+- Method and field unresolved counts increased slightly because newly parsed
+  structured bitwise expressions expose nested member/call facts that were
+  previously hidden in raw expression text.
+
+## Generic Method Type Variable Primitive Boxing Slice
+
+This resolver slice handles primitive actuals passed to generic method
+type-variable parameters. Java boxes primitive values at generic boundaries, so
+`<T> T require(T value, String message)` must be applicable to `boolean` or
+other primitive actuals, with a boxing penalty in overload scoring.
+
+The benchmark exposed the gap as:
+
+```text
+resolve_call_ambiguous	no overload of nonNull matches argument types [Primitive(Boolean), String]	2
+```
+
+The generalized rules are:
+
+- method type-variable parameters accept primitive actuals through boxing
+- primitive-to-type-variable matches are scored worse than reference matches,
+  preserving preference for more specific non-generic overloads
+- generic argument matching applies the same boxed-primitive policy
+- the rule is part of resolver overload applicability, not a `nonNull`
+  special case
+
+The generalized test added for this slice covers:
+
+- overload resolution through `<T> T require(T, String)` with a boolean actual,
+  then using the substituted boolean return in another overload call
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1504
+parser_diagnostics	0
+resolver_diagnostics	108
+semantic_diagnostics	0
+unresolved_method_calls	41944
+external_api_explained_method_calls	41941
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2106
+external_api_explained_field_accesses	2001
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28510
+external_constructor_guesses	2870
+external_field_guesses	1042
+external_api_return_nullability_facts	6225
+total_facts	113700
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `111` to `108`.
+- Files resolved without resolver diagnostics moved from `1502` to `1504`.
+- The previous `nonNull(boolean, String)` top diagnostic disappeared.
+- The remaining top failures are now mostly lambda target/body typing, stream
+  `map`/collector typing, source static constants, enum-set assignability, and
+  selected external API return facts.
+
+## JDK Reader/Writer Hierarchy Slice
+
+This resolver/stdlib slice handles standard Java character I/O hierarchy
+assignability. The benchmark exposed this through overloads that accepted
+`Reader` while callers passed concrete `FileReader` instances, plus matching
+writer-family cases.
+
+The generalized rules are:
+
+- `FileReader`, `BufferedReader`, `StringReader`, `InputStreamReader`,
+  `CharArrayReader`, `FilterReader`, `PushbackReader`, and `PipedReader` are
+  known `Reader` subtypes for resolver assignability
+- `FileWriter`, `BufferedWriter`, `StringWriter`, `OutputStreamWriter`,
+  `CharArrayWriter`, `FilterWriter`, `PrintWriter`, and `PipedWriter` are known
+  `Writer` subtypes for resolver assignability
+- the rule lives in stdlib hierarchy facts consumed by resolver overload
+  scoring, not in lowering
+
+The generalized test added for this slice covers:
+
+- overload resolution where `FileReader` selects a `Reader` overload and
+  `BufferedWriter` selects a `Writer` overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1511
+parser_diagnostics	0
+resolver_diagnostics	99
+semantic_diagnostics	0
+unresolved_method_calls	41944
+external_api_explained_method_calls	41941
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2106
+external_api_explained_field_accesses	2001
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28508
+external_constructor_guesses	2870
+external_field_guesses	1042
+external_api_return_nullability_facts	6225
+total_facts	113698
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of applyToArray matches argument types [Array(Primitive(Int)), Unknown("lambda")]	1
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `108` to `99`.
+- Files resolved without resolver diagnostics moved from `1504` to `1511`.
+- The previous `parse(FileReader, ...)` failure class disappeared from the top
+  diagnostics.
+- The remaining top failures are now mostly lambda target/body typing,
+  stream/collector generic propagation, source static constants, and selected
+  external API return facts.
+
+## Primitive Functional Interface Target Slice
+
+This resolver/stdlib slice expands the known JDK functional-interface set used
+for lambda and method-reference applicability. The benchmark exposed this as a
+source overload that accepted `IntToDoubleFunction` while the call supplied an
+`int[]` and a lambda.
+
+The generalized rules are:
+
+- common primitive functional interfaces such as `IntToDoubleFunction`,
+  `IntFunction`, `IntConsumer`, `LongToDoubleFunction`, `DoubleFunction`, and
+  related supplier/consumer/function forms are known functional interfaces
+- lambda and method-reference overload applicability remains resolver-owned
+- stdlib owns the list of external JDK functional-interface names
+- lowering does not special-case `applyToArray` or any corpus method name
+
+The generalized test added for this slice covers:
+
+- overload resolution where an `int[]` plus lambda selects an
+  `IntToDoubleFunction` overload instead of a non-functional overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1512
+parser_diagnostics	0
+resolver_diagnostics	98
+semantic_diagnostics	0
+unresolved_method_calls	41944
+external_api_explained_method_calls	41941
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2106
+external_api_explained_field_accesses	2001
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28507
+external_constructor_guesses	2870
+external_field_guesses	1042
+external_api_return_nullability_facts	6225
+total_facts	113697
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "LinkedHashMap", args: [] }, Unknown("UNSPECIFIED_ALTERNATE_ALLELE"), String, Unknown("null")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `99` to `98`.
+- Files resolved without resolver diagnostics moved from `1511` to `1512`.
+- The previous `applyToArray(int[], lambda)` top diagnostic disappeared.
+- The remaining leading failures now point at array element typing inside
+  generic containers, stream/collector generic propagation, source static
+  constants, and selected external API return facts.
+
+## Stream Map Lambda Body Type Slice
+
+This resolver/type-inference slice handles `Stream<T>.map(lambda)` return
+typing when the lambda body has an inferable source return type. The benchmark
+exposed this through stream pipelines where `collect(Collectors.toList())`
+needed the mapped element type before a later overload could be selected.
+
+The generalized rules are:
+
+- for `Stream<T>.map(lambda)`, resolver expression typing binds the lambda's
+  first parameter to `T`
+- expression-bodied lambdas infer the mapped stream element type from the
+  lambda body
+- unresolved same-class calls used inside such lambda bodies can contribute
+  source return-type evidence without requiring lowering to resolve them
+- `collect(Collectors.toList())` then consumes the mapped `Stream<R>` type
+  through the existing collector substitution rule
+
+The generalized test added for this slice covers:
+
+- `List<Genotype>.stream().map(g -> parse(g)).collect(Collectors.toList())`
+  selecting a constructor that expects `List<double[]>`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1513
+parser_diagnostics	0
+resolver_diagnostics	97
+semantic_diagnostics	0
+unresolved_method_calls	41944
+external_api_explained_method_calls	41941
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2106
+external_api_explained_field_accesses	2001
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28607
+external_constructor_guesses	2870
+external_field_guesses	1042
+external_api_return_nullability_facts	6299
+total_facts	113797
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "LinkedHashMap", args: [] }, Unknown("UNSPECIFIED_ALTERNATE_ALLELE"), String, Unknown("null")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `98` to `97`.
+- Files resolved without resolver diagnostics moved from `1512` to `1513`.
+- This fixed one stream-map/collect class, but the visible
+  `calculatePosteriorProbs` row remains. That path likely has an additional
+  generic-array or local type-evidence issue because the first argument is still
+  reported as `List<double>` rather than `List<double[]>`.
+
+## Primitive Array Arrays.asList Slice
+
+This external API fact slice corrects `Arrays.asList` typing for primitive
+array arguments. Java varargs cannot spread a primitive array into boxed
+elements, so `Arrays.asList(double[])` produces `List<double[]>`, not
+`List<double>`.
+
+The benchmark exposed this through:
+
+```text
+resolve_call_ambiguous	no overload of calculatePosteriorProbs matches argument types [Named { name: "List", args: [Primitive(Double)] }, Array(Primitive(Double)), Primitive(Int), Primitive(Boolean)]	1
+```
+
+The generalized rules are:
+
+- `Arrays.asList(T...)` keeps a single primitive array argument as the list
+  element type
+- existing reference-array behavior is preserved by tests
+- the rule lives in stdlib argument-sensitive external API return facts
+- resolver overload selection consumes the corrected list type before lowering
+
+The generalized tests added for this slice cover:
+
+- parser preservation of `List<double[]>`
+- `Arrays.asList(double[])` selecting an overload that expects
+  `List<double[]>`
+- the existing `Arrays.asList(first, second)` reference-element behavior
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1514
+parser_diagnostics	0
+resolver_diagnostics	96
+semantic_diagnostics	0
+unresolved_method_calls	41944
+external_api_explained_method_calls	41941
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2106
+external_api_explained_field_accesses	2001
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28605
+external_constructor_guesses	2870
+external_field_guesses	1042
+external_api_return_nullability_facts	6299
+total_facts	113795
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "LinkedHashMap", args: [] }, Unknown("UNSPECIFIED_ALTERNATE_ALLELE"), String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `97` to `96`.
+- Files resolved without resolver diagnostics moved from `1513` to `1514`.
+- The previous `calculatePosteriorProbs(Arrays.asList(double[]), ...)`
+  diagnostic disappeared.
+- The next leading failures are now mostly stream/collector propagation through
+  less direct pipelines, source static constants, external `decode`/path facts,
+  and selected source/external return-type facts.
+
+## External Allele Constant Field Slice
+
+This resolver/external API slice models external enum-like constants on
+`Allele` as values of type `Allele`. The benchmark exposed this through:
+
+```text
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "LinkedHashMap", args: [] }, Unknown("UNSPECIFIED_ALTERNATE_ALLELE"), String, Unknown("null")]	1
+```
+
+The generalized rules are:
+
+- static external owner names normalized by the parser, such as `allele`, are
+  canonicalized back to external API owner keys such as `Allele`
+- known `Allele` constants are typed as `Allele` in external field facts
+- the rule lives in `stdlib` external field typing and owner canonicalization
+- resolver overload selection consumes the field type before lowering
+
+The generalized test added for this slice covers:
+
+- `Allele.UNSPECIFIED_ALTERNATE_ALLELE` and `Allele.NO_CALL` selecting an
+  overload that expects `Allele`, not `String`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1516
+parser_diagnostics	0
+resolver_diagnostics	94
+semantic_diagnostics	0
+unresolved_method_calls	41944
+external_api_explained_method_calls	41941
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1949
+external_api_explained_field_accesses	1844
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28604
+external_constructor_guesses	2869
+external_field_guesses	984
+external_api_return_nullability_facts	6300
+total_facts	113578
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of createArtificialRead matches argument types [Named { name: "SAMFileHeader", args: [] }, Unknown("decode")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `96` to `94`.
+- Files resolved without resolver diagnostics moved from `1514` to `1516`.
+- The previous `LinkedHashMap + Allele.UNSPECIFIED_ALTERNATE_ALLELE`
+  diagnostic disappeared.
+- Field-access counts dropped because `Allele` constants now enter the
+  external field model instead of remaining unresolved.
+
+## Source Static Factory In Stream Map Slice
+
+This resolver slice lets expression type inference use source methods on a
+source receiver, including static factory calls in stream `map` lambdas. The
+pattern is general Java:
+
+```java
+names.stream().map(name -> ProductFactory.create(name)).collect(Collectors.toList())
+```
+
+Before this rule, the mapper result could become `Unknown("create")`, which
+then propagated through `collect(Collectors.toList())` as `List<Unknown>`.
+
+The generalized rules are:
+
+- resolver expression typing may resolve a call on another source type through
+  `ProgramSymbols::methods_for_hierarchy`
+- the selected source method return type feeds stream `map` result typing
+- the existing collector substitution rule then produces `List<R>`
+- lowering does not inspect the factory name or stream expression
+
+The generalized test added for this slice covers:
+
+- `List<String>.stream().map(name -> ProductFactory.create(name))`
+  collecting as `List<Product>` and selecting a `List<Product>` overload
+
+After this slice, the GATK benchmark output remained:
+
+```text
+files_resolved_without_errors	1516
+resolver_diagnostics	94
+unexplained_method_calls	3
+unexplained_constructors	73
+unexplained_field_accesses	105
+```
+
+Interpretation:
+
+- This is a no-movement benchmark slice for the current GATK top count.
+- The regression is still kept because it captures a real source-resolution
+  rule and prevents a known `List<Unknown("create")>` failure mode without
+  adding a corpus-specific rule.
+- The remaining visible `Unknown("collect")` diagnostics likely require more
+  complete stream/collector propagation through external or unresolved call
+  chains, not just source static factory return typing.
+
+## External Static Decoder Return Slice
+
+This external API fact slice models known static decoder methods whose return
+type is defined by the external owner. The benchmark exposed this through:
+
+```text
+resolve_call_ambiguous	no overload of createArtificialRead matches argument types [Named { name: "SAMFileHeader", args: [] }, Unknown("decode")]	1
+```
+
+The generalized rules are:
+
+- static external owner names normalized by the parser, such as
+  `text_cigar_codec`, are canonicalized to external API owner keys such as
+  `TextCigarCodec`
+- `TextCigarCodec.decode(...)` returns `Cigar`
+- known external decoders are read-only getter facts
+- known external decoder results are definitely non-null unless the API model
+  says otherwise
+- resolver overload selection consumes the external return type before
+  lowering
+
+The generalized tests added for this slice cover:
+
+- `TextCigarCodec.decode(cigarText)` selecting an overload that expects
+  `Cigar`
+- `TextCigarCodec.decode(...)` producing a read-only, non-null external API
+  effect fact
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1516
+parser_diagnostics	0
+resolver_diagnostics	93
+semantic_diagnostics	0
+unresolved_method_calls	41944
+external_api_explained_method_calls	41941
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1949
+external_api_explained_field_accesses	1844
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28602
+external_constructor_guesses	2869
+external_field_guesses	984
+external_api_return_nullability_facts	6312
+total_facts	113576
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of decode matches argument types [Primitive(Int)]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `94` to `93`.
+- The previous `createArtificialRead(SAMFileHeader, Unknown("decode"))`
+  diagnostic disappeared.
+- Return nullability fact count increased because known decoder calls now enter
+  the external API fact model as non-null getter results.
+- The remaining `decode(Primitive(Int))` row appears to be a different source
+  method or primitive-argument typing issue, not the external
+  `TextCigarCodec.decode(String)` boundary handled by this slice.
+
+## Assignment Expression Target Type Slice
+
+This parser/type-inference slice corrects expression-level Java assignment.
+Previously, an expression such as `row = cursor.next()` or
+`first = bytes[0]` was represented as binary addition in Java IR. That made
+assignment-in-condition diagnostics less precise and could widen overload
+arguments to numeric `int` when the target variable had a narrower declared
+type.
+
+The benchmark exposed this through:
+
+```text
+resolve_call_ambiguous	no overload of decode matches argument types [Primitive(Int)]	1
+```
+
+The generalized rules are:
+
+- expression-level assignment is represented as `BinaryOp::Assign`, not
+  `BinaryOp::Add`
+- assignment expression type inference uses the assignment target type when it
+  is known
+- assignment-in-condition planning now matches `BinaryOp::Assign` explicitly
+- lowering still leaves assignment-in-condition as a documented unsupported
+  idiom until the control-flow normalization pass owns emission
+
+The generalized tests added or updated for this slice cover:
+
+- `decode(first = bases[0])` selecting a `byte` overload because `first` is
+  declared as `byte`
+- assignment-in-condition semantic facts and normalization plans still being
+  produced
+- gap documentation now expecting the faithful `row = cursor.next()` shape
+  rather than the old bogus `row + cursor.next()` shape
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1516
+parser_diagnostics	0
+resolver_diagnostics	92
+semantic_diagnostics	0
+unresolved_method_calls	41943
+external_api_explained_method_calls	41940
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1949
+external_api_explained_field_accesses	1844
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28600
+external_constructor_guesses	2869
+external_field_guesses	984
+external_api_return_nullability_facts	6311
+total_facts	113573
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of getAttributeAsDoubleArray matches argument types [Named { name: "Genotype", args: [] }, Unknown("GENOTYPE_POSTERIORS_KEY"), Unknown("lambda"), Primitive(Double)]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `93` to `92`.
+- The previous `decode(Primitive(Int))` diagnostic disappeared.
+- This is a Java syntax/type-inference responsibility, not an external decoder
+  table entry and not a lowering rule.
+
+## External String Constants And File Path API Slice
+
+This external API fact slice models library constants and file/path utilities
+that are visible at Java overload-resolution time. The benchmark exposed this
+through diagnostics where external static fields or method results remained
+unknown:
+
+```text
+resolve_call_ambiguous	no overload of getAttributeAsDoubleArray matches argument types [Named { name: "Genotype", args: [] }, Unknown("GENOTYPE_POSTERIORS_KEY"), Unknown("lambda"), Primitive(Double)]	1
+resolve_call_ambiguous	no overload of replaceExtension matches argument types [Unknown("getPath"), String]	1
+```
+
+The generalized rules are:
+
+- known external all-caps string constants on `VCFConstants`,
+  `GATKVCFConstants`, and `FileExtensions` have Java type `String`
+- canonicalized owner names such as `v_c_f_constants`,
+  `g_a_t_k_v_c_f_constants`, and `file_extensions` map to external API owner
+  keys before field typing
+- `File.getPath()` and `File.getAbsolutePath()` return `String`
+- `IOUtils.replaceExtension(String, String)` returns a definitely non-null
+  `String`
+- `IOUtils.replaceExtension` is modeled as a read-only external utility fact
+- resolver overload selection consumes these facts before lowering
+
+The generalized tests added for this slice cover:
+
+- external string constants selecting `String` overloads
+- external string constants used together with supplier lambdas in overload
+  selection
+- `File.getPath()` feeding `IOUtils.replaceExtension(...)` and selecting a
+  `String` overload
+- `IOUtils.replaceExtension(...)` producing a read-only, definitely non-null
+  external API effect fact
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1519
+parser_diagnostics	0
+resolver_diagnostics	88
+semantic_diagnostics	0
+unresolved_method_calls	41943
+external_api_explained_method_calls	41940
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1680
+external_api_explained_field_accesses	1575
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28593
+external_constructor_guesses	2866
+external_field_guesses	829
+external_api_return_nullability_facts	6311
+total_facts	113139
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of getIntervalsWithFlanks matches argument types [Named { name: "List", args: [Named { name: "RECORD", args: [] }] }, Primitive(Int), Named { name: "SAMSequenceDictionary", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `92` to `88`.
+- Files resolved without resolver diagnostics moved from `1516` to `1519`.
+- Field-access counts dropped because known string constants now enter the
+  external field model instead of remaining unresolved.
+- The previous `replaceExtension(Unknown("getPath"), String)` diagnostic
+  disappeared.
+- These are external API facts and resolver inputs, not lowering rules.
+
+## Boxed Primitive Static Parser Slice
+
+This external API fact slice models boxed primitive static parser methods whose
+return type is defined by the Java standard library. The benchmark exposed this
+through:
+
+```text
+resolve_call_ambiguous	no overload of isPositiveOrZero matches argument types [Unknown("parseInt"), String]	1
+```
+
+The generalized rules are:
+
+- `Integer.parseInt(String)` and `Integer.parseInt(String, int)` return Java
+  primitive `int`
+- `Integer.parseInt` is a read-only static utility fact
+- primitive parser results are definitely non-null because they are primitive
+  values
+- resolver overload selection consumes the external return type before
+  lowering
+
+The generalized tests added for this slice cover:
+
+- `Integer.parseInt(text)` selecting an overload that expects `int`
+- `Integer.parseInt(...)` producing a read-only, definitely non-null external
+  API effect fact
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1519
+parser_diagnostics	0
+resolver_diagnostics	86
+semantic_diagnostics	0
+unresolved_method_calls	41943
+external_api_explained_method_calls	41940
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1680
+external_api_explained_field_accesses	1575
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28591
+external_constructor_guesses	2866
+external_field_guesses	829
+external_api_return_nullability_facts	6361
+total_facts	113137
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of getIntervalsWithFlanks matches argument types [Named { name: "List", args: [Named { name: "RECORD", args: [] }] }, Primitive(Int), Named { name: "SAMSequenceDictionary", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `88` to `86`.
+- The previous `isPositiveOrZero(Unknown("parseInt"), String)` diagnostic
+  disappeared.
+- Return nullability fact count increased because primitive parser calls now
+  produce external API effect facts.
+- This is a Java standard-library return typing rule, not a lowering rule.
+
+## Error Subtype Throwable Assignability Slice
+
+This resolver subtype slice models Java `Error` subclasses as assignable to
+`Throwable` without treating them as `Exception` subclasses. The benchmark
+exposed this through:
+
+```text
+resolve_call_ambiguous	no overload of handleNonUserException matches argument types [Named { name: "OutOfMemoryError", args: [] }]	1
+```
+
+The generalized rules are:
+
+- `OutOfMemoryError`, `StackOverflowError`, and `AssertionError` are known
+  Java `Error` subclasses
+- known `Error` subclasses are assignable to `Error` and `Throwable`
+- known `Error` subclasses are not added to the `Exception` subtype branch
+- resolver overload selection consumes the Java hierarchy evidence before
+  lowering
+
+The generalized test added for this slice covers:
+
+- `OutOfMemoryError` selecting a `Throwable` overload rather than `String` or
+  `Exception`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1520
+parser_diagnostics	0
+resolver_diagnostics	85
+semantic_diagnostics	0
+unresolved_method_calls	41943
+external_api_explained_method_calls	41940
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1680
+external_api_explained_field_accesses	1575
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28590
+external_constructor_guesses	2866
+external_field_guesses	829
+external_api_return_nullability_facts	6361
+total_facts	113136
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of getIntervalsWithFlanks matches argument types [Named { name: "List", args: [Named { name: "RECORD", args: [] }] }, Primitive(Int), Named { name: "SAMSequenceDictionary", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `86` to `85`.
+- Files resolved without resolver diagnostics moved from `1519` to `1520`.
+- The previous `handleNonUserException(OutOfMemoryError)` diagnostic
+  disappeared.
+- This is resolver-owned Java subtype evidence, not exception lowering.
+
+## External Allele List Domain Getter Slice
+
+This external API fact slice extends the existing allele payload getter model
+to cover alternate allele lists. The benchmark exposed this through:
+
+```text
+resolve_call_ambiguous	no overload of getNumTandemRepeatUnits matches argument types [Named { name: "Allele", args: [] }, Unknown("getAlternateAlleles"), Array(Primitive(Byte))]	1
+```
+
+The generalized rules are:
+
+- external `getAlleles()` and `getAlternateAlleles()` domain getters return
+  `List<Allele>`
+- these calls are read-only getter facts with conservative unknown
+  nullability
+- resolver overload selection consumes the `List<Allele>` return type before
+  lowering
+
+The generalized tests added or extended for this slice cover:
+
+- `variant.getAlternateAlleles()` selecting an overload that expects
+  `List<Allele>`
+- `getAlternateAlleles()` producing a read-only external getter fact with
+  conservative return nullability
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1521
+parser_diagnostics	0
+resolver_diagnostics	84
+semantic_diagnostics	0
+unresolved_method_calls	41943
+external_api_explained_method_calls	41940
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1680
+external_api_explained_field_accesses	1575
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28547
+external_constructor_guesses	2866
+external_field_guesses	829
+external_api_return_nullability_facts	6342
+total_facts	113093
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of getIntervalsWithFlanks matches argument types [Named { name: "List", args: [Named { name: "RECORD", args: [] }] }, Primitive(Int), Named { name: "SAMSequenceDictionary", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `85` to `84`.
+- Files resolved without resolver diagnostics moved from `1520` to `1521`.
+- The previous `getNumTandemRepeatUnits(... Unknown("getAlternateAlleles"), ...)`
+  diagnostic disappeared.
+- This is external API return typing and fact production, not a lowering rule.
+
+## External Read, Interval, And Typed Field Slice
+
+This external API fact slice models common library boundary values that are
+known before Rust representation planning. The benchmark exposed this through
+diagnostics where explicit Java library members stayed unknown:
+
+```text
+resolve_call_ambiguous	no overload of makeIntoFlowBased matches argument types [Unknown("getReadGroup")]	1
+resolve_call_ambiguous	no overload of setCigar matches argument types [Unknown("NO_ALIGNMENT_CIGAR")]	1
+resolve_call_ambiguous	no overload of setTraversalBounds matches argument types [Unknown("getTraversalParameters")]	1
+resolve_call_ambiguous	no overload of sortAndMergeIntervals matches argument types [Unknown("getIntervals"), Named { name: "SAMSequenceDictionary", args: [] }, Named { name: "IntervalMergingRule", args: [] }]	1
+```
+
+The generalized rules are:
+
+- `SAMRecord.NO_ALIGNMENT_CIGAR` has Java type `Cigar`
+- `System.out` and `System.err` have Java type `PrintStream`
+- external `getReadGroup()` returns `SAMReadGroupRecord`
+- external `getIntervals(...)` and `getIntervalsForTraversal(...)` return
+  `List<SimpleInterval>`
+- external `getTraversalParameters(SAMSequenceDictionary)` returns
+  `TraversalParameters`
+- these external getter calls are read-only facts with conservative unknown
+  nullability
+- resolver overload selection consumes these field and return types before
+  lowering
+
+The generalized tests added or extended for this slice cover:
+
+- typed external static fields selecting `Cigar` and `PrintStream` overloads
+- external read/interval getters selecting `SAMReadGroupRecord`,
+  `List<SimpleInterval>`, and `TraversalParameters` overloads
+- read/interval getters producing read-only external getter facts with
+  conservative return nullability
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1525
+parser_diagnostics	0
+resolver_diagnostics	80
+semantic_diagnostics	0
+unresolved_method_calls	41942
+external_api_explained_method_calls	41939
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1574
+external_api_explained_field_accesses	1469
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28570
+external_constructor_guesses	2866
+external_field_guesses	780
+external_api_return_nullability_facts	6343
+total_facts	112960
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of sum matches argument types [Unknown("ebeMultiply")]	3
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `84` to `80`.
+- Files resolved without resolver diagnostics moved from `1521` to `1525`.
+- Unresolved field accesses moved from `1680` to `1574`, mostly because
+  typed `System.out`/`System.err` fields no longer remain unresolved.
+- External field guesses moved from `829` to `780`.
+- The prior `makeIntoFlowBased(getReadGroup())`,
+  `setCigar(SAMRecord.NO_ALIGNMENT_CIGAR)`,
+  `setTraversalBounds(getTraversalParameters(...))`, and
+  `sortAndMergeIntervals(getIntervals(...), ...)` top rows disappeared.
+- This is external API field and return typing, not a lowering rule.
+
+## External Numeric Array Math Slice
+
+This external API fact slice models argument-sensitive numeric array utilities.
+The benchmark exposed this through:
+
+```text
+resolve_call_ambiguous	no overload of sum matches argument types [Unknown("ebeMultiply")]	3
+```
+
+The generalized rules are:
+
+- `MathArrays.ebeMultiply(left, right)` returns the same primitive array type
+  when both arguments are arrays of the same primitive element type
+- `MathArrays.ebeMultiply` is a read-only static utility fact
+- array math utility results are definitely non-null unless a more specific
+  API model says otherwise
+- source overload selection consumes the external return type before lowering
+
+The generalized tests added for this slice cover:
+
+- `sum(MathArrays.ebeMultiply(left, right))` selecting a `double[]` overload
+- `MathArrays.ebeMultiply(...)` producing a read-only, definitely non-null
+  external API effect fact
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1528
+parser_diagnostics	0
+resolver_diagnostics	77
+semantic_diagnostics	0
+unresolved_method_calls	41942
+external_api_explained_method_calls	41939
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1574
+external_api_explained_field_accesses	1469
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28567
+external_constructor_guesses	2866
+external_field_guesses	780
+external_api_return_nullability_facts	6346
+total_facts	112957
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of getIntervalsWithFlanks matches argument types [Named { name: "List", args: [Named { name: "RECORD", args: [] }] }, Primitive(Int), Named { name: "SAMSequenceDictionary", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `80` to `77`.
+- Files resolved without resolver diagnostics moved from `1525` to `1528`.
+- The three previous `sum(Unknown("ebeMultiply"))` diagnostics disappeared.
+- This is argument-sensitive external API return typing, not a `sum` special
+  case and not a lowering rule.
+
+## Core Enum, Quality, Cigar, And Split Utility Slice
+
+This mixed parser and external API fact slice handles core Java/library values
+that should be known before Rust planning. The benchmark exposed these through
+several unresolved return and argument shapes:
+
+```text
+resolve_call_ambiguous	no overload of qualToProb matches argument types [Unknown("getPhredScaledQual")]	1
+resolve_call_ambiguous	no overload of set matches argument types [Unknown("ordinal"), String]	1
+resolve_call_ambiguous	no overload of split matches argument types [String, Unknown("','")]	1
+resolve_call_ambiguous	no overload of stream matches argument types [Unknown("getCigarElements")]	1
+```
+
+The generalized rules are:
+
+- Java character literals parse as `Literal::Char`, so char-delimiter overloads
+  can be selected by normal resolver typing
+- Java `ordinal()` returns primitive `int` and is a read-only getter fact
+- `QualityUtils.qualToProb(...)` and `qualToProbLog10(...)` return primitive
+  `double`
+- `getPhredScaledQual()` returns primitive `double`
+- `getCigarElements()` returns `List<CigarElement>`
+- `Utils.split(...)` returns `List<String>` and `StringUtils.split(...)`
+  returns `String[]`
+- `String.join`, `Utils.join`, `StringUtils.join`, and `StringUtil.join` return
+  `String`
+- these utility calls are read-only facts with non-null return facts where the
+  Java API returns primitives, arrays, lists, or strings
+
+The generalized tests added for this slice cover:
+
+- parser conversion of character literals, including escaped tab
+- `ordinal()`, `QualityUtils.qualToProb(...)`, and `getPhredScaledQual()`
+  selecting `int`/`double` overloads
+- `getCigarElements()`, `Utils.join(...)`, and `Utils.split(text, ',')`
+  selecting `List<CigarElement>`, `String`, and `List<String>` overloads
+- semantic external API effects for `ordinal`, `qualToProb`, `join`, and
+  `split`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1531
+parser_diagnostics	0
+resolver_diagnostics	73
+semantic_diagnostics	0
+unresolved_method_calls	41941
+external_api_explained_method_calls	41938
+unexplained_method_calls	3
+unresolved_constructors	4343
+external_api_explained_constructors	4270
+unexplained_constructors	73
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1574
+external_api_explained_field_accesses	1469
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28554
+external_constructor_guesses	2866
+external_field_guesses	780
+external_api_return_nullability_facts	6494
+total_facts	112943
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of getIntervalsWithFlanks matches argument types [Named { name: "List", args: [Named { name: "RECORD", args: [] }] }, Primitive(Int), Named { name: "SAMSequenceDictionary", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `77` to `73`.
+- Files resolved without resolver diagnostics moved from `1528` to `1531`.
+- The `qualToProb(getPhredScaledQual())`, `ordinal()`, char delimiter
+  `split`, and `getCigarElements().stream()` top rows disappeared.
+- The remaining `join(String, Object[])` row did not move; it appears to be a
+  source varargs/array applicability issue rather than a missing utility return
+  type.
+- This slice keeps parser syntax handling in the parser and Java/library API
+  behavior in `stdlib`; lowering is unchanged.
+
+## Multi-Parameter Varargs, Array Cast, And Unknown Boundary Slice
+
+The next slice addressed the remaining `join(String, Object[])` diagnostic
+without adding a `Utils.join` special case.
+
+The corpus row was:
+
+```java
+Utils.join("\t", (Object[]) columns)
+```
+
+where `columns` is declared as `String ... columns` and the target method is:
+
+```java
+public static String join(final CharSequence separator, final Object ... objects)
+```
+
+The generalized parser rules are:
+
+- A varargs parameter after one or more fixed parameters must be preserved as
+  an array parameter with `is_varargs = true`.
+- An array cast such as `(Object[]) value` must preserve the array dimensions
+  in the cast type.
+
+The generalized resolver rule is:
+
+- An unresolved external-boundary expression may participate in overload
+  scoring with a high cost. It should not make overload resolution fail when
+  other arguments disambiguate the overload, but equal-cost candidates should
+  remain ambiguous.
+
+This keeps responsibility separated:
+
+- parser owns preserving Java syntax shape for multi-parameter varargs and
+  array casts
+- resolver owns overload applicability and conservative unknown-boundary
+  evidence
+- external API facts and lowering are unchanged for this slice
+
+The generalized tests added for this slice cover:
+
+- parsing `join(CharSequence separator, Object... values)` as two parameters
+  with the second represented as `Object[]` varargs
+- parsing `(Object[]) columns` as a cast to `Object[]`
+- resolving an explicit array argument passed to a varargs parameter
+- resolving overloads when an unknown external-boundary argument is
+  disambiguated by another argument
+- resolving overloads when an unknown external-boundary argument is used for a
+  primitive target and another argument disambiguates the overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1565
+parser_diagnostics	0
+resolver_diagnostics	34
+semantic_diagnostics	0
+unresolved_method_calls	41898
+external_api_explained_method_calls	41895
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1564
+external_api_explained_field_accesses	1459
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28503
+external_constructor_guesses	2865
+external_field_guesses	773
+external_api_return_nullability_facts	6491
+total_facts	112828
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor IndexedSampleList: ambiguous constructor for argument types [Unknown("getGenotypeSamples")]	2
+resolve_call_ambiguous	ambiguous overload of getMaxClusterableStartingPosition for argument types [Unknown("collect")]	1
+resolve_call_ambiguous	ambiguous overload of isPositive for argument types [Unknown("size"), String]	1
+resolve_call_ambiguous	ambiguous overload of joinOverlapping for argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "L", args: [] }] }, Named { name: "Class", args: [Named { name: "L", args: [] }] }, Named { name: "SAMSequenceDictionary", args: [] }, Unknown("parallelize"), Primitive(Int), Named { name: "FlatMapFunction2", args: [Named { name: "Iterator", args: [Named { name: "L", args: [] }] }, Named { name: "Iterator", args: [Named { name: "I", args: [] }] }, Named { name: "T", args: [] }] }]	1
+resolve_call_ambiguous	ambiguous overload of setAttribute for argument types [String, Unknown("b")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `73` to `34`.
+- Files resolved without resolver diagnostics moved from `1531` to `1565`.
+- The `join(String, Object[])` row disappeared.
+- The parser now exposes more real varargs signatures, and the resolver can
+  use unknown-boundary arguments when other arguments make the overload choice
+  finite.
+- Remaining top rows are mostly true unknown-boundary ambiguities, unresolved
+  stream/container element inference, or missing constructor/API facts.
+
+## External String List Getter Slice
+
+The next slice addressed the `IndexedSampleList(Unknown("getGenotypeSamples"))`
+constructor ambiguity without adding an `IndexedSampleList` constructor rule.
+
+The corpus shape was a constructor overloaded between:
+
+```java
+SampleList(Collection<String> samples)
+SampleList(String... samples)
+```
+
+called with an external header getter:
+
+```java
+new SampleList(header.getGenotypeSamples())
+```
+
+The generalized rule is:
+
+- external domain getters that are known to return a string list should be
+  modeled as `List<String>` in the external API fact layer
+- constructor overload resolution should then select the `Collection<String>`
+  overload through ordinary collection assignability
+
+The implementation adds `getGenotypeSamples()` to the string-list domain getter
+model in `stdlib`. This keeps responsibilities separated:
+
+- external API facts own the library return type
+- resolver owns collection assignability and constructor overload selection
+- lowering remains unchanged
+
+The generalized tests added for this slice cover:
+
+- `getGenotypeSamples()` as a read-only external getter fact with conservative
+  return nullability
+- constructor overload selection between `Collection<String>` and `String...`
+  when the argument comes from that external string-list getter
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1567
+parser_diagnostics	0
+resolver_diagnostics	32
+semantic_diagnostics	0
+unresolved_method_calls	41898
+external_api_explained_method_calls	41895
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1564
+external_api_explained_field_accesses	1459
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28501
+external_constructor_guesses	2865
+external_field_guesses	773
+external_api_return_nullability_facts	6490
+total_facts	112826
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of getMaxClusterableStartingPosition for argument types [Unknown("collect")]	1
+resolve_call_ambiguous	ambiguous overload of isPositive for argument types [Unknown("size"), String]	1
+resolve_call_ambiguous	ambiguous overload of joinOverlapping for argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "L", args: [] }] }, Named { name: "Class", args: [Named { name: "L", args: [] }] }, Named { name: "SAMSequenceDictionary", args: [] }, Unknown("parallelize"), Primitive(Int), Named { name: "FlatMapFunction2", args: [Named { name: "Iterator", args: [Named { name: "L", args: [] }] }, Named { name: "Iterator", args: [Named { name: "I", args: [] }] }, Named { name: "T", args: [] }] }]	1
+resolve_call_ambiguous	ambiguous overload of setAttribute for argument types [String, Unknown("b")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("forEnumeration")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `34` to `32`.
+- Files resolved without resolver diagnostics moved from `1565` to `1567`.
+- The two `IndexedSampleList(Unknown("getGenotypeSamples"))` constructor
+  ambiguity rows disappeared.
+- Remaining top rows are dominated by stream/container result typing, unknown
+  external boundary values, and missing constructor/API facts.
+
+## Current Receiver Method Reference Stream Slice
+
+The next slice addressed a stream `collect` result that stayed unknown because
+the mapper was a bound current-receiver method reference:
+
+```java
+itemIds.stream().map(this::getItem).collect(Collectors.toList())
+```
+
+The generalized resolver rule is:
+
+- In a stream `map` call, `this::method` and `super::method` are bound method
+  references on the current type, not methods on the stream element type.
+- The resolver should use normal method overload selection for that method
+  reference, with the stream element as the functional-interface argument.
+- The stream map result type is `Stream<R>`, where `R` is the resolved method
+  return type; `collect(Collectors.toList())` can then produce `List<R>` using
+  the existing stream collect machinery.
+
+This keeps responsibility separated:
+
+- resolver owns Java method-reference target typing and overload selection
+- stream/container result typing remains in resolver/type inference
+- external API facts and lowering are unchanged for this slice
+
+The generalized test added for this slice covers:
+
+- `ids.stream().map(this::getItem).collect(Collectors.toList())` selecting a
+  `Collection<Item>` overload, without referencing the GATK class names
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1568
+parser_diagnostics	0
+resolver_diagnostics	31
+semantic_diagnostics	0
+unresolved_method_calls	41898
+external_api_explained_method_calls	41895
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1564
+external_api_explained_field_accesses	1459
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28501
+external_constructor_guesses	2865
+external_field_guesses	773
+external_api_return_nullability_facts	6491
+total_facts	112826
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of isPositive for argument types [Unknown("size"), String]	1
+resolve_call_ambiguous	ambiguous overload of joinOverlapping for argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "L", args: [] }] }, Named { name: "Class", args: [Named { name: "L", args: [] }] }, Named { name: "SAMSequenceDictionary", args: [] }, Unknown("parallelize"), Primitive(Int), Named { name: "FlatMapFunction2", args: [Named { name: "Iterator", args: [Named { name: "L", args: [] }] }, Named { name: "Iterator", args: [Named { name: "I", args: [] }] }, Named { name: "T", args: [] }] }]	1
+resolve_call_ambiguous	ambiguous overload of setAttribute for argument types [String, Unknown("b")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("forEnumeration")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `32` to `31`.
+- Files resolved without resolver diagnostics moved from `1567` to `1568`.
+- The `getMaxClusterableStartingPosition(Unknown("collect"))` row
+  disappeared.
+- Remaining top rows include unknown-boundary stream sources, unresolved
+  stream/container operations, and missing library constructor/API facts.
+
+## External Collection-Like Size Slice
+
+The next slice addressed:
+
+```text
+resolve_call_ambiguous	ambiguous overload of isPositive for argument types [Unknown("size"), String]	1
+```
+
+The motivating corpus shape was:
+
+```java
+ParamUtils.isPositive(segmentsIntervalList.size(), "...")
+```
+
+where `segmentsIntervalList` has an external library type that behaves like a
+collection.
+
+The generalized rule is:
+
+- known external collection-like receivers should expose collection API return
+  types, including `size() -> int` and `isEmpty() -> boolean`
+- specific external collection-like classes can be added to the collection
+  taxonomy, after which resolver overload selection should follow normal Java
+  primitive matching
+
+The implementation adds `IntervalList` to the collection-like taxonomy and
+extends collection-family return typing for `size()` and `isEmpty()`. This keeps
+responsibility separated:
+
+- `stdlib` owns the external API taxonomy and method return facts
+- resolver owns overload selection using those facts
+- lowering remains unchanged
+
+The generalized tests added for this slice cover:
+
+- `IntervalList.size()` as a read-only external collection-like getter fact
+  with definitely non-null primitive return
+- overload selection where `IntervalList.size()` selects an `int` overload
+  instead of a `String` overload
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1568
+parser_diagnostics	0
+resolver_diagnostics	30
+semantic_diagnostics	0
+unresolved_method_calls	41898
+external_api_explained_method_calls	41895
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1564
+external_api_explained_field_accesses	1459
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28502
+external_constructor_guesses	2841
+external_field_guesses	773
+external_api_return_nullability_facts	6492
+total_facts	112803
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of joinOverlapping for argument types [Named { name: "JavaSparkContext", args: [] }, Named { name: "JavaRDD", args: [Named { name: "L", args: [] }] }, Named { name: "Class", args: [Named { name: "L", args: [] }] }, Named { name: "SAMSequenceDictionary", args: [] }, Unknown("parallelize"), Primitive(Int), Named { name: "FlatMapFunction2", args: [Named { name: "Iterator", args: [Named { name: "L", args: [] }] }, Named { name: "Iterator", args: [Named { name: "I", args: [] }] }, Named { name: "T", args: [] }] }]	1
+resolve_call_ambiguous	ambiguous overload of setAttribute for argument types [String, Unknown("b")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("forEnumeration")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("newDirectoryStream")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `31` to `30`.
+- The `isPositive(Unknown("size"), String)` row disappeared.
+- Files resolved without diagnostics did not move because the resolved row was
+  in a file that still has another resolver diagnostic.
+- Remaining top rows are mostly unresolved external stream sources, Spark RDD
+  API typing, and missing constructor/API facts.
+
+## External Parallelize Generic Container Slice
+
+The next slice addressed:
+
+```text
+resolve_call_ambiguous	ambiguous overload of joinOverlapping for argument types [..., Unknown("parallelize"), ...]	1
+```
+
+The motivating corpus shape was:
+
+```java
+joinOverlapping(ctx, locatables, locatableClass, sequenceDictionary,
+    ctx.parallelize(intervals), maxLocatableLength, f)
+```
+
+where an external Spark context lifts a `List<I>` into a `JavaRDD<I>`, and that
+return type decides overload selection.
+
+The generalized rule is:
+
+- an external API fact may be argument-sensitive when a library method creates a
+  generic container from an input container
+- `JavaSparkContext.parallelize(Collection<T>)` returns `JavaRDD<T>`
+- resolver overload selection should consume that inferred return type through
+  the normal Java type-matching path
+
+Responsibility stays separated:
+
+- `stdlib` owns the known external API return fact
+- resolver owns applying that expression type to overload selection
+- lowering does not inspect Spark, RDD, `parallelize`, or GATK method names
+
+The regression test is synthetic and intentionally avoids GATK method names:
+
+- `resolver_uses_external_parallelize_result_type_for_overloads`
+
+It uses neutral `Item`/`join` names and asserts that
+`context.parallelize(values)` selects the `JavaRDD<Item>, int` overload rather
+than a `List<Item>, String` overload.
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1569
+parser_diagnostics	0
+resolver_diagnostics	29
+semantic_diagnostics	0
+unresolved_method_calls	41898
+external_api_explained_method_calls	41895
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1564
+external_api_explained_field_accesses	1459
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28501
+external_constructor_guesses	2841
+external_field_guesses	773
+external_api_return_nullability_facts	6492
+total_facts	112802
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of setAttribute for argument types [String, Unknown("b")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("forEnumeration")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("newDirectoryStream")]	1
+resolve_call_ambiguous	ambiguous overload of validateInputs for argument types [Unknown("toArray")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `30` to `29`.
+- Files resolved without diagnostics moved from `1568` to `1569`.
+- The `joinOverlapping(... Unknown("parallelize") ...)` row disappeared.
+- Remaining top rows are unresolved external stream sources, a `toArray`
+  boundary feeding varargs, and a few constructor/API facts.
+
+## External Stream Source Adapter Slice
+
+The next slice addressed two of the remaining external stream-source rows:
+
+```text
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("forEnumeration")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("newDirectoryStream")]	1
+```
+
+The motivating corpus shapes were:
+
+```java
+return Utils.stream(Iterators.forEnumeration(enumeration));
+gcsNIOPaths = Utils.stream(Files.newDirectoryStream(inputGCSNIOPath, inputGlob))
+    .collect(Collectors.toList());
+```
+
+The generalized rule is:
+
+- external stream-source adapter methods should expose the Java container shape
+  they create
+- `Iterators.forEnumeration(Enumeration<T>)` returns `Iterator<T>`
+- `Files.newDirectoryStream(Path, ...)` returns `DirectoryStream<Path>`
+- `DirectoryStream<T>` is a known iterable subtype, so resolver overload
+  selection can match `Iterable<T>` normally
+
+Responsibility stays separated:
+
+- `stdlib` owns external API return types, nullability, roles, owner
+  canonicalization, and known JDK hierarchy edges
+- resolver consumes those Java types through ordinary overload selection
+- lowering does not special-case `Utils.stream`, `Iterators`, `Files`, path
+  streams, or any GATK call site
+
+The regression tests are synthetic and avoid GATK names:
+
+- `resolver_uses_external_enumeration_iterator_adapter_for_stream_overloads`
+- `resolver_uses_external_directory_stream_result_for_iterable_overloads`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1570
+parser_diagnostics	0
+resolver_diagnostics	27
+semantic_diagnostics	0
+unresolved_method_calls	41898
+external_api_explained_method_calls	41895
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1564
+external_api_explained_field_accesses	1459
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28500
+external_constructor_guesses	2841
+external_field_guesses	773
+external_api_return_nullability_facts	6495
+total_facts	112801
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of setAttribute for argument types [String, Unknown("b")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	ambiguous overload of validateInputs for argument types [Unknown("toArray")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `29` to `27`.
+- Files resolved without diagnostics moved from `1569` to `1570`.
+- The `forEnumeration` and `newDirectoryStream` stream rows disappeared.
+- The remaining `stream(Unknown("iterator"))` row is a separate
+  target-typed/source-interface lambda issue and should not be folded into the
+  external API adapter rule.
+
+## Stream Iterator Terminal And Source Stream Overload Slice
+
+The next investigation targeted the remaining:
+
+```text
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+```
+
+Narrowed corpus runs showed that similar rows are exposed by utility/read code,
+especially shapes like:
+
+```java
+Utils.stream(readsContext.iterator()).forEach(...)
+Utils.stream(readsContext.iterator(expandedInterval)).forEach(...)
+stream.map(...).iterator()
+```
+
+The generalized rules added were:
+
+- `Utils.stream(Iterator<T> | Iterable<T> | Enumeration<T>)` should expose
+  `Stream<T>` as an external API fact when `Utils` is treated as a library
+  boundary.
+- `Stream<T>.iterator()` should expose `Iterator<T>`.
+- Source overload tests should prove that a source `stream(Iterator<T>)`
+  overload can consume a source receiver method returning `Iterator<T>`.
+
+The tests added are synthetic and not GATK-specific:
+
+- `resolver_uses_stream_iterator_result_type_after_map_for_overloads`
+- `resolver_uses_source_iterator_return_type_for_source_stream_overload`
+
+After this slice, the full GATK benchmark remained:
+
+```text
+files_resolved_without_errors	1570
+resolver_diagnostics	27
+external_api_return_nullability_facts	6515
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of setAttribute for argument types [String, Unknown("b")]	1
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	ambiguous overload of validateInputs for argument types [Unknown("toArray")]	1
+```
+
+Interpretation:
+
+- This is a no-movement benchmark slice for the current top count.
+- The tests still cover real Java stream/iterator rules and are kept.
+- The remaining full-corpus row likely has a different unresolved receiver
+  shape than the synthetic `Iterator<T>` and source-overload cases.
+- The next higher-leverage target should therefore be classified separately
+  instead of expanding this stream rule into a catch-all.
+
+## External Pair-Like Public Field Slice
+
+The next slice addressed:
+
+```text
+resolve_call_ambiguous	ambiguous overload of setAttribute for argument types [String, Unknown("b")]	1
+```
+
+The motivating corpus shape was:
+
+```java
+Tuple<Integer, String> value = mateChangedReads.get(keystring);
+read.setAttribute("MC", value.b);
+```
+
+The generalized rule is:
+
+- external pair-like generic types may expose public fields as generic
+  projections
+- `_1`/`a` project the left type parameter
+- `_2`/`b` project the right type parameter
+- overload selection should consume the projected field type normally
+
+This is not a `setAttribute` rule. Responsibility stays separated:
+
+- `stdlib` owns generic external field typing for pair-like library values
+- resolver owns field expression typing and overload selection
+- lowering does not inspect `setAttribute`, read tags, tuple names, or GATK
+  callers
+
+The regression test is synthetic and not GATK-specific:
+
+- `resolver_uses_named_tuple_field_type_for_overload_arguments`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1571
+parser_diagnostics	0
+resolver_diagnostics	26
+semantic_diagnostics	0
+unresolved_method_calls	41898
+external_api_explained_method_calls	41895
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1556
+external_api_explained_field_accesses	1451
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28499
+external_constructor_guesses	2841
+external_field_guesses	767
+external_api_return_nullability_facts	6515
+total_facts	112786
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	ambiguous overload of validateInputs for argument types [Unknown("toArray")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `27` to `26`.
+- Files resolved without diagnostics moved from `1570` to `1571`.
+- The `setAttribute(String, Unknown("b"))` row disappeared.
+- Unresolved field accesses dropped from `1564` to `1556`, reflecting the
+  generic pair-like field projection.
+
+## Stream To Array Generator And FlatMap Slice
+
+The next slice addressed the `toArray` boundary that fed a varargs overload:
+
+```text
+resolve_call_ambiguous	ambiguous overload of validateInputs for argument types [Unknown("toArray")]	1
+```
+
+Two related but distinct Java stream rules were needed.
+
+First, the corpus exposed a direct array-generator terminal:
+
+```java
+stream.toArray(File[]::new)
+```
+
+The generalized rule is:
+
+- `Stream<T>.toArray(ArrayType[]::new)` should infer `ArrayType[]`
+- resolver overload selection should then handle that array as an explicit
+  varargs array argument
+
+The synthetic regression test is:
+
+- `resolver_uses_stream_to_array_generator_result_type_for_varargs_overloads`
+
+This first slice moved the benchmark from:
+
+```text
+files_resolved_without_errors	1571
+resolver_diagnostics	26
+```
+
+to:
+
+```text
+files_resolved_without_errors	1572
+resolver_diagnostics	25
+```
+
+but the displayed `validateInputs(Unknown("toArray"))` row remained. Narrowing
+showed that one caller had been fixed, while the remaining caller used a
+flattened stream.
+
+The remaining corpus shape was:
+
+```java
+CopyNumberArgumentValidationUtils.validateInputs(
+    Stream.of(inputDenoisedCopyRatiosFiles,
+              inputAllelicCountsFiles,
+              Collections.singletonList(inputNormalAllelicCountsFile),
+              Collections.singletonList(inputSegmentsFile))
+          .flatMap(Collection::stream)
+          .toArray(File[]::new));
+```
+
+The generalized rules added for the second slice are:
+
+- `Stream.of(T...)` exposes `Stream<T>` as an external static API fact
+- `Stream<Collection<T>>.flatMap(Collection::stream)` exposes `Stream<T>`
+- the existing `toArray(ArrayType[]::new)` rule then provides `ArrayType[]`
+  for varargs overload selection
+
+Responsibility stays separated:
+
+- `stdlib` owns the external `Stream.of` return fact and API policy metadata
+- resolver owns target-typed stream method-reference inference
+- overload resolution consumes the inferred Java array type
+- lowering does not inspect `validateInputs`, `File`, `ModelSegments`, or any
+  GATK-specific path
+
+The synthetic regression test is:
+
+- `resolver_uses_stream_flat_map_collection_method_reference_before_to_array_varargs`
+
+After the second slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1573
+parser_diagnostics	0
+resolver_diagnostics	24
+semantic_diagnostics	0
+unresolved_method_calls	41898
+external_api_explained_method_calls	41895
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1556
+external_api_explained_field_accesses	1451
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28317
+external_constructor_guesses	2841
+external_field_guesses	767
+external_api_return_nullability_facts	6604
+total_facts	112604
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `26` to `24` across the two stream-array
+  slices.
+- Files resolved without diagnostics moved from `1571` to `1573`.
+- The `validateInputs(Unknown("toArray"))` row disappeared.
+- External API guesses dropped because `Stream.of` is now a known static API
+  fact.
+
+## Bound Receiver Method Reference Collect Slice
+
+The next investigation targeted the remaining stream-collect diagnostics:
+
+```text
+resolve_call_ambiguous	no overload of create matches argument types [ArrayList, List<Unknown("collect")>, Allele, String, null]	1
+resolve_call_ambiguous	no overload of create matches argument types [List<String>, List<Unknown("collect")>, Allele, String, FuncotationMetadata]	1
+```
+
+One corpus-adjacent shape was:
+
+```java
+Arrays.stream(keys).map(valuesByKey::get).collect(Collectors.toList())
+```
+
+The generalized resolver rule added is:
+
+- a method reference target may name a local or field receiver, not only a type
+  name, `this`, or `super`
+- resolver method-reference typing should normalize Java identifier spelling to
+  the internal binding name before lookup
+- once the target receiver type is known, existing source/external method
+  return typing should be used with the stream element as the functional
+  argument
+- for example, `Map<K,V>::get` over a `Stream<K>` maps to `Stream<V>`, and
+  `collect(Collectors.toList())` maps to `List<V>`
+
+Responsibility stays separated:
+
+- resolver owns binding the method-reference target and target-typed return
+  inference
+- `stdlib` already owns the external `Map<K,V>.get(...) -> V` fact
+- `stdlib` owns the external API role classification for stream instance
+  methods; this slice fixed `Stream` static-utility handling so `collect` stays
+  a read-only getter fact instead of being shadowed by `Stream.of`
+- stream collect typing consumes the inferred stream element type
+- lowering does not inspect factory names, GATK classes, or map method names
+
+The regression tests are synthetic and not GATK-specific:
+
+- `resolver_uses_bound_receiver_method_reference_return_type_before_collect_result_type`
+- `resolver_uses_external_receiver_lambda_return_type_before_collect_result_type`
+
+The existing semantic fact test
+`stream_collect_and_collector_fact_roles_are_read_only_non_null` covers the
+external API role boundary.
+
+After this slice, the full GATK benchmark remained:
+
+```text
+files_resolved_without_errors	1573
+resolver_diagnostics	24
+external_api_guesses	28321
+external_api_return_nullability_facts	6605
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+```
+
+Interpretation:
+
+- This is a no-movement benchmark slice for the current top count.
+- The method-reference rule is still a real Java resolver rule and is kept.
+- `TableFuncotation.java` resolves without diagnostics in isolation, so the
+  remaining full-corpus `Unknown("collect")` rows need a fresh reduction from
+  the cross-file/static-factory context instead of expanding this rule into a
+  catch-all.
+
+## Boxed Generic Element Assignability Slice
+
+The next slice addressed:
+
+```text
+resolve_call_ambiguous	no overload of logLikelihoodRatio matches argument types [int, List<byte>, int]	1
+```
+
+The motivating corpus shape was:
+
+```java
+logLikelihoodRatio(refCount, altQualBuffer, 1)
+```
+
+where the overload expects `List<Byte>` and the available argument type was
+inferred as `List<byte>`.
+
+The generalized rule is:
+
+- Java primitive boxing/widening must apply inside generic argument
+  assignability checks, not only at top-level method arguments.
+- `List<byte>` can therefore match `List<Byte>` when selecting an overload.
+- The rule belongs in resolver assignability and overload scoring.
+
+Responsibility stays separated:
+
+- resolver owns generic argument match scoring, boxing, widening, and overload
+  selection
+- `stdlib` owns primitive wrapper names through `boxed_primitive_type`
+- lowering does not inspect `logLikelihoodRatio`, `Byte`, or any GATK method
+  name
+
+The regression test is synthetic and not GATK-specific:
+
+- `resolver_matches_boxed_generic_element_type_for_overload_arguments`
+
+This turn also added a cross-source static-factory regression that currently
+passes and protects the earlier `Unknown("collect")` investigation without
+claiming to fix the benchmark row:
+
+- `resolver_uses_stream_collect_type_for_same_class_static_factory_with_source_context`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1574
+parser_diagnostics	0
+resolver_diagnostics	23
+semantic_diagnostics	0
+unresolved_method_calls	41898
+external_api_explained_method_calls	41895
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1556
+external_api_explained_field_accesses	1451
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28320
+external_constructor_guesses	2841
+external_field_guesses	767
+external_api_return_nullability_facts	6605
+total_facts	112607
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `24` to `23`.
+- Files resolved without diagnostics moved from `1573` to `1574`.
+- The `logLikelihoodRatio(int, List<byte>, int)` row disappeared.
+- Remaining top rows are still stream-source typing, unresolved stream collect
+  in static factory contexts, source generic/supertype overload matching, and
+  external Spark write API typing.
+
+## Inherited Generic Source Supertype Substitution Slice
+
+The next slice addressed:
+
+```text
+resolve_call_ambiguous	no overload of getIntervalsWithFlanks matches argument types [List<RECORD>, int, SAMSequenceDictionary]	1
+```
+
+The motivating corpus shape was:
+
+```java
+class AbstractRecordCollection<METADATA, RECORD> {
+    public final List<RECORD> getRecords() { ... }
+}
+
+class AbstractLocatableCollection<METADATA, RECORD>
+    extends AbstractRecordCollection<METADATA, RECORD> { ... }
+
+class SimpleIntervalCollection
+    extends AbstractLocatableCollection<SimpleLocatableMetadata, SimpleInterval> { ... }
+
+IntervalUtils.getIntervalsWithFlanks(
+    specifiedIntervals.getRecords(), 0, specifiedIntervals.getMetadata().getSequenceDictionary())
+```
+
+The generalized rules are:
+
+- source superclass chains must carry generic substitutions while collecting
+  inherited methods
+- inherited method return and parameter types should be substituted before
+  resolver expression typing and overload selection consume them
+- source interface traversal still uses normalized base interface names, so
+  generic `implements` syntax does not break subtype assignability
+- overload candidate de-duplication must happen after receiver generic
+  substitutions, so an inherited generic method that becomes the same signature
+  as a subclass override does not create an artificial ambiguity
+
+Responsibility stays separated:
+
+- parser preserves source type parameters and generic extends/implements text
+  as Java type input
+- resolver owns source hierarchy traversal, generic substitution, inherited
+  member typing, override de-duplication, and overload selection
+- lowering does not inspect `getRecords`, `getIntervalsWithFlanks`,
+  `SVClusterLinkage`, or any GATK-specific class
+
+The regression tests are synthetic and not GATK-specific:
+
+- `resolver_substitutes_inherited_generic_return_type_through_superclass_chain`
+- `resolver_deduplicates_substituted_generic_override_candidates`
+
+The second test protects the related regression found during the slice: after
+substituting `Linkage<T>` through `ConcreteLinkage<Item>`, inherited generic
+methods that match concrete overrides must not remain as duplicate overload
+candidates.
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1574
+parser_diagnostics	0
+resolver_diagnostics	22
+semantic_diagnostics	0
+unresolved_method_calls	41874
+external_api_explained_method_calls	41871
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28306
+external_constructor_guesses	2839
+external_field_guesses	760
+external_api_return_nullability_facts	6603
+total_facts	112549
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `23` to `22`.
+- Files resolved without diagnostics stayed at `1574`.
+- The `getIntervalsWithFlanks(List<RECORD>, int, SAMSequenceDictionary)` row
+  disappeared.
+- A temporary regression from duplicate substituted source overrides was fixed
+  before reporting this benchmark. The transient `areClusterable` and
+  `getMaxClusterableStartingPosition` ambiguities are not part of the reported
+  valid result.
+- Remaining top rows are stream-source typing, unresolved stream collect in
+  static factory contexts, external Spark write API typing, and constructor
+  argument types that still flow from unknown external calls.
+
+## Header Metadata Retrieval Collect Slice
+
+The next investigation targeted the remaining `List<Unknown("collect")>` rows:
+
+```text
+resolve_call_ambiguous	no overload of create matches argument types [ArrayList, List<Unknown("collect")>, Allele, String, null]	1
+resolve_call_ambiguous	no overload of create matches argument types [List<String>, List<Unknown("collect")>, Allele, String, FuncotationMetadata]	1
+```
+
+One nearby corpus shape is:
+
+```java
+metadata.retrieveAllHeaderInfo()
+    .stream()
+    .map(VCFInfoHeaderLine::getID)
+    .collect(Collectors.toList())
+```
+
+The generalized external API fact added is:
+
+- `retrieveAllHeaderInfo()` at an external library boundary returns a
+  collection of header-line-like records
+- existing resolver stream/map/collect typing can then turn
+  `HeaderLine::getID` into `List<String>`
+
+Responsibility stays separated:
+
+- `stdlib` owns the known external API return shape for the metadata retrieval
+  method
+- resolver owns method-reference typing, stream element propagation, collector
+  result typing, and overload selection
+- lowering does not inspect metadata, header-line, funcotation, or GATK class
+  names
+
+The regression test is synthetic and not GATK-specific:
+
+- `resolver_uses_external_header_metadata_retrieval_before_collect_result_type`
+
+After this slice, the full GATK benchmark remained:
+
+```text
+files_resolved_without_errors	1574
+resolver_diagnostics	22
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+```
+
+Interpretation:
+
+- This is a no-movement benchmark slice.
+- The external API fact is still kept because it captures a real Java library
+  boundary pattern and has a direct resolver regression test.
+- The remaining `Unknown("collect")` rows are not explained by this metadata
+  retrieval shape. They need a fresh reduction with file-level diagnostic
+  provenance or a more detailed benchmark mode that records which Java file
+  produced each top resolver diagnostic.
+
+## Resolver Diagnostic File Provenance Slice
+
+The previous no-movement slice showed that aggregate resolver diagnostics were
+not enough to reduce the next corpus failure safely. The benchmark report now
+keeps up to five example source files for each top resolver diagnostic and
+renders them in a separate section:
+
+```text
+top_resolver_diagnostic_files
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1	org/broadinstitute/hellbender/tools/spark/sv/utils/CNVInputReader.java
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1	org/broadinstitute/hellbender/tools/funcotator/dataSources/cosmic/CosmicFuncotationFactory.java
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1	org/broadinstitute/hellbender/tools/funcotator/mafOutput/CustomMafFuncotationCreator.java
+```
+
+Responsibility stays separated:
+
+- `resolver_benchmark` owns corpus reporting and diagnostic provenance
+- resolver diagnostics remain structured by code and message
+- resolver, `stdlib`, semantic facts, and lowering do not depend on benchmark
+  file paths
+
+The regression test is:
+
+- `resolver_benchmark_reports_resolver_diagnostic_summaries`
+
+Interpretation:
+
+- This is benchmark tooling, not a resolver semantic change.
+- The counts remained `1574` files resolved without errors and `22` resolver
+  diagnostics before the next semantic slice.
+- The added file provenance directly identified the next reductions:
+  `CNVInputReader.java`, `CosmicFuncotationFactory.java`,
+  `CustomMafFuncotationCreator.java`, `Utils.java`, and
+  `ReadsSparkSink.java`.
+
+## Iterable Functional Interface Lambda Slice
+
+The diagnostic provenance identified this row in
+`org/broadinstitute/hellbender/utils/Utils.java`:
+
+```text
+resolve_call_ambiguous	no overload of stream matches argument types [Unknown("lambda")]	1
+```
+
+The motivating corpus shape was:
+
+```java
+public static <T> Stream<T> stream(final Iterator<T> iterator) {
+    return stream(() -> iterator);
+}
+```
+
+where the overload set includes `stream(Iterable<T>)` and
+`stream(Iterator<T>)`. Java `Iterable<T>` is a functional interface because its
+single abstract method is `iterator()`, so the lambda `() -> iterator` should
+be applicable to the `Iterable<T>` overload.
+
+The generalized rule is:
+
+- `Iterable` is a known Java functional interface at the resolver/std-library
+  boundary
+- lambda overload applicability should consume this fact through the existing
+  resolver functional-interface matching path
+
+Responsibility stays separated:
+
+- `stdlib` owns the known external/JDK functional-interface list
+- resolver owns lambda assignability, overload scoring, and call target
+  selection
+- lowering does not inspect `Utils.stream`, `Iterable`, or GATK source paths
+
+The regression test is synthetic and not GATK-specific:
+
+- `resolver_matches_lambda_arguments_to_known_iterable_functional_interface`
+
+This turn also added a benchmark-level guard for a related source/import shape
+that already worked and should stay working:
+
+- `resolver_benchmark_uses_imported_generic_source_iterator_return_type`
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1575
+parser_diagnostics	0
+resolver_diagnostics	21
+semantic_diagnostics	0
+unresolved_method_calls	41874
+external_api_explained_method_calls	41871
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28305
+external_constructor_guesses	2839
+external_field_guesses	760
+external_api_return_nullability_facts	6602
+total_facts	112548
+top_resolver_diagnostics
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+top_resolver_diagnostic_files
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1	org/broadinstitute/hellbender/tools/spark/sv/utils/CNVInputReader.java
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1	org/broadinstitute/hellbender/tools/funcotator/dataSources/cosmic/CosmicFuncotationFactory.java
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1	org/broadinstitute/hellbender/tools/funcotator/mafOutput/CustomMafFuncotationCreator.java
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `22` to `21`.
+- Files resolved without diagnostics moved from `1574` to `1575`.
+- The `Utils.java` `stream(Unknown("lambda"))` row disappeared.
+- The remaining `stream(Unknown("iterator"))` row is in
+  `CNVInputReader.java` and needs a separate reduction around
+  `FeatureDataSource<VariantContext>.iterator()` as seen through the full
+  package/import benchmark path.
+
+## Final Generic Try-Resource Type Normalization Slice
+
+The next investigation targeted:
+
+```text
+resolve_call_ambiguous	ambiguous overload of stream for argument types [Unknown("iterator")]	1
+org/broadinstitute/hellbender/tools/spark/sv/utils/CNVInputReader.java
+```
+
+The motivating corpus shape was:
+
+```java
+try ( final FeatureDataSource<VariantContext> dataSource =
+        new FeatureDataSource<>(cnvCallsFile, null, 0, null) ) {
+    Utils.stream(dataSource.iterator())
+        .map(...)
+        .forEach(...);
+}
+```
+
+`FeatureDataSource<T>` is source-visible and exposes `iterator() ->
+Iterator<T>`. The resolver already knew how to use source imports, generic
+receiver substitution, and `Utils.stream(Iterator<T>)`. The failure was earlier:
+the parser fallback for try-resource declarations preserved the declaration
+modifier in the type text, so the resource type became
+`final FeatureDataSource<VariantContext>` instead of
+`FeatureDataSource<VariantContext>`.
+
+The generalized rule added is:
+
+- parser type-text normalization strips Java declaration modifiers such as
+  `final` before parsing a fallback type
+- try-resource declarations then preserve the actual generic source type, so
+  resolver-owned source method lookup and generic substitution can type
+  `dataSource.iterator()` normally
+
+Responsibility stays separated:
+
+- parser owns syntax normalization for declaration modifiers in type text
+- resolver owns source method lookup, receiver generic substitution, and
+  overload selection for `stream`
+- `stdlib` owns known JDK/external stream and iterator API facts
+- lowering does not inspect `CNVInputReader`, `FeatureDataSource`, or
+  `Utils.stream`
+
+The generalized regression tests are:
+
+- `parses_final_generic_try_resource_type_without_modifier_in_name`
+- `resolver_benchmark_uses_imported_generic_source_iterator_return_type`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1576
+parser_diagnostics	0
+resolver_diagnostics	20
+semantic_diagnostics	0
+unresolved_method_calls	41813
+external_api_explained_method_calls	41810
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28231
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6599
+total_facts	112412
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of writeReads matches argument types [Named { name: "JavaSparkContext", args: [] }, String, Named { name: "GATKPath", args: [] }, Named { name: "JavaRDD", args: [Named { name: "SAMRecord", args: [] }] }, Named { name: "SAMFileHeader", args: [] }, Primitive(Long), Named { name: "FileCardinalityWriteOption", args: [] }, Named { name: "TempPartsDirectoryWriteOption", args: [] }, Named { name: "BaiWriteOption", args: [] }, Named { name: "SbiWriteOption", args: [] }]	1
+top_resolver_diagnostic_files
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1	org/broadinstitute/hellbender/tools/funcotator/dataSources/cosmic/CosmicFuncotationFactory.java
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1	org/broadinstitute/hellbender/tools/funcotator/mafOutput/CustomMafFuncotationCreator.java
+resolve_call_ambiguous	no overload of writeReads matches argument types [Named { name: "JavaSparkContext", args: [] }, String, Named { name: "GATKPath", args: [] }, Named { name: "JavaRDD", args: [Named { name: "SAMRecord", args: [] }] }, Named { name: "SAMFileHeader", args: [] }, Primitive(Long), Named { name: "FileCardinalityWriteOption", args: [] }, Named { name: "TempPartsDirectoryWriteOption", args: [] }, Named { name: "BaiWriteOption", args: [] }, Named { name: "SbiWriteOption", args: [] }]	1	org/broadinstitute/hellbender/engine/spark/datasources/ReadsSparkSink.java
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `21` to `20`.
+- Files resolved without diagnostics moved from `1575` to `1576`.
+- The `CNVInputReader.java` `stream(Unknown("iterator"))` row disappeared.
+- Remaining top call diagnostics are now two `List<Unknown("collect")>` static
+  factory contexts and one Spark write API overload context.
+
+## Joining Collector Result Type Slice
+
+The next investigation targeted the two remaining `List<Unknown("collect")>`
+static factory contexts:
+
+```text
+resolve_call_ambiguous	no overload of create matches argument types [ArrayList, List<Unknown("collect")>, Allele, String, null]	1
+resolve_call_ambiguous	no overload of create matches argument types [List<String>, List<Unknown("collect")>, Allele, String, FuncotationMetadata]	1
+```
+
+Both motivating files contain the same reduced shape:
+
+```java
+Collections.singletonList(
+    values.stream()
+        .map(...)
+        .collect(Collectors.joining("|")))
+```
+
+`Collectors.joining(...)` is a JDK collector whose terminal
+`Stream.collect(...)` result is `String`. That means the outer
+`Collections.singletonList(...)` should produce `List<String>` once the stream
+receiver remains typed as a `Stream`.
+
+The generalized external API fact added is:
+
+- `Collectors.joining()`, `Collectors.joining(delimiter)`, and
+  `Collectors.joining(delimiter, prefix, suffix)` produce collector values
+  whose collection result is `String`
+
+Responsibility stays separated:
+
+- `stdlib` owns the JDK collector result shape, nullability, and API role
+- resolver owns stream receiver typing, collect result propagation, and static
+  factory overload selection
+- lowering does not inspect `TableFuncotation`, funcotation fields, COSMIC,
+  dbSNP, or GATK package names
+
+The generalized regression test is:
+
+- `resolver_uses_joining_collector_string_result_inside_singleton_list`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice, the full GATK benchmark remained:
+
+```text
+files_resolved_without_errors	1576
+resolver_diagnostics	20
+external_api_return_nullability_facts	6653
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "ArrayList", args: [] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Unknown("null")]	1
+resolve_call_ambiguous	no overload of create matches argument types [Named { name: "List", args: [String] }, Named { name: "List", args: [Unknown("collect")] }, Named { name: "Allele", args: [] }, String, Named { name: "FuncotationMetadata", args: [] }]	1
+resolve_call_ambiguous	no overload of writeReads matches argument types [Named { name: "JavaSparkContext", args: [] }, String, Named { name: "GATKPath", args: [] }, Named { name: "JavaRDD", args: [Named { name: "SAMRecord", args: [] }] }, Named { name: "SAMFileHeader", args: [] }, Primitive(Long), Named { name: "FileCardinalityWriteOption", args: [] }, Named { name: "TempPartsDirectoryWriteOption", args: [] }, Named { name: "BaiWriteOption", args: [] }, Named { name: "SbiWriteOption", args: [] }]	1
+```
+
+Interpretation:
+
+- This is a no-movement benchmark slice.
+- The JDK collector fact is still kept because it is a real general API rule
+  and has a direct resolver regression test.
+- The remaining corpus failure likely loses the `Stream` receiver before the
+  terminal `collect`, through complex `map(...)` lambda typing. The next
+  reduction should target stream intermediate operations preserving a typed
+  `Stream<Unknown>` wrapper when the element type is not yet known, so
+  terminal collectors that do not depend on the element type can still resolve.
+
+## Map Entry Set Stream Collect Slice
+
+The previous no-movement collector slice showed that `Collectors.joining(...)`
+was necessary but not sufficient: the corpus chain first needed
+`Map<K,V>.entrySet()` to keep the stream receiver typed.
+
+The motivating reduced shape was:
+
+```java
+Collections.singletonList(
+    counts.entrySet().stream()
+        .map(entry -> entry.getKey())
+        .collect(Collectors.joining("|")))
+```
+
+The generalized external API fact added is:
+
+- `Map<K,V>.entrySet()` returns `Set<Entry<K,V>>`
+- existing stream typing turns that into `Stream<Entry<K,V>>`
+- existing pair-like entry access typing exposes `Entry.getKey() -> K` and
+  `Entry.getValue() -> V`
+- the previously added `Collectors.joining(...)` fact then makes
+  `collect(...) -> String`
+
+Responsibility stays separated:
+
+- `stdlib` owns the JDK `Map.entrySet()` return shape
+- resolver owns stream propagation, lambda body typing, collect result typing,
+  and overload selection
+- lowering does not inspect map field names, funcotation factories, COSMIC,
+  dbSNP, or GATK package names
+
+The generalized regression test is:
+
+- `resolver_uses_map_entry_set_stream_before_joining_collector_result`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1578
+parser_diagnostics	0
+resolver_diagnostics	18
+semantic_diagnostics	0
+unresolved_method_calls	41813
+external_api_explained_method_calls	41810
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28228
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6685
+total_facts	112409
+top_resolver_diagnostics
+resolve_call_ambiguous	no overload of writeReads matches argument types [Named { name: "JavaSparkContext", args: [] }, String, Named { name: "GATKPath", args: [] }, Named { name: "JavaRDD", args: [Named { name: "SAMRecord", args: [] }] }, Named { name: "SAMFileHeader", args: [] }, Primitive(Long), Named { name: "FileCardinalityWriteOption", args: [] }, Named { name: "TempPartsDirectoryWriteOption", args: [] }, Named { name: "BaiWriteOption", args: [] }, Named { name: "SbiWriteOption", args: [] }]	1
+resolve_constructor_ambiguous	constructor AnnotatedIntervalCollection: no constructor matches argument types [Wildcard(None), Named { name: "List", args: [Named { name: "AnnotatedInterval", args: [] }] }]	1
+resolve_constructor_ambiguous	constructor CachingIndexedFastaSequenceFile: ambiguous constructor for argument types [Unknown("getReferencePath")]	1
+top_resolver_diagnostic_files
+resolve_call_ambiguous	no overload of writeReads matches argument types [Named { name: "JavaSparkContext", args: [] }, String, Named { name: "GATKPath", args: [] }, Named { name: "JavaRDD", args: [Named { name: "SAMRecord", args: [] }] }, Named { name: "SAMFileHeader", args: [] }, Primitive(Long), Named { name: "FileCardinalityWriteOption", args: [] }, Named { name: "TempPartsDirectoryWriteOption", args: [] }, Named { name: "BaiWriteOption", args: [] }, Named { name: "SbiWriteOption", args: [] }]	1	org/broadinstitute/hellbender/engine/spark/datasources/ReadsSparkSink.java
+resolve_constructor_ambiguous	constructor AnnotatedIntervalCollection: no constructor matches argument types [Wildcard(None), Named { name: "List", args: [Named { name: "AnnotatedInterval", args: [] }] }]	1	org/broadinstitute/hellbender/tools/copynumber/arguments/CopyNumberArgumentValidationUtils.java
+resolve_constructor_ambiguous	constructor CachingIndexedFastaSequenceFile: ambiguous constructor for argument types [Unknown("getReferencePath")]	1	org/broadinstitute/hellbender/tools/walkers/rnaseq/SplitNCigarReads.java
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `20` to `18`.
+- Files resolved without diagnostics moved from `1576` to `1578`.
+- Both `List<Unknown("collect")>` static factory rows disappeared.
+- The top call diagnostic is now the Spark `writeReads(...)` overload in
+  `ReadsSparkSink.java`; the rest of the visible top set is constructor
+  applicability and unknown-return typing.
+
+## External Write Option Varargs Slice
+
+The next top call diagnostic was:
+
+```text
+resolve_call_ambiguous	no overload of writeReads matches argument types [JavaSparkContext, String, GATKPath, JavaRDD<SAMRecord>, SAMFileHeader, long, FileCardinalityWriteOption, TempPartsDirectoryWriteOption, BaiWriteOption, SbiWriteOption]	1
+org/broadinstitute/hellbender/engine/spark/datasources/ReadsSparkSink.java
+```
+
+The source method being called is a source-visible private varargs overload:
+
+```java
+private static void writeReads(
+    JavaSparkContext ctx,
+    String outputFile,
+    GATKPath referencePathSpecifier,
+    JavaRDD<SAMRecord> reads,
+    SAMFileHeader header,
+    long sbiIndexGranularity,
+    WriteOption... writeOptions)
+```
+
+The resolver already handled expanded Java varargs. The missing rule was
+external hierarchy assignability: the DISQ write option classes implement the
+external `WriteOption` API, so they are valid expanded varargs elements.
+
+The generalized external API fact added is:
+
+- `ReadsFormatWriteOption`, `FileCardinalityWriteOption`,
+  `TempPartsDirectoryWriteOption`, `BaiWriteOption`, and `SbiWriteOption` are
+  known `WriteOption` subtypes
+
+Responsibility stays separated:
+
+- `stdlib` owns the known external API hierarchy fact
+- resolver owns expanded varargs applicability and overload selection
+- lowering does not inspect `ReadsSparkSink`, Spark, DISQ call sites, or GATK
+  package names
+
+The regression test is:
+
+- `resolver_matches_external_write_option_subtypes_to_varargs_parameter`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1579
+parser_diagnostics	0
+resolver_diagnostics	17
+semantic_diagnostics	0
+unresolved_method_calls	41813
+external_api_explained_method_calls	41810
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28227
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6685
+total_facts	112408
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor AnnotatedIntervalCollection: no constructor matches argument types [Wildcard(None), Named { name: "List", args: [Named { name: "AnnotatedInterval", args: [] }] }]	1
+resolve_constructor_ambiguous	constructor CachingIndexedFastaSequenceFile: ambiguous constructor for argument types [Unknown("getReferencePath")]	1
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: ambiguous constructor for argument types [Unknown("toFile"), String]	1
+top_resolver_diagnostic_files
+resolve_constructor_ambiguous	constructor AnnotatedIntervalCollection: no constructor matches argument types [Wildcard(None), Named { name: "List", args: [Named { name: "AnnotatedInterval", args: [] }] }]	1	org/broadinstitute/hellbender/tools/copynumber/arguments/CopyNumberArgumentValidationUtils.java
+resolve_constructor_ambiguous	constructor CachingIndexedFastaSequenceFile: ambiguous constructor for argument types [Unknown("getReferencePath")]	1	org/broadinstitute/hellbender/tools/walkers/rnaseq/SplitNCigarReads.java
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: ambiguous constructor for argument types [Unknown("toFile"), String]	1	org/broadinstitute/hellbender/tools/walkers/haplotypecaller/AlleleLikelihoodWriter.java
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `18` to `17`.
+- Files resolved without diagnostics moved from `1578` to `1579`.
+- The `ReadsSparkSink.java` `writeReads(...)` call diagnostic disappeared.
+- The visible top diagnostics are now constructor applicability problems,
+  mostly driven by unknown-return external calls or source constructor shape.
+
+## Bounded Wildcard Receiver Return Slice
+
+The next top constructor diagnostic was:
+
+```text
+resolve_constructor_ambiguous	constructor AnnotatedIntervalCollection: no constructor matches argument types [Wildcard(None), List<AnnotatedInterval>]	1
+org/broadinstitute/hellbender/tools/copynumber/arguments/CopyNumberArgumentValidationUtils.java
+```
+
+The motivating source shape was:
+
+```java
+public static AnnotatedIntervalCollection validateAnnotatedIntervalsSubset(
+        File annotatedIntervalsFile,
+        AbstractLocatableCollection<?, ?> locatableCollection,
+        Logger logger) {
+    ...
+    return new AnnotatedIntervalCollection(
+        locatableCollection.getMetadata(),
+        subsetAnnotatedIntervals);
+}
+```
+
+`AbstractLocatableCollection<METADATA extends LocatableMetadata, RECORD extends
+Locatable>` inherits `getMetadata()` through a generic superclass. For a
+receiver declared as `AbstractLocatableCollection<?, ?>`, Java still knows that
+the first wildcard is bounded by the declared type parameter upper bound:
+`LocatableMetadata`. The resolver had stored only type parameter names, so the
+return type collapsed to unbounded wildcard before constructor overload
+selection.
+
+The generalized resolver rule added is:
+
+- Java IR stores type parameter upper bounds alongside type parameter names
+- parser records `T extends Bound` for class and interface declarations
+- resolver receiver substitutions replace an unbounded wildcard actual with
+  the corresponding declared upper bound when typing inherited generic method
+  returns
+
+Responsibility stays separated:
+
+- parser owns extracting source generic bounds
+- Java IR owns representing source generic bounds
+- resolver owns substituting wildcard receiver arguments through those bounds
+  and using the resulting Java type in constructor overload selection
+- lowering does not inspect `AnnotatedIntervalCollection`,
+  `AbstractLocatableCollection`, or GATK package names
+
+The generalized regression test is:
+
+- `resolver_uses_type_parameter_bound_for_unbounded_wildcard_receiver_return`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test parser_tree_sitter --quiet
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1580
+parser_diagnostics	0
+resolver_diagnostics	16
+semantic_diagnostics	0
+unresolved_method_calls	41811
+external_api_explained_method_calls	41808
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28226
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6685
+total_facts	112405
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor CachingIndexedFastaSequenceFile: ambiguous constructor for argument types [Unknown("getReferencePath")]	1
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: ambiguous constructor for argument types [Unknown("toFile"), String]	1
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: no constructor matches argument types [String, Named { name: "SAMException", args: [] }]	1
+top_resolver_diagnostic_files
+resolve_constructor_ambiguous	constructor CachingIndexedFastaSequenceFile: ambiguous constructor for argument types [Unknown("getReferencePath")]	1	org/broadinstitute/hellbender/tools/walkers/rnaseq/SplitNCigarReads.java
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: ambiguous constructor for argument types [Unknown("toFile"), String]	1	org/broadinstitute/hellbender/tools/walkers/haplotypecaller/AlleleLikelihoodWriter.java
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: no constructor matches argument types [String, Named { name: "SAMException", args: [] }]	1	org/broadinstitute/hellbender/metrics/MetricsUtils.java
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `17` to `16`.
+- Files resolved without diagnostics moved from `1579` to `1580`.
+- The `AnnotatedIntervalCollection` constructor row disappeared.
+- The next visible failures are mostly external method return facts feeding
+  constructors and exception constructor compatibility.
+
+## External Reference Path Getter Slice
+
+The next top constructor diagnostic was:
+
+```text
+resolve_constructor_ambiguous	constructor CachingIndexedFastaSequenceFile: ambiguous constructor for argument types [Unknown("getReferencePath")]	1
+org/broadinstitute/hellbender/tools/walkers/rnaseq/SplitNCigarReads.java
+```
+
+The motivating source shape was:
+
+```java
+referenceReader =
+    new CachingIndexedFastaSequenceFile(referenceArguments.getReferencePath());
+```
+
+The source method exists outside the local receiver shape seen at the call
+site:
+
+```java
+public Path getReferencePath() {
+    return getReferenceSpecifier() != null
+        ? getReferenceSpecifier().toPath()
+        : null;
+}
+```
+
+The generalized external API fact added is:
+
+- a zero-argument `getReferencePath()` at a source or external boundary returns
+  `Path`
+
+This is intentionally a Java type fact, not a lowering rule. Once the resolver
+knows the call returns `Path`, ordinary constructor overload selection can pick
+the `CachingIndexedFastaSequenceFile(Path)` constructor.
+
+Responsibility stays separated:
+
+- `stdlib` owns the known path getter return fact
+- resolver owns applying external method return facts before constructor
+  overload selection
+- parser, semantic facts, and lowering do not inspect reference-reader,
+  FASTA, or GATK-specific names
+
+The generalized regression tests are:
+
+- `resolver_uses_external_reference_path_getter_return_type_for_constructor_overloads`
+- `resolver_uses_inherited_camel_case_field_receiver_for_source_getter_return`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1581
+parser_diagnostics	0
+resolver_diagnostics	15
+semantic_diagnostics	0
+unresolved_method_calls	41811
+external_api_explained_method_calls	41808
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28226
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6685
+total_facts	112405
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: ambiguous constructor for argument types [Unknown("toFile"), String]	1
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: no constructor matches argument types [String, Named { name: "SAMException", args: [] }]	1
+resolve_constructor_ambiguous	constructor CouldNotReadInputFile: no constructor matches argument types [Named { name: "Path", args: [] }, String, Named { name: "StorageException", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `16` to `15`.
+- Files resolved without diagnostics moved from `1580` to `1581`.
+- The `CachingIndexedFastaSequenceFile(getReferencePath())` row disappeared.
+- The next visible failures are still constructor applicability issues, now led
+  by `Path.toFile()` and exception subclass assignability.
+
+## Path To File External Conversion Slice
+
+The next top constructor diagnostic was:
+
+```text
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: ambiguous constructor for argument types [Unknown("toFile"), String]	1
+org/broadinstitute/hellbender/tools/walkers/haplotypecaller/AlleleLikelihoodWriter.java
+```
+
+The motivating source shape was:
+
+```java
+throw new UserException.CouldNotCreateOutputFile(
+    _outputPath.toFile(),
+    "Unable to open %s for writing");
+```
+
+The target class has overloads for both `File,String` and `String,String`.
+The resolver could not choose because `Path.toFile()` did not have a known Java
+return type at the external/JDK boundary.
+
+The generalized external API fact added is:
+
+- `Path.toFile()` returns `File`
+
+The fact is receiver-gated to path-like receivers. It does not make every
+zero-argument `toFile()` call return `File`.
+
+Responsibility stays separated:
+
+- `stdlib` owns the JDK path conversion return fact
+- resolver owns using that fact to type the constructor argument and choose the
+  overload
+- exception modeling, semantic facts, and lowering do not special-case
+  `CouldNotCreateOutputFile` or GATK exception classes
+
+The generalized regression test is:
+
+- `resolver_uses_external_path_to_file_result_type_for_constructor_overloads`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls path_to_file -- --nocapture
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1582
+parser_diagnostics	0
+resolver_diagnostics	14
+semantic_diagnostics	0
+unresolved_method_calls	41811
+external_api_explained_method_calls	41808
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28225
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6685
+total_facts	112404
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: no constructor matches argument types [String, Named { name: "SAMException", args: [] }]	1
+resolve_constructor_ambiguous	constructor CouldNotReadInputFile: no constructor matches argument types [Named { name: "Path", args: [] }, String, Named { name: "StorageException", args: [] }]	1
+resolve_constructor_ambiguous	constructor CouldNotReadInputFile: no constructor matches argument types [String, Named { name: "UncheckedIOException", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `15` to `14`.
+- Files resolved without diagnostics moved from `1581` to `1582`.
+- The `CouldNotCreateOutputFile(Path.toFile(), String)` row disappeared.
+- The next visible failures are mainly exception hierarchy assignability and
+  unresolved external/JDK factory return facts feeding constructors.
+
+## External Exception Hierarchy Slice
+
+The next top constructor diagnostics were:
+
+```text
+resolve_constructor_ambiguous	constructor CouldNotCreateOutputFile: no constructor matches argument types [String, Named { name: "SAMException", args: [] }]	1
+resolve_constructor_ambiguous	constructor CouldNotReadInputFile: no constructor matches argument types [Named { name: "Path", args: [] }, String, Named { name: "StorageException", args: [] }]	1
+resolve_constructor_ambiguous	constructor CouldNotReadInputFile: no constructor matches argument types [String, Named { name: "UncheckedIOException", args: [] }]	1
+```
+
+The motivating source shapes were exception-wrapper constructors. Examples:
+
+```java
+} catch (IOException | SAMException e ){
+    throw new UserException.CouldNotCreateOutputFile(
+        "Could not write metrics to file: " + metricsOutputPath,
+        e);
+}
+```
+
+and:
+
+```java
+} catch (com.google.cloud.storage.StorageException cloudBoom) {
+    throw new UserException.CouldNotReadInputFile(
+        path,
+        cloudBoom.getCode() + ": " + cloudBoom.getMessage(),
+        cloudBoom);
+}
+```
+
+The target constructors accept `Exception` or `Throwable`. The resolver already
+handled core JDK exception hierarchy, but it did not know that these common
+external/JDK exceptions are throwable/runtime-exception classes.
+
+The generalized external hierarchy facts added are:
+
+- `SAMException` is treated as a known runtime exception
+- `StorageException` is treated as a known runtime exception
+- `UncheckedIOException` is treated as a known runtime exception
+- all three are assignable to `Exception` and `Throwable`
+
+Responsibility stays separated:
+
+- `stdlib` owns known Java/JDK/external exception hierarchy facts
+- resolver owns overload applicability using those subtype facts
+- exception semantic modeling and lowering do not special-case GATK user
+  exception wrappers
+
+The generalized regression tests are:
+
+- `resolver_uses_known_external_exception_hierarchy_for_constructor_assignability`
+- `resolver_uses_known_runtime_exception_hierarchy_for_throwable_constructor_assignability`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls exception_hierarchy -- --nocapture
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1585
+parser_diagnostics	0
+resolver_diagnostics	11
+semantic_diagnostics	0
+unresolved_method_calls	41811
+external_api_explained_method_calls	41808
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28225
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6687
+total_facts	112404
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor Fragment: ambiguous constructor for argument types [Unknown("of")]	1
+resolve_constructor_ambiguous	constructor GATKPath: ambiguous constructor for argument types [Unknown("getProperty")]	1
+resolve_constructor_ambiguous	constructor RecalibrationReport: no constructor matches argument types [String]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `14` to `11`.
+- Files resolved without diagnostics moved from `1582` to `1585`.
+- The `SAMException`, `StorageException`, and `UncheckedIOException`
+  constructor rows disappeared.
+- The remaining visible failures are now mostly unresolved external/JDK factory
+  return facts and source constructor shape issues.
+
+## Static Factory Return Type Slice
+
+The next constructor diagnostics included several unknown return types from
+static library factories:
+
+```text
+resolve_constructor_ambiguous	constructor Fragment: ambiguous constructor for argument types [Unknown("of")]	1
+resolve_constructor_ambiguous	constructor GATKPath: ambiguous constructor for argument types [Unknown("getProperty")]	1
+resolve_constructor_ambiguous	constructor SeqVertex: ambiguous constructor for argument types [Unknown("addAll")]	1
+resolve_constructor_ambiguous	constructor SeqVertex: ambiguous constructor for argument types [Unknown("copyOf")]	1
+```
+
+The motivating source shapes were:
+
+```java
+return reads.size() == 1
+    ? new Fragment(reads.get(0))
+    : new Fragment(ImmutablePair.of(reads.get(0), reads.get(1)));
+```
+
+```java
+tmpDir = new GATKPath(System.getProperty("java.io.tmpdir"));
+```
+
+```java
+final SeqVertex newV = new SeqVertex(ArrayUtils.addAll(prevSeq, v.getSequence()));
+```
+
+and:
+
+```java
+return prefixSize > 0
+    ? new SeqVertex(Arrays.copyOf(sequence, prefixSize))
+    : null;
+```
+
+The generalized external/static API facts added are:
+
+- `ImmutablePair.of(L, R)` and `Pair.of(L, R)` return `Pair<L, R>`
+- `System.getProperty(...)` returns `String`
+- `Arrays.copyOf(T[], int)` returns `T[]`
+- `ArrayUtils.addAll(T[], T[])` returns `T[]` when both arrays have the same
+  element type
+
+These are Java type facts for standard/static library calls. They do not encode
+GATK constructors, graph classes, or fragment classes.
+
+Responsibility stays separated:
+
+- `stdlib` owns static external API return types, nullability, role metadata,
+  and receiver-owner canonicalization
+- resolver owns applying those return types during constructor overload
+  selection
+- lowering does not inspect `ImmutablePair`, `System`, `ArrayUtils`, `SeqVertex`,
+  `Fragment`, or `GATKPath`
+
+The generalized regression tests are:
+
+- `resolver_uses_pair_factory_result_type_for_constructor_overloads`
+- `resolver_uses_system_get_property_result_type_for_constructor_overloads`
+- `resolver_uses_arrays_copy_of_result_type_for_constructor_overloads`
+- `resolver_uses_primitive_array_add_all_result_type_for_constructor_overloads`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls pair_factory -- --nocapture
+cargo test --test resolve_calls system_get_property -- --nocapture
+cargo test --test resolve_calls copy_of -- --nocapture
+cargo test --test resolve_calls primitive_array_add_all -- --nocapture
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1589
+parser_diagnostics	0
+resolver_diagnostics	7
+semantic_diagnostics	0
+unresolved_method_calls	41811
+external_api_explained_method_calls	41808
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28223
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6774
+total_facts	112402
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor RecalibrationReport: no constructor matches argument types [String]	1
+resolve_constructor_ambiguous	constructor SeqVertex: ambiguous constructor for argument types [Unknown("getAdditionalSequence")]	1
+resolve_constructor_ambiguous	constructor SimpleInterval: ambiguous constructor for argument types [Unknown("getAttributeAsString")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `11` to `7`.
+- Files resolved without diagnostics moved from `1585` to `1589`.
+- The `Fragment(ImmutablePair.of)`, `GATKPath(System.getProperty)`,
+  `SeqVertex(ArrayUtils.addAll)`, and `SeqVertex(Arrays.copyOf)` rows
+  disappeared.
+- Remaining visible failures now cluster around inherited generic/source method
+  return typing, source constructor shape, and a few missing external
+  constructors.
+
+## Bounded Type Parameter Receiver Method Slice
+
+The next source resolver diagnostic was:
+
+```text
+resolve_constructor_ambiguous	constructor SeqVertex: ambiguous constructor for argument types [Unknown("getAdditionalSequence")]	1
+org/broadinstitute/hellbender/tools/walkers/haplotypecaller/graphs/BaseGraph.java
+```
+
+The motivating source shape was:
+
+```java
+public abstract class BaseGraph<V extends BaseVertex, E extends BaseEdge> {
+    public SeqGraph toSequenceGraph() {
+        ...
+        for (final V dv : vertexSet()) {
+            final SeqVertex sv =
+                new SeqVertex(dv.getAdditionalSequence(isSource(dv)));
+        }
+    }
+}
+```
+
+`V` is a type parameter with upper bound `BaseVertex`. The resolver already
+stored class type parameter bounds, but source receiver lookup only tried to
+find methods on the literal receiver type `V`. It did not fall back to the
+declared bound before method resolution, so the call result stayed
+`Unknown("getAdditionalSequence")`.
+
+The generalized resolver rule added is:
+
+- when resolving a source instance method on a receiver whose type is a current
+  class type parameter, use the type parameter's declared upper bound as the
+  source receiver type
+
+Responsibility stays separated:
+
+- parser and Java IR own preserving type parameter bounds
+- `ProgramSymbols` owns querying current type parameter bounds
+- resolver owns using the bound for source receiver method lookup
+- `stdlib`, semantic facts, and lowering do not inspect graph, vertex, or
+  sequence names
+
+The generalized regression test is:
+
+- `resolver_uses_current_type_parameter_bound_for_receiver_method_return`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls current_type_parameter_bound -- --nocapture
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1590
+parser_diagnostics	0
+resolver_diagnostics	6
+semantic_diagnostics	0
+unresolved_method_calls	41811
+external_api_explained_method_calls	41808
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28225
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6775
+total_facts	112404
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor RecalibrationReport: no constructor matches argument types [String]	1
+resolve_constructor_ambiguous	constructor SimpleInterval: ambiguous constructor for argument types [Unknown("getAttributeAsString")]	1
+resolve_constructor_ambiguous	constructor SimpleInterval: ambiguous constructor for argument types [Unknown("substring")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `7` to `6`.
+- Files resolved without diagnostics moved from `1589` to `1590`.
+- The `SeqVertex(getAdditionalSequence)` row disappeared.
+- The remaining visible failures are source constructor coverage and external
+  library return/constructor facts.
+
+## External String Return API Slice
+
+The next two constructor diagnostics were:
+
+```text
+resolve_constructor_ambiguous	constructor SimpleInterval: ambiguous constructor for argument types [Unknown("getAttributeAsString")]	1
+resolve_constructor_ambiguous	constructor SimpleInterval: ambiguous constructor for argument types [Unknown("substring")]	1
+org/broadinstitute/hellbender/tools/spark/sv/discovery/inference/SegmentedCpxVariantSimpleVariantExtractor.java
+```
+
+The motivating source shapes were:
+
+```java
+new SimpleInterval(simple.getAttributeAsString(DUP_REPEAT_UNIT_REF_SPAN, ""))
+```
+
+and:
+
+```java
+new SimpleInterval(description.substring(offset))
+```
+
+`SimpleInterval` has a `String` constructor. The resolver could not select it
+because the external variant attribute API and `String.substring(...)` did not
+produce explicit Java string return facts.
+
+The generalized external API facts added are:
+
+- `getAttributeAsString(name)` and `getAttributeAsString(name, defaultValue)`
+  return `String`
+- `String.substring(begin)` and `String.substring(begin, end)` return `String`
+
+Responsibility stays separated:
+
+- `stdlib` owns external/JDK method return facts, nullability, and role metadata
+- resolver owns applying those Java return types during constructor overload
+  selection
+- lowering does not inspect `SimpleInterval`, variant attributes, structural
+  variant constants, or string parsing shapes
+
+The generalized regression tests are:
+
+- `resolver_uses_external_attribute_string_result_for_constructor_overloads`
+- `resolver_uses_string_substring_result_type_for_constructor_overloads`
+
+This turn also added two reduced `Map.Entry<String, File>.getValue()` tests
+while investigating the remaining `RecalibrationReport(String)` diagnostic:
+
+- `resolver_uses_map_entry_value_type_for_constructor_overloads`
+- `resolver_uses_enhanced_for_map_entry_value_type_for_constructor_overloads`
+- `resolver_benchmark_resolves_imported_constructor_from_map_entry_value`
+
+Those tests already pass and show that the direct generic `Map.Entry` accessor
+rule is not the remaining corpus blocker.
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls attribute_string -- --nocapture
+cargo test --test resolve_calls substring_result -- --nocapture
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1591
+parser_diagnostics	0
+resolver_diagnostics	4
+semantic_diagnostics	0
+unresolved_method_calls	41811
+external_api_explained_method_calls	41808
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28215
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6854
+total_facts	112394
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor RecalibrationReport: no constructor matches argument types [String]	1
+resolve_constructor_ambiguous	constructor SimpleInterval: no constructor matches argument types [Named { name: "NamedFeature", args: [] }]	1
+resolve_constructor_ambiguous	constructor SimpleNovelAdjacencyAndChimericAlignmentEvidence: no constructor matches argument types [Named { name: "NovelAdjacencyAndAltHaplotype", args: [] }, Named { name: "NovelAdjacencyAndAltHaplotype", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `6` to `4`.
+- Files resolved without diagnostics moved from `1590` to `1591`.
+- Both `SimpleInterval` rows fed by unknown string-return calls disappeared.
+- The remaining visible failures are source constructor coverage, one
+  unreproduced imported `Map.Entry`/report constructor diagnostic, and one
+  target-typed empty collection/factory case.
+
+## External Feature Locatable Hierarchy Slice
+
+The next constructor diagnostic was:
+
+```text
+resolve_constructor_ambiguous	constructor SimpleInterval: no constructor matches argument types [Named { name: "NamedFeature", args: [] }]	1
+org/broadinstitute/hellbender/tools/copynumber/formats/records/SimpleCount.java
+```
+
+The motivating source shape was:
+
+```java
+public SimpleCount(final NamedFeature namedFeature) {
+    ...
+    this.interval = new SimpleInterval(namedFeature);
+}
+```
+
+`SimpleInterval` has a constructor accepting `Locatable`. The external taxonomy
+already knew `NamedFeature` as a feature-like type, but not as locatable. That
+prevented ordinary constructor assignability from selecting the `Locatable`
+overload.
+
+The generalized external hierarchy rule added is:
+
+- known external feature-like types such as `NamedFeature`, `SimpleFeature`,
+  `BEDFeature`, and `TableFeature` are also locatable when matching a
+  `Locatable` target
+
+Responsibility stays separated:
+
+- `stdlib` owns known external Java hierarchy facts
+- resolver owns applying those facts during constructor overload selection
+- lowering does not inspect `SimpleInterval`, `SimpleCount`, or copy-number
+  classes
+
+The generalized regression test strengthened is:
+
+- `resolver_uses_known_external_locatable_assignability_for_constructor_overload_arguments`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls known_external_locatable -- --nocapture
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1592
+parser_diagnostics	0
+resolver_diagnostics	3
+semantic_diagnostics	0
+unresolved_method_calls	41811
+external_api_explained_method_calls	41808
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28215
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6854
+total_facts	112394
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor RecalibrationReport: no constructor matches argument types [String]	1
+resolve_constructor_ambiguous	constructor SimpleNovelAdjacencyAndChimericAlignmentEvidence: no constructor matches argument types [Named { name: "NovelAdjacencyAndAltHaplotype", args: [] }, Named { name: "NovelAdjacencyAndAltHaplotype", args: [] }]	1
+resolve_constructor_ambiguous	constructor StandardCovariateList: ambiguous constructor for argument types [Named { name: "RecalibrationArgumentCollection", args: [] }, Unknown("emptyList")]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `4` to `3`.
+- Files resolved without diagnostics moved from `1591` to `1592`.
+- The `SimpleInterval(NamedFeature)` row disappeared.
+- The remaining visible failures are a report constructor mismatch, a source
+  constructor mismatch, and target typing for an empty collection factory.
+
+## Target-Typed Empty Collection Factory Slice
+
+The next constructor diagnostic was:
+
+```text
+resolve_constructor_ambiguous	constructor StandardCovariateList: ambiguous constructor for argument types [Named { name: "RecalibrationArgumentCollection", args: [] }, Unknown("emptyList")]	1
+org/broadinstitute/hellbender/utils/recalibration/RecalibrationReport.java
+```
+
+The motivating source shape was:
+
+```java
+new StandardCovariateList(RAC, Collections.emptyList())
+```
+
+The target constructor takes `List<String>`. Java target typing allows
+`Collections.emptyList()` to satisfy that parameter even though the call itself
+does not carry an element type. The resolver previously treated it as an
+ordinary unknown method result during overload selection.
+
+The generalized resolver rule added is:
+
+- unknown empty collection factory calls are compatible with matching
+  collection targets during overload scoring:
+  - `emptyList` -> `List`, `Collection`, or `Iterable`
+  - `emptySet` -> `Set`, `Collection`, or `Iterable`
+  - `emptyMap` -> `Map`
+
+This does not invent a concrete element type globally. It only supplies
+target-typed applicability evidence for overload resolution.
+
+Responsibility stays separated:
+
+- resolver owns target-typed overload applicability
+- `stdlib` owns API role/nullability metadata for `Collections.empty*`
+- lowering does not inspect `StandardCovariateList`, recalibration classes, or
+  empty-list call names
+
+The generalized regression test is:
+
+- `resolver_uses_target_type_for_empty_list_constructor_overloads`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls target_type_for_empty_list -- --nocapture
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1593
+parser_diagnostics	0
+resolver_diagnostics	2
+semantic_diagnostics	0
+unresolved_method_calls	41811
+external_api_explained_method_calls	41808
+unexplained_method_calls	3
+unresolved_constructors	4340
+external_api_explained_constructors	4269
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1545
+external_api_explained_field_accesses	1440
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28215
+external_constructor_guesses	2838
+external_field_guesses	760
+external_api_return_nullability_facts	6854
+total_facts	112394
+top_resolver_diagnostics
+resolve_constructor_ambiguous	constructor RecalibrationReport: no constructor matches argument types [String]	1
+resolve_constructor_ambiguous	constructor SimpleNovelAdjacencyAndChimericAlignmentEvidence: no constructor matches argument types [Named { name: "NovelAdjacencyAndAltHaplotype", args: [] }, Named { name: "NovelAdjacencyAndAltHaplotype", args: [] }]	1
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `3` to `2`.
+- Files resolved without diagnostics moved from `1592` to `1593`.
+- The `StandardCovariateList(Collections.emptyList())` row disappeared.
+- The remaining visible failures are a report constructor mismatch and a source
+  constructor mismatch.
+
+## Map Entry Source-Name Collision Slice
+
+The remaining source constructor diagnostic included:
+
+```text
+resolve_constructor_ambiguous	constructor SimpleNovelAdjacencyAndChimericAlignmentEvidence: no constructor matches argument types [Named { name: "NovelAdjacencyAndAltHaplotype", args: [] }, Named { name: "NovelAdjacencyAndAltHaplotype", args: [] }]	1
+org/broadinstitute/hellbender/tools/StructuralVariantDiscoverer.java
+```
+
+The motivating source shape had two relevant constructor call forms:
+
+```java
+for ( final Map.Entry<NovelAdjacencyAndAltHaplotype, List<SimpleChimera>> entry :
+        novelAdjacenciesToReinterpret.entrySet() ) {
+    reinterpretedVariants.add(
+        new SimpleNovelAdjacencyAndChimericAlignmentEvidence(entry.getKey(), entry.getValue())
+                .produceAnnotatedVcFromAssemblyEvidence(...).make());
+}
+```
+
+and:
+
+```java
+new SimpleNovelAdjacencyAndChimericAlignmentEvidence(novelAdjacency,
+        Collections.singletonList(simpleChimera))
+```
+
+A first generalized test was added for stream-map lambda propagation:
+
+- `resolver_uses_stream_entry_value_type_inside_lambda_constructor_overload`
+
+That rule is valid and stays in the resolver: `Stream<T>.map(lambda)` should
+resolve the lambda body with the receiver stream element type before constructor
+overload resolution inside the lambda. This did not move the GATK benchmark,
+which was useful signal that the remaining corpus failure was not a stream
+lambda.
+
+The actual moving rule was a source-name collision:
+
+- GATK has a source nested type named `Entry<V1>` in `SVIntervalTree`.
+- The resolver canonicalizes source type names by simple name.
+- `Map.Entry<K, V>` was therefore eligible for source-method lookup as
+  `Entry<V1>`.
+- The one source type parameter was bound to the first actual argument `K`,
+  making `entry.getValue()` look like `K` instead of `V`.
+
+The generalized resolver rule added is:
+
+- source receiver method lookup may use a named source type only when the
+  actual receiver is raw or its generic argument count matches the source
+  declaration's type-parameter count.
+- If the arity does not match, the resolver leaves the expression available for
+  structural/external modeling such as JDK `Map.Entry<K, V>`.
+
+Responsibility stays separated:
+
+- resolver owns source receiver selection, generic arity compatibility, and
+  lambda body target typing
+- `stdlib` owns structural JDK `Map.Entry` `getKey`/`getValue` return types
+- lowering does not inspect GATK class names, `SimpleNovel...`, or `Entry`
+  names
+
+The generalized regression tests added are:
+
+- `resolver_uses_stream_entry_value_type_inside_lambda_constructor_overload`
+- `resolver_uses_enhanced_for_map_entry_value_type_in_multi_arg_constructor_overload`
+- `resolver_uses_wrapped_enhanced_for_map_entry_value_type_in_chained_receiver_constructor`
+- `resolver_benchmark_resolves_imported_multi_arg_constructor_from_map_entry_value`
+- `resolver_benchmark_does_not_let_source_entry_shadow_map_entry_value_type`
+
+Verification:
+
+```text
+cargo fmt
+cargo test --test resolve_calls map_entry -- --nocapture
+cargo test --test resolve_calls stream_entry -- --nocapture
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42237
+external_api_explained_method_calls	42232
+unexplained_method_calls	5
+unresolved_constructors	4364
+external_api_explained_constructors	4293
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1554
+external_api_explained_field_accesses	1449
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28256
+external_constructor_guesses	2852
+external_field_guesses	767
+external_api_return_nullability_facts	6871
+total_facts	112915
+```
+
+Interpretation:
+
+- Resolver diagnostics moved from `2` to `0`.
+- Files resolved without diagnostics moved from `1593` to `1595`.
+- Both remaining visible constructor diagnostics disappeared.
+- The benchmark still has unresolved targets, but they are now represented as
+  unresolved/external facts rather than resolver diagnostics.
+
+## Numeric External API Fact Slice
+
+After resolver diagnostics reached zero, the next benchmark pressure was the
+external API fact layer. The unexplained method list included:
+
+```text
+MethodCall	logBeta	2
+MethodCall	floatValue	1
+MethodCall	getMetadata	1
+MethodCall	getRecords	1
+```
+
+The selected generalized rules were:
+
+- boxed/`Number` primitive extractor methods are read-only getters with
+  primitive non-null results:
+  - `byteValue()`
+  - `shortValue()`
+  - `intValue()`
+  - `longValue()`
+  - `floatValue()`
+  - `doubleValue()`
+- static math special functions such as `Beta.logBeta(double, double)` are
+  read-only getters with primitive non-null results.
+
+The `logBeta` rule is receiver-agnostic as well as `Beta`-specific. The corpus
+source imports `org.apache.commons.math3.special.Beta`, but static owner names
+can be normalized into ordinary identifier space. In this case the owner can
+collide with a Java field or parameter named `beta`, so the external fact model
+must be able to explain `logBeta(2)` even when the receiver key is unavailable.
+
+Responsibility stays separated:
+
+- `stdlib` owns external API return type, role, and nullability for numeric
+  extractors and math special functions
+- semantic analysis consumes `stdlib::external_api_method_policy`
+- resolver/lowering do not inspect GATK classes or rewrite numeric calls by
+  corpus name
+
+The generalized regression tests added are:
+
+- `boxed_number_value_extractors_are_read_only_non_null_getter_facts`
+- `resolver_benchmark_explains_boxed_number_value_extractors`
+- `external_static_math_special_functions_are_read_only_non_null_getter_facts`
+- `resolver_benchmark_explains_static_math_special_function_calls`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test semantic_facts --quiet
+cargo test --test resolve_calls --quiet
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42237
+external_api_explained_method_calls	42235
+unexplained_method_calls	2
+unresolved_constructors	4364
+external_api_explained_constructors	4293
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1554
+external_api_explained_field_accesses	1449
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	28258
+external_constructor_guesses	2852
+external_field_guesses	767
+external_api_return_nullability_facts	6924
+total_facts	112917
+top_unexplained_method_targets
+MethodCall	getMetadata	1
+MethodCall	getRecords	1
+```
+
+Interpretation:
+
+- Unexplained methods moved from `5` to `2` across the two numeric/math
+  external API rules.
+- `floatValue` and both `logBeta` calls disappeared from the unexplained method
+  list.
+- Resolver diagnostics remain at `0`.
+
+## Method Reference And Receiverless Collection Accessor Slice
+
+After numeric external API facts, the remaining unexplained methods were:
+
+```text
+MethodCall	getMetadata	1
+MethodCall	getRecords	1
+```
+
+The selected generalized rules were:
+
+- method references to external API getters should produce external API effect
+  facts, including a receiver-specific fact when the method-reference target
+  names a type and a receiver-agnostic fact for benchmark explanation and
+  conservative fallback.
+- receiverless record-collection accessors such as `getRecords()` should be
+  modeled as read-only collection getters with a conservative `List<Object>`
+  return shape when no receiver type is available.
+
+The `getRecords()` rule deliberately does not model a GATK-specific record
+class. It preserves only the useful container fact: the result is a list-like
+external boundary. Later slot-shape and conversion planning can adapt the
+element type when stronger source, override, or generic facts are available.
+
+Responsibility stays separated:
+
+- `semantic_analysis` owns collecting external API effect facts from method
+  references and unresolved receiverless calls.
+- `stdlib` owns the external API return-shape policy for the generic
+  collection accessor.
+- resolver and lowering do not inspect GATK classes or rewrite `getMetadata`
+  or `getRecords` by corpus-specific name.
+
+The generalized regression tests added are:
+
+- `method_reference_external_api_effects_are_facts`
+- `receiverless_record_collection_accessors_are_current_type_external_list_getter_facts`
+- `resolver_benchmark_explains_receiverless_record_collection_accessors`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test semantic_facts --quiet
+cargo test --test resolve_calls --quiet
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42237
+external_api_explained_method_calls	42237
+unexplained_method_calls	0
+unresolved_constructors	4364
+external_api_explained_constructors	4293
+unexplained_constructors	71
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1554
+external_api_explained_field_accesses	1449
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	29899
+external_constructor_guesses	2852
+external_field_guesses	767
+external_api_return_nullability_facts	7179
+total_facts	114558
+```
+
+Interpretation:
+
+- Unexplained method calls moved from `2` to `0`.
+- All resolver-unresolved method calls in the GATK benchmark now have an
+  external API explanation fact.
+- Remaining unexplained targets are constructor and field boundaries, so the
+  next resolver/external API slice should classify those before coding.
+
+## Implicit Source Constructor Slice
+
+After method calls reached zero unexplained targets, the top unexplained
+constructor bucket was dominated by source helper classes with no declared
+constructor. The most visible target name was `Serializer`, mostly from nested
+classes used as serialization adapters.
+
+The generalized Java rule is:
+
+- every Java class with no declared constructor has an implicit no-argument
+  constructor.
+
+This belongs in resolver symbol collection, not in external API facts. If a
+source class has an implicit constructor, `new Helper()` should resolve as a
+source constructor call instead of becoming an unexplained external constructor
+boundary.
+
+Responsibility stays separated:
+
+- resolver owns implicit source constructor symbols.
+- external constructor facts remain for genuinely external or still-unresolved
+  constructor boundaries.
+- lowering does not inspect nested class names, `Serializer`, or corpus
+  package names.
+
+The generalized regression tests added are:
+
+- `resolver_uses_implicit_no_arg_constructor_for_source_class_without_constructors`
+- `resolver_uses_implicit_no_arg_constructor_for_source_nested_class`
+- `resolver_benchmark_resolves_implicit_no_arg_source_constructors`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls implicit_no_arg -- --nocapture
+cargo test --test resolve_calls --quiet
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_constructors	4364
+external_api_explained_constructors	4293
+unexplained_constructors	71
+external_constructor_guesses	2852
+total_facts	114558
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42237
+external_api_explained_method_calls	42237
+unexplained_method_calls	0
+unresolved_constructors	4217
+external_api_explained_constructors	4203
+unexplained_constructors	14
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1554
+external_api_explained_field_accesses	1449
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	29899
+external_constructor_guesses	2769
+external_field_guesses	767
+external_api_return_nullability_facts	7179
+total_facts	114328
+top_unexplained_constructor_targets
+ConstructorCall	Result	4
+ConstructorCall	Insert	2
+ConstructorCall	OverlapIterator	2
+ConstructorCall	AlleleLikelihoods	1
+ConstructorCall	Element	1
+ConstructorCall	Entry	1
+ConstructorCall	HistogramGenerator	1
+ConstructorCall	MyEdgeFactory	1
+ConstructorCall	SampleList	1
+```
+
+Interpretation:
+
+- Unexplained constructors moved from `71` to `14`.
+- Unresolved constructors moved from `4364` to `4217` because implicit source
+  constructors now resolve before external-boundary classification.
+- The remaining constructor targets look like a mix of source nested/local
+  classes, package/name collisions, and external APIs. They need classification
+  before the next implementation slice.
+
+## Scoped Nested Constructor And Immutable Map Factory Slice
+
+The remaining constructor targets after implicit constructors were mostly
+source classes with common nested names:
+
+```text
+ConstructorCall	Result	4
+ConstructorCall	Insert	2
+ConstructorCall	OverlapIterator	2
+ConstructorCall	AlleleLikelihoods	1
+ConstructorCall	Element	1
+ConstructorCall	Entry	1
+ConstructorCall	HistogramGenerator	1
+ConstructorCall	MyEdgeFactory	1
+ConstructorCall	SampleList	1
+```
+
+The selected generalized resolver rule was:
+
+- constructor lookup must not treat a simple nested type name as globally
+  unique. If multiple source classes have nested types with the same simple
+  name, `new Result(...)` or `new Entry(...)` should prefer constructor
+  candidates visible from the current lexical type before considering broader
+  source candidates.
+
+The implementation keeps duplicate simple-name constructor symbols and records
+their lexical owner. `new Type(...)` resolution now prefers candidates whose
+owner is in the current type's lexical scope. Equivalent constructor
+signatures are deduplicated before overload selection so repeated same-shape
+helper classes such as no-arg nested serializers do not create false ambiguity
+diagnostics.
+
+This exposed one remaining real type-shape gap:
+
+```text
+AnnotatedInterval(SimpleInterval, ImmutableSortedMap.of(...))
+```
+
+The generalized external API rule added for that gap was:
+
+- immutable map factories such as `ImmutableMap.of(k, v)` and
+  `ImmutableSortedMap.of(k, v)` produce non-null `Map<K, V>` and
+  `SortedMap<K, V>` shapes respectively.
+
+Responsibility stays separated:
+
+- resolver owns lexical constructor candidate selection and duplicate source
+  signature deduplication.
+- `stdlib` owns immutable map factory return shapes, sorted-map subtype facts,
+  and external API role/nullability.
+- lowering does not inspect `Result`, `Insert`, `AnnotatedInterval`,
+  `ImmutableSortedMap`, or GATK package names.
+
+The generalized regression tests added are:
+
+- `resolver_prefers_lexically_scoped_nested_constructor_when_simple_names_collide`
+- `resolver_prefers_sibling_nested_constructor_visible_from_nested_class`
+- `resolver_uses_immutable_sorted_map_factory_result_type_for_constructor_overloads`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls --quiet
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_constructors	4217
+external_api_explained_constructors	4203
+unexplained_constructors	14
+resolver_diagnostics	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42237
+external_api_explained_method_calls	42237
+unexplained_method_calls	0
+unresolved_constructors	4202
+external_api_explained_constructors	4199
+unexplained_constructors	3
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1554
+external_api_explained_field_accesses	1449
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+unexplained_non_source_field_accesses	12
+external_api_guesses	29897
+external_constructor_guesses	2765
+external_field_guesses	767
+external_api_return_nullability_facts	7187
+total_facts	114307
+top_unexplained_constructor_targets
+ConstructorCall	AlleleLikelihoods	1
+ConstructorCall	OverlapIterator	1
+ConstructorCall	SampleList	1
+```
+
+Interpretation:
+
+- Unexplained constructors moved from `14` to `3`.
+- Resolver diagnostics remain at `0`.
+- The remaining constructor targets are now small enough to classify
+  individually before deciding whether they are source lookup, generic diamond,
+  anonymous-class, or external-boundary facts.
+
+## Anonymous Interface And Import Precedence Constructor Slice
+
+After the scoped nested constructor slice, the remaining unexplained
+constructor targets were:
+
+```text
+ConstructorCall	AlleleLikelihoods	1
+ConstructorCall	OverlapIterator	1
+ConstructorCall	SampleList	1
+```
+
+The `SampleList` case reduced to a general Java rule:
+
+- `new Interface() { ... }` is anonymous class creation, not an unresolved
+  constructor call on the interface.
+
+The resolver now treats anonymous interface creation with no constructor
+arguments as a resolved anonymous constructor shape when the target source
+interface is known. This keeps the Java meaning in the resolver; lowering can
+later decide how to represent the anonymous implementation.
+
+The `AlleleLikelihoods` investigation exposed two additional general rules:
+
+- constructor overload matching should infer constructor type variables from
+  nested generic argument positions, such as `Map<String, List<E>>`.
+- benchmark source indexing should prefer current package and explicit direct
+  imports over incidental same-package collateral types pulled in while making
+  imported source members visible.
+
+The nested generic constructor inference rule is correct and covered by a
+regression test, but it did not move the GATK constructor count by itself. The
+import-precedence change did not clear `AlleleLikelihoods` either, but it
+removed incidental source-symbol noise and improved field/method unresolved
+counts without adding diagnostics.
+
+Responsibility stays separated:
+
+- resolver owns anonymous class construction and constructor type-variable
+  inference.
+- `resolver_benchmark` owns per-file source-program assembly and import
+  precedence for corpus benchmarking.
+- lowering does not inspect `SampleList`, `AlleleLikelihoods`, or package
+  names.
+
+The generalized regression tests added are:
+
+- `resolver_treats_anonymous_interface_creation_as_resolved_constructor_shape`
+- `resolver_infers_constructor_type_variables_from_nested_generic_arguments`
+- `resolver_benchmark_prefers_explicit_import_over_incidental_package_type_collision`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls --quiet
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_method_calls	42237
+unexplained_method_calls	0
+unresolved_constructors	4202
+external_api_explained_constructors	4199
+unexplained_constructors	3
+unresolved_field_accesses	1554
+external_api_explained_field_accesses	1449
+unexplained_field_accesses	105
+unexplained_source_field_accesses	93
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42233
+external_api_explained_method_calls	42233
+unexplained_method_calls	0
+unresolved_constructors	4196
+external_api_explained_constructors	4194
+unexplained_constructors	2
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1563
+external_api_explained_field_accesses	1461
+unexplained_field_accesses	102
+unexplained_source_field_accesses	90
+unexplained_non_source_field_accesses	12
+external_api_guesses	29889
+external_constructor_guesses	2760
+external_field_guesses	770
+external_api_return_nullability_facts	7186
+total_facts	114296
+top_unexplained_constructor_targets
+ConstructorCall	AlleleLikelihoods	1
+ConstructorCall	OverlapIterator	1
+```
+
+Interpretation:
+
+- `SampleList` disappeared from unexplained constructors.
+- Unexplained constructors moved from `3` to `2`.
+- Resolver diagnostics remain at `0`.
+- Unexplained fields moved from `105` to `102`, likely because explicit import
+  precedence removed a few source-name collision artifacts.
+- The remaining constructor targets need further focused classification before
+  adding any fallback facts.
+
+## Scoped Nested Field Symbol Slice
+
+The next high-value field bucket came from source nested classes whose simple
+names collide across the source program. GATK examples include nested records
+such as `Insert` and `Entry` with fields like `offset`, `length`, and `pos`.
+The general rule is not specific to those classes: Java permits many unrelated
+nested classes with the same simple name, and a field access on `Entry` inside
+one lexical owner must not accidentally use fields from another owner's nested
+`Entry`.
+
+The resolver now keeps field symbols scoped by their declaring type and lexical
+outer type. Field lookup for source receiver expressions uses the current
+lexical type scope to prefer the matching nested class when duplicate simple
+names exist. This keeps source field binding in the resolver; semantic facts,
+external API facts, and lowering do not inspect GATK class names or field
+names.
+
+Responsibility stays separated:
+
+- resolver owns source field symbol lookup, inherited field traversal, and
+  field expression typing.
+- `resolver_benchmark` only reports the remaining unresolved field buckets.
+- external API facts still explain non-source field boundaries.
+- lowering does not decide which Java nested class owns a field.
+
+The generalized regression test added is:
+
+- `resolver_prefers_lexically_scoped_nested_field_when_simple_names_collide`
+
+Verification:
+
+```text
+cargo fmt
+cargo test --test resolve_calls --quiet
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42233
+external_api_explained_method_calls	42233
+unexplained_method_calls	0
+unresolved_constructors	4196
+external_api_explained_constructors	4194
+unexplained_constructors	2
+unresolved_field_accesses	1563
+external_api_explained_field_accesses	1461
+unexplained_field_accesses	102
+unexplained_source_field_accesses	90
+unexplained_non_source_field_accesses	12
+external_api_guesses	29889
+external_constructor_guesses	2760
+external_field_guesses	770
+external_api_return_nullability_facts	7186
+total_facts	114296
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42208
+external_api_explained_method_calls	42208
+unexplained_method_calls	0
+unresolved_constructors	4196
+external_api_explained_constructors	4194
+unexplained_constructors	2
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1477
+external_api_explained_field_accesses	1431
+unexplained_field_accesses	46
+unexplained_source_field_accesses	34
+unexplained_non_source_field_accesses	12
+external_api_guesses	29863
+external_constructor_guesses	2760
+external_field_guesses	753
+external_api_return_nullability_facts	7185
+total_facts	114142
+top_unexplained_constructor_targets
+ConstructorCall	AlleleLikelihoods	1
+ConstructorCall	OverlapIterator	1
+top_unexplained_field_targets
+FieldAccess	UNMAPPED	6
+FieldAccess	logger	5
+FieldAccess	READ_PAIRS_EXAMINED	3
+FieldAccess	READ_PAIR_DUPLICATES	3
+FieldAccess	SECONDARY_OR_SUPPLEMENTARY_RDS	3
+FieldAccess	UNMAPPED_READS	3
+FieldAccess	UNPAIRED_READS_EXAMINED	3
+FieldAccess	UNPAIRED_READ_DUPLICATES	3
+FieldAccess	length	2
+FieldAccess	name	2
+```
+
+Interpretation:
+
+- Resolver diagnostics remain at `0`.
+- Unexplained field accesses moved from `102` to `46`.
+- Unexplained source field accesses moved from `90` to `34`.
+- Raw unresolved field accesses moved from `1563` to `1477`.
+- The remaining field bucket is much more concentrated in external constants,
+  metrics-style public fields, logger fields, array sentinel fields, and a few
+  source fields that need separate classification.
+
+## External Superclass Field Boundary Slice
+
+The scoped nested-field slice left a field bucket dominated by source classes
+that extend unavailable external superclasses. The GATK motivating case is
+`GATKDuplicationMetrics extends DuplicationMetrics`, where Java code reads and
+writes inherited public metric fields such as `READ_PAIRS_EXAMINED`,
+`UNMAPPED_READS`, and `PERCENT_DUPLICATION`.
+
+The generalized rule is:
+
+- when a source receiver type has an unresolved field access, and that source
+  type extends a superclass outside the translated program, semantic analysis
+  may explain the field as an externally inherited field boundary.
+
+This is deliberately a conservative external field fact. It does not teach
+lowering about metric names, and it does not explain arbitrary missing fields
+on ordinary source classes. Plain missing source fields remain unexplained.
+
+Responsibility stays separated:
+
+- resolver still owns source field lookup and unresolved field facts.
+- semantic analysis owns promotion of unresolved external-superclass fields
+  into conservative `ExternalFieldFact`s.
+- external fact queries remain the single explanation mechanism used by the
+  benchmark.
+- lowering does not infer inherited external fields from Java names.
+
+The generalized regression test added is:
+
+- `external_field_facts_explain_fields_inherited_from_external_superclass`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test semantic_facts external_field_facts_explain_fields_inherited_from_external_superclass -- --nocapture
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	1477
+external_api_explained_field_accesses	1431
+unexplained_field_accesses	46
+unexplained_source_field_accesses	34
+unexplained_non_source_field_accesses	12
+external_field_guesses	753
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42208
+external_api_explained_method_calls	42208
+unexplained_method_calls	0
+unresolved_constructors	4196
+external_api_explained_constructors	4194
+unexplained_constructors	2
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1477
+external_api_explained_field_accesses	1464
+unexplained_field_accesses	13
+unexplained_source_field_accesses	1
+unexplained_non_source_field_accesses	12
+external_api_guesses	29863
+external_constructor_guesses	2760
+external_field_guesses	765
+external_api_return_nullability_facts	7185
+total_facts	114154
+top_unexplained_field_targets
+FieldAccess	UNMAPPED	6
+FieldAccess	KEY	2
+FieldAccess	length	2
+FieldAccess	D	1
+FieldAccess	N	1
+FieldAccess	next	1
+top_unexplained_field_receivers
+UNMAPPED	Array	6
+KEY	*	2
+length	*	2
+D	*	1
+N	*	1
+next	SVIntervalTree	1
+```
+
+Interpretation:
+
+- Resolver and semantic diagnostics remain at `0`.
+- Unexplained field accesses moved from `46` to `13`.
+- Unexplained source field accesses moved from `34` to `1`.
+- The remaining unexplained fields are now mostly parser/name-binding or
+  special static constant cases, such as `GenomeLoc.UNMAPPED` appearing as an
+  `Array.UNMAPPED` receiver in the benchmark.
+
+## Type-Qualified Static Member Collision Slice
+
+The previous field report added sample files for unexplained field receiver
+pairs, which exposed a more precise rule than the target names alone showed.
+The largest remaining source-like cases were static constants reached through
+type-qualified paths whose Java type names collide with local or field names
+after Rust-style snake-case normalization.
+
+The motivating shapes were:
+
+- `ReadMetadata.PartitionBounds.UNMAPPED`, where `ReadMetadata` the type and
+  `readMetadata` a method parameter both normalize to `read_metadata`.
+- `PartitionBounds.UNMAPPED`, where the nested type `PartitionBounds` and the
+  instance field `partitionBounds` both normalize to `partition_bounds`.
+- enum constants such as `Base.D` and `Base.N`.
+
+The generalized rule is:
+
+- when a field-access receiver identifier can name a source type, and that
+  source type has a matching static field or nested type member, resolver
+  lookup should prefer the type-qualified static member over a snake-case local
+  or instance-field collision.
+
+This remains resolver-owned Java symbol lookup. It does not add name-specific
+external facts, and lowering does not inspect `ReadMetadata`, `PartitionBounds`,
+`UNMAPPED`, or enum constant names.
+
+The benchmark report now also includes sample files for unexplained field
+receiver pairs so future slices can be selected from concrete syntax evidence
+instead of target names alone.
+
+The generalized regression tests added are:
+
+- `resolver_prefers_type_qualified_nested_static_member_over_snake_case_local_collision`
+- `resolver_prefers_nested_type_static_member_over_same_named_instance_field`
+- `resolver_resolves_static_field_on_qualified_nested_source_type`
+- `resolver_benchmark_resolves_annotated_nested_source_static_fields_across_files`
+- `resolver_benchmark_resolves_wildcard_imported_source_static_fields`
+- `parses_annotated_nested_class_members`
+- `resolver_treats_multidimensional_array_element_length_as_int`
+
+Verification:
+
+```text
+cargo fmt --check
+cargo test --test resolve_calls --quiet
+cargo test --test parser_tree_sitter parses_annotated_nested_class_members -- --nocapture
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	1477
+external_api_explained_field_accesses	1464
+unexplained_field_accesses	13
+unexplained_source_field_accesses	1
+unexplained_non_source_field_accesses	12
+external_field_guesses	765
+top_unexplained_field_targets
+FieldAccess	UNMAPPED	6
+FieldAccess	KEY	2
+FieldAccess	length	2
+FieldAccess	D	1
+FieldAccess	N	1
+FieldAccess	next	1
+top_unexplained_field_receiver_files
+UNMAPPED	Array	6	org/broadinstitute/hellbender/tools/spark/sv/evidence/PartitionCrossingChecker.java,org/broadinstitute/hellbender/tools/spark/sv/evidence/ReadMetadata.java
+KEY	*	2	org/broadinstitute/hellbender/tools/walkers/mutect/filtering/DuplicatedAltReadFilter.java
+length	*	2	org/broadinstitute/hellbender/tools/spark/pipelines/metrics/CollectBaseDistributionByCycleSpark.java
+D	*	1	org/broadinstitute/hellbender/utils/BaseUtils.java
+N	*	1	org/broadinstitute/hellbender/utils/BaseUtils.java
+next	SVIntervalTree	1	org/broadinstitute/hellbender/utils/SVIntervalTree.java
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42208
+external_api_explained_method_calls	42208
+unexplained_method_calls	0
+unresolved_constructors	4196
+external_api_explained_constructors	4194
+unexplained_constructors	2
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1393
+external_api_explained_field_accesses	1390
+unexplained_field_accesses	3
+unexplained_source_field_accesses	1
+unexplained_non_source_field_accesses	2
+external_api_guesses	29863
+external_constructor_guesses	2760
+external_field_guesses	746
+external_api_return_nullability_facts	7185
+total_facts	114051
+top_unexplained_field_targets
+FieldAccess	length	2
+FieldAccess	next	1
+top_unexplained_field_receiver_files
+length	*	2	org/broadinstitute/hellbender/tools/spark/pipelines/metrics/CollectBaseDistributionByCycleSpark.java
+next	SVIntervalTree	1	org/broadinstitute/hellbender/utils/SVIntervalTree.java
+```
+
+Interpretation:
+
+- Resolver and semantic diagnostics remain at `0`.
+- Unexplained field accesses moved from `13` to `3`.
+- Raw unresolved field accesses moved from `1477` to `1393`.
+- External field guesses moved from `765` to `746` because source/static
+  members are no longer treated as conservative external boundaries.
+- The remaining field bucket is now limited to two multidimensional-array
+  `.length` cases and one inner-iterator field named `next`; those need separate
+  classification rather than another static-member rule.
+
+## Qualified Generic Inner Cast Type Slice
+
+The final source-field case in the previous report was:
+
+```text
+next	SVIntervalTree	1	org/broadinstitute/hellbender/utils/SVIntervalTree.java
+```
+
+The motivating Java shape was:
+
+```java
+((SVIntervalTree<?>.IteratorBase)obj).next
+```
+
+The parser previously interpreted `SVIntervalTree<?>.IteratorBase` as the
+outer generic type `SVIntervalTree<?>`, losing the qualified inner type suffix.
+That made resolver field lookup search fields on the outer tree rather than on
+`IteratorBase`, where the protected `next` field is declared.
+
+The generalized rule is:
+
+- for a qualified inner type whose outer qualifier is generic, such as
+  `Outer<?>.Inner`, the parser must preserve the selected inner type segment as
+  the effective Java type name used by resolver lookup.
+
+This is parser/type-shape work with resolver consumption. It is not an external
+API fact and lowering does not infer field ownership from casts.
+
+The generalized regression tests added are:
+
+- `parses_cast_to_qualified_generic_inner_type`
+- `resolver_uses_qualified_generic_inner_cast_type_for_field_lookup`
+
+The array `.length` investigation also added regression tests for the already
+supported general rule:
+
+- `parses_multidimensional_array_field_type_with_initializer`
+- `resolver_treats_initialized_multidimensional_array_field_element_length_as_int`
+- `resolver_treats_multidimensional_array_row_length_in_for_condition_as_int`
+- `resolver_benchmark_handles_nested_multidimensional_array_row_length`
+
+Those tests are kept because they prove the general multidimensional-array
+rules, including the nested-class benchmark shape. They did not move the
+remaining GATK `length` bucket, so that bucket needs a more precise expression
+shape diagnostic before implementation.
+
+Verification:
+
+```text
+cargo fmt
+cargo test --test parser_tree_sitter --quiet
+cargo test --test resolve_calls --quiet
+cargo run -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_method_calls	42208
+unresolved_field_accesses	1393
+external_api_explained_field_accesses	1390
+unexplained_field_accesses	3
+unexplained_source_field_accesses	1
+unexplained_non_source_field_accesses	2
+external_api_guesses	29863
+external_field_guesses	746
+external_api_return_nullability_facts	7185
+total_facts	114051
+top_unexplained_field_targets
+FieldAccess	length	2
+FieldAccess	next	1
+top_unexplained_field_receiver_files
+length	*	2	org/broadinstitute/hellbender/tools/spark/pipelines/metrics/CollectBaseDistributionByCycleSpark.java
+next	SVIntervalTree	1	org/broadinstitute/hellbender/utils/SVIntervalTree.java
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42203
+external_api_explained_method_calls	42203
+unexplained_method_calls	0
+unresolved_constructors	4196
+external_api_explained_constructors	4194
+unexplained_constructors	2
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1375
+external_api_explained_field_accesses	1373
+unexplained_field_accesses	2
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	2
+external_api_guesses	29855
+external_constructor_guesses	2760
+external_field_guesses	737
+external_api_return_nullability_facts	7176
+total_facts	114011
+top_unexplained_field_targets
+FieldAccess	length	2
+top_unexplained_field_receiver_files
+length	*	2	org/broadinstitute/hellbender/tools/spark/pipelines/metrics/CollectBaseDistributionByCycleSpark.java
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained field accesses moved from `3` to `2`.
+- Unexplained source field accesses moved from `1` to `0`.
+- Raw unresolved field accesses moved from `1393` to `1375`.
+- The only remaining unexplained field bucket is two `.length` accesses in one
+  file. The existing general multidimensional-array tests pass, so the next
+  work should first add a benchmark diagnostic that reports the unresolved
+  expression shape, enclosing method, and receiver expression before adding
+  another rule.
+
+## Same-Package Nested Type Collision Slice
+
+The previous report left two unexplained `.length` field accesses:
+
+```text
+length	*	2	org/broadinstitute/hellbender/tools/spark/pipelines/metrics/CollectBaseDistributionByCycleSpark.java
+```
+
+The first step was diagnostic, not semantic: the resolver benchmark now reports
+unexplained field contexts with field name, receiver type, enclosing type,
+enclosing member, count, and sample files. That showed the remaining bucket was:
+
+```text
+length	*	HistogramGenerator	merge	2	org/broadinstitute/hellbender/tools/spark/pipelines/metrics/CollectBaseDistributionByCycleSpark.java
+```
+
+The single-file benchmark for `CollectBaseDistributionByCycleSpark.java`
+resolved those accesses, so the problem was not an array `.length` rule. The
+full package benchmark contained another same-package nested class also named
+`HistogramGenerator` in `MeanQualityByCycleSpark.java`. During benchmark source
+assembly, same-package top-level files were combined in sorted file order. Since
+resolver symbols key nested source types by simple name, the later file could
+overwrite lexical owner metadata for the current file's nested type. That made
+the resolver use the wrong `HistogramGenerator` field shape, turning a
+`long[][]` row into an unknown `.length` receiver.
+
+The generalized rule added is:
+
+- when the benchmark builds the source-symbol context for one file, same-package
+  and imported source types remain visible, but the current file's top-level
+  types are collected last so their nested type lexical metadata wins for the
+  file being resolved.
+
+This is resolver-benchmark/source-symbol assembly work. It does not add a
+lowering rule and does not special-case `HistogramGenerator`, GATK, or
+`.length`.
+
+The generalized regression tests added are:
+
+- `resolver_benchmark_reports_unexplained_field_contexts`
+- `resolver_benchmark_prefers_current_file_nested_type_scope_on_same_package_collisions`
+- `resolver_treats_camel_case_multidimensional_source_field_row_length_as_int`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_benchmark_reports_unexplained_field_contexts --quiet
+cargo test resolver_benchmark_prefers_current_file_nested_type_scope_on_same_package_collisions --quiet
+cargo test resolver_treats_camel_case_multidimensional_source_field_row_length_as_int --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_method_calls	42203
+external_api_explained_method_calls	42203
+unexplained_method_calls	0
+unresolved_constructors	4196
+external_api_explained_constructors	4194
+unexplained_constructors	2
+unresolved_field_accesses	1375
+external_api_explained_field_accesses	1373
+unexplained_field_accesses	2
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	2
+external_api_guesses	29855
+external_constructor_guesses	2760
+external_field_guesses	737
+external_api_return_nullability_facts	7176
+total_facts	114011
+top_unexplained_field_targets
+FieldAccess	length	2
+top_unexplained_field_receiver_files
+length	*	2	org/broadinstitute/hellbender/tools/spark/pipelines/metrics/CollectBaseDistributionByCycleSpark.java
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42181
+external_api_explained_method_calls	42181
+unexplained_method_calls	0
+unresolved_constructors	4195
+external_api_explained_constructors	4194
+unexplained_constructors	1
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1371
+external_api_explained_field_accesses	1371
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29842
+external_constructor_guesses	2760
+external_field_guesses	736
+external_api_return_nullability_facts	7175
+total_facts	113970
+top_unexplained_constructor_targets
+ConstructorCall	AlleleLikelihoods	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained field accesses moved from `2` to `0`.
+- Raw unresolved field accesses moved from `1375` to `1371`.
+- Unexplained constructors moved from `2` to `1`; the remaining target is
+  `AlleleLikelihoods`.
+- The next high-leverage slice should classify that constructor target before
+  adding a rule.
+
+## Argument-List Comment Slice
+
+The previous report left one unexplained constructor:
+
+```text
+top_unexplained_constructor_targets
+ConstructorCall	AlleleLikelihoods	1
+```
+
+The benchmark now reports unexplained constructor contexts with target type,
+receiver type, argument types, enclosing type, enclosing member, count, and
+sample files. That showed the remaining constructor was:
+
+```text
+AlleleLikelihoods	AlleleLikelihoods	AlleleList<A>,SampleList,List<List<NEW_EVIDENCE_TYPE>>,?null,?//TODO this is only currently used for Somatic and i'm alright with removing this for now but this is NOT robust and 3 of these methods is too many,Double[][][]	AlleleLikelihoods	groupEvidence	1	org/broadinstitute/hellbender/utils/genotyper/AlleleLikelihoods.java
+```
+
+The motivating Java shape was a constructor argument list containing an inline
+comment after a `null` argument:
+
+```java
+return new EvidenceLikelihoods<>(
+        alleles,
+        samples,
+        groupedEvidence,
+        null, // intentionally no filtered evidence
+        values);
+```
+
+The parser treated the `line_comment` node as an extra argument. That inflated
+the constructor arity and also produced a bogus unknown argument type derived
+from the comment text. The resolver then correctly refused to match the
+five-parameter constructor because the parsed call appeared to have six
+arguments.
+
+The generalized rule added is:
+
+- argument-list parsing must ignore `line_comment` and `block_comment` nodes.
+
+This is parser-owned syntax cleanup with resolver consequences. It is not an
+`AlleleLikelihoods` rule, not an external constructor fact, and not a lowering
+special case.
+
+The generalized regression tests added are:
+
+- `parses_argument_list_comments_without_extra_arguments`
+- `resolver_ignores_argument_comments_for_generic_constructor_overloads`
+
+The constructor context reporting was also strengthened through:
+
+- `resolver_benchmark_reports_unexplained_source_constructor_targets`
+
+Verification:
+
+```text
+cargo fmt
+cargo test parses_argument_list_comments_without_extra_arguments --quiet
+cargo test resolver_ignores_argument_comments_for_generic_constructor_overloads --quiet
+cargo test resolver_benchmark_reports_unexplained_source_constructor_targets --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_method_calls	42181
+external_api_explained_method_calls	42181
+unexplained_method_calls	0
+unresolved_constructors	4195
+external_api_explained_constructors	4194
+unexplained_constructors	1
+unresolved_field_accesses	1371
+external_api_explained_field_accesses	1371
+unexplained_field_accesses	0
+external_api_guesses	29842
+external_constructor_guesses	2760
+external_field_guesses	736
+external_api_return_nullability_facts	7175
+total_facts	113970
+top_unexplained_constructor_targets
+ConstructorCall	AlleleLikelihoods	1
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1371
+external_api_explained_field_accesses	1371
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29831
+external_constructor_guesses	2758
+external_field_guesses	736
+external_api_return_nullability_facts	7176
+total_facts	113947
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- Unexplained constructors moved from `1` to `0`.
+- Unexplained field accesses remain at `0`.
+- The benchmark's remaining unresolved calls, constructors, and fields are all
+  explained by external API facts under the current report criteria.
+- The next design-critical work should shift from "unexplained target" cleanup
+  to auditing and reducing high-volume external guesses, especially repeated
+  method and constructor guesses that should become known external facts,
+  user-overridable facts, or stricter conservative diagnostics.
+
+## External Guess Classification And Arrays Built-In Model Slice
+
+After unexplained method, constructor, and field targets reached zero, the next
+pressure point was the high volume of external API guesses. Aggregate counts
+were not enough to choose a responsible rule, so the resolver benchmark now
+reports the top conservative external guesses:
+
+- `top_external_api_guess_methods`
+- `top_external_constructor_guess_types`
+- `top_external_field_guess_targets`
+
+The first run with those sections showed the largest conservative method
+buckets were stable JDK `Arrays` APIs:
+
+```text
+top_external_api_guess_methods
+Arrays	asList	157
+Arrays	stream	55
+Arrays	copyOfRange	49
+```
+
+These are known external library models, not heuristic guesses. The generalized
+rule added is:
+
+- built-in external library models must carry a distinct provenance instead of
+  being counted as conservative fallback guesses.
+
+The new provenance is `FactProvenance::BuiltinExternalModel`. User overrides
+still have higher precedence. Source facts remain stronger than built-in
+external facts, and built-in facts are stronger than corpus-derived facts and
+conservative fallbacks.
+
+For this slice, the promoted built-in models are:
+
+- `Arrays.asList`
+- `Arrays.stream`
+- `Arrays.copyOf`
+- `Arrays.copyOfRange`
+
+This is external fact provenance work. It does not add lowering behavior and
+does not change resolver target selection. The existing stdlib return-type,
+role, mutability, and nullability rules for `Arrays` are now classified
+correctly as built-in models.
+
+The generalized regression tests added or strengthened are:
+
+- `arrays_copy_of_range_is_non_null_read_only_array_fact`
+- `arrays_collection_fact_roles_are_builtin_external_models`
+- `resolver_benchmark_reports_unresolved_categories_without_lowering`
+
+Verification:
+
+```text
+cargo fmt
+cargo test arrays_copy_of_range_is_non_null_read_only_array_fact --quiet
+cargo test arrays_collection_fact_roles_are_builtin_external_models --quiet
+cargo test resolver_benchmark_reports_unresolved_categories_without_lowering --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+external_api_guesses	29831
+external_constructor_guesses	2758
+external_field_guesses	736
+top_external_api_guess_methods
+Arrays	asList	157
+Arrays	stream	55
+Arrays	copyOfRange	49
+*	get	30
+*	add	29
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1371
+external_api_explained_field_accesses	1371
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29540
+external_constructor_guesses	2758
+external_field_guesses	736
+external_api_return_nullability_facts	7176
+total_facts	113947
+top_external_api_guess_methods
+*	get	30
+*	add	29
+*	compareTo	16
+*	getContig	15
+*	getStart	15
+*	contains	13
+*	getEnd	13
+*	addAll	7
+*	addMetaDataLine	5
+Class	getAnnotation	5
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external API guesses moved from `29831` to `29540`.
+- The `Arrays.*` buckets no longer appear in the conservative method-guess
+  report because they are now classified as built-in external models.
+- The next high-leverage external-boundary work is likely constructor
+  provenance: `ArrayList`, `HashMap`, `HashSet`, and common exception
+  constructors dominate `top_external_constructor_guess_types` and should be
+  audited as JDK built-in constructor models rather than generic conservative
+  fallbacks.
+
+## JDK Constructor Built-In Model Slice
+
+The previous conservative constructor guess report was dominated by stable JDK
+container and exception constructors:
+
+```text
+top_external_constructor_guess_types
+ArrayList	1	354
+ArrayList	0	203
+IllegalArgumentException	1	144
+HashMap	0	88
+HashSet	1	87
+LinkedHashMap	0	65
+Tuple2	2	37
+StringBuilder	1	31
+RuntimeException	1	26
+OutputStreamWriter	1	23
+```
+
+Those are not corpus-specific APIs. They are stable library constructor models,
+so they should not be counted as conservative fallback guesses.
+
+The generalized rule added is:
+
+- external constructor facts for known JDK-like collection, map, throwable,
+  IO-wrapper, string-builder, and tuple constructors carry
+  `FactProvenance::BuiltinExternalModel` instead of
+  `FactProvenance::ConservativeFallback`.
+
+The classifier lives in `stdlib`, and semantic analysis consumes it when
+creating `ExternalConstructorFact`s from unresolved external constructor calls.
+This keeps the responsibility in the external fact layer. Lowering is not
+involved.
+
+The promoted families are intentionally structural library families, not GATK
+classes:
+
+- known `Collection`/`List`/`Set`/`Queue`/`Deque` constructors with ordinary
+  JDK arities
+- known `Map` constructors with ordinary JDK arities
+- known throwable constructors with ordinary message/cause arities
+- known IO stream/reader/writer wrapper constructors
+- `StringBuilder`/`StringBuffer`
+- `Tuple2`/`Pair`/`ImmutablePair`
+
+The generalized regression tests added or strengthened are:
+
+- `external_constructor_facts_explain_missing_library_constructors_only`
+- `jdk_external_constructor_facts_are_builtin_models`
+
+Verification:
+
+```text
+cargo fmt
+cargo test external_constructor_facts_explain_missing_library_constructors_only --quiet
+cargo test jdk_external_constructor_facts_are_builtin_models --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+external_api_guesses	29540
+external_constructor_guesses	2758
+external_field_guesses	736
+top_external_constructor_guess_types
+ArrayList	1	354
+ArrayList	0	203
+IllegalArgumentException	1	144
+HashMap	0	88
+HashSet	1	87
+LinkedHashMap	0	65
+VCFInfoHeaderLine	4	46
+Tuple2	2	37
+StringBuilder	1	31
+RuntimeException	1	26
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1371
+external_api_explained_field_accesses	1371
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29540
+external_constructor_guesses	970
+external_field_guesses	736
+external_api_return_nullability_facts	7176
+total_facts	113947
+top_external_constructor_guess_types
+VCFInfoHeaderLine	4	46
+NoSuchElementException	1	31
+CigarElement	2	29
+VCFHeader	2	26
+GenotypeBuilder	1	22
+File	1	20
+Cigar	1	18
+BadArgumentValue	2	12
+CommandLineException	1	11
+VCFFormatHeaderLine	4	10
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external constructor guesses moved from `2758` to `970`.
+- Common JDK container, map, exception, IO-wrapper, string-builder, and tuple
+  constructor buckets are no longer counted as conservative guesses.
+- The remaining constructor guesses are mostly domain/library-specific models
+  such as `VCFInfoHeaderLine`, `CigarElement`, `VCFHeader`, and
+  `GenotypeBuilder`; those should be audited separately before promotion.
+
+## External Field Constant Model Slice
+
+The next conservative field guess report still contained stable static
+constant fields mixed with domain-specific fields:
+
+```text
+top_external_field_guess_targets
+Boolean	TRUE	6
+SortOrder	unsorted	5
+Boolean	FALSE	4
+FileExtensions	BAM	4
+LogLevel	DEBUG	4
+Allele	SV_SIMPLE_DEL	3
+Allele	SV_SIMPLE_DUP	2
+ArrayUtils	EMPTY_BYTE_ARRAY	2
+FileExtensions	BCF	2
+FileExtensions	COMPRESSED_VCF	2
+```
+
+The generalized rule added is:
+
+- known external static field constants should be modeled as external field
+  type facts in `stdlib`, and any external field fact that still reaches
+  semantic analysis for a known field type should carry
+  `FactProvenance::BuiltinExternalModel` instead of
+  `FactProvenance::ConservativeFallback`.
+
+This stays in the external API/fact boundary. Resolver consumes the known field
+type facts when it can infer the field access type directly. Semantic analysis
+only classifies field provenance for unresolved external field accesses that
+still need an external field fact. Lowering is not involved.
+
+The promoted families are intentionally library/static-field shapes rather than
+GATK classes:
+
+- boxed `Boolean.TRUE`/`Boolean.FALSE`
+- boxed primitive numeric constants including `MAX_VALUE`, `MIN_VALUE`,
+  floating-point infinities/`NaN`, and wrapper `SIZE`/`BYTES`
+- `FileExtensions` string constants
+- typed external constants such as `System.out`, `SAMRecord.NO_ALIGNMENT_CIGAR`,
+  `ByteOrder.BIG_ENDIAN`, and `ByteOrder.LITTLE_ENDIAN`
+- `ArrayUtils.EMPTY_*_ARRAY` primitive array constants
+- existing enum-like external constants such as `Allele`, `CigarOperator`, and
+  `SAMTag`
+
+The stdlib field model also accepts normalized snake-case field names such as
+`big_endian` when parser/resolver normalization has already happened, while
+preserving mixed-case Java constants such as `Double.NaN`.
+
+The generalized regression tests added or strengthened are:
+
+- `external_field_facts_explain_missing_library_fields_only`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+- `resolver_uses_known_numeric_constant_field_types_for_overload_arguments`
+- `resolver_uses_typed_external_static_field_constants_for_overload_arguments`
+
+Verification:
+
+```text
+cargo fmt
+cargo test external_field_facts_explain_missing_library_fields_only --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --quiet
+cargo test resolver_uses_known_numeric_constant_field_types_for_overload_arguments --quiet
+cargo test resolver_uses_typed_external_static_field_constants_for_overload_arguments --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+external_api_guesses	29540
+external_constructor_guesses	970
+external_field_guesses	736
+unresolved_field_accesses	1371
+external_api_explained_field_accesses	1371
+unexplained_field_accesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1313
+external_api_explained_field_accesses	1313
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29541
+external_constructor_guesses	970
+external_field_guesses	695
+external_api_return_nullability_facts	7176
+total_facts	113849
+top_external_field_guess_targets
+OpenMode	CREATE	5
+SortOrder	unsorted	5
+LogLevel	DEBUG	4
+Allele	SV_SIMPLE_DEL	3
+Allele	SV_SIMPLE_DUP	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Allele	NON_REF_STRING	1
+Allele	REF_N	1
+Allele	SV_SIMPLE_CNV	1
+Allele	SV_SIMPLE_INS	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `736` to `695`.
+- Unresolved field accesses moved from `1371` to `1313` because some known
+  static constants now resolve before semantic fallback facts are needed.
+- Conservative external API method guesses moved from `29540` to `29541`; this
+  is expected boundary movement from resolving one field expression far enough
+  to expose a method-call boundary. It remains visible as a conservative method
+  guess.
+- The remaining field guesses are mostly enum/domain constants and project
+  fields such as `SortOrder.unsorted`, `LogLevel.DEBUG`, `Allele.SV_*`, and
+  `MetricAccumulationLevelArgumentCollection.accumulationLevels`; those need a
+  separate audit before promotion.
+
+## Enum-Like External Constant Slice
+
+The previous field-constant slice left known enum-like external constants in
+the conservative field guess report:
+
+```text
+top_external_field_guess_targets
+OpenMode	CREATE	5
+SortOrder	unsorted	5
+LogLevel	DEBUG	4
+Allele	SV_SIMPLE_DEL	3
+Allele	SV_SIMPLE_DUP	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Allele	NON_REF_STRING	1
+Allele	REF_N	1
+Allele	SV_SIMPLE_CNV	1
+Allele	SV_SIMPLE_INS	1
+```
+
+The generalized rule added is:
+
+- for known enum-like external receiver types, all-uppercase enum constant
+  names may be typed as the receiver type and classified as
+  `FactProvenance::BuiltinExternalModel`;
+- string-like constant names such as `*_STRING`, `*_KEY`, and `*_FIELD`, plus
+  lower-case or instance-looking fields, remain conservative unless another
+  rule proves their type.
+
+This rule remains in `stdlib` field typing and external field provenance.
+Resolver can consume it for overload selection, and semantic analysis can use
+it when an unresolved field fact still needs provenance. Lowering is not
+involved.
+
+The generalized regression tests added or strengthened are:
+
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+- `resolver_uses_external_allele_constant_type_for_overload_arguments`
+
+Verification:
+
+```text
+cargo fmt
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --quiet
+cargo test resolver_uses_external_allele_constant_type_for_overload_arguments --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	1313
+external_api_explained_field_accesses	1313
+external_field_guesses	695
+top_external_field_guess_targets
+OpenMode	CREATE	5
+SortOrder	unsorted	5
+LogLevel	DEBUG	4
+Allele	SV_SIMPLE_DEL	3
+Allele	SV_SIMPLE_DUP	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1295
+external_api_explained_field_accesses	1295
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29541
+external_constructor_guesses	970
+external_field_guesses	687
+external_api_return_nullability_facts	7176
+total_facts	113823
+top_external_field_guess_targets
+OpenMode	CREATE	5
+SortOrder	unsorted	5
+LogLevel	DEBUG	4
+Config	genotypeArgs	3
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+AssemblyRegionArgumentCollection	maxReadsPerAlignmentStart	1
+Attribute	PRIMITIVE	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `695` to `687`.
+- Unresolved field accesses moved from `1313` to `1295`.
+- The `Allele.SV_*` enum-like buckets are no longer conservative field
+  guesses.
+- `Allele.NON_REF_STRING` and `Allele.UNSPECIFIED_ALTERNATE_ALLELE_STRING`
+  intentionally remain conservative because their names indicate string
+  constants, not enum values.
+- The next field buckets need a separate audit: `OpenMode.CREATE` may be a JDK
+  enum-like constant, while `SortOrder.unsorted` and `LogLevel.DEBUG` require
+  caution because their spelling and receiver context may reflect library or
+  instance-specific conventions.
+
+## Curated External Enum Family Slice
+
+The previous enum-like constant rule removed structurally uppercase `Allele`
+constants, but the next field buckets were known external enum families with
+library-specific spelling:
+
+```text
+top_external_field_guess_targets
+OpenMode	CREATE	5
+SortOrder	unsorted	5
+LogLevel	DEBUG	4
+Config	genotypeArgs	3
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+```
+
+Corpus inspection showed these were external enum families:
+
+- `HDF5File.OpenMode.CREATE` and `HDF5File.OpenMode.READ_ONLY`
+- `Log.LogLevel.DEBUG`, `INFO`, `WARNING`, and `ERROR`
+- `SAMFileHeader.SortOrder.coordinate`, `queryname`, `unsorted`, `unknown`,
+  and `duplicate`
+
+The generalized rule added is:
+
+- curated external enum families may define their own constant spelling style;
+- `OpenMode` and `LogLevel` use uppercase enum constants;
+- `SortOrder` uses lower-case enum constants;
+- arbitrary lower-case fields remain conservative unless the receiver is a
+  curated enum family with that spelling rule.
+
+This is still an external field type/provenance model in `stdlib`. Resolver can
+use the field type facts for overload and constructor applicability; semantic
+analysis can classify unresolved external field facts with built-in provenance.
+Lowering is not involved.
+
+The generalized regression tests added or strengthened are:
+
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+- `resolver_uses_curated_external_enum_constant_types_for_overload_arguments`
+
+Verification:
+
+```text
+cargo fmt
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --quiet
+cargo test resolver_uses_curated_external_enum_constant_types_for_overload_arguments --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	1295
+external_api_explained_field_accesses	1295
+external_api_guesses	29541
+external_constructor_guesses	970
+external_field_guesses	687
+external_api_return_nullability_facts	7176
+top_external_field_guess_targets
+OpenMode	CREATE	5
+SortOrder	unsorted	5
+LogLevel	DEBUG	4
+Config	genotypeArgs	3
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1235
+external_api_explained_field_accesses	1235
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29542
+external_constructor_guesses	967
+external_field_guesses	636
+external_api_return_nullability_facts	7179
+total_facts	113710
+top_external_field_guess_targets
+log	LogLevel	4
+Config	genotypeArgs	3
+Collections	EMPTY_LIST	2
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+AssemblyRegionArgumentCollection	maxReadsPerAlignmentStart	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `687` to `636`.
+- Unresolved field accesses moved from `1295` to `1235`.
+- Conservative constructor guesses moved from `970` to `967`, because some
+  enum-typed constructor arguments now resolve far enough for constructor
+  applicability.
+- Conservative external API method guesses moved from `29541` to `29542`, and
+  non-null external API return facts moved from `7176` to `7179`; that is
+  expected second-order exposure from improved field typing and remains visible
+  in the benchmark.
+- The next top field row, `log LogLevel`, is not the same as
+  `LogLevel.DEBUG`; it appears to be a nested type or qualified-name parsing
+  shape and should be audited separately before adding another enum rule.
+
+## External Nested Enum Qualifier Slice
+
+The previous slice left this row at the top of the conservative field guesses:
+
+```text
+top_external_field_guess_targets
+log	LogLevel	4
+Config	genotypeArgs	3
+Collections	EMPTY_LIST	2
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+```
+
+Corpus inspection showed that `log LogLevel` came from Java nested enum
+qualifiers such as:
+
+```text
+Log.LogLevel.DEBUG
+HDF5File.OpenMode.CREATE
+SAMFileHeader.SortOrder.coordinate
+```
+
+The intermediate qualifier, for example `Log.LogLevel`, is a nested type name,
+not a field access. The generalized rule added is:
+
+- curated external nested enum qualifiers may be typed as their nested enum
+  type before unresolved field facts are produced;
+- enum constants on those nested enum types then use the existing curated enum
+  constant model;
+- unknown nested qualifiers still remain unresolved/conservative.
+
+This belongs in `stdlib` external field typing because the resolver already
+uses `known_external_field_type_for_receiver` to avoid recording unresolved
+external field accesses when a field-like expression is actually a known
+library boundary. Lowering is not involved.
+
+The nested qualifier families modeled by this slice are:
+
+- `Log.LogLevel`
+- `HDF5File.OpenMode`
+- `SAMFileHeader.SortOrder`
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_treats_curated_external_nested_enum_qualifiers_as_types`
+- `resolver_uses_curated_external_enum_constant_types_for_overload_arguments`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_treats_curated_external_nested_enum_qualifiers_as_types --quiet
+cargo test resolver_uses_curated_external_enum_constant_types_for_overload_arguments --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	1235
+external_api_explained_field_accesses	1235
+external_api_guesses	29542
+external_constructor_guesses	967
+external_field_guesses	636
+external_api_return_nullability_facts	7179
+top_external_field_guess_targets
+log	LogLevel	4
+Config	genotypeArgs	3
+Collections	EMPTY_LIST	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1178
+external_api_explained_field_accesses	1178
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29542
+external_constructor_guesses	967
+external_field_guesses	601
+external_api_return_nullability_facts	7179
+total_facts	113618
+top_external_field_guess_targets
+Config	genotypeArgs	3
+CigarOperator	MATCH_OR_MISMATCH	2
+Collections	EMPTY_LIST	2
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+AssemblyRegionArgumentCollection	maxReadsPerAlignmentStart	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `636` to `601`.
+- Unresolved field accesses moved from `1235` to `1178`.
+- The `log LogLevel` row is gone because `Log.LogLevel` is now treated as a
+  known nested enum qualifier instead of an external field.
+- The next field rows are no longer mainly stable enum constants. `Config.*`
+  and argument-collection fields look more project/config-structure-specific,
+  while `Collections.EMPTY_LIST` is a likely JDK static field model and should
+  be audited separately.
+
+## JDK Collections Empty Field Slice
+
+The previous field report still contained a stable JDK static field model:
+
+```text
+top_external_field_guess_targets
+Config	genotypeArgs	3
+CigarOperator	MATCH_OR_MISMATCH	2
+Collections	EMPTY_LIST	2
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+```
+
+Corpus inspection showed uses of `Collections.EMPTY_LIST` and
+`Collections.EMPTY_MAP`. These are stable JDK static singleton fields, not
+project-specific GATK behavior.
+
+The generalized rule added is:
+
+- `Collections.EMPTY_LIST` has external type `List<Object>`;
+- `Collections.EMPTY_SET` has external type `Set<Object>`;
+- `Collections.EMPTY_MAP` has external type `Map<Object, Object>`;
+- these fields use built-in external-model provenance when they reach semantic
+  field facts.
+
+This belongs in `stdlib` external field typing and provenance. Resolver
+consumes these facts for overload/type applicability. Lowering is not involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_uses_jdk_empty_collection_static_field_types_for_overload_arguments`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_jdk_empty_collection_static_field_types_for_overload_arguments --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	1178
+external_api_explained_field_accesses	1178
+external_api_guesses	29542
+external_constructor_guesses	967
+external_field_guesses	601
+external_api_return_nullability_facts	7179
+top_external_field_guess_targets
+Config	genotypeArgs	3
+CigarOperator	MATCH_OR_MISMATCH	2
+Collections	EMPTY_LIST	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1175
+external_api_explained_field_accesses	1175
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29542
+external_constructor_guesses	967
+external_field_guesses	598
+external_api_return_nullability_facts	7179
+total_facts	113612
+top_external_field_guess_targets
+Config	genotypeArgs	3
+CigarOperator	MATCH_OR_MISMATCH	2
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+AssemblyRegionArgumentCollection	maxReadsPerAlignmentStart	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+BatchCompletionCallbackFunctionArgument	totalBatchCount	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `601` to `598`.
+- Unresolved field accesses moved from `1178` to `1175`.
+- The `Collections.EMPTY_LIST` bucket is no longer a conservative field guess.
+- The remaining top rows are mostly project/config fields and specialized
+  constants. `CigarOperator.MATCH_OR_MISMATCH` is the next likely external
+  enum/static constant candidate, but it should be audited as its own rule.
+
+## CigarOperator Alias Constant Slice
+
+The previous field report still contained one specialized htsjdk constant:
+
+```text
+top_external_field_guess_targets
+Config	genotypeArgs	3
+CigarOperator	MATCH_OR_MISMATCH	2
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+```
+
+Corpus inspection showed `CigarOperator.MATCH_OR_MISMATCH` being passed where a
+`CigarOperator` is expected, including `new CigarElement(...,
+CigarOperator.MATCH_OR_MISMATCH)`.
+
+The generalized rule added is:
+
+- known `CigarOperator` aliases are still `CigarOperator` values;
+- the alias is modeled in the existing explicit `CigarOperator` external enum
+  constant list, not by broadening all uppercase constants for every receiver.
+
+This remains in `stdlib` external field typing and provenance. Resolver
+consumes the field type for overload and constructor applicability. Lowering is
+not involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_uses_external_enum_like_constant_type_for_overload_arguments`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_enum_like_constant_type_for_overload_arguments --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	1175
+external_api_explained_field_accesses	1175
+external_api_guesses	29542
+external_constructor_guesses	967
+external_field_guesses	598
+external_api_return_nullability_facts	7179
+top_external_field_guess_targets
+Config	genotypeArgs	3
+CigarOperator	MATCH_OR_MISMATCH	2
+Config	annotateAllSitesWithPLs	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1171
+external_api_explained_field_accesses	1171
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29542
+external_constructor_guesses	965
+external_field_guesses	596
+external_api_return_nullability_facts	7179
+total_facts	113604
+top_external_field_guess_targets
+Config	genotypeArgs	3
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+AssemblyRegionArgumentCollection	maxReadsPerAlignmentStart	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+BatchCompletionCallbackFunctionArgument	totalBatchCount	1
+CallState	HET_REF_VAR1	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `598` to `596`.
+- Unresolved field accesses moved from `1175` to `1171`.
+- Conservative constructor guesses moved from `967` to `965` because some
+  `CigarElement` constructor arguments now resolve to `CigarOperator`.
+- The remaining top field guesses are now mostly project/config object fields
+  and string-like constants. They should not be promoted by name without a
+  separate structural rule or source/corpus fact.
+
+## Generic Type Parameter Bound Field Lookup Slice
+
+The previous field report still contained source-looking config field misses:
+
+```text
+top_external_field_guess_targets
+Config	genotypeArgs	3
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+```
+
+Corpus inspection showed a generic source shape rather than an external API
+constant:
+
+```text
+GenotypingEngine<Config extends StandardCallerArgumentCollection>
+protected final Config configuration;
+configuration.genotypeArgs
+configuration.annotateAllSitesWithPLs
+```
+
+`StandardCallerArgumentCollection` declares those fields. The generalized rule
+added is:
+
+- when an instance field receiver has a static type that is a type parameter of
+  the current source type, source field lookup starts from the type parameter's
+  bound if the type parameter itself is not a concrete source type;
+- inherited source field lookup then proceeds normally through that bound's
+  superclass chain.
+
+This belongs in resolver source field lookup. It is not an external API model,
+semantic fact, slot-shape rule, or lowering rule.
+
+The generalized regression test added is:
+
+- `resolver_uses_type_parameter_bound_fields_for_field_access_arguments`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_type_parameter_bound_fields_for_field_access_arguments --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	1171
+external_api_explained_field_accesses	1171
+external_api_guesses	29542
+external_constructor_guesses	965
+external_field_guesses	596
+external_api_return_nullability_facts	7179
+total_facts	113604
+top_external_field_guess_targets
+Config	genotypeArgs	3
+Config	annotateAllSitesWithPLs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	1146
+external_api_explained_field_accesses	1146
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29542
+external_constructor_guesses	965
+external_field_guesses	586
+external_api_return_nullability_facts	7179
+total_facts	113569
+top_external_field_guess_targets
+Config	genotypeArgs	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+AssemblyRegionArgumentCollection	maxReadsPerAlignmentStart	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+BatchCompletionCallbackFunctionArgument	totalBatchCount	1
+CallState	HET_REF_VAR1	1
+CallState	HET_VAR1_VAR2	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `596` to `586`.
+- Unresolved field accesses moved from `1171` to `1146`.
+- The remaining top rows include external enum/static constants and a smaller
+  number of source/config fields. The enum-like constants should be handled as
+  external API facts, while the source/config rows need separate source lookup
+  or corpus fact analysis.
+
+## External Header And Genotype Enum Constant Slice
+
+The previous field report showed many unresolved field accesses whose targets
+were enum constants or nested enum qualifiers from un-translated libraries:
+
+```text
+top_unresolved_field_targets
+FieldAccess	String	48
+FieldAccess	HET	47
+FieldAccess	POSITIVE	46
+FieldAccess	Integer	42
+FieldAccess	HOM_REF	39
+FieldAccess	HOM_VAR	37
+FieldAccess	Float	28
+FieldAccess	A	20
+FieldAccess	UNBOUNDED	18
+FieldAccess	NEGATIVE	17
+FieldAccess	CallState	14
+```
+
+Corpus inspection showed stable external enum families such as:
+
+```text
+VCFHeaderLineType.String
+VCFHeaderLineType.Integer
+VCFHeaderLineType.Float
+VCFHeaderLineCount.A
+VCFHeaderLineCount.UNBOUNDED
+GenotypeType.HET
+GenotypeType.HOM_REF
+Strand.POSITIVE
+Strand.NEGATIVE
+GenotypeConcordanceStates.CallState.HOM_REF
+GenotypeConcordanceStates.TruthState.NO_CALL
+```
+
+The generalized rule added is:
+
+- curated external enum-like fields have the enum receiver type, including enum
+  families with Java-style mixed-case constants such as
+  `VCFHeaderLineType.String`;
+- curated nested external enum qualifiers, such as
+  `GenotypeConcordanceStates.CallState`, are modeled as external nested enum
+  types;
+- acronym-heavy parsed receiver names are canonicalized before external field
+  lookup, so `v_c_f_header_line_type` maps to `VCFHeaderLineType`.
+
+This belongs in `stdlib` external field typing, receiver canonicalization, and
+field provenance. Resolver consumes the resulting field types for overload and
+constructor applicability. Lowering is not involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_uses_external_header_and_genotype_enum_constant_types_for_overloads`
+- `resolver_treats_curated_external_nested_state_enum_qualifiers_as_types`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_header_and_genotype_enum_constant_types_for_overloads --quiet
+cargo test resolver_treats_curated_external_nested_state_enum_qualifiers_as_types --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	1146
+external_api_explained_field_accesses	1146
+external_api_guesses	29542
+external_constructor_guesses	965
+external_field_guesses	586
+external_api_return_nullability_facts	7179
+total_facts	113569
+top_unresolved_field_targets
+FieldAccess	String	48
+FieldAccess	HET	47
+FieldAccess	POSITIVE	46
+FieldAccess	Integer	42
+FieldAccess	HOM_REF	39
+FieldAccess	HOM_VAR	37
+FieldAccess	Float	28
+FieldAccess	A	20
+FieldAccess	UNBOUNDED	18
+FieldAccess	NEGATIVE	17
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	723
+external_api_explained_field_accesses	723
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29539
+external_constructor_guesses	948
+external_field_guesses	468
+external_api_return_nullability_facts	7178
+total_facts	113008
+top_external_field_guess_targets
+Config	genotypeArgs	2
+DbsnpArgumentCollection	dbsnp	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+AssemblyRegionArgumentCollection	maxReadsPerAlignmentStart	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+BatchCompletionCallbackFunctionArgument	totalBatchCount	1
+Config	annotateAllSitesWithPLs	1
+top_unresolved_field_targets
+FieldAccess	Type	10
+FieldAccess	name	9
+FieldAccess	PASSES_FILTERS_v4	8
+FieldAccess	dbsnp	8
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	IOUtils	7
+FieldAccess	alignmentContext	7
+FieldAccess	io	7
+FieldAccess	ConfigFactory	6
+FieldAccess	NO_ALIGNMENT_REFERENCE_NAME	6
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `586` to `468`.
+- Unresolved field accesses moved from `1146` to `723`.
+- Conservative constructor guesses moved from `965` to `948`, mostly because
+  VCF header constructors now receive typed enum arguments.
+- The remaining field misses are no longer dominated by the handled enum
+  constants. Next candidates include source/config fields, package-qualified
+  names such as `org.apache.commons.io.IOUtils`, SAMRecord constants, and other
+  curated external constants.
+
+## Package-Qualified External Static Member Slice
+
+The previous field report still contained package-qualified external type
+fragments and stable htsjdk static constants:
+
+```text
+top_unresolved_field_targets
+FieldAccess	IOUtils	7
+FieldAccess	io	7
+FieldAccess	NO_ALIGNMENT_REFERENCE_NAME	6
+FieldAccess	NO_ALIGNMENT_START	6
+FieldAccess	aeonbits	6
+FieldAccess	owner	6
+FieldAccess	apache	5
+FieldAccess	commons	5
+```
+
+Corpus inspection showed fully qualified external utility calls and static
+members such as:
+
+```text
+org.apache.commons.io.IOUtils.copy(istream, ostream)
+htsjdk.samtools.SAMRecord.NO_ALIGNMENT_REFERENCE_INDEX
+SAMRecord.NO_ALIGNMENT_START
+SAMRecord.NO_ALIGNMENT_REFERENCE_NAME
+```
+
+The generalized rule added is:
+
+- resolver treats unknown lowercase-prefix field chains as Java package
+  qualifier fragments when they are not locals or source fields;
+- resolver treats a lowercase package prefix followed by a type-like segment as
+  a package-qualified type qualifier, so the final static call receiver becomes
+  the external class name, for example `IOUtils`;
+- `stdlib` owns the stable external static field types for known
+  `SAMRecord.NO_ALIGNMENT_*` constants.
+
+This keeps responsibility split cleanly: resolver owns Java name/qualifier
+classification; `stdlib` owns external field typing and provenance; lowering is
+not involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_treats_package_qualified_external_static_utility_as_type_qualifier`
+- `resolver_uses_known_external_static_alignment_constants_for_overload_arguments`
+- `external_field_facts_explain_missing_library_fields_only`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_treats_package_qualified_external_static_utility_as_type_qualifier --quiet
+cargo test resolver_uses_known_external_static_alignment_constants_for_overload_arguments --quiet
+cargo test external_field_facts_explain_missing_library_fields_only --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	723
+external_api_explained_field_accesses	723
+external_api_guesses	29539
+external_constructor_guesses	948
+external_field_guesses	468
+external_api_return_nullability_facts	7178
+total_facts	113008
+top_unresolved_field_targets
+FieldAccess	Type	10
+FieldAccess	name	9
+FieldAccess	PASSES_FILTERS_v4	8
+FieldAccess	dbsnp	8
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	IOUtils	7
+FieldAccess	alignmentContext	7
+FieldAccess	io	7
+FieldAccess	ConfigFactory	6
+FieldAccess	NO_ALIGNMENT_REFERENCE_NAME	6
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	606
+external_api_explained_field_accesses	606
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29539
+external_constructor_guesses	948
+external_field_guesses	416
+external_api_return_nullability_facts	7178
+total_facts	112839
+top_external_field_guess_targets
+Config	genotypeArgs	2
+DbsnpArgumentCollection	dbsnp	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Slice	EMBEDDED_REFERENCE_ABSENT_CONTENT_ID	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+AssemblyRegionArgumentCollection	maxReadsPerAlignmentStart	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+BatchCompletionCallbackFunctionArgument	totalBatchCount	1
+top_unresolved_field_targets
+FieldAccess	Type	10
+FieldAccess	name	9
+FieldAccess	PASSES_FILTERS_v4	8
+FieldAccess	dbsnp	8
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	alignmentContext	7
+FieldAccess	PairOrientation	6
+FieldAccess	Attribute	5
+FieldAccess	BLOCK_HEADER_LENGTH	5
+FieldAccess	DEL	5
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `468` to `416`.
+- Unresolved field accesses moved from `723` to `606`.
+- Package qualifier fragments such as `org.apache.commons.io` no longer appear
+  in the top field misses.
+- The remaining field misses now include a mix of source/config fields,
+  additional curated constants, and source enum or nested-type patterns such as
+  `VariantContext.Type.INDEL`, `SAMFlag.SECONDARY_ALIGNMENT`, and
+  `BlockCompressedStreamConstants.BLOCK_HEADER_LENGTH`.
+
+## External Nested Enum And Numeric Constant Slice
+
+The previous field report still contained nested enum constants and stable
+numeric constants from external libraries:
+
+```text
+top_unresolved_field_targets
+FieldAccess	Type	10
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	PairOrientation	6
+FieldAccess	BLOCK_HEADER_LENGTH	5
+FieldAccess	DEL	5
+FieldAccess	SECONDARY_ALIGNMENT	4
+FieldAccess	VCF4_2	4
+FieldAccess	DuplicateTaggingPolicy	3
+```
+
+Corpus inspection showed shapes such as:
+
+```text
+VariantContext.Type.INDEL
+VariantContext.Type.NO_VARIATION
+SAMFlag.SECONDARY_ALIGNMENT.isUnset(flag)
+SAMFlag.READ_UNMAPPED
+VCFHeaderVersion.VCF4_2
+MarkDuplicates.DuplicateTaggingPolicy.DontTag
+BlockCompressedStreamConstants.BLOCK_HEADER_LENGTH
+```
+
+The generalized rule added is:
+
+- curated external nested enum qualifiers may introduce a nested enum type,
+  such as `VariantContext.Type` or
+  `MarkDuplicates.DuplicateTaggingPolicy`;
+- constants on those enum types have the enum receiver type, including
+  mixed-case Java constants such as `DontTag`;
+- stable external numeric constants, such as
+  `BlockCompressedStreamConstants.BLOCK_HEADER_LENGTH`, get their primitive
+  type from the external field model;
+- enum predicate methods such as `SAMFlag.isSet(int)` and
+  `SAMFlag.isUnset(int)` are boolean external API facts.
+
+This belongs in `stdlib` external field typing, receiver canonicalization, and
+external method return typing. Resolver consumes these facts for overload
+selection and unresolved-target accounting. Lowering is not involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_uses_external_nested_enum_and_static_numeric_constants_for_overloads`
+- `resolver_uses_external_enum_constant_receiver_for_predicate_overloads`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_nested_enum_and_static_numeric_constants_for_overloads --quiet
+cargo test resolver_uses_external_enum_constant_receiver_for_predicate_overloads --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	606
+external_api_explained_field_accesses	606
+external_api_guesses	29539
+external_constructor_guesses	948
+external_field_guesses	416
+external_api_return_nullability_facts	7178
+total_facts	112839
+top_unresolved_field_targets
+FieldAccess	Type	10
+FieldAccess	name	9
+FieldAccess	PASSES_FILTERS_v4	8
+FieldAccess	dbsnp	8
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	alignmentContext	7
+FieldAccess	PairOrientation	6
+FieldAccess	Attribute	5
+FieldAccess	BLOCK_HEADER_LENGTH	5
+FieldAccess	DEL	5
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	526
+external_api_explained_field_accesses	526
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29550
+external_constructor_guesses	948
+external_field_guesses	370
+external_api_return_nullability_facts	7180
+total_facts	112724
+top_external_field_guess_targets
+BlockCompressedStreamConstants	EMPTY_GZIP_BLOCK	2
+Config	genotypeArgs	2
+DbsnpArgumentCollection	dbsnp	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+AssemblyRegionArgumentCollection	maxReadsPerAlignmentStart	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+BatchCompletionCallbackFunctionArgument	totalBatchCount	1
+top_unresolved_field_targets
+FieldAccess	name	9
+FieldAccess	PASSES_FILTERS_v4	8
+FieldAccess	dbsnp	8
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	alignmentContext	7
+FieldAccess	PairOrientation	6
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	batchCount	5
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `416` to `370`.
+- Unresolved field accesses moved from `606` to `526`.
+- `external_api_guesses` increased from `29539` to `29550` because fewer enum
+  receiver expressions remain unknown, so their external predicate/accessor
+  calls are now visible as method-boundary facts.
+- The remaining top rows are now mostly source/config fields, additional
+  curated constants, source or external nested enum families not yet modeled,
+  and project-specific metrics constants.
+
+## External Domain Constant Family Slice
+
+The previous report still contained stable primitive, string, array, and nested
+enum constants from external libraries:
+
+```text
+top_unresolved_field_targets
+FieldAccess	PASSES_FILTERS_v4	8
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	PairOrientation	6
+FieldAccess	INFO_FIELD_ARRAY_SEPARATOR_CHAR	3
+FieldAccess	MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED	3
+FieldAccess	MAX_GENOTYPE_QUAL	3
+```
+
+Corpus inspection showed uses such as:
+
+```text
+VCFConstants.PASSES_FILTERS_v4
+VCFConstants.INFO_FIELD_ARRAY_SEPARATOR_CHAR
+VCFConstants.MAX_GENOTYPE_QUAL
+GenotypeLikelihoods.MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED
+CommonInfo.NO_LOG10_PERROR
+BlockCompressedStreamConstants.EMPTY_GZIP_BLOCK
+BlockCompressedStreamConstants.BLOCK_LENGTH_OFFSET
+SamPairUtil.PairOrientation.FR
+```
+
+The generalized rule added is:
+
+- curated external constant families may provide primitive, string, array, and
+  enum field types;
+- constants that do not follow strict all-uppercase naming, such as
+  `PASSES_FILTERS_v4`, are still known external fields when the owning library
+  API defines them;
+- nested enum qualifiers such as `SamPairUtil.PairOrientation` are modeled as
+  external nested enum types, and constants on that nested type have the enum
+  type.
+
+This belongs in `stdlib` external field typing, receiver canonicalization, and
+field provenance. Resolver consumes the field types for overload selection and
+unresolved-target accounting. Lowering is not involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `resolver_uses_external_nested_pair_orientation_enum_constants`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --quiet
+cargo test resolver_uses_external_nested_pair_orientation_enum_constants --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_field_accesses	526
+external_api_explained_field_accesses	526
+external_api_guesses	29550
+external_constructor_guesses	948
+external_field_guesses	370
+external_api_return_nullability_facts	7180
+total_facts	112724
+top_unresolved_field_targets
+FieldAccess	name	9
+FieldAccess	PASSES_FILTERS_v4	8
+FieldAccess	dbsnp	8
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	alignmentContext	7
+FieldAccess	PairOrientation	6
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	batchCount	5
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42174
+external_api_explained_method_calls	42174
+unexplained_method_calls	0
+unresolved_constructors	4192
+external_api_explained_constructors	4192
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	487
+external_api_explained_field_accesses	487
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29550
+external_constructor_guesses	948
+external_field_guesses	349
+external_api_return_nullability_facts	7180
+total_facts	112664
+top_external_field_guess_targets
+Config	genotypeArgs	2
+DbsnpArgumentCollection	dbsnp	2
+MetricAccumulationLevelArgumentCollection	accumulationLevels	2
+Slice	EMBEDDED_REFERENCE_ABSENT_CONTENT_ID	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+AssemblyRegionArgumentCollection	maxReadsPerAlignmentStart	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+BatchCompletionCallbackFunctionArgument	totalBatchCount	1
+top_unresolved_field_targets
+FieldAccess	name	9
+FieldAccess	dbsnp	8
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	alignmentContext	7
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	batchCount	5
+FieldAccess	logger	5
+FieldAccess	GenomicsDBColumn	4
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls, constructors, and fields remain at `0`.
+- Conservative external field guesses moved from `370` to `349`.
+- Unresolved field accesses moved from `526` to `487`.
+- The remaining top rows include source/config fields, source enum-like fields,
+  additional output-writer options such as `INDEX_ON_THE_FLY`, metrics fields,
+  and project-specific constants.
+
+## Transitive Source Field Dependency Slice
+
+The next field-family inspection showed that some remaining field misses were
+not missing library constants. They were source fields reached through imported
+source declarations whose own field types live in other packages.
+
+Representative corpus shape:
+
+```text
+HaplotypeCallerSpark.hcArgs.dbsnp.dbsnp
+GenotypeGVCFsEngine.setupVCFWriter(..., DbsnpArgumentCollection dbsnp, ...)
+```
+
+`DbsnpArgumentCollection.dbsnp` is declared in the translated source corpus.
+The resolver could resolve the first receiver type but the benchmark source
+symbol set did not include transitive declaration dependencies of imported
+source types, so the inner field was conservatively explained as an external
+field guess.
+
+The generalized rule added is:
+
+- benchmark/source-symbol preparation should include a finite closure of source
+  types referenced by declaration signatures of already-visible source types;
+- the closure follows field types, method return and parameter types,
+  constructor parameter types, superclass and interface types, and type
+  parameter bounds;
+- dependency names are resolved using the declaring type's source package and
+  imports: same package, exact source imports, and wildcard source imports;
+- a simple name must not be satisfied by an unrelated source type when an exact
+  import points to an external class with the same simple name.
+
+This belongs in resolver benchmark source-symbol selection. Resolver field
+lookup still owns symbol/type lookup once the source symbols are available.
+Lowering is not involved.
+
+The generalized regression tests added are:
+
+- `resolver_benchmark_uses_transitive_source_field_dependencies`
+- `resolver_benchmark_does_not_satisfy_exact_external_import_with_source_simple_name`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_benchmark_ --test resolve_calls --quiet
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+unresolved_method_calls	42174
+unresolved_constructors	4192
+unresolved_field_accesses	487
+external_api_explained_field_accesses	487
+external_api_guesses	29550
+external_constructor_guesses	948
+external_field_guesses	349
+external_api_return_nullability_facts	7180
+total_facts	112664
+top_unresolved_field_targets
+FieldAccess	name	9
+FieldAccess	dbsnp	8
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	alignmentContext	7
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	batchCount	5
+FieldAccess	logger	5
+FieldAccess	GenomicsDBColumn	4
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42004
+external_api_explained_method_calls	42004
+unexplained_method_calls	0
+unresolved_constructors	4191
+external_api_explained_constructors	4191
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	466
+external_api_explained_field_accesses	466
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29353
+external_constructor_guesses	947
+external_field_guesses	338
+external_api_return_nullability_facts	7169
+total_facts	112263
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Slice	EMBEDDED_REFERENCE_ABSENT_CONTENT_ID	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+BatchCompletionCallbackFunctionArgument	totalBatchCount	1
+Config	annotateAllSitesWithPLs	1
+ContainerStats	alignmentContext	1
+ContainerStats	containerOrdinal	1
+top_unresolved_field_targets
+FieldAccess	name	9
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	alignmentContext	7
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	batchCount	5
+FieldAccess	GenomicsDBColumn	4
+FieldAccess	tag	4
+FieldAccess	DO_NOT_WRITE_GENOTYPES	3
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- `dbsnp` dropped out of the top unresolved field targets.
+- Unresolved field accesses moved from `487` to `466`.
+- Conservative external field guesses moved from `349` to `338`.
+- The external API guess count also moved down because some source methods and
+  constructors became visible through the same source dependency closure.
+- The remaining field rows are now mostly external constants, Java records,
+  nested enum-like constants, metrics fields, and project-specific library
+  surfaces that need separate classification.
+
+## Java Record Component Slice
+
+The next source/member-looking field family came from Java records. GATK uses
+private nested records for small data carriers, for example:
+
+```text
+private record ContainerStats(
+        int containerOrdinal,
+        boolean isBad,
+        AlignmentContext alignmentContext,
+        long misMatchCount,
+        double misMatchRate
+) { }
+```
+
+Later code reads record components through field-like access in the same nest,
+such as:
+
+```text
+containerStats.alignmentContext
+containerStats.misMatchCount
+```
+
+The parser was creating enough syntax to keep the file parseable, but record
+components were not represented as source members. The resolver therefore
+treated component fields and canonical record construction as external
+boundary guesses.
+
+The generalized rule added is:
+
+- `record_declaration` is a first-class Java type kind;
+- record components are source fields;
+- record components also introduce no-argument accessor methods with the same
+  Java name and return type;
+- records without explicit constructors have a canonical constructor over the
+  component parameter list;
+- compact record constructors are represented as canonical constructors with
+  the component parameter list;
+- records are class-like for object strategy and constructor resolution.
+
+Parser owns the syntax and IR shape. Resolver consumes the generated fields,
+accessors, and constructors. Lowering is not involved.
+
+The generalized regression tests added are:
+
+- `resolver_benchmark_resolves_record_component_fields_and_canonical_constructor`
+- `resolver_uses_record_component_accessor_return_type_for_overload_arguments`
+
+Verification:
+
+```text
+cargo fmt
+cargo test record_component --test resolve_calls --quiet
+cargo test --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+unresolved_method_calls	42004
+unresolved_constructors	4191
+unresolved_field_accesses	466
+external_api_explained_field_accesses	466
+external_api_guesses	29353
+external_constructor_guesses	947
+external_field_guesses	338
+external_api_return_nullability_facts	7169
+total_facts	112263
+top_unresolved_field_targets
+FieldAccess	name	9
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	alignmentContext	7
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	batchCount	5
+FieldAccess	GenomicsDBColumn	4
+FieldAccess	tag	4
+FieldAccess	DO_NOT_WRITE_GENOTYPES	3
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	450
+external_api_explained_field_accesses	450
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29341
+external_constructor_guesses	942
+external_field_guesses	330
+external_api_return_nullability_facts	7168
+total_facts	112236
+top_external_field_guess_targets
+Config	genotypeArgs	2
+SAMRecord	UNKNOWN_MAPPING_QUALITY	2
+Slice	EMBEDDED_REFERENCE_ABSENT_CONTENT_ID	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+BatchCompletionCallbackFunctionArgument	totalBatchCount	1
+Config	annotateAllSitesWithPLs	1
+DiscoverVariantsFromContigAlignmentsArgumentCollection	cnvCallsFile	1
+top_unresolved_field_targets
+FieldAccess	name	9
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	MISSING_VALUE_v4	6
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	batchCount	5
+FieldAccess	GenomicsDBColumn	4
+FieldAccess	tag	4
+FieldAccess	value	4
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- `alignmentContext` dropped out of the top unresolved field targets.
+- Unresolved field accesses moved from `466` to `450`.
+- Conservative external field guesses moved from `338` to `330`.
+- Constructor guesses moved from `947` to `942` because canonical record
+  constructors are now source constructors.
+- Remaining high rows are now mostly external constants, external record-like
+  fields, nested enum-like constants, and library/project surfaces.
+
+## External Enum And Static Constant Family Slice
+
+The next field-family inspection showed stable external API constants rather
+than missing source semantics:
+
+```text
+Options.INDEX_ON_THE_FLY
+Options.DO_NOT_WRITE_GENOTYPES
+SWOverhangStrategy.INDEL
+SWOverhangStrategy.SOFTCLIP
+VCFConstants.MISSING_VALUE_v4
+SAMRecord.UNKNOWN_MAPPING_QUALITY
+```
+
+These are library-defined constants and enum values. They should be modeled as
+external API facts with built-in provenance, not as resolver heuristics or
+lowering rewrites.
+
+The generalized rule added is:
+
+- recognized external enum receiver types produce enum-typed constants;
+- external constants with mixed suffixes such as `MISSING_VALUE_v4` are still
+  known constants when the library API defines them;
+- stable numeric constants on known external classes have explicit primitive
+  types;
+- resolver overload selection consumes these field types through the existing
+  external field model.
+
+This belongs in `stdlib` external field typing, receiver canonicalization, and
+field provenance. Resolver consumes the modeled Java types. Lowering is not
+involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `resolver_uses_external_enum_constants_for_collection_and_alignment_overloads`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test resolver_uses_external_enum_constants_for_collection_and_alignment_overloads --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+unresolved_method_calls	41994
+unresolved_constructors	4185
+unresolved_field_accesses	450
+external_api_explained_field_accesses	450
+external_api_guesses	29341
+external_constructor_guesses	942
+external_field_guesses	330
+external_api_return_nullability_facts	7168
+total_facts	112236
+top_unresolved_field_targets
+FieldAccess	name	9
+FieldAccess	INDEX_ON_THE_FLY	7
+FieldAccess	MISSING_VALUE_v4	6
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	batchCount	5
+FieldAccess	GenomicsDBColumn	4
+FieldAccess	tag	4
+FieldAccess	value	4
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	415
+external_api_explained_field_accesses	415
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29341
+external_constructor_guesses	942
+external_field_guesses	303
+external_api_return_nullability_facts	7168
+total_facts	112174
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Slice	EMBEDDED_REFERENCE_ABSENT_CONTENT_ID	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+Attribute	PRIMITIVE	1
+BatchCompletionCallbackFunctionArgument	batchCount	1
+BatchCompletionCallbackFunctionArgument	totalBatchCount	1
+Config	annotateAllSitesWithPLs	1
+DiscoverVariantsFromContigAlignmentsArgumentCollection	cnvCallsFile	1
+DiscoverVariantsFromContigAlignmentsArgumentCollection	truthIntervalPadding	1
+top_unresolved_field_targets
+FieldAccess	name	9
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	INDEX_ON_THE_FLY	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	batchCount	5
+FieldAccess	GenomicsDBColumn	4
+FieldAccess	tag	4
+FieldAccess	value	4
+FieldAccess	Option	3
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `450` to `415`.
+- Conservative external field guesses moved from `330` to `303`.
+- `MISSING_VALUE_v4`, `SOFTCLIP`, and `UNKNOWN_MAPPING_QUALITY` dropped out of
+  the top field targets.
+- The remaining `INDEX_ON_THE_FLY` rows likely include a separate receiver
+  shape, such as collection/static-import context, and need a separate
+  classification before another model is added.
+
+## External Public Data Field And Nested Type Slice
+
+The next recurring field family mixed two external-boundary shapes:
+
+```text
+JexlVCMatchExp.name
+SAMTagAndValue.tag
+SAMTagAndValue.value
+BatchCompletionCallbackFunctionArgument.batchCount
+BatchCompletionCallbackFunctionArgument.totalBatchCount
+Coordinates.GenomicsDBColumn
+Coordinates.ContigPosition
+```
+
+The first group is public data fields on external library record-like classes.
+The second group is imported external nested type qualification. Both should be
+modeled before lowering: the former as external field facts, the latter as
+external nested type facts consumed by resolver field-access typing.
+
+The generalized rule added is:
+
+- known external public data fields have explicit Java field types;
+- known imported external outer types may expose nested type names;
+- these facts have built-in external provenance and remain auditable;
+- resolver consumes the facts for overload resolution and to avoid recording
+  type qualifiers as unresolved field accesses.
+
+This belongs in `stdlib` external field typing, receiver canonicalization, and
+provenance. Resolver consumes the modeled field types and nested type facts.
+Lowering is not involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_uses_known_external_public_data_fields_for_overload_arguments`
+- `resolver_treats_imported_external_nested_types_as_type_qualifiers`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_known_external_public_data_fields_for_overload_arguments --test resolve_calls --quiet
+cargo test resolver_treats_imported_external_nested_types_as_type_qualifiers --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+unresolved_method_calls	41994
+unresolved_constructors	4185
+unresolved_field_accesses	415
+external_api_explained_field_accesses	415
+external_api_guesses	29341
+external_constructor_guesses	942
+external_field_guesses	303
+external_api_return_nullability_facts	7168
+total_facts	112174
+top_unresolved_field_targets
+FieldAccess	name	9
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	INDEX_ON_THE_FLY	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	batchCount	5
+FieldAccess	GenomicsDBColumn	4
+FieldAccess	tag	4
+FieldAccess	value	4
+FieldAccess	Option	3
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	389
+external_api_explained_field_accesses	389
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	941
+external_field_guesses	291
+external_api_return_nullability_facts	7169
+total_facts	112136
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Slice	EMBEDDED_REFERENCE_ABSENT_CONTENT_ID	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+Attribute	PRIMITIVE	1
+Config	annotateAllSitesWithPLs	1
+DiscoverVariantsFromContigAlignmentsArgumentCollection	cnvCallsFile	1
+DiscoverVariantsFromContigAlignmentsArgumentCollection	truthIntervalPadding	1
+DiscoverVariantsFromContigAlignmentsArgumentCollection	truthVCF	1
+EnumSet	INDEX_ON_THE_FLY	1
+top_unresolved_field_targets
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	INDEX_ON_THE_FLY	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	CNV	3
+FieldAccess	Option	3
+FieldAccess	Priority	3
+FieldAccess	READ_PAIRS_EXAMINED	3
+FieldAccess	READ_PAIR_DUPLICATES	3
+FieldAccess	SECONDARY_OR_SUPPLEMENTARY_RDS	3
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `415` to `389`.
+- Conservative external field guesses moved from `303` to `291`.
+- `name`, `batchCount`, `GenomicsDBColumn`, `tag`, and `value` dropped out of
+  the top field targets.
+- Remaining rows are now dominated by enum constants and project/library
+  constants, plus static-import or receiver-shape cases that need separate
+  classification.
+
+## External Field Guess Context And JDK Static Constant Slice
+
+The next inspection needed more context than bare field names. A target such as
+`PRIMITIVE`, `DEL`, or `INDEX_ON_THE_FLY` does not by itself say whether the
+owner is source lookup, external nested enum modeling, or a stable JDK/library
+constant. The benchmark report now includes:
+
+```text
+top_external_field_guess_contexts
+field_name receiver_type enclosing_type enclosing_member count sample_files
+```
+
+This is a reporting-only improvement. It records context only for conservative
+external field guesses, so known built-in external facts stay separate from
+unknown boundary guesses.
+
+The first rule selected from the new context table was stable JDK static
+constant typing:
+
+- `StandardCharsets.US_ASCII` has type `Charset`;
+- `Pattern.CASE_INSENSITIVE` has type `int`;
+- `RoundingMode.HALF_UP` has type `RoundingMode`;
+- snake-case unknown receivers produced by unresolved type qualifiers are
+  canonicalized to the JDK owner type before external field typing.
+
+This belongs in `stdlib` external receiver canonicalization and external field
+typing. Resolver consumes these facts for overload resolution. Lowering is not
+involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_benchmark_reports_unresolved_categories_without_lowering`
+- `resolver_uses_known_jdk_static_constant_types_for_overload_arguments`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_benchmark_reports_unresolved_categories_without_lowering --test resolve_calls --quiet
+cargo test resolver_uses_known_jdk_static_constant_types_for_overload_arguments --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unresolved_field_accesses	389
+external_api_explained_field_accesses	389
+unexplained_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	941
+external_field_guesses	291
+external_api_return_nullability_facts	7169
+total_facts	112136
+top_external_field_guess_contexts
+Attribute	field_value	BigQueryUtils	addComplexRowToStringBuilder	3
+PRIMITIVE	Attribute	BigQueryUtils	addComplexRowToStringBuilder	3
+US_ASCII	standard_charsets	FuncotatorUtils	sanitizeFuncotationFieldForVcf	3
+CASE_INSENSITIVE	pattern	SeqToClip	<init>	2
+HALF_UP	rounding_mode	CoverageOutputWriter	<init>	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	380
+external_api_explained_field_accesses	380
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29340
+external_constructor_guesses	941
+external_field_guesses	286
+external_api_return_nullability_facts	7169
+total_facts	112120
+top_external_field_guess_contexts
+Attribute	field_value	BigQueryUtils	addComplexRowToStringBuilder	3
+PRIMITIVE	Attribute	BigQueryUtils	addComplexRowToStringBuilder	3
+ARGUMENTS_POSITIONAL	template_properties	GATKWDLWorkUnitHandler	processPositionalArguments	2
+Attribute	field_value	BigQueryUtils	calculateColumnWidths	2
+BAM	reads_format_write_option	ReadsSparkSink	writeReads	2
+CNV	structural_variant_type	JointGermlineCNVSegmentation	buildVariantContext	2
+ESTIMATED_LIBRARY_SIZE	GATKDuplicationMetrics	GATKDuplicationMetrics	copy	2
+EstimationType	percentile	CanonicalSVCollapser	collapseInterval	2
+FR	read_ends	MarkDuplicatesSparkUtils	handlePairs	2
+FR	read_ends	Pair	getOrientation	2
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `389` to `380`.
+- Conservative external field guesses moved from `291` to `286`.
+- `US_ASCII`, `CASE_INSENSITIVE`, and `HALF_UP` dropped out of the external
+  field guess context table.
+- Remaining leading rows split into nested external enum/type constants
+  (`FieldValue.Attribute.PRIMITIVE`), source/inherited metric fields
+  (`GATKDuplicationMetrics.READ_PAIRS_EXAMINED`), and additional library
+  constants. These should be handled as separate slices.
+
+## Modeled External Superclass Field Slice
+
+The next recurring field family was source classes inheriting public data fields
+from an external superclass. In GATK, `GATKDuplicationMetrics` is a source class
+that extends Picard's external `DuplicationMetrics`; methods read and write
+fields such as:
+
+```text
+LIBRARY
+READ_PAIRS_EXAMINED
+READ_PAIR_DUPLICATES
+SECONDARY_OR_SUPPLEMENTARY_RDS
+UNMAPPED_READS
+UNPAIRED_READS_EXAMINED
+UNPAIRED_READ_DUPLICATES
+PERCENT_DUPLICATION
+ESTIMATED_LIBRARY_SIZE
+```
+
+Before this slice, resolver saw these as unresolved fields on the source
+subclass. Semantic analysis could conservatively explain them later as external
+fields because the subclass has an external superclass, but resolver could not
+use typed field evidence for overload selection and the benchmark still carried
+the misses.
+
+The generalized rule added is:
+
+- known external public data fields are still owned by the external field model;
+- resolver may walk a source class's `extends` chain and, when the next
+  superclass is external, ask `stdlib` whether the field is a modeled external
+  public field;
+- if the external model provides a type, resolver treats the field access as
+  resolved and uses that type for overload selection;
+- arbitrary fields on arbitrary external superclasses remain conservative
+  semantic facts, not resolver guesses.
+
+This keeps responsibilities split: `stdlib` owns the Picard `DuplicationMetrics`
+field types, resolver owns Java inheritance lookup, semantic analysis still owns
+fallback external field facts for unmodeled fields, and lowering is not
+involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_uses_modeled_external_superclass_fields_for_overload_arguments`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+- existing `external_field_facts_explain_fields_inherited_from_external_superclass`
+  continues to cover the conservative fallback path.
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_modeled_external_superclass_fields_for_overload_arguments --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unresolved_field_accesses	380
+external_api_explained_field_accesses	380
+unexplained_field_accesses	0
+external_api_guesses	29340
+external_constructor_guesses	941
+external_field_guesses	286
+external_api_return_nullability_facts	7169
+total_facts	112120
+top_unresolved_field_targets
+FieldAccess	READ_PAIRS_EXAMINED	3
+FieldAccess	READ_PAIR_DUPLICATES	3
+FieldAccess	SECONDARY_OR_SUPPLEMENTARY_RDS	3
+FieldAccess	UNMAPPED_READS	3
+FieldAccess	UNPAIRED_READS_EXAMINED	3
+FieldAccess	UNPAIRED_READ_DUPLICATES	3
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	349
+external_api_explained_field_accesses	349
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29341
+external_constructor_guesses	941
+external_field_guesses	273
+external_api_return_nullability_facts	7169
+total_facts	112077
+top_unresolved_field_targets
+FieldAccess	Attribute	5
+FieldAccess	DEL	5
+FieldAccess	INDEX_ON_THE_FLY	5
+FieldAccess	PRIMITIVE	5
+FieldAccess	FR	4
+FieldAccess	CNV	3
+FieldAccess	GroupOrder	3
+FieldAccess	Option	3
+FieldAccess	Priority	3
+FieldAccess	UNFILTERED	3
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `380` to `349`.
+- Conservative external field guesses moved from `286` to `273`.
+- The `GATKDuplicationMetrics`/`DuplicationMetrics` inherited metric field rows
+  dropped out of the top unresolved field targets.
+- Remaining leading rows are now mostly external nested enum/type constants,
+  enum-like constants, and library constants such as
+  `FieldValue.Attribute.PRIMITIVE`, structural variant enum values, and
+  `EnumSet`/`Options` receiver-shape cases.
+
+## External Nested Enum Family Slice
+
+The next recurring family was external nested enum qualifiers. The benchmark
+context showed cases like:
+
+```text
+FieldValue.Attribute.PRIMITIVE
+QueryJobConfiguration.Priority.BATCH
+QueryJobConfiguration.Priority.INTERACTIVE
+BlockCompressedInputStream.FileTermination.DEFECTIVE
+BlockCompressedInputStream.FileTermination.HAS_TERMINATOR_BLOCK
+SAMFileHeader.GroupOrder.query
+```
+
+These are not source fields and should not be discovered in lowering. They are
+stable external API facts: the outer library type exposes a nested enum type,
+and constants on that nested enum have the nested enum type.
+
+The generalized rule added is:
+
+- known external outer types may expose nested enum type qualifiers;
+- known external nested enum receiver types accept enum-like constants;
+- receiver canonicalization maps the snake-case unknown receiver names produced
+  by unresolved type qualifiers back to their Java owner names;
+- resolver consumes the modeled field types for overload selection and does not
+  record the type qualifier or enum constant as an unresolved field.
+
+This belongs in `stdlib` external field typing and receiver canonicalization.
+Resolver already consumes `known_external_field_type_for_receiver`; no lowering
+change is involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_treats_known_external_nested_enum_families_as_type_qualifiers`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_treats_known_external_nested_enum_families_as_type_qualifiers --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unresolved_field_accesses	349
+external_api_explained_field_accesses	349
+unexplained_field_accesses	0
+external_api_guesses	29341
+external_constructor_guesses	941
+external_field_guesses	273
+external_api_return_nullability_facts	7169
+total_facts	112077
+top_external_field_guess_contexts
+Attribute	field_value	BigQueryUtils	addComplexRowToStringBuilder	3
+PRIMITIVE	Attribute	BigQueryUtils	addComplexRowToStringBuilder	3
+GroupOrder	SAMFileHeader	MarkDuplicatesSpark	runTool	2
+FileTermination	block_compressed_input_stream	GatherVcfsCloud	gatherWithBlockCopying	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	323
+external_api_explained_field_accesses	323
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	941
+external_field_guesses	261
+external_api_return_nullability_facts	7170
+total_facts	112040
+top_external_field_guess_contexts
+ARGUMENTS_POSITIONAL	template_properties	GATKWDLWorkUnitHandler	processPositionalArguments	2
+BAM	reads_format_write_option	ReadsSparkSink	writeReads	2
+CNV	structural_variant_type	JointGermlineCNVSegmentation	buildVariantContext	2
+EstimationType	percentile	CanonicalSVCollapser	collapseInterval	2
+FR	read_ends	MarkDuplicatesSparkUtils	handlePairs	2
+FR	read_ends	Pair	getOrientation	2
+GENOTYPE_ALLELE_DEPTHS	VCFConstants	VariantsToTable	addGenotypeFieldsToRecords	2
+GENOTYPE_CONCORDANCE	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HEADER_FIELDS	v_c_f_header	VariantsToTable	onTraversalStart	2
+HET_PPV	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `349` to `323`.
+- Conservative external field guesses moved from `273` to `261`.
+- `FieldValue.Attribute`, `Attribute.PRIMITIVE`, `SAMFileHeader.GroupOrder`,
+  `QueryJobConfiguration.Priority`, and `BlockCompressedInputStream.FileTermination`
+  dropped out of the leading external field guess contexts.
+- Remaining rows now include more enum-like library constants and source/static
+  constant families, especially structural variant enum values and
+  `ReadEnds.FR/RF`.
+
+## External Enum And Byte Constant Family Slice
+
+The next field family contained stable external enum constants plus Picard
+byte-valued orientation constants:
+
+```text
+StructuralVariantType.DEL
+StructuralVariantType.CNV
+GoalType.MAXIMIZE
+Percentile.EstimationType.R_1
+ReadEnds.FR
+ReadEnds.RF
+```
+
+These are library facts rather than resolver heuristics. `StructuralVariantType`
+and `GoalType` are external enum-like receivers, `Percentile.EstimationType` is
+an external nested enum family, and `ReadEnds` exposes byte constants used as
+orientation keys.
+
+The generalized rule added is:
+
+- known external enum receiver types produce enum-typed constants;
+- known external outer types may expose nested enum families;
+- known non-enum static constant owners, such as `ReadEnds`, may provide typed
+  primitive constants;
+- receiver canonicalization maps snake-case unresolved owner names back to the
+  external model before field typing.
+
+This belongs in `stdlib` external field typing and receiver canonicalization.
+Resolver consumes the modeled field types through the existing field-access type
+path. Lowering is not involved.
+
+The generalized regression tests added or strengthened are:
+
+- `resolver_uses_known_external_enum_and_byte_constant_families_for_overloads`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_known_external_enum_and_byte_constant_families_for_overloads --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unresolved_field_accesses	323
+external_api_explained_field_accesses	323
+unexplained_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	941
+external_field_guesses	261
+external_api_return_nullability_facts	7170
+total_facts	112040
+top_external_field_guess_contexts
+CNV	structural_variant_type	JointGermlineCNVSegmentation	buildVariantContext	2
+EstimationType	percentile	CanonicalSVCollapser	collapseInterval	2
+FR	read_ends	MarkDuplicatesSparkUtils	handlePairs	2
+FR	read_ends	Pair	getOrientation	2
+MAXIMIZE	goal_type	OptimizationUtils	max	2
+RF	read_ends	MarkDuplicatesSparkUtils	handlePairs	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	289
+external_api_explained_field_accesses	289
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	941
+external_field_guesses	237
+external_api_return_nullability_facts	7170
+total_facts	111982
+top_external_field_guess_contexts
+ARGUMENTS_POSITIONAL	template_properties	GATKWDLWorkUnitHandler	processPositionalArguments	2
+BAM	reads_format_write_option	ReadsSparkSink	writeReads	2
+GENOTYPE_ALLELE_DEPTHS	VCFConstants	VariantsToTable	addGenotypeFieldsToRecords	2
+GENOTYPE_CONCORDANCE	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HEADER_FIELDS	v_c_f_header	VariantsToTable	onTraversalStart	2
+HET_PPV	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HET_SENSITIVITY	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HOMVAR_PPV	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HOMVAR_SENSITIVITY	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+INDEX_ON_THE_FLY	EnumSet	GatherVcfsCloud	gatherConventionally	2
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `323` to `289`.
+- Conservative external field guesses moved from `261` to `237`.
+- Structural variant enum constants, `GoalType.MAXIMIZE`,
+  `Percentile.EstimationType.R_1`, and `ReadEnds` orientation constants dropped
+  out of the leading field guess contexts.
+- Remaining rows are now dominated by source/static constant families,
+  `EnumSet` receiver-shape cases, VCF constants, and metrics/header constants.
+
+## Collection Element Type-Qualifier Collision Slice
+
+The next recurring receiver-shape issue was `Options.INDEX_ON_THE_FLY` in
+methods that also have a local collection named `options`:
+
+```java
+final EnumSet<Options> options = ...;
+options.add(Options.INDEX_ON_THE_FLY);
+```
+
+Java distinguishes the type qualifier `Options` from the local variable
+`options`, but after normalization the resolver can see the field access as if
+it were on the local `EnumSet<Options>`. Before this slice, the benchmark
+recorded rows such as:
+
+```text
+INDEX_ON_THE_FLY	EnumSet	GatherVcfsCloud	gatherConventionally	2
+```
+
+The generalized rule added is:
+
+- when resolver sees a field access on a collection-like receiver with a known
+  element type, it may ask the external field model whether the field is a
+  static constant on the element type;
+- if the element type owns the constant, resolver uses the element type as the
+  field type and does not record a field miss;
+- external API knowledge remains in `stdlib`; resolver only performs the Java
+  lookup recovery using available type evidence.
+
+This handles parser/name-normalization loss without adding a lowering special
+case. It is deliberately constrained to collection-like receivers with explicit
+element types and modeled constants on that element type.
+
+The generalized regression test added is:
+
+- `resolver_prefers_external_type_qualifier_over_same_snake_case_local_for_static_constants`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_prefers_external_type_qualifier_over_same_snake_case_local_for_static_constants --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unresolved_field_accesses	289
+external_api_explained_field_accesses	289
+unexplained_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	941
+external_field_guesses	237
+external_api_return_nullability_facts	7170
+total_facts	111982
+top_external_field_guess_contexts
+INDEX_ON_THE_FLY	EnumSet	GatherVcfsCloud	gatherConventionally	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	280
+external_api_explained_field_accesses	280
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	941
+external_field_guesses	229
+external_api_return_nullability_facts	7170
+total_facts	111965
+top_external_field_guess_contexts
+ARGUMENTS_POSITIONAL	template_properties	GATKWDLWorkUnitHandler	processPositionalArguments	2
+BAM	reads_format_write_option	ReadsSparkSink	writeReads	2
+GENOTYPE_ALLELE_DEPTHS	VCFConstants	VariantsToTable	addGenotypeFieldsToRecords	2
+GENOTYPE_CONCORDANCE	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HEADER_FIELDS	v_c_f_header	VariantsToTable	onTraversalStart	2
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `289` to `280`.
+- Conservative external field guesses moved from `237` to `229`.
+- `INDEX_ON_THE_FLY` on `EnumSet<Options>` dropped out of the leading field
+  guess contexts.
+- Remaining leading rows are now mostly source/static constants and stable
+  library constants such as VCF keys, header constants, SAM constants, and
+  template property names.
+
+## Stable External Static Constant Family Slice
+
+The next leading field rows were stable external static constants rather than
+lowering behavior:
+
+```text
+ARGUMENTS_POSITIONAL	template_properties	GATKWDLWorkUnitHandler	processPositionalArguments	2
+BAM	reads_format_write_option	ReadsSparkSink	writeReads	2
+GENOTYPE_ALLELE_DEPTHS	VCFConstants	VariantsToTable	addGenotypeFieldsToRecords	2
+MAX_PHRED_SCORE	s_a_m_utils	BAQ	initializeCachedData	2
+UNKNOWN_SEQUENCE_LENGTH	s_a_m_sequence_record	SequenceDictionaryUtils	sequenceRecordsAreEquivalent	2
+NULL_QUALS	SAMRecord	...
+```
+
+The generalized rule added is:
+
+- stable external static constants are modeled as typed external field facts;
+- receiver aliases such as `template_properties`, `s_a_m_utils`, and
+  `reads_format_write_option` canonicalize to the same external model as their
+  Java type names;
+- string, primitive, byte-array, and enum-like constants keep their Java types
+  so overload resolution does not rely on a broad "all constants are strings"
+  fallback;
+- resolver consumes the modeled field types through the existing field-access
+  path, and lowering is not involved.
+
+The generalized regression tests strengthened are:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --test semantic_facts --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unresolved_field_accesses	280
+external_api_explained_field_accesses	280
+unexplained_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	941
+external_field_guesses	229
+external_api_return_nullability_facts	7170
+total_facts	111965
+top_external_field_guess_contexts
+ARGUMENTS_POSITIONAL	template_properties	GATKWDLWorkUnitHandler	processPositionalArguments	2
+BAM	reads_format_write_option	ReadsSparkSink	writeReads	2
+GENOTYPE_ALLELE_DEPTHS	VCFConstants	VariantsToTable	addGenotypeFieldsToRecords	2
+MAX_PHRED_SCORE	s_a_m_utils	BAQ	initializeCachedData	2
+UNKNOWN_SEQUENCE_LENGTH	s_a_m_sequence_record	SequenceDictionaryUtils	sequenceRecordsAreEquivalent	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	248
+external_api_explained_field_accesses	248
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	941
+external_field_guesses	210
+external_api_return_nullability_facts	7170
+total_facts	111914
+top_external_field_guess_contexts
+GENOTYPE_CONCORDANCE	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HEADER_FIELDS	v_c_f_header	VariantsToTable	onTraversalStart	2
+HET_PPV	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HET_SENSITIVITY	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HOMVAR_PPV	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `280` to `248`.
+- Conservative external field guesses moved from `229` to `210`.
+- The selected VCF, SAM, template-property, write-option, SAM utility, and
+  sequence-record constants dropped out of the leading field guess contexts.
+- Remaining leading rows now include metrics constants, VCF header constants,
+  URI/path constants, time-unit constants, and source-looking fields. These
+  should be classified before adding more facts because some likely belong to
+  source lookup or object/field modeling rather than external constants.
+
+## External Header Metric And Core Constant Slice
+
+The next benchmark pass still had stable external constants at the top, mixed
+with source-looking fields:
+
+```text
+GENOTYPE_CONCORDANCE	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HEADER_FIELDS	v_c_f_header	VariantsToTable	onTraversalStart	2
+SECONDS	time_unit	StreamingProcessController	terminate	2
+OutputType	variant_context_writer_builder	GATKVariantContextUtils	createVCFWriter	2
+XT	reserved_tag_constants	AbstractAlignmentMerger	updateCigarForTrimmedOrClippedBases	2
+VALID_BASES_UPPER	sequence_util	...
+```
+
+The generalized rule added is another external API fact slice:
+
+- metrics label constants are typed as `String`;
+- VCF header constant families keep their Java shapes, such as
+  `Set<String>` for `HEADER_FIELDS` and `String` for `REFERENCE_KEY`;
+- Java enum-style constants such as `TimeUnit.SECONDS` are modeled as
+  enum-typed constants;
+- external nested type constants such as
+  `VariantContextWriterBuilder.OutputType` are modeled through the nested enum
+  fact path;
+- utility/file/path constants are typed exactly when the stable external API is
+  known.
+
+This remains in `stdlib`: resolver only consumes field types and semantic
+facts record builtin provenance. No lowering rule was added.
+
+The generalized regression tests strengthened are:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --test semantic_facts --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unresolved_field_accesses	248
+external_api_explained_field_accesses	248
+unexplained_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	941
+external_field_guesses	210
+external_api_return_nullability_facts	7170
+total_facts	111914
+top_external_field_guess_contexts
+GENOTYPE_CONCORDANCE	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HEADER_FIELDS	v_c_f_header	VariantsToTable	onTraversalStart	2
+HET_PPV	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HET_SENSITIVITY	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+HOMVAR_PPV	GenotypeConcordanceSummaryMetrics	SVConcordanceAnnotator	annotate	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	203
+external_api_explained_field_accesses	203
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29344
+external_constructor_guesses	941
+external_field_guesses	185
+external_api_return_nullability_facts	7171
+total_facts	111846
+top_external_field_guess_contexts
+altByte	SliceInfo	AddFlowSNVQuality	generateSidedHmerBaseErrorProbability	2
+cnvCallsFile	DiscoverVariantsFromContigAlignmentsArgumentCollection	StructuralVariantDiscoverer	onTraversalStart	2
+deletionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+insertionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+left	ImmutablePair	VariantRecalibrator	variantLocusChanged	2
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `248` to `203`.
+- Conservative external field guesses moved from `210` to `185`.
+- The remaining leading rows are now mostly source/public-data-looking fields,
+  tuple-style fields, or specific external record fields. The next slice should
+  classify source field lookup, public external data fields, tuple aliases, and
+  record-like receiver modeling before adding another constant batch.
+
+## Pair-Like Left Right Field Alias Slice
+
+The previous benchmark left one tuple-style row in the leading contexts:
+
+```text
+left	ImmutablePair	VariantRecalibrator	variantLocusChanged	2
+```
+
+The translator already modeled pair-like public fields as generic projections
+for `_1`, `_2`, `a`, and `b`. This slice extends the same external field rule
+to the common `left` and `right` aliases:
+
+- `Pair<L, R>.left` and `ImmutablePair<L, R>.left` project `L`;
+- `Pair<L, R>.right` and `ImmutablePair<L, R>.right` project `R`;
+- the rule belongs in the external field model because these are public fields
+  on external tuple-like values;
+- resolver consumes the projected type for overload selection;
+- lowering does not inspect pair field names or caller names.
+
+The generalized regression test strengthened is:
+
+- `resolver_uses_named_tuple_field_type_for_overload_arguments`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_named_tuple_field_type_for_overload_arguments --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_field_accesses	203
+external_api_explained_field_accesses	203
+unexplained_field_accesses	0
+external_field_guesses	185
+top_external_field_guess_contexts
+altByte	SliceInfo	AddFlowSNVQuality	generateSidedHmerBaseErrorProbability	2
+cnvCallsFile	DiscoverVariantsFromContigAlignmentsArgumentCollection	StructuralVariantDiscoverer	onTraversalStart	2
+deletionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+insertionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+left	ImmutablePair	VariantRecalibrator	variantLocusChanged	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unexplained_method_calls	0
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	201
+external_api_explained_field_accesses	201
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29344
+external_constructor_guesses	941
+external_field_guesses	184
+external_api_return_nullability_facts	7171
+total_facts	111843
+top_external_field_guess_contexts
+altByte	SliceInfo	AddFlowSNVQuality	generateSidedHmerBaseErrorProbability	2
+cnvCallsFile	DiscoverVariantsFromContigAlignmentsArgumentCollection	StructuralVariantDiscoverer	onTraversalStart	2
+deletionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+insertionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+length	getSequence	FermiLiteAssemblyHandler	joinContigs	2
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `203` to `201`.
+- Conservative external field guesses moved from `185` to `184`.
+- The `ImmutablePair.left` row disappeared.
+- Remaining leading rows now look dominated by record-like public fields and
+  source/member resolution shapes, so the next slice should classify those
+  before adding more external constants.
+
+## Method-Local Class Symbol Slice
+
+The next classification pass found that some leading rows were not external
+fields at all. For example, GATK contains a method-local source class:
+
+```java
+final class SliceInfo {
+    int[] slice;
+    byte altByte;
+    int sideFlow;
+}
+...
+SliceInfo si = new SliceInfo();
+si.slice = altSlice;
+si.altByte = flowOrder[sideFlow % flowOrderLength];
+si.sideFlow = sideFlow;
+...
+sliceProbs(si.slice, ..., si.sideFlow);
+```
+
+Before this slice, `SliceInfo` fields appeared in the external-field guess
+contexts because `ProgramSymbols` indexed top-level and member nested types but
+not `Stmt::LocalType` declarations inside method bodies.
+
+The generalized resolver rule added is:
+
+- method-local class/interface/enum/record declarations contribute source
+  symbols before resolution;
+- local type fields and default constructors are indexed under the enclosing
+  source type scope;
+- local types nested inside blocks, loops, switches, try/catch/finally, and
+  other statement bodies are discovered recursively;
+- source field lookup then handles reads, writes, constructor calls, and
+  overload arguments normally.
+
+This is a resolver/source-symbol rule. It deliberately does not add external
+facts for source local classes and does not change lowering.
+
+The generalized regression test added is:
+
+- `resolver_uses_method_local_class_fields_for_overload_arguments`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_method_local_class_fields_for_overload_arguments --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41994
+external_api_explained_method_calls	41994
+unresolved_constructors	4185
+external_api_explained_constructors	4185
+unresolved_field_accesses	201
+external_api_explained_field_accesses	201
+unexplained_field_accesses	0
+external_field_guesses	184
+top_external_field_guess_contexts
+altByte	SliceInfo	AddFlowSNVQuality	generateSidedHmerBaseErrorProbability	2
+sideFlow	SliceInfo	AddFlowSNVQuality	generateSidedHmerBaseErrorProbability	2
+slice	SliceInfo	AddFlowSNVQuality	generateSidedHmerBaseErrorProbability	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41992
+external_api_explained_method_calls	41992
+unexplained_method_calls	0
+unresolved_constructors	4183
+external_api_explained_constructors	4183
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	193
+external_api_explained_field_accesses	193
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	939
+external_field_guesses	179
+external_api_return_nullability_facts	7171
+total_facts	111822
+top_external_field_guess_contexts
+cnvCallsFile	DiscoverVariantsFromContigAlignmentsArgumentCollection	StructuralVariantDiscoverer	onTraversalStart	2
+deletionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+insertionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+length	getSequence	FermiLiteAssemblyHandler	joinContigs	2
+overallGCP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `201` to `193`.
+- Conservative external field guesses moved from `184` to `179`.
+- Unresolved constructors moved from `4185` to `4183` because default
+  constructors for method-local classes are now indexed.
+- Unresolved method calls moved from `41994` to `41992`, likely from calls whose
+  arguments became typed through local source fields.
+- The remaining leading rows are now mostly external/native public data holders
+  such as `ReadDataHolder`, source argument-collection fields that require
+  nested/import owner analysis, and a few unresolved expression-shape cases such
+  as `.length` on call results.
+
+## External Native Public Data Holder Slice
+
+After local source classes were indexed, the leading external field rows were
+native or library data holders with public fields:
+
+```text
+deletionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+insertionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+overallGCP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+readBases	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+readQuals	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+value	SAMBinaryTagAndValue	SAMRecordSparkCodec	encode	2
+```
+
+The generalized rule added is:
+
+- known external/native public data holders have explicit Java field types;
+- read sequence and quality holder fields are typed as `byte[]`;
+- generic binary tag payloads are typed as `Object`;
+- native argument settings such as `avxLevel` and `openMPSetting` are typed as
+  their declared external enum-like setting types;
+- resolver consumes these external field types for overload selection;
+- semantic facts record builtin provenance for these modeled external fields.
+
+This stays in the external fact model. It does not introduce a rule for arbitrary
+public fields and does not add lowering logic.
+
+The generalized regression tests strengthened are:
+
+- `resolver_uses_known_external_public_data_fields_for_overload_arguments`
+- `known_external_field_constants_do_not_use_conservative_field_fallbacks`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_known_external_public_data_fields_for_overload_arguments --test resolve_calls --quiet
+cargo test known_external_field_constants_do_not_use_conservative_field_fallbacks --test semantic_facts --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41992
+external_api_explained_method_calls	41992
+unresolved_constructors	4183
+external_api_explained_constructors	4183
+unresolved_field_accesses	193
+external_api_explained_field_accesses	193
+unexplained_field_accesses	0
+external_field_guesses	179
+top_external_field_guess_contexts
+deletionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+insertionGOP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+overallGCP	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+readBases	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+readQuals	ReadDataHolder	VectorLoglessPairHMM	computeLog10Likelihoods	2
+value	SAMBinaryTagAndValue	SAMRecordSparkCodec	encode	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41992
+external_api_explained_method_calls	41992
+unexplained_method_calls	0
+unresolved_constructors	4183
+external_api_explained_constructors	4183
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	170
+external_api_explained_field_accesses	170
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29342
+external_constructor_guesses	939
+external_field_guesses	164
+external_api_return_nullability_facts	7171
+total_facts	111784
+top_external_field_guess_contexts
+cnvCallsFile	DiscoverVariantsFromContigAlignmentsArgumentCollection	StructuralVariantDiscoverer	onTraversalStart	2
+length	getSequence	FermiLiteAssemblyHandler	joinContigs	2
+truthIntervalPadding	DiscoverVariantsFromContigAlignmentsArgumentCollection	SvDiscoveryUtils	evaluateIntervalsAndNarls	2
+truthVCF	DiscoverVariantsFromContigAlignmentsArgumentCollection	SvDiscoveryUtils	evaluateIntervalsAndNarls	2
+ACCEPT_CASE_INSENSITIVE_PROPERTIES	mapper_feature	HtsgetReader	getObjectMapper	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `193` to `170`.
+- Conservative external field guesses moved from `179` to `164`.
+- The `ReadDataHolder` and `SAMBinaryTagAndValue` rows dropped from the leading
+  contexts.
+- Remaining leading rows now split between source nested/import owner
+  resolution, stable external constants not yet modeled, and expression-shape
+  inference such as `.length` on call results.
+
+## Imported Nested Source Type Slice
+
+The leading source-looking field rows after the native data-holder slice were
+fields on an imported nested source class:
+
+```text
+cnvCallsFile	DiscoverVariantsFromContigAlignmentsArgumentCollection	StructuralVariantDiscoverer	onTraversalStart	2
+truthIntervalPadding	DiscoverVariantsFromContigAlignmentsArgumentCollection	SvDiscoveryUtils	evaluateIntervalsAndNarls	2
+truthVCF	DiscoverVariantsFromContigAlignmentsArgumentCollection	SvDiscoveryUtils	evaluateIntervalsAndNarls	2
+```
+
+The generalized resolver rule added is:
+
+- the benchmark source index records nested source types by their Java qualified
+  name, such as `Outer.Params`;
+- exact nested imports make that nested type visible by its simple name;
+- wildcard and package-peer expansion only expose top-level Java types, so an
+  exact import from a package does not accidentally import unrelated nested
+  classes;
+- nested source types can resolve dependencies on sibling nested types under
+  the same outer class, which is needed for functional-interface constructor
+  parameters such as `Outer.Writer` depending on `Outer.WriteFunc`;
+- resolver consumes these source symbols and constructor signatures. No
+  external facts or lowering rules are added for source nested classes.
+
+During this slice an intermediate benchmark run exposed a diagnostic regression
+for `new Writer(..., this::encode, ...)`: the nested source `Writer` became
+visible, but its sibling functional interface `WriteFunc` was not visible to
+constructor scoring. The final rule fixes that as a source-symbol dependency
+problem instead of treating `Writer` as an external fallback.
+
+The generalized regression tests added are:
+
+- `resolver_benchmark_resolves_imported_nested_source_instance_fields_across_files`
+- `resolver_benchmark_does_not_import_incidental_nested_package_types`
+- `resolver_benchmark_resolves_nested_source_constructor_with_sibling_functional_interface`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_benchmark_does_not_import_incidental_nested_package_types --test resolve_calls --quiet
+cargo test resolver_benchmark_resolves_nested_source_constructor_with_sibling_functional_interface --test resolve_calls --quiet
+cargo test resolver_benchmark_resolves_imported_nested_source_instance_fields_across_files --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41992
+external_api_explained_method_calls	41992
+unresolved_constructors	4183
+external_api_explained_constructors	4183
+unresolved_field_accesses	170
+external_api_explained_field_accesses	170
+unexplained_field_accesses	0
+external_field_guesses	164
+top_external_field_guess_contexts
+cnvCallsFile	DiscoverVariantsFromContigAlignmentsArgumentCollection	StructuralVariantDiscoverer	onTraversalStart	2
+length	getSequence	FermiLiteAssemblyHandler	joinContigs	2
+truthIntervalPadding	DiscoverVariantsFromContigAlignmentsArgumentCollection	SvDiscoveryUtils	evaluateIntervalsAndNarls	2
+truthVCF	DiscoverVariantsFromContigAlignmentsArgumentCollection	SvDiscoveryUtils	evaluateIntervalsAndNarls	2
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41949
+external_api_explained_method_calls	41949
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4177
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	157
+external_api_explained_field_accesses	157
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29305
+external_constructor_guesses	933
+external_field_guesses	154
+external_api_return_nullability_facts	7170
+total_facts	111669
+top_external_field_guess_contexts
+length	getSequence	FermiLiteAssemblyHandler	joinContigs	2
+ACCEPT_CASE_INSENSITIVE_PROPERTIES	mapper_feature	HtsgetReader	getObjectMapper	1
+AVRO	data_format	StorageAPIAvroReader	<init>	1
+BIGNUMBER_STAR	tar_archive_output_stream	IOUtils	writeTarGz	1
+BYTE_ARRAY	data_series_type	CRAMAnalyzer	analyzeTagEncodingMap	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- The imported nested argument-collection field rows are no longer leading
+  unresolved field contexts.
+- Unresolved field accesses moved from `170` to `157`.
+- Conservative external field guesses moved from `164` to `154`.
+- Unresolved constructors moved from `4183` to `4177` because nested source
+  constructor dependencies now expose enough type information for selected
+  overloads.
+- Remaining leading rows are now mostly external constants and expression
+  shape inference, such as `.length` on call results.
+
+## Primitive Stream Mapper And Unknown Length Slice
+
+After imported nested source types were resolved, the leading remaining
+expression-shape field rows included Java `.length` on call results:
+
+```text
+length	getSequence	FermiLiteAssemblyHandler	joinContigs	2
+length	values	2
+```
+
+The generalized rules added are:
+
+- resolver target-types lambda parameters for `Stream<T>.mapToInt`,
+  `Stream<T>.mapToLong`, and `Stream<T>.mapToDouble` using the same stream
+  element propagation already used for `Stream<T>.map`;
+- `stdlib` models primitive stream mapper return types and primitive stream
+  `sum()` terminal return types with builtin provenance;
+- resolver treats `.length` on an otherwise unknown call result as Java array
+  length and types the field value as `int`. The array element type remains
+  unknown; this does not add a lowering rule or a named external-library fact.
+
+This slice deliberately keeps responsibilities separated:
+
+- stream lambda parameter target typing belongs in resolver;
+- primitive stream return/nullability/provenance belongs in `stdlib`;
+- `.length` field typing is a resolver Java-expression rule;
+- lowering remains unchanged.
+
+The generalized regression tests added are:
+
+- `resolver_target_types_primitive_stream_mapper_lambda_before_array_length_field`
+- `resolver_keeps_raw_primitive_stream_mapper_lambda_parameter_conservative`
+- `resolver_treats_unknown_call_result_length_as_java_array_length`
+- `primitive_stream_mapper_and_sum_facts_are_read_only_non_null_builtin`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_target_types_primitive_stream_mapper_lambda_before_array_length_field --test resolve_calls --quiet
+cargo test resolver_keeps_raw_primitive_stream_mapper_lambda_parameter_conservative --test resolve_calls --quiet
+cargo test resolver_treats_unknown_call_result_length_as_java_array_length --test resolve_calls --quiet
+cargo test primitive_stream_mapper_and_sum_facts_are_read_only_non_null_builtin --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41949
+external_api_explained_method_calls	41949
+unresolved_constructors	4177
+external_api_explained_constructors	4177
+unresolved_field_accesses	157
+external_api_explained_field_accesses	157
+unexplained_field_accesses	0
+external_api_guesses	29305
+external_constructor_guesses	933
+external_field_guesses	154
+external_api_return_nullability_facts	7170
+total_facts	111669
+top_external_field_guess_contexts
+length	getSequence	FermiLiteAssemblyHandler	joinContigs	2
+ACCEPT_CASE_INSENSITIVE_PROPERTIES	mapper_feature	HtsgetReader	getObjectMapper	1
+AVRO	data_format	StorageAPIAvroReader	<init>	1
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	152
+external_api_explained_field_accesses	152
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29128
+external_constructor_guesses	933
+external_field_guesses	151
+external_api_return_nullability_facts	7361
+total_facts	111760
+top_external_field_guess_contexts
+ACCEPT_CASE_INSENSITIVE_PROPERTIES	mapper_feature	HtsgetReader	getObjectMapper	1
+AVRO	data_format	StorageAPIAvroReader	<init>	1
+BIGNUMBER_STAR	tar_archive_output_stream	IOUtils	writeTarGz	1
+BYTE_ARRAY	data_series_type	CRAMAnalyzer	analyzeTagEncodingMap	1
+C	calculateSegmentCost	Segment	<init>	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `157` to `152`.
+- Conservative external field guesses moved from `154` to `151`.
+- The `length/getSequence` and `length/values` rows dropped out of the leading
+  field receivers.
+- Unresolved method-call facts increased from `41949` to `42032`, and
+  constructors from `4177` to `4178`, because primitive stream mapper lambda
+  bodies are now traversed and their internal external calls are recorded
+  instead of being skipped. These are all still externally explained.
+- External API guesses moved from `29305` to `29128` because primitive stream
+  mapper and terminal methods now have builtin external-model provenance.
+
+## Stable External Constants And Native Argument Fields Slice
+
+After the primitive stream and `.length` slice, the leading field rows were
+stable external constants and public native-argument holder fields:
+
+```text
+Config	genotypeArgs	2
+Slice	EMBEDDED_REFERENCE_ABSENT_CONTENT_ID	2
+SupportedHeaderLineType	FORMAT	2
+SupportedHeaderLineType	INFO	2
+Option	CACHE_FILE_BASED_INDEXES	1
+Option	INCLUDE_SOURCE_IN_RECORDS	1
+PDHMMNativeArguments	maxNumberOfThreads	1
+PairHMMNativeArguments	maxNumberOfThreads	1
+PairHMMNativeArguments	useDoublePrecision	1
+```
+
+The generalized external-model rules added are:
+
+- stable external static constants have typed field facts:
+  - CRAM `Slice.EMBEDDED_REFERENCE_ABSENT_CONTENT_ID` as `int`;
+  - tabix `TabixFormat.GENERIC_FLAGS` as `int`;
+  - reader factory `Option` constants as `Option`;
+  - VCF `SupportedHeaderLineType` constants as `SupportedHeaderLineType`;
+  - genotype concordance tag constants as `String`;
+  - writer builder default option sets as `EnumSet<Options>`;
+  - cloud HTTP/HTTPS provider schemes as `String`;
+  - HTTP provider default settings as `HttpFileSystemProviderSettings`;
+- native PairHMM/PDHMM argument holder public fields are modeled as ordinary
+  external public data fields with primitive or setting types.
+
+This stays entirely in `stdlib` external facts. Resolver consumes the modeled
+field types for overload resolution and semantic facts record builtin
+provenance. No lowering rule or GATK-specific branch was added.
+
+The generalized regression tests strengthened are:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `resolver_uses_known_external_public_data_fields_for_overload_arguments`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test resolver_uses_known_external_public_data_fields_for_overload_arguments --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	152
+external_api_explained_field_accesses	152
+unexplained_field_accesses	0
+external_api_guesses	29128
+external_constructor_guesses	933
+external_field_guesses	151
+external_api_return_nullability_facts	7361
+total_facts	111760
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Slice	EMBEDDED_REFERENCE_ABSENT_CONTENT_ID	2
+SupportedHeaderLineType	FORMAT	2
+SupportedHeaderLineType	INFO	2
+Option	CACHE_FILE_BASED_INDEXES	1
+Option	INCLUDE_SOURCE_IN_RECORDS	1
+PDHMMNativeArguments	maxNumberOfThreads	1
+PairHMMNativeArguments	maxNumberOfThreads	1
+PairHMMNativeArguments	useDoublePrecision	1
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	132
+external_api_explained_field_accesses	132
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29128
+external_constructor_guesses	933
+external_field_guesses	132
+external_api_return_nullability_facts	7361
+total_facts	111721
+top_external_field_guess_targets
+TabixFormat	ZERO_BASED	5
+Config	genotypeArgs	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+File	separator	1
+GenotypeLikelihoodsAllelePair	alleleIndex1	1
+GenotypeLikelihoodsAllelePair	alleleIndex2	1
+HaplotypeDataHolder	haplotypePDBases	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `152` to `132`.
+- Conservative external field guesses moved from `151` to `132`.
+- The selected CRAM, VCF, reader-option, cloud scheme, writer option set, and
+  native argument rows dropped out of the leading targets.
+- Remaining leading field rows are still a mix of stable external constants,
+  external public data holders, and collection/static-qualifier ambiguities.
+
+## Secondary External Constants And Public Data Fields Slice
+
+After the stable external constants slice, the next leading rows included
+additional stable library constants and remaining public data-holder fields:
+
+```text
+TabixFormat	ZERO_BASED	5
+ReservedTagConstants	PROGRAM_GROUP_ID	1
+ReservedTagConstants	READ_GROUP_ID	1
+SAMBinaryTagAndValue	tag	1
+SAMRecord	NULL_SEQUENCE	1
+HaplotypeDataHolder	haplotypePDBases	1
+IndexType	TABIX	1
+IndexBalanceApproach	FOR_SEEK_TIME	1
+```
+
+The generalized external-model rules added are:
+
+- tabix coordinate constants such as `ZERO_BASED` are typed as `int`;
+- Java/logging and indexing enum-like constants are typed as their enum owner
+  types, including `Level`, `Locale`, `ElementKind`, `IndexType`, and
+  `IndexBalanceApproach`;
+- `GenomicsDBExportConfiguration.ExportConfiguration` is treated as an
+  external nested type qualifier;
+- common SAM/GATK constants such as reserved tag names, FASTQ mate suffixes,
+  `SAMRecord.NULL_SEQUENCE`, and `ReadLikelihoodCalculationEngine.MAX_REPEAT_LENGTH`
+  are typed in the external model;
+- remaining native/public data-holder fields such as `SAMBinaryTagAndValue.tag`
+  and `HaplotypeDataHolder.haplotypePDBases` are modeled as public data fields.
+
+This remains a `stdlib` fact-model change. Resolver only consumes the typed
+facts for overload resolution, semantic facts record builtin provenance, and
+lowering is unchanged.
+
+The generalized regression tests strengthened are:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `resolver_uses_known_external_public_data_fields_for_overload_arguments`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test resolver_uses_known_external_public_data_fields_for_overload_arguments --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	132
+external_api_explained_field_accesses	132
+unexplained_field_accesses	0
+external_api_guesses	29128
+external_constructor_guesses	933
+external_field_guesses	132
+external_api_return_nullability_facts	7361
+total_facts	111721
+top_external_field_guess_targets
+TabixFormat	ZERO_BASED	5
+Config	genotypeArgs	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+File	separator	1
+GenotypeLikelihoodsAllelePair	alleleIndex1	1
+GenotypeLikelihoodsAllelePair	alleleIndex2	1
+HaplotypeDataHolder	haplotypePDBases	1
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	106
+external_api_explained_field_accesses	106
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29129
+external_constructor_guesses	933
+external_field_guesses	106
+external_api_return_nullability_facts	7361
+total_facts	111670
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+File	separator	1
+GenotypeLikelihoodsAllelePair	alleleIndex1	1
+GenotypeLikelihoodsAllelePair	alleleIndex2	1
+ReadLikelihoodCalculationEngine	DEFAULT_EXPECTED_ERROR_RATE_PER_BASE	1
+SVIntervalTree	_2	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `132` to `106`.
+- Conservative external field guesses moved from `132` to `106`.
+- The selected tabix, logging/locale, FASTQ, genomics nested-type, SAM, reserved
+  tag, and public-data-holder rows dropped out of the leading field targets.
+- External API guesses moved from `29128` to `29129`; this one-count increase is
+  outside the selected field rows, while the selected field fact classes moved
+  from conservative field guesses to builtin modeled facts.
+
+## External Strings, Data-Holder Fields, And Nested Type Qualifier Slice
+
+The next leading field rows included a mix of stable external API facts and
+rows that look like resolver/type-shape issues. This slice only promoted facts
+where the external boundary is clear:
+
+```text
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+File	separator	1
+GenotypeLikelihoodsAllelePair	alleleIndex1	1
+GenotypeLikelihoodsAllelePair	alleleIndex2	1
+ReadLikelihoodCalculationEngine	DEFAULT_EXPECTED_ERROR_RATE_PER_BASE	1
+SWNativeAlignerResult	alignment_offset	1
+SWNativeAlignerResult	cigar	1
+VariantContext	NO_LOG10_PERROR	1
+VCFConstants	NULL_ALLELE	1
+SpecialArgumentsCollection	SHOW_HIDDEN	1
+Storage	SignUrlOption	1
+```
+
+The generalized external-model rules added are:
+
+- external string constants such as allele display strings, VCF null allele
+  sentinels, and `File.separator` are typed as `String`;
+- external numeric and boolean constants used as API arguments are typed as
+  primitive `double` or `boolean`;
+- simple public data-holder fields on external result structs are modeled with
+  their Java field types;
+- external nested type qualifiers such as `Storage.SignUrlOption` are modeled
+  as nested type facts rather than field reads.
+
+This remains a `stdlib`/external fact-model change. Resolver consumes these
+facts for overload selection, semantic facts record builtin provenance, and
+lowering remains unchanged.
+
+The generalized regression tests strengthened are:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `resolver_uses_known_external_public_data_fields_for_overload_arguments`
+- `resolver_treats_imported_external_nested_types_as_type_qualifiers`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test resolver_uses_known_external_public_data_fields_for_overload_arguments --test resolve_calls --quiet
+cargo test resolver_treats_imported_external_nested_types_as_type_qualifiers --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	106
+external_api_explained_field_accesses	106
+unexplained_field_accesses	0
+external_api_guesses	29129
+external_constructor_guesses	933
+external_field_guesses	106
+external_api_return_nullability_facts	7361
+total_facts	111670
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Allele	NON_REF_STRING	1
+Allele	UNSPECIFIED_ALTERNATE_ALLELE_STRING	1
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+File	separator	1
+GenotypeLikelihoodsAllelePair	alleleIndex1	1
+GenotypeLikelihoodsAllelePair	alleleIndex2	1
+ReadLikelihoodCalculationEngine	DEFAULT_EXPECTED_ERROR_RATE_PER_BASE	1
+SVIntervalTree	_2	1
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	94
+external_api_explained_field_accesses	94
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29117
+external_constructor_guesses	933
+external_field_guesses	94
+external_api_return_nullability_facts	7360
+total_facts	111634
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+File	separatorChar	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+access_mode	READ	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `106` to `94`.
+- Conservative external field guesses moved from `106` to `94`.
+- External API guesses moved from `29129` to `29117`.
+- The promoted facts are stable external constants, public data-holder fields,
+  or nested type qualifiers. Remaining rows such as `Config.genotypeArgs`,
+  `EvidenceTargetLink._2`, `SVIntervalTree._2`, `Set.INFO`,
+  `T.contigIndex`, and `TruthAndCallStates.*` should be inspected as resolver,
+  source-type, generic, or tuple/member-shape problems before modeling them as
+  external facts.
+
+## Common External Static Constant Slice
+
+After the nested-type and data-holder slice, several leading field guesses were
+stable Java/JDK or library static constants rather than source members:
+
+```text
+File	separatorChar	1
+StandardOpenOption	CREATE_NEW	1
+AccessMode	READ	1
+AccessMode	WRITE	1
+PosixFilePermission	GROUP_EXECUTE	1
+HttpMethod	GET	1
+MapperFeature	ACCEPT_CASE_INSENSITIVE_PROPERTIES	1
+DataFormat	AVRO	1
+DataSeriesType	BYTE_ARRAY	1
+CloudStorageConfiguration	DEFAULT	1
+Spliterator	IMMUTABLE	1
+SBIIndexWriter	DEFAULT_GRANULARITY	1
+TarArchiveOutputStream	BIGNUMBER_STAR	1
+NullOutputStream	INSTANCE	1
+```
+
+The generalized external-model rules added are:
+
+- JDK enum-style constants used as API arguments are typed as their enum owner
+  types, including `StandardOpenOption`, `AccessMode`, and
+  `PosixFilePermission`;
+- common library enum-style constants are typed as named external boundary
+  types, including HTTP, mapper, cloud-storage, and genomics data-format
+  constants;
+- integer and long bitmask/configuration constants such as spliterator flags,
+  compression levels, tar big-number modes, and SBI index granularity are typed
+  as Java primitives;
+- singleton external stream objects such as `NullOutputStream.INSTANCE` are
+  typed as their usable boundary supertype.
+
+This is still an external fact-model change in `stdlib`. Resolver uses the
+facts for overload selection, semantic analysis records builtin provenance, and
+lowering remains unchanged.
+
+The generalized regression tests strengthened are:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	94
+external_api_explained_field_accesses	94
+unexplained_field_accesses	0
+external_api_guesses	29117
+external_constructor_guesses	933
+external_field_guesses	94
+external_api_return_nullability_facts	7360
+total_facts	111634
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+File	separatorChar	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+access_mode	READ	1
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	71
+external_api_explained_field_accesses	71
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29117
+external_constructor_guesses	933
+external_field_guesses	71
+external_api_return_nullability_facts	7360
+total_facts	111588
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+NullOutputStream	NULL_OUTPUT_STREAM	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TarArchiveOutputStream	LONGFILE_GNU	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `94` to `71`.
+- Conservative external field guesses moved from `94` to `71`.
+- The selected JDK/library constant rows dropped from the top field targets.
+- Remaining rows are now increasingly mixed with source member and imported
+  static member issues. For example, `Config.*`, `TruthAndCallStates.*`,
+  `EvidenceTargetLink._2`, and `SVIntervalTree._2` should be handled through
+  source lookup, generic/nested member modeling, or tuple-like member semantics
+  before adding more external fallback facts.
+
+## External Runtime Defaults And Nested Enum Qualifier Slice
+
+The next clean external rows were common Java and library static constants:
+
+```text
+Math	PI	5
+SystemUtils	OS_ARCH	2
+SystemUtils	IS_OS_MAC	1
+SystemUtils	IS_OS_LINUX	1
+Defaults	COMPRESSION_LEVEL	1
+Defaults	USE_ASYNC_IO_READ_FOR_SAMTOOLS	1
+Defaults	USE_ASYNC_IO_WRITE_FOR_SAMTOOLS	1
+Defaults	USE_ASYNC_IO_WRITE_FOR_TRIBBLE	1
+RetryHandler	DEFAULT_RETRYABLE_HTTP_CODES	1
+RetryHandler	DEFAULT_RETRYABLE_EXCEPTIONS	1
+RetryHandler	DEFALT_RETRYABLE_MESSAGES	1
+ValidationStringency	LENIENT	1
+IndexFactory	IndexType	1
+IndexFactory	IndexBalanceApproach	1
+NullOutputStream	NULL_OUTPUT_STREAM	1
+TarArchiveOutputStream	LONGFILE_GNU	1
+```
+
+The generalized external-model rules added are:
+
+- Java math constants such as `Math.PI` are primitive `double`;
+- Apache commons system constants expose string and boolean facts;
+- HTSJDK defaults expose primitive configuration values;
+- retry-handler static collections are modeled as opaque external object
+  boundaries instead of lowering-specific names;
+- validation stringency and index factory nested enum constants are typed at
+  the external fact layer;
+- null-output stream and tar long-file mode constants are modeled as ordinary
+  external static constants.
+
+This remains a `stdlib` external fact-model change. Resolver consumes typed
+fields and nested type facts for overload resolution. Semantic facts record
+builtin provenance. Lowering remains unchanged.
+
+The generalized regression tests strengthened are:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	71
+external_api_explained_field_accesses	71
+unexplained_field_accesses	0
+external_api_guesses	29117
+external_constructor_guesses	933
+external_field_guesses	71
+external_api_return_nullability_facts	7360
+total_facts	111588
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+NullOutputStream	NULL_OUTPUT_STREAM	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TarArchiveOutputStream	LONGFILE_GNU	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	48
+external_api_explained_field_accesses	48
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29115
+external_constructor_guesses	933
+external_field_guesses	48
+external_api_return_nullability_facts	7360
+total_facts	111539
+top_external_field_guess_targets
+Config	genotypeArgs	2
+sam_reader_factory	Option	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+bwa_mem_aligner	MEM_F_ALL	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `71` to `48`.
+- Conservative external field guesses moved from `71` to `48`.
+- External API guesses moved from `29117` to `29115`.
+- Remaining rows are now dominated by source member/type-shape issues and a few
+  external constants that need separate classification. Examples:
+  `Config.*`, `TruthAndCallStates.*`, `EvidenceTargetLink._2`, and
+  `SVIntervalTree._2` should not be modeled as external facts; `sam_reader_factory.Option`,
+  `VCFCompoundHeaderLine.SupportedHeaderLineType`, and `BwaMemAligner.MEM_F_ALL`
+  are candidates for a later external/static-member slice after confirming
+  their generalized API role.
+
+## External Static Members And Generated Nested Types Slice
+
+The next selected rows were stable external static members or nested type
+qualifiers:
+
+```text
+SamReaderFactory	Option	2
+VCFCompoundHeaderLine	SupportedHeaderLineType	4
+BwaMemAligner	MEM_F_ALL	1
+FileCardinalityWriteOption	MULTIPLE	1
+FileCardinalityWriteOption	SINGLE	1
+GenotypesContext	NO_GENOTYPES	1
+FeatureCodecHeader	NO_HEADER_END	1
+MessageDigestAlgorithms	SHA_256	1
+SAMReadGroupRecord	READ_GROUP_ID_TAG	1
+SAMReadGroupRecord	READ_GROUP_SAMPLE_TAG	1
+NullWriter	INSTANCE	1
+DeserializationFeature	UNWRAP_ROOT_VALUE	1
+GenomicsDBImportConfiguration	ImportConfiguration	1
+GenomicsDBImportConfiguration	Partition	1
+```
+
+The generalized external-model rules added are:
+
+- external nested type qualifiers can be modeled independently of method
+  lowering, including nested option/header/generated protobuf builder types;
+- external enum-style constants used as API arguments are typed as their owner
+  types;
+- external primitive and string constants used as flags, sentinels, or digest
+  algorithm names are typed in the fact model;
+- singleton external writer/null objects are typed as their usable boundary
+  supertype.
+
+Resolver consumes these facts for field and overload resolution. Semantic facts
+record builtin provenance. Lowering remains unchanged.
+
+The generalized regression tests strengthened are:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `resolver_treats_imported_external_nested_types_as_type_qualifiers`
+- `external_field_provenance_uses_builtin_model_for_known_field_types`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test resolver_treats_imported_external_nested_types_as_type_qualifiers --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	48
+external_api_explained_field_accesses	48
+unexplained_field_accesses	0
+external_api_guesses	29115
+external_constructor_guesses	933
+external_field_guesses	48
+external_api_return_nullability_facts	7360
+total_facts	111539
+top_external_field_guess_targets
+Config	genotypeArgs	2
+sam_reader_factory	Option	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+bwa_mem_aligner	MEM_F_ALL	1
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	30
+external_api_explained_field_accesses	30
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29115
+external_constructor_guesses	933
+external_field_guesses	30
+external_api_return_nullability_facts	7360
+total_facts	111503
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+calculateSegmentCost	C	1
+characteristics	IDENTITY_FINISH	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `48` to `30`.
+- Conservative external field guesses moved from `48` to `30`.
+- Remaining leading rows are mostly not clean external-library facts:
+  source/member rows such as `Config.*`, local result fields such as
+  `calculateSegmentCost.C`, tuple-like fields such as `_2`, enum/interface
+  default-method constants such as `characteristics.*`, and generated/Scala
+  singleton patterns such as `class_tag$.MODULE$` need separate resolver or
+  semantic modeling before adding any further facts.
+
+## External Generated Type And Domain Constant Slice
+
+The next selected rows were generated or domain-library external boundaries
+that still fit the external fact model:
+
+```text
+GenomicsDBVidMapProto	VidMappingPB	1
+GenomicsDBVidMapProto	FieldLengthDescriptorComponentPB	1
+ReadSession	TableReadOptions	1
+JexlMissingValueTreatment	TREAT_AS_MATCH	1
+JexlMissingValueTreatment	TREAT_AS_MISMATCH	1
+WDLWorkUnitHandler	POSITIONAL_ARGS	1
+Genotype	UNPHASED_ALLELE_SEPARATOR	1
+```
+
+The generalized external-model rules added are:
+
+- generated protobuf and BigQuery nested type qualifiers are modeled as nested
+  external type facts;
+- external enum-style policy constants are typed as their owner type;
+- external domain string and char constants are typed directly in the external
+  fact model.
+
+This slice also added a resolver regression test for uppercase source instance
+fields returned from a same-class call. That test is intentionally generalized
+and guards the source-field boundary, but the production changes in this slice
+remain external fact-model additions.
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test resolver_treats_imported_external_nested_types_as_type_qualifiers --test resolve_calls --quiet
+cargo test external_field_provenance_uses_builtin_model_for_known_field_types --test semantic_facts --quiet
+cargo test resolver_uses_uppercase_source_instance_field_type_for_overload_arguments --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	30
+external_api_explained_field_accesses	30
+unexplained_field_accesses	0
+external_api_guesses	29115
+external_constructor_guesses	933
+external_field_guesses	30
+external_api_return_nullability_facts	7360
+total_facts	111503
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+calculateSegmentCost	C	1
+characteristics	IDENTITY_FINISH	1
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	23
+external_api_explained_field_accesses	23
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29083
+external_constructor_guesses	933
+external_field_guesses	23
+external_api_return_nullability_facts	7345
+total_facts	111457
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+calculateSegmentCost	C	1
+characteristics	IDENTITY_FINISH	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses moved from `30` to `23`.
+- Conservative external field guesses moved from `30` to `23`.
+- External API guesses moved from `29115` to `29083`, mostly because generated
+  nested type qualifiers are no longer treated as external field guesses.
+- The remaining leading rows are now mainly resolver/source-shape work:
+  source public fields behind generic/config receivers, tuple-like `_2`,
+  source local result fields such as `calculateSegmentCost.C`, enum constants
+  reached through an inferred `Set`, and unknown call-result fields such as
+  `get.destroyed`, `next.loc`, `peek.record`, and `tail.forwardStrand`.
+
+## Generic Iterator And Queue Element Return Slice
+
+The next selected outcome was the family of field accesses reached through
+generic collection cursor APIs:
+
+```text
+next	loc	OverhangFixingManager	addSplicePosition	1
+```
+
+The general rule is not specific to that class or field:
+
+- Java iterator-like receivers expose `next()` as the generic element type.
+- Java queue-like receivers expose `peek()`, `poll()`, `remove()`, and
+  `element()` as the generic element type.
+- List, set, collection, and iterable receivers expose `iterator()` as
+  `Iterator<T>`.
+- Reading from `? extends T` projects to the readable upper bound `T`; raw or
+  unbounded shapes remain conservative.
+
+This belongs in the external API fact layer because these are JDK collection
+method facts. The resolver only consumes the inferred return type to resolve
+the following field access and overload.
+
+Generalized tests added:
+
+- `resolver_uses_iterator_next_element_type_for_field_access_arguments`
+- `resolver_uses_queue_peek_element_type_for_field_access_arguments`
+- `resolver_keeps_raw_iterator_next_field_access_conservative`
+- `resolver_uses_extends_wildcard_iterator_next_bound_for_chained_iterator`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_iterator_next_element_type_for_field_access_arguments --test resolve_calls --quiet
+cargo test resolver_uses_queue_peek_element_type_for_field_access_arguments --test resolve_calls --quiet
+cargo test resolver_keeps_raw_iterator_next_field_access_conservative --test resolve_calls --quiet
+cargo test resolver_uses_extends_wildcard_iterator_next_bound_for_chained_iterator --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42032
+external_api_explained_method_calls	42032
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	23
+external_api_explained_field_accesses	23
+unexplained_field_accesses	0
+external_api_guesses	29083
+external_constructor_guesses	933
+external_field_guesses	23
+external_api_return_nullability_facts	7345
+total_facts	111457
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42009
+external_api_explained_method_calls	42009
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	20
+external_api_explained_field_accesses	20
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29057
+external_constructor_guesses	933
+external_field_guesses	20
+external_api_return_nullability_facts	7342
+total_facts	111402
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+calculateSegmentCost	C	1
+characteristics	IDENTITY_FINISH	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`; the transient wildcard
+  `iterator()` classification gap was resolved by projecting `? extends T` to
+  its readable upper bound.
+- Unresolved method calls moved from `42032` to `42009`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `23` to `20`.
+- The `next.loc` field row is gone. Remaining cursor-like rows such as
+  `tail.forwardStrand` and `tail.referenceSpan` should be inspected before
+  adding rules, because they may be source method return-type or domain tuple
+  shapes rather than JDK collection facts.
+
+## Enclosing Source Method Lookup Slice
+
+The next selected outcome was a source-owned field access inside constructor
+delegation:
+
+```text
+C	calculateSegmentCost	Segment	<init>	1
+```
+
+The motivating source shape was:
+
+```text
+this(start, end, calculateSegmentCost(...).C)
+```
+
+where `Segment` is a nested source class, `calculateSegmentCost` is an
+enclosing source static method, and `C` is a field on the source return type.
+
+The generalized resolver rule added is:
+
+- unqualified calls from a source type look first in the current source type;
+- if no current-type candidate applies, lexical enclosing source types
+  contribute candidates;
+- static nested types only see static enclosing methods through this lexical
+  lookup path;
+- once the enclosing method return type is known, ordinary source field lookup
+  resolves the following field access.
+
+This is resolver/source lookup work. No external API fact or lowering rule was
+added for the GATK class or field name.
+
+Generalized test added:
+
+- `resolver_uses_enclosing_static_method_return_type_in_nested_constructor_delegation`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_enclosing_static_method_return_type_in_nested_constructor_delegation --test resolve_calls --quiet
+cargo test resolve_annotates_same_class_constructor_delegation_targets --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	42009
+external_api_explained_method_calls	42009
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	20
+external_api_explained_field_accesses	20
+unexplained_field_accesses	0
+external_api_guesses	29057
+external_constructor_guesses	933
+external_field_guesses	20
+external_api_return_nullability_facts	7342
+total_facts	111402
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41961
+external_api_explained_method_calls	41961
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	19
+external_api_explained_field_accesses	19
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29015
+external_constructor_guesses	933
+external_field_guesses	19
+external_api_return_nullability_facts	7342
+total_facts	111310
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+characteristics	IDENTITY_FINISH	1
+characteristics	UNORDERED	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- Unresolved method calls moved from `42009` to `41961` because unqualified
+  enclosing source calls are no longer treated as external fallbacks.
+- Unresolved field accesses and conservative external field guesses moved from
+  `20` to `19`.
+- The `calculateSegmentCost.C` row is gone.
+
+## JDK Nested Enum Constant Slice
+
+The next selected outcome was a pair of standard JDK nested enum constants:
+
+```text
+IDENTITY_FINISH	characteristics	DragstrLocusCaseStratificator	characteristics	1
+UNORDERED	characteristics	DragstrLocusCaseStratificator	characteristics	1
+```
+
+The motivating source was:
+
+```text
+EnumSet.of(Characteristics.IDENTITY_FINISH, Characteristics.UNORDERED)
+```
+
+where `Characteristics` is `java.util.stream.Collector.Characteristics`.
+
+The generalized external-model rules added are:
+
+- `Characteristics` is modeled as a known external enum type;
+- constants on `Characteristics` are typed as `Characteristics`;
+- `EnumSet.of(E...)` returns `EnumSet<E>` when the argument element type is
+  known.
+
+This belongs in `stdlib`: it is JDK API knowledge. The resolver only consumes
+the field and factory return types for overload selection.
+
+Generalized test added:
+
+- `resolver_uses_jdk_nested_enum_constants_for_enum_set_overloads`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_jdk_nested_enum_constants_for_enum_set_overloads --test resolve_calls --quiet
+cargo test resolver_uses_known_external_enum_and_byte_constant_families_for_overloads --test resolve_calls --quiet
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41961
+external_api_explained_method_calls	41961
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	19
+external_api_explained_field_accesses	19
+unexplained_field_accesses	0
+external_api_guesses	29015
+external_constructor_guesses	933
+external_field_guesses	19
+external_api_return_nullability_facts	7342
+total_facts	111310
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41961
+external_api_explained_method_calls	41961
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	17
+external_api_explained_field_accesses	17
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29015
+external_constructor_guesses	933
+external_field_guesses	17
+external_api_return_nullability_facts	7342
+total_facts	111306
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+class_tag$	MODULE$	1
+constants	CHROMOSOME_FOLDER_DELIMITER_SYMBOL_REGEX	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `19` to `17`.
+- The `Characteristics.IDENTITY_FINISH` and `Characteristics.UNORDERED` rows
+  are gone.
+
+## External Library String Constant Slice
+
+The next selected outcome was a string constant from an un-translated external
+library:
+
+```text
+CHROMOSOME_FOLDER_DELIMITER_SYMBOL_REGEX	constants	GenomicsDBImport	generateIntervalListFromWorkspace	1
+```
+
+The motivating source shape was:
+
+```text
+partition.split(Constants.CHROMOSOME_FOLDER_DELIMITER_SYMBOL_REGEX)
+```
+
+where `Constants` is imported from `org.genomicsdb.Constants`.
+
+The generalized external-model rule added is:
+
+- known external static string constants can be modeled as typed fields in
+  `stdlib`;
+- parser-normalized external receivers are canonicalized before fact lookup;
+- the resolver consumes the typed field for overload selection.
+
+This belongs in `stdlib`: it is external library API knowledge. No resolver
+lookup special case or lowering rule was added for the GATK file.
+
+Generalized tests added or exercised:
+
+- `resolver_uses_external_library_string_constants_for_overloads`
+- `external_field_facts_explain_missing_library_fields_only`
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_library_string_constants_for_overloads --test resolve_calls --quiet
+cargo test external_field_facts_explain_missing_library_fields_only --test semantic_facts --quiet
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41961
+external_api_explained_method_calls	41961
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	17
+external_api_explained_field_accesses	17
+unexplained_field_accesses	0
+external_api_guesses	29015
+external_constructor_guesses	933
+external_field_guesses	17
+external_api_return_nullability_facts	7342
+total_facts	111306
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41961
+external_api_explained_method_calls	41961
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	16
+external_api_explained_field_accesses	16
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29015
+external_constructor_guesses	933
+external_field_guesses	16
+external_api_return_nullability_facts	7342
+total_facts	111304
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+class_tag$	MODULE$	1
+genotypeArgs	samplePloidy	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `17` to `16`.
+- The `constants.CHROMOSOME_FOLDER_DELIMITER_SYMBOL_REGEX` row is gone.
+
+## ThreadLocal Generic Get Slice
+
+The next selected outcome was a field reached through a JDK generic holder:
+
+```text
+destroyed	get	ProcessController	getThreadLocal	1
+```
+
+The motivating source shape was:
+
+```text
+threadProcessController.get().destroyed
+```
+
+where `threadProcessController` has type `ThreadLocal<ProcessController>`.
+
+The generalized external-model rule added is:
+
+- `ThreadLocal<T>.get()` returns readable `T`;
+- raw `ThreadLocal.get()` remains conservative and does not fabricate a value
+  shape;
+- following source field lookup then resolves against the returned `T`.
+
+This belongs in `stdlib`: it is JDK generic method return knowledge. The
+resolver only consumes the method return type before ordinary field lookup.
+No lowering rule was added for `get` or `destroyed`.
+
+Generalized tests added:
+
+- `resolver_uses_thread_local_get_value_type_for_field_access_arguments`
+- `resolver_keeps_raw_thread_local_get_field_access_conservative`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_thread_local_get_value_type_for_field_access_arguments --test resolve_calls --quiet
+cargo test resolver_keeps_raw_thread_local_get_field_access_conservative --test resolve_calls --quiet
+cargo test resolver_uses_iterator_next_element_type_for_field_access_arguments --test resolve_calls --quiet
+cargo test external_field_facts_explain_missing_library_fields_only --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41961
+external_api_explained_method_calls	41961
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	16
+external_api_explained_field_accesses	16
+unexplained_field_accesses	0
+external_api_guesses	29015
+external_constructor_guesses	933
+external_field_guesses	16
+external_api_return_nullability_facts	7342
+total_facts	111304
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41961
+external_api_explained_method_calls	41961
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	15
+external_api_explained_field_accesses	15
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29015
+external_constructor_guesses	933
+external_field_guesses	15
+external_api_return_nullability_facts	7342
+total_facts	111302
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+class_tag$	MODULE$	1
+genotypeArgs	samplePloidy	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `16` to `15`.
+- The `get.destroyed` row is gone.
+
+## Nested Bounded Field Access Slice
+
+The next selected outcome family was the repeated bounded configuration field
+shape:
+
+```text
+genotypeArgs	Config	HaplotypeCallerGenotypingEngine	assignGenotypeLikelihoods	1
+genotypeArgs	Config	MinimalGenotypingEngine	calculateGenotypes	1
+annotateAllSitesWithPLs	Config	MinimalGenotypingEngine	forceKeepAllele	1
+samplePloidy	genotypeArgs	HaplotypeCallerGenotypingEngine	assignGenotypeLikelihoods	1
+```
+
+The motivating source shape includes:
+
+```text
+class GenotypingEngine<Config extends StandardCallerArgumentCollection> {
+    protected final Config configuration;
+    ...
+    configuration.genotypeArgs.samplePloidy
+}
+```
+
+The generalized resolver rule added is:
+
+- reusable member-access type inference now asks source field lookup for field
+  types, including fields reached through type-parameter bounds;
+- chained field access such as `configuration.options.count` gets the terminal
+  field type, not the intermediate field type;
+- external superclass field lookup remains in the same helper, so call
+  argument typing and unresolved-field recording share one answer.
+
+This belongs in `resolve`: it is Java source field/type-parameter-bound
+semantics. No lowering or external API rule was added.
+
+Generalized tests added or exercised:
+
+- `resolver_uses_nested_type_parameter_bound_field_types_for_chained_access`
+- `resolver_uses_type_parameter_bound_fields_for_field_access_arguments`
+- `resolver_uses_source_field_access_type_for_chained_call_arguments`
+- `resolver_uses_modeled_external_superclass_fields_for_overload_arguments`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_nested_type_parameter_bound_field_types_for_chained_access --test resolve_calls --quiet
+cargo test resolver_uses_type_parameter_bound_fields_for_field_access_arguments --test resolve_calls --quiet
+cargo test resolver_uses_source_field_access_type_for_chained_call_arguments --test resolve_calls --quiet
+cargo test resolver_uses_modeled_external_superclass_fields_for_overload_arguments --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before and after this slice:
+
+```text
+unresolved_method_calls	41961
+external_api_explained_method_calls	41961
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	15
+external_api_explained_field_accesses	15
+unexplained_field_accesses	0
+external_api_guesses	29015
+external_constructor_guesses	933
+external_field_guesses	15
+external_api_return_nullability_facts	7342
+total_facts	111302
+```
+
+Interpretation:
+
+- This was a correct generalized resolver fix and is covered by reduced tests.
+- It did not move the current GATK benchmark rows, which means the remaining
+  `Config` rows are not just simple chained source fields through a bounded
+  type parameter. They likely involve inherited generic context or another
+  owner-specific lookup path.
+
+## Source Enum Values And Stream Array Slice
+
+The next selected outcome was a source enum private field accessed through
+`values()` and `Stream.of(...)`:
+
+```text
+charEncoding	values	Strand	decode	1
+```
+
+The motivating source shape was:
+
+```text
+Stream.of(values()).map(s -> "" + s.charEncoding)
+```
+
+where `values()` is the implicit Java enum method returning `Strand[]`.
+
+The generalized rules added are:
+
+- source enums have synthetic static `values()` and `valueOf(String)` methods
+  in the resolver;
+- `values()` returns an array of the current source enum type;
+- `Stream.of(array)` uses the array component type as the stream element type
+  for lambda bodies.
+
+The first two rules belong in `resolve` because they are source enum semantics.
+The `Stream.of(array)` rule belongs in `stdlib` because it is external JDK
+factory behavior. Lowering does not inspect enum or stream names for this.
+
+Generalized tests added:
+
+- `resolver_uses_source_enum_values_array_type_for_element_field_access`
+- `resolver_uses_stream_of_array_element_type_for_lambda_field_access`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_source_enum_values_array_type_for_element_field_access --test resolve_calls --quiet
+cargo test resolver_uses_stream_of_array_element_type_for_lambda_field_access --test resolve_calls --quiet
+cargo test resolver_uses_jdk_nested_enum_constants_for_enum_set_overloads --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41961
+external_api_explained_method_calls	41961
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	15
+external_api_explained_field_accesses	15
+unexplained_field_accesses	0
+external_api_guesses	29015
+external_constructor_guesses	933
+external_field_guesses	15
+external_api_return_nullability_facts	7342
+total_facts	111302
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41957
+external_api_explained_method_calls	41957
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	14
+external_api_explained_field_accesses	14
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29014
+external_constructor_guesses	933
+external_field_guesses	14
+external_api_return_nullability_facts	7342
+total_facts	111295
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+TruthAndCallStates	callState	1
+TruthAndCallStates	truthState	1
+class_tag$	MODULE$	1
+genotypeArgs	samplePloidy	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved method calls moved from `41961` to `41957`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `15` to `14`.
+- The `values.charEncoding` row is gone.
+
+## External DTO Public State Fields Slice
+
+The next selected outcome was a pair of public fields on an un-translated
+external data carrier:
+
+```text
+callState	TruthAndCallStates	SVConcordanceAnnotator	annotate	1
+truthState	TruthAndCallStates	SVConcordanceAnnotator	annotate	1
+```
+
+The motivating source shape was:
+
+```text
+scheme.getContingencyStateString(states.truthState, states.callState)
+```
+
+where `TruthAndCallStates`, `TruthState`, and `CallState` come from
+`picard.vcf.*`, outside the translated corpus.
+
+The generalized external-model rule added is:
+
+- known external DTO public fields can be modeled as typed data fields in
+  `stdlib`;
+- nested external enum types remain modeled separately;
+- resolver overload selection consumes those field types without adding
+  downstream name heuristics.
+
+This belongs in `stdlib`: it is external library surface knowledge. No source
+resolver or lowering special case was added for `SVConcordanceAnnotator`.
+
+Generalized tests added or exercised:
+
+- `resolver_uses_known_external_public_data_fields_for_overload_arguments`
+- `resolver_treats_curated_external_nested_state_enum_qualifiers_as_types`
+- `external_field_facts_explain_missing_library_fields_only`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_known_external_public_data_fields_for_overload_arguments --test resolve_calls --quiet
+cargo test resolver_treats_curated_external_nested_state_enum_qualifiers_as_types --test resolve_calls --quiet
+cargo test external_field_facts_explain_missing_library_fields_only --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41957
+external_api_explained_method_calls	41957
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	14
+external_api_explained_field_accesses	14
+unexplained_field_accesses	0
+external_api_guesses	29014
+external_constructor_guesses	933
+external_field_guesses	14
+external_api_return_nullability_facts	7342
+total_facts	111295
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41957
+external_api_explained_method_calls	41957
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	12
+external_api_explained_field_accesses	12
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29014
+external_constructor_guesses	933
+external_field_guesses	12
+external_api_return_nullability_facts	7342
+total_facts	111291
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+Set	INFO	1
+T	contigIndex	1
+class_tag$	MODULE$	1
+genotypeArgs	samplePloidy	1
+scala	Option	1
+tail	forwardStrand	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `14` to `12`.
+- The `TruthAndCallStates.callState` and `TruthAndCallStates.truthState` rows
+  are gone.
+
+## External Nested Header Enum Slice
+
+The next selected outcome was:
+
+```text
+INFO	Set	VariantsToTable	onTraversalStart	1
+```
+
+The motivating source shape was:
+
+```text
+for (VCFHeader.HEADER_FIELDS headerField : VCFHeader.HEADER_FIELDS.values()) {
+    if (!headerField.name().equals(VCFHeader.HEADER_FIELDS.INFO.name())) {
+        ...
+    }
+}
+```
+
+The previous model treated `VCFHeader.HEADER_FIELDS` as `Set<String>`, but in
+the htsjdk source it is a nested enum type. The generalized external-model
+rules added are:
+
+- `VCFHeader.HEADER_FIELDS` is modeled as an external nested enum type
+  qualifier;
+- `HEADER_FIELDS.INFO` is modeled as an enum constant;
+- external enum `values()` returns an array of that enum type;
+- external enum `valueOf(String)` returns that enum type.
+
+This belongs in `stdlib`: it is htsjdk external API knowledge. The resolver
+only consumes the nested type, enum constant, and external method return facts.
+
+Generalized tests updated or exercised:
+
+- `resolver_uses_external_domain_constants_for_primitive_and_string_overloads`
+- `resolver_treats_known_external_nested_enum_families_as_type_qualifiers`
+- `external_field_facts_explain_missing_library_fields_only`
+- semantic facts for known external static fields now use
+  `VCFHeader.HEADER_FIELDS.INFO` instead of treating the nested enum type as a
+  value.
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_uses_external_domain_constants_for_primitive_and_string_overloads --test resolve_calls --quiet
+cargo test resolver_treats_known_external_nested_enum_families_as_type_qualifiers --test resolve_calls --quiet
+cargo test --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41957
+external_api_explained_method_calls	41957
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	12
+external_api_explained_field_accesses	12
+unexplained_field_accesses	0
+external_api_guesses	29014
+external_constructor_guesses	933
+external_field_guesses	12
+external_api_return_nullability_facts	7342
+total_facts	111291
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41957
+external_api_explained_method_calls	41957
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	11
+external_api_explained_field_accesses	11
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29013
+external_constructor_guesses	933
+external_field_guesses	11
+external_api_return_nullability_facts	7343
+total_facts	111288
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+T	contigIndex	1
+class_tag$	MODULE$	1
+genotypeArgs	samplePloidy	1
+scala	Option	1
+tail	forwardStrand	1
+tail	referenceSpan	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `12` to `11`.
+- The `Set.INFO` row is gone.
+
+## Method Type Parameter Bound Field Slice
+
+The next selected outcome was:
+
+```text
+contigIndex	T	GenomeLoc	merge	1
+```
+
+The motivating source shape was:
+
+```text
+public static <T extends GenomeLoc> GenomeLoc merge(final T a, final T b) {
+    return new GenomeLoc(a.getContig(), a.contigIndex, ...);
+}
+```
+
+The resolver already knew class type-parameter bounds, but method-scoped type
+parameters were not represented in the IR or resolver environment. That meant a
+receiver with Java type `T` inside a method could not use `T extends Base` for
+source field lookup.
+
+The generalized rules added are:
+
+- method and constructor declarations preserve scoped type parameters and
+  bounds in the Java IR;
+- parser tests assert those method-scoped bounds directly;
+- resolver body environments carry scoped type-parameter bounds;
+- source receiver lookup consults scoped method/constructor bounds before
+  falling back to existing class-bound and source-type lookup.
+
+This belongs in parser/IR and resolver. It is Java source semantics, not an
+external API fact, and no lowering or GATK-specific branch was added.
+
+Generalized tests added:
+
+- `parses_method_type_parameter_bounds`
+- `parser_does_not_treat_generic_return_type_as_method_type_parameters`
+- `resolver_uses_method_type_parameter_bound_fields_for_field_access_arguments`
+
+Verification:
+
+```text
+cargo fmt
+cargo test parses_method_type_parameter_bounds --test parser_tree_sitter --quiet
+cargo test parser_does_not_treat_generic_return_type_as_method_type_parameters --test parser_tree_sitter --quiet
+cargo test resolver_uses_method_type_parameter_bound_fields_for_field_access_arguments --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41957
+external_api_explained_method_calls	41957
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	11
+external_api_explained_field_accesses	11
+unexplained_field_accesses	0
+external_api_guesses	29013
+external_constructor_guesses	933
+external_field_guesses	11
+external_api_return_nullability_facts	7343
+total_facts	111288
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41957
+external_api_explained_method_calls	41957
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	10
+external_api_explained_field_accesses	10
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	29013
+external_constructor_guesses	933
+external_field_guesses	10
+external_api_return_nullability_facts	7343
+total_facts	111286
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+class_tag$	MODULE$	1
+genotypeArgs	samplePloidy	1
+scala	Option	1
+tail	forwardStrand	1
+tail	referenceSpan	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `11` to `10`.
+- The `T.contigIndex` row is gone.
+- The remaining rows still need classification. The tuple-like `_2` rows look
+  like captured generic/tuple receiver-shape work, `Config.*` rows look like
+  source/inherited configuration shape work, and the Scala singleton rows look
+  like external library boundary facts.
+
+## Multi-Declarator Local Type Slice
+
+The next selected outcomes were:
+
+```text
+forwardStrand	tail	AssemblyContigWithFineTunedAlignments	hasIncompletePictureFromMultipleAlignments	1
+referenceSpan	tail	AssemblyContigWithFineTunedAlignments	hasIncompletePictureFromMultipleAlignments	1
+```
+
+The motivating source shape was:
+
+```text
+final AlignmentInterval head = sourceTig.getHeadAlignment(),
+                        tail = sourceTig.getTailAlignment();
+
+if (!head.referenceSpan.getContig().equals(tail.referenceSpan.getContig())
+        || head.forwardStrand != tail.forwardStrand) {
+    ...
+}
+```
+
+The parser previously kept only the first declarator in a Java local variable
+declaration. That meant `head` was learned as `AlignmentInterval`, but `tail`
+was not introduced as a typed local before later field accesses.
+
+The generalized parser rule added is:
+
+- a Java local declaration with multiple declarators is normalized into
+  multiple `Stmt::VarDecl` IR statements;
+- each generated `VarDecl` keeps the shared declared Java type and its own
+  initializer;
+- this flattening applies in ordinary blocks, wrapped `statement` nodes,
+  switch groups, try resources, and `for` initializers;
+- resolver and type environments continue to learn ordinary `VarDecl`s, so no
+  special field or GATK-specific rule is needed.
+
+This belongs in parser normalization. The resolver only consumes the typed
+locals already present in the IR.
+
+Generalized tests added:
+
+- `parser_splits_multi_declarator_local_variables_with_shared_type`
+- `resolver_uses_shared_type_for_multi_declarator_local_field_access`
+
+Verification:
+
+```text
+cargo fmt
+cargo test parser_splits_multi_declarator_local_variables_with_shared_type --test parser_tree_sitter --quiet
+cargo test resolver_uses_shared_type_for_multi_declarator_local_field_access --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41957
+external_api_explained_method_calls	41957
+unexplained_method_calls	0
+unresolved_constructors	4178
+external_api_explained_constructors	4178
+unresolved_field_accesses	10
+external_api_explained_field_accesses	10
+unexplained_field_accesses	0
+external_api_guesses	29013
+external_constructor_guesses	933
+external_field_guesses	10
+external_api_return_nullability_facts	7343
+total_facts	111286
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41942
+external_api_explained_method_calls	41942
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	8
+external_api_explained_field_accesses	8
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	28997
+external_constructor_guesses	933
+external_field_guesses	8
+external_api_return_nullability_facts	7344
+total_facts	111253
+top_external_field_guess_targets
+Config	genotypeArgs	2
+Config	annotateAllSitesWithPLs	1
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+class_tag$	MODULE$	1
+genotypeArgs	samplePloidy	1
+scala	Option	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `10` to `8`.
+- The `tail.forwardStrand` and `tail.referenceSpan` rows are gone.
+- The method and constructor totals shifted because the parser now retains
+  later declarators that were previously omitted. This is expected: the
+  benchmark is seeing more of the Java program instead of dropping those
+  declarations.
+
+## Inherited Generic Field Substitution Slice
+
+The next selected outcomes were:
+
+```text
+genotypeArgs	Config	HaplotypeCallerGenotypingEngine	assignGenotypeLikelihoods	1
+genotypeArgs	Config	MinimalGenotypingEngine	calculateGenotypes	1
+annotateAllSitesWithPLs	Config	MinimalGenotypingEngine	forceKeepAllele	1
+samplePloidy	genotypeArgs	HaplotypeCallerGenotypingEngine	assignGenotypeLikelihoods	1
+```
+
+The motivating source shape was:
+
+```text
+abstract class GenotypingEngine<Config extends StandardCallerArgumentCollection> {
+    protected final Config configuration;
+}
+
+final class MinimalGenotypingEngine
+        extends GenotypingEngine<StandardCallerArgumentCollection> {
+    protected boolean forceKeepAllele(final Allele allele) {
+        return configuration.annotateAllSitesWithPLs;
+    }
+}
+```
+
+The resolver already substituted generic return types through superclass
+chains, but inherited fields were collected without applying superclass type
+arguments. Subclasses therefore learned inherited field `configuration` as raw
+`Config` instead of `StandardCallerArgumentCollection`, and later field lookup
+fell back to conservative external field guesses.
+
+The generalized resolver rule added is:
+
+- inherited source fields are collected with the same superclass type-argument
+  substitution model used for inherited methods;
+- field types are substituted as the hierarchy walk crosses generic superclass
+  edges;
+- resolver/type environments then learn the concrete inherited field type, so
+  chained field access can use ordinary source field lookup.
+
+This belongs in resolver symbol collection. It is source generic semantics, not
+an external API fact, and no lowering or GATK-specific branch was added.
+
+Generalized test added:
+
+- `resolver_substitutes_inherited_generic_field_type_for_field_access`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_substitutes_inherited_generic_field_type_for_field_access --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41942
+external_api_explained_method_calls	41942
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unresolved_field_accesses	8
+external_api_explained_field_accesses	8
+unexplained_field_accesses	0
+external_api_guesses	28997
+external_constructor_guesses	933
+external_field_guesses	8
+external_api_return_nullability_facts	7344
+total_facts	111253
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41939
+external_api_explained_method_calls	41939
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	4
+external_api_explained_field_accesses	4
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	28993
+external_constructor_guesses	933
+external_field_guesses	4
+external_api_return_nullability_facts	7342
+total_facts	111238
+top_external_field_guess_targets
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+class_tag$	MODULE$	1
+scala	Option	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `8` to `4`.
+- The `Config.genotypeArgs`, `Config.annotateAllSitesWithPLs`, and
+  `genotypeArgs.samplePloidy` rows are gone.
+- The remaining rows now split cleanly into tuple-like `_2` receiver-shape work
+  and Scala library singleton/type qualifier facts.
+
+## Scala External Type Qualifier And Singleton Slice
+
+The next selected outcomes were:
+
+```text
+MODULE$	class_tag$	SparkSharder	coalesce	1
+Option	scala	RangePartitionCoalescer	coalesce	1
+```
+
+The motivating source shapes were:
+
+```text
+scala.Option<String> preferredLocation = scala.Option.apply(...);
+ClassTag<T> tag = ClassTag$.MODULE$.apply(cls);
+```
+
+These are Scala library surfaces used from Java:
+
+- `scala.Option` is a package-qualified external type qualifier;
+- `ClassTag$.MODULE$` is the singleton instance field for the Scala object
+  `ClassTag$`;
+- `Option.apply(value)` returns `Option<T>`;
+- `ClassTag$.MODULE$.apply(cls)` returns a `ClassTag`.
+
+The generalized external-model rule added is:
+
+- known Scala package/type qualifiers and object singleton fields are modeled
+  in `stdlib`;
+- their factory methods expose stable return types to resolver overload
+  selection;
+- resolver consumes those facts without adding package-name heuristics or
+  lowering branches.
+
+This belongs in the external API fact layer. The exact Scala API identity is
+the modeled fact, so using the Scala names in tests is appropriate.
+
+Generalized tests added:
+
+- `resolver_treats_package_qualified_scala_option_as_external_type_qualifier`
+- `resolver_uses_scala_object_module_singleton_field_for_factory_calls`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_treats_package_qualified_scala_option_as_external_type_qualifier --test resolve_calls --quiet
+cargo test resolver_uses_scala_object_module_singleton_field_for_factory_calls --test resolve_calls --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41939
+external_api_explained_method_calls	41939
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unresolved_field_accesses	4
+external_api_explained_field_accesses	4
+unexplained_field_accesses	0
+external_api_guesses	28993
+external_constructor_guesses	933
+external_field_guesses	4
+external_api_return_nullability_facts	7342
+total_facts	111238
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41939
+external_api_explained_method_calls	41939
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	2
+external_api_explained_field_accesses	2
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	28994
+external_constructor_guesses	933
+external_field_guesses	2
+external_api_return_nullability_facts	7342
+total_facts	111235
+top_external_field_guess_targets
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `4` to `2`.
+- The Scala `class_tag$.MODULE$` and `scala.Option` rows are gone.
+- The only remaining field rows are tuple-like `_2` projections whose receiver
+  shape still needs source generic/captured type analysis.
+
+## Source Iterable Supertype And Functional Interface Substitution Slice
+
+The next selected outcomes were the final two external field guesses:
+
+```text
+EvidenceTargetLink	_2	1
+SVIntervalTree	_2	1
+```
+
+The motivating source shapes were stream pipelines over source classes whose
+declared type implements `Iterable<T>` through a generic supertype:
+
+```java
+Utils.stream(evidenceTargetLinks)
+    .map(p -> p._2)
+    .filter(EvidenceTargetLink::isImpreciseDeletion)
+```
+
+and nested source containers where the stream element type comes from an
+implemented `Iterable<Source.Entry<V>>` supertype before field projection.
+
+The generalized resolver rules added are:
+
+- source classes implementing a single-argument generic supertype such as
+  `Iterable<T>` can bind a source generic method parameter declared against
+  that supertype;
+- method-level type parameters are carried in `MethodSymbol`, so source generic
+  method substitutions are based on declared method parameters rather than only
+  uppercase-name heuristics;
+- target-typed lambda resolution substitutes functional-interface type
+  parameters from the expected instantiated interface before resolving the
+  lambda body;
+- parser coverage now explicitly checks that static generic method parameters
+  and generic `implements` clauses keep the type information the resolver
+  needs.
+
+This belongs in resolver and parser boundary tests. It is source Java generic
+semantics and target typing, not a tuple-specific external field fact and not a
+lowering rule.
+
+Generalized tests added:
+
+- `parser_preserves_generic_implements_clause_arguments`
+- `parses_static_method_type_parameters_after_modifiers`
+- `resolver_uses_source_iterable_supertype_element_for_utils_stream_tuple_projection`
+- `resolver_substitutes_source_generic_method_parameter_from_source_iterable_supertype`
+- `resolver_uses_source_iterable_supertype_with_nested_generic_element_for_utils_stream`
+
+Verification:
+
+```text
+cargo fmt
+cargo test resolver_substitutes_source_generic_method_parameter_from_source_iterable_supertype --test resolve_calls --quiet
+cargo test resolver_uses_source_iterable_supertype_element_for_utils_stream_tuple_projection --test resolve_calls --quiet
+cargo test resolver_uses_source_iterable_supertype_with_nested_generic_element_for_utils_stream --test resolve_calls --quiet
+cargo test parses_static_method_type_parameters_after_modifiers --test parser_tree_sitter --quiet
+cargo test parser_preserves_generic_implements_clause_arguments --test parser_tree_sitter --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41939
+external_api_explained_method_calls	41939
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unresolved_field_accesses	2
+external_api_explained_field_accesses	2
+unexplained_field_accesses	0
+external_api_guesses	28994
+external_constructor_guesses	933
+external_field_guesses	2
+external_api_return_nullability_facts	7342
+total_facts	111235
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	28991
+external_constructor_guesses	933
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unresolved field accesses and conservative external field guesses moved from
+  `2` to `0`.
+- The last `_2` rows are gone without modeling tuple projection as a new
+  external field special case.
+- The remaining benchmark pressure is now method and constructor external API
+  modeling rather than unexplained field access.
+
+## Collection And Map API Provenance Slice
+
+The next selected benchmark pressure was not an unexplained resolver failure.
+It was conservative external API guess volume for common collection and map
+methods:
+
+```text
+external_api_guesses	28991
+top_unresolved_targets
+MethodCall	get	2352
+MethodCall	size	1767
+MethodCall	add	1730
+MethodCall	put	972
+MethodCall	isEmpty	775
+MethodCall	addAll	389
+```
+
+The resolver already explained all method calls through external API facts, and
+`stdlib` already modeled collection/map roles such as indexed getter, mutator,
+read-only getter, return nullability, and receiver mutability. The remaining
+problem was provenance: these modeled APIs were still recorded as conservative
+fallback guesses.
+
+The generalized external-fact rule added is:
+
+- collection-like receiver methods with modeled roles are builtin external API
+  models, not conservative guesses;
+- map-like receiver methods with modeled roles are builtin external API models,
+  not conservative guesses;
+- unknown external methods remain conservative fallbacks.
+
+This belongs in the external API fact layer. It does not alter resolver target
+selection, generated Rust, or lowering behavior.
+
+Generalized tests added:
+
+- `modeled_collection_api_effects_are_builtin_external_models`
+- `modeled_map_api_effects_are_builtin_external_models`
+- `unknown_external_api_effects_remain_conservative_fallbacks`
+
+Verification:
+
+```text
+cargo fmt
+cargo test modeled_collection_api_effects_are_builtin_external_models --test semantic_facts --quiet
+cargo test modeled_map_api_effects_are_builtin_external_models --test semantic_facts --quiet
+cargo test unknown_external_api_effects_remain_conservative_fallbacks --test semantic_facts --quiet
+cargo test external_collection_api_effects_are_receiver_specific_facts --test semantic_facts --quiet
+cargo test external_map_api_effects_distinguish_read_and_write_methods --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+external_api_guesses	28991
+external_constructor_guesses	933
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	933
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external API method guesses moved from `28,991` to `24,792`.
+- Resolver counts did not change, as expected: this slice reclassified already
+  modeled API behavior with stronger provenance.
+- Constructor guess volume is unchanged and remains the next major external
+  fact pressure area.
+
+## Stable JDK Constructor Provenance Slice
+
+The next selected benchmark pressure was conservative constructor guess volume.
+The previous top constructor guesses still mixed stable JDK constructors with
+domain/library constructors:
+
+```text
+external_constructor_guesses	933
+top_external_constructor_guess_types
+NoSuchElementException	1	31
+File	1	20
+DecimalFormat	1	3
+GZIPInputStream	1	2
+```
+
+The generalized external-fact rule added is:
+
+- standard runtime exception constructors such as `NoSuchElementException`
+  are builtin external constructor models;
+- standard file/path constructors such as `File(String)` are builtin external
+  constructor models;
+- standard formatter constructors such as `DecimalFormat(String)` are builtin
+  external constructor models;
+- standard zip stream wrappers such as `GZIPInputStream(InputStream)` are
+  builtin external constructor models;
+- arbitrary unknown external constructors remain conservative fallbacks.
+
+This belongs in the external API fact layer. It is stable JDK constructor
+provenance, not domain-library modeling, resolver target selection, or lowering.
+HTSJDK/GATK-like constructors such as `VCFInfoHeaderLine`, `CigarElement`, and
+`GenotypeBuilder` remain conservative until separately audited.
+
+Generalized tests updated:
+
+- `jdk_external_constructor_facts_are_builtin_models`
+- `external_constructor_facts_explain_missing_library_constructors_only`
+
+Verification:
+
+```text
+cargo fmt
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	933
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	827
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `933` to `827`.
+- The top remaining conservative constructor guesses are domain or third-party
+  library constructors such as `VCFInfoHeaderLine`, `CigarElement`,
+  `VCFHeader`, and `GenotypeBuilder`.
+- Those remaining constructor families should be audited as library-specific
+  external facts or left conservative; they should not be promoted as generic
+  JDK models.
+
+## HTSJDK Constructor Provenance Slice
+
+The next selected constructor pressure was the stable HTSJDK-style constructor
+family that remained after generic JDK constructor promotion:
+
+```text
+top_external_constructor_guess_types
+VCFInfoHeaderLine	4	28
+CigarElement	2	27
+VCFHeader	2	26
+GenotypeBuilder	1	22
+Cigar	1	18
+VCFFormatHeaderLine	4	8
+VCFHeader	1	8
+```
+
+Corpus inspection showed these are standard library-boundary value constructors
+from HTSJDK-style APIs, not GATK-local classes:
+
+- VCF header line constructors such as `new VCFInfoHeaderLine(...)` and
+  `new VCFFormatHeaderLine(...)`;
+- VCF header constructors such as `new VCFHeader()`,
+  `new VCFHeader(lines)`, and `new VCFHeader(lines, samples)`;
+- CIGAR constructors such as `new Cigar()` and `new Cigar(elements)`;
+- CIGAR element constructors such as `new CigarElement(length, operator)`;
+- genotype builder constructors such as `new GenotypeBuilder()` and
+  `new GenotypeBuilder(genotype)`.
+
+The generalized external-fact rule added is:
+
+- audited HTSJDK constructor families are builtin external constructor models;
+- the rule is explicit by library family and constructor arity;
+- unknown external constructors remain conservative fallbacks.
+
+This belongs in the external API fact layer. It does not resolve constructor
+targets into source constructors and does not add lowering behavior. It only
+changes provenance for audited external constructors that are already explained
+as external boundaries.
+
+Generalized tests added:
+
+- `htsjdk_external_constructor_facts_are_builtin_models`
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`
+
+Verification:
+
+```text
+cargo fmt
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	827
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	655
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `827` to `655`.
+- HTSJDK header, CIGAR, and genotype builder constructor rows are gone from
+  `top_external_constructor_guess_types`.
+- The remaining top conservative constructor guesses are other domain or
+  third-party families, such as GATK command-line exceptions, Apache math
+  vectors/matrices, serializers, iterators, and feature readers.
+
+## Apache Commons Constructor Provenance Slice
+
+The next selected constructor pressure was the Apache Commons-style math/lang
+constructor family:
+
+```text
+top_external_constructor_guess_types
+Array2DRowRealMatrix	2	9
+DefaultRealMatrixChangingVisitor	0	5
+ArrayRealVector	1	3
+MutableDouble	1	2
+```
+
+Corpus inspection showed stable third-party library constructors rather than
+GATK-local classes:
+
+- matrix constructors such as `new Array2DRowRealMatrix(data)` and
+  `new Array2DRowRealMatrix(rows, columns)`;
+- vector constructors such as `new ArrayRealVector(values)` and
+  `new ArrayRealVector(size)`;
+- visitor constructors such as `new DefaultRealMatrixChangingVisitor()`;
+- mutable numeric wrappers such as `new MutableDouble(value)`.
+
+The generalized external-fact rule added is:
+
+- audited Apache Commons math/lang constructor families are builtin external
+  constructor models;
+- the rule is explicit by library family and constructor arity;
+- unknown external constructors remain conservative fallbacks.
+
+This belongs in the external API fact layer. It does not change resolver target
+selection or lowering; it only classifies audited third-party constructor
+boundaries with stronger provenance.
+
+Generalized tests added:
+
+- `apache_commons_external_constructor_facts_are_builtin_models`
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`
+
+Verification:
+
+```text
+cargo fmt
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	655
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	631
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `655` to `631`.
+- Apache matrix/vector/visitor/mutable-double constructor rows are gone from
+  `top_external_constructor_guess_types`.
+- The next remaining constructor pressure is mostly GATK command-line
+  exceptions, serializers, aligners, iterators, feature readers, and other
+  domain-specific library boundaries.
+
+## Barclay Command-Line Exception Constructor Provenance Slice
+
+The next selected constructor pressure was the Barclay command-line exception
+family:
+
+```text
+top_external_constructor_guess_types
+BadArgumentValue	2	12
+CommandLineException	1	11
+BadArgumentValue	1	6
+BadArgumentValue	3	6
+```
+
+Corpus inspection showed these constructors are imported from Barclay
+(`org.broadinstitute.barclay.argparser.CommandLineException`) rather than
+defined in the translated GATK source. Representative forms include:
+
+- `new CommandLineException(message)`;
+- `new CommandLineException.BadArgumentValue(name, value, message)`;
+- `new CommandLineException.BadArgumentValue(message)`;
+- `new CommandLineException.MissingArgument(name, message)`.
+
+The generalized external-fact rule added is:
+
+- audited Barclay command-line exception constructor families are builtin
+  external constructor models;
+- the rule is explicit by library family, nested/simple type name, and
+  constructor arity;
+- unknown external constructors remain conservative fallbacks.
+
+This belongs in the external API fact layer. It is not a source nested-class
+resolver rule because the constructors come from a library outside the
+translated corpus, and it does not add lowering behavior.
+
+Generalized tests added:
+
+- `barclay_command_line_exception_constructor_facts_are_builtin_models`
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`
+
+Verification:
+
+```text
+cargo fmt
+cargo test barclay_command_line_exception_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	631
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	591
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `631` to `591`.
+- Barclay `BadArgumentValue` and `CommandLineException` rows are gone from
+  `top_external_constructor_guess_types`.
+- The remaining constructor pressure is now mostly serializers, aligners,
+  HTSJDK comparators/builders, HDF5 boundaries, fastutil collections, feature
+  readers, and other domain-specific library constructors.
+
+## HTSJDK Variant Builder And Seekable Stream Constructor Provenance Slice
+
+The next selected constructor pressure was a recurring HTSJDK variant and
+stream IO family:
+
+```text
+top_external_constructor_guess_types
+VariantContextComparator	1	6
+VariantContextBuilder	1	2
+SeekableBufferedStream	1	2
+```
+
+Corpus inspection showed many `VariantContextBuilder` calls and several
+`VariantContextComparator` and `SeekableBufferedStream` calls. These are
+constructors from HTSJDK or related seekable-stream APIs outside the translated
+GATK source, so the generalized rule belongs in the external API fact layer:
+
+- audited HTSJDK variant builder/comparator and seekable buffered stream
+  constructors are builtin external constructor models;
+- the model is explicit by type and arity:
+  - `VariantContextBuilder` with `0`, `1`, or `5` arguments;
+  - `VariantContextComparator` with `1` argument;
+  - `SeekableBufferedStream` with `1` argument;
+- unknown external constructors remain conservative fallbacks.
+
+This does not add a resolver or lowering rule. It keeps named library behavior
+as external facts with provenance.
+
+Generalized test coverage:
+
+- extended `htsjdk_external_constructor_facts_are_builtin_models` with a small
+  synthetic Java class using HTSJDK API names but neutral surrounding code;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo fmt
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test barclay_command_line_exception_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	591
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	509
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `591` to `509`.
+- `VariantContextComparator`, `VariantContextBuilder`, and
+  `SeekableBufferedStream` no longer appear in the top constructor guess list.
+- The remaining constructor pressure is now mostly serializers, aligners, HDF5,
+  fastutil/Guava abstract collections, feature readers, and other external
+  domain-library constructors.
+
+## HDF5 Constructor Provenance Slice
+
+The next selected constructor pressure was the HDF5 external library boundary:
+
+```text
+top_external_constructor_guess_types
+HDF5File	2	5
+HDF5File	1	2
+HDF5Library	0	2
+```
+
+Corpus inspection showed `HDF5File` used as an external resource wrapper,
+including try-with-resources forms, and `HDF5Library` used as a loader object.
+These types are not source classes in the translated corpus. The generalized
+rule belongs in the external API fact layer:
+
+- audited HDF5 file/library constructors are builtin external constructor
+  models;
+- the model is explicit by type and arity:
+  - `HDF5Library` with `0` arguments;
+  - `HDF5File` with `1` or `2` arguments;
+- unknown HDF5 or non-HDF5 constructors remain conservative fallbacks.
+
+This does not add resolver behavior or lowering behavior. It keeps an external
+resource/library boundary as provenance-bearing facts.
+
+Generalized test coverage:
+
+- `hdf5_external_constructor_facts_are_builtin_models`
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`
+
+Verification:
+
+```text
+cargo fmt
+cargo test hdf5_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	509
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	500
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `509` to `500`.
+- `HDF5File` and `HDF5Library` no longer appear in the top constructor guess
+  list.
+- The remaining constructor pressure is now mostly serializers, native aligner
+  wrappers, abstract iterator/list classes, statistical distributions, bitsets,
+  feature readers, and other external domain-library constructors.
+
+## Apache Commons Math Distribution Constructor Provenance Slice
+
+The next selected constructor pressure was an Apache Commons Math distribution
+family:
+
+```text
+top_external_constructor_guess_types
+BinomialDistribution	3	4
+BinomialDistribution	2	2
+AbstractIntegerDistribution	1	1
+```
+
+Corpus inspection showed both default-random and supplied-random
+`BinomialDistribution` constructors, plus anonymous subclasses invoking
+`AbstractIntegerDistribution(RandomGenerator)`. These are library constructors
+outside the translated corpus. The generalized rule belongs in the external API
+fact layer:
+
+- audited Apache Commons Math distribution constructors are builtin external
+  constructor models;
+- the model is explicit by type and arity:
+  - `BinomialDistribution` with `2` or `3` arguments;
+  - `AbstractIntegerDistribution` with `1` argument;
+- unknown distribution or non-distribution constructors remain conservative
+  fallbacks.
+
+This does not add resolver behavior or lowering behavior. It extends the
+existing Apache Commons constructor provenance family.
+
+Generalized test coverage:
+
+- extended `apache_commons_external_constructor_facts_are_builtin_models` with
+  distribution constructor forms;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo fmt
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test hdf5_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	500
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	493
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `500` to `493`.
+- `BinomialDistribution` and `AbstractIntegerDistribution` no longer appear in
+  the top constructor guess list.
+- The remaining constructor pressure is now mostly serializers, native aligner
+  wrappers, abstract iterator/list classes, bitsets, feature readers, and other
+  external domain-library constructors.
+
+## JDK Utility And Abstract Collection Constructor Provenance Slice
+
+The next selected constructor pressure was a small set of stable JDK library
+constructors:
+
+```text
+top_external_constructor_guess_types
+BitSet	1	4
+AbstractList	0	3
+ArrayIndexOutOfBoundsException	1	2
+AbstractSet	0	1
+ArrayBlockingQueue	1	1
+AtomicBoolean	0	1
+```
+
+Corpus inspection showed ordinary Java library usage: bitsets sized from
+counts, anonymous `AbstractList`/`AbstractSet` views, a blocking queue created
+with a capacity, an atomic boolean flag, and array-index exceptions. These are
+not source resolver failures and should not be lowered by name. The generalized
+rule belongs in the JDK external constructor and type taxonomy:
+
+- audited JDK utility constructors are builtin external constructor models;
+- abstract collection classes participate in the collection taxonomy;
+- `ArrayIndexOutOfBoundsException` participates in the throwable hierarchy;
+- unknown non-JDK constructors remain conservative fallbacks.
+
+The model covers:
+
+- `BitSet` with `0` or `1` arguments;
+- `AtomicBoolean` with `0` or `1` arguments;
+- `AbstractList` and `AbstractSet` through collection constructor taxonomy;
+- `ArrayBlockingQueue` through queue/collection constructor taxonomy;
+- `ArrayIndexOutOfBoundsException` through throwable constructor taxonomy.
+
+Generalized test coverage:
+
+- extended `jdk_external_constructor_facts_are_builtin_models` with these
+  constructor forms;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo fmt
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	493
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	481
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `493` to `481`.
+- `BitSet`, `AbstractList`, `AbstractSet`, `ArrayIndexOutOfBoundsException`,
+  `ArrayBlockingQueue`, and `AtomicBoolean` no longer appear in the top
+  constructor guess list.
+- The remaining constructor pressure is now mostly serializers, native aligner
+  wrappers, Hadoop/configuration boundaries, HTSJDK/SAM codecs, feature
+  readers, and other external domain-library constructors.
+
+## Kryo FieldSerializer Constructor Provenance Slice
+
+The next selected constructor pressure was the Kryo serializer boundary:
+
+```text
+top_external_constructor_guess_types
+FieldSerializer	2	9
+```
+
+Corpus inspection showed `FieldSerializer(kryo, class)` used in Spark/Kryo
+registration code. This is a constructor from Kryo outside the translated
+corpus. The generalized rule belongs in the external API fact layer:
+
+- audited Kryo `FieldSerializer` constructors are builtin external constructor
+  models;
+- the model is explicit by type and arity:
+  - `FieldSerializer` with `2` arguments;
+- unknown Kryo or non-Kryo constructors remain conservative fallbacks.
+
+This does not add resolver behavior or lowering behavior. It treats the
+serializer as an external library boundary with provenance.
+
+Generalized test coverage:
+
+- `kryo_serializer_constructor_facts_are_builtin_models`;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo fmt
+cargo test kryo_serializer_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test hdf5_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	481
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	472
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `481` to `472`.
+- `FieldSerializer` no longer appears in the top constructor guess list.
+- The remaining constructor pressure is now mostly native aligner wrappers,
+  abstract iterator/list classes, Hadoop/configuration boundaries, HTSJDK/SAM
+  codecs, feature readers, and other external domain-library constructors.
+
+## BWA Native Wrapper Constructor Provenance Slice
+
+The next selected constructor pressure was the BWA native-wrapper boundary:
+
+```text
+top_external_constructor_guess_types
+BwaMemAligner	1	6
+BwaMemIndex	1	3
+```
+
+Corpus inspection showed `BwaMemIndex(path)` and `BwaMemAligner(index)` used as
+wrappers around native BWA resources. `BwaMemAligner` already had an audited
+external field model for `MEM_F_ALL`; these constructors are the same external
+library boundary, not source resolver failures. The generalized rule belongs in
+the external API fact layer:
+
+- audited BWA native-wrapper constructors are builtin external constructor
+  models;
+- the model is explicit by type and arity:
+  - `BwaMemIndex` with `1` argument;
+  - `BwaMemAligner` with `1` argument;
+- unknown BWA or non-BWA constructors remain conservative fallbacks.
+
+This does not add resolver behavior or lowering behavior. It treats native
+resource wrappers as external facts with provenance.
+
+Generalized test coverage:
+
+- `bwa_native_wrapper_constructor_facts_are_builtin_models`;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo fmt
+cargo test bwa_native_wrapper_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test kryo_serializer_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	472
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	463
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `472` to `463`.
+- `BwaMemAligner` and `BwaMemIndex` no longer appear in the top constructor
+  guess list.
+- The remaining constructor pressure is now mostly abstract iterator/list
+  classes, Hadoop/configuration boundaries, HTSJDK/SAM codecs, feature readers,
+  and other external domain-library constructors.
+
+## HTSJDK SAM Codec And Line Reader Constructor Provenance Slice
+
+The next selected constructor pressure was an HTSJDK/SAM codec and line-reader
+boundary:
+
+```text
+top_external_constructor_guess_types
+BAMRecordCodec	1	2
+BlockCompressedInputStream	1	2
+AsciiLineReaderIterator	1	1
+BAMIndexer	2	1
+BCF2Codec	0	1
+BufferedLineReader	1	3
+```
+
+Corpus inspection showed ordinary HTSJDK/SAM IO construction: BAM codecs,
+block-compressed input streams, BAM index writers, BCF codecs, buffered line
+readers, and ASCII line-reader iterators. These constructors are from external
+libraries rather than translated source classes. The generalized rule belongs
+in the external API fact layer:
+
+- audited HTSJDK/SAM codec and line-reader constructors are builtin external
+  constructor models;
+- the model is explicit by type and arity:
+  - `BAMRecordCodec` with `1` argument;
+  - `BlockCompressedInputStream` with `1` or `2` arguments;
+  - `BAMIndexer` with `2` arguments;
+  - `BCF2Codec` with `0` arguments;
+  - `BufferedLineReader` with `1` argument;
+  - `AsciiLineReaderIterator` with `1` argument;
+- unknown HTSJDK/SAM or non-HTSJDK constructors remain conservative fallbacks.
+
+This does not add resolver behavior or lowering behavior. It extends the
+existing HTSJDK constructor provenance family.
+
+Generalized test coverage:
+
+- extended `htsjdk_external_constructor_facts_are_builtin_models` with codec,
+  indexer, block-compressed stream, and line-reader constructor forms;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo fmt
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test bwa_native_wrapper_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	463
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	452
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `463` to `452`.
+- `BAMRecordCodec`, `BlockCompressedInputStream`, `AsciiLineReaderIterator`,
+  `BAMIndexer`, `BCF2Codec`, and `BufferedLineReader` no longer appear in the
+  top constructor guess list.
+- The remaining constructor pressure is now mostly abstract iterator/list
+  classes, block-compressed output streams, Hadoop/configuration boundaries,
+  feature readers, and other external domain-library constructors.
+
+## HTSJDK SAM Output And Binary Codec Constructor Provenance Slice
+
+The next selected constructor pressure was the output-side counterpart to the
+HTSJDK/SAM IO constructors modeled earlier:
+
+```text
+top_external_constructor_guess_types
+BlockCompressedOutputStream	2	3
+BlockCompressedOutputStream	3	1
+BinaryCodec	1	1
+```
+
+Corpus inspection also showed `BinaryCodec()` as a field initializer in the
+SAM spark codec. These constructors are external HTSJDK/SAM IO boundaries, not
+translated source classes. The generalized rule belongs in the external API
+fact layer:
+
+- audited HTSJDK/SAM output and binary codec constructors are builtin external
+  constructor models;
+- the model is explicit by type and arity:
+  - `BlockCompressedOutputStream` with `2` or `3` arguments;
+  - `BinaryCodec` with `0` or `1` arguments;
+- unknown HTSJDK/SAM or non-HTSJDK constructors remain conservative fallbacks.
+
+This does not add resolver behavior or lowering behavior. It extends the
+existing HTSJDK constructor provenance family.
+
+Generalized test coverage:
+
+- extended `htsjdk_external_constructor_facts_are_builtin_models` with
+  block-compressed output stream and binary codec constructor forms;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo fmt
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test jdk_numeric_and_atomic_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	448
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	443
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `448` to `443`.
+- `BlockCompressedOutputStream` and `BinaryCodec` no longer appear in the top
+  constructor guess list.
+- The remaining constructor pressure is now mostly abstract iterator/list
+  classes, Hadoop/configuration boundaries, graph helpers, feature readers, and
+  other external domain-library constructors.
+
+## Apache Commons Math Optimizer And Beta Distribution Constructor Slice
+
+The next selected constructor pressure was another Apache Commons Math family:
+
+```text
+top_external_constructor_guess_types
+BetaDistribution	3	1
+BrentOptimizer	2	1
+```
+
+Corpus inspection showed `BetaDistribution(random, alpha, beta)` and
+`BrentOptimizer(relativeTolerance, absoluteTolerance)` constructor forms. These
+are external Apache Commons Math constructors rather than translated source
+classes. The generalized rule belongs in the external API fact layer:
+
+- audited Apache Commons Math distribution and optimizer constructors are
+  builtin external constructor models;
+- the model is explicit by type and arity:
+  - `BetaDistribution` with `3` arguments;
+  - `BrentOptimizer` with `2` arguments;
+- unknown Apache Commons or non-Apache constructors remain conservative
+  fallbacks.
+
+This does not add resolver behavior or lowering behavior. It extends the
+existing Apache Commons constructor provenance family.
+
+Generalized test coverage:
+
+- extended `apache_commons_external_constructor_facts_are_builtin_models` with
+  beta distribution and optimizer constructor forms;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo fmt
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	443
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	441
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `443` to `441`.
+- `BetaDistribution` and `BrentOptimizer` no longer appear in the top
+  constructor guess list.
+- The remaining constructor pressure is now mostly abstract iterator/list
+  classes, histogram/CSV/configuration boundaries, graph helpers, feature
+  readers, and other external domain-library constructors.
+
+## Apache Commons MutablePair Constructor Provenance Slice
+
+The next audit found that several high-ranking remaining rows are not safe
+plain constructor facts:
+
+- `AbstractIterator`, `AbstractDoubleList`, and `Access2D` are anonymous-class
+  creation pressure and should not be hidden as ordinary external
+  constructors;
+- `Histogram` is both a source class in the GATK corpus and an imported HTSJDK
+  utility class, so it needs disambiguation before any provenance model;
+- source-local domain records such as `Connection`, `Contig`, and
+  `BwaMemAlignment` should not be modeled as external library facts.
+
+The selected safe external family was Apache Commons Lang tuple constructors.
+The benchmark top list only showed:
+
+```text
+MutablePair	2	2
+```
+
+but corpus inspection showed repeated `new MutablePair<>(left, right)` forms in
+several files. `MutablePair` is already treated as tuple-like elsewhere in the
+standard-library model, while constructor provenance only covered `Pair`,
+`ImmutablePair`, and `Tuple2`.
+
+The generalized rule belongs in the external API fact layer:
+
+- audited tuple-like external constructors are builtin external constructor
+  models;
+- the model covers `Pair`, `ImmutablePair`, `MutablePair`, and `Tuple2` with
+  two arguments;
+- unknown tuple-like or non-tuple constructors remain conservative fallbacks.
+
+This does not add resolver behavior or lowering behavior. It fills a missing
+case in the existing tuple constructor provenance helper.
+
+Generalized test coverage:
+
+- `tuple_like_external_constructor_facts_are_builtin_models`;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo fmt
+cargo test tuple_like_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	441
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	433
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `441` to `433`.
+- `MutablePair` no longer appears in the top constructor guess list.
+- Anonymous-class and source/domain rows were intentionally left as future
+  resolver/parser/object-model work rather than papered over as external
+  constructor facts.
+
+## JDK Numeric And Atomic Constructor Provenance Slice
+
+The next selected constructor pressure was a stable JDK utility family:
+
+```text
+top_external_constructor_guess_types
+BigInteger	2	2
+AtomicInteger	1	1
+AtomicLong	1	1
+```
+
+Corpus inspection also showed `AtomicLong()` and `BigInteger(String)` forms.
+These are ordinary JDK constructors, not source resolver failures. The
+generalized rule belongs in the JDK external constructor taxonomy:
+
+- audited JDK numeric and atomic utility constructors are builtin external
+  constructor models;
+- the model is explicit by type and arity:
+  - `BigInteger` with `1` or `2` arguments;
+  - `AtomicInteger` with `0` or `1` arguments;
+  - `AtomicLong` with `0` or `1` arguments;
+- unknown utility constructors remain conservative fallbacks.
+
+This does not add resolver behavior or lowering behavior. It extends the
+existing JDK utility constructor provenance family.
+
+Generalized test coverage:
+
+- `jdk_numeric_and_atomic_constructor_facts_are_builtin_models`;
+- existing JDK constructor coverage remains in
+  `jdk_external_constructor_facts_are_builtin_models`;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo fmt
+cargo test jdk_numeric_and_atomic_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	452
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	448
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `452` to `448`.
+- `BigInteger`, `AtomicInteger`, and `AtomicLong` no longer appear in the top
+  constructor guess list.
+- The remaining constructor pressure is now mostly abstract iterator/list
+  classes, block-compressed output streams, Hadoop/configuration boundaries,
+  feature readers, and other external domain-library constructors.
+
+## JGraphT Algorithm Constructor Provenance Slice
+
+This slice adds explicit external constructor provenance for audited JGraphT
+algorithm helpers:
+
+- `ConnectivityInspector` with `1` argument;
+- `CycleDetector` with `1` argument.
+
+These are modeled as a dedicated JGraphT stdlib constructor family, not as
+generic one-argument constructor handling. The GATK corpus imports these from
+`org.jgrapht.alg`, so the model is an external-library fact rather than a
+source-domain or anonymous-class workaround.
+
+Generalized test coverage:
+
+- `jgrapht_algorithm_constructor_facts_are_builtin_models`;
+- existing tuple constructor coverage remains in
+  `tuple_like_external_constructor_facts_are_builtin_models`;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo test jgrapht_algorithm_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test tuple_like_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	433
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	429
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `433` to `429`.
+- `ConnectivityInspector/1` and `CycleDetector/1` no longer appear in the top
+  constructor guess list.
+- Remaining high-pressure constructor rows include anonymous-class/abstract
+  type pressure, source-owned domain types, and ambiguous imported/source names;
+  those should not be converted into generic external constructor rules.
+
+## External Library Constructor Provenance Slice
+
+This slice adds explicit external constructor provenance for several audited
+library families that appear in the current GATK constructor guess list:
+
+- Barclay reflection helpers:
+  - `ClassFinder` with `0` arguments;
+- OpenCSV readers and writers:
+  - `CSVReader` with `1` or `4` arguments;
+  - `CSVWriter` with `2` or `4` arguments;
+- Hadoop configuration:
+  - `Configuration` with `0` arguments;
+- GenomicsDB readers:
+  - `GenomicsDBFeatureReader` with `3` arguments.
+
+Each family is modeled as a separate stdlib constructor helper. This keeps the
+mapping explicit by library and arity, instead of introducing a broad rule for
+all no-argument or IO-looking constructors. The GATK corpus has clear imports
+for these external classes, but the regression tests use small synthetic Java
+fixtures that assert the semantic fact boundary only.
+
+Generalized test coverage:
+
+- `barclay_reflection_helper_constructor_facts_are_builtin_models`;
+- `opencsv_external_constructor_facts_are_builtin_models`;
+- `hadoop_configuration_constructor_facts_are_builtin_models`;
+- `genomicsdb_reader_constructor_facts_are_builtin_models`;
+- existing fallback coverage remains in
+  `external_constructor_facts_explain_missing_library_constructors_only`.
+
+Verification:
+
+```text
+cargo test barclay_reflection_helper_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test opencsv_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test hadoop_configuration_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test genomicsdb_reader_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+external_constructor_guesses	429
+external_api_guesses	24792
+external_field_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	418
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `429` to `418`.
+- `Configuration/0`, `CSVReader/1`, `CSVReader/4`, `CSVWriter/2`,
+  `CSVWriter/4`, `ClassFinder/0`, and `GenomicsDBFeatureReader/3` no longer
+  appear in the top constructor guess list.
+- The remaining top rows now include anonymous-class/abstract type pressure
+  (`AbstractIterator`, `AbstractDoubleList`, `Access2D`), source-owned domain
+  types (`Connection`, `Contig`, `NoMnpIterator`), and ambiguous names such as
+  `Histogram`. Those should be handled by resolver/object-model work or import
+  disambiguation, not by broad external constructor provenance.
+
+## Source-Owned Constructor Guess Reporting Slice
+
+This slice refines the benchmark boundary between external API pressure and
+source-owned resolver pressure.
+
+Before this change, the benchmark ran semantic analysis one file at a time.
+That meant a constructor for a source class defined in another file could
+produce a conservative external constructor fact, and the aggregate report then
+counted it as external API pressure. The directory benchmark already has a
+global source-type index, so the report now uses that index to split
+conservative constructor facts into:
+
+- `external_constructor_guesses`;
+- `source_constructor_guesses`;
+- `top_external_constructor_guess_types`;
+- `top_source_constructor_guess_types`.
+
+Unresolved source-owned constructor calls are also separated from non-source
+constructor misses:
+
+- `unexplained_source_constructors`;
+- `unexplained_non_source_constructors`.
+
+This does not resolve any Java constructor. It makes the benchmark ownership
+boundary more honest so later work does not turn resolver/source-model failures
+into external-library facts.
+
+Generalized test coverage:
+
+- `resolver_benchmark_separates_cross_file_source_constructor_guesses`;
+- existing source constructor benchmark coverage remains in
+  `resolver_benchmark_reports_unexplained_source_constructor_targets`;
+- existing implicit constructor coverage remains in
+  `resolver_benchmark_resolves_implicit_no_arg_source_constructors`.
+
+Verification:
+
+```text
+cargo test resolver_benchmark_separates_cross_file_source_constructor_guesses --test resolve_calls --quiet
+cargo test resolver_benchmark_reports_unexplained_source_constructor_targets --test resolve_calls --quiet
+cargo test resolver_benchmark_resolves_implicit_no_arg_source_constructors --test resolve_calls --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+external_constructor_guesses	418
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4173
+unexplained_constructors	7
+unexplained_source_constructors	7
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	414
+source_constructor_guesses	4
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Top source-owned constructor guesses after this slice:
+
+```text
+top_source_constructor_guess_types
+Histogram	2	3
+MergingIterator	2	1
+```
+
+Top unexplained source constructor contexts after this slice:
+
+```text
+Histogram	Histogram	String,String	PerUnitInsertSizeMetricsCollector	<init>	3	org/broadinstitute/hellbender/metrics/PerUnitInsertSizeMetricsCollector.java
+Histogram	Histogram	String,String	F1R2FilterUtils	createAltHistogram	1	org/broadinstitute/hellbender/tools/walkers/readorientation/F1R2FilterUtils.java
+Histogram	Histogram	String,String	F1R2FilterUtils	createRefHistogram	1	org/broadinstitute/hellbender/tools/walkers/readorientation/F1R2FilterUtils.java
+Histogram	Histogram	String,String	HistogramGenerator	getMeanQualityHistogram	1	org/broadinstitute/hellbender/tools/spark/pipelines/metrics/MeanQualityByCycleSpark.java
+MergingIterator	MergingIterator	VariantContextComparator,List<CloseableIterator<VariantContext>>	MultiVariantDataSource	getMergedIteratorFromDataSources	1	org/broadinstitute/hellbender/engine/MultiVariantDataSource.java
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- This is a reporting/refactoring improvement, not a resolution improvement:
+  total unresolved constructors remain `4180`.
+- `7` constructor misses are now correctly classified as source-owned
+  unresolved constructors instead of external API explained constructors.
+- Conservative external constructor guesses moved from `418` to `414` because
+  `4` guesses are now classified as `source_constructor_guesses`.
+- The next source-owned resolver target is `Histogram(String, String)` and
+  `MergingIterator(VariantContextComparator, List<CloseableIterator<...>>)`.
+  These should be handled by source constructor/import resolution, not external
+  constructor provenance.
+
+## Import-Aware Source Constructor Ownership Slice
+
+The previous source-owned constructor split exposed a useful boundary, but its
+first implementation used a flat simple-name source check. That overclassified
+some explicit external imports as source-owned when the translated corpus also
+contained a source type with the same simple name.
+
+Corpus inspection showed both reported source-owned rows were actually external
+imports at their use sites:
+
+- `Histogram(String, String)` comes from explicit
+  `htsjdk.samtools.util.Histogram` imports in metrics/read-orientation code,
+  even though the corpus also contains
+  `org.broadinstitute.hellbender.utils.Histogram`;
+- `MergingIterator(VariantContextComparator, List<...>)` comes from explicit
+  `htsjdk.samtools.util.MergingIterator` imports in `MultiVariantDataSource`,
+  even though another source file has a nested `MultiFeatureWalker.MergingIterator`.
+
+The benchmark ownership check is now import-aware:
+
+- an exact non-static import for a simple type name decides ownership first;
+- if that exact import points at a known source qualified name, the constructor
+  remains source-owned;
+- if that exact import does not point at a known source qualified name, the
+  constructor remains external API pressure;
+- otherwise the benchmark falls back to the source symbol set built for that
+  file.
+
+This remains benchmark/reporting logic. It does not change resolver target
+selection, semantic fact generation, stdlib external constructor provenance, or
+lowering.
+
+Generalized test coverage:
+
+- `resolver_benchmark_does_not_mark_explicit_external_import_as_source_constructor`;
+- `resolver_benchmark_separates_cross_file_source_constructor_guesses`;
+- `resolver_benchmark_reports_unexplained_source_constructor_targets`.
+
+Verification:
+
+```text
+cargo test resolver_benchmark_does_not_mark_explicit_external_import_as_source_constructor --test resolve_calls --quiet
+cargo test resolver_benchmark_separates_cross_file_source_constructor_guesses --test resolve_calls --quiet
+cargo test resolver_benchmark_reports_unexplained_source_constructor_targets --test resolve_calls --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+unresolved_constructors	4180
+external_api_explained_constructors	4173
+unexplained_constructors	7
+unexplained_source_constructors	7
+unexplained_non_source_constructors	0
+external_constructor_guesses	414
+source_constructor_guesses	4
+top_source_constructor_guess_types
+Histogram	2	3
+MergingIterator	2	1
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	418
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- There are currently no measured GATK source-owned constructor misses after
+  import-aware ownership classification.
+- The previous `Histogram` and `MergingIterator` source-owned rows are correctly
+  restored to external API pressure because their use sites explicitly import
+  external HTSJDK types.
+- `external_constructor_guesses` returns from `414` to `418`, and
+  `source_constructor_guesses` moves from `4` to `0`.
+- The next constructor work is again external API taxonomy or a deeper resolver
+  task such as anonymous/abstract class construction; it is not source
+  constructor overload resolution for these two rows.
+
+## HTSJDK Utility Constructor Provenance Slice
+
+This slice adds audited external constructor provenance for HTSJDK utility
+classes that became visible after the import-aware source/external ownership
+correction:
+
+- `Histogram` with `0` or `2` arguments;
+- `PeekableIterator` with `1` argument;
+- `MergingIterator` with `2` arguments;
+- `SamFileHeaderMerger` with `3` arguments;
+- `Lazy` with `1` argument.
+
+Corpus inspection showed explicit HTSJDK imports for these uses, including
+`htsjdk.samtools.util.Histogram`, `htsjdk.samtools.util.PeekableIterator`,
+`htsjdk.samtools.util.MergingIterator`, `htsjdk.samtools.SamFileHeaderMerger`,
+and `htsjdk.samtools.util.Lazy`. The model is added only to the HTSJDK
+constructor family, with explicit arities. It does not introduce a generic rule
+for iterators, suppliers, headers, or histogram-like names.
+
+Generalized test coverage:
+
+- `htsjdk_external_constructor_facts_are_builtin_models` now includes these
+  utility constructors;
+- `external_constructor_facts_explain_missing_library_constructors_only`
+  remains the fallback guard;
+- `resolver_benchmark_does_not_mark_explicit_external_import_as_source_constructor`
+  remains decoupled from the specific `Histogram` name and uses a neutral
+  collision type.
+
+Verification:
+
+```text
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo test resolver_benchmark_does_not_mark_explicit_external_import_as_source_constructor --test resolve_calls --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	418
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	395
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `418` to `395`.
+- `Histogram`, `PeekableIterator`, `MergingIterator`, `SamFileHeaderMerger`,
+  and `Lazy` no longer appear in the top constructor guess list.
+- Remaining top constructor pressure includes Apache math statistics
+  (`Median`), HTSJDK/reference sequence construction, anonymous/abstract class
+  pressure, and several domain/library constructors that need separate
+  ownership checks before modeling.
+
+## Apache Math, HTSJDK Reference, And Apache HTTP Constructor Slice
+
+This slice adds audited external constructor provenance for three separate
+library families that appeared in the next benchmark rows:
+
+- Apache Commons Math:
+  - `Median` with `0` arguments;
+  - `ChiSquaredDistribution` with `1` or `2` arguments;
+- HTSJDK and Tribble:
+  - `ReferenceSequence` with `3` arguments;
+  - `CodecLineParsingException` with `1` argument;
+- Apache HTTP:
+  - `HttpGet` with `1` argument.
+
+Corpus inspection showed explicit imports for each family:
+`org.apache.commons.math3.stat.descriptive.rank.Median`,
+`org.apache.commons.math3.distribution.ChiSquaredDistribution`,
+`htsjdk.samtools.reference.ReferenceSequence`,
+`htsjdk.tribble.exception.CodecLineParsingException`, and
+`org.apache.http.client.methods.HttpGet`.
+
+The implementation keeps separate helper ownership:
+
+- Apache Commons Math constructors remain in the Apache Commons helper;
+- HTSJDK/Tribble constructors remain in the HTSJDK helper;
+- Apache HTTP constructors use a dedicated Apache HTTP helper.
+
+Generalized test coverage:
+
+- `apache_commons_external_constructor_facts_are_builtin_models`;
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `apache_http_constructor_facts_are_builtin_models`;
+- `external_constructor_facts_explain_missing_library_constructors_only`
+  remains the fallback guard.
+
+Verification:
+
+```text
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_http_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	395
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	380
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `395` to `380`.
+- `Median`, `ReferenceSequence`, `HttpGet`, `ChiSquaredDistribution`, and
+  `CodecLineParsingException` no longer appear in the top constructor guess
+  list.
+- The remaining top rows are now dominated by anonymous/abstract-class
+  pressure, FermiLite/domain constructors, some source-like nested names with
+  external import ambiguity, and scattered third-party constructors.
+
+## JDK Map, HTSJDK Builder, Tribble GFF, And Barclay Parser Constructor Slice
+
+This slice adds audited constructor provenance for the next small set of
+well-owned rows:
+
+- JDK maps:
+  - `ConcurrentHashMap` with `0` arguments;
+- HTSJDK and Tribble:
+  - `FastaReferenceWriterBuilder` with `0` arguments;
+  - `Gff3BaseData` with `9` arguments;
+- Barclay:
+  - `CommandLineArgumentParser` with `3` arguments.
+
+Corpus inspection showed explicit imports for these external classes:
+`java.util.concurrent.ConcurrentHashMap`,
+`htsjdk.samtools.reference.FastaReferenceWriterBuilder`,
+`htsjdk.tribble.gff.Gff3BaseData`, and
+`org.broadinstitute.barclay.argparser.CommandLineArgumentParser`.
+
+The implementation keeps ownership separated:
+
+- `ConcurrentHashMap` joins the JDK map constructor family;
+- `FastaReferenceWriterBuilder` and `Gff3BaseData` stay in the HTSJDK/Tribble
+  constructor helper;
+- `CommandLineArgumentParser` stays in the Barclay constructor helper.
+
+Generalized test coverage:
+
+- `jdk_external_constructor_facts_are_builtin_models`;
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `barclay_reflection_helper_constructor_facts_are_builtin_models`;
+- `external_constructor_facts_explain_missing_library_constructors_only`
+  remains the fallback guard.
+
+Verification:
+
+```text
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test barclay_reflection_helper_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	380
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	373
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `380` to `373`.
+- `FastaReferenceWriterBuilder`, `CommandLineArgumentParser`,
+  `ConcurrentHashMap`, and `Gff3BaseData` no longer appear in the top
+  constructor guess list.
+- The next top rows include anonymous/abstract constructions
+  (`AbstractIterator`, `Comparator`, `AbstractDoubleList`, `Access2D`),
+  external domain/library constructors (`HashPartitioner`, `Configurations`,
+  FermiLite nested types), and standard exception constructors.
+
+## Apache Percentile, Commons Configuration, And Spark Constructor Slice
+
+This slice adds audited constructor provenance for three stable external
+library families:
+
+- Apache Commons Math:
+  - `Percentile` with `0` or `1` arguments;
+- Apache Commons Configuration:
+  - `Configurations` with `0` arguments;
+- Spark:
+  - `HashPartitioner` with `1` argument.
+
+Corpus inspection showed explicit imports:
+`org.apache.commons.math3.stat.descriptive.rank.Percentile`,
+`org.apache.commons.configuration2.builder.fluent.Configurations`, and
+`org.apache.spark.HashPartitioner`.
+
+The implementation keeps the families separate:
+
+- `Percentile` stays in the Apache Commons Math constructor helper;
+- `Configurations` uses a dedicated Apache Commons Configuration helper;
+- `HashPartitioner` uses a dedicated Spark helper.
+
+Generalized test coverage:
+
+- `apache_commons_external_constructor_facts_are_builtin_models`;
+- `apache_commons_configuration_constructor_facts_are_builtin_models`;
+- `spark_constructor_facts_are_builtin_models`;
+- `external_constructor_facts_explain_missing_library_constructors_only`
+  remains the fallback guard.
+
+Verification:
+
+```text
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_configuration_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test spark_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	373
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	366
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111226
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Conservative external constructor guesses moved from `373` to `366`.
+- `Percentile`, `HashPartitioner`, and `Configurations` no longer appear in
+  the top constructor guess list.
+- Remaining top rows include anonymous/abstract class construction
+  (`AbstractIterator`, `Comparator`, `AbstractDoubleList`, `Access2D`), and
+  external domain/library constructors such as FermiLite/BWA/CRAM-related types
+  that should be modeled only after a separate ownership audit.
+
+## Anonymous Class Constructor Classification Slice
+
+This slice separates anonymous class construction from ordinary external
+constructor provenance. GATK exposed rows such as `AbstractIterator`,
+`Comparator`, `AbstractDoubleList`, `Access2D`, and `CloseableIterator` in the
+external constructor guess table, but these are Java anonymous class
+expressions. They should be handled by representation and object-model
+planning, not by the external API constructor fact layer.
+
+Generalized rule:
+
+- Resolver-owned unresolved constructor facts preserve whether `new T(...) {
+  ... }` is anonymous class construction.
+- Semantic external-constructor fact collection ignores anonymous class
+  constructor facts.
+- The resolver benchmark reports anonymous class constructor pressure in a
+  separate bucket instead of counting it as an external API constructor guess.
+
+No GATK-specific class, package, or lowering rule was added.
+
+Generalized test coverage:
+
+- `anonymous_class_constructors_do_not_become_external_constructor_facts`;
+- `resolver_benchmark_reports_anonymous_class_constructors_separately`;
+- `jdk_external_constructor_facts_are_builtin_models` now keeps abstract
+  anonymous `AbstractList`/`AbstractSet` construction out of ordinary JDK
+  constructor facts.
+
+Verification:
+
+```text
+cargo test anonymous_class_constructors_do_not_become_external_constructor_facts --test semantic_facts --quiet
+cargo test resolver_benchmark_reports_anonymous_class_constructors_separately --test resolve_calls --quiet
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4180
+external_api_explained_constructors	4180
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	366
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4128
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	339
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111189
+```
+
+Top anonymous constructor targets after the split:
+
+```text
+DefaultRealMatrixChangingVisitor	0	14
+Iterator	0	7
+AbstractIterator	0	5
+AbstractList	0	4
+ObjectInstantiator	0	4
+Function	0	2
+MapFunction	0	2
+AbstractDoubleList	0	1
+AbstractIntegerDistribution	1	1
+AbstractSet	0	1
+Access2D	0	1
+CloseableIterator	0	1
+Comparator	0	1
+DelegatingIterator	1	1
+FeatureReader	0	1
+Iterable	0	1
+SamRecordFilter	0	1
+ServiceUnavailableRetryStrategy	0	1
+SimpleStandardOption	1	1
+Spliterator	0	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- `52` anonymous class constructor rows are now reported separately.
+- Conservative external constructor guesses moved from `366` to `339`.
+- The drop in `external_api_explained_constructors` is intentional: anonymous
+  class construction is no longer treated as external API constructor
+  provenance.
+- Remaining external constructor guesses are now cleaner candidates for either
+  stable external API facts or later source/member resolution work.
+
+## JDK And HTSJDK Constructor Fact Slice
+
+After anonymous class construction was moved out of the external constructor
+guess table, the next stable external-boundary rows were ordinary JDK utility
+constructors and HTSJDK `SAMFileHeader` constructors.
+
+Corpus evidence included:
+
+- `new SAMFileHeader()` and `new SAMFileHeader(sequenceDictionary)`;
+- `new Random()` and `new Random(seed)`;
+- `new Date()`;
+- `new ConsoleHandler()`;
+- `new ConcurrentModificationException(message)`.
+
+Generalized rule:
+
+- Known JDK utility constructors and HTSJDK constructors belong in the external
+  API fact layer with builtin provenance.
+- JDK exception hierarchy facts should include
+  `ConcurrentModificationException` as a runtime exception so throwable
+  constructor provenance remains generalized.
+- No lowering rule or GATK-specific constructor branch is needed.
+
+Generalized test coverage:
+
+- `jdk_external_constructor_facts_are_builtin_models` now covers `Date`,
+  `Random`, `ConsoleHandler`, and `ConcurrentModificationException`;
+- `htsjdk_external_constructor_facts_are_builtin_models` now covers
+  `SAMFileHeader/0` and `SAMFileHeader/1`.
+
+Verification:
+
+```text
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4180
+external_api_explained_constructors	4128
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	339
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4128
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	316
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111189
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- Conservative external constructor guesses moved from `339` to `316`.
+- The top constructor guess table now starts with other stable external
+  boundaries such as `SAMTextHeaderCodec`, `MetricsFile`, `Input`, and
+  domain-specific graph/CRAM/BWA/FermiLite constructors.
+
+## HTSJDK, Apache Commons Collections, And JGraphT Constructor Slice
+
+This slice promotes another set of stable external-boundary constructors from
+the cleaned constructor guess table. Corpus imports showed these were known
+library APIs rather than source lookup failures:
+
+- HTSJDK:
+  - `SAMTextHeaderCodec/0`;
+  - `MetricsFile/0`;
+  - `DefaultSAMRecordFactory/0`;
+  - `CramContainerIterator/1`;
+  - `CRAMReferenceRegion/2`;
+  - nested utility `DefaultingMap/2`;
+- Apache Commons Collections:
+  - `DefaultedMap/1`;
+- JGraphT:
+  - `DefaultDirectedWeightedGraph/1`;
+  - `DOTExporter/5`.
+
+Generalized rule:
+
+- Library constructor provenance stays in the external API fact layer, grouped
+  by family-specific helpers.
+- Nested external utility constructors such as HTSJDK
+  `CollectionUtil.DefaultingMap` are still external API facts when their
+  owning library is not translated.
+- No resolver lookup rule or lowering branch was added for GATK names.
+
+Generalized test coverage:
+
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `apache_commons_collections_constructor_facts_are_builtin_models`;
+- `jgrapht_algorithm_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_collections_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test jgrapht_algorithm_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4180
+external_api_explained_constructors	4128
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	316
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4128
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	291
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111189
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- Conservative external constructor guesses moved from `316` to `291`.
+- The next constructor pressure is mixed: stable library facts such as
+  `RuntimeIOException`, `VCFCodec`, Apache math distributions, and
+  `ForkJoinPool`, plus domain/source-like classes such as FermiLite
+  `Connection` and `Contig` that need separate ownership inspection before
+  being modeled.
+
+## JDK, HTSJDK, Apache Math, And Hipparchus Constructor Slice
+
+This slice promotes stable imported library constructors from the next
+constructor guess table while deliberately excluding source/domain-looking
+Broad/FermiLite rows such as `Connection`, `Contig`, `NoMnpIterator`, and
+`FermiLiteAssembly`.
+
+Corpus evidence showed explicit imports or JDK ownership for:
+
+- JDK:
+  - `ForkJoinPool/0` and `ForkJoinPool/1`;
+- HTSJDK:
+  - `RuntimeIOException/1` and `RuntimeIOException/2`;
+  - `VCFCodec/0`;
+- Apache Commons Math:
+  - `DescriptiveStatistics/0`;
+  - `DimensionMismatchException/2`;
+  - `EnumeratedDistribution/2`;
+  - `ExponentialDistribution/2`;
+- Hipparchus:
+  - `EmpiricalDistribution/0`.
+
+Generalized rule:
+
+- Imported external library constructors belong in the external API fact layer
+  with builtin provenance.
+- `RuntimeIOException` participates in throwable/runtime-exception hierarchy
+  facts.
+- Broad/FermiLite-looking rows are not modeled here because they may require
+  source/nested-type resolution or project-specific ownership analysis.
+
+Generalized test coverage:
+
+- `jdk_external_constructor_facts_are_builtin_models`;
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `apache_commons_external_constructor_facts_are_builtin_models`;
+- `hipparchus_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test hipparchus_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4180
+external_api_explained_constructors	4128
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	291
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4180
+external_api_explained_constructors	4128
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	272
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111189
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- Conservative external constructor guesses moved from `291` to `272`.
+- The top remaining constructor guesses now include stable external libraries
+  such as `Kryo`, `FeatureCodecHeader`, `FilteringSamIterator`, `FastaSequenceFile`,
+  Avro `GenericDatumReader`, and GenomicsDB importer types, plus source/domain
+  rows that should not be blindly added as external API facts.
+
+## Anonymous-Body Local Source Constructor Slice
+
+This slice fixes a resolver/source-classification boundary rather than adding
+another external API model. GATK exposed `NoMnpIterator` as an external
+constructor guess, but inspection showed it is a local class declared inside an
+anonymous class body in `GenomicsDBImport`.
+
+Generalized rule:
+
+- Source type collection must include Java local classes declared in blocks.
+- Source type collection must also include member types declared inside
+  anonymous class bodies.
+- Resolver symbol collection must traverse expressions so constructors for
+  anonymous-body local classes are available before external API fallback.
+- Semantic external constructor collection and benchmark source/external
+  classification should agree on the same source-owned type universe.
+
+No `NoMnpIterator` special case and no lowering rule was added.
+
+Generalized test coverage:
+
+- `resolver_benchmark_resolves_local_class_constructor_inside_anonymous_body`.
+
+Verification:
+
+```text
+cargo test resolver_benchmark_resolves_local_class_constructor_inside_anonymous_body --test resolve_calls --quiet
+cargo test resolver_benchmark_reports_anonymous_class_constructors_separately --test resolve_calls --quiet
+cargo test anonymous_class_constructors_do_not_become_external_constructor_facts --test semantic_facts --quiet
+cargo check --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4180
+external_api_explained_constructors	4128
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	272
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	270
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- `NoMnpIterator/1` is no longer a constructor guess.
+- Unresolved constructors moved from `4180` to `4177`.
+- Conservative external constructor guesses moved from `272` to `270`.
+- Remaining `Connection`, `Contig`, and `FermiLiteAssembly` rows appear to come
+  from package imports whose source is not present in the current translated
+  GATK tree, so they should not be reclassified as source without additional
+  corpus/source evidence.
+
+## Kryo, HTSJDK Iterator/Header, Avro, GenomicsDB, And Triple Constructor Slice
+
+This slice promotes stable imported library constructors from the next
+constructor guess table. It keeps each family in its owning external fact
+helper rather than adding a loose name-based lowering rule.
+
+Corpus evidence showed:
+
+- Kryo:
+  - `Kryo/0`;
+  - `Input/1`;
+  - `Output/1`;
+- HTSJDK/Tribble/reference helpers:
+  - `FeatureCodecHeader/2`;
+  - `FilteringSamIterator/2`;
+  - `FastaSequenceFile/2`;
+- Apache Commons Collections:
+  - `FilterIterator/2`;
+- Avro:
+  - `GenericDatumReader/1`;
+- GenomicsDB:
+  - `GenomicsDBImporter/1`;
+- tuple-like Apache Commons Lang:
+  - `ImmutableTriple/3`.
+
+Generalized rule:
+
+- Imported serialization, iterator/filter, feature-header, and reader helper
+  constructors belong in external API facts with builtin provenance.
+- Tuple-like triple constructors are modeled with the existing tuple-like
+  constructor policy rather than a GATK-specific rule.
+- The ambiguous simple name `Input` is modeled as part of the Kryo constructor
+  family based on the explicit `com.esotericsoftware.kryo.io.Input` imports
+  found in the corpus evidence.
+
+Generalized test coverage:
+
+- `tuple_like_external_constructor_facts_are_builtin_models`;
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `apache_commons_collections_constructor_facts_are_builtin_models`;
+- `kryo_serializer_constructor_facts_are_builtin_models`;
+- `genomicsdb_reader_constructor_facts_are_builtin_models`;
+- `avro_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test tuple_like_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_collections_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test kryo_serializer_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test genomicsdb_reader_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test avro_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo check --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	270
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	247
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- Conservative external constructor guesses moved from `270` to `247`.
+- The top remaining constructor guesses are now mostly project/domain
+  boundaries absent from the current source tree, compression/fastutil/metrics
+  library constructors, and a few command-line/program-group helper types.
+
+## Compress, Fastutil, Picard, Disq, And Lang Builder Constructor Slice
+
+This slice promotes another set of stable imported library constructors from
+the external constructor guess table. The GATK evidence showed explicit imports
+or fully-qualified construction for these libraries:
+
+- Apache Commons Compress:
+  - `GzipCompressorInputStream/1`;
+  - `GzipCompressorOutputStream/1`;
+- fastutil:
+  - `Int2ObjectArrayMap/0`;
+  - `Int2ObjectArrayMap/1`;
+- Picard:
+  - `OpticalDuplicateFinder/0`;
+  - `OpticalDuplicateFinder/3`;
+  - `GenotypeConcordanceCounts/0`;
+  - `GenotypeConcordanceSummaryMetrics/5`;
+  - `DiagnosticsAndQCProgramGroup/0`;
+- Apache Commons Lang:
+  - `HashCodeBuilder/0`;
+- Disq:
+  - `HtsjdkReadsRdd/2`;
+- HTSJDK nested helper:
+  - `ComponentMethods/0`.
+
+Generalized rule:
+
+- Stable imported helper constructors belong in family-specific external API
+  fact helpers with builtin provenance.
+- Fully-qualified construction such as
+  `new picard.cmdline.programgroups.DiagnosticsAndQCProgramGroup()` is still an
+  external API fact even when there is no import.
+- Broad/FermiLite/domain rows remain excluded because their source is absent
+  from the current translated tree or they need separate project-boundary
+  analysis.
+
+Generalized test coverage:
+
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `apache_commons_compress_constructor_facts_are_builtin_models`;
+- `apache_commons_lang_builder_constructor_facts_are_builtin_models`;
+- `fastutil_constructor_facts_are_builtin_models`;
+- `picard_constructor_facts_are_builtin_models`;
+- `disq_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_compress_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_lang_builder_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test fastutil_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test picard_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test disq_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo check --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	247
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	232
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- Conservative external constructor guesses moved from `247` to `232`.
+- The top remaining constructor guesses now include project/domain boundaries
+  (`Connection`, `Contig`, `FermiLiteAssembly`), additional external map/path
+  helpers, and several one-off external library constructors that should be
+  inspected before modeling.
+
+## HTSJDK Interval/Path, Fastutil OpenMap, GenomicsDB Config, Disq, Broad HTTP, And JDK Exception Constructor Slice
+
+This slice promotes another batch of stable external constructors from the
+remaining guess table. The corpus evidence was a mix of frequently repeated
+library calls and one-off calls whose receiver family is already modeled as an
+external API boundary.
+
+Constructors modeled with builtin provenance:
+
+- JDK throwable hierarchy:
+  - `IndexOutOfBoundsException/0`;
+  - `IndexOutOfBoundsException/1`;
+- HTSJDK:
+  - `SeekablePathStream/1`;
+  - `Interval/1`;
+  - `Interval/2`;
+  - `Interval/3`;
+  - `Interval/5`;
+- Apache Commons Math:
+  - `HypergeometricDistribution/4`;
+- fastutil:
+  - `Int2ObjectOpenHashMap/0`;
+  - `Int2ObjectOpenHashMap/1`;
+- Disq:
+  - `HtsjdkReadsTraversalParameters/2`;
+  - `HtsjdkVariantsRdd/2`;
+- Broad HTTP NIO:
+  - `HttpFileSystemProviderSettings/3`;
+- GenomicsDB:
+  - `ImportConfig/8`.
+
+Generalized rule:
+
+- Constructors for stable imported external library types belong in
+  `src/stdlib.rs` family-specific external constructor helpers and produce
+  `BuiltinExternalModel` provenance.
+- The tests assert external constructor facts directly. No lowering branch is
+  allowed to infer Java library meaning from class names.
+- Exact API names are acceptable here because the API identity is the modeled
+  external boundary. Project/domain-looking rows remain excluded unless they
+  are proven to be absent external dependencies rather than source that should
+  be discovered.
+
+Generalized test coverage:
+
+- `jdk_external_constructor_facts_are_builtin_models`;
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `apache_commons_external_constructor_facts_are_builtin_models`;
+- `fastutil_constructor_facts_are_builtin_models`;
+- `disq_constructor_facts_are_builtin_models`;
+- `broad_http_constructor_facts_are_builtin_models`;
+- `genomicsdb_reader_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test fastutil_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test disq_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test broad_http_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test genomicsdb_reader_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	232
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	215
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- Conservative external constructor guesses moved from `232` to `215`.
+- The top remaining constructor guesses are now concentrated in additional
+  HTSJDK record/header helpers, JSON, project/domain boundaries, and a few
+  external collection/inflater/factory types. The next slice should inspect
+  whether `VCFHeaderLine`, `SAMReadGroupRecord`, `SAMRecord`, and
+  `SAMFileWriterFactory` are stable external API models or whether a more
+  general inherited/source constructor rule is missing.
+
+## HTSJDK SAM/VCF, JSON, Fastutil Int Collections, Intel GKL, And JGraphT Constructor Slice
+
+This slice classifies the next constructor guess table instead of promoting
+every remaining name. The modeled rows are imported third-party API boundaries:
+HTSJDK SAM/VCF helpers, fastutil int collections, `org.json`, Intel GKL
+compression factories, and a JGraphT component-name provider. Broad/GATK domain
+rows such as `BwaMemAlignment` remain excluded because they need source
+discovery or an explicit project-boundary decision rather than a generic
+library fact.
+
+Constructors modeled with builtin provenance:
+
+- HTSJDK:
+  - `VCFHeaderLine/2`;
+  - `SAMReadGroupRecord/1`;
+  - `SAMRecord/1`;
+  - `SAMFileWriterFactory/0`;
+  - `IndexedFastaSequenceFile/1`;
+- fastutil:
+  - `IntArrayList/1`;
+  - `Int2IntArrayMap/2`;
+- JSON:
+  - `JSONObject/0`;
+  - `JSONObject/1`;
+  - `JSONTokener/1`;
+- Intel GKL:
+  - `IntelDeflaterFactory/0`;
+  - `IntelInflaterFactory/0`;
+- JGraphT:
+  - `IntegerComponentNameProvider/0`.
+
+Generalized rule:
+
+- Imported third-party constructors that are not part of the translated source
+  corpus should be modeled as external constructor facts with
+  `BuiltinExternalModel` provenance.
+- Fact tests should assert provenance directly at the semantic-fact layer.
+- Project/domain-looking constructor rows should not be promoted until we prove
+  whether they are translated source, missing source, generated code, or an
+  intentional external boundary.
+
+Generalized test coverage:
+
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `fastutil_constructor_facts_are_builtin_models`;
+- `json_constructor_facts_are_builtin_models`;
+- `intel_gkl_constructor_facts_are_builtin_models`;
+- `jgrapht_algorithm_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test fastutil_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test json_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test intel_gkl_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test jgrapht_algorithm_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	215
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	178
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- Conservative external constructor guesses moved from `215` to `178`.
+- The next top rows are more mixed: Apache Commons mutable numbers and random
+  generators, JSON arrays, Intel PairHMM wrappers, interval/tree helpers, and
+  project/domain boundaries. The next slice should classify these carefully
+  before adding any new builtin models.
+
+## Commons Mutable/Random, Jama Matrix, HTSJDK Interval Helpers, Picard Program Group, JSON Array, And Intel PairHMM Constructor Slice
+
+This slice promotes imported external dependencies that appeared in the next
+constructor guess table. It continues to exclude Broad/GATK domain rows and
+source-looking helper types until source discovery or project-boundary facts
+can classify them.
+
+Constructors modeled with builtin provenance:
+
+- Apache Commons Lang:
+  - `MutableInt/0`;
+  - `MutableInt/1`;
+- Apache Commons Math:
+  - `JDKRandomGenerator/0`;
+- Jama:
+  - `Matrix/1`;
+  - `Matrix/2`;
+- HTSJDK:
+  - `IntervalTree/0`;
+  - `IntervalMergerIterator/4`;
+- Picard:
+  - `IntervalsManipulationProgramGroup/0`;
+- JSON:
+  - `JSONArray/0`;
+  - `JSONArray/1`;
+- Intel GKL:
+  - `IntelPDHMM/0`;
+  - `IntelPairHmm/0`;
+  - `IntelPairHmmOMP/0`.
+
+Generalized rule:
+
+- Stable imported external constructors should be represented as builtin
+  external constructor facts with family-specific helpers.
+- Simple names that are ambiguous across dependency families should still be
+  tested as external facts only when corpus imports show they are dependency
+  constructors, not translated source.
+- Source/domain rows such as `BwaMemAlignment`, `FermiLiteAssembly`, and
+  `HaplotypeDataHolder` remain out of the external model until a source
+  discovery or explicit project-boundary rule owns them.
+
+Generalized test coverage:
+
+- `apache_commons_lang_builder_constructor_facts_are_builtin_models`;
+- `apache_commons_external_constructor_facts_are_builtin_models`;
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `json_constructor_facts_are_builtin_models`;
+- `intel_gkl_constructor_facts_are_builtin_models`;
+- `jama_matrix_constructor_facts_are_builtin_models`;
+- `picard_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test apache_commons_lang_builder_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test json_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test intel_gkl_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test jama_matrix_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test picard_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	178
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	158
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- Conservative external constructor guesses moved from `178` to `158`.
+- The top remaining rows are now mostly exceptions/reflection/builders,
+  Spark wrappers, JDK IO/manifest helpers, HTSJDK iterators, and source/domain
+  boundaries. The next slice should decide whether to model additional stable
+  JDK/external APIs or switch to a resolver/source-discovery rule for the
+  project-domain rows.
+
+## JDK Manifest/Line Reader, HTSJDK Iterators, Commons Exception/Eval, Spark, Guava, And Reflections Constructor Slice
+
+This slice promotes another set of imported external/JDK constructors while
+continuing to exclude project-domain rows. The modeled types are stable
+library boundaries with explicit imports or JDK ownership.
+
+Constructors modeled with builtin provenance:
+
+- JDK:
+  - `Manifest/1`;
+  - `LineNumberReader/1`;
+- HTSJDK:
+  - `LineIteratorImpl/1`;
+  - `MergingSamRecordIterator/3`;
+- Apache Commons Lang:
+  - `NotImplementedException/1`;
+- Apache Commons Math:
+  - `MaxEval/1`;
+- Spark:
+  - `JavaSparkContext/1`;
+  - `JavaRDD/2`;
+- Guava:
+  - `ThreadFactoryBuilder/0`;
+- Reflections:
+  - `Reflections/1`.
+
+Generalized rule:
+
+- JDK and imported third-party constructors are external API facts when their
+  implementation is outside the translation corpus.
+- Throwable-like external exceptions should participate in the throwable
+  hierarchy where known, so later exception planning does not rediscover this
+  in lowering.
+- Source/domain names such as `Connection`, `Contig`, `FermiLiteAssembly`, and
+  `DocException` remain outside the builtin external model until source
+  discovery or project-boundary facts own them.
+
+Generalized test coverage:
+
+- `jdk_external_constructor_facts_are_builtin_models`;
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `apache_commons_lang_builder_constructor_facts_are_builtin_models`;
+- `apache_commons_external_constructor_facts_are_builtin_models`;
+- `spark_constructor_facts_are_builtin_models`;
+- `guava_constructor_facts_are_builtin_models`;
+- `reflections_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_lang_builder_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test spark_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test guava_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test reflections_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	158
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	143
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- Conservative external constructor guesses moved from `158` to `143`.
+- The remaining constructor guesses are increasingly dominated by
+  source/project-boundary names plus a tail of stable external APIs. The next
+  high-leverage work should likely improve source/project-boundary
+  classification rather than keep only shaving the external tail.
+
+## Missing Same-Project Import Constructor Classification Slice
+
+This slice changes the benchmark classification layer rather than adding more
+external API models. The remaining constructor guess table contained many
+types imported from the same project namespace but absent from the downloaded
+source tree, for example FermiLite/BWA/native-wrapper and some HTSJDK-adjacent
+helper types. Treating those as external library guesses hid a different
+problem: the corpus is missing source or needs an explicit project-boundary
+fact.
+
+Generalized rule:
+
+- A constructor guess for a parsed source type remains a source constructor
+  guess.
+- A constructor guess for an explicit external import remains an external API
+  guess.
+- A constructor guess for an explicit import that is absent from parsed source
+  but shares the corpus project package root is now a project constructor
+  guess.
+- This is benchmark/reporting classification only. It does not add lowering
+  behavior and does not turn missing project types into builtin stdlib facts.
+
+Generalized test coverage:
+
+- `resolver_benchmark_marks_missing_same_project_import_as_project_constructor_guess`;
+- `resolver_benchmark_does_not_mark_explicit_external_import_as_source_constructor`;
+- `resolver_benchmark_separates_cross_file_source_constructor_guesses`.
+
+Verification:
+
+```text
+cargo test resolver_benchmark_marks_missing_same_project_import_as_project_constructor_guess --test resolve_calls --quiet
+cargo test resolver_benchmark_does_not_mark_explicit_external_import_as_source_constructor --test resolve_calls --quiet
+cargo test resolver_benchmark_separates_cross_file_source_constructor_guesses --test resolve_calls --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	143
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	87
+project_constructor_guesses	56
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Top project constructor guesses after classification:
+
+```text
+Tuple	2	4
+VCFFilterHeaderLine	2	3
+VariantContextWriterBuilder	0	3
+Connection	4	2
+Contig	3	2
+FermiLiteAssembly	1	2
+HaplotypeDataHolder	0	2
+ReadDataHolder	0	2
+SAMProgramRecord	1	2
+SAMSequenceDictionary	1	2
+SAMSequenceDictionaryCodec	1	2
+StringHeader	1	2
+BwaMemAlignment	16	1
+FermiLiteAssembler	0	1
+OverlapDetector	2	1
+PDHMMNativeArguments	0	1
+PairHMMNativeArguments	0	1
+PositionalOutputStream	1	1
+QueryInterval	3	1
+ReferenceSequenceFileWalker	1	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- True external constructor guesses moved from `143` to `87` because 56
+  same-project missing imports now have their own project-boundary bucket.
+- The next external API slice can focus on the remaining real external tail
+  (`Properties`, `SimpleGraph`, `SingletonIterator`, `Tuple3`, `URI`,
+  Commons/fastutil/null-stream helpers, and similar). Separately, project
+  constructor guesses should drive source acquisition, generated-source
+  handling, or explicit project-boundary override work.
+
+## External Tail Constructor Slice: JDK URI/Properties, Commons, Fastutil, Picard, Kryo, JGraphT, Spark, And Tuple3
+
+This slice returns to the true external constructor tail after separating out
+same-project missing imports. The selected rows are stable JDK or imported
+third-party API boundaries, not project-domain types.
+
+Constructors modeled with builtin provenance:
+
+- JDK:
+  - `Properties/0`;
+  - `URI/1`;
+  - `NullPointerException/0`;
+- Apache Commons Collections:
+  - `SingletonIterator/1`;
+  - `MultiMap/0`;
+- Apache Commons IO:
+  - `NullInputStream/1`;
+  - `NullOutputStream/1`;
+- Apache Commons Lang:
+  - `MutableLong/1`;
+- Apache Commons Math:
+  - `Mean/0`;
+  - `NormalDistribution/2`;
+  - `NormalDistribution/3`;
+- fastutil:
+  - `Object2IntOpenHashMap/1`;
+- Picard:
+  - `OtherProgramGroup/0`;
+- Kryo/Guava serializer:
+  - `ImmutableMapSerializer/0`;
+- JGraphT:
+  - `SimpleGraph/1`;
+- Spark:
+  - `PartitionGroup/1`;
+- Scala tuple:
+  - `Tuple3/3`.
+
+Generalized rule:
+
+- Remaining true external constructor rows should be modeled only when they are
+  stable JDK/imported dependency constructors.
+- Project constructor guesses remain in the project-boundary bucket and should
+  not be converted into builtin stdlib facts.
+- Tests assert external constructor fact provenance directly; lowering remains
+  uninvolved.
+
+Generalized test coverage:
+
+- `jdk_external_constructor_facts_are_builtin_models`;
+- `tuple_like_external_constructor_facts_are_builtin_models`;
+- `apache_commons_collections_constructor_facts_are_builtin_models`;
+- `apache_commons_compress_constructor_facts_are_builtin_models`;
+- `apache_commons_lang_builder_constructor_facts_are_builtin_models`;
+- `apache_commons_external_constructor_facts_are_builtin_models`;
+- `fastutil_constructor_facts_are_builtin_models`;
+- `picard_constructor_facts_are_builtin_models`;
+- `spark_constructor_facts_are_builtin_models`;
+- `kryo_serializer_constructor_facts_are_builtin_models`;
+- `jgrapht_algorithm_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test tuple_like_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_collections_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_compress_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_lang_builder_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test fastutil_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test picard_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test spark_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test kryo_serializer_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test jgrapht_algorithm_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	87
+project_constructor_guesses	56
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	66
+project_constructor_guesses	56
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- True external constructor guesses moved from `87` to `66`.
+- Project constructor guesses stayed at `56`, confirming this slice did not
+  hide missing same-project imports as external library facts.
+- The remaining external tail includes a few JDK/HTSJDK/Picard/Spark/HTTP
+  helpers and some ambiguous names. Further external modeling should be
+  weighed against switching to method/effect fact quality, since unresolved
+  methods now dominate the benchmark signal.
+
+## External Tail Constructor Slice: JDK Process/Format, HTSJDK SAM/CRAM, Commons Math/Compress, Picard, Spark, And Apache HTTP
+
+This slice models another small constructor tail where the benchmark rows are
+stable JDK or imported third-party library boundaries. It deliberately skips
+ambiguous short names such as `Builder`, `Parser`, `DocException`, and
+`RetrySettings` until their ownership can be proven.
+
+Constructors modeled with builtin provenance:
+
+- JDK:
+  - `ProcessBuilder/1`;
+  - `SimpleDateFormat/1`;
+- HTSJDK:
+  - `Container/3`;
+  - `SAMRecordCoordinateComparator/0`;
+  - `SAMRecordQueryNameComparator/0`;
+  - `SAMSequenceDictionary/0`;
+  - `SAMSequenceDictionary/1`;
+  - `SAMSequenceRecord/2`;
+  - `SAMProgramRecord/1`;
+  - `SAMFormatException/1`;
+  - `SBIIndexWriter/2`;
+- Apache Commons Math:
+  - `PoissonDistribution/1`;
+- Apache Commons Compress:
+  - `NullOutputStream/0`;
+- Picard:
+  - `ReadDataManipulationProgramGroup/0`;
+  - `ReferenceProgramGroup/0`;
+- Spark:
+  - `RowMatrix/1`;
+- Apache HTTP:
+  - `PoolingHttpClientConnectionManager/0`.
+
+Generalized rule:
+
+- Known external constructors should be represented as external constructor
+  facts with `BuiltinExternalModel` provenance.
+- A constructor should be added here only when the type belongs to a stable
+  un-translated library boundary or JDK API.
+- Ambiguous project-like names remain guesses until import/source ownership is
+  proven or a user override supplies the missing fact.
+- Tests assert semantic facts and provenance directly; lowering remains
+  uninvolved.
+
+Generalized test coverage:
+
+- `jdk_external_constructor_facts_are_builtin_models`;
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `apache_commons_external_constructor_facts_are_builtin_models`;
+- `apache_commons_compress_constructor_facts_are_builtin_models`;
+- `picard_constructor_facts_are_builtin_models`;
+- `spark_constructor_facts_are_builtin_models`;
+- `apache_http_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_compress_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test picard_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_http_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test spark_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	66
+project_constructor_guesses	56
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	44
+project_constructor_guesses	48
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Top external constructor guesses after this slice:
+
+```text
+DocException	2	2
+SimpleEntry	2	2
+SingularValueDecomposition	1	2
+TarArchiveInputStream	1	2
+VCFFilterHeaderLine	2	2
+VCFRecordCodec	2	2
+ZipEntry	1	2
+Builder	0	1
+Parser	0	1
+RetrySettings	5	1
+SQLiteConfig	0	1
+SearchInterval	3	1
+SimpleFeature	3	1
+SparkConf	0	1
+StandardDeviation	0	1
+StringJoiner	1	1
+StringTokenizer	3	1
+SynchronousLineReader	1	1
+TDistribution	2	1
+TarArchiveEntry	2	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- True external constructor guesses moved from `66` to `44`.
+- Project constructor guesses moved from `56` to `48` because several HTSJDK
+  SAM/CRAM constructors that had appeared in the project-boundary tail are now
+  covered as known external library constructors.
+- The remaining constructor tail is small and mixed. The next high-leverage
+  work should probably shift toward unresolved method/effect quality or toward
+  resolving ambiguous constructor ownership before adding more curated
+  constructor constants.
+
+## External Tail Constructor Slice: JDK Utility/Zip, HTSJDK VCF/Feature, Commons Math/Tar, Spark, And SQLite
+
+This slice takes one more constructor-tail pass, but only for rows with stable
+external ownership. Ambiguous short names and project-like types remain guesses.
+
+Constructors modeled with builtin provenance:
+
+- JDK:
+  - `SimpleEntry/2`;
+  - `ZipEntry/1`;
+  - `StringJoiner/1`;
+  - `StringTokenizer/3`;
+- HTSJDK/Tribble:
+  - `VCFFilterHeaderLine/2`;
+  - `VCFRecordCodec/2`;
+  - `SynchronousLineReader/1`;
+  - `SimpleFeature/3`;
+- Apache Commons Math:
+  - `SingularValueDecomposition/1`;
+  - `StandardDeviation/0`;
+  - `TDistribution/2`;
+- Apache Commons Compress:
+  - `TarArchiveInputStream/1`;
+  - `TarArchiveEntry/2`;
+- Spark:
+  - `SparkConf/0`;
+- SQLite:
+  - `SQLiteConfig/0`.
+
+Rows intentionally skipped for this slice:
+
+- `Builder/0`;
+- `Parser/0`;
+- `DocException/2`;
+- `RetrySettings/5`;
+- `SearchInterval/3`.
+
+Those names need import/source ownership proof or explicit user overrides
+before they should become builtin external models.
+
+Generalized rule:
+
+- Stable JDK and imported-library constructors belong in external constructor
+  facts with `BuiltinExternalModel` provenance.
+- Constructor-tail cleanup should stop at ambiguous ownership boundaries rather
+  than silently converting project or generated-source gaps into stdlib facts.
+- Tests remain semantic-fact tests; no lowering behavior is added.
+
+Generalized test coverage:
+
+- `jdk_external_constructor_facts_are_builtin_models`;
+- `htsjdk_external_constructor_facts_are_builtin_models`;
+- `apache_commons_external_constructor_facts_are_builtin_models`;
+- `apache_commons_compress_constructor_facts_are_builtin_models`;
+- `spark_constructor_facts_are_builtin_models`;
+- `sqlite_constructor_facts_are_builtin_models`.
+
+Verification:
+
+```text
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_compress_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test sqlite_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test spark_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+external_constructor_guesses	44
+project_constructor_guesses	48
+source_constructor_guesses	0
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24792
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7341
+total_facts	111184
+```
+
+Top external constructor guesses after this slice:
+
+```text
+DocException	2	2
+ZipFile	1	2
+ZipOutputStream	1	2
+Builder	0	1
+Parser	0	1
+RetrySettings	5	1
+SearchInterval	3	1
+TarArchiveOutputStream	1	1
+TempPartsDirectoryWriteOption	1	1
+TruthAndCallStates	2	1
+Tuple4	4	1
+URL	1	1
+UnivariateObjectiveFunction	1	1
+UnmodifiableCollectionsSerializer	0	1
+VCFFileReader	1	1
+VCFSimpleHeaderLine	2	1
+VariantEvaluationProgramGroup	0	1
+VariantFilteringProgramGroup	0	1
+VariantManipulationProgramGroup	0	1
+ZipInputStream	1	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- True external constructor guesses moved from `44` to `23`.
+- Project constructor guesses moved from `48` to `45`.
+- The constructor tail is now small enough that further progress should be
+  selective: model stable JDK/library leftovers such as zip streams or variant
+  program groups, but prioritize method/effect fact quality or ownership
+  classification before adding more ambiguous constructor constants.
+
+## External Method Effect Slice: Java-Wide Compare, File Canonical Path, And Output Side Effects
+
+This slice shifts from constructor-tail cleanup to external method/effect fact
+quality. The selected rows are stable Java-wide or output-boundary APIs, not
+GATK-specific lowering patterns.
+
+Methods modeled with builtin provenance:
+
+- Java-wide comparison:
+  - `compareTo/1`;
+  - `compareTo/0` for method-reference and unresolved-arity fact collection;
+- JDK file path access:
+  - `getCanonicalPath/0`;
+- output/event side effects:
+  - `addAlignment`;
+  - `addAndFlush`;
+  - `addEvent`;
+  - `addMetaDataLine`.
+
+Generalized rule:
+
+- Java-wide APIs with stable return types and effects should be represented as
+  external API effect facts with `BuiltinExternalModel` provenance.
+- Specific output/event side-effect method names should not be treated as
+  generic builder fluent mutators just because the receiver type ends in
+  `Builder`.
+- Receiver-unknown facts may be builtin only when the method identity is
+  specific enough to avoid overfitting, such as `compareTo` and
+  `getCanonicalPath`.
+- Lowering remains uninvolved; it consumes facts and plans only.
+
+Generalized test coverage:
+
+- `java_wide_comparison_api_effects_are_builtin_read_only_facts`;
+- `external_file_path_accessors_are_builtin_string_getter_facts`;
+- `external_writer_and_event_side_effects_are_builtin_read_only_facts`.
+
+Verification:
+
+```text
+cargo test java_wide_comparison_api_effects_are_builtin_read_only_facts --test semantic_facts --quiet
+cargo test external_file_path_accessors_are_builtin_string_getter_facts --test semantic_facts --quiet
+cargo test external_writer_and_event_side_effects_are_builtin_read_only_facts --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+external_api_guesses	24792
+external_api_return_nullability_facts	7341
+external_constructor_guesses	23
+project_constructor_guesses	45
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24673
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7423
+total_facts	111185
+```
+
+Top external API guess methods after this slice:
+
+```text
+*	get	30
+*	add	29
+*	getContig	15
+*	getStart	15
+*	contains	13
+*	getEnd	11
+*	addAll	7
+*	apply	4
+*	attribute	4
+*	close	4
+*	getCount	4
+*	_1	3
+*	_2	3
+*	abs	2
+*	isCram	2
+Attributes	getValue	2
+"YES"	equals	1
+*	addHeader	1
+*	addHistogram	1
+*	addJunctionTree	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `24792` to `24673`.
+- External API return-nullability facts moved from `7341` to `7423`.
+- `compareTo`, `getCanonicalPath`, `addMetaDataLine`, `addAlignment`,
+  `addAndFlush`, and `addEvent` no longer appear in the top external API guess
+  list.
+- The next method-effect slice should avoid broad promotion of generic
+  receiver-unknown `get`, `add`, and domain getter names until ownership,
+  receiver type, or a stable API role can be proven.
+
+## Receiver Classification Slice: Method-Reference Expression Targets
+
+This slice improves method-reference receiver classification before adding more
+external method facts. The motivating shape is an expression target such as
+`values::get`, where the target is a local variable, not a type name.
+
+Generalized rule:
+
+- Method-reference targets that name a local or field should use that binding's
+  Java type as the external API receiver.
+- Type-like method-reference targets such as `RecordCollection::getMetadata`
+  should continue to be treated as type receivers.
+- Raw variable names must not become synthetic external receiver types.
+- Receiverless fallback facts can still exist for method references, but they
+  should not replace the typed receiver fact.
+
+Generalized test coverage:
+
+- `method_reference_expression_targets_use_local_receiver_type_facts`;
+- `method_reference_external_api_effects_are_facts`.
+
+Verification:
+
+```text
+cargo test method_reference_expression_targets_use_local_receiver_type_facts --test semantic_facts --quiet
+cargo test method_reference_external_api_effects_are_facts --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+external_api_guesses	24673
+external_constructor_guesses	23
+project_constructor_guesses	45
+external_api_return_nullability_facts	7423
+total_facts	111185
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24592
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7424
+total_facts	111121
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `24673` to `24592`.
+- Total facts moved from `111185` to `111121`, which is expected: expression
+  method-reference targets no longer create extra fake receiver-type facts.
+- The top remaining method guesses are still dominated by receiver-unknown
+  generic `get`/`add`/domain getter rows. The next useful slice should improve
+  receiver typing or ownership for those calls, not globally promote the names.
+
+## Receiver Classification Slice: Suppress Redundant Method-Reference Fallbacks
+
+This slice refines the previous method-reference work. Once a method-reference
+expression target is proven to be a local or field, the semantic fact collector
+now emits the typed receiver fact and skips the receiverless fallback. Type-like
+targets still keep the receiverless fallback because the exact dispatch shape
+can remain ambiguous.
+
+Generalized rule:
+
+- Expression-target method references such as `values::get` should produce a
+  fact for the expression's Java type, such as `List.get`.
+- The raw expression text should not become a receiver type.
+- A receiverless fallback should not be added when the expression receiver type
+  is already known.
+- Type-target method references such as `RecordCollection::getMetadata` may
+  still produce both type-specific and receiverless facts.
+
+Generalized test coverage:
+
+- `method_reference_expression_targets_use_local_receiver_type_facts`;
+- `method_reference_external_api_effects_are_facts`.
+
+Verification:
+
+```text
+cargo test method_reference_expression_targets_use_local_receiver_type_facts --test semantic_facts --quiet
+cargo test method_reference_external_api_effects_are_facts --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+external_api_guesses	24592
+external_api_return_nullability_facts	7424
+total_facts	111121
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	24462
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7414
+total_facts	110987
+```
+
+Top external API guess methods after this slice:
+
+```text
+*	getContig	15
+*	getStart	15
+*	add	11
+*	getEnd	11
+*	get	8
+*	getCount	4
+*	getMetadata	4
+*	_1	3
+*	_2	3
+*	abs	2
+*	addAll	2
+*	attribute	2
+*	close	2
+*	isCram	2
+Attributes	getValue	2
+"YES"	equals	1
+*	addHeader	1
+*	addHistogram	1
+*	addJunctionTree	1
+*	addReadGroup	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `24592` to `24462`.
+- Receiverless `* get` dropped from `30` to `8`, and receiverless `* add`
+  dropped from `29` to `11`.
+- Total facts moved from `111121` to `110987`, which is expected because
+  redundant fallback facts were intentionally removed.
+- Remaining receiverless domain getters such as `getContig`, `getStart`, and
+  `getEnd` likely need better method-reference target typing or domain
+  interface recognition rather than broad name promotion.
+
+## Receiver Classification Slice: Receiver-Specific Method References Only
+
+This slice removes the remaining receiverless fallback for method-reference
+facts when a receiver target exists. The previous policy kept both a
+receiver-specific fact and a receiverless fallback for type-target method
+references. In practice this polluted the external API guess report with broad
+`* get`, `* getStart`, `* getContig`, and similar rows even when a better
+receiver-specific fact existed.
+
+Generalized rule:
+
+- Method-reference facts should be receiver-specific whenever the reference has
+  a target.
+- Expression targets use the local or field Java type.
+- Type targets use the named target type.
+- Receiverless facts should be reserved for genuinely receiverless calls, not
+  as a fallback for method references with known targets.
+
+Generalized test coverage:
+
+- `method_reference_external_api_effects_are_facts`;
+- `method_reference_expression_targets_use_local_receiver_type_facts`.
+
+Verification:
+
+```text
+cargo test method_reference_external_api_effects_are_facts --test semantic_facts --quiet
+cargo test method_reference_expression_targets_use_local_receiver_type_facts --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+external_api_guesses	24462
+external_api_return_nullability_facts	7414
+total_facts	110987
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	23810
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7271
+total_facts	110314
+```
+
+Top external API guess methods after this slice:
+
+```text
+Allele	create	28
+BiFunction	apply	8
+*	encode	5
+AbstractLocatableCollection[]	new	3
+AUTOSOMAL_RECESSIVE_GENES	contains	2
+AbstractLocatableCollection	getMetadata	2
+Attributes	getValue	2
+"YES"	equals	1
+*	add	1
+*	arHetvarRule	1
+*	arHomvarRule	1
+*	buildAndSanitizeRecord	1
+*	checkSampleInBamHeader	1
+*	closeTool	1
+*	combineUnit	1
+*	contains	1
+*	createSampleToReaderMap	1
+*	createUnknownOutOnDemand	1
+*	decodeSampleNameIfNecessary	1
+*	estimateMinorFraction	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `24462` to `23810`.
+- Total facts moved from `110987` to `110314`, expected because broad fallback
+  facts were removed.
+- Receiverless generic getter/domain rows disappeared from the top guess list.
+- The remaining top rows now point to more concrete work: known external
+  functional interfaces such as `BiFunction.apply`, factory/static utility
+  calls such as `Allele.create`, and array constructor method references such
+  as `Type[]::new`.
+
+## External Method Effect Slice: Allele Factory And Functional Apply
+
+This slice models two stable external API families from the new top method
+guess list:
+
+- HTSJDK `Allele.create(...)` factory calls;
+- Java functional-interface `Function.apply(...)` and `BiFunction.apply(...)`.
+
+Generalized rule:
+
+- Stable external factory methods should produce builtin external API effect
+  facts with explicit return nullability and return type when known.
+- Functional-interface `apply` methods are read-only external calls. Their
+  result nullability remains unknown unless a more specific target type proves
+  otherwise.
+- These facts belong in the external API policy layer, not in lowering.
+
+Generalized test coverage:
+
+- `external_allele_factory_is_non_null_read_only_fact`;
+- `external_functional_interface_apply_is_read_only_builtin_fact`.
+
+Verification:
+
+```text
+cargo test external_allele_factory_is_non_null_read_only_fact --test semantic_facts --quiet
+cargo test external_functional_interface_apply_is_read_only_builtin_fact --test semantic_facts --quiet
+cargo fmt
+cargo test --quiet
+cargo check --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Before this slice:
+
+```text
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+external_api_guesses	23810
+external_api_return_nullability_facts	7271
+total_facts	110314
+```
+
+After this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	23738
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7299
+total_facts	110314
+```
+
+Top external API guess methods after this slice:
+
+```text
+*	encode	5
+AbstractLocatableCollection[]	new	3
+AUTOSOMAL_RECESSIVE_GENES	contains	2
+AbstractLocatableCollection	getMetadata	2
+AlleleFractionGlobalParameters	copyWithNewBiasVariance	2
+AlleleFractionGlobalParameters	copyWithNewMeanBias	2
+Attributes	getValue	2
+"YES"	equals	1
+*	add	1
+*	arHetvarRule	1
+*	arHomvarRule	1
+*	buildAndSanitizeRecord	1
+*	checkSampleInBamHeader	1
+*	closeTool	1
+*	combineUnit	1
+*	contains	1
+*	createSampleToReaderMap	1
+*	createUnknownOutOnDemand	1
+*	decodeSampleNameIfNecessary	1
+*	estimateMinorFraction	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `23810` to `23738`.
+- `Allele.create` and `BiFunction.apply` disappeared from the top external API
+  guess list.
+- External API return-nullability facts moved from `7271` to `7299`, reflecting
+  the non-null `Allele.create` factory result.
+- The next visible high-value external method family is array constructor
+  method references such as `Type[]::new`, plus a small set of concrete
+  receiver-specific external methods.
+
+## External Method Effect Slice: Array Constructor Method References
+
+Motivating corpus signal:
+
+```text
+AbstractLocatableCollection[]	new	3
+```
+
+Generalized rule:
+
+- `Element[]::new` is a Java array-constructor method reference. It is an
+  allocation/type operator used for functional target typing, not an external
+  API method call on receiver `Element[]`.
+- Semantic external API effect collection should therefore skip array
+  constructor method references instead of recording `ArrayType[]::new` as a
+  conservative external method effect.
+- Ordinary type-target and expression-target method references still produce
+  external API effect facts through the existing receiver classification path.
+
+Responsible layer:
+
+- `semantic_analysis`, because this is about whether a method-reference syntax
+  form contributes an external API effect fact. Resolver-owned stream
+  `toArray(Element[]::new)` return typing remains separate.
+
+Tests added or strengthened:
+
+- `array_constructor_method_references_do_not_become_external_api_facts`
+- Existing guards still pass:
+  - `method_reference_external_api_effects_are_facts`
+  - `method_reference_expression_targets_use_local_receiver_type_facts`
+
+Verification:
+
+```text
+cargo test array_constructor_method_references_do_not_become_external_api_facts --test semantic_facts --quiet
+cargo test method_reference_external_api_effects_are_facts --test semantic_facts --quiet
+cargo test method_reference_expression_targets_use_local_receiver_type_facts --test semantic_facts --quiet
+cargo fmt
+cargo check --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	23726
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7299
+total_facts	110302
+```
+
+Top external API guess methods after this slice:
+
+```text
+*	encode	5
+AUTOSOMAL_RECESSIVE_GENES	contains	2
+AbstractLocatableCollection	getMetadata	2
+AlleleFractionGlobalParameters	copyWithNewBiasVariance	2
+AlleleFractionGlobalParameters	copyWithNewMeanBias	2
+AlleleFractionGlobalParameters	copyWithNewOutlierProbability	2
+Attributes	getValue	2
+"YES"	equals	1
+*	add	1
+*	arHetvarRule	1
+*	arHomvarRule	1
+*	buildAndSanitizeRecord	1
+*	checkSampleInBamHeader	1
+*	closeTool	1
+*	combineUnit	1
+*	contains	1
+*	createSampleToReaderMap	1
+*	createUnknownOutOnDemand	1
+*	decodeSampleNameIfNecessary	1
+*	estimateMinorFraction	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `23738` to `23726`.
+- Total facts moved from `110314` to `110302`, matching the removal of
+  non-API array-constructor effect facts.
+- The `AbstractLocatableCollection[] new` external guess row disappeared.
+- Remaining top rows are concrete external/static receiver facts or
+  receiverless conservative guesses; the next slice should classify them by
+  whether they are resolver lookup gaps, external API facts, or intentional
+  conservative fallbacks before adding more models.
+
+## External Method Effect Slice: Source Receiver Method References
+
+Motivating corpus signal:
+
+```text
+*	encode	5
+```
+
+Representative examples included codec writer constructors using source
+receiver method references such as `this::encode`. These are source receiver
+references, not receiverless external API boundaries.
+
+Generalized rule:
+
+- `this::method` and `super::method` refer to source receiver methods. Semantic
+  external API effect collection should not record them as receiverless
+  conservative external API method effects.
+- This rule is deliberately about receiver classification. It does not add an
+  `encode` model and does not special-case codec classes.
+- Type-target method references such as `ExternalType::method` and expression
+  target method references such as `values::get` still flow through the
+  existing external API effect classification.
+
+Responsible layer:
+
+- `semantic_analysis`, because this is deciding whether a Java
+  method-reference expression contributes an external API effect fact.
+
+Tests added or strengthened:
+
+- `source_receiver_method_references_do_not_become_receiverless_external_api_facts`
+- Existing guards still pass:
+  - `array_constructor_method_references_do_not_become_external_api_facts`
+  - `method_reference_external_api_effects_are_facts`
+  - `method_reference_expression_targets_use_local_receiver_type_facts`
+
+Verification:
+
+```text
+cargo test source_receiver_method_references_do_not_become_receiverless_external_api_facts --test semantic_facts --quiet
+cargo test array_constructor_method_references_do_not_become_external_api_facts --test semantic_facts --quiet
+cargo test method_reference_external_api_effects_are_facts --test semantic_facts --quiet
+cargo test method_reference_expression_targets_use_local_receiver_type_facts --test semantic_facts --quiet
+cargo fmt
+cargo check --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	23673
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7294
+total_facts	110248
+```
+
+Top external API guess methods after this slice:
+
+```text
+AlleleFractionSegmentedData	getIndexedAllelicCountsInSegment	3
+A	equals	2
+A	isReference	2
+ALL_KMERS	forEach	2
+AUTOSOMAL_RECESSIVE_GENES	contains	2
+AbstractLocatableCollection	getMetadata	2
+AlleleFractionGlobalParameters	copyWithNewBiasVariance	2
+AlleleFractionGlobalParameters	copyWithNewMeanBias	2
+AlleleFractionGlobalParameters	copyWithNewOutlierProbability	2
+Attributes	getValue	2
+"YES"	equals	1
+*	getBytes	1
+*	getClass	1
+*	getContig	1
+*	getEnd	1
+*	getStart	1
+*	logBeta	1
+*	toString	1
+A	getBases	1
+A	length	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `23726` to `23673`.
+- Total facts moved from `110302` to `110248`.
+- The `* encode` row disappeared without adding any codec- or
+  method-name-specific model.
+- Remaining top rows now include generic-looking receiver names such as `A`.
+  The next slice should classify whether those are type-parameter receiver
+  facts that need bounded generic substitution or legitimate conservative
+  external boundaries.
+
+## External Method Effect Slice: Bounded Type-Parameter Receivers
+
+Motivating corpus signal:
+
+```text
+A	equals	2
+A	isReference	2
+A	getBases	1
+A	length	1
+```
+
+The receiver name `A` is a type parameter in the motivating cases, not an
+external class named `A`. When a type parameter has a declared bound, semantic
+external API facts should use the bound as the effective receiver.
+
+Generalized rule:
+
+- For receiver expressions whose Java type is a type parameter with a declared
+  class or interface bound, semantic external API effect facts use the bound's
+  receiver key.
+- Class-level and method-level type-parameter bounds are inserted into the
+  semantic external-effect `TypeEnv`.
+- The unresolved-target backfill uses the enclosing type/member context to
+  normalize bounded type-parameter receivers before checking or adding external
+  API facts.
+- The benchmark's explained-call check uses the same bounded receiver key, so
+  it reports against the facts actually produced by semantic analysis.
+
+Responsible layers:
+
+- `semantic_analysis` owns effect-fact receiver normalization.
+- `resolver_benchmark` owns report classification and must mirror the semantic
+  receiver key when deciding whether an unresolved method call is explained.
+
+Tests added:
+
+- `external_api_effect_receivers_use_type_parameter_bounds`
+
+Verification:
+
+```text
+cargo test external_api_effect_receivers_use_type_parameter_bounds --test semantic_facts --quiet
+cargo test source_receiver_method_references_do_not_become_receiverless_external_api_facts --test semantic_facts --quiet
+cargo test external_allele_factory_is_non_null_read_only_fact --test semantic_facts --quiet
+cargo fmt
+cargo check --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	23654
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7289
+total_facts	110232
+```
+
+Top external API guess methods after this slice:
+
+```text
+AlleleFractionSegmentedData	getIndexedAllelicCountsInSegment	3
+ALL_KMERS	forEach	2
+AUTOSOMAL_RECESSIVE_GENES	contains	2
+AbstractLocatableCollection	getMetadata	2
+AlleleFractionGlobalParameters	copyWithNewBiasVariance	2
+AlleleFractionGlobalParameters	copyWithNewMeanBias	2
+AlleleFractionGlobalParameters	copyWithNewOutlierProbability	2
+Attributes	getValue	2
+"YES"	equals	1
+*	getBytes	1
+*	getClass	1
+*	getContig	1
+*	getEnd	1
+*	getStart	1
+*	logBeta	1
+*	toString	1
+A	ordinal	1
+A	toString	1
+ALL_KMERS	contains	1
+ALL_KMERS	size	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0` after the benchmark explanation path
+  was updated to use bounded receiver keys.
+- External API guesses moved from `23673` to `23654`.
+- Total facts moved from `110248` to `110232`.
+- The `A equals`, `A isReference`, `A getBases`, and `A length` rows
+  disappeared without adding a receiver-name special case.
+- Remaining `A ordinal` and `A toString` rows should be inspected separately:
+  they may be unbounded or enum-bounded type parameters, and should not be
+  folded into this slice without proof.
+
+## External Method Effect Slice: Source Static Field Receiver Types
+
+Motivating corpus signal:
+
+```text
+ALL_KMERS	forEach	2
+ALL_KMERS	contains	1
+ALL_KMERS	size	1
+```
+
+The motivating source declares an uppercase static field with a collection
+type, then calls collection methods through a type-qualified field receiver.
+The receiver is the field's declared Java type, not an external class named
+after the field.
+
+Generalized rule:
+
+- Source field lookup must match exact Java field names as well as normalized
+  Rust-style names. Uppercase Java constants such as `ITEMS` or `ALL_KMERS`
+  should resolve as source fields.
+- Semantic body walking should not mint external receiver facts from weak
+  field-access inference such as `Unknown("ITEMS")`.
+- Resolver unresolved-target facts remain the authoritative source for these
+  receivers; semantic backfill should produce facts for the resolved field
+  type, such as `List.size`, `List.contains`, and `List.forEach`.
+
+Responsible layers:
+
+- `resolve` owns source field lookup and static field typing.
+- `semantic_analysis` owns avoiding weak external API guesses when expression
+  typing cannot prove a field-access receiver type.
+
+Tests added or strengthened:
+
+- `source_static_field_call_receivers_use_resolved_field_type_facts`
+- Existing guards still pass:
+  - `resolver_uses_uppercase_source_instance_field_type_for_overload_arguments`
+  - `external_api_effects_use_resolver_unresolved_receiver_facts`
+
+Verification:
+
+```text
+cargo test source_static_field_call_receivers_use_resolved_field_type_facts --test semantic_facts --quiet
+cargo test resolver_uses_uppercase_source_instance_field_type_for_overload_arguments --test resolve_calls --quiet
+cargo test external_api_effects_use_resolver_unresolved_receiver_facts --test semantic_facts --quiet
+cargo fmt
+cargo check --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	23315
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7232
+total_facts	109892
+```
+
+Top external API guess methods after this slice:
+
+```text
+*	equals	29
+*	contains	14
+*	getStart	9
+*	getContig	6
+*	isUnset	5
+*	containsKey	4
+*	getBytes	4
+*	getEnd	4
+*	getCigarElements	3
+AlleleFractionSegmentedData	getIndexedAllelicCountsInSegment	3
+*	charAt	2
+*	getFormatString	2
+*	getVersionString	2
+AbstractLocatableCollection	getMetadata	2
+AlleleFractionGlobalParameters	copyWithNewBiasVariance	2
+AlleleFractionGlobalParameters	copyWithNewMeanBias	2
+AlleleFractionGlobalParameters	copyWithNewOutlierProbability	2
+Attributes	getValue	2
+"YES"	equals	1
+*	containsEdge	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `23654` to `23315`.
+- Total facts moved from `110232` to `109892`.
+- The `ALL_KMERS forEach/contains/size` rows disappeared without adding a
+  field-name-specific model.
+- The new top rows are mostly receiverless conservative facts. The next slice
+  should classify whether they are source receiverless call lookup gaps,
+  receiver-agnostic external utility calls, or intentional conservative
+  fallbacks.
+
+## External Method Effect Slice: Weak Receivers Are Not Receiverless Calls
+
+Motivating corpus signal after the source static-field slice:
+
+```text
+*	equals	29
+*	contains	14
+*	getStart	9
+*	getContig	6
+*	isUnset	5
+*	containsKey	4
+*	getBytes	4
+*	getEnd	4
+```
+
+The previous slice correctly stopped recording weak field-access receiver names
+such as `ALL_KMERS`, but it exposed another classification problem: a call with
+an explicit receiver whose type cannot be proven is not the same thing as a
+receiverless static utility call. Treating both as `None` created conservative
+`* method` facts.
+
+Generalized rule:
+
+- Semantic external API effect collection has three outcomes for a call
+  receiver:
+  - record a typed receiver fact;
+  - record a true receiverless fact for known receiverless/static utility
+    calls;
+  - skip body-walk fact production when an explicit receiver expression exists
+    but only weak inference is available.
+- Resolver unresolved-target facts remain the authoritative path for adding
+  facts when the resolver has a receiver type.
+- This avoids turning unknown receiver expressions into global receiverless
+  method facts.
+
+Responsible layer:
+
+- `semantic_analysis`, because this is receiver classification for external
+  API effect fact production.
+
+Tests added or strengthened:
+
+- `source_static_field_call_receivers_use_resolved_field_type_facts` now also
+  asserts no receiverless fallback facts are produced for source static-field
+  receiver calls.
+- Existing guards still pass:
+  - `receiverless_record_collection_accessors_are_current_type_external_list_getter_facts`
+  - `external_api_effects_explain_receiver_agnostic_methods_without_receiver_type`
+
+Verification:
+
+```text
+cargo test source_static_field_call_receivers_use_resolved_field_type_facts --test semantic_facts --quiet
+cargo test receiverless_record_collection_accessors_are_current_type_external_list_getter_facts --test semantic_facts --quiet
+cargo test external_api_effects_explain_receiver_agnostic_methods_without_receiver_type --test semantic_facts --quiet
+cargo fmt
+cargo check --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	23191
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7147
+total_facts	109765
+```
+
+Top external API guess methods after this slice:
+
+```text
+Allele	getBaseString	12
+AlleleFractionSegmentedData	getIndexedAllelicCountsInSegment	3
+AllelicCountCollection	getIntervals	3
+AbstractLocatableCollection	getMetadata	2
+AlleleFractionGlobalParameters	copyWithNewBiasVariance	2
+AlleleFractionGlobalParameters	copyWithNewMeanBias	2
+AlleleFractionGlobalParameters	copyWithNewOutlierProbability	2
+Attributes	getValue	2
+"YES"	equals	1
+*	getClass	1
+*	logBeta	1
+*	toString	1
+A	toString	1
+ASEReadCounter	getHeaderForFeatures	1
+AS_QualByDepth	getDescriptions	1
+AS_RankSumTest	getKeyNames	1
+AS_RankSumTest	getPrimaryRawKey	1
+AS_StrandBiasTest	getKeyNames	1
+AbstractBCICodec	decode	1
+AbstractConcordanceWalker	apply	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `23315` to `23191`.
+- Total facts moved from `109892` to `109765`.
+- Most receiverless false positives disappeared without adding method-specific
+  models for `equals`, `contains`, `getStart`, or `getContig`.
+- The next visible high-volume row is `Allele.getBaseString`, which should be
+  classified separately as either a reusable external API fact or a domain
+  method fallback.
+
+## External Method Effect Slice: Allele Base String Getter
+
+Motivating corpus signal:
+
+```text
+Allele	getBaseString	12
+```
+
+`Allele` is already modeled as an external HTSJDK type, and
+`getBaseString()` is a stable read-only getter returning the allele bases as a
+`String`. This is a reusable external API fact, not a GATK-only lowering rule.
+
+Generalized rule:
+
+- `Allele.getBaseString()` is a builtin external API getter.
+- It is read-only.
+- Its return is definitely non-null `String`.
+- The existing return-type path already classifies `getBaseString` as a string
+  domain getter; this slice adds builtin effect provenance and nullability.
+
+Responsible layer:
+
+- `stdlib`, because this is behavior of a library type outside the translated
+  source corpus.
+
+Tests added or strengthened:
+
+- `external_allele_factory_is_non_null_read_only_fact` now also asserts
+  `Allele.getBaseString()` role, mutability, nullability, and provenance.
+
+Verification:
+
+```text
+cargo test external_allele_factory_is_non_null_read_only_fact --test semantic_facts --quiet
+cargo test external_api_effect_receivers_use_type_parameter_bounds --test semantic_facts --quiet
+cargo fmt
+cargo check --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	23179
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7159
+total_facts	109765
+```
+
+Top external API guess methods after this slice:
+
+```text
+Allele	equals	40
+AlleleFractionSegmentedData	getIndexedAllelicCountsInSegment	3
+AllelicCountCollection	getIntervals	3
+AbstractLocatableCollection	getMetadata	2
+AlleleFractionGlobalParameters	copyWithNewBiasVariance	2
+AlleleFractionGlobalParameters	copyWithNewMeanBias	2
+AlleleFractionGlobalParameters	copyWithNewOutlierProbability	2
+Attributes	getValue	2
+"YES"	equals	1
+*	getClass	1
+*	logBeta	1
+*	toString	1
+A	toString	1
+ASEReadCounter	getHeaderForFeatures	1
+AS_QualByDepth	getDescriptions	1
+AS_RankSumTest	getKeyNames	1
+AS_RankSumTest	getPrimaryRawKey	1
+AS_StrandBiasTest	getKeyNames	1
+AbstractBCICodec	decode	1
+AbstractConcordanceWalker	apply	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `23191` to `23179`.
+- External API return-nullability facts moved from `7147` to `7159`.
+- Total facts stayed at `109765`; this slice changes provenance/nullability of
+  existing facts rather than adding/removing fact rows.
+- `Allele.getBaseString` disappeared from top guesses.
+- The new high-volume row is `Allele.equals`, which should be classified
+  separately. It may be a reusable object/equality fact, but it should not be
+  folded into the base-string getter slice.
+
+## External Method Effect Slice: Typed Java Object Methods
+
+Motivating corpus signal:
+
+```text
+Allele	equals	40
+```
+
+`equals`, `hashCode`, `toString`, and `getClass` are inherited from
+`java.lang.Object`. When the receiver type is known, these are not
+library-specific unknown calls and should not remain conservative external API
+guesses. The corpus exposed the issue through `Allele.equals`, but the rule is
+receiver-typed Java object-method behavior, not an Allele-specific model.
+
+Generalized rule:
+
+- A typed receiver call to `equals(Object)`, `hashCode()`, `toString()`, or
+  `getClass()` is a builtin external object-method fact.
+- These calls are read-only.
+- `equals`, `hashCode`, `toString`, and `getClass` return definitely non-null
+  values from the Rust-shaping perspective because primitives are non-null and
+  Java `Object.getClass()` returns a non-null `Class`.
+- Receiverless calls or weak unknown receivers still remain conservative
+  external guesses; this slice does not invent receiver facts.
+
+Responsible layer:
+
+- `stdlib`, because these are Java platform method facts for typed external or
+  inherited object receivers.
+
+Tests added or strengthened:
+
+- `external_core_object_api_effects_are_read_only_when_known` now uses a neutral
+  external receiver type and asserts role, receiver mutability, return
+  nullability, and builtin provenance for `equals`, `hashCode`, `toString`, and
+  `getClass`.
+- `inherited_object_methods_on_this_are_external_read_facts` now asserts builtin
+  provenance for source receivers using inherited object methods.
+
+Verification:
+
+```text
+cargo test external_core_object_api_effects_are_read_only_when_known --test semantic_facts --quiet
+cargo test inherited_object_methods_on_this_are_external_read_facts --test semantic_facts --quiet
+cargo fmt
+cargo check --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	21885
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7420
+total_facts	109765
+```
+
+Top external API guess methods after this slice:
+
+```text
+Allele	getBases	25
+AlleleFractionSegmentedData	getIndexedAllelicCountsInSegment	3
+AllelicCountCollection	getIntervals	3
+AbstractLocatableCollection	getMetadata	2
+AlleleFractionGlobalParameters	copyWithNewBiasVariance	2
+AlleleFractionGlobalParameters	copyWithNewMeanBias	2
+AlleleFractionGlobalParameters	copyWithNewOutlierProbability	2
+AllelicCountCollection	getMetadata	2
+Attributes	getValue	2
+"YES"	equals	1
+*	getClass	1
+*	logBeta	1
+*	toString	1
+ASEReadCounter	getHeaderForFeatures	1
+AS_QualByDepth	getDescriptions	1
+AS_RankSumTest	getKeyNames	1
+AS_RankSumTest	getPrimaryRawKey	1
+AS_StrandBiasTest	getKeyNames	1
+AbstractBCICodec	decode	1
+AbstractConcordanceWalker	apply	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `23179` to `21885`.
+- External API return-nullability facts moved from `7159` to `7420`.
+- Total facts stayed at `109765`; this slice changes provenance/nullability of
+  existing facts rather than adding/removing fact rows.
+- `Allele.equals` disappeared from the top guesses without adding an
+  Allele-specific equality rule.
+- Remaining receiverless or weak receiver rows such as `* getClass` and
+  `"YES".equals` are intentionally not solved by this rule; they need receiver
+  typing or weak-receiver cleanup before they can become typed object-method
+  facts.
+- The next high-volume row is `Allele.getBases`, which should be classified
+  separately as a stable external API return-shape/nullability fact or deferred
+  as a domain-library model.
+
+## External Method Effect Slice: Curated Domain Getter Provenance
+
+Motivating corpus signal:
+
+```text
+Allele	getBases	25
+```
+
+`getBases()` was already part of the known byte-array domain getter family used
+by return-type inference. The missing piece was effect provenance: the
+translator knew the return shape, but still classified the method effect as a
+conservative external API guess. This slice connects curated zero-argument
+domain getter return models to builtin external API effect provenance.
+
+Generalized rule:
+
+- If a typed receiver calls a curated zero-argument domain getter, the external
+  API effect provenance is `BuiltinExternalModel`.
+- The rule applies to existing explicit domain getter families such as string
+  getters, integral getters, byte-array getters, int-array getters, allele
+  getters, allele-list getters, string-list getters, object-list getters,
+  sequence-dictionary getters, and path getters.
+- The rule does not make broad `get*` name guesses builtin. Open-ended
+  heuristics such as `get...String` remain separate from the curated domain
+  getter set.
+- Nullability remains conservative unless a separate known model proves
+  non-null. For byte-array getters such as `getBases`, `getReadBases`, and
+  `getBaseQualities`, this slice changes provenance but does not claim
+  non-nullability.
+
+Responsible layer:
+
+- `stdlib`, because this connects existing external return-type models to
+  external API effect provenance for libraries outside the translated corpus.
+
+Tests added or strengthened:
+
+- `external_byte_array_accessors_are_read_only_getter_facts` now covers
+  `getBases`, `getReadBases`, and `getBaseQualities` on neutral external
+  receiver names and asserts read-only getter role, unknown nullability, and
+  builtin provenance.
+
+Verification:
+
+```text
+cargo test external_byte_array_accessors_are_read_only_getter_facts --test semantic_facts --quiet
+cargo fmt
+cargo check --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	19848
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7420
+total_facts	109765
+```
+
+Top external API guess methods after this slice:
+
+```text
+Allele	length	36
+AlleleFractionSegmentedData	getIndexedAllelicCountsInSegment	3
+AllelicCountCollection	getIntervals	3
+AbstractLocatableCollection	getMetadata	2
+AlleleFractionGlobalParameters	copyWithNewBiasVariance	2
+AlleleFractionGlobalParameters	copyWithNewMeanBias	2
+AlleleFractionGlobalParameters	copyWithNewOutlierProbability	2
+AllelicCountCollection	getMetadata	2
+Attributes	getValue	2
+"YES"	equals	1
+*	getClass	1
+*	logBeta	1
+*	toString	1
+ASEReadCounter	getHeaderForFeatures	1
+AS_QualByDepth	getDescriptions	1
+AS_RankSumTest	getKeyNames	1
+AS_RankSumTest	getPrimaryRawKey	1
+AS_StrandBiasTest	getKeyNames	1
+AbstractBCICodec	decode	1
+AbstractConcordanceWalker	apply	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `21885` to `19848`.
+- External API return-nullability facts stayed at `7420`.
+- Total facts stayed at `109765`; this slice changes provenance of existing
+  facts rather than adding/removing fact rows.
+- `Allele.getBases` disappeared from the top guesses without adding an
+  Allele-specific `getBases` branch.
+- The new top row, `Allele.length`, should not be handled as a normal external
+  API method until it is classified. It likely points to array length or receiver
+  type propagation after `getBases()` rather than a real `Allele.length()`
+  library method.
+
+## External Method Effect Slice: Typed Scalar Length Accessor
+
+Motivating corpus signal:
+
+```text
+Allele	length	36
+```
+
+Initial classification checked whether this was array `.length` leaking through
+`getBases()`. It was not: the corpus contains real `Allele.length()` calls.
+Those calls behave like typed scalar accessors and return `int`. The rule should
+therefore live in the external API model, while array `.length` must remain a
+field-like Java array metadata operation and must not become an external API
+method fact.
+
+Generalized rule:
+
+- A typed external receiver call to zero-argument `length()` returns `int`.
+- The external API effect is a builtin read-only getter.
+- The result is definitely non-null because it is a primitive scalar.
+- Field-like array `.length` remains separate and is not modeled as an external
+  method on either the array receiver or the original getter receiver.
+
+Responsible layer:
+
+- `stdlib`, because this is an external API return/effect model.
+- Resolver consumes the return type for overload selection.
+- Semantic analysis keeps array metadata out of external API method facts.
+
+Tests added:
+
+- `external_scalar_length_method_is_builtin_read_only_int_fact` asserts
+  role, mutability, nullability, and builtin provenance for a neutral
+  `ExternalSequence.length()` call.
+- `resolver_uses_external_scalar_length_result_for_int_overloads` asserts that
+  `ExternalSequence.length()` selects an `int` overload.
+- `external_array_length_on_domain_getter_result_is_not_receiver_method_fact`
+  guards the boundary: `sequence.getBases().length` does not become
+  `ExternalSequence.length` or `Array.length` external API facts.
+
+Verification:
+
+```text
+cargo test external_scalar_length_method_is_builtin_read_only_int_fact --test semantic_facts --quiet
+cargo test resolver_uses_external_scalar_length_result_for_int_overloads --test resolve_calls --quiet
+cargo test external_array_length_on_domain_getter_result_is_not_receiver_method_fact --test semantic_facts --quiet
+cargo fmt
+cargo check --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	19655
+external_constructor_guesses	23
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7420
+total_facts	109763
+```
+
+Top external API guess methods after this slice:
+
+```text
+AlleleFractionSegmentedData	getIndexedAllelicCountsInSegment	3
+AllelicCountCollection	getIntervals	3
+AbstractLocatableCollection	getMetadata	2
+AlleleFractionGlobalParameters	copyWithNewBiasVariance	2
+AlleleFractionGlobalParameters	copyWithNewMeanBias	2
+AlleleFractionGlobalParameters	copyWithNewOutlierProbability	2
+AllelicCountCollection	getMetadata	2
+Attributes	getValue	2
+"YES"	equals	1
+*	getClass	1
+*	logBeta	1
+*	toString	1
+ASEReadCounter	getHeaderForFeatures	1
+AS_QualByDepth	getDescriptions	1
+AS_RankSumTest	getKeyNames	1
+AS_RankSumTest	getPrimaryRawKey	1
+AS_StrandBiasTest	getKeyNames	1
+AbstractBCICodec	decode	1
+AbstractConcordanceWalker	apply	1
+AbstractFeatureReader	hasIndex	1
+```
+
+Interpretation:
+
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained method calls remain at `0`.
+- External API guesses moved from `19848` to `19655`.
+- External API return-nullability facts stayed at `7420`.
+- Total facts moved from `109765` to `109763`; the return-type improvement lets
+  a few previously unknown paths collapse before fact emission.
+- `Allele.length` disappeared from top guesses without adding an
+  Allele-specific branch.
+- The remaining top rows are now low-frequency specific external getters and
+  receiverless or weak-receiver cleanup candidates. The next slice should be
+  selected by ownership and design leverage rather than raw count alone.
+
+## External Constructor Slice: Archive Stream Wrappers
+
+Motivating corpus signal:
+
+```text
+ZipFile	1	2
+ZipOutputStream	1	2
+TarArchiveOutputStream	1	1
+ZipInputStream	1	1
+```
+
+These are reusable archive/file wrapper constructors, not GATK-specific classes.
+They belong in the external constructor provenance model alongside existing JDK
+I/O wrappers and Apache Commons Compress constructors.
+
+Generalized rule:
+
+- `ZipInputStream(InputStream)` is a JDK input stream wrapper constructor.
+- `ZipOutputStream(OutputStream)` is a JDK output stream wrapper constructor.
+- `ZipFile(...)` is a JDK file/archive utility constructor with one argument.
+- `TarArchiveOutputStream(OutputStream)` is an Apache Commons Compress archive
+  output wrapper constructor.
+- These constructors receive `BuiltinExternalModel` provenance.
+
+Responsible layer:
+
+- `stdlib`, because this is external library constructor modeling.
+- Semantic analysis consumes the provenance when converting unresolved
+  constructor targets into external constructor facts.
+- Lowering remains uninvolved.
+
+Tests added or strengthened:
+
+- `jdk_external_constructor_facts_are_builtin_models` now covers `ZipFile`,
+  `ZipInputStream`, and `ZipOutputStream`.
+- `apache_commons_compress_constructor_facts_are_builtin_models` now covers
+  `TarArchiveOutputStream`.
+
+Verification:
+
+```text
+cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test apache_commons_compress_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo fmt
+cargo check --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	19655
+external_constructor_guesses	17
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	7420
+total_facts	109763
+```
+
+Top external constructor guess types after this slice:
+
+```text
+DocException	2	2
+Builder	0	1
+Parser	0	1
+RetrySettings	5	1
+SearchInterval	3	1
+TempPartsDirectoryWriteOption	1	1
+TruthAndCallStates	2	1
+Tuple4	4	1
+URL	1	1
+UnivariateObjectiveFunction	1	1
+UnmodifiableCollectionsSerializer	0	1
+VCFFileReader	1	1
+VCFSimpleHeaderLine	2	1
+VariantEvaluationProgramGroup	0	1
+VariantFilteringProgramGroup	0	1
+VariantManipulationProgramGroup	0	1
+```
+
+Interpretation:
+
+- External constructor guesses moved from `23` to `17`.
+- Parser, resolver, and semantic diagnostics remain at `0`.
+- Unexplained constructors remain at `0`.
+- ZIP and Tar archive stream wrappers disappeared from the constructor guess
+  list.
+- The remaining constructor rows are mostly project/domain or ambiguous short
+  names. They should be classified individually before adding more builtin
+  constructor models.
+
+## Dependency External Packs and Crate-Mapping Facades
+
+This slice moves selected dependency behavior out of generic `stdlib`
+constructor/API guesses and into explicit external library packs:
+
+- `htsjdk.variant.variantcontext`
+- `htsjdk.variant.vcf`
+- selected `htsjdk.samtools` header and sequence dictionary models
+- `htsjdk.tribble.Feature` and simple feature values
+- selected `htsjdk.samtools.util` interval, locatable, iterator, histogram,
+  and runtime-IO utility models
+- HDF5 as a crate-mapping facade targeting `hdf5_pure_rust`
+- SQLite as a crate-mapping facade targeting `sqlite`
+
+It also adds pack-owned missing-API diagnostics. A call on a pack-owned type
+that is neither modeled nor explicitly unsupported now reports
+`external_pack_missing_api` instead of silently becoming a generic external API
+guess. Builtin Java/Object behavior such as `equals` still stays in the builtin
+model before the missing-pack check.
+
+Verification:
+
+```text
+cargo test --test external_packs --quiet
+cargo test --quiet
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Benchmark after this slice:
+
+```text
+root	/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2652
+unresolved_method_calls	41937
+external_api_explained_method_calls	40494
+unexplained_method_calls	1443
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
+external_api_guesses	17686
+external_pack_api_facts	2001
+external_pack_constructor_facts	255
+external_pack_explained_method_calls	4234
+external_pack_explained_constructors	461
+external_constructor_guesses	17
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	8834
+total_facts	108853
+```
+
+Top external-pack API rows:
+
+```text
+Locatable	getStart	61
+SAMSequenceDictionary	getSequence	47
+Locatable	getContig	46
+SAMFileHeader	getSequenceDictionary	46
+Locatable	getEnd	43
+SAMSequenceDictionary	getSequences	36
+SAMSequenceRecord	getSequenceLength	33
+SAMFileHeader	getReadGroups	32
+Allele	create	28
+Allele	getBases	25
+SAMSequenceDictionary	getSequenceIndex	22
+SAMFileHeader	getSortOrder	21
+VCFHeader	getSequenceDictionary	15
+Allele	getBaseString	12
+PeekableIterator	hasNext	10
+PeekableIterator	next	9
+PeekableIterator	peek	9
+Feature	getEnd	7
+Feature	getStart	7
+CloseableIterator	close	5
+```
+
+Top external-pack constructor rows:
+
+```text
+VariantContextBuilder	1	48
+VCFHeader	2	28
+VCFInfoHeaderLine	4	27
+GenotypeBuilder	1	22
+VariantContextBuilder	0	11
+PeekableIterator	1	10
+VCFHeaderLine	2	8
+RuntimeIOException	1	7
+SAMFileHeader	0	7
+SAMReadGroupRecord	1	7
+SAMFileHeader	1	6
+GenotypeBuilder	2	5
+HDF5File	2	5
+VCFFormatHeaderLine	4	5
+Histogram	2	4
+Interval	3	4
+HDF5File	1	2
+HDF5Library	0	2
+GenotypeBuilder	0	1
+Interval	5	1
+```
+
+Top unexplained method targets after enforcing pack ownership:
+
+```text
+MethodCall	getGenotype	86
+MethodCall	getPloidy	48
+MethodCall	getAttributeAsInt	42
+MethodCall	getAlternateAllele	40
+MethodCall	isSymbolic	33
+MethodCall	hasExtendedAttribute	30
+MethodCall	getFilters	28
+MethodCall	rmAttribute	28
+MethodCall	getDP	27
+MethodCall	getAllele	23
+MethodCall	getType	15
+MethodCall	getAnyAttribute	14
+MethodCall	getSource	14
+MethodCall	getDisplayString	13
+MethodCall	isHomRef	13
+MethodCall	getValueLabel	10
+MethodCall	isFiltered	10
+MethodCall	getMd5	9
+MethodCall	add	8
+MethodCall	getGenotypeString	8
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at `0`.
+- Semantic diagnostics moved from `0` to `2652` because pack-owned receiver
+  gaps are now explicit `external_pack_missing_api` diagnostics. This is
+  intentional all-or-nothing coverage pressure, not a parser or resolver
+  regression.
+- External API guesses moved from `19655` to `17686`.
+- External-pack facts now account for `2001` API facts and `255` constructor
+  facts.
+- The benchmark can now distinguish:
+  - modeled pack coverage (`external_pack_*` counters),
+  - explicit pack gaps (`semantic_diagnostics`),
+  - generic external guesses (`external_api_guesses`), and
+  - remaining constructor guess classes.
+- The next useful work is to mine the top missing pack APIs above into
+  additional neutral tests and pack entries, especially `VariantContext`,
+  `Genotype`, `Allele`, and `SAMSequenceRecord` methods.
+
+## Dependency Pack Attribution Refresh
+
+This run refreshes the dependency-pack section after adding manifest-shaped
+pack declarations, source/fact-provider benchmark attribution, mode-specific
+external-pack counters, pack-owned missing constructor/field diagnostics, and
+`IntervalList` constructor coverage.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Summary:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2652
+unresolved_method_calls	41937
+external_api_explained_method_calls	40494
+unexplained_method_calls	1443
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unresolved_field_accesses	0
+external_api_guesses	17686
+external_pack_api_facts	2001
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	1991
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	10
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	4234
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	4217
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	17
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+source_constructor_guesses	0
+external_field_guesses	0
+external_api_return_nullability_facts	8834
+total_facts	108853
+```
+
+Top external-pack constructor rows after the refresh:
+
+```text
+VCFHeader	2	28
+VCFInfoHeaderLine	4	27
+GenotypeBuilder	1	22
+VariantContextBuilder	0	11
+PeekableIterator	1	10
+VCFHeaderLine	2	8
+RuntimeIOException	1	7
+SAMFileHeader	0	7
+SAMReadGroupRecord	1	7
+IntervalList	1	6
+SAMFileHeader	1	6
+GenotypeBuilder	2	5
+HDF5File	2	5
+VCFFormatHeaderLine	4	5
+Histogram	2	4
+Interval	3	4
+VCFCodec	0	4
+HDF5File	1	2
+HDF5Library	0	2
+GenotypeBuilder	0	1
+```
+
+Remaining top unexplained method targets:
+
+```text
+MethodCall	getGenotype	86
+MethodCall	getPloidy	48
+MethodCall	getAttributeAsInt	42
+MethodCall	getAlternateAllele	40
+MethodCall	isSymbolic	33
+MethodCall	hasExtendedAttribute	30
+MethodCall	getFilters	28
+MethodCall	rmAttribute	28
+MethodCall	getDP	27
+MethodCall	getAllele	23
+MethodCall	getType	15
+MethodCall	getAnyAttribute	14
+MethodCall	getSource	14
+MethodCall	getDisplayString	13
+MethodCall	isHomRef	13
+MethodCall	getValueLabel	10
+MethodCall	isFiltered	10
+MethodCall	getMd5	9
+MethodCall	add	8
+MethodCall	getGenotypeString	8
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero on the full GATK source root.
+- No unresolved field accesses remain.
+- Pack-owned constructor coverage is now complete for this benchmark run:
+  `unexplained_constructors` is `0`, and `IntervalList/1` is modeled as
+  `htsjdk.samtools.util` pack coverage.
+- The mode-specific counters separate HTSJDK external fact-model coverage from
+  HDF5/SQLite Rust crate-mapping coverage.
+- The remaining semantic diagnostics are explicit pack-owned missing method
+  diagnostics. They are useful pressure for expanding `VariantContext`,
+  `Genotype`, `Allele`, `GenotypesContext`, `Histogram`, and
+  `SAMSequenceRecord` method coverage without adding lowering special cases.

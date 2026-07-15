@@ -37,6 +37,7 @@ pub struct TypeRepresentation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepresentationProvenance {
     ParsedSource,
+    BuiltinExternalModel,
     CorpusAnalysis,
     UserOverride,
     ConservativeFallback,
@@ -450,6 +451,9 @@ pub fn representation_hierarchy_fact_policy_with_effective_facts(
 fn representation_provenance_for_fact(provenance: FactProvenance) -> RepresentationProvenance {
     match provenance {
         FactProvenance::ParsedSource => RepresentationProvenance::ParsedSource,
+        FactProvenance::BuiltinExternalModel | FactProvenance::ExternalLibraryPack => {
+            RepresentationProvenance::BuiltinExternalModel
+        }
         FactProvenance::CorpusAnalysis => RepresentationProvenance::CorpusAnalysis,
         FactProvenance::UserOverride => RepresentationProvenance::UserOverride,
         FactProvenance::ConservativeFallback => RepresentationProvenance::ConservativeFallback,

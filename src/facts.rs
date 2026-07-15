@@ -15,12 +15,17 @@ pub struct FactSet {
     pub field_nullability_facts: Vec<FieldNullabilityFact>,
     pub trivial_accessor_facts: Vec<TrivialAccessorFact>,
     pub external_api_effect_facts: Vec<ExternalApiEffectFact>,
+    pub external_constructor_facts: Vec<ExternalConstructorFact>,
+    pub external_field_facts: Vec<ExternalFieldFact>,
     pub method_effect_facts: Vec<MethodEffectFact>,
     pub recursion_facts: Vec<RecursionFact>,
     pub control_flow_facts: Vec<ControlFlowFact>,
+    pub unresolved_target_facts: Vec<UnresolvedTargetFact>,
     pub dispatch_requirement_facts: Vec<DispatchRequirementFact>,
     pub exception_facts: Vec<ExceptionFact>,
     pub catch_facts: Vec<CatchFact>,
+    pub external_library_packs: Vec<ExternalLibraryPackFact>,
+    pub unsupported_external_api_facts: Vec<UnsupportedExternalApiFact>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,9 +39,14 @@ pub enum FactKind {
     TrivialAccessor,
     MethodEffect,
     ExternalApiEffect,
+    ExternalConstructor,
+    ExternalField,
     ControlFlow,
+    UnresolvedTarget,
     DispatchRequirement,
     ExceptionHierarchy,
+    ExternalLibraryPack,
+    UnsupportedExternalApi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -127,6 +137,7 @@ pub enum ExternalApiRole {
     Setter,
     Mutator,
     FluentMutator,
+    SideEffect,
     IndexedGetter,
     IndexedSetter,
     Unknown,
@@ -138,6 +149,57 @@ pub struct ExternalApiEffectFact {
     pub receiver_type: Option<String>,
     pub role: ExternalApiRole,
     pub receiver_mutability: ReceiverMutabilityFact,
+    pub return_type: Option<JavaType>,
+    pub return_nullability: NullabilityState,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExternalLibraryMode {
+    ExternalFactModel,
+    RustCrateMapping,
+    FfiBoundary,
+    ConservativeBoundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExternalApiCoverage {
+    Declared,
+    Conservative,
+    Semantic,
+    Mapped,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalLibraryPackFact {
+    pub pack_name: String,
+    pub package_prefix: String,
+    pub mode: ExternalLibraryMode,
+    pub coverage: ExternalApiCoverage,
+    pub rust_target: Option<String>,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedExternalApiFact {
+    pub pack_name: String,
+    pub receiver_type: String,
+    pub method_name: String,
+    pub reason: String,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalConstructorFact {
+    pub type_name: String,
+    pub arg_types: Vec<JavaType>,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFieldFact {
+    pub field: FieldKey,
     pub provenance: FactProvenance,
 }
 
@@ -174,6 +236,26 @@ pub enum ControlFlowFactKind {
 pub struct ControlFlowFact {
     pub method: MethodKey,
     pub kind: ControlFlowFactKind,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnresolvedTargetKind {
+    MethodCall,
+    ConstructorCall,
+    ConstructorDelegation,
+    FieldAccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedTargetFact {
+    pub enclosing_type: String,
+    pub enclosing_member: Option<String>,
+    pub kind: UnresolvedTargetKind,
+    pub target_name: String,
+    pub receiver_type: Option<JavaType>,
+    pub arg_types: Vec<JavaType>,
+    pub is_anonymous_class: bool,
     pub provenance: FactProvenance,
 }
 
@@ -313,6 +395,8 @@ pub enum ObjectSafetyViolation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FactProvenance {
     ParsedSource,
+    BuiltinExternalModel,
+    ExternalLibraryPack,
     CorpusAnalysis,
     UserOverride,
     ConservativeFallback,
@@ -399,13 +483,22 @@ impl FactSet {
             .extend(other.trivial_accessor_facts);
         self.external_api_effect_facts
             .extend(other.external_api_effect_facts);
+        self.external_constructor_facts
+            .extend(other.external_constructor_facts);
+        self.external_field_facts.extend(other.external_field_facts);
         self.method_effect_facts.extend(other.method_effect_facts);
         self.recursion_facts.extend(other.recursion_facts);
         self.control_flow_facts.extend(other.control_flow_facts);
+        self.unresolved_target_facts
+            .extend(other.unresolved_target_facts);
         self.dispatch_requirement_facts
             .extend(other.dispatch_requirement_facts);
         self.exception_facts.extend(other.exception_facts);
         self.catch_facts.extend(other.catch_facts);
+        self.external_library_packs
+            .extend(other.external_library_packs);
+        self.unsupported_external_api_facts
+            .extend(other.unsupported_external_api_facts);
     }
 
     pub fn field_nullability_for(
@@ -510,6 +603,59 @@ impl FactSet {
                     .rev()
                     .find(|fact| fact.method_name == method_name && fact.receiver_type.is_none())
             })
+    }
+
+    pub fn external_constructor_for(
+        &self,
+        type_name: &str,
+        arg_types: &[JavaType],
+    ) -> Option<&ExternalConstructorFact> {
+        self.external_constructor_facts.iter().rev().find(|fact| {
+            fact.type_name == type_name
+                && (fact.arg_types == arg_types
+                    || fact.provenance == FactProvenance::UserOverride
+                    || (fact.provenance == FactProvenance::ExternalLibraryPack
+                        && fact.arg_types.len() == arg_types.len()))
+        })
+    }
+
+    pub fn external_field_for(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<&ExternalFieldFact> {
+        let canonical_type_name = crate::stdlib::canonical_external_receiver_type_key(type_name);
+        let snake_type_name = crate::parser::to_snake_case(type_name);
+        let canonical_field_name = crate::parser::to_snake_case(field_name);
+        self.external_field_facts.iter().rev().find(|fact| {
+            (fact.field.type_name == type_name
+                || fact.field.type_name == canonical_type_name
+                || fact.field.type_name == snake_type_name)
+                && (fact.field.field_name == field_name
+                    || fact.field.field_name == canonical_field_name
+                    || fact.provenance == FactProvenance::UserOverride)
+        })
+    }
+
+    pub fn external_library_pack_for_type(
+        &self,
+        type_name: &str,
+    ) -> Option<&ExternalLibraryPackFact> {
+        self.external_library_packs
+            .iter()
+            .rev()
+            .find(|pack| external_pack_owns_type(pack, type_name))
+    }
+
+    pub fn unsupported_external_api_for_receiver(
+        &self,
+        receiver_type: &str,
+        method_name: &str,
+    ) -> Option<&UnsupportedExternalApiFact> {
+        self.unsupported_external_api_facts
+            .iter()
+            .rev()
+            .find(|fact| fact.receiver_type == receiver_type && fact.method_name == method_name)
     }
 
     pub fn recursion_facts_for(&self, type_name: &str, method_name: &str) -> Vec<&RecursionFact> {
@@ -794,6 +940,13 @@ impl FactSet {
     pub fn diagnostics(&self) -> Vec<FactDiagnostic> {
         type_capability_override_conflicts(&self.type_capability_overrides)
     }
+}
+
+fn external_pack_owns_type(pack: &ExternalLibraryPackFact, type_name: &str) -> bool {
+    type_name == pack.package_prefix
+        || type_name
+            .strip_prefix(&pack.package_prefix)
+            .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
 fn capability_type_name(java_ty: &JavaType) -> Option<&str> {

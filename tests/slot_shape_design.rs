@@ -204,7 +204,7 @@ use new_java2rust::unsupported::{
 use new_java2rust::usage::{
     BindingUse, BindingUseFacts, CallArgumentBoundary, CallArgumentBoundaryPolicy,
     CallResultBoundaryPolicy, ConstructorInvocationBoundaryPolicy, FieldUse,
-    MethodApiBoundaryPolicy, analyze_usage, analyze_usage_with_facts,
+    MethodApiBoundaryPolicy, MethodUsageFacts, analyze_usage, analyze_usage_with_facts,
     call_argument_boundary_policy, call_result_boundary_policy,
     constructor_invocation_boundary_policy, method_api_boundary_policy,
 };
@@ -2979,6 +2979,8 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
         plan_unsupported_member(&Member::Type(new_java2rust::java_ir::TypeDecl {
             kind: new_java2rust::java_ir::TypeKind::Class,
             name: "Nested".to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
             modifiers: Vec::new(),
             extends: None,
             implements: Vec::new(),
@@ -7140,7 +7142,8 @@ fn external_facts_parser_ingests_external_api_effect_overrides() {
     let parsed = parse_external_facts(
         r#"
 external-api getValue * getter read-only
-external-api setValue ExternalCounter setter mutates-receiver
+external-api setValue ExternalCounter setter mutates-receiver unknown
+external-api format String getter read-only definitely-non-null
 "#,
     );
 
@@ -7150,6 +7153,7 @@ external-api setValue ExternalCounter setter mutates-receiver
     assert_eq!(getter.receiver_type, None);
     assert_eq!(getter.role, ExternalApiRole::Getter);
     assert_eq!(getter.receiver_mutability, ReceiverMutabilityFact::ReadOnly);
+    assert_eq!(getter.return_nullability, NullabilityState::Unknown);
     assert_eq!(getter.provenance, FactProvenance::UserOverride);
 
     let setter = parsed
@@ -7162,7 +7166,17 @@ external-api setValue ExternalCounter setter mutates-receiver
         setter.receiver_mutability,
         ReceiverMutabilityFact::MutatesReceiver
     );
+    assert_eq!(setter.return_nullability, NullabilityState::Unknown);
     assert_eq!(setter.provenance, FactProvenance::UserOverride);
+
+    let format = parsed
+        .facts
+        .external_api_effect_for_receiver(Some("String"), "format")
+        .unwrap();
+    assert_eq!(
+        format.return_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
 }
 
 #[test]
@@ -9412,6 +9426,7 @@ fn external_name_type() -> JavaType {
 #[test]
 fn usage_call_result_boundary_policy_names_result_boundaries() {
     let internal_methods = HashSet::from(["local_fetch".to_string()]);
+    let empty_usage = MethodUsageFacts::default();
 
     assert_eq!(
         call_argument_boundary_policy(None, "trim", &internal_methods),
@@ -9439,30 +9454,70 @@ fn usage_call_result_boundary_policy_names_result_boundaries() {
         }
     );
     assert_eq!(
-        call_result_boundary_policy(&parse_expr("localFetch()"), &internal_methods),
+        call_result_boundary_policy(&parse_expr("localFetch()"), &internal_methods, &empty_usage),
         Some(CallResultBoundaryPolicy {
             name: "localFetch".to_string(),
+            receiver_type: None,
             boundary: CallArgumentBoundary::Unknown,
         })
     );
     assert_eq!(
-        call_result_boundary_policy(&parse_expr("local_fetch()"), &internal_methods),
+        call_result_boundary_policy(
+            &parse_expr("local_fetch()"),
+            &internal_methods,
+            &empty_usage
+        ),
         Some(CallResultBoundaryPolicy {
             name: "local_fetch".to_string(),
+            receiver_type: None,
             boundary: CallArgumentBoundary::InternalSameType,
         })
     );
     assert_eq!(
-        call_result_boundary_policy(&parse_expr("helper.fetch()"), &internal_methods),
+        call_result_boundary_policy(
+            &parse_expr("helper.fetch()"),
+            &internal_methods,
+            &empty_usage
+        ),
         Some(CallResultBoundaryPolicy {
             name: "fetch".to_string(),
+            receiver_type: None,
             boundary: CallArgumentBoundary::Unknown,
         })
     );
     assert_eq!(
-        call_result_boundary_policy(&parse_expr("new ExternalName()"), &internal_methods),
+        call_result_boundary_policy(
+            &parse_expr("new ExternalName()"),
+            &internal_methods,
+            &empty_usage
+        ),
         Some(CallResultBoundaryPolicy {
             name: "new".to_string(),
+            receiver_type: None,
+            boundary: CallArgumentBoundary::Unknown,
+        })
+    );
+
+    let mut usage = MethodUsageFacts::default();
+    usage.bindings.insert(
+        "helper".to_string(),
+        BindingUseFacts {
+            name: "helper".to_string(),
+            java_ty: JavaType::Named {
+                name: "Helper".to_string(),
+                args: Vec::new(),
+            },
+            uses: Vec::new(),
+        },
+    );
+    assert_eq!(
+        call_result_boundary_policy(&parse_expr("helper.fetch()"), &internal_methods, &usage),
+        Some(CallResultBoundaryPolicy {
+            name: "fetch".to_string(),
+            receiver_type: Some(JavaType::Named {
+                name: "Helper".to_string(),
+                args: Vec::new(),
+            }),
             boundary: CallArgumentBoundary::Unknown,
         })
     );
@@ -9525,6 +9580,7 @@ class Helper {
             BindingUse::AssignedFromCall {
                 name,
                 boundary: CallArgumentBoundary::Unknown,
+                ..
             } if name == "fetch"
         )
     }));
@@ -9547,6 +9603,50 @@ class Helper {
         local_constraints.constraints,
         conservative_boundary_constraints(&external_name_type(), &facts)
     );
+}
+
+#[test]
+fn signature_constraints_apply_external_call_return_nullability_to_locals() {
+    let parsed = parse_java_source(
+        r#"
+class ExternalReturnLocal {
+    private String label(Formatter formatter, String name, int count) {
+        String label = formatter.renderLabel(name, count);
+        return label;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let external = parse_external_facts(
+        "external-api renderLabel Formatter getter read-only definitely-non-null\n",
+    );
+    assert!(
+        external.diagnostics.is_empty(),
+        "{:?}",
+        external.diagnostics
+    );
+    let mut facts = resolved.facts.clone();
+    facts.extend_from(external.facts);
+
+    let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
+    let method_constraints = constraints
+        .methods
+        .get(&MethodKey {
+            type_name: "ExternalReturnLocal".to_string(),
+            rust_name: "label".to_string(),
+        })
+        .unwrap();
+    let local_constraints = method_constraints
+        .locals
+        .iter()
+        .find(|local| local.name == "label")
+        .unwrap();
+
+    assert!(local_constraints.constraints.contains(
+        &SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull)
+    ));
 }
 
 #[test]
@@ -9637,6 +9737,46 @@ class Helper {
 }
 
 #[test]
+fn signature_constraints_apply_external_call_return_nullability_to_method_returns() {
+    let parsed = parse_java_source(
+        r#"
+class ExternalReturnMethod {
+    private String label(Formatter formatter, String name) {
+        return formatter.renderLabel(name);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let external = parse_external_facts(
+        "external-api renderLabel Formatter getter read-only definitely-non-null\n",
+    );
+    assert!(
+        external.diagnostics.is_empty(),
+        "{:?}",
+        external.diagnostics
+    );
+    let mut facts = resolved.facts.clone();
+    facts.extend_from(external.facts);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "label" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(
+        method_return_shape_constraints(ty, method, &usage, &facts).contains(
+            &SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull)
+        )
+    );
+}
+
+#[test]
 fn usage_classifies_unknown_call_results_assigned_to_constructor_locals_as_boundaries() {
     let parsed = parse_java_source(
         r#"
@@ -9673,6 +9813,7 @@ class Helper {
             BindingUse::AssignedFromCall {
                 name,
                 boundary: CallArgumentBoundary::Unknown,
+                ..
             } if name == "fetch"
         )
     }));
@@ -9734,6 +9875,7 @@ class Helper {
                 field_name,
                 name,
                 boundary: CallArgumentBoundary::Unknown,
+                ..
             } if field_name == "cached" && name == "fetch"
         )
     }));
@@ -9777,6 +9919,7 @@ class Helper {
                 field_name,
                 name,
                 boundary: CallArgumentBoundary::Unknown,
+                ..
             } if field_name == "cached" && name == "fetch"
         )
     }));
@@ -9819,6 +9962,7 @@ class Helper {
                 field_name,
                 name,
                 boundary: CallArgumentBoundary::Unknown,
+                ..
             } if field_name == "cached" && name == "fetch"
         )
     }));
@@ -9862,6 +10006,7 @@ class Helper {
                 field_name,
                 name,
                 boundary: CallArgumentBoundary::Unknown,
+                ..
             } if field_name == "cached" && name == "fetch"
         )
     }));
@@ -10040,6 +10185,48 @@ class Helper {
             })
             .unwrap(),
         &expected
+    );
+}
+
+#[test]
+fn signature_constraints_apply_external_call_return_nullability_to_fields() {
+    let parsed = parse_java_source(
+        r#"
+class ExternalReturnField {
+    String cached;
+
+    private void cache(Formatter formatter, String name) {
+        this.cached = formatter.renderLabel(name);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let external = parse_external_facts(
+        "external-api renderLabel Formatter getter read-only definitely-non-null\n",
+    );
+    assert!(
+        external.diagnostics.is_empty(),
+        "{:?}",
+        external.diagnostics
+    );
+    let mut facts = resolved.facts.clone();
+    facts.extend_from(external.facts);
+    let ty = &resolved.program.types[0];
+    let field = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Field(field) if field.name == "cached" => Some(field),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(
+        field_shape_constraints_with_usage(ty, field, &usage, &facts).contains(
+            &SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull)
+        )
     );
 }
 
@@ -12161,7 +12348,10 @@ fn effective_fact_precedence_queries_are_audited_by_consumer_module() {
     assert!(effective_facts_source.contains("pub struct EffectiveFact<T>"));
     assert!(effective_facts_source.contains("pub provenance: FactProvenance"));
     assert!(effective_facts_source.contains("fn fact_precedence_key"));
-    assert!(effective_facts_source.contains("FactProvenance::UserOverride => 3"));
+    assert!(effective_facts_source.contains(
+        "FactProvenance::BuiltinExternalModel | FactProvenance::ExternalLibraryPack => 2"
+    ));
+    assert!(effective_facts_source.contains("FactProvenance::UserOverride => 4"));
     assert!(effective_facts_source.contains("fn apply_type_capability_override"));
     assert!(effective_facts_source.contains("pub fn type_capabilities_for"));
     assert!(effective_facts_source.contains("object_safe_trait_fact_for_name_with_provenance"));
@@ -12905,8 +13095,9 @@ class Uses {
     assert!(source.contains("pub struct ConstructorInvocationBoundaryPolicy"));
     assert!(source.contains("pub fn constructor_invocation_boundary_policy"));
     assert!(source.contains("constructor_invocation_boundary_policy(*kind)"));
-    assert!(source.contains("call_result_boundary_policy(initializer, internal_methods)"));
-    assert!(source.contains("call_result_boundary_policy(expr, internal_methods)"));
+    assert!(source.contains("call_result_boundary_policy(initializer, internal_methods, facts)"));
+    assert!(source.contains("call_result_boundary_policy(expr, internal_methods, facts)"));
+    assert!(source.contains("receiver_type: policy.receiver_type"));
 }
 
 #[test]

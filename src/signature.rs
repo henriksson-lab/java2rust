@@ -967,7 +967,7 @@ fn propagate_call_result_constraints_to_bindings(
         };
         for binding in method_usage.bindings.values() {
             for use_site in &binding.uses {
-                let BindingUse::AssignedFromCall { name, boundary } = use_site else {
+                let BindingUse::AssignedFromCall { name, boundary, .. } = use_site else {
                     continue;
                 };
                 if *boundary != CallArgumentBoundary::InternalSameType {
@@ -1001,7 +1001,7 @@ fn propagate_constructor_call_result_constraints_to_bindings(
         };
         for binding in constructor_usage.bindings.values() {
             for use_site in &binding.uses {
-                let BindingUse::AssignedFromCall { name, boundary } = use_site else {
+                let BindingUse::AssignedFromCall { name, boundary, .. } = use_site else {
                     continue;
                 };
                 if *boundary != CallArgumentBoundary::InternalSameType {
@@ -1043,6 +1043,7 @@ fn propagate_call_result_constraints_to_fields(
                 field_name,
                 name,
                 boundary,
+                ..
             } = field_use
             else {
                 continue;
@@ -1079,6 +1080,7 @@ fn propagate_constructor_call_result_constraints_to_fields(
                 field_name,
                 name,
                 boundary,
+                ..
             } = field_use
             else {
                 continue;
@@ -3407,11 +3409,54 @@ pub fn field_shape_constraints_with_usage(
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
     let mut constraints = field_shape_constraints_with_facts(ty, field, facts);
+    push_unique_signature_constraints(
+        &mut constraints,
+        &external_call_return_field_constraints(ty, field, usage, facts),
+    );
     if let Some(kind) = field_boundary_policy(ty, field, usage).kind {
         push_unique_signature_constraints(
             &mut constraints,
             &signature_boundary_policy(kind, &field.ty, facts).constraints,
         );
+    }
+    constraints
+}
+
+pub fn external_call_return_field_constraints(
+    ty: &TypeDecl,
+    field: &FieldDecl,
+    usage: &UsageFacts,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let mut constraints = Vec::new();
+    let method_field_use = usage
+        .methods
+        .iter()
+        .filter(|(key, _)| key.type_name == ty.name)
+        .flat_map(|(_, method_usage)| method_usage.field_uses.iter());
+    let constructor_field_use = usage
+        .constructors
+        .iter()
+        .filter(|(key, _)| key.type_name == ty.name)
+        .flat_map(|(_, constructor_usage)| constructor_usage.field_uses.iter());
+    for field_use in method_field_use.chain(constructor_field_use) {
+        let FieldUse::AssignedFromCall {
+            field_name,
+            name,
+            receiver_type,
+            boundary: CallArgumentBoundary::Unknown,
+        } = field_use
+        else {
+            continue;
+        };
+        if field_name == &field.name {
+            push_external_call_return_constraints(
+                &mut constraints,
+                receiver_type.as_ref(),
+                name,
+                facts,
+            );
+        }
     }
     constraints
 }
@@ -4040,6 +4085,10 @@ fn local_shape_constraints_with_usage_and_effective_facts(
             &mut constraints,
             &external_receiver_binding_constraints(binding, facts),
         );
+        push_unique_signature_constraints(
+            &mut constraints,
+            &external_call_return_binding_constraints(binding, facts),
+        );
     }
     if let Some(kind) = usage
         .and_then(|usage| usage.bindings.get(name))
@@ -4068,7 +4117,7 @@ pub fn external_receiver_binding_constraints(
         };
         let receiver_type = external_api_receiver_type_key(&binding.java_ty);
         if facts
-            .external_api_effect_for_receiver(receiver_type, name)
+            .external_api_effect_for_receiver(receiver_type.as_deref(), name)
             .is_some_and(|effect| {
                 effect.receiver_mutability == ReceiverMutabilityFact::MutatesReceiver
             })
@@ -4084,12 +4133,57 @@ pub fn external_receiver_binding_constraints(
     constraints
 }
 
-fn external_api_receiver_type_key(java_ty: &JavaType) -> Option<&str> {
+pub fn external_call_return_binding_constraints(
+    binding: &BindingUseFacts,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let mut constraints = Vec::new();
+    for usage in &binding.uses {
+        let BindingUse::AssignedFromCall {
+            name,
+            receiver_type,
+            boundary: CallArgumentBoundary::Unknown,
+        } = usage
+        else {
+            continue;
+        };
+        push_external_call_return_constraints(
+            &mut constraints,
+            receiver_type.as_ref(),
+            name,
+            facts,
+        );
+    }
+    constraints
+}
+
+fn push_external_call_return_constraints(
+    constraints: &mut Vec<SignatureConstraint>,
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    facts: &FactSet,
+) {
+    let receiver_type = receiver_type.and_then(external_api_receiver_type_key);
+    if let Some(effect) = facts.external_api_effect_for_receiver(receiver_type.as_deref(), name)
+        && effect.return_nullability != NullabilityState::Unknown
+    {
+        push_unique_signature_constraints(
+            constraints,
+            &[SignatureConstraint::RequiredStorageNullability(
+                effect.return_nullability,
+            )],
+        );
+    }
+}
+
+fn external_api_receiver_type_key(java_ty: &JavaType) -> Option<String> {
     match java_ty {
-        JavaType::Named { name, .. } => Some(name.as_str()),
-        JavaType::String => Some("String"),
-        JavaType::Array(_) => Some("Array"),
-        JavaType::Unknown(name) => Some(name.as_str()),
+        JavaType::Named { name, .. } => {
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+        }
+        JavaType::String => Some("String".to_string()),
+        JavaType::Array(_) => Some("Array".to_string()),
+        JavaType::Unknown(name) => Some(crate::stdlib::canonical_external_receiver_type_key(name)),
         JavaType::Void | JavaType::Primitive(_) | JavaType::Wildcard(_) => None,
     }
 }
@@ -4358,11 +4452,42 @@ pub fn method_return_shape_constraints(
             )],
         );
     }
+    push_unique_signature_constraints(
+        &mut constraints,
+        &external_call_return_method_return_constraints(ty, method, usage, facts),
+    );
     if boundary_kind.is_none() {
         constraints.extend(
             borrowed_return_content_policy_from_param_with_facts(ty, method, usage, facts)
                 .map(signature_constraints_for_borrowed_content_policy)
                 .unwrap_or_default(),
+        );
+    }
+    constraints
+}
+
+pub fn external_call_return_method_return_constraints(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    usage: &UsageFacts,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let mut constraints = Vec::new();
+    let Some(method_usage) = usage.methods.get(&UsageMethodKey {
+        type_name: ty.name.clone(),
+        method_name: method.name.clone(),
+    }) else {
+        return constraints;
+    };
+    for returned in &method_usage.returned_call_results {
+        if returned.boundary != CallArgumentBoundary::Unknown {
+            continue;
+        }
+        push_external_call_return_constraints(
+            &mut constraints,
+            returned.receiver_type.as_ref(),
+            &returned.name,
+            facts,
         );
     }
     constraints

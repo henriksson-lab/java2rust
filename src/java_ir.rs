@@ -18,6 +18,8 @@ pub struct ImportDecl {
 pub struct TypeDecl {
     pub kind: TypeKind,
     pub name: String,
+    pub type_params: Vec<String>,
+    pub type_param_bounds: Vec<Option<JavaType>>,
     pub modifiers: Vec<Modifier>,
     pub extends: Option<String>,
     pub implements: Vec<String>,
@@ -31,6 +33,7 @@ pub enum TypeKind {
     Class,
     Interface,
     Enum,
+    Record,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +58,8 @@ pub struct FieldDecl {
 pub struct MethodDecl {
     pub name: String,
     pub rust_name: Option<String>,
+    pub type_params: Vec<String>,
+    pub type_param_bounds: Vec<Option<JavaType>>,
     pub return_type: JavaType,
     pub throws: Vec<JavaType>,
     pub params: Vec<Param>,
@@ -67,6 +72,8 @@ pub struct MethodDecl {
 pub struct ConstructorDecl {
     pub name: String,
     pub rust_name: Option<String>,
+    pub type_params: Vec<String>,
+    pub type_param_bounds: Vec<Option<JavaType>>,
     pub params: Vec<Param>,
     pub throws: Vec<JavaType>,
     pub modifiers: Vec<Modifier>,
@@ -314,11 +321,15 @@ pub enum Literal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
+    Assign,
     Add,
     Sub,
     Mul,
     Div,
     Rem,
+    BitAnd,
+    BitOr,
+    BitXor,
     Shl,
     Shr,
     Eq,

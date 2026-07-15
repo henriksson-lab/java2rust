@@ -77,16 +77,23 @@ fn documents_to_array_empty_string_array_gap() {
 }
 
 #[test]
-fn documents_runtime_downcast_for_typed_getter_gap() {
+fn external_get_name_getter_no_longer_requires_runtime_downcast() {
     let translation = translate_source(&idiom_gap("TypedGetterAvoidsDowncast.java"));
 
     assert!(
-        translation.rust.contains("downcast::<String>()"),
+        !translation.rust.contains("downcast::<String>()"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("expect(\"invalid Java cast\")"),
+        !translation.rust.contains("expect(\"invalid Java cast\")"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let name: String = box.get_name();"),
         "{}",
         translation.rust
     );
@@ -142,14 +149,16 @@ fn documents_external_primitive_getter_dispatch_coercion_gap() {
 }
 
 #[test]
-fn documents_external_boolean_getter_dispatch_coercion_gap() {
+fn external_boolean_getter_no_longer_requires_runtime_downcast() {
     let translation = translate_source(&idiom_gap("BooleanGetterDispatchCoercion.java"));
 
     assert!(
-        translation.rust.contains("is_paired()")
-            && translation
+        translation
+            .rust
+            .contains("let value: bool = read.is_paired();")
+            && !translation
                 .rust
-                .contains("unsupported Java dispatch coercion: target type Primitive(Boolean)"),
+                .contains("unsupported Java dispatch coercion"),
         "{}",
         translation.rust
     );
@@ -560,7 +569,7 @@ fn documents_while_assignment_not_null_gap() {
     assert!(
         translation.rust.contains("while")
             && translation.rust.contains("cursor.next()")
-            && translation.rust.contains("(row + cursor.next())")
+            && translation.rust.contains("(row = cursor.next())")
             && !translation.rust.contains("while let"),
         "{}",
         translation.rust
@@ -574,7 +583,7 @@ fn documents_while_assignment_null_variants_gap() {
     assert!(
         translation.rust.contains("cursor.read()")
             && translation.rust.contains("cursor.advance()")
-            && translation.rust.contains("(row + cursor.read())")
+            && translation.rust.contains("(row = cursor.read())")
             && !translation.rust.contains("while let"),
         "{}",
         translation.rust

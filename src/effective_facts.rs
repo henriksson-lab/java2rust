@@ -300,8 +300,9 @@ fn fact_precedence_key(provenance: FactProvenance) -> u8 {
     match provenance {
         FactProvenance::ConservativeFallback => 0,
         FactProvenance::CorpusAnalysis => 1,
-        FactProvenance::ParsedSource => 2,
-        FactProvenance::UserOverride => 3,
+        FactProvenance::BuiltinExternalModel | FactProvenance::ExternalLibraryPack => 2,
+        FactProvenance::ParsedSource => 3,
+        FactProvenance::UserOverride => 4,
     }
 }
 

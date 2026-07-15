@@ -1,5 +1,6 @@
 use new_java2rust::java_ir::{
-    ConstructorInvocationKind, Expr, JavaType, Member, Modifier, Stmt, UnaryOp, WildcardBound,
+    BinaryOp, ConstructorInvocationKind, Expr, JavaType, Literal, Member, Modifier, PrimitiveType,
+    Stmt, UnaryOp, WildcardBound,
 };
 use new_java2rust::parser::parse_java_source;
 
@@ -84,6 +85,300 @@ fn parses_simple_class_members() {
 }
 
 #[test]
+fn parses_annotated_nested_class_members() {
+    let parsed = parse_java_source(
+        r#"
+class Outer {
+    @SerializableShape(Outer.Inner.class)
+    public static final class Inner {
+        public final static int SENTINEL = 7;
+    }
+}
+"#,
+    );
+
+    let outer = &parsed.program.types[0];
+    let inner = outer
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Type(ty) if ty.name == "Inner" => Some(ty),
+            _ => None,
+        })
+        .expect("expected annotated nested class to be parsed");
+
+    assert!(inner.modifiers.contains(&Modifier::Static));
+    assert!(inner.members.iter().any(|member| matches!(
+        member,
+        Member::Field(field)
+            if field.name == "s_e_n_t_i_n_e_l" && field.modifiers.contains(&Modifier::Static)
+    )));
+}
+
+#[test]
+fn parses_multidimensional_array_field_type_with_initializer() {
+    let parsed = parse_java_source(
+        r#"
+class MatrixHolder {
+    private static final int ROWS = 2;
+    private int max = 0;
+    private final long[][] totals = new long[ROWS][max];
+}
+"#,
+    );
+    let ty = &parsed.program.types[0];
+    let totals = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Field(field) if field.name == "totals" => Some(field),
+            _ => None,
+        })
+        .expect("expected totals field");
+
+    assert_eq!(
+        totals.ty,
+        JavaType::Array(Box::new(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Long
+        )))))
+    );
+}
+
+#[test]
+fn parses_argument_list_comments_without_extra_arguments() {
+    let parsed = parse_java_source(
+        r#"
+class ArgumentCommentParsing {
+    Product make(Source source, double[][][] values) {
+        return new Product(
+                source.alleles,
+                source.samples,
+                source.evidence,
+                null, // comment about the null placeholder
+                values);
+    }
+}
+"#,
+    );
+
+    let ty = &parsed.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "make" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let body = method.body.as_ref().unwrap();
+    let Stmt::Return(Some(Expr::New { args, .. })) = &body.statements[0] else {
+        panic!("expected constructor return");
+    };
+
+    assert_eq!(args.len(), 5);
+    assert!(matches!(args[3], Expr::Literal(Literal::Null)));
+}
+
+#[test]
+fn parses_cast_to_qualified_generic_inner_type() {
+    let parsed = parse_java_source(
+        r#"
+class Tree<T> {
+    abstract class IteratorBase {}
+
+    boolean same(Object obj) {
+        return ((Tree<?>.IteratorBase)obj).equals(this);
+    }
+}
+"#,
+    );
+    let ty = &parsed.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "same" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let body = method.body.as_ref().unwrap();
+    let Stmt::Return(Some(Expr::Call {
+        receiver: Some(receiver),
+        ..
+    })) = &body.statements[0]
+    else {
+        panic!("expected call on cast receiver");
+    };
+    let Expr::Cast { ty, .. } = receiver.as_ref() else {
+        panic!("expected cast receiver");
+    };
+    assert_eq!(
+        ty,
+        &JavaType::Named {
+            name: "IteratorBase".to_string(),
+            args: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn parses_varargs_parameters_as_array_params() {
+    let parsed = parse_java_source(
+        r#"
+class VarargsParameters {
+    VarargsParameters(String... names) {}
+
+    void record(Object... values) {}
+}
+"#,
+    );
+
+    let ty = &parsed.program.types[0];
+    let constructor = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Constructor(constructor) => Some(constructor),
+            _ => None,
+        })
+        .unwrap();
+    assert!(constructor.params[0].is_varargs);
+    assert_eq!(
+        constructor.params[0].ty,
+        JavaType::Array(Box::new(JavaType::String))
+    );
+
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    assert!(method.params[0].is_varargs);
+    assert_eq!(
+        method.params[0].ty,
+        JavaType::Array(Box::new(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        }))
+    );
+}
+
+#[test]
+fn parses_varargs_parameter_after_fixed_parameter() {
+    let parsed = parse_java_source(
+        r#"
+class MultiParameterVarargs {
+    void join(CharSequence separator, Object... values) {}
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "join" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(method.params.len(), 2);
+    assert_eq!(
+        method.params[0].ty,
+        JavaType::Named {
+            name: "CharSequence".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert!(method.params[1].is_varargs);
+    assert_eq!(
+        method.params[1].ty,
+        JavaType::Array(Box::new(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        }))
+    );
+}
+
+#[test]
+fn parses_array_cast_type_with_dimensions() {
+    let parsed = parse_java_source(
+        r#"
+class ArrayCastType {
+    void run(String[] columns) {
+        Object value = (Object[]) columns;
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let body = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::VarDecl {
+        initializer: Some(Expr::Cast { ty, .. }),
+        ..
+    } = &body.statements[0]
+    else {
+        panic!("expected cast initializer");
+    };
+
+    assert_eq!(
+        ty,
+        &JavaType::Array(Box::new(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        }))
+    );
+}
+
+#[test]
+fn parses_generic_primitive_array_type_arguments() {
+    let parsed = parse_java_source(
+        r#"
+class GenericPrimitiveArrayArgument {
+    void run() {
+        List<double[]> values = null;
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::VarDecl { ty, .. } = &method.body.as_ref().unwrap().statements[0] else {
+        panic!("expected generic primitive array variable declaration");
+    };
+
+    assert_eq!(
+        *ty,
+        JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::Array(Box::new(JavaType::Primitive(
+                PrimitiveType::Double,
+            )))],
+        }
+    );
+}
+
+#[test]
 fn parses_ternary_return_expression() {
     let parsed = parse_java_source(&fixture("01-expressions/ExpressionPrecedence.java"));
     let method = parsed.program.types[0]
@@ -114,6 +409,80 @@ fn parses_prefix_unary_expressions() {
 
     let not = parse_java_source(&fixture("06-stdlib/StreamsCollect.java"));
     assert!(program_has_unary(&not.program, UnaryOp::Not));
+}
+
+#[test]
+fn parses_character_literals_as_typed_literals() {
+    let parsed = parse_java_source(
+        r#"
+class CharacterLiteralUse {
+    void run() {
+        accept(',');
+        accept('\t');
+    }
+}
+"#,
+    );
+
+    let body = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let chars = body
+        .statements
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Expr(Expr::Call { args, .. }) => match args.first() {
+                Some(Expr::Literal(Literal::Char(ch))) => Some(*ch),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(chars, vec![',', '\t']);
+}
+
+#[test]
+fn parses_bitwise_binary_expressions_as_structured_ops() {
+    let parsed = parse_java_source(
+        r#"
+class BitwiseExpressions {
+    int masked(byte left, byte right) {
+        return (left & 0xFF) | (right ^ 3);
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = first_method(&parsed.program.types[0]);
+    let Stmt::Return(Some(Expr::Binary {
+        op: BinaryOp::BitOr,
+        left,
+        right,
+    })) = &method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected top-level bitwise or expression");
+    };
+    assert!(matches!(
+        left.as_ref(),
+        Expr::Binary {
+            op: BinaryOp::BitAnd,
+            ..
+        }
+    ));
+    assert!(matches!(
+        right.as_ref(),
+        Expr::Binary {
+            op: BinaryOp::BitXor,
+            ..
+        }
+    ));
 }
 
 fn program_has_unary(program: &new_java2rust::java_ir::Program, op: UnaryOp) -> bool {
@@ -313,10 +682,193 @@ fn parses_try_with_resources_declarations() {
 }
 
 #[test]
+fn parses_method_type_parameter_bounds() {
+    let parsed = parse_java_source(
+        r#"
+class Holder {
+    <T extends Base> T first(T value) {
+        return value;
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = first_method(&parsed.program.types[0]);
+    assert_eq!(method.type_params, vec!["T"]);
+    assert!(matches!(
+        method.type_param_bounds.as_slice(),
+        [Some(JavaType::Named { name, args })] if name == "Base" && args.is_empty()
+    ));
+}
+
+#[test]
+fn parses_static_method_type_parameters_after_modifiers() {
+    let parsed = parse_java_source(
+        r#"
+class Holder {
+    static <T> Box<T> wrap(Iterable<T> values) {
+        return null;
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = first_method(&parsed.program.types[0]);
+    assert_eq!(method.type_params, vec!["T"]);
+    assert_eq!(method.type_param_bounds, vec![None]);
+    assert_eq!(method.name, "wrap");
+}
+
+#[test]
+fn parser_preserves_generic_implements_clause_arguments() {
+    let parsed = parse_java_source(
+        r#"
+class Source<V> implements Iterable<Tuple2<Key, V>> {
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    assert_eq!(
+        parsed.program.types[0].implements,
+        vec!["Iterable<Tuple2<Key, V>>"]
+    );
+}
+
+#[test]
+fn parser_does_not_treat_generic_return_type_as_method_type_parameters() {
+    let parsed = parse_java_source(
+        r#"
+class Holder {
+    List<Item> values() {
+        return null;
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = first_method(&parsed.program.types[0]);
+    assert!(method.type_params.is_empty());
+    assert!(method.type_param_bounds.is_empty());
+}
+
+#[test]
+fn parser_splits_multi_declarator_local_variables_with_shared_type() {
+    let parsed = parse_java_source(
+        r#"
+class Holder {
+    void run() {
+        final Item head = first(), tail = last();
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = first_method(&parsed.program.types[0]);
+    let statements = &method.body.as_ref().unwrap().statements;
+    assert_eq!(statements.len(), 2);
+    assert!(matches!(
+        &statements[0],
+        Stmt::VarDecl {
+            ty: JavaType::Named { name, args },
+            name: local_name,
+            initializer: Some(Expr::Call { name: method_name, .. })
+        } if name == "Item" && args.is_empty() && local_name == "head" && method_name == "first"
+    ));
+    assert!(matches!(
+        &statements[1],
+        Stmt::VarDecl {
+            ty: JavaType::Named { name, args },
+            name: local_name,
+            initializer: Some(Expr::Call { name: method_name, .. })
+        } if name == "Item" && args.is_empty() && local_name == "tail" && method_name == "last"
+    ));
+}
+
+#[test]
+fn parses_final_generic_try_resource_type_without_modifier_in_name() {
+    let parsed = parse_java_source(
+        r#"
+class TryResourceGenericType {
+    void run() {
+        try (final Box<Item> box = new Box<>()) {
+            box.use();
+        }
+    }
+}
+"#,
+    );
+    let method = first_method(&parsed.program.types[0]);
+    let resources = method
+        .body
+        .as_ref()
+        .unwrap()
+        .statements
+        .iter()
+        .find_map(|stmt| match stmt {
+            Stmt::Try { resources, .. } => Some(resources),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(matches!(
+        &resources[0],
+        Stmt::VarDecl {
+            ty: JavaType::Named { name, args },
+            name: resource_name,
+            ..
+        } if name == "Box"
+            && matches!(args.as_slice(), [JavaType::Named { name, .. }] if name == "Item")
+            && resource_name == "box"
+    ));
+}
+
+#[test]
 fn parses_lambda_arguments_in_stream_fixture() {
     let parsed = parse_java_source(&fixture("06-stdlib/StreamsUse.java"));
     let method = first_method(&parsed.program.types[0]);
     assert!(block_has_lambda(method.body.as_ref().unwrap()));
+}
+
+#[test]
+fn parses_static_utility_method_receiver_as_identifier() {
+    let parsed = parse_java_source(
+        r#"
+class StaticUtilityReceiverUse {
+    void run(Collection<Integer> values) {
+        median(Ints.toArray(values));
+    }
+}
+"#,
+    );
+
+    let ty = &parsed.program.types[0];
+    let body = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Expr(Expr::Call { args, .. }) = &body.statements[0] else {
+        panic!("expected outer method call");
+    };
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        ..
+    } = &args[0]
+    else {
+        panic!("expected inner static utility method call");
+    };
+
+    assert_eq!(name, "toArray");
+    assert!(matches!(receiver.as_ref(), Expr::Var(owner) if owner == "ints"));
 }
 
 #[test]
@@ -333,6 +885,22 @@ fn parses_interface_members_and_implements_list() {
 
     let class = &parsed.program.types[1];
     assert_eq!(class.implements, vec!["Named"]);
+}
+
+#[test]
+fn parses_interface_extends_as_hierarchy_edges() {
+    let parsed = parse_java_source(
+        r#"
+interface Left {}
+interface Right {}
+interface Child extends Left, Right {}
+"#,
+    );
+    let interface = &parsed.program.types[2];
+
+    assert_eq!(interface.name, "Child");
+    assert_eq!(interface.extends.as_deref(), Some("Left"));
+    assert_eq!(interface.implements, vec!["Right"]);
 }
 
 #[test]

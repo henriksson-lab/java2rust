@@ -6,6 +6,7 @@ use crate::java_ir::{BinaryOp, Expr, JavaType, Literal, PrimitiveType, Stmt};
 pub struct TypeEnv {
     locals: HashMap<String, JavaType>,
     fields: HashMap<String, JavaType>,
+    type_param_bounds: HashMap<String, JavaType>,
 }
 
 impl TypeEnv {
@@ -21,12 +22,20 @@ impl TypeEnv {
         self.fields.insert(name.into(), ty);
     }
 
+    pub fn insert_type_param_bound(&mut self, name: impl Into<String>, bound: JavaType) {
+        self.type_param_bounds.insert(name.into(), bound);
+    }
+
     pub fn local_type(&self, name: &str) -> Option<&JavaType> {
         self.locals.get(name)
     }
 
     pub fn field_type(&self, name: &str) -> Option<&JavaType> {
         self.fields.get(name)
+    }
+
+    pub fn type_param_bound(&self, name: &str) -> Option<&JavaType> {
+        self.type_param_bounds.get(name)
     }
 
     pub fn learn_stmt(&mut self, stmt: &Stmt) {
@@ -100,20 +109,58 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
             &infer_expr_type(then_expr, env),
             &infer_expr_type(else_expr, env),
         ),
-        Expr::Call { name, resolved, .. } => resolved
-            .as_ref()
-            .map(|call| call.return_type.clone())
-            .unwrap_or_else(|| JavaType::Unknown(name.clone())),
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved,
+        } => {
+            if let Some(call) = resolved {
+                call.return_type.clone()
+            } else if name == "nonNull" && !args.is_empty() {
+                infer_expr_type(&args[0], env)
+            } else {
+                let receiver_type = receiver
+                    .as_deref()
+                    .map(|receiver| infer_expr_type(receiver, env));
+                let arg_types = args
+                    .iter()
+                    .map(|arg| infer_expr_type(arg, env))
+                    .collect::<Vec<_>>();
+                crate::stdlib::known_external_method_return_type_for_call(
+                    receiver_type.as_ref(),
+                    name,
+                    &arg_types,
+                )
+                .or_else(|| external_pack_method_return_type(receiver_type.as_ref(), name))
+                .unwrap_or_else(|| JavaType::Unknown(name.clone()))
+            }
+        }
         Expr::New { ty, .. } => ty.clone(),
         Expr::Cast { ty, .. } => ty.clone(),
         Expr::InstanceOf { .. } => JavaType::Primitive(PrimitiveType::Boolean),
         Expr::Lambda { .. } => JavaType::Unknown("lambda".to_string()),
         Expr::MethodReference { .. } => JavaType::Unknown("method_reference".to_string()),
-        Expr::ClassLiteral(_) => JavaType::Named {
-            name: "Class".to_string(),
-            args: Vec::new(),
-        },
+        Expr::ClassLiteral(ty) => class_literal_type(ty),
         Expr::Raw(raw) => JavaType::Unknown(raw.clone()),
+    }
+}
+
+fn external_pack_method_return_type(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+) -> Option<JavaType> {
+    let receiver_name = match receiver_type {
+        Some(JavaType::Named { name, .. }) | Some(JavaType::Unknown(name)) => Some(name.as_str()),
+        _ => None,
+    };
+    crate::external_packs::external_api_return_type_for_receiver(receiver_name, name)
+}
+
+pub fn class_literal_type(ty: &JavaType) -> JavaType {
+    JavaType::Named {
+        name: "Class".to_string(),
+        args: vec![ty.clone()],
     }
 }
 
@@ -195,6 +242,9 @@ fn is_java_length_receiver(ty: &JavaType) -> bool {
 
 fn infer_binary_type(op: BinaryOp, left: &Expr, right: &Expr, env: &TypeEnv) -> JavaType {
     match op {
+        BinaryOp::Assign => {
+            assignment_target_type(left, env).unwrap_or_else(|| infer_expr_type(right, env))
+        }
         BinaryOp::Eq
         | BinaryOp::Ne
         | BinaryOp::Lt
@@ -215,8 +265,38 @@ fn infer_binary_type(op: BinaryOp, left: &Expr, right: &Expr, env: &TypeEnv) -> 
         {
             JavaType::String
         }
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+            integral_binary_type(&infer_expr_type(left, env), &infer_expr_type(right, env))
+        }
         BinaryOp::Shl | BinaryOp::Shr => infer_expr_type(left, env),
         _ => numeric_binary_type(&infer_expr_type(left, env), &infer_expr_type(right, env)),
+    }
+}
+
+fn assignment_target_type(target: &Expr, env: &TypeEnv) -> Option<JavaType> {
+    match target {
+        Expr::Var(name) => env
+            .local_type(name)
+            .cloned()
+            .or_else(|| env.field_type(name).cloned()),
+        Expr::FieldAccess(receiver, field) => {
+            if matches!(receiver.as_ref(), Expr::This) {
+                env.field_type(field).cloned()
+            } else {
+                None
+            }
+        }
+        Expr::ArrayAccess(array, _) => sequence_element_type(&infer_expr_type(array, env)),
+        _ => None,
+    }
+}
+
+fn integral_binary_type(left: &JavaType, right: &JavaType) -> JavaType {
+    use PrimitiveType::*;
+    if matches!(left, JavaType::Primitive(Long)) || matches!(right, JavaType::Primitive(Long)) {
+        JavaType::Primitive(Long)
+    } else {
+        JavaType::Primitive(Int)
     }
 }
 

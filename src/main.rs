@@ -4,20 +4,48 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let Some(args) = parse_args(env::args().skip(1)) else {
-        eprintln!("usage: new-java2rust [--facts facts.txt] <file.java>");
+        eprintln!(
+            "usage: new-java2rust [--facts facts.txt] <file.java>\n       new-java2rust resolver-bench <dir>"
+        );
         return ExitCode::from(2);
     };
 
-    let source = match fs::read_to_string(&args.source_path) {
+    if let Args::ResolverBench { root_path } = args {
+        return match new_java2rust::resolver_benchmark::benchmark_java_resolver_dir(
+            std::path::Path::new(&root_path),
+        ) {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    new_java2rust::resolver_benchmark::render_resolver_benchmark_report(&report)
+                );
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("failed to benchmark {root_path}: {err}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    let Args::Translate {
+        source_path,
+        facts_path,
+    } = args
+    else {
+        unreachable!();
+    };
+
+    let source = match fs::read_to_string(&source_path) {
         Ok(source) => source,
         Err(err) => {
-            eprintln!("failed to read {}: {err}", args.source_path);
+            eprintln!("failed to read {}: {err}", source_path);
             return ExitCode::from(1);
         }
     };
 
     let mut fact_diagnostics = new_java2rust::diagnostics::DiagnosticBag::default();
-    let external_facts = if let Some(facts_path) = &args.facts_path {
+    let external_facts = if let Some(facts_path) = &facts_path {
         let fact_source = match fs::read_to_string(facts_path) {
             Ok(source) => source,
             Err(err) => {
@@ -49,15 +77,28 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-struct Args {
-    source_path: String,
-    facts_path: Option<String>,
+enum Args {
+    Translate {
+        source_path: String,
+        facts_path: Option<String>,
+    },
+    ResolverBench {
+        root_path: String,
+    },
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
     let mut source_path = None;
     let mut facts_path = None;
     let mut args = args.peekable();
+    if args.peek().is_some_and(|arg| arg == "resolver-bench") {
+        args.next();
+        let root_path = args.next()?;
+        if args.next().is_some() {
+            return None;
+        }
+        return Some(Args::ResolverBench { root_path });
+    }
     while let Some(arg) = args.next() {
         if arg == "--facts" {
             facts_path = args.next();
@@ -67,7 +108,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
             return None;
         }
     }
-    Some(Args {
+    Some(Args::Translate {
         source_path: source_path?,
         facts_path,
     })

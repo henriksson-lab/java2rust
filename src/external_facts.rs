@@ -317,6 +317,26 @@ pub fn parse_external_facts(source: &str) -> ExternalFactsParse {
                     receiver_type,
                     role,
                     receiver_mutability,
+                    "unknown",
+                );
+            }
+            [
+                "external-api",
+                method_name,
+                receiver_type,
+                role,
+                receiver_mutability,
+                return_nullability,
+            ] => {
+                push_external_api_effect_fact(
+                    &mut facts,
+                    &mut diagnostics,
+                    line_index,
+                    method_name,
+                    receiver_type,
+                    role,
+                    receiver_mutability,
+                    return_nullability,
                 );
             }
             ["field-nullability", type_name, field_name, state] => {
@@ -375,6 +395,7 @@ fn parse_external_api_role(value: &str) -> Option<ExternalApiRole> {
         "setter" => Some(ExternalApiRole::Setter),
         "mutator" => Some(ExternalApiRole::Mutator),
         "fluent-mutator" => Some(ExternalApiRole::FluentMutator),
+        "side-effect" => Some(ExternalApiRole::SideEffect),
         "indexed-getter" => Some(ExternalApiRole::IndexedGetter),
         "indexed-setter" => Some(ExternalApiRole::IndexedSetter),
         "unknown" => Some(ExternalApiRole::Unknown),
@@ -416,6 +437,7 @@ fn push_external_api_effect_fact(
     receiver_type: &str,
     role: &str,
     receiver_mutability: &str,
+    return_nullability: &str,
 ) {
     let Some(role) = parse_external_api_role(role) else {
         push_external_fact_error(diagnostics, line_index, "invalid external API role");
@@ -429,11 +451,21 @@ fn push_external_api_effect_fact(
         );
         return;
     };
+    let Some(return_nullability) = parse_nullability_state(return_nullability) else {
+        push_external_fact_error(
+            diagnostics,
+            line_index,
+            "invalid external API return nullability",
+        );
+        return;
+    };
     facts.external_api_effect_facts.push(ExternalApiEffectFact {
         method_name: method_name.to_string(),
         receiver_type: parse_receiver_type(receiver_type),
         role,
         receiver_mutability,
+        return_type: None,
+        return_nullability,
         provenance: FactProvenance::UserOverride,
     });
 }

@@ -44,6 +44,7 @@ use new_java2rust::conversion_plan::{
 };
 use new_java2rust::effective_facts::EffectiveFacts;
 use new_java2rust::expr_shape::{ExprShapeContext, ShapeEnv};
+use new_java2rust::external_packs::hdf5_pack_facts;
 use new_java2rust::facts::{
     FactProvenance, FactSet, OwnedRecoveryCapability, TypeCapabilityOverride,
 };
@@ -204,6 +205,40 @@ fn type_inference_owns_java_length_type() {
     );
     assert_eq!(plan.op, MemberAccessOp::LenAsI32);
     assert_eq!(plan.shape.java_ty, JavaType::Primitive(PrimitiveType::Int));
+}
+
+#[test]
+fn type_inference_consumes_external_pack_return_type_facts() {
+    let mut env = TypeEnv::new();
+    env.insert_local(
+        "hdf5",
+        JavaType::Named {
+            name: "HDF5File".to_string(),
+            args: Vec::new(),
+        },
+    );
+    env.insert_local(
+        "variant",
+        JavaType::Named {
+            name: "VariantContext".to_string(),
+            args: Vec::new(),
+        },
+    );
+
+    assert_eq!(
+        infer_expr_type(&parse_expr(r#"hdf5.readDoubleArray("/metrics")"#), &env),
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Double)))
+    );
+    assert_eq!(
+        infer_expr_type(&parse_expr("variant.getAlleles()"), &env),
+        JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::Named {
+                name: "Allele".to_string(),
+                args: Vec::new(),
+            }],
+        }
+    );
 }
 
 #[test]
@@ -559,6 +594,106 @@ fn conversion_plan_wraps_slot_conversion_decisions_before_application() {
         ),
         RustExpr::Var("value".to_string())
     );
+}
+
+#[test]
+fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
+    let crate_mapped_ty = JavaType::Named {
+        name: "OpenMode".to_string(),
+        args: Vec::new(),
+    };
+    let source_helper_ty = JavaType::Named {
+        name: "SourceOpenMode".to_string(),
+        args: Vec::new(),
+    };
+
+    let mut source_facts = FactSet::default();
+    source_facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "SourceOpenMode".to_string(),
+            copy: Some(false),
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: None,
+            provenance: FactProvenance::ParsedSource,
+        });
+
+    let crate_mapped_actual = RustSlotShape {
+        java_ty: crate_mapped_ty.clone(),
+        ownership: OwnershipShape::SharedBorrow,
+        view: ViewShape::Native,
+        dispatch: DispatchShape::Concrete,
+        mutability: new_java2rust::slot_shape::MutabilityShape::Immutable,
+        type_identity: new_java2rust::slot_shape::TypeIdentity::from_java_type(
+            crate_mapped_ty.clone(),
+        ),
+    };
+    let crate_mapped_target = RustSlotShape::conservative(crate_mapped_ty);
+    let source_actual = RustSlotShape {
+        java_ty: source_helper_ty.clone(),
+        ownership: OwnershipShape::SharedBorrow,
+        view: ViewShape::Native,
+        dispatch: DispatchShape::Concrete,
+        mutability: new_java2rust::slot_shape::MutabilityShape::Immutable,
+        type_identity: new_java2rust::slot_shape::TypeIdentity::from_java_type(
+            source_helper_ty.clone(),
+        ),
+    };
+    let source_target = RustSlotShape::conservative(source_helper_ty);
+
+    let crate_mapped_plan = slot_conversion_plan_with_facts(
+        &crate_mapped_actual,
+        &Slot::Return(crate_mapped_target),
+        &hdf5_pack_facts(),
+    );
+    let source_plan = slot_conversion_plan_with_facts(
+        &source_actual,
+        &Slot::Return(source_target),
+        &source_facts,
+    );
+
+    let crate_mapped_coercions = match &crate_mapped_plan {
+        SlotConversionPlan::Shape(plan) => plan.coercions(),
+        other => panic!("expected crate-mapped shape conversion plan, got {other:?}"),
+    };
+    let source_coercions = match &source_plan {
+        SlotConversionPlan::Shape(plan) => plan.coercions(),
+        other => panic!("expected source helper shape conversion plan, got {other:?}"),
+    };
+
+    assert_eq!(crate_mapped_coercions.len(), 1);
+    assert_eq!(source_coercions.len(), 1);
+    assert!(matches!(
+        crate_mapped_coercions.as_slice(),
+        [Coercion::CloneRecovery {
+            policy: CloneRecoveryPolicy::ProvenCloneCapability { .. }
+        }]
+    ));
+    assert!(matches!(
+        source_coercions.as_slice(),
+        [Coercion::CloneRecovery {
+            policy: CloneRecoveryPolicy::ProvenCloneCapability { .. }
+        }]
+    ));
+    assert!(matches!(
+        crate_mapped_plan,
+        SlotConversionPlan::Shape(ShapeCoercionPlan {
+            ownership: OwnershipCoercionPolicy::RecoverOwnedWithClone { .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        source_plan,
+        SlotConversionPlan::Shape(ShapeCoercionPlan {
+            ownership: OwnershipCoercionPolicy::RecoverOwnedWithClone { .. },
+            ..
+        })
+    ));
 }
 
 #[test]

@@ -50,6 +50,7 @@ pub enum BindingUse {
     },
     AssignedFromCall {
         name: String,
+        receiver_type: Option<JavaType>,
         boundary: CallArgumentBoundary,
     },
     PassedToCall {
@@ -73,6 +74,7 @@ pub enum FieldUse {
     AssignedFromCall {
         field_name: String,
         name: String,
+        receiver_type: Option<JavaType>,
         boundary: CallArgumentBoundary,
     },
     PassedToCall {
@@ -113,12 +115,14 @@ pub struct ConstructorCallSiteUse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnedCallResultUse {
     pub name: String,
+    pub receiver_type: Option<JavaType>,
     pub boundary: CallArgumentBoundary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallResultBoundaryPolicy {
     pub name: String,
+    pub receiver_type: Option<JavaType>,
     pub boundary: CallArgumentBoundary,
 }
 
@@ -288,12 +292,15 @@ fn analyze_stmt(
                         },
                     );
                 }
-                if let Some(policy) = call_result_boundary_policy(initializer, internal_methods) {
+                if let Some(policy) =
+                    call_result_boundary_policy(initializer, internal_methods, facts)
+                {
                     record_use(
                         facts,
                         name,
                         BindingUse::AssignedFromCall {
                             name: policy.name,
+                            receiver_type: policy.receiver_type,
                             boundary: policy.boundary,
                         },
                     );
@@ -312,10 +319,13 @@ fn analyze_stmt(
             if let Expr::Var(name) = target {
                 if is_unshadowed_field_name(facts, field_names, name) {
                     facts.mutates_self = true;
-                    if let Some(policy) = call_result_boundary_policy(value, internal_methods) {
+                    if let Some(policy) =
+                        call_result_boundary_policy(value, internal_methods, facts)
+                    {
                         facts.field_uses.push(FieldUse::AssignedFromCall {
                             field_name: name.clone(),
                             name: policy.name,
+                            receiver_type: policy.receiver_type,
                             boundary: policy.boundary,
                         });
                     }
@@ -331,12 +341,15 @@ fn analyze_stmt(
                             },
                         );
                     }
-                    if let Some(policy) = call_result_boundary_policy(value, internal_methods) {
+                    if let Some(policy) =
+                        call_result_boundary_policy(value, internal_methods, facts)
+                    {
                         record_use(
                             facts,
                             name,
                             BindingUse::AssignedFromCall {
                                 name: policy.name,
+                                receiver_type: policy.receiver_type,
                                 boundary: policy.boundary,
                             },
                         );
@@ -347,10 +360,11 @@ fn analyze_stmt(
                 if target_is_this_field(target) {
                     facts.mutates_self = true;
                 }
-                if let Some(policy) = call_result_boundary_policy(value, internal_methods) {
+                if let Some(policy) = call_result_boundary_policy(value, internal_methods, facts) {
                     facts.field_uses.push(FieldUse::AssignedFromCall {
                         field_name: field_name.clone(),
                         name: policy.name,
+                        receiver_type: policy.receiver_type,
                         boundary: policy.boundary,
                     });
                 }
@@ -662,17 +676,34 @@ fn is_unshadowed_field_name(
 pub fn call_result_boundary_policy(
     expr: &Expr,
     internal_methods: &HashSet<String>,
+    facts: &MethodUsageFacts,
 ) -> Option<CallResultBoundaryPolicy> {
     match expr {
         Expr::Call { receiver, name, .. } => Some(CallResultBoundaryPolicy {
             name: name.clone(),
+            receiver_type: receiver
+                .as_deref()
+                .and_then(|receiver| call_result_receiver_type(receiver, facts)),
             boundary: call_argument_boundary_policy(receiver.as_deref(), name, internal_methods)
                 .boundary,
         }),
         Expr::New { .. } => Some(CallResultBoundaryPolicy {
             name: "new".to_string(),
+            receiver_type: None,
             boundary: CallArgumentBoundary::Unknown,
         }),
+        _ => None,
+    }
+}
+
+fn call_result_receiver_type(receiver: &Expr, facts: &MethodUsageFacts) -> Option<JavaType> {
+    match receiver {
+        Expr::Var(name) => facts
+            .bindings
+            .get(name)
+            .map(|binding| binding.java_ty.clone()),
+        Expr::This | Expr::Super => None,
+        Expr::Cast { ty, .. } => Some(ty.clone()),
         _ => None,
     }
 }
@@ -952,11 +983,12 @@ fn record_returned_call_result_use(
 ) {
     match expr {
         Expr::Call { .. } | Expr::New { .. } => {
-            let Some(policy) = call_result_boundary_policy(expr, internal_methods) else {
+            let Some(policy) = call_result_boundary_policy(expr, internal_methods, facts) else {
                 return;
             };
             facts.returned_call_results.push(ReturnedCallResultUse {
                 name: policy.name,
+                receiver_type: policy.receiver_type,
                 boundary: policy.boundary,
             });
         }

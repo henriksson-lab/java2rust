@@ -3,19 +3,21 @@ use std::collections::{HashMap, HashSet};
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
     AccessorInlinePolicy, CatchFact, ControlFlowFact, ControlFlowFactKind, DispatchRequirementFact,
-    DispatchRequirementKind, ExceptionFact, ExceptionKind, ExternalApiEffectFact, ExternalApiRole,
-    FactProvenance, FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
-    MethodEffectFact, MethodKey, NullabilityState, ReceiverMutabilityFact, RecursionFact,
-    RecursionKind, TrivialAccessorFact, TrivialAccessorKind,
+    DispatchRequirementKind, ExceptionFact, ExceptionKind, ExternalApiEffectFact,
+    ExternalConstructorFact, ExternalFieldFact, FactProvenance, FactSet, FieldKey,
+    FieldNullabilityFact, FieldNullabilityProvenance, MethodEffectFact, MethodKey,
+    NullabilityState, ReceiverMutabilityFact, RecursionFact, RecursionKind, TrivialAccessorFact,
+    TrivialAccessorKind, UnresolvedTargetKind,
 };
 use crate::java_ir::{
     BinaryOp, Block, ConstructorDecl, ConstructorInvocationKind, Expr, FieldDecl, JavaType,
-    Literal, Member, MethodDecl, Modifier, Program, Stmt, TypeDecl,
+    LambdaBody, Literal, Member, MethodDecl, Modifier, Program, Stmt, TypeDecl,
 };
 use crate::rewrite::{
     AssignmentConditionNormalizedShape, AssignmentInConditionPlan, ControlFlowRewritePlan,
     MethodControlFlowPlan, NullTestKind, TailRecursiveLoopPlan, TailRecursiveNormalizedShape,
 };
+use crate::types::{TypeEnv, infer_expr_type};
 use crate::usage::{self, UsageFacts, UsageMethodKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +88,8 @@ pub fn analyze_program_with_config(
         collect_field_nullability_facts(program, &mut facts, &mut diagnostics);
     if config.enable_external_api_guesses {
         collect_external_api_effect_facts(program, &mut facts, &config, &mut diagnostics);
+        collect_external_constructor_facts(program, &mut facts, &mut diagnostics);
+        collect_external_field_facts(program, &mut facts, &mut diagnostics);
     }
     collect_method_effect_facts(program, &usage, &mut facts);
     collect_recursion_facts(program, &mut facts);
@@ -249,13 +253,370 @@ fn collect_external_api_effect_facts(
             config.max_external_guess_iterations,
             &mut guessed_count,
             &mut budget_exhausted,
+            diagnostics,
         );
     }
+    collect_external_api_effect_facts_from_unresolved_targets(
+        program,
+        facts,
+        &mut seen,
+        config.max_external_guess_iterations,
+        &mut guessed_count,
+        &mut budget_exhausted,
+        diagnostics,
+    );
     if budget_exhausted {
         diagnostics.push(SemanticDiagnostic {
             code: "semantic_external_api_effect_budget_exhausted",
             message: "external API effect guessing stopped at configured finite budget".to_string(),
         });
+    }
+}
+
+fn collect_external_constructor_facts(
+    program: &Program,
+    facts: &mut FactSet,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    let source_types = program_type_names(program);
+    let unresolved_targets = facts.unresolved_target_facts.clone();
+    for fact in unresolved_targets {
+        if fact.kind != UnresolvedTargetKind::ConstructorCall || fact.is_anonymous_class {
+            continue;
+        }
+        let Some(type_name) = constructor_target_type_name(&fact) else {
+            continue;
+        };
+        if source_types.contains(type_name) {
+            continue;
+        }
+        if facts
+            .external_constructor_for(type_name, &fact.arg_types)
+            .is_some()
+        {
+            continue;
+        }
+        if let Some(pack_fact) =
+            crate::external_packs::external_constructor_for(type_name, &fact.arg_types)
+        {
+            facts.external_constructor_facts.push(pack_fact);
+            continue;
+        }
+        if let Some(pack) = crate::external_packs::external_library_pack_for_type(type_name) {
+            diagnostics.push(SemanticDiagnostic {
+                code: "external_pack_missing_constructor",
+                message: format!(
+                    "{} constructor with {} argument(s) is inside external pack {} but has no modeled coverage entry",
+                    type_name,
+                    fact.arg_types.len(),
+                    pack.pack_name
+                ),
+            });
+            continue;
+        }
+        facts
+            .external_constructor_facts
+            .push(ExternalConstructorFact {
+                type_name: type_name.to_string(),
+                arg_types: fact.arg_types.clone(),
+                provenance: crate::stdlib::external_constructor_provenance(
+                    type_name,
+                    &fact.arg_types,
+                ),
+            });
+    }
+}
+
+fn collect_external_field_facts(
+    program: &Program,
+    facts: &mut FactSet,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    let source_types = program_type_names(program);
+    let external_superclasses = external_superclasses_by_source_type(program, &source_types);
+    let unresolved_targets = facts.unresolved_target_facts.clone();
+    for fact in unresolved_targets {
+        if fact.kind != UnresolvedTargetKind::FieldAccess {
+            continue;
+        }
+        let Some(type_name) = fact.receiver_type.as_ref().and_then(java_type_name) else {
+            continue;
+        };
+        let type_name = crate::stdlib::canonical_external_receiver_type_key(type_name);
+        if program_contains_type_named(&source_types, &type_name)
+            && !external_superclasses.contains_key(&type_name)
+        {
+            continue;
+        }
+        if facts
+            .external_field_for(&type_name, &fact.target_name)
+            .is_some()
+        {
+            continue;
+        }
+        if let Some(pack_fact) =
+            crate::external_packs::external_field_for(&type_name, &fact.target_name)
+        {
+            facts.external_field_facts.push(pack_fact);
+            continue;
+        }
+        if let Some(pack) = crate::external_packs::external_library_pack_for_type(&type_name) {
+            diagnostics.push(SemanticDiagnostic {
+                code: "external_pack_missing_field",
+                message: format!(
+                    "{}.{} is inside external pack {} but has no modeled coverage entry",
+                    type_name, fact.target_name, pack.pack_name
+                ),
+            });
+            continue;
+        }
+        facts.external_field_facts.push(ExternalFieldFact {
+            field: FieldKey {
+                type_name: type_name.clone(),
+                field_name: fact.target_name.clone(),
+            },
+            provenance: crate::stdlib::external_field_provenance(&type_name, &fact.target_name),
+        });
+    }
+}
+
+fn external_superclasses_by_source_type(
+    program: &Program,
+    source_types: &HashSet<String>,
+) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for ty in &program.types {
+        collect_type_external_superclasses(ty, source_types, &mut out);
+    }
+    out
+}
+
+fn collect_type_external_superclasses(
+    ty: &TypeDecl,
+    source_types: &HashSet<String>,
+    out: &mut HashMap<String, String>,
+) {
+    if let Some(extends) = &ty.extends {
+        let super_ty = crate::parser::parse_type(extends);
+        if let Some(super_name) = java_type_name(&super_ty) {
+            let canonical_super = crate::stdlib::canonical_external_receiver_type_key(super_name);
+            if !program_contains_type_named(source_types, &canonical_super) {
+                out.insert(ty.name.clone(), canonical_super);
+            }
+        }
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_type_external_superclasses(nested, source_types, out);
+        }
+    }
+}
+
+fn program_contains_type_named(source_types: &HashSet<String>, type_name: &str) -> bool {
+    source_types.contains(type_name)
+        || source_types
+            .iter()
+            .any(|source_type| crate::parser::to_snake_case(source_type) == type_name)
+}
+
+fn constructor_target_type_name(fact: &crate::facts::UnresolvedTargetFact) -> Option<&str> {
+    fact.receiver_type
+        .as_ref()
+        .and_then(java_type_name)
+        .or(Some(fact.target_name.as_str()))
+}
+
+fn program_type_names(program: &Program) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for ty in &program.types {
+        collect_program_type_names(ty, &mut names);
+    }
+    names
+}
+
+fn collect_program_type_names(ty: &TypeDecl, names: &mut HashSet<String>) {
+    names.insert(ty.name.clone());
+    for member in &ty.members {
+        collect_member_type_names(member, names);
+    }
+}
+
+fn collect_member_type_names(member: &Member, names: &mut HashSet<String>) {
+    match member {
+        Member::Type(nested) => collect_program_type_names(nested, names),
+        Member::Method(method) => {
+            if let Some(body) = &method.body {
+                collect_block_type_names(body, names);
+            }
+        }
+        Member::Constructor(constructor) => {
+            if let Some(body) = &constructor.body {
+                collect_block_type_names(body, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_block_type_names(block: &Block, names: &mut HashSet<String>) {
+    for stmt in &block.statements {
+        collect_stmt_type_names(stmt, names);
+    }
+}
+
+fn collect_stmt_type_names(stmt: &Stmt, names: &mut HashSet<String>) {
+    match stmt {
+        Stmt::LocalType(local) => collect_program_type_names(local, names),
+        Stmt::VarDecl {
+            initializer: Some(initializer),
+            ..
+        } => collect_expr_type_names(initializer, names),
+        Stmt::Assign { target, value } => {
+            collect_expr_type_names(target, names);
+            collect_expr_type_names(value, names);
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => collect_expr_type_names(expr, names),
+        Stmt::Return(Some(expr)) => collect_expr_type_names(expr, names),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_expr_type_names(condition, names);
+            collect_block_type_names(then_block, names);
+            if let Some(else_block) = else_block {
+                collect_block_type_names(else_block, names);
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_expr_type_names(condition, names);
+            collect_block_type_names(body, names);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                collect_stmt_type_names(stmt, names);
+            }
+            if let Some(condition) = condition {
+                collect_expr_type_names(condition, names);
+            }
+            for expr in update {
+                collect_expr_type_names(expr, names);
+            }
+            collect_block_type_names(body, names);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_expr_type_names(iterable, names);
+            collect_block_type_names(body, names);
+        }
+        Stmt::Switch {
+            selector, cases, ..
+        } => {
+            collect_expr_type_names(selector, names);
+            for case in cases {
+                for stmt in &case.statements {
+                    collect_stmt_type_names(stmt, names);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_stmt_type_names(resource, names);
+            }
+            collect_block_type_names(body, names);
+            for catch in catches {
+                collect_block_type_names(&catch.body, names);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_block_type_names(finally_block, names);
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_expr_type_names(arg, names);
+            }
+        }
+        Stmt::Block(block) => collect_block_type_names(block, names),
+        Stmt::VarDecl {
+            initializer: None, ..
+        }
+        | Stmt::Return(None)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
+    match expr {
+        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+            collect_expr_type_names(receiver, names);
+        }
+        Expr::ArrayAccess(array, index)
+        | Expr::Binary {
+            left: array,
+            right: index,
+            ..
+        } => {
+            collect_expr_type_names(array, names);
+            collect_expr_type_names(index, names);
+        }
+        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+            for expr in dimensions {
+                collect_expr_type_names(expr, names);
+            }
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_type_names(condition, names);
+            collect_expr_type_names(then_expr, names);
+            collect_expr_type_names(else_expr, names);
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_expr_type_names(receiver, names);
+            }
+            for arg in args {
+                collect_expr_type_names(arg, names);
+            }
+        }
+        Expr::New { args, body, .. } => {
+            for arg in args {
+                collect_expr_type_names(arg, names);
+            }
+            if let Some(members) = body {
+                for member in members {
+                    collect_member_type_names(member, names);
+                }
+            }
+        }
+        Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_expr_type_names(expr, names);
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => collect_expr_type_names(expr, names),
+            LambdaBody::Block(block) => collect_block_type_names(block, names),
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
     }
 }
 
@@ -266,30 +627,41 @@ fn collect_type_external_api_effect_facts(
     budget: Option<usize>,
     guessed_count: &mut usize,
     budget_exhausted: &mut bool,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
 ) {
     for member in &ty.members {
         match member {
             Member::Method(method) => {
                 if let Some(body) = &method.body {
                     collect_external_api_effects_from_block(
+                        ty,
+                        &method.type_params,
+                        &method.type_param_bounds,
+                        &method.params,
                         body,
                         facts,
                         seen,
                         budget,
                         guessed_count,
                         budget_exhausted,
+                        diagnostics,
                     );
                 }
             }
             Member::Constructor(ctor) => {
                 if let Some(body) = &ctor.body {
                     collect_external_api_effects_from_block(
+                        ty,
+                        &ctor.type_params,
+                        &ctor.type_param_bounds,
+                        &ctor.params,
                         body,
                         facts,
                         seen,
                         budget,
                         guessed_count,
                         budget_exhausted,
+                        diagnostics,
                     );
                 }
             }
@@ -300,47 +672,454 @@ fn collect_type_external_api_effect_facts(
                 budget,
                 guessed_count,
                 budget_exhausted,
+                diagnostics,
             ),
             _ => {}
         }
     }
 }
 
+fn collect_external_api_effect_facts_from_unresolved_targets(
+    program: &Program,
+    facts: &mut FactSet,
+    seen: &mut HashSet<String>,
+    budget: Option<usize>,
+    guessed_count: &mut usize,
+    budget_exhausted: &mut bool,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    let unresolved_targets = facts.unresolved_target_facts.clone();
+    for fact in unresolved_targets {
+        if fact.kind != UnresolvedTargetKind::MethodCall {
+            continue;
+        }
+        let receiver_type_key = unresolved_target_receiver_type_key(program, &fact);
+        if receiver_type_key.is_none()
+            && !crate::stdlib::is_known_receiverless_static_utility_method(
+                &fact.target_name,
+                fact.arg_types.len(),
+            )
+            && !crate::stdlib::has_receiver_agnostic_external_return_type(
+                &fact.target_name,
+                fact.arg_types.len(),
+            )
+        {
+            continue;
+        }
+        push_external_api_effect_guess(
+            facts,
+            seen,
+            budget,
+            guessed_count,
+            budget_exhausted,
+            diagnostics,
+            receiver_type_key,
+            &fact.target_name,
+            fact.arg_types.len(),
+        );
+    }
+}
+
+fn unresolved_target_receiver_type_key(
+    program: &Program,
+    fact: &crate::facts::UnresolvedTargetFact,
+) -> Option<String> {
+    let receiver_type = fact.receiver_type.as_ref()?;
+    if let JavaType::Named { name, args } = receiver_type
+        && args.is_empty()
+        && let Some(bound) = unresolved_target_type_param_bound(program, fact, name)
+    {
+        return external_api_receiver_type_key(&bound);
+    }
+    external_api_receiver_type_key(receiver_type)
+}
+
+fn unresolved_target_type_param_bound(
+    program: &Program,
+    fact: &crate::facts::UnresolvedTargetFact,
+    type_param: &str,
+) -> Option<JavaType> {
+    let ty = find_type_decl(program, &fact.enclosing_type)?;
+    type_param_bound_from_decl(&ty.type_params, &ty.type_param_bounds, type_param).or_else(|| {
+        let member_name = fact.enclosing_member.as_deref()?;
+        type_param_bound_from_member(ty, member_name, type_param)
+    })
+}
+
+fn type_param_bound_from_member(
+    ty: &TypeDecl,
+    member_name: &str,
+    type_param: &str,
+) -> Option<JavaType> {
+    for member in &ty.members {
+        match member {
+            Member::Method(method) if method.name == member_name => {
+                if let Some(bound) = type_param_bound_from_decl(
+                    &method.type_params,
+                    &method.type_param_bounds,
+                    type_param,
+                ) {
+                    return Some(bound);
+                }
+            }
+            Member::Constructor(constructor) if member_name == "<init>" => {
+                if let Some(bound) = type_param_bound_from_decl(
+                    &constructor.type_params,
+                    &constructor.type_param_bounds,
+                    type_param,
+                ) {
+                    return Some(bound);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn type_param_bound_from_decl(
+    type_params: &[String],
+    type_param_bounds: &[Option<JavaType>],
+    type_param: &str,
+) -> Option<JavaType> {
+    type_params
+        .iter()
+        .zip(type_param_bounds.iter())
+        .find_map(|(name, bound)| (name == type_param).then(|| bound.clone()).flatten())
+}
+
+fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
+    program
+        .types
+        .iter()
+        .find_map(|ty| find_type_decl_in_type(ty, type_name))
+}
+
+fn find_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
+    if ty.name == type_name {
+        return Some(ty);
+    }
+    ty.members.iter().find_map(|member| match member {
+        Member::Type(nested) => find_type_decl_in_type(nested, type_name),
+        _ => None,
+    })
+}
+
 fn collect_external_api_effects_from_block(
+    ty: &TypeDecl,
+    member_type_params: &[String],
+    member_type_param_bounds: &[Option<JavaType>],
+    params: &[crate::java_ir::Param],
     body: &Block,
     facts: &mut FactSet,
     seen: &mut HashSet<String>,
     budget: Option<usize>,
     guessed_count: &mut usize,
     budget_exhausted: &mut bool,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    let mut env =
+        collect_external_api_type_env(ty, member_type_params, member_type_param_bounds, params);
+    collect_external_api_effects_from_block_with_env(
+        body,
+        facts,
+        seen,
+        budget,
+        guessed_count,
+        budget_exhausted,
+        diagnostics,
+        &mut env,
+        &ty.name,
+    );
+}
+
+fn collect_external_api_effects_from_block_with_env(
+    body: &Block,
+    facts: &mut FactSet,
+    seen: &mut HashSet<String>,
+    budget: Option<usize>,
+    guessed_count: &mut usize,
+    budget_exhausted: &mut bool,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+    env: &mut TypeEnv,
+    current_type: &str,
 ) {
     for stmt in &body.statements {
         walk_stmt_exprs(stmt, &mut |expr| {
+            if let Expr::MethodReference { target, method } = expr {
+                if !is_non_external_method_reference(target, method) {
+                    let receiver = method_reference_receiver(target, env);
+                    push_external_api_effect_guess(
+                        facts,
+                        seen,
+                        budget,
+                        guessed_count,
+                        budget_exhausted,
+                        diagnostics,
+                        receiver.type_key,
+                        method,
+                        0,
+                    );
+                }
+            }
             if let Expr::Call {
-                receiver: Some(receiver),
+                receiver,
                 name,
                 args,
                 resolved,
             } = expr
-                && !matches!(receiver.as_ref(), Expr::This | Expr::Super)
                 && resolved.is_none()
-                && seen.insert(name.clone())
             {
-                if budget.is_some_and(|budget| *guessed_count >= budget) {
-                    *budget_exhausted = true;
+                let Some(receiver_type_key) = external_api_call_receiver_type_key(
+                    receiver.as_deref(),
+                    name,
+                    args.len(),
+                    env,
+                    current_type,
+                ) else {
+                    return;
+                };
+                if receiver_type_key.is_none()
+                    && !crate::stdlib::is_known_receiverless_static_utility_method(name, args.len())
+                    && !crate::stdlib::has_receiver_agnostic_external_return_type(name, args.len())
+                {
                     return;
                 }
-                let role = external_api_role(name, args.len());
-                facts.external_api_effect_facts.push(ExternalApiEffectFact {
-                    method_name: name.clone(),
-                    receiver_type: None,
-                    role,
-                    receiver_mutability: external_api_receiver_mutability(role),
-                    provenance: FactProvenance::ConservativeFallback,
-                });
-                *guessed_count += 1;
+                push_external_api_effect_guess(
+                    facts,
+                    seen,
+                    budget,
+                    guessed_count,
+                    budget_exhausted,
+                    diagnostics,
+                    receiver_type_key,
+                    name,
+                    args.len(),
+                );
             }
         });
+        env.learn_stmt(stmt);
+    }
+}
+
+fn is_non_external_method_reference(target: &str, method: &str) -> bool {
+    is_source_receiver_method_reference(target)
+        || is_array_constructor_method_reference(target, method)
+}
+
+fn is_source_receiver_method_reference(target: &str) -> bool {
+    matches!(target, "this" | "super")
+}
+
+fn is_array_constructor_method_reference(target: &str, method: &str) -> bool {
+    method == "new" && matches!(crate::parser::parse_type(target), JavaType::Array(_))
+}
+
+struct MethodReferenceReceiver {
+    type_key: Option<String>,
+}
+
+fn method_reference_receiver(target: &str, env: &TypeEnv) -> MethodReferenceReceiver {
+    if let Some(java_ty) = env.local_type(target).or_else(|| env.field_type(target)) {
+        return MethodReferenceReceiver {
+            type_key: external_api_receiver_type_key_with_env(java_ty, env),
+        };
+    }
+    let normalized = crate::parser::to_snake_case(target);
+    if normalized != target
+        && let Some(java_ty) = env
+            .local_type(&normalized)
+            .or_else(|| env.field_type(&normalized))
+    {
+        return MethodReferenceReceiver {
+            type_key: external_api_receiver_type_key_with_env(java_ty, env),
+        };
+    }
+    let parsed = crate::parser::parse_type(target);
+    let type_key = java_type_name(&parsed)
+        .map(crate::stdlib::canonical_external_receiver_type_key)
+        .or_else(|| Some(crate::stdlib::canonical_external_receiver_type_key(target)));
+    MethodReferenceReceiver { type_key }
+}
+
+fn push_external_api_effect_guess(
+    facts: &mut FactSet,
+    seen: &mut HashSet<String>,
+    budget: Option<usize>,
+    guessed_count: &mut usize,
+    budget_exhausted: &mut bool,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+    receiver_type_key: Option<String>,
+    name: &str,
+    arg_count: usize,
+) {
+    if facts
+        .external_api_effect_for_receiver(receiver_type_key.as_deref(), name)
+        .is_some_and(|fact| fact.provenance == FactProvenance::UserOverride)
+    {
+        return;
+    }
+    if facts
+        .external_api_effect_for_receiver(receiver_type_key.as_deref(), name)
+        .is_some()
+    {
+        return;
+    }
+    if let Some(receiver_type) = receiver_type_key.as_deref()
+        && let Some(unsupported) =
+            crate::external_packs::unsupported_external_api_for_receiver(Some(receiver_type), name)
+    {
+        diagnostics.push(SemanticDiagnostic {
+            code: "external_pack_unsupported_api",
+            message: format!(
+                "{}.{} is unsupported by external pack {}: {}",
+                unsupported.receiver_type,
+                unsupported.method_name,
+                unsupported.pack_name,
+                unsupported.reason
+            ),
+        });
+        return;
+    }
+    if let Some(pack_fact) =
+        crate::external_packs::external_api_effect_for_receiver(receiver_type_key.as_deref(), name)
+    {
+        facts.external_api_effect_facts.push(pack_fact);
+        return;
+    }
+    let policy =
+        crate::stdlib::external_api_method_policy(receiver_type_key.as_deref(), name, arg_count);
+    if policy.provenance == FactProvenance::BuiltinExternalModel {
+        facts.external_api_effect_facts.push(ExternalApiEffectFact {
+            method_name: name.to_string(),
+            receiver_type: receiver_type_key,
+            role: policy.role,
+            receiver_mutability: policy.receiver_mutability,
+            return_type: None,
+            return_nullability: policy.return_nullability,
+            provenance: policy.provenance,
+        });
+        *guessed_count += 1;
+        return;
+    }
+    if let Some(receiver_type) = receiver_type_key.as_deref()
+        && let Some(pack) = crate::external_packs::external_library_pack_for_type(receiver_type)
+    {
+        diagnostics.push(SemanticDiagnostic {
+            code: "external_pack_missing_api",
+            message: format!(
+                "{}.{} is inside external pack {} but has no modeled coverage entry",
+                receiver_type, name, pack.pack_name
+            ),
+        });
+        return;
+    }
+    let seen_key = format!("{}::{}", receiver_type_key.as_deref().unwrap_or("*"), name);
+    if !seen.insert(seen_key) {
+        return;
+    }
+    if budget.is_some_and(|budget| *guessed_count >= budget) {
+        *budget_exhausted = true;
+        return;
+    }
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: name.to_string(),
+        receiver_type: receiver_type_key,
+        role: policy.role,
+        receiver_mutability: policy.receiver_mutability,
+        return_type: None,
+        return_nullability: policy.return_nullability,
+        provenance: policy.provenance,
+    });
+    *guessed_count += 1;
+}
+
+fn external_api_call_receiver_type_key(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    env: &TypeEnv,
+    current_type: &str,
+) -> Option<Option<String>> {
+    match receiver {
+        None if crate::stdlib::is_known_receiverless_static_utility_method(name, arg_count) => {
+            Some(None)
+        }
+        None => Some(Some(current_type.to_string())),
+        Some(Expr::This | Expr::Super) => Some(Some(current_type.to_string())),
+        Some(receiver) => external_api_receiver_expr_type_key(receiver, env).map(Some),
+    }
+}
+
+fn external_api_receiver_expr_type_key(receiver: &Expr, env: &TypeEnv) -> Option<String> {
+    let inferred = infer_expr_type(receiver, env);
+    if weak_unknown_field_access_receiver(receiver, &inferred) {
+        return None;
+    }
+    external_api_receiver_type_key_with_env(&inferred, env)
+}
+
+fn weak_unknown_field_access_receiver(receiver: &Expr, inferred: &JavaType) -> bool {
+    match (receiver, inferred) {
+        (Expr::FieldAccess(_, field), JavaType::Unknown(name)) => {
+            name == field
+                || crate::parser::to_snake_case(name) == crate::parser::to_snake_case(field)
+        }
+        _ => false,
+    }
+}
+
+fn collect_external_api_type_env(
+    ty: &TypeDecl,
+    member_type_params: &[String],
+    member_type_param_bounds: &[Option<JavaType>],
+    params: &[crate::java_ir::Param],
+) -> TypeEnv {
+    let mut env = TypeEnv::new();
+    insert_external_api_type_param_bounds(&mut env, &ty.type_params, &ty.type_param_bounds);
+    insert_external_api_type_param_bounds(&mut env, member_type_params, member_type_param_bounds);
+    for member in &ty.members {
+        if let Member::Field(field) = member {
+            env.insert_field(field.name.clone(), field.ty.clone());
+        }
+    }
+    for param in params {
+        env.insert_local(param.name.clone(), param.ty.clone());
+    }
+    env
+}
+
+fn insert_external_api_type_param_bounds(
+    env: &mut TypeEnv,
+    type_params: &[String],
+    type_param_bounds: &[Option<JavaType>],
+) {
+    for (name, bound) in type_params.iter().zip(type_param_bounds.iter()) {
+        if let Some(bound) = bound {
+            env.insert_type_param_bound(name.clone(), bound.clone());
+        }
+    }
+}
+
+fn external_api_receiver_type_key_with_env(java_ty: &JavaType, env: &TypeEnv) -> Option<String> {
+    if let JavaType::Named { name, args } = java_ty
+        && args.is_empty()
+        && let Some(bound) = env.type_param_bound(name)
+    {
+        return external_api_receiver_type_key(bound);
+    }
+    external_api_receiver_type_key(java_ty)
+}
+
+fn external_api_receiver_type_key(java_ty: &JavaType) -> Option<String> {
+    match java_ty {
+        JavaType::Named { name, .. } => {
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+        }
+        JavaType::String => Some("String".to_string()),
+        JavaType::Array(_) => Some("Array".to_string()),
+        JavaType::Unknown(name) => Some(crate::stdlib::canonical_external_receiver_type_key(name)),
+        JavaType::Void | JavaType::Primitive(_) | JavaType::Wildcard(_) => None,
     }
 }
 
@@ -1090,9 +1869,12 @@ fn assignment_fragment_plan(
     expr: &Expr,
     null_test: NullTestKind,
 ) -> Option<AssignmentInConditionPlan> {
-    let Expr::Binary { left, right, .. } = expr else {
+    let Expr::Binary { op, left, right } = expr else {
         return None;
     };
+    if *op != BinaryOp::Assign {
+        return None;
+    }
     let Expr::Var(local_name) = left.as_ref() else {
         return None;
     };
@@ -2101,40 +2883,6 @@ fn is_reference_type(java_ty: &JavaType) -> bool {
 
 fn types_compatible(left: &JavaType, right: &JavaType) -> bool {
     left == right
-}
-
-fn external_api_role(name: &str, arg_count: usize) -> ExternalApiRole {
-    if (name == "get" && arg_count > 1) || name.starts_with("get") {
-        ExternalApiRole::Getter
-    } else if name.starts_with("is") || name.starts_with("has") {
-        ExternalApiRole::BooleanGetter
-    } else if name == "size" || name == "length" {
-        ExternalApiRole::Getter
-    } else if name == "set" && arg_count > 1 {
-        ExternalApiRole::IndexedSetter
-    } else if name.starts_with("set") {
-        ExternalApiRole::Setter
-    } else if matches!(
-        name,
-        "add" | "remove" | "put" | "clear" | "advance" | "read" | "write" | "copy"
-    ) {
-        ExternalApiRole::Mutator
-    } else {
-        ExternalApiRole::Unknown
-    }
-}
-
-fn external_api_receiver_mutability(role: ExternalApiRole) -> ReceiverMutabilityFact {
-    match role {
-        ExternalApiRole::Getter
-        | ExternalApiRole::BooleanGetter
-        | ExternalApiRole::IndexedGetter => ReceiverMutabilityFact::ReadOnly,
-        ExternalApiRole::Setter
-        | ExternalApiRole::Mutator
-        | ExternalApiRole::FluentMutator
-        | ExternalApiRole::IndexedSetter => ReceiverMutabilityFact::MutatesReceiver,
-        ExternalApiRole::Unknown => ReceiverMutabilityFact::Unknown,
-    }
 }
 
 fn classify_exception_type(type_name: &str, facts: &FactSet) -> ExceptionKind {
