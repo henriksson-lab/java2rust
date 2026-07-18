@@ -47,6 +47,7 @@ pub struct SemanticAnalysisConfig {
     pub max_external_guess_iterations: Option<usize>,
     pub enable_external_api_guesses: bool,
     pub enable_control_flow_facts: bool,
+    pub enable_builtin_external_packs: bool,
 }
 
 impl Default for SemanticAnalysisConfig {
@@ -55,6 +56,7 @@ impl Default for SemanticAnalysisConfig {
             max_external_guess_iterations: None,
             enable_external_api_guesses: true,
             enable_control_flow_facts: true,
+            enable_builtin_external_packs: true,
         }
     }
 }
@@ -88,8 +90,24 @@ pub fn analyze_program_with_config(
         collect_field_nullability_facts(program, &mut facts, &mut diagnostics);
     if config.enable_external_api_guesses {
         collect_external_api_effect_facts(program, &mut facts, &config, &mut diagnostics);
-        collect_external_constructor_facts(program, &mut facts, &mut diagnostics);
-        collect_external_field_facts(program, &mut facts, &mut diagnostics);
+        collect_java_platform_api_argument_effect_facts(&mut facts);
+        collect_java_platform_exception_facts(&mut facts);
+        collect_builtin_external_api_argument_effect_facts(
+            &mut facts,
+            config.enable_builtin_external_packs,
+        );
+        collect_external_constructor_facts(
+            program,
+            &mut facts,
+            config.enable_builtin_external_packs,
+            &mut diagnostics,
+        );
+        collect_external_field_facts(
+            program,
+            &mut facts,
+            config.enable_builtin_external_packs,
+            &mut diagnostics,
+        );
     }
     collect_method_effect_facts(program, &usage, &mut facts);
     collect_recursion_facts(program, &mut facts);
@@ -251,6 +269,7 @@ fn collect_external_api_effect_facts(
             facts,
             &mut seen,
             config.max_external_guess_iterations,
+            config.enable_builtin_external_packs,
             &mut guessed_count,
             &mut budget_exhausted,
             diagnostics,
@@ -261,6 +280,7 @@ fn collect_external_api_effect_facts(
         facts,
         &mut seen,
         config.max_external_guess_iterations,
+        config.enable_builtin_external_packs,
         &mut guessed_count,
         &mut budget_exhausted,
         diagnostics,
@@ -273,9 +293,59 @@ fn collect_external_api_effect_facts(
     }
 }
 
+fn collect_java_platform_api_argument_effect_facts(facts: &mut FactSet) {
+    for fact in crate::external_packs::java_platform_api_argument_effect_facts() {
+        let already_present = facts
+            .external_api_argument_effect_facts
+            .iter()
+            .any(|existing| {
+                existing.receiver_type == fact.receiver_type
+                    && existing.method_name == fact.method_name
+                    && existing.parameter_index == fact.parameter_index
+                    && existing.provenance == fact.provenance
+            });
+        if !already_present {
+            facts.external_api_argument_effect_facts.push(fact);
+        }
+    }
+}
+
+fn collect_java_platform_exception_facts(facts: &mut FactSet) {
+    for fact in crate::external_packs::java_platform_exception_facts() {
+        let already_present = facts.exception_facts.iter().any(|existing| {
+            existing.type_name == fact.type_name && existing.provenance == fact.provenance
+        });
+        if !already_present {
+            facts.exception_facts.push(fact);
+        }
+    }
+}
+
+fn collect_builtin_external_api_argument_effect_facts(facts: &mut FactSet, enabled: bool) {
+    if !enabled {
+        return;
+    }
+
+    for fact in crate::external_packs::builtin_external_api_argument_effect_facts() {
+        let already_present = facts
+            .external_api_argument_effect_facts
+            .iter()
+            .any(|existing| {
+                existing.receiver_type == fact.receiver_type
+                    && existing.method_name == fact.method_name
+                    && existing.parameter_index == fact.parameter_index
+                    && existing.provenance == fact.provenance
+            });
+        if !already_present {
+            facts.external_api_argument_effect_facts.push(fact);
+        }
+    }
+}
+
 fn collect_external_constructor_facts(
     program: &Program,
     facts: &mut FactSet,
+    enable_builtin_external_packs: bool,
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) {
     let source_types = program_type_names(program);
@@ -296,13 +366,61 @@ fn collect_external_constructor_facts(
         {
             continue;
         }
-        if let Some(pack_fact) =
-            crate::external_packs::external_constructor_for(type_name, &fact.arg_types)
+        if let Some(unsupported) =
+            facts.unsupported_external_constructor_for(type_name, fact.arg_types.len())
         {
+            diagnostics.push(SemanticDiagnostic {
+                code: "external_pack_unsupported_constructor",
+                message: format!(
+                    "{} constructor with {} argument(s) is unsupported by external pack {}: {}",
+                    type_name,
+                    fact.arg_types.len(),
+                    unsupported.pack_name,
+                    unsupported.reason
+                ),
+            });
+            continue;
+        }
+        if let Some(pack) = facts.external_library_pack_for_type(type_name) {
+            diagnostics.push(SemanticDiagnostic {
+                code: "external_pack_missing_constructor",
+                message: format!(
+                    "{} constructor with {} argument(s) is inside external pack {} but has no modeled coverage entry",
+                    type_name,
+                    fact.arg_types.len(),
+                    pack.pack_name
+                ),
+            });
+            continue;
+        }
+        if let Some(pack_fact) = builtin_external_constructor_for(
+            type_name,
+            &fact.arg_types,
+            enable_builtin_external_packs,
+        ) {
             facts.external_constructor_facts.push(pack_fact);
             continue;
         }
-        if let Some(pack) = crate::external_packs::external_library_pack_for_type(type_name) {
+        if let Some(unsupported) = builtin_unsupported_external_constructor_for(
+            type_name,
+            fact.arg_types.len(),
+            enable_builtin_external_packs,
+        ) {
+            diagnostics.push(SemanticDiagnostic {
+                code: "external_pack_unsupported_constructor",
+                message: format!(
+                    "{} constructor with {} argument(s) is unsupported by external pack {}: {}",
+                    type_name,
+                    fact.arg_types.len(),
+                    unsupported.pack_name,
+                    unsupported.reason
+                ),
+            });
+            continue;
+        }
+        if let Some(pack) =
+            builtin_external_library_pack_for_type(type_name, enable_builtin_external_packs)
+        {
             diagnostics.push(SemanticDiagnostic {
                 code: "external_pack_missing_constructor",
                 message: format!(
@@ -330,6 +448,7 @@ fn collect_external_constructor_facts(
 fn collect_external_field_facts(
     program: &Program,
     facts: &mut FactSet,
+    enable_builtin_external_packs: bool,
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) {
     let source_types = program_type_names(program);
@@ -354,13 +473,51 @@ fn collect_external_field_facts(
         {
             continue;
         }
+        if let Some(unsupported) =
+            facts.unsupported_external_field_for(&type_name, &fact.target_name)
+        {
+            diagnostics.push(SemanticDiagnostic {
+                code: "external_pack_unsupported_field",
+                message: format!(
+                    "{}.{} is unsupported by external pack {}: {}",
+                    type_name, fact.target_name, unsupported.pack_name, unsupported.reason
+                ),
+            });
+            continue;
+        }
         if let Some(pack_fact) =
-            crate::external_packs::external_field_for(&type_name, &fact.target_name)
+            builtin_external_field_for(&type_name, &fact.target_name, enable_builtin_external_packs)
         {
             facts.external_field_facts.push(pack_fact);
             continue;
         }
-        if let Some(pack) = crate::external_packs::external_library_pack_for_type(&type_name) {
+        if let Some(unsupported) = builtin_unsupported_external_field_for(
+            &type_name,
+            &fact.target_name,
+            enable_builtin_external_packs,
+        ) {
+            diagnostics.push(SemanticDiagnostic {
+                code: "external_pack_unsupported_field",
+                message: format!(
+                    "{}.{} is unsupported by external pack {}: {}",
+                    type_name, fact.target_name, unsupported.pack_name, unsupported.reason
+                ),
+            });
+            continue;
+        }
+        if let Some(pack) = facts.external_library_pack_for_type(&type_name) {
+            diagnostics.push(SemanticDiagnostic {
+                code: "external_pack_missing_field",
+                message: format!(
+                    "{}.{} is inside external pack {} but has no modeled coverage entry",
+                    type_name, fact.target_name, pack.pack_name
+                ),
+            });
+            continue;
+        }
+        if let Some(pack) =
+            builtin_external_library_pack_for_type(&type_name, enable_builtin_external_packs)
+        {
             diagnostics.push(SemanticDiagnostic {
                 code: "external_pack_missing_field",
                 message: format!(
@@ -375,6 +532,13 @@ fn collect_external_field_facts(
                 type_name: type_name.clone(),
                 field_name: fact.target_name.clone(),
             },
+            field_type: crate::stdlib::known_external_field_type_for_receiver(
+                &JavaType::Named {
+                    name: type_name.clone(),
+                    args: Vec::new(),
+                },
+                &fact.target_name,
+            ),
             provenance: crate::stdlib::external_field_provenance(&type_name, &fact.target_name),
         });
     }
@@ -625,6 +789,7 @@ fn collect_type_external_api_effect_facts(
     facts: &mut FactSet,
     seen: &mut HashSet<String>,
     budget: Option<usize>,
+    enable_builtin_external_packs: bool,
     guessed_count: &mut usize,
     budget_exhausted: &mut bool,
     diagnostics: &mut Vec<SemanticDiagnostic>,
@@ -642,6 +807,7 @@ fn collect_type_external_api_effect_facts(
                         facts,
                         seen,
                         budget,
+                        enable_builtin_external_packs,
                         guessed_count,
                         budget_exhausted,
                         diagnostics,
@@ -659,6 +825,7 @@ fn collect_type_external_api_effect_facts(
                         facts,
                         seen,
                         budget,
+                        enable_builtin_external_packs,
                         guessed_count,
                         budget_exhausted,
                         diagnostics,
@@ -670,6 +837,7 @@ fn collect_type_external_api_effect_facts(
                 facts,
                 seen,
                 budget,
+                enable_builtin_external_packs,
                 guessed_count,
                 budget_exhausted,
                 diagnostics,
@@ -684,6 +852,7 @@ fn collect_external_api_effect_facts_from_unresolved_targets(
     facts: &mut FactSet,
     seen: &mut HashSet<String>,
     budget: Option<usize>,
+    enable_builtin_external_packs: bool,
     guessed_count: &mut usize,
     budget_exhausted: &mut bool,
     diagnostics: &mut Vec<SemanticDiagnostic>,
@@ -710,6 +879,7 @@ fn collect_external_api_effect_facts_from_unresolved_targets(
             facts,
             seen,
             budget,
+            enable_builtin_external_packs,
             guessed_count,
             budget_exhausted,
             diagnostics,
@@ -814,6 +984,7 @@ fn collect_external_api_effects_from_block(
     facts: &mut FactSet,
     seen: &mut HashSet<String>,
     budget: Option<usize>,
+    enable_builtin_external_packs: bool,
     guessed_count: &mut usize,
     budget_exhausted: &mut bool,
     diagnostics: &mut Vec<SemanticDiagnostic>,
@@ -825,6 +996,7 @@ fn collect_external_api_effects_from_block(
         facts,
         seen,
         budget,
+        enable_builtin_external_packs,
         guessed_count,
         budget_exhausted,
         diagnostics,
@@ -838,6 +1010,7 @@ fn collect_external_api_effects_from_block_with_env(
     facts: &mut FactSet,
     seen: &mut HashSet<String>,
     budget: Option<usize>,
+    enable_builtin_external_packs: bool,
     guessed_count: &mut usize,
     budget_exhausted: &mut bool,
     diagnostics: &mut Vec<SemanticDiagnostic>,
@@ -845,60 +1018,543 @@ fn collect_external_api_effects_from_block_with_env(
     current_type: &str,
 ) {
     for stmt in &body.statements {
-        walk_stmt_exprs(stmt, &mut |expr| {
-            if let Expr::MethodReference { target, method } = expr {
-                if !is_non_external_method_reference(target, method) {
-                    let receiver = method_reference_receiver(target, env);
-                    push_external_api_effect_guess(
+        collect_external_api_effects_from_stmt_with_env(
+            stmt,
+            facts,
+            seen,
+            budget,
+            enable_builtin_external_packs,
+            guessed_count,
+            budget_exhausted,
+            diagnostics,
+            env,
+            current_type,
+        );
+        env.learn_stmt(stmt);
+    }
+}
+
+fn collect_external_api_effects_from_stmt_with_env(
+    stmt: &Stmt,
+    facts: &mut FactSet,
+    seen: &mut HashSet<String>,
+    budget: Option<usize>,
+    enable_builtin_external_packs: bool,
+    guessed_count: &mut usize,
+    budget_exhausted: &mut bool,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+    env: &mut TypeEnv,
+    current_type: &str,
+) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => {
+            if let Some(expr) = initializer {
+                collect_external_api_effects_from_expr_with_env(
+                    expr,
+                    facts,
+                    seen,
+                    budget,
+                    enable_builtin_external_packs,
+                    guessed_count,
+                    budget_exhausted,
+                    diagnostics,
+                    env,
+                    current_type,
+                );
+            }
+        }
+        Stmt::Assign { target, value } => {
+            collect_external_api_effects_from_expr_with_env(
+                target,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                env,
+                current_type,
+            );
+            collect_external_api_effects_from_expr_with_env(
+                value,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                env,
+                current_type,
+            );
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => collect_external_api_effects_from_expr_with_env(
+            expr,
+            facts,
+            seen,
+            budget,
+            enable_builtin_external_packs,
+            guessed_count,
+            budget_exhausted,
+            diagnostics,
+            env,
+            current_type,
+        ),
+        Stmt::Return(Some(expr)) => collect_external_api_effects_from_expr_with_env(
+            expr,
+            facts,
+            seen,
+            budget,
+            enable_builtin_external_packs,
+            guessed_count,
+            budget_exhausted,
+            diagnostics,
+            env,
+            current_type,
+        ),
+        Stmt::Return(None)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::LocalType(_)
+        | Stmt::Unsupported(_) => {}
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_external_api_effects_from_expr_with_env(
+                condition,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                env,
+                current_type,
+            );
+            collect_external_api_effects_from_block_with_env(
+                then_block,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                &mut env.clone(),
+                current_type,
+            );
+            if let Some(else_block) = else_block {
+                collect_external_api_effects_from_block_with_env(
+                    else_block,
+                    facts,
+                    seen,
+                    budget,
+                    enable_builtin_external_packs,
+                    guessed_count,
+                    budget_exhausted,
+                    diagnostics,
+                    &mut env.clone(),
+                    current_type,
+                );
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_external_api_effects_from_expr_with_env(
+                condition,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                env,
+                current_type,
+            );
+            collect_external_api_effects_from_block_with_env(
+                body,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                &mut env.clone(),
+                current_type,
+            );
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            let mut loop_env = env.clone();
+            for stmt in init {
+                collect_external_api_effects_from_stmt_with_env(
+                    stmt,
+                    facts,
+                    seen,
+                    budget,
+                    enable_builtin_external_packs,
+                    guessed_count,
+                    budget_exhausted,
+                    diagnostics,
+                    &mut loop_env,
+                    current_type,
+                );
+                loop_env.learn_stmt(stmt);
+            }
+            if let Some(condition) = condition {
+                collect_external_api_effects_from_expr_with_env(
+                    condition,
+                    facts,
+                    seen,
+                    budget,
+                    enable_builtin_external_packs,
+                    guessed_count,
+                    budget_exhausted,
+                    diagnostics,
+                    &mut loop_env,
+                    current_type,
+                );
+            }
+            for expr in update {
+                collect_external_api_effects_from_expr_with_env(
+                    expr,
+                    facts,
+                    seen,
+                    budget,
+                    enable_builtin_external_packs,
+                    guessed_count,
+                    budget_exhausted,
+                    diagnostics,
+                    &mut loop_env,
+                    current_type,
+                );
+            }
+            collect_external_api_effects_from_block_with_env(
+                body,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                &mut loop_env,
+                current_type,
+            );
+        }
+        Stmt::EnhancedFor {
+            var_type,
+            var_name,
+            iterable,
+            body,
+        } => {
+            collect_external_api_effects_from_expr_with_env(
+                iterable,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                env,
+                current_type,
+            );
+            let mut body_env = env.clone();
+            body_env.insert_local(var_name.clone(), var_type.clone());
+            collect_external_api_effects_from_block_with_env(
+                body,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                &mut body_env,
+                current_type,
+            );
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_external_api_effects_from_expr_with_env(
+                selector,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                env,
+                current_type,
+            );
+            for case in cases {
+                let mut case_env = env.clone();
+                for stmt in &case.statements {
+                    collect_external_api_effects_from_stmt_with_env(
+                        stmt,
                         facts,
                         seen,
                         budget,
+                        enable_builtin_external_packs,
                         guessed_count,
                         budget_exhausted,
                         diagnostics,
-                        receiver.type_key,
-                        method,
-                        0,
+                        &mut case_env,
+                        current_type,
                     );
+                    case_env.learn_stmt(stmt);
                 }
             }
-            if let Expr::Call {
-                receiver,
-                name,
-                args,
-                resolved,
-            } = expr
-                && resolved.is_none()
-            {
-                let Some(receiver_type_key) = external_api_call_receiver_type_key(
-                    receiver.as_deref(),
-                    name,
-                    args.len(),
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            let mut try_env = env.clone();
+            for resource in resources {
+                collect_external_api_effects_from_stmt_with_env(
+                    resource,
+                    facts,
+                    seen,
+                    budget,
+                    enable_builtin_external_packs,
+                    guessed_count,
+                    budget_exhausted,
+                    diagnostics,
+                    &mut try_env,
+                    current_type,
+                );
+                try_env.learn_stmt(resource);
+            }
+            collect_external_api_effects_from_block_with_env(
+                body,
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                &mut try_env.clone(),
+                current_type,
+            );
+            for catch in catches {
+                let mut catch_env = env.clone();
+                for catch_type in &catch.types {
+                    catch_env.insert_local(catch.name.clone(), catch_type.clone());
+                }
+                collect_external_api_effects_from_block_with_env(
+                    &catch.body,
+                    facts,
+                    seen,
+                    budget,
+                    enable_builtin_external_packs,
+                    guessed_count,
+                    budget_exhausted,
+                    diagnostics,
+                    &mut catch_env,
+                    current_type,
+                );
+            }
+            if let Some(finally_block) = finally_block {
+                collect_external_api_effects_from_block_with_env(
+                    finally_block,
+                    facts,
+                    seen,
+                    budget,
+                    enable_builtin_external_packs,
+                    guessed_count,
+                    budget_exhausted,
+                    diagnostics,
+                    &mut env.clone(),
+                    current_type,
+                );
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_external_api_effects_from_expr_with_env(
+                    arg,
+                    facts,
+                    seen,
+                    budget,
+                    enable_builtin_external_packs,
+                    guessed_count,
+                    budget_exhausted,
+                    diagnostics,
                     env,
                     current_type,
-                ) else {
-                    return;
-                };
-                if receiver_type_key.is_none()
-                    && !crate::stdlib::is_known_receiverless_static_utility_method(name, args.len())
-                    && !crate::stdlib::has_receiver_agnostic_external_return_type(name, args.len())
-                {
-                    return;
-                }
+                );
+            }
+        }
+        Stmt::Block(block) => collect_external_api_effects_from_block_with_env(
+            block,
+            facts,
+            seen,
+            budget,
+            enable_builtin_external_packs,
+            guessed_count,
+            budget_exhausted,
+            diagnostics,
+            &mut env.clone(),
+            current_type,
+        ),
+    }
+}
+
+fn collect_external_api_effects_from_expr_with_env(
+    expr: &Expr,
+    facts: &mut FactSet,
+    seen: &mut HashSet<String>,
+    budget: Option<usize>,
+    enable_builtin_external_packs: bool,
+    guessed_count: &mut usize,
+    budget_exhausted: &mut bool,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+    env: &TypeEnv,
+    current_type: &str,
+) {
+    walk_expr_outside_lambdas(expr, &mut |expr| {
+        if let Expr::MethodReference { target, method } = expr {
+            if !is_non_external_method_reference(target, method) {
+                let receiver = method_reference_receiver(target, env);
                 push_external_api_effect_guess(
                     facts,
                     seen,
                     budget,
+                    enable_builtin_external_packs,
                     guessed_count,
                     budget_exhausted,
                     diagnostics,
-                    receiver_type_key,
-                    name,
-                    args.len(),
+                    receiver.type_key,
+                    method,
+                    0,
                 );
             }
-        });
-        env.learn_stmt(stmt);
+        }
+        if let Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved,
+        } = expr
+        {
+            let Some(receiver_type_key) = external_api_call_receiver_type_key(
+                receiver.as_deref(),
+                name,
+                args.len(),
+                env,
+                current_type,
+            ) else {
+                return;
+            };
+            let is_java_platform_api = receiver_type_key.as_deref().is_some_and(|receiver_type| {
+                crate::external_packs::java_platform_api_effect_for_receiver_with_arity(
+                    receiver_type,
+                    name,
+                    Some(args.len()),
+                )
+                .is_some()
+            });
+            if resolved.is_some() && !is_java_platform_api {
+                return;
+            }
+            if receiver_type_key.is_none()
+                && !crate::stdlib::is_known_receiverless_static_utility_method(name, args.len())
+                && !crate::stdlib::has_receiver_agnostic_external_return_type(name, args.len())
+            {
+                return;
+            }
+            push_external_api_effect_guess(
+                facts,
+                seen,
+                budget,
+                enable_builtin_external_packs,
+                guessed_count,
+                budget_exhausted,
+                diagnostics,
+                receiver_type_key,
+                name,
+                args.len(),
+            );
+        }
+        if let Expr::FieldAccess(receiver, field) = expr
+            && let Some(receiver_type_key) = external_api_receiver_expr_type_key(receiver, env)
+        {
+            push_external_field_fact_guess(
+                facts,
+                enable_builtin_external_packs,
+                diagnostics,
+                &receiver_type_key,
+                field,
+            );
+        }
+    });
+}
+
+fn walk_expr_outside_lambdas(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
+    visit(expr);
+    match expr {
+        Expr::FieldAccess(receiver, _) => walk_expr_outside_lambdas(receiver, visit),
+        Expr::ArrayAccess(array, index) => {
+            walk_expr_outside_lambdas(array, visit);
+            walk_expr_outside_lambdas(index, visit);
+        }
+        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+            for expr in dimensions {
+                walk_expr_outside_lambdas(expr, visit);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            walk_expr_outside_lambdas(left, visit);
+            walk_expr_outside_lambdas(right, visit);
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            walk_expr_outside_lambdas(expr, visit);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            walk_expr_outside_lambdas(condition, visit);
+            walk_expr_outside_lambdas(then_expr, visit);
+            walk_expr_outside_lambdas(else_expr, visit);
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                walk_expr_outside_lambdas(receiver, visit);
+            }
+            for arg in args {
+                walk_expr_outside_lambdas(arg, visit);
+            }
+        }
+        Expr::New { args, .. } => {
+            for arg in args {
+                walk_expr_outside_lambdas(arg, visit);
+            }
+        }
+        Expr::Lambda { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
     }
 }
 
@@ -946,6 +1602,7 @@ fn push_external_api_effect_guess(
     facts: &mut FactSet,
     seen: &mut HashSet<String>,
     budget: Option<usize>,
+    enable_builtin_external_packs: bool,
     guessed_count: &mut usize,
     budget_exhausted: &mut bool,
     diagnostics: &mut Vec<SemanticDiagnostic>,
@@ -954,20 +1611,27 @@ fn push_external_api_effect_guess(
     arg_count: usize,
 ) {
     if facts
-        .external_api_effect_for_receiver(receiver_type_key.as_deref(), name)
+        .external_api_effect_for_receiver_with_arity(
+            receiver_type_key.as_deref(),
+            name,
+            Some(arg_count),
+        )
         .is_some_and(|fact| fact.provenance == FactProvenance::UserOverride)
     {
         return;
     }
     if facts
-        .external_api_effect_for_receiver(receiver_type_key.as_deref(), name)
+        .external_api_effect_for_receiver_with_arity(
+            receiver_type_key.as_deref(),
+            name,
+            Some(arg_count),
+        )
         .is_some()
     {
         return;
     }
     if let Some(receiver_type) = receiver_type_key.as_deref()
-        && let Some(unsupported) =
-            crate::external_packs::unsupported_external_api_for_receiver(Some(receiver_type), name)
+        && let Some(unsupported) = facts.unsupported_external_api_for_receiver(receiver_type, name)
     {
         diagnostics.push(SemanticDiagnostic {
             code: "external_pack_unsupported_api",
@@ -981,9 +1645,31 @@ fn push_external_api_effect_guess(
         });
         return;
     }
-    if let Some(pack_fact) =
-        crate::external_packs::external_api_effect_for_receiver(receiver_type_key.as_deref(), name)
+    if let Some(receiver_type) = receiver_type_key.as_deref()
+        && let Some(unsupported) = builtin_unsupported_external_api_for_receiver(
+            Some(receiver_type),
+            name,
+            enable_builtin_external_packs,
+        )
     {
+        diagnostics.push(SemanticDiagnostic {
+            code: "external_pack_unsupported_api",
+            message: format!(
+                "{}.{} is unsupported by external pack {}: {}",
+                unsupported.receiver_type,
+                unsupported.method_name,
+                unsupported.pack_name,
+                unsupported.reason
+            ),
+        });
+        return;
+    }
+    if let Some(pack_fact) = builtin_external_api_effect_for_receiver(
+        receiver_type_key.as_deref(),
+        name,
+        arg_count,
+        enable_builtin_external_packs,
+    ) {
         facts.external_api_effect_facts.push(pack_fact);
         return;
     }
@@ -993,17 +1679,19 @@ fn push_external_api_effect_guess(
         facts.external_api_effect_facts.push(ExternalApiEffectFact {
             method_name: name.to_string(),
             receiver_type: receiver_type_key,
+            arg_count: Some(arg_count),
             role: policy.role,
             receiver_mutability: policy.receiver_mutability,
             return_type: None,
             return_nullability: policy.return_nullability,
+            thrown: Vec::new(),
             provenance: policy.provenance,
         });
         *guessed_count += 1;
         return;
     }
     if let Some(receiver_type) = receiver_type_key.as_deref()
-        && let Some(pack) = crate::external_packs::external_library_pack_for_type(receiver_type)
+        && let Some(pack) = facts.external_library_pack_for_type(receiver_type)
     {
         diagnostics.push(SemanticDiagnostic {
             code: "external_pack_missing_api",
@@ -1014,7 +1702,25 @@ fn push_external_api_effect_guess(
         });
         return;
     }
-    let seen_key = format!("{}::{}", receiver_type_key.as_deref().unwrap_or("*"), name);
+    if let Some(receiver_type) = receiver_type_key.as_deref()
+        && let Some(pack) =
+            builtin_external_library_pack_for_type(receiver_type, enable_builtin_external_packs)
+    {
+        diagnostics.push(SemanticDiagnostic {
+            code: "external_pack_missing_api",
+            message: format!(
+                "{}.{} is inside external pack {} but has no modeled coverage entry",
+                receiver_type, name, pack.pack_name
+            ),
+        });
+        return;
+    }
+    let seen_key = format!(
+        "{}::{}::{}",
+        receiver_type_key.as_deref().unwrap_or("*"),
+        name,
+        arg_count
+    );
     if !seen.insert(seen_key) {
         return;
     }
@@ -1025,13 +1731,191 @@ fn push_external_api_effect_guess(
     facts.external_api_effect_facts.push(ExternalApiEffectFact {
         method_name: name.to_string(),
         receiver_type: receiver_type_key,
+        arg_count: Some(arg_count),
         role: policy.role,
         receiver_mutability: policy.receiver_mutability,
         return_type: None,
         return_nullability: policy.return_nullability,
+        thrown: Vec::new(),
         provenance: policy.provenance,
     });
     *guessed_count += 1;
+}
+
+fn push_external_field_fact_guess(
+    facts: &mut FactSet,
+    enable_builtin_external_packs: bool,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+    type_name: &str,
+    field_name: &str,
+) {
+    let type_name = crate::stdlib::canonical_external_receiver_type_key(type_name);
+    if facts
+        .external_field_for(&type_name, field_name)
+        .is_some_and(|fact| fact.provenance == FactProvenance::UserOverride)
+    {
+        return;
+    }
+    if facts.external_field_for(&type_name, field_name).is_some() {
+        return;
+    }
+    if let Some(unsupported) = facts.unsupported_external_field_for(&type_name, field_name) {
+        push_semantic_diagnostic_once(
+            diagnostics,
+            "external_pack_unsupported_field",
+            format!(
+                "{}.{} is unsupported by external pack {}: {}",
+                type_name, field_name, unsupported.pack_name, unsupported.reason
+            ),
+        );
+        return;
+    }
+    if let Some(pack_fact) =
+        builtin_external_field_for(&type_name, field_name, enable_builtin_external_packs)
+    {
+        facts.external_field_facts.push(pack_fact);
+        return;
+    }
+    if let Some(unsupported) = builtin_unsupported_external_field_for(
+        &type_name,
+        field_name,
+        enable_builtin_external_packs,
+    ) {
+        push_semantic_diagnostic_once(
+            diagnostics,
+            "external_pack_unsupported_field",
+            format!(
+                "{}.{} is unsupported by external pack {}: {}",
+                type_name, field_name, unsupported.pack_name, unsupported.reason
+            ),
+        );
+        return;
+    }
+    if let Some(pack) = facts.external_library_pack_for_type(&type_name) {
+        push_semantic_diagnostic_once(
+            diagnostics,
+            "external_pack_missing_field",
+            format!(
+                "{}.{} is inside external pack {} but has no modeled coverage entry",
+                type_name, field_name, pack.pack_name
+            ),
+        );
+        return;
+    }
+    if let Some(pack) =
+        builtin_external_library_pack_for_type(&type_name, enable_builtin_external_packs)
+    {
+        push_semantic_diagnostic_once(
+            diagnostics,
+            "external_pack_missing_field",
+            format!(
+                "{}.{} is inside external pack {} but has no modeled coverage entry",
+                type_name, field_name, pack.pack_name
+            ),
+        );
+    }
+}
+
+fn push_semantic_diagnostic_once(
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+    code: &'static str,
+    message: String,
+) {
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == code && diagnostic.message == message)
+    {
+        return;
+    }
+    diagnostics.push(SemanticDiagnostic { code, message });
+}
+
+fn builtin_external_api_effect_for_receiver(
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_count: usize,
+    enabled: bool,
+) -> Option<ExternalApiEffectFact> {
+    if let Some(receiver_type) = receiver_type
+        && let Some(effect) =
+            crate::external_packs::java_platform_api_effect_for_receiver_with_arity(
+                receiver_type,
+                method_name,
+                Some(arg_count),
+            )
+    {
+        return Some(effect);
+    }
+    enabled
+        .then(|| {
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                receiver_type,
+                method_name,
+                Some(arg_count),
+            )
+        })
+        .flatten()
+}
+
+fn builtin_unsupported_external_api_for_receiver(
+    receiver_type: Option<&str>,
+    method_name: &str,
+    enabled: bool,
+) -> Option<crate::facts::UnsupportedExternalApiFact> {
+    enabled
+        .then(|| {
+            crate::external_packs::unsupported_external_api_for_receiver(receiver_type, method_name)
+        })
+        .flatten()
+}
+
+fn builtin_external_constructor_for(
+    type_name: &str,
+    arg_types: &[JavaType],
+    enabled: bool,
+) -> Option<ExternalConstructorFact> {
+    enabled
+        .then(|| crate::external_packs::external_constructor_for(type_name, arg_types))
+        .flatten()
+}
+
+fn builtin_unsupported_external_constructor_for(
+    type_name: &str,
+    arg_count: usize,
+    enabled: bool,
+) -> Option<crate::facts::UnsupportedExternalConstructorFact> {
+    enabled
+        .then(|| crate::external_packs::unsupported_external_constructor_for(type_name, arg_count))
+        .flatten()
+}
+
+fn builtin_external_field_for(
+    type_name: &str,
+    field_name: &str,
+    enabled: bool,
+) -> Option<ExternalFieldFact> {
+    enabled
+        .then(|| crate::external_packs::external_field_for(type_name, field_name))
+        .flatten()
+}
+
+fn builtin_unsupported_external_field_for(
+    type_name: &str,
+    field_name: &str,
+    enabled: bool,
+) -> Option<crate::facts::UnsupportedExternalFieldFact> {
+    enabled
+        .then(|| crate::external_packs::unsupported_external_field_for(type_name, field_name))
+        .flatten()
+}
+
+fn builtin_external_library_pack_for_type(
+    type_name: &str,
+    enabled: bool,
+) -> Option<crate::facts::ExternalLibraryPackFact> {
+    enabled
+        .then(|| crate::external_packs::external_library_pack_for_type(type_name))
+        .flatten()
 }
 
 fn external_api_call_receiver_type_key(
@@ -1054,9 +1938,38 @@ fn external_api_call_receiver_type_key(
 fn external_api_receiver_expr_type_key(receiver: &Expr, env: &TypeEnv) -> Option<String> {
     let inferred = infer_expr_type(receiver, env);
     if weak_unknown_field_access_receiver(receiver, &inferred) {
-        return None;
+        let external_field_ty = infer_external_field_access_type(receiver, env)?;
+        return external_api_receiver_type_key_with_env(&external_field_ty, env);
     }
     external_api_receiver_type_key_with_env(&inferred, env)
+}
+
+fn infer_external_field_access_type(expr: &Expr, env: &TypeEnv) -> Option<JavaType> {
+    let Expr::FieldAccess(receiver, field) = expr else {
+        return None;
+    };
+    let receiver_ty = infer_external_field_access_type(receiver, env)
+        .unwrap_or_else(|| infer_expr_type(receiver, env));
+    external_pack_or_stdlib_field_type(&receiver_ty, field)
+}
+
+fn external_pack_or_stdlib_field_type(receiver_ty: &JavaType, field: &str) -> Option<JavaType> {
+    if let Some(receiver_name) = external_field_receiver_name(receiver_ty)
+        && let Some(field_fact) = crate::external_packs::external_field_for(&receiver_name, field)
+        && let Some(field_type) = field_fact.field_type
+    {
+        return Some(field_type);
+    }
+    crate::stdlib::known_external_field_type_for_receiver(receiver_ty, field)
+}
+
+fn external_field_receiver_name(receiver_ty: &JavaType) -> Option<String> {
+    match receiver_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+        }
+        _ => None,
+    }
 }
 
 fn weak_unknown_field_access_receiver(receiver: &Expr, inferred: &JavaType) -> bool {
@@ -1139,7 +2052,10 @@ fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &m
     for member in &ty.members {
         match member {
             Member::Method(method) => {
-                let thrown = method_thrown_exception_types(method);
+                let mut thrown = method_thrown_exception_types(method);
+                for external_throw in external_api_thrown_exception_types(ty, method, facts) {
+                    push_unique_java_type(&mut thrown, external_throw);
+                }
                 let receiver_mutability = method_receiver_mutability_effect(ty, method, usage);
                 let return_nullability = method_return_nullability_effect(method);
                 facts.method_effect_facts.push(MethodEffectFact {
@@ -1157,6 +2073,58 @@ fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &m
             _ => {}
         }
     }
+}
+
+fn external_api_thrown_exception_types(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    facts: &FactSet,
+) -> Vec<JavaType> {
+    let Some(body) = &method.body else {
+        return Vec::new();
+    };
+    let mut env = collect_external_api_type_env(
+        ty,
+        &method.type_params,
+        &method.type_param_bounds,
+        &method.params,
+    );
+    let mut thrown = Vec::new();
+    for stmt in &body.statements {
+        walk_stmt_exprs(stmt, &mut |expr| {
+            let Expr::Call {
+                receiver,
+                name,
+                args,
+                resolved,
+            } = expr
+            else {
+                return;
+            };
+            if resolved.is_some() {
+                return;
+            }
+            let Some(receiver_type_key) = external_api_call_receiver_type_key(
+                receiver.as_deref(),
+                name,
+                args.len(),
+                &env,
+                &ty.name,
+            ) else {
+                return;
+            };
+            let Some(effect) =
+                facts.external_api_effect_for_receiver(receiver_type_key.as_deref(), name)
+            else {
+                return;
+            };
+            for ty in &effect.thrown {
+                push_unique_java_type(&mut thrown, ty.clone());
+            }
+        });
+        env.learn_stmt(stmt);
+    }
+    thrown
 }
 
 fn method_receiver_mutability_effect(

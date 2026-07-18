@@ -71,7 +71,12 @@ pub fn translate_source(source: &str) -> Translation {
 
 pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Translation {
     let parsed = parser::parse_java_source(source);
-    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let resolved = resolve::resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        external_facts,
+    );
     let semantic =
         semantic_analysis::analyze_program(&resolved.program, &resolved.facts, external_facts);
     let representations = representation::plan_representations(&resolved.program, &semantic.facts);

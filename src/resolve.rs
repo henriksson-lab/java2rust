@@ -38,6 +38,21 @@ pub fn resolve_program_with_source_program(
     resolve_program_with_source_symbols(program, diagnostics, &source_symbols)
 }
 
+pub fn resolve_program_with_source_program_and_facts(
+    program: &Program,
+    diagnostics: DiagnosticBag,
+    source_program: &Program,
+    external_facts: &FactSet,
+) -> ResolvedProgram {
+    let source_symbols = source_symbols_from_program(source_program);
+    resolve_program_with_source_symbols_and_facts(
+        program,
+        diagnostics,
+        &source_symbols,
+        external_facts,
+    )
+}
+
 pub fn source_symbols_from_program(source_program: &Program) -> SourceSymbols {
     let mut symbol_program = source_program.clone();
     let mut diagnostics = DiagnosticBag::new();
@@ -54,6 +69,20 @@ pub fn resolve_program_with_source_symbols(
     diagnostics: DiagnosticBag,
     source_symbols: &SourceSymbols,
 ) -> ResolvedProgram {
+    resolve_program_with_source_symbols_and_facts(
+        program,
+        diagnostics,
+        source_symbols,
+        &FactSet::default(),
+    )
+}
+
+pub fn resolve_program_with_source_symbols_and_facts(
+    program: &Program,
+    diagnostics: DiagnosticBag,
+    source_symbols: &SourceSymbols,
+    external_facts: &FactSet,
+) -> ResolvedProgram {
     let mut diagnostics = diagnostics;
     let mut program = program.clone();
     for ty in &mut program.types {
@@ -62,7 +91,13 @@ pub fn resolve_program_with_source_symbols(
     let symbols = &source_symbols.symbols;
     let mut resolver_facts = FactSet::default();
     for ty in &mut program.types {
-        resolve_type_calls(ty, symbols, &mut diagnostics, &mut resolver_facts);
+        resolve_type_calls(
+            ty,
+            symbols,
+            &mut diagnostics,
+            &mut resolver_facts,
+            external_facts,
+        );
     }
     let mut facts = collect_resolved_facts(&program);
     facts.extend_from(resolver_facts);
@@ -71,6 +106,12 @@ pub fn resolve_program_with_source_symbols(
         diagnostics,
         facts,
     }
+}
+
+pub fn declaration_facts_from_program(program: &Program) -> FactSet {
+    let mut facts = FactSet::default();
+    collect_type_capability_facts(program, &mut facts);
+    facts
 }
 
 fn assign_type_rust_names(ty: &mut TypeDecl, diagnostics: &mut DiagnosticBag) {
@@ -104,6 +145,7 @@ fn resolve_type_calls(
     symbols: &ProgramSymbols,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
+    external_facts: &FactSet,
 ) {
     let methods = symbols.methods_for_hierarchy(&ty.name);
     let constructors = symbols.constructors_for(&ty.name);
@@ -130,6 +172,7 @@ fn resolve_type_calls(
                         &mut env,
                         diagnostics,
                         facts,
+                        external_facts,
                         Some(&method.name),
                     );
                 }
@@ -154,11 +197,14 @@ fn resolve_type_calls(
                         &mut env,
                         diagnostics,
                         facts,
+                        external_facts,
                         Some("<init>"),
                     );
                 }
             }
-            Member::Type(nested) => resolve_type_calls(nested, symbols, diagnostics, facts),
+            Member::Type(nested) => {
+                resolve_type_calls(nested, symbols, diagnostics, facts, external_facts)
+            }
             _ => {}
         }
     }
@@ -365,9 +411,22 @@ impl ProgramSymbols {
             .insert(ty.name.clone(), ty.type_param_bounds.clone());
         self.static_by_type
             .insert(ty.name.clone(), ty.modifiers.contains(&Modifier::Static));
+        self.canonical_type_names
+            .insert(ty.name.clone(), ty.name.clone());
         if let Some(outer) = outer {
             self.outer_by_type
                 .insert(ty.name.clone(), outer.name.clone());
+            let outer_aliases = self
+                .canonical_type_names
+                .iter()
+                .filter_map(|(alias, source_name)| {
+                    (source_name == &outer.name).then(|| alias.clone())
+                })
+                .collect::<Vec<_>>();
+            for outer_alias in outer_aliases {
+                self.canonical_type_names
+                    .insert(format!("{outer_alias}.{}", ty.name), ty.name.clone());
+            }
         }
         if is_source_functional_interface(ty) {
             self.functional_interfaces.insert(ty.name.clone());
@@ -653,6 +712,7 @@ impl ProgramSymbols {
     }
 
     fn constructors_for(&self, type_name: &str) -> &[ConstructorSymbol] {
+        let type_name = self.source_type_name(type_name);
         self.constructors_by_type
             .get(type_name)
             .map(Vec::as_slice)
@@ -745,9 +805,11 @@ impl ProgramSymbols {
                 current = Some(super_name);
                 continue;
             }
-            if let Some(java_ty) =
-                crate::stdlib::known_external_field_type_for_receiver(super_ty, field_name)
-            {
+            if let Some(java_ty) = known_external_or_pack_field_type_for_receiver(
+                super_ty,
+                field_name,
+                &FactSet::default(),
+            ) {
                 return Some(java_ty);
             }
             return None;
@@ -1172,6 +1234,7 @@ fn resolve_block_calls(
     env: &mut TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
+    external_facts: &FactSet,
     enclosing_member: Option<&str>,
 ) {
     for stmt in &mut block.statements {
@@ -1184,6 +1247,7 @@ fn resolve_block_calls(
             env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         );
         env.learn_stmt(stmt);
@@ -1199,6 +1263,7 @@ fn resolve_stmt_calls(
     env: &mut TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
+    external_facts: &FactSet,
     enclosing_member: Option<&str>,
 ) {
     match stmt {
@@ -1214,6 +1279,7 @@ fn resolve_stmt_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
         }
@@ -1227,6 +1293,7 @@ fn resolve_stmt_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             resolve_expr_calls(
@@ -1237,6 +1304,7 @@ fn resolve_stmt_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
         }
@@ -1248,6 +1316,7 @@ fn resolve_stmt_calls(
             env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
         Stmt::Return(Some(expr)) => resolve_expr_calls(
@@ -1258,6 +1327,7 @@ fn resolve_stmt_calls(
             env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
         Stmt::If {
@@ -1273,6 +1343,7 @@ fn resolve_stmt_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             resolve_block_calls(
@@ -1284,6 +1355,7 @@ fn resolve_stmt_calls(
                 &mut env.clone(),
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             if let Some(block) = else_block {
@@ -1296,6 +1368,7 @@ fn resolve_stmt_calls(
                     &mut env.clone(),
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
             }
@@ -1309,6 +1382,7 @@ fn resolve_stmt_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             resolve_block_calls(
@@ -1320,6 +1394,7 @@ fn resolve_stmt_calls(
                 &mut env.clone(),
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
         }
@@ -1340,6 +1415,7 @@ fn resolve_stmt_calls(
                     env,
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
                 env.learn_stmt(stmt);
@@ -1353,6 +1429,7 @@ fn resolve_stmt_calls(
                     env,
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
             }
@@ -1365,6 +1442,7 @@ fn resolve_stmt_calls(
                     env,
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
             }
@@ -1377,6 +1455,7 @@ fn resolve_stmt_calls(
                 &mut env.clone(),
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
         }
@@ -1394,6 +1473,7 @@ fn resolve_stmt_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             let mut body_env = env.clone();
@@ -1407,6 +1487,7 @@ fn resolve_stmt_calls(
                 &mut body_env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
         }
@@ -1419,6 +1500,7 @@ fn resolve_stmt_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             for case in cases {
@@ -1432,6 +1514,7 @@ fn resolve_stmt_calls(
                             env,
                             diagnostics,
                             facts,
+                            external_facts,
                             enclosing_member,
                         );
                     }
@@ -1447,6 +1530,7 @@ fn resolve_stmt_calls(
                         &mut case_env,
                         diagnostics,
                         facts,
+                        external_facts,
                         enclosing_member,
                     );
                     case_env.learn_stmt(stmt);
@@ -1469,6 +1553,7 @@ fn resolve_stmt_calls(
                     env,
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
                 env.learn_stmt(resource);
@@ -1482,6 +1567,7 @@ fn resolve_stmt_calls(
                 &mut env.clone(),
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             for catch in catches {
@@ -1498,6 +1584,7 @@ fn resolve_stmt_calls(
                     &mut catch_env,
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
             }
@@ -1511,6 +1598,7 @@ fn resolve_stmt_calls(
                     &mut env.clone(),
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
             }
@@ -1523,6 +1611,7 @@ fn resolve_stmt_calls(
             env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
         Stmt::ConstructorInvocation {
@@ -1539,13 +1628,22 @@ fn resolve_stmt_calls(
                     env,
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
             }
             if matches!(kind, ConstructorInvocationKind::This) {
                 let arg_types = args
                     .iter()
-                    .map(|arg| infer_resolver_expr_type(arg, current_type, symbols, env))
+                    .map(|arg| {
+                        infer_resolver_expr_type_with_facts(
+                            arg,
+                            current_type,
+                            symbols,
+                            env,
+                            external_facts,
+                        )
+                    })
                     .collect::<Vec<_>>();
                 match resolve_same_class_constructor(&arg_types, constructors, symbols) {
                     Ok(Some(constructor)) => *resolved = Some(constructor),
@@ -1578,6 +1676,7 @@ fn resolve_stmt_calls(
             &mut env.clone(),
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
         _ => {}
@@ -1592,6 +1691,7 @@ fn resolve_expr_calls(
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
+    external_facts: &FactSet,
     enclosing_member: Option<&str>,
 ) {
     match expr {
@@ -1604,6 +1704,7 @@ fn resolve_expr_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             record_unresolved_field_access(
@@ -1612,6 +1713,7 @@ fn resolve_expr_calls(
                 symbols,
                 env,
                 facts,
+                external_facts,
                 enclosing_member,
             );
         }
@@ -1624,6 +1726,7 @@ fn resolve_expr_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             resolve_expr_calls(
@@ -1634,6 +1737,7 @@ fn resolve_expr_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
         }
@@ -1646,6 +1750,7 @@ fn resolve_expr_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             resolve_expr_calls(
@@ -1656,6 +1761,7 @@ fn resolve_expr_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
         }
@@ -1667,6 +1773,7 @@ fn resolve_expr_calls(
             env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
         Expr::Ternary {
@@ -1682,6 +1789,7 @@ fn resolve_expr_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             resolve_expr_calls(
@@ -1692,6 +1800,7 @@ fn resolve_expr_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
             resolve_expr_calls(
@@ -1702,6 +1811,7 @@ fn resolve_expr_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
         }
@@ -1720,10 +1830,19 @@ fn resolve_expr_calls(
                     env,
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
             }
-            for arg in args.iter_mut() {
+            let receiver_type = receiver
+                .as_deref()
+                .map(|receiver| infer_resolver_expr_type(receiver, current_type, symbols, env));
+            let defer_stream_lambda_arg =
+                should_defer_stream_lambda_arg_resolution(receiver_type.as_ref(), name, args);
+            for (arg_index, arg) in args.iter_mut().enumerate() {
+                if defer_stream_lambda_arg && arg_index == 0 {
+                    continue;
+                }
                 resolve_expr_calls(
                     arg,
                     current_type,
@@ -1732,13 +1851,11 @@ fn resolve_expr_calls(
                     env,
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
             }
 
-            let receiver_type = receiver
-                .as_deref()
-                .map(|receiver| infer_resolver_expr_type(receiver, current_type, symbols, env));
             resolve_stream_map_lambda_arg(
                 receiver_type.as_ref(),
                 name,
@@ -1749,12 +1866,21 @@ fn resolve_expr_calls(
                 env,
                 diagnostics,
                 facts,
+                external_facts,
                 enclosing_member,
             );
 
             let arg_types = args
                 .iter()
-                .map(|arg| infer_resolver_expr_type(arg, current_type, symbols, env))
+                .map(|arg| {
+                    infer_resolver_expr_type_with_facts(
+                        arg,
+                        current_type,
+                        symbols,
+                        env,
+                        external_facts,
+                    )
+                })
                 .collect::<Vec<_>>();
             if receiver.is_none()
                 || receiver
@@ -1785,6 +1911,7 @@ fn resolve_expr_calls(
                             env,
                             diagnostics,
                             facts,
+                            external_facts,
                             enclosing_member,
                         );
                         *resolved = Some(selection.call);
@@ -1835,6 +1962,7 @@ fn resolve_expr_calls(
                             env,
                             diagnostics,
                             facts,
+                            external_facts,
                             enclosing_member,
                         );
                         *resolved = Some(selection.call);
@@ -1885,13 +2013,22 @@ fn resolve_expr_calls(
                     env,
                     diagnostics,
                     facts,
+                    external_facts,
                     enclosing_member,
                 );
             }
             if let JavaType::Named { name, .. } | JavaType::Unknown(name) = ty {
                 let arg_types = args
                     .iter()
-                    .map(|arg| infer_resolver_expr_type(arg, current_type, symbols, env))
+                    .map(|arg| {
+                        infer_resolver_expr_type_with_facts(
+                            arg,
+                            current_type,
+                            symbols,
+                            env,
+                            external_facts,
+                        )
+                    })
                     .collect::<Vec<_>>();
                 let constructor_candidates = symbols.constructors_for_new(name, current_type);
                 let selection = if body.is_some() {
@@ -1925,33 +2062,58 @@ fn resolve_expr_calls(
             if let Some(members) = body {
                 for member in members {
                     match member {
+                        Member::Field(field) => {
+                            if let Some(initializer) = &mut field.initializer {
+                                resolve_expr_calls(
+                                    initializer,
+                                    current_type,
+                                    symbols,
+                                    methods,
+                                    env,
+                                    diagnostics,
+                                    facts,
+                                    external_facts,
+                                    Some(&field.name),
+                                );
+                            }
+                        }
                         Member::Method(method) => {
                             if let Some(body) = &mut method.body {
+                                let mut body_env = env.clone();
+                                for param in &method.params {
+                                    body_env.insert_local(param.name.clone(), param.ty.clone());
+                                }
                                 resolve_block_calls(
                                     body,
                                     current_type,
                                     symbols,
                                     methods,
                                     &[],
-                                    &mut env.clone(),
+                                    &mut body_env,
                                     diagnostics,
                                     facts,
-                                    enclosing_member,
+                                    external_facts,
+                                    Some(&method.name),
                                 );
                             }
                         }
                         Member::Constructor(ctor) => {
                             if let Some(body) = &mut ctor.body {
+                                let mut body_env = env.clone();
+                                for param in &ctor.params {
+                                    body_env.insert_local(param.name.clone(), param.ty.clone());
+                                }
                                 resolve_block_calls(
                                     body,
                                     current_type,
                                     symbols,
                                     methods,
                                     &[],
-                                    &mut env.clone(),
+                                    &mut body_env,
                                     diagnostics,
                                     facts,
-                                    enclosing_member,
+                                    external_facts,
+                                    Some(&ctor.name),
                                 );
                             }
                         }
@@ -1969,6 +2131,7 @@ fn resolve_expr_calls(
             env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
         Expr::InstanceOf { expr, .. } => resolve_expr_calls(
@@ -1979,11 +2142,29 @@ fn resolve_expr_calls(
             env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
         Expr::Lambda { .. } => {}
         _ => {}
     }
+}
+
+fn should_defer_stream_lambda_arg_resolution(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    args: &[Expr],
+) -> bool {
+    if !is_stream_lambda_mapper_name(name) || args.len() != 1 {
+        return false;
+    }
+    matches!(
+        receiver_type,
+        Some(JavaType::Named {
+            name: receiver_name,
+            ..
+        }) if receiver_name == "Stream"
+    ) && matches!(args.first(), Some(Expr::Lambda { .. }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1997,6 +2178,7 @@ fn resolve_stream_map_lambda_arg(
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
+    external_facts: &FactSet,
     enclosing_member: Option<&str>,
 ) {
     if !is_stream_lambda_mapper_name(name) || args.len() != 1 {
@@ -2024,6 +2206,7 @@ fn resolve_stream_map_lambda_arg(
         env,
         diagnostics,
         facts,
+        external_facts,
         enclosing_member,
     );
 }
@@ -2042,6 +2225,7 @@ fn resolve_target_typed_lambda_args(
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
+    external_facts: &FactSet,
     enclosing_member: Option<&str>,
 ) {
     for (arg, param) in args.iter_mut().zip(params) {
@@ -2054,6 +2238,7 @@ fn resolve_target_typed_lambda_args(
             env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         );
     }
@@ -2069,6 +2254,7 @@ fn resolve_lambda_with_single_param_type(
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
+    external_facts: &FactSet,
     enclosing_member: Option<&str>,
 ) {
     let Expr::Lambda { params, body } = expr else {
@@ -2093,6 +2279,7 @@ fn resolve_lambda_with_single_param_type(
             &lambda_env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
         LambdaBody::Block(block) => resolve_block_calls(
@@ -2104,6 +2291,7 @@ fn resolve_lambda_with_single_param_type(
             &mut lambda_env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
     }
@@ -2119,6 +2307,7 @@ fn resolve_lambda_with_expected_type(
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
+    external_facts: &FactSet,
     enclosing_member: Option<&str>,
 ) {
     let Expr::Lambda { params, body } = expr else {
@@ -2145,6 +2334,7 @@ fn resolve_lambda_with_expected_type(
             &lambda_env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
         LambdaBody::Block(block) => resolve_block_calls(
@@ -2156,6 +2346,7 @@ fn resolve_lambda_with_expected_type(
             &mut lambda_env,
             diagnostics,
             facts,
+            external_facts,
             enclosing_member,
         ),
     }
@@ -2167,12 +2358,22 @@ fn record_unresolved_field_access(
     symbols: &ProgramSymbols,
     env: &TypeEnv,
     facts: &mut FactSet,
+    external_facts: &FactSet,
     enclosing_member: Option<&str>,
 ) {
     let Expr::FieldAccess(receiver, field) = expr else {
         return;
     };
-    if infer_resolver_member_access_type(receiver, field, current_type, symbols, env).is_some() {
+    if infer_resolver_member_access_type_with_facts(
+        receiver,
+        field,
+        current_type,
+        symbols,
+        env,
+        external_facts,
+    )
+    .is_some()
+    {
         return;
     }
     if matches!(receiver.as_ref(), Expr::This) && env.field_type(field).is_some() {
@@ -2418,6 +2619,16 @@ fn infer_resolver_expr_type(
     symbols: &ProgramSymbols,
     env: &TypeEnv,
 ) -> JavaType {
+    infer_resolver_expr_type_with_facts(expr, current_type, symbols, env, &FactSet::default())
+}
+
+fn infer_resolver_expr_type_with_facts(
+    expr: &Expr,
+    current_type: &str,
+    symbols: &ProgramSymbols,
+    env: &TypeEnv,
+    external_facts: &FactSet,
+) -> JavaType {
     match expr {
         Expr::Call {
             resolved: Some(call),
@@ -2430,11 +2641,23 @@ fn infer_resolver_expr_type(
             resolved: None,
         } => {
             if name == "nonNull" && !args.is_empty() {
-                return infer_resolver_expr_type(&args[0], current_type, symbols, env);
+                return infer_resolver_expr_type_with_facts(
+                    &args[0],
+                    current_type,
+                    symbols,
+                    env,
+                    external_facts,
+                );
             }
-            let receiver_type = receiver
-                .as_deref()
-                .map(|receiver| infer_resolver_expr_type(receiver, current_type, symbols, env));
+            let receiver_type = receiver.as_deref().map(|receiver| {
+                infer_resolver_expr_type_with_facts(
+                    receiver,
+                    current_type,
+                    symbols,
+                    env,
+                    external_facts,
+                )
+            });
             if let Some(java_ty) = infer_stream_map_return_type(
                 receiver_type.as_ref(),
                 name,
@@ -2469,7 +2692,15 @@ fn infer_resolver_expr_type(
             }
             let arg_types = args
                 .iter()
-                .map(|arg| infer_resolver_expr_type(arg, current_type, symbols, env))
+                .map(|arg| {
+                    infer_resolver_expr_type_with_facts(
+                        arg,
+                        current_type,
+                        symbols,
+                        env,
+                        external_facts,
+                    )
+                })
                 .collect::<Vec<_>>();
             if receiver.is_none()
                 && let Some(enum_call) =
@@ -2528,9 +2759,14 @@ fn infer_resolver_expr_type(
             args: Vec::new(),
         },
         Expr::FieldAccess(receiver, field) => {
-            if let Some(java_ty) =
-                infer_resolver_member_access_type(receiver, field, current_type, symbols, env)
-            {
+            if let Some(java_ty) = infer_resolver_member_access_type_with_facts(
+                receiver,
+                field,
+                current_type,
+                symbols,
+                env,
+                external_facts,
+            ) {
                 return java_ty;
             }
             if let Some(type_name) = qualified_this_type_name(receiver, field, symbols) {
@@ -2562,7 +2798,7 @@ fn infer_resolver_expr_type(
             infer_expr_type(expr, env)
         }
         Expr::ArrayAccess(array, _) => crate::types::sequence_element_type(
-            &infer_resolver_expr_type(array, current_type, symbols, env),
+            &infer_resolver_expr_type_with_facts(array, current_type, symbols, env, external_facts),
         )
         .unwrap_or_else(|| infer_expr_type(expr, env)),
         Expr::Ternary {
@@ -2570,8 +2806,20 @@ fn infer_resolver_expr_type(
             else_expr,
             ..
         } => resolver_common_type(
-            &infer_resolver_expr_type(then_expr, current_type, symbols, env),
-            &infer_resolver_expr_type(else_expr, current_type, symbols, env),
+            &infer_resolver_expr_type_with_facts(
+                then_expr,
+                current_type,
+                symbols,
+                env,
+                external_facts,
+            ),
+            &infer_resolver_expr_type_with_facts(
+                else_expr,
+                current_type,
+                symbols,
+                env,
+                external_facts,
+            ),
             symbols,
         ),
         Expr::New { ty, .. } | Expr::Cast { ty, .. } => ty.clone(),
@@ -3022,17 +3270,19 @@ fn two_generic_args(ty: &JavaType) -> Option<(&JavaType, &JavaType)> {
     }
 }
 
-fn infer_resolver_member_access_type(
+fn infer_resolver_member_access_type_with_facts(
     receiver: &Expr,
     member: &str,
     current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
+    external_facts: &FactSet,
 ) -> Option<JavaType> {
     if let Some(java_ty) = crate::types::infer_member_access_type(receiver, member, env) {
         return Some(java_ty);
     }
-    let receiver_ty = infer_resolver_expr_type(receiver, current_type, symbols, env);
+    let receiver_ty =
+        infer_resolver_expr_type_with_facts(receiver, current_type, symbols, env, external_facts);
     if member == "length" && matches!(receiver_ty, JavaType::Array(_) | JavaType::String) {
         return Some(JavaType::Primitive(crate::java_ir::PrimitiveType::Int));
     }
@@ -3052,15 +3302,32 @@ fn infer_resolver_member_access_type(
     {
         return Some(java_ty);
     }
-    if let Some(java_ty) = collection_element_static_constant_type(&receiver_ty, member) {
+    if let Some(java_ty) =
+        collection_element_static_constant_type(&receiver_ty, member, external_facts)
+    {
         return Some(java_ty);
     }
-    crate::stdlib::known_external_field_type_for_receiver(&receiver_ty, member)
+    if let Some(java_ty) =
+        known_external_or_pack_field_type_for_receiver(&receiver_ty, member, external_facts)
+    {
+        return Some(java_ty);
+    }
+    if let Expr::Var(receiver_name) = receiver
+        && env.local_type(receiver_name).is_none()
+        && env.field_type(receiver_name).is_none()
+    {
+        return crate::stdlib::conservative_external_enum_field_type_for_type_qualifier(
+            receiver_name,
+            member,
+        );
+    }
+    None
 }
 
 fn collection_element_static_constant_type(
     receiver_ty: &JavaType,
     member: &str,
+    external_facts: &FactSet,
 ) -> Option<JavaType> {
     let JavaType::Named { name, args } = receiver_ty else {
         return None;
@@ -3069,7 +3336,36 @@ fn collection_element_static_constant_type(
         return None;
     }
     let element_ty = args.first()?;
-    crate::stdlib::known_external_field_type_for_receiver(element_ty, member)
+    known_external_or_pack_field_type_for_receiver(element_ty, member, external_facts)
+}
+
+fn known_external_or_pack_field_type_for_receiver(
+    receiver_ty: &JavaType,
+    member: &str,
+    external_facts: &FactSet,
+) -> Option<JavaType> {
+    if let Some(receiver_name) = external_receiver_type_name(receiver_ty)
+        && let Some(field) = external_facts.external_field_for(&receiver_name, member)
+        && let Some(field_type) = field.field_type.clone()
+    {
+        return Some(field_type);
+    }
+    if let Some(receiver_name) = external_receiver_type_name(receiver_ty)
+        && let Some(field) = crate::external_packs::external_field_for(&receiver_name, member)
+        && let Some(field_type) = field.field_type
+    {
+        return Some(field_type);
+    }
+    crate::stdlib::known_external_field_type_for_receiver(receiver_ty, member)
+}
+
+fn external_receiver_type_name(receiver_ty: &JavaType) -> Option<String> {
+    match receiver_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+        }
+        _ => None,
+    }
 }
 
 fn is_collection_like_type_name(name: &str) -> bool {
@@ -3895,12 +4191,20 @@ fn collect_capture_facts(program: &Program) -> FactSet {
 
 fn collect_type_capability_facts(program: &Program, facts: &mut FactSet) {
     for ty in &program.types {
-        collect_type_capability_facts_for_type(ty, facts);
+        collect_type_capability_facts_for_type(ty, facts, &[]);
     }
 }
 
-fn collect_type_capability_facts_for_type(ty: &TypeDecl, facts: &mut FactSet) {
+fn collect_type_capability_facts_for_type(
+    ty: &TypeDecl,
+    facts: &mut FactSet,
+    inferred_final_type_names: &[String],
+) {
     let object_safety = (ty.kind == TypeKind::Interface).then(|| interface_object_safety_fact(ty));
+    let inferred_closed_nested_variants = inferred_closed_nested_variants_for_type(ty);
+    let inferred_final = inferred_final_type_names
+        .iter()
+        .any(|type_name| type_name == &ty.name);
     facts
         .type_capability_overrides
         .push(TypeCapabilityOverride {
@@ -3912,37 +4216,110 @@ fn collect_type_capability_facts_for_type(ty: &TypeDecl, facts: &mut FactSet) {
             implements: ty
                 .implements
                 .iter()
-                .map(|name| JavaType::Named {
-                    name: name.clone(),
-                    args: Vec::new(),
-                })
+                .map(|name| crate::parser::parse_hierarchy_type(name))
                 .collect(),
-            extends: ty.extends.as_ref().map(|name| {
-                let parsed = crate::parser::parse_type(name);
-                JavaType::Named {
-                    name: java_type_simple_name(&parsed),
-                    args: Vec::new(),
-                }
-            }),
-            final_type: Some(ty.modifiers.contains(&Modifier::Final)),
+            extends: ty
+                .extends
+                .as_ref()
+                .map(|name| crate::parser::parse_hierarchy_type(name)),
+            final_type: Some(ty.modifiers.contains(&Modifier::Final) || inferred_final),
             object_safe_trait: object_safety.as_ref().map(|fact| fact.object_safe),
             provenance: FactProvenance::ParsedSource,
         });
     if let Some(object_safety) = object_safety {
         facts.object_safety_facts.push(object_safety);
     }
-    if ty.modifiers.contains(&Modifier::Sealed) && !ty.permits.is_empty() {
+    if (ty.modifiers.contains(&Modifier::Sealed) && !ty.permits.is_empty())
+        || !inferred_closed_nested_variants.is_empty()
+    {
         facts.closed_hierarchy_facts.push(ClosedHierarchyFact {
             type_name: ty.name.clone(),
             closed: true,
-            provenance: FactProvenance::ParsedSource,
+            provenance: if inferred_closed_nested_variants.is_empty() {
+                FactProvenance::ParsedSource
+            } else {
+                FactProvenance::CorpusAnalysis
+            },
         });
     }
     for member in &ty.members {
         if let Member::Type(nested) = member {
-            collect_type_capability_facts_for_type(nested, facts);
+            collect_type_capability_facts_for_type(nested, facts, &inferred_closed_nested_variants);
         }
     }
+}
+
+fn inferred_closed_nested_variants_for_type(ty: &TypeDecl) -> Vec<String> {
+    if ty.kind != TypeKind::Class || !ty.modifiers.contains(&Modifier::Abstract) {
+        return Vec::new();
+    }
+    let variants = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Type(nested)
+                if nested.kind == TypeKind::Class
+                    && !nested.modifiers.contains(&Modifier::Abstract)
+                    && nested_extends_type(nested, &ty.name)
+                    && constructors_are_not_publicly_extensible(nested) =>
+            {
+                Some(nested.name.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if variants.is_empty() {
+        return Vec::new();
+    }
+    let all_direct_nested_subclasses_are_variants = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Type(nested) if nested_extends_type(nested, &ty.name) => Some(nested),
+            _ => None,
+        })
+        .all(|nested| variants.iter().any(|variant| variant == &nested.name));
+    all_direct_nested_subclasses_are_variants
+        .then_some(variants)
+        .unwrap_or_default()
+}
+
+fn nested_extends_type(ty: &TypeDecl, super_name: &str) -> bool {
+    ty.extends
+        .as_ref()
+        .map(|extends| crate::parser::parse_hierarchy_type(extends))
+        .as_ref()
+        .and_then(java_type_simple_name_option)
+        == Some(super_name)
+}
+
+fn java_type_simple_name_option(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            Some(name.rsplit('.').next().unwrap_or(name))
+        }
+        JavaType::String => Some("String"),
+        _ => None,
+    }
+}
+
+fn constructors_are_not_publicly_extensible(ty: &TypeDecl) -> bool {
+    let constructors = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Constructor(constructor) => Some(constructor),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if constructors.is_empty() {
+        return !ty.modifiers.contains(&Modifier::Public)
+            && !ty.modifiers.contains(&Modifier::Protected);
+    }
+    constructors.iter().all(|constructor| {
+        !constructor.modifiers.contains(&Modifier::Public)
+            && !constructor.modifiers.contains(&Modifier::Protected)
+    })
 }
 
 fn interface_object_safety_fact(ty: &TypeDecl) -> ObjectSafetyFact {
@@ -3965,11 +4342,9 @@ fn collect_interface_object_safety_violations(
             Member::Method(method) => {
                 push_interface_method_object_safety_violations(&ty.name, method, violations)
             }
-            Member::Type(nested) => collect_interface_object_safety_violations(nested, violations),
+            Member::Type(_) => {}
             Member::Unsupported { .. } => violations.push(ObjectSafetyViolation::UnsupportedMember),
-            Member::Field(field) => violations.push(ObjectSafetyViolation::FieldMember {
-                field_name: field.name.clone(),
-            }),
+            Member::Field(_) => {}
             Member::Constructor(_) => violations.push(ObjectSafetyViolation::ConstructorMember),
         }
     }
@@ -3981,16 +4356,18 @@ fn push_interface_method_object_safety_violations(
     violations: &mut Vec<ObjectSafetyViolation>,
 ) {
     if method.modifiers.contains(&Modifier::Static) {
-        violations.push(ObjectSafetyViolation::StaticMethod {
-            method_name: method.name.clone(),
-        });
+        return;
     }
+    let combinator_self_return = is_combinator_self_return_method(method, interface_name);
     match java_type_self_reference_kind(&method.return_type, interface_name) {
-        Some(InterfaceSelfReferenceKind::Direct) => {
+        Some(InterfaceSelfReferenceKind::Direct)
+            if !is_clone_like_self_return_method(method) && !combinator_self_return =>
+        {
             violations.push(ObjectSafetyViolation::SelfReferentialReturn {
                 method_name: method.name.clone(),
             });
         }
+        Some(InterfaceSelfReferenceKind::Direct) => {}
         Some(InterfaceSelfReferenceKind::Nested) => {
             violations.push(ObjectSafetyViolation::NestedSelfReferentialReturn {
                 method_name: method.name.clone(),
@@ -3999,13 +4376,11 @@ fn push_interface_method_object_safety_violations(
         None => {}
     }
     for param in &method.params {
+        if combinator_self_return {
+            continue;
+        }
         match java_type_self_reference_kind(&param.ty, interface_name) {
-            Some(InterfaceSelfReferenceKind::Direct) => {
-                violations.push(ObjectSafetyViolation::SelfReferentialParameter {
-                    method_name: method.name.clone(),
-                    param_name: param.name.clone(),
-                });
-            }
+            Some(InterfaceSelfReferenceKind::Direct) => {}
             Some(InterfaceSelfReferenceKind::Nested) => {
                 violations.push(ObjectSafetyViolation::NestedSelfReferentialParameter {
                     method_name: method.name.clone(),
@@ -4015,6 +4390,18 @@ fn push_interface_method_object_safety_violations(
             None => {}
         }
     }
+}
+
+fn is_clone_like_self_return_method(method: &MethodDecl) -> bool {
+    method.params.is_empty() && matches!(method.name.as_str(), "copy" | "deepCopy" | "clone")
+}
+
+fn is_combinator_self_return_method(method: &MethodDecl, interface_name: &str) -> bool {
+    matches!(
+        method.name.as_str(),
+        "and" | "or" | "negate" | "andThen" | "compose"
+    ) && java_type_self_reference_kind(&method.return_type, interface_name)
+        == Some(InterfaceSelfReferenceKind::Direct)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

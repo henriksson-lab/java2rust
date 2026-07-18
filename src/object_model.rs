@@ -278,17 +278,24 @@ pub fn object_strategy_for_type_with_effective_facts(
     facts: &EffectiveFacts<'_>,
 ) -> ObjectStrategyPlan {
     let requirements = facts.dispatch_requirements_for(&ty.name);
+    let explicit_hierarchy_override = facts
+        .hierarchy_overrides()
+        .iter()
+        .find(|override_fact| override_fact.type_name == ty.name);
     let (strategy, diagnostics) = match ty.kind {
-        TypeKind::Class | TypeKind::Record => (ObjectRepresentation::ConcreteStruct, Vec::new()),
-        TypeKind::Interface
-            if has_explicit_hierarchy_override_in_effective_facts(facts, &ty.name) =>
+        TypeKind::Class
+            if ty.modifiers.contains(&crate::java_ir::Modifier::Abstract)
+                && facts.closed_hierarchy_fact_for_name(&ty.name) == Some(true) =>
         {
-            (
-                ObjectRepresentation::DynTrait {
-                    trait_name: ty.name.clone(),
-                },
-                Vec::new(),
-            )
+            (ObjectRepresentation::ErasedObject, Vec::new())
+        }
+        TypeKind::Class | TypeKind::Record => (ObjectRepresentation::ConcreteStruct, Vec::new()),
+        TypeKind::Interface if explicit_hierarchy_override.is_some() => {
+            let override_fact =
+                explicit_hierarchy_override.expect("interface override was checked by match guard");
+            let policy =
+                hierarchy_override_representation_policy_with_effective_facts(override_fact, facts);
+            (policy.representation, policy.diagnostics)
         }
         TypeKind::Interface => {
             let policy = object_representation_policy_with_effective_facts(
@@ -426,6 +433,14 @@ pub fn object_hierarchy_edge_representation_policy(
         representation,
         represented,
     }
+}
+
+pub fn object_representation_is_user_closed_enum(
+    representation: &ObjectRepresentation,
+    provenance: FactProvenance,
+) -> bool {
+    provenance == FactProvenance::UserOverride
+        && matches!(representation, ObjectRepresentation::ClosedEnum { .. })
 }
 
 pub fn object_hierarchy_edge_diagnostic_policy(
@@ -818,6 +833,27 @@ impl ObjectHierarchyContext {
             .cloned()
             .unwrap_or_default()
     }
+
+    pub fn transitive_subtypes_of(&self, type_name: &str) -> Vec<String> {
+        let mut out = BTreeSet::new();
+        self.collect_transitive_subtypes(type_name, &mut out);
+        out.into_iter().collect()
+    }
+
+    pub fn terminal_subtypes_of(&self, type_name: &str) -> Vec<String> {
+        self.transitive_subtypes_of(type_name)
+            .into_iter()
+            .filter(|subtype| self.direct_subtypes_of(subtype).is_empty())
+            .collect()
+    }
+
+    fn collect_transitive_subtypes(&self, type_name: &str, out: &mut BTreeSet<String>) {
+        for subtype in self.direct_subtypes_of(type_name) {
+            if out.insert(subtype.clone()) {
+                self.collect_transitive_subtypes(&subtype, out);
+            }
+        }
+    }
 }
 
 pub fn hierarchy_override_application_policy(
@@ -839,13 +875,15 @@ pub fn hierarchy_override_application_policy_with_effective_facts(
     facts: &EffectiveFacts<'_>,
 ) -> HierarchyOverrideApplicationPolicy {
     let validation = hierarchy_override_validation_policy(override_fact, context);
-    let direct_subtypes = context.direct_subtypes_of(&override_fact.type_name);
+    let direct_subtypes = hierarchy_override_represented_subtypes(override_fact, context);
     let mut diagnostics = validation.diagnostics;
     let representation = if context.contains_type(&override_fact.type_name) {
         let policy =
             hierarchy_override_representation_policy_with_effective_facts(override_fact, facts);
         diagnostics.extend(policy.diagnostics);
         Some(policy.representation)
+    } else if external_erased_object_override_introduces_boundary_root(override_fact) {
+        Some(ObjectRepresentation::ErasedObject)
     } else {
         None
     };
@@ -859,12 +897,24 @@ pub fn hierarchy_override_application_policy_with_effective_facts(
     }
 }
 
+fn hierarchy_override_represented_subtypes(
+    override_fact: &HierarchyOverride,
+    context: &ObjectHierarchyContext,
+) -> Vec<String> {
+    match &override_fact.strategy {
+        HierarchyStrategy::ClosedEnum { variants, .. } => variants.clone(),
+        _ => context.direct_subtypes_of(&override_fact.type_name),
+    }
+}
+
 pub fn hierarchy_override_validation_policy(
     override_fact: &HierarchyOverride,
     context: &ObjectHierarchyContext,
 ) -> HierarchyOverrideValidationPolicy {
     let mut diagnostics = Vec::new();
-    if !context.contains_type(&override_fact.type_name) {
+    if !context.contains_type(&override_fact.type_name)
+        && !external_erased_object_override_introduces_boundary_root(override_fact)
+    {
         diagnostics.push(representation_override_conflict_diagnostic(format!(
             "hierarchy override references unknown Java type {}",
             override_fact.type_name
@@ -882,6 +932,13 @@ pub fn hierarchy_override_validation_policy(
         type_name: override_fact.type_name.clone(),
         diagnostics,
     }
+}
+
+fn external_erased_object_override_introduces_boundary_root(
+    override_fact: &HierarchyOverride,
+) -> bool {
+    override_fact.provenance == FactProvenance::ExternalLibraryPack
+        && override_fact.strategy == HierarchyStrategy::ErasedObject
 }
 
 pub fn hierarchy_override_representation_policy(
@@ -1015,7 +1072,7 @@ fn push_closed_enum_override_validation_diagnostics(
     variants: &[String],
     context: &ObjectHierarchyContext,
 ) {
-    let known_subtypes = context.direct_subtypes_of(&override_fact.type_name);
+    let known_subtypes = context.transitive_subtypes_of(&override_fact.type_name);
     for variant in variants {
         if !context.contains_type(variant) {
             diagnostics.push(representation_override_conflict_diagnostic(format!(
@@ -1024,15 +1081,15 @@ fn push_closed_enum_override_validation_diagnostics(
             )));
         } else if !known_subtypes.iter().any(|subtype| subtype == variant) {
             diagnostics.push(representation_override_conflict_diagnostic(format!(
-                "closed enum override for {} includes {}, but source facts do not record it as a direct subtype",
+                "closed enum override for {} includes {}, but source facts do not record it as a subtype",
                 override_fact.type_name, variant
             )));
         }
     }
-    for subtype in known_subtypes {
+    for subtype in context.terminal_subtypes_of(&override_fact.type_name) {
         if !variants.iter().any(|variant| variant == &subtype) {
             diagnostics.push(representation_override_conflict_diagnostic(format!(
-                "closed enum override for {} omits source subtype {}",
+                "closed enum override for {} omits terminal source subtype {}",
                 override_fact.type_name, subtype
             )));
         }

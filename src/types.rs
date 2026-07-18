@@ -132,7 +132,9 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
                     name,
                     &arg_types,
                 )
-                .or_else(|| external_pack_method_return_type(receiver_type.as_ref(), name))
+                .or_else(|| {
+                    external_pack_method_return_type(receiver_type.as_ref(), name, args.len())
+                })
                 .unwrap_or_else(|| JavaType::Unknown(name.clone()))
             }
         }
@@ -149,12 +151,18 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
 fn external_pack_method_return_type(
     receiver_type: Option<&JavaType>,
     name: &str,
+    arg_count: usize,
 ) -> Option<JavaType> {
     let receiver_name = match receiver_type {
         Some(JavaType::Named { name, .. }) | Some(JavaType::Unknown(name)) => Some(name.as_str()),
         _ => None,
     };
-    crate::external_packs::external_api_return_type_for_receiver(receiver_name, name)
+    crate::external_packs::external_api_effect_for_receiver_with_arity(
+        receiver_name,
+        name,
+        Some(arg_count),
+    )
+    .and_then(|fact| fact.return_type)
 }
 
 pub fn class_literal_type(ty: &JavaType) -> JavaType {
@@ -231,9 +239,21 @@ pub fn infer_member_access_type(receiver: &Expr, member: &str, env: &TypeEnv) ->
     let receiver_ty = infer_expr_type(receiver, env);
     if member == "length" && is_java_length_receiver(&receiver_ty) {
         Some(JavaType::Primitive(PrimitiveType::Int))
+    } else if let Some(java_ty) = external_pack_field_type(&receiver_ty, member) {
+        Some(java_ty)
     } else {
         None
     }
+}
+
+fn external_pack_field_type(receiver_ty: &JavaType, member: &str) -> Option<JavaType> {
+    let receiver_name = match receiver_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        _ => return None,
+    };
+    crate::external_packs::external_field_for(receiver_name, member)?
+        .field_type
+        .clone()
 }
 
 fn is_java_length_receiver(ty: &JavaType) -> bool {

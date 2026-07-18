@@ -77,7 +77,7 @@ impl<'a> EffectiveFacts<'a> {
             .facts
             .type_capability_overrides
             .iter()
-            .filter(|override_fact| override_fact.type_name == type_name)
+            .filter(|override_fact| type_name_matches(&override_fact.type_name, type_name))
             .filter_map(|override_fact| {
                 override_fact.object_safe_trait.map(|value| EffectiveFact {
                     value,
@@ -89,7 +89,7 @@ impl<'a> EffectiveFacts<'a> {
             .facts
             .object_safety_facts
             .iter()
-            .filter(|fact| fact.type_name == type_name)
+            .filter(|fact| type_name_matches(&fact.type_name, type_name))
             .map(|fact| EffectiveFact {
                 value: fact.object_safe,
                 provenance: fact.provenance,
@@ -105,7 +105,7 @@ impl<'a> EffectiveFacts<'a> {
         self.facts
             .object_safety_facts
             .iter()
-            .filter(|fact| fact.type_name == type_name)
+            .filter(|fact| type_name_matches(&fact.type_name, type_name))
             .max_by_key(|fact| fact_precedence_key(fact.provenance))
     }
 
@@ -146,7 +146,7 @@ impl<'a> EffectiveFacts<'a> {
         self.facts
             .closed_hierarchy_facts
             .iter()
-            .filter(|fact| fact.type_name == type_name)
+            .filter(|fact| type_name_matches(&fact.type_name, type_name))
             .map(|fact| EffectiveFact {
                 value: fact.closed,
                 provenance: fact.provenance,
@@ -184,7 +184,7 @@ impl<'a> EffectiveFacts<'a> {
                 self.facts
                     .hierarchy_overrides
                     .iter()
-                    .any(|override_fact| override_fact.type_name == type_name)
+                    .any(|override_fact| type_name_matches(&override_fact.type_name, type_name))
                     || self.closed_hierarchy_fact_for_name(type_name).is_some()
             })
     }
@@ -229,7 +229,10 @@ impl<'a> EffectiveFacts<'a> {
         self.facts
             .type_capability_overrides
             .iter()
-            .filter(|override_fact| Some(override_fact.type_name.as_str()) == type_name)
+            .filter(|override_fact| {
+                type_name
+                    .is_some_and(|type_name| type_name_matches(&override_fact.type_name, type_name))
+            })
             .filter_map(|override_fact| {
                 override_fact.clone.map(|value| EffectiveFact {
                     value,
@@ -270,7 +273,10 @@ impl<'a> EffectiveFacts<'a> {
         self.facts
             .type_capability_overrides
             .iter()
-            .filter(move |override_fact| Some(override_fact.type_name.as_str()) == type_name)
+            .filter(move |override_fact| {
+                type_name
+                    .is_some_and(|type_name| type_name_matches(&override_fact.type_name, type_name))
+            })
     }
 }
 
@@ -304,6 +310,25 @@ fn fact_precedence_key(provenance: FactProvenance) -> u8 {
         FactProvenance::ParsedSource => 3,
         FactProvenance::UserOverride => 4,
     }
+}
+
+fn type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
+    let fact_aliases = type_name_aliases(fact_type_name);
+    let query_aliases = type_name_aliases(query_type_name);
+    fact_aliases.iter().any(|fact_alias| {
+        query_aliases
+            .iter()
+            .any(|query_alias| query_alias == fact_alias)
+    })
+}
+
+fn type_name_aliases(type_name: &str) -> Vec<String> {
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(type_name);
+    let snake = crate::parser::to_snake_case(type_name);
+    let mut aliases = vec![type_name.to_string(), canonical, snake];
+    aliases.sort();
+    aliases.dedup();
+    aliases
 }
 
 fn apply_type_capability_override(

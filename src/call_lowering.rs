@@ -36,6 +36,21 @@ pub fn apply_call_target(
             function: Box::new(RustExpr::Var(rust_name.clone())),
             args,
         },
+        CallTargetPlan::ExternalCrateReceiver {
+            crate_name,
+            rust_name,
+            ..
+        } => {
+            let receiver =
+                lowered_receiver.expect("external crate receiver target must provide receiver");
+            let mut facade_args = Vec::with_capacity(args.len() + 1);
+            facade_args.push(receiver);
+            facade_args.extend(args);
+            RustExpr::Call {
+                function: Box::new(RustExpr::Raw(format!("{crate_name}::{rust_name}"))),
+                args: facade_args,
+            }
+        }
     }
 }
 
@@ -48,6 +63,15 @@ pub fn apply_new_target_with_facts(
     args: Vec<RustExpr>,
     facts: &FactSet,
 ) -> RustExpr {
+    if let Some(external_crate) = &target.external_crate {
+        return RustExpr::Call {
+            function: Box::new(RustExpr::Raw(format!(
+                "{}::{}::{}",
+                external_crate.crate_name, external_crate.type_name, external_crate.rust_name
+            ))),
+            args,
+        };
+    }
     RustExpr::Call {
         function: Box::new(RustExpr::Raw(format!(
             "{}::{}",

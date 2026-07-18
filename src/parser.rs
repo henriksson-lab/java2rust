@@ -18,11 +18,15 @@ pub fn parse_java_source(source: &str) -> ParsedProgram {
     let root = tree.root_node();
     collect_syntax_diagnostics(root, &mut diagnostics);
 
+    let imports = parse_imports(root, source);
+    let mut types = parse_top_level_types(root, source, &mut diagnostics);
+    qualify_java_sql_imported_types(&mut types, &imports);
+
     ParsedProgram {
         program: Program {
             package: parse_package(root, source),
-            imports: parse_imports(root, source),
-            types: parse_top_level_types(root, source, &mut diagnostics),
+            imports,
+            types,
         },
         diagnostics,
     }
@@ -81,6 +85,353 @@ fn parse_imports(root: tree_sitter::Node, source: &str) -> Vec<ImportDecl> {
         .collect()
 }
 
+fn qualify_java_sql_imported_types(types: &mut [TypeDecl], imports: &[ImportDecl]) {
+    let imported = JavaSqlImports::from_imports(imports);
+    if imported.is_empty() {
+        return;
+    }
+    for ty in types {
+        qualify_java_sql_type_decl(ty, &imported);
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct JavaSqlImports {
+    wildcard: bool,
+    connection: bool,
+    statement: bool,
+    prepared_statement: bool,
+    result_set: bool,
+    result_set_metadata: bool,
+    database_metadata: bool,
+    sql_exception: bool,
+    driver_manager: bool,
+}
+
+impl JavaSqlImports {
+    fn from_imports(imports: &[ImportDecl]) -> Self {
+        let mut imported = Self::default();
+        for import in imports.iter().filter(|import| !import.is_static) {
+            if import.is_wildcard && import.path == "java.sql" {
+                imported.wildcard = true;
+                continue;
+            }
+            match import.path.as_str() {
+                "java.sql.Connection" => imported.connection = true,
+                "java.sql.Statement" => imported.statement = true,
+                "java.sql.PreparedStatement" => imported.prepared_statement = true,
+                "java.sql.ResultSet" => imported.result_set = true,
+                "java.sql.ResultSetMetaData" => imported.result_set_metadata = true,
+                "java.sql.DatabaseMetaData" => imported.database_metadata = true,
+                "java.sql.SQLException" => imported.sql_exception = true,
+                "java.sql.DriverManager" => imported.driver_manager = true,
+                _ => {}
+            }
+        }
+        imported
+    }
+
+    fn is_empty(self) -> bool {
+        !self.wildcard
+            && !self.connection
+            && !self.statement
+            && !self.prepared_statement
+            && !self.result_set
+            && !self.result_set_metadata
+            && !self.database_metadata
+            && !self.sql_exception
+            && !self.driver_manager
+    }
+
+    fn qualify(self, name: &str) -> Option<&'static str> {
+        match name {
+            "Connection" if self.wildcard || self.connection => Some("java.sql.Connection"),
+            "Statement" if self.wildcard || self.statement => Some("java.sql.Statement"),
+            "PreparedStatement" if self.wildcard || self.prepared_statement => {
+                Some("java.sql.PreparedStatement")
+            }
+            "ResultSet" if self.wildcard || self.result_set => Some("java.sql.ResultSet"),
+            "ResultSetMetaData" if self.wildcard || self.result_set_metadata => {
+                Some("java.sql.ResultSetMetaData")
+            }
+            "DatabaseMetaData" if self.wildcard || self.database_metadata => {
+                Some("java.sql.DatabaseMetaData")
+            }
+            "SQLException" if self.wildcard || self.sql_exception => Some("java.sql.SQLException"),
+            "DriverManager" if self.wildcard || self.driver_manager => {
+                Some("java.sql.DriverManager")
+            }
+            _ => None,
+        }
+    }
+}
+
+fn qualify_java_sql_type_decl(ty: &mut TypeDecl, imported: &JavaSqlImports) {
+    for bound in &mut ty.type_param_bounds {
+        if let Some(bound) = bound {
+            qualify_java_sql_type(bound, imported);
+        }
+    }
+    for member in &mut ty.members {
+        qualify_java_sql_member(member, imported);
+    }
+}
+
+fn qualify_java_sql_member(member: &mut Member, imported: &JavaSqlImports) {
+    match member {
+        Member::Field(field) => {
+            qualify_java_sql_type(&mut field.ty, imported);
+            if let Some(initializer) = &mut field.initializer {
+                qualify_java_sql_expr(initializer, imported);
+            }
+        }
+        Member::Method(method) => {
+            for bound in &mut method.type_param_bounds {
+                if let Some(bound) = bound {
+                    qualify_java_sql_type(bound, imported);
+                }
+            }
+            qualify_java_sql_type(&mut method.return_type, imported);
+            for thrown in &mut method.throws {
+                qualify_java_sql_type(thrown, imported);
+            }
+            for param in &mut method.params {
+                qualify_java_sql_type(&mut param.ty, imported);
+            }
+            if let Some(body) = &mut method.body {
+                qualify_java_sql_block(body, imported);
+            }
+        }
+        Member::Constructor(ctor) => {
+            for bound in &mut ctor.type_param_bounds {
+                if let Some(bound) = bound {
+                    qualify_java_sql_type(bound, imported);
+                }
+            }
+            for thrown in &mut ctor.throws {
+                qualify_java_sql_type(thrown, imported);
+            }
+            for param in &mut ctor.params {
+                qualify_java_sql_type(&mut param.ty, imported);
+            }
+            if let Some(body) = &mut ctor.body {
+                qualify_java_sql_block(body, imported);
+            }
+        }
+        Member::Type(nested) => qualify_java_sql_type_decl(nested, imported),
+        Member::Unsupported { .. } => {}
+    }
+}
+
+fn qualify_java_sql_block(block: &mut Block, imported: &JavaSqlImports) {
+    for stmt in &mut block.statements {
+        qualify_java_sql_stmt(stmt, imported);
+    }
+}
+
+fn qualify_java_sql_stmt(stmt: &mut Stmt, imported: &JavaSqlImports) {
+    match stmt {
+        Stmt::VarDecl {
+            ty, initializer, ..
+        } => {
+            qualify_java_sql_type(ty, imported);
+            if let Some(initializer) = initializer {
+                qualify_java_sql_expr(initializer, imported);
+            }
+        }
+        Stmt::Assign { target, value } => {
+            qualify_java_sql_expr(target, imported);
+            qualify_java_sql_expr(value, imported);
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            qualify_java_sql_expr(expr, imported);
+        }
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            qualify_java_sql_expr(condition, imported);
+            qualify_java_sql_block(then_block, imported);
+            if let Some(else_block) = else_block {
+                qualify_java_sql_block(else_block, imported);
+            }
+        }
+        Stmt::While { condition, body } => {
+            qualify_java_sql_expr(condition, imported);
+            qualify_java_sql_block(body, imported);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for init in init {
+                qualify_java_sql_stmt(init, imported);
+            }
+            if let Some(condition) = condition {
+                qualify_java_sql_expr(condition, imported);
+            }
+            for update in update {
+                qualify_java_sql_expr(update, imported);
+            }
+            qualify_java_sql_block(body, imported);
+        }
+        Stmt::EnhancedFor {
+            var_type,
+            iterable,
+            body,
+            ..
+        } => {
+            qualify_java_sql_type(var_type, imported);
+            qualify_java_sql_expr(iterable, imported);
+            qualify_java_sql_block(body, imported);
+        }
+        Stmt::Switch { selector, cases } => {
+            qualify_java_sql_expr(selector, imported);
+            for case in cases {
+                for label in &mut case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        qualify_java_sql_expr(expr, imported);
+                    }
+                }
+                for stmt in &mut case.statements {
+                    qualify_java_sql_stmt(stmt, imported);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                qualify_java_sql_stmt(resource, imported);
+            }
+            qualify_java_sql_block(body, imported);
+            for catch in catches {
+                for ty in &mut catch.types {
+                    qualify_java_sql_type(ty, imported);
+                }
+                qualify_java_sql_block(&mut catch.body, imported);
+            }
+            if let Some(finally_block) = finally_block {
+                qualify_java_sql_block(finally_block, imported);
+            }
+        }
+        Stmt::LocalType(ty) => qualify_java_sql_type_decl(ty, imported),
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                qualify_java_sql_expr(arg, imported);
+            }
+        }
+        Stmt::Block(block) => qualify_java_sql_block(block, imported),
+    }
+}
+
+fn qualify_java_sql_expr(expr: &mut Expr, imported: &JavaSqlImports) {
+    match expr {
+        Expr::Literal(_) | Expr::Var(_) | Expr::This | Expr::Super | Expr::Raw(_) => {}
+        Expr::FieldAccess(receiver, _) => qualify_java_sql_expr(receiver, imported),
+        Expr::ArrayAccess(array, index) => {
+            qualify_java_sql_expr(array, imported);
+            qualify_java_sql_expr(index, imported);
+        }
+        Expr::ArrayCreation {
+            element_type,
+            dimensions,
+        } => {
+            qualify_java_sql_type(element_type, imported);
+            for dimension in dimensions {
+                qualify_java_sql_expr(dimension, imported);
+            }
+        }
+        Expr::ArrayInitializer(elements) => {
+            for element in elements {
+                qualify_java_sql_expr(element, imported);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            qualify_java_sql_expr(left, imported);
+            qualify_java_sql_expr(right, imported);
+        }
+        Expr::Unary { expr, .. } => qualify_java_sql_expr(expr, imported),
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            qualify_java_sql_expr(condition, imported);
+            qualify_java_sql_expr(then_expr, imported);
+            qualify_java_sql_expr(else_expr, imported);
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                qualify_java_sql_expr(receiver, imported);
+            }
+            for arg in args {
+                qualify_java_sql_expr(arg, imported);
+            }
+        }
+        Expr::New { ty, args, body, .. } => {
+            qualify_java_sql_type(ty, imported);
+            for arg in args {
+                qualify_java_sql_expr(arg, imported);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    qualify_java_sql_member(member, imported);
+                }
+            }
+        }
+        Expr::Cast { ty, expr } | Expr::InstanceOf { expr, ty } => {
+            qualify_java_sql_type(ty, imported);
+            qualify_java_sql_expr(expr, imported);
+        }
+        Expr::Lambda { params, body } => {
+            for param in params {
+                if let Some(ty) = &mut param.ty {
+                    qualify_java_sql_type(ty, imported);
+                }
+            }
+            match body {
+                LambdaBody::Expr(expr) => qualify_java_sql_expr(expr, imported),
+                LambdaBody::Block(block) => qualify_java_sql_block(block, imported),
+            }
+        }
+        Expr::MethodReference { .. } => {}
+        Expr::ClassLiteral(ty) => qualify_java_sql_type(ty, imported),
+    }
+}
+
+fn qualify_java_sql_type(ty: &mut JavaType, imported: &JavaSqlImports) {
+    match ty {
+        JavaType::Array(inner) => qualify_java_sql_type(inner, imported),
+        JavaType::Named { name, args } => {
+            if let Some(qualified) = imported.qualify(name) {
+                *name = qualified.to_string();
+            }
+            for arg in args {
+                qualify_java_sql_type(arg, imported);
+            }
+        }
+        JavaType::Wildcard(Some(bound)) => match bound {
+            WildcardBound::Extends(inner) | WildcardBound::Super(inner) => {
+                qualify_java_sql_type(inner, imported);
+            }
+        },
+        JavaType::Void
+        | JavaType::Primitive(_)
+        | JavaType::String
+        | JavaType::Wildcard(None)
+        | JavaType::Unknown(_) => {}
+    }
+}
+
 fn parse_top_level_types(
     root: tree_sitter::Node,
     source: &str,
@@ -120,16 +471,9 @@ fn parse_class_decl(
     diagnostics: &mut DiagnosticBag,
 ) -> TypeDecl {
     let name = field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string());
-    let extends = node.child_by_field_name("superclass").map(|superclass| {
-        first_named_child(superclass)
-            .map(|child| type_name_text(child, source))
-            .unwrap_or_else(|| {
-                text(superclass, source)
-                    .trim_start_matches("extends")
-                    .trim()
-                    .to_string()
-            })
-    });
+    let extends = node
+        .child_by_field_name("superclass")
+        .map(|superclass| type_name_text(superclass, source));
     let implements = node
         .child_by_field_name("interfaces")
         .map(|interfaces| parse_type_name_list(interfaces, source))
@@ -572,8 +916,22 @@ fn parse_field_decl(node: tree_sitter::Node, source: &str) -> Vec<Member> {
         .child_by_field_name("type")
         .map(|node| parse_type_node(node, source))
         .unwrap_or_else(|| JavaType::Unknown("field".to_string()));
-    let modifiers = parse_modifiers(node, source);
-    field_children(node, "declarator")
+    let mut modifiers = parse_modifiers(node, source);
+    if node.kind() == "constant_declaration" {
+        for implicit in [Modifier::Public, Modifier::Static, Modifier::Final] {
+            if !modifiers.contains(&implicit) {
+                modifiers.push(implicit);
+            }
+        }
+    }
+    let mut declarators = field_children(node, "declarator");
+    if declarators.is_empty() {
+        declarators = named_children(node)
+            .into_iter()
+            .filter(|child| child.kind() == "variable_declarator")
+            .collect();
+    }
+    declarators
         .into_iter()
         .filter_map(|decl| {
             let name = field_text(decl, "name", source)?;
@@ -1372,7 +1730,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "object_creation_expression" => {
             let ty = node
                 .child_by_field_name("type")
-                .map(|node| parse_type_node(node, source))
+                .map(|node| parse_new_type_node(node, source))
                 .unwrap_or_else(|| JavaType::Unknown("new".to_string()));
             Expr::New {
                 ty,
@@ -1575,8 +1933,59 @@ pub fn parse_type(src: &str) -> JavaType {
     parse_type_text(src)
 }
 
+pub fn parse_hierarchy_type(src: &str) -> JavaType {
+    parse_hierarchy_type_text(src)
+}
+
 fn parse_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
     parse_type_text(text(node, source))
+}
+
+fn parse_new_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
+    let raw = text(node, source).trim();
+    let mut ty = parse_type_text(raw);
+    if type_text_starts_with_type_like_segment(raw) {
+        if let JavaType::Named { name, .. } | JavaType::Unknown(name) = &mut ty {
+            *name = raw.to_string();
+        }
+    }
+    ty
+}
+
+fn type_text_starts_with_type_like_segment(raw: &str) -> bool {
+    raw.split(['.', '<', '['])
+        .next()
+        .and_then(|segment| segment.trim().chars().next())
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+        && raw.contains('.')
+        && !raw.contains('<')
+}
+
+fn parse_hierarchy_type_text(src: &str) -> JavaType {
+    let mut src = src.trim();
+    while let Some(rest) = src.strip_prefix("final ") {
+        src = rest.trim_start();
+    }
+    src = src
+        .trim_start_matches("extends")
+        .trim_start_matches("implements")
+        .trim();
+    if let Some(inner) = src.strip_suffix("[]") {
+        return JavaType::Array(Box::new(parse_hierarchy_type_text(inner)));
+    }
+    if let Some(open) = src.find('<') {
+        let close = matching_angle_close(src, open).unwrap_or(src.len());
+        let name = src[..open].trim().to_string();
+        let inner = src[open + 1..close].trim();
+        return JavaType::Named {
+            name,
+            args: split_top_level_commas(inner)
+                .into_iter()
+                .map(|part| parse_type_text(part.trim()))
+                .collect(),
+        };
+    }
+    parse_type_text(src)
 }
 
 fn parse_type_text(src: &str) -> JavaType {

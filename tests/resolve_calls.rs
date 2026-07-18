@@ -1,7 +1,11 @@
+use new_java2rust::external_facts::parse_external_facts;
 use new_java2rust::facts::{FactProvenance, UnresolvedTargetKind};
 use new_java2rust::java_ir::{CallKind, ConstructorInvocationKind, Expr, JavaType, Member, Stmt};
 use new_java2rust::parser::parse_java_source;
-use new_java2rust::resolve::{resolve_program, resolve_program_with_source_program};
+use new_java2rust::resolve::{
+    resolve_program, resolve_program_with_source_program,
+    resolve_program_with_source_program_and_facts,
+};
 use new_java2rust::resolver_benchmark::{
     benchmark_java_resolver_dir, render_resolver_benchmark_report,
 };
@@ -2060,6 +2064,43 @@ class StreamMapCollectLambdaBodyTypeResolution {
 
     assert_eq!(constructor.declaring_type, "PosteriorBatch");
     assert_eq!(constructor.rust_name, "new_list");
+}
+
+#[test]
+fn resolver_does_not_resolve_stream_lambda_body_before_element_type_is_known() {
+    let root = std::env::temp_dir().join(format!(
+        "new_java2rust_stream_lambda_external_name_collision_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("StreamLambdaParameterNameCollisionResolution.java"),
+        r#"
+class Constants {
+    static String DELIMITER;
+}
+
+class StreamLambdaParameterNameCollisionResolution {
+    List<String> run(List<String> partitions) {
+        return partitions.stream().map(partition -> {
+            String[] pieces = partition.split(Constants.DELIMITER);
+            return pieces[0];
+        }).collect(Collectors.toList());
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let report = benchmark_java_resolver_dir(&root).unwrap();
+    let rendered = render_resolver_benchmark_report(&report);
+    std::fs::remove_dir_all(&root).unwrap();
+
+    assert_eq!(
+        report.semantic_diagnostics, 0,
+        "stream lambda body should be resolved only after parameter `partition` is typed as String; report:\n{rendered}"
+    );
 }
 
 #[test]
@@ -4586,6 +4627,8 @@ public class Leaf {
         "transitive source field dependencies should resolve as source fields: {rendered}"
     );
     assert_eq!(report.external_field_guesses, 0, "{rendered}");
+    assert_eq!(report.project_field_guesses, 0, "{rendered}");
+    assert_eq!(report.source_field_guesses, 0, "{rendered}");
 }
 
 #[test]
@@ -4686,6 +4729,8 @@ class Payload {
     assert_eq!(report.unresolved_constructors, 0, "{rendered}");
     assert_eq!(report.unresolved_field_accesses, 0, "{rendered}");
     assert_eq!(report.external_field_guesses, 0, "{rendered}");
+    assert_eq!(report.project_field_guesses, 0, "{rendered}");
+    assert_eq!(report.source_field_guesses, 0, "{rendered}");
 }
 
 #[test]
@@ -4921,16 +4966,16 @@ class VariantPackApi {
     assert!(rendered.contains("external_pack_explained_constructors\t"));
     assert!(rendered.contains("top_external_pack_api_methods"));
     assert!(
-        rendered.contains("VariantContextBuilder\tchr\t1"),
+        rendered.contains("VariantContextBuilder\tchr\tExternalFactModel\t1"),
         "{rendered}"
     );
     assert!(
-        rendered.contains("VariantContext\tgetAttribute\t1"),
+        rendered.contains("VariantContext\tgetAttribute\tExternalFactModel\t1"),
         "{rendered}"
     );
     assert!(rendered.contains("top_external_pack_constructor_types"));
     assert!(
-        rendered.contains("VariantContextBuilder\t0\t1"),
+        rendered.contains("VariantContextBuilder\t0\tExternalFactModel\t1"),
         "{rendered}"
     );
 }
@@ -4985,20 +5030,26 @@ class VcfPackApi {
     );
     assert!(rendered.contains("top_external_pack_api_methods"));
     assert!(
-        rendered.contains("VCFHeader\taddMetaDataLine\t1"),
+        rendered.contains("VCFHeader\taddMetaDataLine\tExternalFactModel\t1"),
         "{rendered}"
     );
     assert!(
-        rendered.contains("VCFHeader\tgetGenotypeSamples\t1"),
+        rendered.contains("VCFHeader\tgetGenotypeSamples\tExternalFactModel\t1"),
         "{rendered}"
     );
     assert!(
-        rendered.contains("VCFHeader\tgetSequenceDictionary\t1"),
+        rendered.contains("VCFHeader\tgetSequenceDictionary\tExternalFactModel\t1"),
         "{rendered}"
     );
     assert!(rendered.contains("top_external_pack_constructor_types"));
-    assert!(rendered.contains("VCFHeader\t0\t1"), "{rendered}");
-    assert!(rendered.contains("VCFHeaderLine\t2\t1"), "{rendered}");
+    assert!(
+        rendered.contains("VCFHeader\t0\tExternalFactModel\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("VCFHeaderLine\t2\tExternalFactModel\t1"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -5060,24 +5111,30 @@ class SamHeaderPackApi {
     );
     assert!(rendered.contains("top_external_pack_api_methods"));
     assert!(
-        rendered.contains("SAMFileHeader\tsetSequenceDictionary\t1"),
+        rendered.contains("SAMFileHeader\tsetSequenceDictionary\tExternalFactModel\t1"),
         "{rendered}"
     );
     assert!(
-        rendered.contains("SAMFileHeader\tgetSequenceDictionary\t1"),
+        rendered.contains("SAMFileHeader\tgetSequenceDictionary\tExternalFactModel\t1"),
         "{rendered}"
     );
     assert!(
-        rendered.contains("SAMSequenceDictionary\tgetSequence\t1"),
+        rendered.contains("SAMSequenceDictionary\tgetSequence\tExternalFactModel\t1"),
         "{rendered}"
     );
     assert!(rendered.contains("top_external_pack_constructor_types"));
     assert!(
-        rendered.contains("SAMSequenceDictionary\t1\t1"),
+        rendered.contains("SAMSequenceDictionary\t1\tExternalFactModel\t1"),
         "{rendered}"
     );
-    assert!(rendered.contains("SAMFileHeader\t0\t1"), "{rendered}");
-    assert!(rendered.contains("SAMReadGroupRecord\t1\t1"), "{rendered}");
+    assert!(
+        rendered.contains("SAMFileHeader\t0\tExternalFactModel\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("SAMReadGroupRecord\t1\tExternalFactModel\t1"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -5139,14 +5196,23 @@ class TribbleFeaturePackApi {
         "{rendered}"
     );
     assert!(rendered.contains("top_external_pack_api_methods"));
-    assert!(rendered.contains("Feature\tgetContig\t1"), "{rendered}");
     assert!(
-        rendered.contains("SimpleFeature\tgetStart\t1"),
+        rendered.contains("Feature\tgetContig\tExternalFactModel\t1"),
         "{rendered}"
     );
-    assert!(rendered.contains("SimpleFeature\tgetEnd\t1"), "{rendered}");
+    assert!(
+        rendered.contains("SimpleFeature\tgetStart\tExternalFactModel\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("SimpleFeature\tgetEnd\tExternalFactModel\t1"),
+        "{rendered}"
+    );
     assert!(rendered.contains("top_external_pack_constructor_types"));
-    assert!(rendered.contains("SimpleFeature\t3\t1"), "{rendered}");
+    assert!(
+        rendered.contains("SimpleFeature\t3\tExternalFactModel\t1"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -5202,13 +5268,31 @@ class SamtoolsUtilPackApi {
         "{rendered}"
     );
     assert!(rendered.contains("top_external_pack_api_methods"));
-    assert!(rendered.contains("Locatable\tgetStart\t1"), "{rendered}");
-    assert!(rendered.contains("Locatable\tgetEnd\t1"), "{rendered}");
-    assert!(rendered.contains("Interval\tintersects\t1"), "{rendered}");
-    assert!(rendered.contains("PeekableIterator\tpeek\t1"), "{rendered}");
+    assert!(
+        rendered.contains("Locatable\tgetStart\tExternalFactModel\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Locatable\tgetEnd\tExternalFactModel\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Interval\tintersects\tExternalFactModel\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("PeekableIterator\tpeek\tExternalFactModel\t1"),
+        "{rendered}"
+    );
     assert!(rendered.contains("top_external_pack_constructor_types"));
-    assert!(rendered.contains("Interval\t3\t1"), "{rendered}");
-    assert!(rendered.contains("PeekableIterator\t1\t1"), "{rendered}");
+    assert!(
+        rendered.contains("Interval\t3\tExternalFactModel\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("PeekableIterator\t1\tExternalFactModel\t1"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -5258,13 +5342,22 @@ class Hdf5PackApi {
         report.rust_crate_mapping_explained_constructors >= 1,
         "{rendered}"
     );
-    assert!(rendered.contains("HDF5File\texists\t1"), "{rendered}");
     assert!(
-        rendered.contains("HDF5File\twriteDoubleArray\t1"),
+        rendered.contains("HDF5File\texists\tRustCrateMapping\t1"),
         "{rendered}"
     );
-    assert!(rendered.contains("HDF5File\tclose\t1"), "{rendered}");
-    assert!(rendered.contains("HDF5File\t2\t1"), "{rendered}");
+    assert!(
+        rendered.contains("HDF5File\twriteDoubleArray\tRustCrateMapping\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("HDF5File\tclose\tRustCrateMapping\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("HDF5File\t2\tRustCrateMapping\t1"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -5279,11 +5372,13 @@ fn resolver_benchmark_reports_external_pack_coverage_for_sqlite_crate_mapping_ca
         root.join("SqlitePackApi.java"),
         r#"
 class SqlitePackApi {
-    Object connect(String path) {
+    Object connect(String path, String query) {
         SQLiteConfig config = new SQLiteConfig();
         config.setReadOnly(true);
         config.setBusyTimeout(1000);
-        return config.createConnection(path);
+        SQLiteConnection connection = config.createConnection(path);
+        SQLiteStatement statement = connection.prepareStatement(query);
+        return statement.executeQuery();
     }
 }
 "#,
@@ -5302,22 +5397,41 @@ class SqlitePackApi {
         "{rendered}"
     );
     assert!(
+        report.rust_crate_mapping_explained_method_calls >= 5,
+        "{rendered}"
+    );
+    assert!(
         report.external_pack_explained_constructors >= 1,
         "{rendered}"
     );
     assert!(
-        rendered.contains("SQLiteConfig\tsetReadOnly\t1"),
+        report.rust_crate_mapping_explained_constructors >= 1,
         "{rendered}"
     );
     assert!(
-        rendered.contains("SQLiteConfig\tsetBusyTimeout\t1"),
+        rendered.contains("SQLiteConfig\tsetReadOnly\tRustCrateMapping\t1"),
         "{rendered}"
     );
     assert!(
-        rendered.contains("SQLiteConfig\tcreateConnection\t1"),
+        rendered.contains("SQLiteConfig\tsetBusyTimeout\tRustCrateMapping\t1"),
         "{rendered}"
     );
-    assert!(rendered.contains("SQLiteConfig\t0\t1"), "{rendered}");
+    assert!(
+        rendered.contains("SQLiteConfig\tcreateConnection\tRustCrateMapping\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("SQLiteConnection\tprepareStatement\tRustCrateMapping\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("SQLiteStatement\texecuteQuery\tRustCrateMapping\t1"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("SQLiteConfig\t0\tRustCrateMapping\t1"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -5491,8 +5605,19 @@ class CollisionBoxUse {
     assert_eq!(report.external_constructor_guesses, 1, "{rendered}");
     assert_eq!(report.project_constructor_guesses, 0, "{rendered}");
     assert_eq!(report.source_constructor_guesses, 0, "{rendered}");
+    assert_eq!(report.top_external_constructor_guess_contexts.len(), 1);
+    let context = &report.top_external_constructor_guess_contexts[0];
+    assert_eq!(context.target_name, "CollisionBox");
+    assert_eq!(context.receiver_type, "CollisionBox");
+    assert_eq!(context.arg_types, vec!["String", "String"]);
+    assert_eq!(context.enclosing_type, "CollisionBoxUse");
+    assert_eq!(context.enclosing_member, "run");
     assert!(rendered.contains("top_external_constructor_guess_types"));
     assert!(rendered.contains("CollisionBox\t2\t1"));
+    assert!(rendered.contains("top_external_constructor_guess_contexts"));
+    assert!(rendered.contains(
+        "CollisionBox\tCollisionBox\tString,String\tCollisionBoxUse\trun\t1\tCollisionBoxUse.java"
+    ));
     assert!(!rendered.contains("top_source_constructor_guess_types"));
 }
 
@@ -5530,9 +5655,20 @@ class UseGeneratedRecord {
     assert_eq!(report.external_constructor_guesses, 0, "{rendered}");
     assert_eq!(report.project_constructor_guesses, 1, "{rendered}");
     assert_eq!(report.source_constructor_guesses, 0, "{rendered}");
+    assert_eq!(report.top_project_constructor_guess_contexts.len(), 1);
+    let context = &report.top_project_constructor_guess_contexts[0];
+    assert_eq!(context.target_name, "GeneratedRecord");
+    assert_eq!(context.receiver_type, "GeneratedRecord");
+    assert_eq!(context.arg_types, vec!["String", "Int"]);
+    assert_eq!(context.enclosing_type, "UseGeneratedRecord");
+    assert_eq!(context.enclosing_member, "run");
     assert!(rendered.contains("project_constructor_guesses\t1"));
     assert!(rendered.contains("top_project_constructor_guess_types"));
     assert!(rendered.contains("GeneratedRecord\t2\t1"));
+    assert!(rendered.contains("top_project_constructor_guess_contexts"));
+    assert!(rendered.contains(
+        "GeneratedRecord\tGeneratedRecord\tString,Int\tUseGeneratedRecord\trun\t1\tUseGeneratedRecord.java"
+    ));
     assert!(!rendered.contains("top_external_constructor_guess_types"));
 }
 
@@ -8649,6 +8785,72 @@ class CuratedExternalEnumConstantArgumentResolution {
 }
 
 #[test]
+fn resolver_uses_conservative_external_enum_constant_type_for_overload_arguments() {
+    assert_eq!(
+        new_java2rust::stdlib::conservative_external_enum_field_type_for_type_qualifier(
+            "tail", "left"
+        ),
+        Some(JavaType::Named {
+            name: "Tail".to_string(),
+            args: Vec::new(),
+        })
+    );
+
+    let parsed = parse_java_source(
+        r#"
+class ConservativeExternalEnumConstantResolution {
+    void count(Cigar cigar, Tail tail) {}
+    void count(Cigar cigar, CigarOperator operator) {}
+    void count(Cigar cigar, String label) {}
+
+    void run(Cigar cigar) {
+        count(cigar, Tail.LEFT);
+        count(cigar, Tail.RIGHT);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+
+    let unresolved_fields = resolved
+        .facts
+        .unresolved_target_facts
+        .iter()
+        .filter(|fact| fact.kind == UnresolvedTargetKind::FieldAccess)
+        .collect::<Vec<_>>();
+    assert!(
+        unresolved_fields.is_empty(),
+        "enum-shaped constants on unknown external enum receivers should infer the receiver type: {unresolved_fields:?}"
+    );
+
+    let calls = resolved.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .unwrap()
+        .statements
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::Expr(Expr::Call {
+                resolved: Some(call),
+                ..
+            }) => Some(call.rust_name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(calls, vec!["count_cigar_tail", "count_cigar_tail"]);
+}
+
+#[test]
 fn resolver_uses_external_header_and_genotype_enum_constant_types_for_overloads() {
     let parsed = parse_java_source(
         r#"
@@ -11427,10 +11629,7 @@ class ExternalDomainConstantArgumentResolution {
         acceptString(ReservedTagConstants.XT);
         acceptBytes(SequenceUtil.VALID_BASES_UPPER);
         acceptInt(BAMFileConstants.FIXED_BLOCK_SIZE);
-        acceptString(GATKConfig.CONFIG_FILE_VARIABLE_FILE_NAME);
         acceptString(CloudStorageFileSystem.URI_SCHEME);
-        acceptInt(ReferenceContext.UNINITIALIZED_REFERENCE_ID);
-        acceptInt(Slice.EMBEDDED_REFERENCE_ABSENT_CONTENT_ID);
         acceptInt(TabixFormat.GENERIC_FLAGS);
         acceptOption(Option.CACHE_FILE_BASED_INDEXES);
         acceptOption(Option.INCLUDE_SOURCE_IN_RECORDS);
@@ -11446,7 +11645,6 @@ class ExternalDomainConstantArgumentResolution {
         acceptString(File.separator);
         acceptString(VCFConstants.NULL_ALLELE);
         acceptDouble(VariantContext.NO_LOG10_PERROR);
-        acceptDouble(ReadLikelihoodCalculationEngine.DEFAULT_EXPECTED_ERROR_RATE_PER_BASE);
         acceptBoolean(SpecialArgumentsCollection.SHOW_HIDDEN);
         acceptChar(File.separatorChar);
         acceptInt(BlockCompressedStreamConstants.DEFAULT_COMPRESSION_LEVEL);
@@ -11497,7 +11695,6 @@ class ExternalDomainConstantArgumentResolution {
         acceptDeserializationFeature(DeserializationFeature.UNWRAP_ROOT_VALUE);
         acceptJexlMissingValueTreatment(JexlMissingValueTreatment.TREAT_AS_MATCH);
         acceptJexlMissingValueTreatment(JexlMissingValueTreatment.TREAT_AS_MISMATCH);
-        acceptString(WDLWorkUnitHandler.POSITIONAL_ARGS);
         acceptChar(Genotype.UNPHASED_ALLELE_SEPARATOR);
         acceptInt(TabixFormat.ZERO_BASED);
         acceptLevel(Level.DEBUG);
@@ -11508,7 +11705,6 @@ class ExternalDomainConstantArgumentResolution {
         acceptString(FastqConstants.SECOND_OF_PAIR);
         acceptElementKind(ElementKind.FIELD);
         acceptExportConfiguration(GenomicsDBExportConfiguration.ExportConfiguration);
-        acceptInt(ReadLikelihoodCalculationEngine.MAX_REPEAT_LENGTH);
         acceptString(ReservedTagConstants.PROGRAM_GROUP_ID);
         acceptString(ReservedTagConstants.READ_GROUP_ID);
         acceptBytes(SAMRecord.NULL_SEQUENCE);
@@ -11591,9 +11787,6 @@ class ExternalDomainConstantArgumentResolution {
             "accept_bytes_byte_array",
             "accept_int_int",
             "accept_string_string",
-            "accept_string_string",
-            "accept_int_int",
-            "accept_int_int",
             "accept_int_int",
             "accept_option_option",
             "accept_option_option",
@@ -11608,7 +11801,6 @@ class ExternalDomainConstantArgumentResolution {
             "accept_string_string",
             "accept_string_string",
             "accept_string_string",
-            "accept_double_double",
             "accept_double_double",
             "accept_boolean_boolean",
             "accept_char_char",
@@ -11660,7 +11852,6 @@ class ExternalDomainConstantArgumentResolution {
             "accept_deserialization_feature_deserialization_feature",
             "accept_jexl_missing_value_treatment_jexl_missing_value_treatment",
             "accept_jexl_missing_value_treatment_jexl_missing_value_treatment",
-            "accept_string_string",
             "accept_char_char",
             "accept_int_int",
             "accept_level_level",
@@ -11671,7 +11862,6 @@ class ExternalDomainConstantArgumentResolution {
             "accept_string_string",
             "accept_element_kind_element_kind",
             "accept_export_configuration_export_configuration",
-            "accept_int_int",
             "accept_string_string",
             "accept_string_string",
             "accept_bytes_byte_array",
@@ -12503,6 +12693,68 @@ class EnhancedForMapEntryValueConstructorResolution {
 }
 
 #[test]
+fn resolver_keeps_external_map_entry_receiver_type_in_enhanced_for() {
+    let parsed = parse_java_source(
+        r#"
+import htsjdk.variant.variantcontext.Allele;
+import java.util.List;
+import java.util.Map;
+
+class Haplotype {}
+
+class ExternalMapEntryReceiverResolution {
+    void run(Map<Allele, List<Haplotype>> alleleMapper) {
+        for (final Map.Entry<Allele, List<Haplotype>> allele : alleleMapper.entrySet()) {
+            allele.getKey();
+            allele.getValue();
+        }
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+
+    let get_key = resolved
+        .facts
+        .unresolved_target_facts
+        .iter()
+        .find(|fact| fact.target_name == "getKey")
+        .expect("getKey should remain an unresolved external API target");
+    assert_eq!(
+        get_key.receiver_type,
+        Some(JavaType::Named {
+            name: "Entry".to_string(),
+            args: vec![
+                JavaType::Named {
+                    name: "Allele".to_string(),
+                    args: Vec::new(),
+                },
+                JavaType::Named {
+                    name: "List".to_string(),
+                    args: vec![JavaType::Named {
+                        name: "Haplotype".to_string(),
+                        args: Vec::new(),
+                    }],
+                },
+            ],
+        })
+    );
+
+    let get_value = resolved
+        .facts
+        .unresolved_target_facts
+        .iter()
+        .find(|fact| fact.target_name == "getValue")
+        .expect("getValue should remain an unresolved external API target");
+    assert_eq!(get_value.receiver_type, get_key.receiver_type);
+}
+
+#[test]
 fn resolver_uses_enhanced_for_map_entry_value_type_in_multi_arg_constructor_overload() {
     let parsed = parse_java_source(
         r#"
@@ -12935,6 +13187,285 @@ class UppercaseSourceFieldArgumentResolution {
     };
 
     assert_eq!(call.rust_name, "accept_double");
+}
+
+#[test]
+fn resolver_uses_gatk_source_constant_field_types_before_external_fallbacks() {
+    let parsed = parse_java_source(
+        r#"
+class GATKConfig {
+    static final String CONFIG_FILE_VARIABLE_FILE_NAME = "gatk-config-file";
+}
+
+class ReferenceContext {
+    static final int UNINITIALIZED_REFERENCE_ID = -1;
+}
+
+class Slice {
+    static final int EMBEDDED_REFERENCE_ABSENT_CONTENT_ID = -1;
+}
+
+class ReadLikelihoodCalculationEngine {
+    static final int MAX_REPEAT_LENGTH = 20;
+    static final double DEFAULT_EXPECTED_ERROR_RATE_PER_BASE = 0.001;
+}
+
+class WDLWorkUnitHandler {
+    static final String POSITIONAL_ARGS = "positional";
+}
+
+class GatkSourceConstantArgumentResolution {
+    void acceptString(String value) {}
+    void acceptString(int value) {}
+
+    void acceptInt(int value) {}
+    void acceptInt(String value) {}
+
+    void acceptDouble(double value) {}
+    void acceptDouble(String value) {}
+
+    void run() {
+        acceptString(GATKConfig.CONFIG_FILE_VARIABLE_FILE_NAME);
+        acceptInt(ReferenceContext.UNINITIALIZED_REFERENCE_ID);
+        acceptInt(Slice.EMBEDDED_REFERENCE_ABSENT_CONTENT_ID);
+        acceptInt(ReadLikelihoodCalculationEngine.MAX_REPEAT_LENGTH);
+        acceptDouble(ReadLikelihoodCalculationEngine.DEFAULT_EXPECTED_ERROR_RATE_PER_BASE);
+        acceptString(WDLWorkUnitHandler.POSITIONAL_ARGS);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+
+    let unresolved_fields = resolved
+        .facts
+        .unresolved_target_facts
+        .iter()
+        .filter(|fact| fact.kind == UnresolvedTargetKind::FieldAccess)
+        .collect::<Vec<_>>();
+    assert!(
+        unresolved_fields.is_empty(),
+        "co-translated GATK source constants should resolve before fallback facts: {unresolved_fields:?}"
+    );
+
+    let body = resolved.program.types[5]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let resolved_calls = body
+        .statements
+        .iter()
+        .map(|stmt| match stmt {
+            Stmt::Expr(Expr::Call {
+                resolved: Some(call),
+                ..
+            }) => call.rust_name.as_str(),
+            other => panic!("expected resolved overload call, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolved_calls,
+        vec![
+            "accept_string_string",
+            "accept_int_int",
+            "accept_int_int",
+            "accept_int_int",
+            "accept_double_double",
+            "accept_string_string",
+        ]
+    );
+}
+
+#[test]
+fn resolver_uses_configured_field_facts_for_absent_source_constants() {
+    let parsed = parse_java_source(
+        r#"
+class GatkFactConstantArgumentResolution {
+    void acceptString(String value) {}
+    void acceptString(int value) {}
+
+    void acceptInt(int value) {}
+    void acceptInt(String value) {}
+
+    void acceptDouble(double value) {}
+    void acceptDouble(String value) {}
+
+    void run() {
+        acceptString(GATKConfig.CONFIG_FILE_VARIABLE_FILE_NAME);
+        acceptInt(ReferenceContext.UNINITIALIZED_REFERENCE_ID);
+        acceptDouble(ReadLikelihoodCalculationEngine.DEFAULT_EXPECTED_ERROR_RATE_PER_BASE);
+    }
+}
+"#,
+    );
+    let field_facts = parse_external_facts(
+        r#"
+field GATKConfig.CONFIG_FILE_VARIABLE_FILE_NAME String
+field ReferenceContext.UNINITIALIZED_REFERENCE_ID int
+field ReadLikelihoodCalculationEngine.DEFAULT_EXPECTED_ERROR_RATE_PER_BASE double
+"#,
+    );
+    assert!(
+        field_facts.diagnostics.is_empty(),
+        "{:?}",
+        field_facts.diagnostics
+    );
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &field_facts.facts,
+    );
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+
+    let unresolved_fields = resolved
+        .facts
+        .unresolved_target_facts
+        .iter()
+        .filter(|fact| fact.kind == UnresolvedTargetKind::FieldAccess)
+        .collect::<Vec<_>>();
+    assert!(
+        unresolved_fields.is_empty(),
+        "configured source-summary field facts should explain absent helper constants before unresolved external field fallback: {unresolved_fields:?}"
+    );
+
+    let body = resolved.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let resolved_calls = body
+        .statements
+        .iter()
+        .map(|stmt| match stmt {
+            Stmt::Expr(Expr::Call {
+                resolved: Some(call),
+                ..
+            }) => call.rust_name.as_str(),
+            other => panic!("expected resolved overload call, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolved_calls,
+        vec![
+            "accept_string_string",
+            "accept_int_int",
+            "accept_double_double",
+        ]
+    );
+}
+
+#[test]
+fn resolver_threads_configured_field_facts_through_nested_expressions() {
+    let parsed = parse_java_source(
+        r#"
+class GatkFactConstantNestedResolution {
+    void acceptInt(int value) {}
+    void acceptInt(String value) {}
+
+    void acceptString(String value) {}
+    void acceptString(int value) {}
+
+    void acceptHolder(HelperHolder value) {}
+    void acceptHolder(String value) {}
+
+    void run(boolean choose) {
+        acceptInt(SummaryConstants.MAX_COUNT);
+        acceptInt(choose ? SummaryConstants.MAX_COUNT : 7);
+        acceptInt(SummaryConstants.COUNTS[0]);
+        acceptString(choose ? SummaryConstants.DEFAULT_NAME : "fallback");
+        acceptString(SummaryConstants.NAMES[0]);
+        acceptString(SummaryConstants.HOLDER.name);
+        acceptHolder(SummaryConstants.HOLDER);
+    }
+}
+"#,
+    );
+    let field_facts = parse_external_facts(
+        r#"
+field SummaryConstants.MAX_COUNT int
+field SummaryConstants.COUNTS int[]
+field SummaryConstants.DEFAULT_NAME String
+field SummaryConstants.NAMES String[]
+field SummaryConstants.HOLDER HelperHolder
+field HelperHolder.name String
+"#,
+    );
+    assert!(
+        field_facts.diagnostics.is_empty(),
+        "{:?}",
+        field_facts.diagnostics
+    );
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &field_facts.facts,
+    );
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+
+    let unresolved_fields = resolved
+        .facts
+        .unresolved_target_facts
+        .iter()
+        .filter(|fact| fact.kind == UnresolvedTargetKind::FieldAccess)
+        .collect::<Vec<_>>();
+    assert!(
+        unresolved_fields.is_empty(),
+        "configured source-summary field facts must stay active through nested resolver inference: {unresolved_fields:?}"
+    );
+
+    let body = resolved.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let resolved_calls = body
+        .statements
+        .iter()
+        .map(|stmt| match stmt {
+            Stmt::Expr(Expr::Call {
+                resolved: Some(call),
+                ..
+            }) => call.rust_name.as_str(),
+            other => panic!("expected resolved overload call, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resolved_calls,
+        vec![
+            "accept_int_int",
+            "accept_int_int",
+            "accept_int_int",
+            "accept_string_string",
+            "accept_string_string",
+            "accept_string_string",
+            "accept_holder_helper_holder",
+        ]
+    );
 }
 
 #[test]
@@ -13606,6 +14137,37 @@ class SecondAmbiguousCall {
     assert!(rendered.contains("top_resolver_diagnostic_files"));
     assert!(rendered.contains("AmbiguousCall.java"));
     assert!(rendered.contains("SecondAmbiguousCall.java"));
+}
+
+#[test]
+fn resolver_benchmark_reports_semantic_diagnostic_summaries() {
+    let root = std::env::temp_dir().join(format!(
+        "new_java2rust_semantic_benchmark_diagnostics_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("UnsupportedExternal.java"),
+        r#"
+class UnsupportedExternal {
+    void run(VariantContext variant) {
+        variant.fullyDecode(null, false);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let report = benchmark_java_resolver_dir(&root).unwrap();
+    let rendered = render_resolver_benchmark_report(&report);
+    std::fs::remove_dir_all(&root).unwrap();
+
+    assert!(report.semantic_diagnostics > 0, "{rendered}");
+    assert!(rendered.contains("top_semantic_diagnostics"));
+    assert!(rendered.contains("external_pack_unsupported_api"));
+    assert!(rendered.contains("top_semantic_diagnostic_files"));
+    assert!(rendered.contains("UnsupportedExternal.java"));
 }
 
 fn first_return_expr(ty: &new_java2rust::java_ir::TypeDecl) -> Option<&Expr> {

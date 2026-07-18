@@ -774,7 +774,7 @@ class AnonymousConstructorUse {
 }
 
 #[test]
-fn tuple_like_external_constructor_facts_are_builtin_models() {
+fn tuple_like_external_constructor_facts_keep_dependency_tuples_pack_owned() {
     let parsed = parser::parse_java_source(
         r#"
 class TupleLikeConstructorUse {
@@ -796,31 +796,32 @@ class TupleLikeConstructorUse {
         &new_java2rust::facts::FactSet::default(),
     );
 
-    for type_name in ["Pair", "ImmutablePair", "MutablePair", "Tuple2"] {
+    for (type_name, arity, owner) in [
+        ("Pair", 2, "Apache Commons Lang"),
+        ("ImmutablePair", 2, "Apache Commons Lang"),
+        ("MutablePair", 2, "Apache Commons Lang"),
+        ("ImmutableTriple", 3, "Apache Commons Lang"),
+        ("Tuple2", 2, "Scala tuple"),
+        ("Tuple3", 3, "Scala tuple"),
+    ] {
         let fact = semantic
             .facts
             .external_constructor_facts
             .iter()
-            .find(|fact| fact.type_name == type_name && fact.arg_types.len() == 2)
-            .unwrap_or_else(|| panic!("expected external constructor fact for {type_name}/2"));
+            .find(|fact| fact.type_name == type_name && fact.arg_types.len() == arity)
+            .unwrap_or_else(|| {
+                panic!("expected external constructor fact for {type_name}/{arity}")
+            });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/2 constructor should be an audited tuple-like external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arity} constructor should be owned by the {owner} pack"
         );
-    }
-
-    for type_name in ["Tuple3", "ImmutableTriple"] {
-        let fact = semantic
-            .facts
-            .external_constructor_facts
-            .iter()
-            .find(|fact| fact.type_name == type_name && fact.arg_types.len() == 3)
-            .unwrap_or_else(|| panic!("expected external constructor fact for {type_name}/3"));
+        let args = vec![JavaType::Unknown("arg".to_string()); arity];
         assert_eq!(
-            fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/3 constructor should be an audited tuple-like external model"
+            new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
+            FactProvenance::ConservativeFallback,
+            "{type_name}/{arity} precision should come from the {owner} pack, not stdlib"
         );
     }
 }
@@ -835,6 +836,7 @@ class JdkConstructorUse {
         HashMap<String, Integer> counts = new HashMap<>();
         Properties properties = new Properties();
         URI uri = new URI(path);
+        URL url = new URL(path);
         ProcessBuilder processBuilder = new ProcessBuilder(names);
         IllegalArgumentException bad = new IllegalArgumentException(message, cause);
         NoSuchElementException missing = new NoSuchElementException(message);
@@ -898,6 +900,7 @@ class JdkConstructorUse {
         ),
         ("Properties", Vec::new()),
         ("URI", vec![JavaType::String]),
+        ("URL", vec![JavaType::String]),
         (
             "ProcessBuilder",
             vec![JavaType::Named {
@@ -1181,46 +1184,39 @@ class HtsjdkConstructorUse {
         ("Cigar", 1),
         ("VariantContextComparator", 1),
         ("SeekableBufferedStream", 1),
-        ("BAMRecordCodec", 1),
-        ("BlockCompressedInputStream", 1),
-        ("BlockCompressedInputStream", 2),
-        ("BAMIndexer", 2),
-        ("BCF2Codec", 0),
-        ("FeatureCodecHeader", 2),
+        ("SeekablePathStream", 1),
+        ("BinaryCodec", 0),
+        ("BinaryCodec", 1),
         ("BufferedLineReader", 1),
         ("AsciiLineReaderIterator", 1),
         ("LineIteratorImpl", 1),
         ("SynchronousLineReader", 1),
+        ("FeatureCodecHeader", 2),
+        ("CodecLineParsingException", 1),
         ("FilteringSamIterator", 2),
+        ("SAMTextHeaderCodec", 0),
+        ("SAMFormatException", 1),
         ("FastaSequenceFile", 2),
+        ("IndexedFastaSequenceFile", 1),
+        ("ReferenceSequence", 3),
+        ("FastaReferenceWriterBuilder", 0),
         ("BlockCompressedOutputStream", 2),
         ("BlockCompressedOutputStream", 3),
-        ("BinaryCodec", 0),
-        ("BinaryCodec", 1),
-        ("SAMTextHeaderCodec", 0),
-        ("MetricsFile", 0),
-        ("DefaultSAMRecordFactory", 0),
-        ("ComponentMethods", 0),
-        ("CramContainerIterator", 1),
-        ("Container", 3),
-        ("SAMRecordCoordinateComparator", 0),
-        ("SAMRecordQueryNameComparator", 0),
-        ("SAMProgramRecord", 1),
-        ("SAMFormatException", 1),
-        ("SBIIndexWriter", 2),
-        ("CRAMReferenceRegion", 2),
         ("DefaultingMap", 2),
-        ("SAMRecord", 1),
-        ("SAMFileWriterFactory", 0),
-        ("IndexedFastaSequenceFile", 1),
+        ("Lazy", 1),
         ("SamFileHeaderMerger", 3),
         ("MergingSamRecordIterator", 3),
-        ("Lazy", 1),
-        ("ReferenceSequence", 3),
-        ("CodecLineParsingException", 1),
-        ("FastaReferenceWriterBuilder", 0),
         ("Gff3BaseData", 9),
-        ("SeekablePathStream", 1),
+        ("SAMFileWriterFactory", 0),
+        ("BAMRecordCodec", 1),
+        ("BAMIndexer", 2),
+        ("SBIIndexWriter", 2),
+        ("CramContainerIterator", 1),
+        ("Container", 3),
+        ("CRAMReferenceRegion", 2),
+        ("BCF2Codec", 0),
+        ("MetricsFile", 0),
+        ("ComponentMethods", 0),
     ] {
         let fact = semantic
             .facts
@@ -1232,8 +1228,50 @@ class HtsjdkConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited HTSJDK external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be owned by an HTSJDK external pack"
+        );
+    }
+
+    let program_record = semantic
+        .facts
+        .external_constructor_facts
+        .iter()
+        .find(|fact| fact.type_name == "SAMProgramRecord" && fact.arg_types.len() == 1)
+        .unwrap_or_else(|| panic!("expected external constructor fact for SAMProgramRecord/1"));
+    assert_eq!(
+        program_record.provenance,
+        FactProvenance::ExternalLibraryPack,
+        "SAMProgramRecord/1 constructor should be owned by the SAM header external pack"
+    );
+
+    let sam_record = semantic
+        .facts
+        .external_constructor_facts
+        .iter()
+        .find(|fact| fact.type_name == "SAMRecord" && fact.arg_types.len() == 1)
+        .unwrap_or_else(|| panic!("expected external constructor fact for SAMRecord/1"));
+    assert_eq!(
+        sam_record.provenance,
+        FactProvenance::ExternalLibraryPack,
+        "SAMRecord/1 constructor should be owned by the SAM record external pack"
+    );
+
+    for type_name in [
+        "DefaultSAMRecordFactory",
+        "SAMRecordCoordinateComparator",
+        "SAMRecordQueryNameComparator",
+    ] {
+        let fact = semantic
+            .facts
+            .external_constructor_facts
+            .iter()
+            .find(|fact| fact.type_name == type_name && fact.arg_types.is_empty())
+            .unwrap_or_else(|| panic!("expected external constructor fact for {type_name}/0"));
+        assert_eq!(
+            fact.provenance,
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/0 constructor should be owned by the SAM record external pack"
         );
     }
 
@@ -1289,7 +1327,7 @@ class HtsjdkConstructorUse {
 }
 
 #[test]
-fn apache_commons_collections_constructor_facts_are_builtin_models() {
+fn apache_commons_collections_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class ApacheCommonsCollectionsConstructorUse {
@@ -1325,14 +1363,14 @@ class ApacheCommonsCollectionsConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} constructor should be an audited Apache Commons Collections external model"
         );
     }
 }
 
 #[test]
-fn apache_commons_compress_constructor_facts_are_builtin_models() {
+fn apache_commons_compress_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class ApacheCommonsCompressConstructorUse {
@@ -1376,14 +1414,14 @@ class ApacheCommonsCompressConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} constructor should be an audited Apache Commons Compress external model"
         );
     }
 }
 
 #[test]
-fn apache_commons_lang_builder_constructor_facts_are_builtin_models() {
+fn apache_commons_lang_builder_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class ApacheCommonsLangBuilderConstructorUse {
@@ -1421,14 +1459,14 @@ class ApacheCommonsLangBuilderConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} constructor should be an audited Apache Commons Lang external model"
         );
     }
 }
 
 #[test]
-fn apache_commons_external_constructor_facts_are_builtin_models() {
+fn apache_commons_external_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class ApacheCommonsConstructorUse {
@@ -1503,8 +1541,6 @@ class ApacheCommonsConstructorUse {
         ("SingularValueDecomposition", 1),
         ("StandardDeviation", 0),
         ("TDistribution", 2),
-        ("Percentile", 0),
-        ("Percentile", 1),
     ] {
         let fact = semantic
             .facts
@@ -1516,14 +1552,29 @@ class ApacheCommonsConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited Apache Commons external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be an audited Apache Commons external pack model"
+        );
+    }
+    for (type_name, arg_len) in [("Percentile", 0), ("Percentile", 1)] {
+        let fact = semantic
+            .facts
+            .external_constructor_facts
+            .iter()
+            .find(|fact| fact.type_name == type_name && fact.arg_types.len() == arg_len)
+            .unwrap_or_else(|| {
+                panic!("expected external constructor fact for {type_name}/{arg_len}")
+            });
+        assert_eq!(
+            fact.provenance,
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be owned by the Apache Commons stats pack"
         );
     }
 }
 
 #[test]
-fn hipparchus_constructor_facts_are_builtin_models() {
+fn hipparchus_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class HipparchusConstructorUse {
@@ -1550,13 +1601,13 @@ class HipparchusConstructorUse {
         });
     assert_eq!(
         fact.provenance,
-        FactProvenance::BuiltinExternalModel,
+        FactProvenance::ExternalLibraryPack,
         "EmpiricalDistribution/0 constructor should be an audited Hipparchus external model"
     );
 }
 
 #[test]
-fn fastutil_constructor_facts_are_builtin_models() {
+fn fastutil_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class FastutilConstructorUse {
@@ -1598,14 +1649,14 @@ class FastutilConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited fastutil external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be an audited fastutil external pack model"
         );
     }
 }
 
 #[test]
-fn json_constructor_facts_are_builtin_models() {
+fn json_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class JsonConstructorUse {
@@ -1643,14 +1694,14 @@ class JsonConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited JSON external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be an audited JSON external pack model"
         );
     }
 }
 
 #[test]
-fn intel_gkl_constructor_facts_are_builtin_models() {
+fn intel_gkl_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class IntelGklConstructorUse {
@@ -1686,14 +1737,14 @@ class IntelGklConstructorUse {
             .unwrap_or_else(|| panic!("expected external constructor fact for {type_name}/0"));
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/0 constructor should be an audited Intel GKL external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/0 constructor should be owned by the Intel GKL pack"
         );
     }
 }
 
 #[test]
-fn jama_matrix_constructor_facts_are_builtin_models() {
+fn jama_matrix_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class JamaMatrixConstructorUse {
@@ -1720,14 +1771,14 @@ class JamaMatrixConstructorUse {
             .unwrap_or_else(|| panic!("expected external constructor fact for Matrix/{arg_len}"));
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
+            FactProvenance::ExternalLibraryPack,
             "Matrix/{arg_len} constructor should be an audited Jama external model"
         );
     }
 }
 
 #[test]
-fn picard_constructor_facts_are_builtin_models() {
+fn picard_constructor_facts_have_family_specific_provenance() {
     let parsed = parser::parse_java_source(
         r#"
 class PicardConstructorUse {
@@ -1753,17 +1804,25 @@ class PicardConstructorUse {
         &new_java2rust::facts::FactSet::default(),
     );
 
-    for (type_name, arg_len) in [
+    for (type_name, arg_len, provenance) in [
         ("OpticalDuplicateFinder", 0),
         ("OpticalDuplicateFinder", 3),
         ("GenotypeConcordanceCounts", 0),
         ("GenotypeConcordanceSummaryMetrics", 5),
-        ("DiagnosticsAndQCProgramGroup", 0),
-        ("IntervalsManipulationProgramGroup", 0),
-        ("OtherProgramGroup", 0),
-        ("ReadDataManipulationProgramGroup", 0),
-        ("ReferenceProgramGroup", 0),
-    ] {
+    ]
+    .into_iter()
+    .map(|(type_name, arg_len)| (type_name, arg_len, FactProvenance::ExternalLibraryPack))
+    .chain(
+        [
+            ("DiagnosticsAndQCProgramGroup", 0),
+            ("IntervalsManipulationProgramGroup", 0),
+            ("OtherProgramGroup", 0),
+            ("ReadDataManipulationProgramGroup", 0),
+            ("ReferenceProgramGroup", 0),
+        ]
+        .into_iter()
+        .map(|(type_name, arg_len)| (type_name, arg_len, FactProvenance::ExternalLibraryPack)),
+    ) {
         let fact = semantic
             .facts
             .external_constructor_facts
@@ -1773,15 +1832,14 @@ class PicardConstructorUse {
                 panic!("expected external constructor fact for {type_name}/{arg_len}")
             });
         assert_eq!(
-            fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited Picard external model"
+            fact.provenance, provenance,
+            "{type_name}/{arg_len} constructor should have the expected Picard family provenance"
         );
     }
 }
 
 #[test]
-fn disq_constructor_facts_are_builtin_models() {
+fn disq_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class DisqConstructorUse {
@@ -1814,14 +1872,14 @@ class DisqConstructorUse {
             .unwrap_or_else(|| panic!("expected external constructor fact for {type_name}/2"));
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/2 constructor should be an audited Disq external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/2 constructor should be owned by the DISQ pack"
         );
     }
 }
 
 #[test]
-fn broad_http_constructor_facts_are_builtin_models() {
+fn broad_http_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class BroadHttpConstructorUse {
@@ -1851,13 +1909,13 @@ class BroadHttpConstructorUse {
         });
     assert_eq!(
         fact.provenance,
-        FactProvenance::BuiltinExternalModel,
-        "HttpFileSystemProviderSettings/3 constructor should be an audited Broad HTTP external model"
+        FactProvenance::ExternalLibraryPack,
+        "HttpFileSystemProviderSettings/3 constructor should be an audited Broad HTTP external-pack model"
     );
 }
 
 #[test]
-fn barclay_command_line_exception_constructor_facts_are_builtin_models() {
+fn barclay_command_line_exception_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class BarclayCommandLineExceptionConstructorUse {
@@ -1893,14 +1951,14 @@ class BarclayCommandLineExceptionConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited Barclay external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be owned by the Barclay argparser pack"
         );
     }
 }
 
 #[test]
-fn barclay_reflection_helper_constructor_facts_are_builtin_models() {
+fn barclay_reflection_helper_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class BarclayReflectionHelperConstructorUse {
@@ -1929,8 +1987,8 @@ class BarclayReflectionHelperConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited Barclay external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be owned by a Barclay external pack"
         );
     }
 }
@@ -1974,7 +2032,7 @@ class Hdf5ConstructorUse {
 }
 
 #[test]
-fn opencsv_external_constructor_facts_are_builtin_models() {
+fn opencsv_external_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class OpenCsvConstructorUse {
@@ -2010,14 +2068,14 @@ class OpenCsvConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited OpenCSV external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be an audited OpenCSV pack model"
         );
     }
 }
 
 #[test]
-fn hadoop_configuration_constructor_facts_are_builtin_models() {
+fn hadoop_configuration_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class HadoopConfigurationConstructorUse {
@@ -2042,13 +2100,13 @@ class HadoopConfigurationConstructorUse {
         .unwrap_or_else(|| panic!("expected external constructor fact for Configuration/0"));
     assert_eq!(
         fact.provenance,
-        FactProvenance::BuiltinExternalModel,
-        "Configuration/0 constructor should be an audited Hadoop external model"
+        FactProvenance::ExternalLibraryPack,
+        "Configuration/0 constructor should be an audited Hadoop conf pack model"
     );
 }
 
 #[test]
-fn apache_commons_configuration_constructor_facts_are_builtin_models() {
+fn apache_commons_configuration_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class ApacheCommonsConfigurationConstructorUse {
@@ -2073,8 +2131,8 @@ class ApacheCommonsConfigurationConstructorUse {
         .unwrap_or_else(|| panic!("expected external constructor fact for Configurations/0"));
     assert_eq!(
         fact.provenance,
-        FactProvenance::BuiltinExternalModel,
-        "Configurations/0 constructor should be an audited Apache Commons Configuration external model"
+        FactProvenance::ExternalLibraryPack,
+        "Configurations/0 constructor should be an audited Apache Commons Configuration pack model"
     );
 }
 
@@ -2110,7 +2168,7 @@ class SqliteConstructorUse {
 }
 
 #[test]
-fn spark_constructor_facts_are_builtin_models() {
+fn spark_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class SparkConstructorUse {
@@ -2150,14 +2208,14 @@ class SparkConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited Spark external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be an audited Spark pack model"
         );
     }
 }
 
 #[test]
-fn guava_constructor_facts_are_builtin_models() {
+fn guava_concurrent_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class GuavaConstructorUse {
@@ -2182,13 +2240,13 @@ class GuavaConstructorUse {
         .unwrap_or_else(|| panic!("expected external constructor fact for ThreadFactoryBuilder/0"));
     assert_eq!(
         fact.provenance,
-        FactProvenance::BuiltinExternalModel,
-        "ThreadFactoryBuilder/0 constructor should be an audited Guava external model"
+        FactProvenance::ExternalLibraryPack,
+        "ThreadFactoryBuilder/0 constructor should be owned by the Guava concurrent pack"
     );
 }
 
 #[test]
-fn reflections_constructor_facts_are_builtin_models() {
+fn reflections_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class ReflectionsConstructorUse {
@@ -2213,13 +2271,13 @@ class ReflectionsConstructorUse {
         .unwrap_or_else(|| panic!("expected external constructor fact for Reflections/1"));
     assert_eq!(
         fact.provenance,
-        FactProvenance::BuiltinExternalModel,
-        "Reflections/1 constructor should be an audited Reflections external model"
+        FactProvenance::ExternalLibraryPack,
+        "Reflections/1 constructor should be an audited Reflections external pack model"
     );
 }
 
 #[test]
-fn apache_http_constructor_facts_are_builtin_models() {
+fn apache_http_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class ApacheHttpConstructorUse {
@@ -2248,14 +2306,14 @@ class ApacheHttpConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} constructor should be an audited Apache HTTP external model"
         );
     }
 }
 
 #[test]
-fn kryo_serializer_constructor_facts_are_builtin_models() {
+fn kryo_serializer_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class KryoSerializerConstructorUse {
@@ -2293,8 +2351,8 @@ class KryoSerializerConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited Kryo external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be an audited Kryo pack model"
         );
     }
 }
@@ -2336,14 +2394,14 @@ class GenomicsDbReaderConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited GenomicsDB external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be owned by the GenomicsDB external pack"
         );
     }
 }
 
 #[test]
-fn avro_constructor_facts_are_builtin_models() {
+fn avro_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class AvroConstructorUse {
@@ -2368,13 +2426,13 @@ class AvroConstructorUse {
         .unwrap_or_else(|| panic!("expected external constructor fact for GenericDatumReader/1"));
     assert_eq!(
         fact.provenance,
-        FactProvenance::BuiltinExternalModel,
-        "GenericDatumReader/1 constructor should be an audited Avro external model"
+        FactProvenance::ExternalLibraryPack,
+        "GenericDatumReader/1 constructor should be owned by the Avro external pack"
     );
 }
 
 #[test]
-fn bwa_native_wrapper_constructor_facts_are_builtin_models() {
+fn bwa_native_wrapper_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class BwaNativeWrapperConstructorUse {
@@ -2403,14 +2461,14 @@ class BwaNativeWrapperConstructorUse {
             });
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name}/{arg_len} constructor should be an audited BWA native-wrapper external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}/{arg_len} constructor should be an audited BWA native-wrapper pack model"
         );
     }
 }
 
 #[test]
-fn jgrapht_algorithm_constructor_facts_are_builtin_models() {
+fn jgrapht_algorithm_constructor_facts_are_external_pack_models() {
     let parsed = parser::parse_java_source(
         r#"
 class JGraphTAlgorithmConstructorUse {
@@ -2455,8 +2513,8 @@ class JGraphTAlgorithmConstructorUse {
             .unwrap_or_else(|| panic!("expected external constructor fact for {type_name}"));
         assert_eq!(
             fact.provenance,
-            FactProvenance::BuiltinExternalModel,
-            "{type_name} constructor should be an audited JGraphT external model"
+            FactProvenance::ExternalLibraryPack,
+            "{type_name} constructor should be an audited JGraphT external pack model"
         );
     }
 
@@ -2468,8 +2526,8 @@ class JGraphTAlgorithmConstructorUse {
         .unwrap_or_else(|| panic!("expected external constructor fact for DOTExporter/5"));
     assert_eq!(
         dot_exporter.provenance,
-        FactProvenance::BuiltinExternalModel,
-        "DOTExporter/5 constructor should be an audited JGraphT external model"
+        FactProvenance::ExternalLibraryPack,
+        "DOTExporter/5 constructor should be an audited JGraphT external pack model"
     );
 }
 
@@ -2522,6 +2580,48 @@ class LocalBox {
             .facts
             .external_field_for("LocalBox", "missingCount")
             .is_none()
+    );
+}
+
+#[test]
+fn parsed_field_facts_preserve_source_summary_constant_types() {
+    let parsed = parser::parse_java_source(
+        r#"
+class SourceSummaryConstantUse {
+    String read() {
+        return GATKConfig.CONFIG_FILE_VARIABLE_FILE_NAME;
+    }
+}
+"#,
+    );
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let external = external_facts::parse_external_facts(
+        "field GATKConfig.CONFIG_FILE_VARIABLE_FILE_NAME String\n",
+    );
+    assert!(
+        external.diagnostics.is_empty(),
+        "{:?}",
+        external.diagnostics
+    );
+    let semantic =
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &external.facts);
+
+    let config = semantic
+        .facts
+        .external_field_for("GATKConfig", "CONFIG_FILE_VARIABLE_FILE_NAME")
+        .expect("source-summary field fact should be preserved");
+    assert_eq!(config.provenance, FactProvenance::UserOverride);
+    assert_eq!(config.field_type, Some(JavaType::String));
+    assert_eq!(
+        semantic
+            .facts
+            .external_field_facts
+            .iter()
+            .filter(|fact| fact.field.type_name == "GATKConfig"
+                && fact.field.field_name == "CONFIG_FILE_VARIABLE_FILE_NAME")
+            .count(),
+        1,
+        "semantic analysis should not add a conservative duplicate for parsed field facts"
     );
 }
 
@@ -2597,9 +2697,7 @@ class KnownExternalFieldConstantUse {
         String reservedTag = ReservedTagConstants.XT;
         byte[] validBases = SequenceUtil.VALID_BASES_UPPER;
         int fixedBlockSize = BAMFileConstants.FIXED_BLOCK_SIZE;
-        String configFile = GATKConfig.CONFIG_FILE_VARIABLE_FILE_NAME;
         String cloudScheme = CloudStorageFileSystem.URI_SCHEME;
-        int uninitializedReferenceId = ReferenceContext.UNINITIALIZED_REFERENCE_ID;
         Object binaryTagValue = SAMBinaryTagAndValue.value;
         byte[] readBases = ReadDataHolder.readBases;
         byte[] readQuals = ReadDataHolder.readQuals;
@@ -2631,98 +2729,23 @@ class KnownExternalFieldConstantUse {
         ("ArrayUtils", "EMPTY_BYTE_ARRAY"),
         ("ArrayUtils", "EMPTY_INT_ARRAY"),
         ("ByteOrder", "BIG_ENDIAN"),
-        ("SAMRecord", "NO_ALIGNMENT_CIGAR"),
-        ("SAMRecord", "NO_ALIGNMENT_START"),
-        ("SAMRecord", "NO_ALIGNMENT_REFERENCE_INDEX"),
-        ("SAMRecord", "NO_ALIGNMENT_REFERENCE_NAME"),
-        ("SAMRecord", "UNKNOWN_MAPPING_QUALITY"),
-        ("Allele", "NO_CALL"),
-        ("Allele", "SV_SIMPLE_DEL"),
-        ("Allele", "SV_SIMPLE_DUP"),
-        ("OpenMode", "CREATE"),
-        ("LogLevel", "DEBUG"),
-        ("SortOrder", "coordinate"),
-        ("SortOrder", "unsorted"),
         ("Collections", "EMPTY_LIST"),
         ("Collections", "EMPTY_SET"),
         ("Collections", "EMPTY_MAP"),
-        ("CigarOperator", "MATCH_OR_MISMATCH"),
         ("VCFHeaderLineType", "String"),
         ("VCFHeaderLineType", "Integer"),
         ("VCFHeaderLineCount", "A"),
         ("VCFHeaderLineCount", "UNBOUNDED"),
         ("GenotypeType", "HET"),
         ("Strand", "POSITIVE"),
-        ("GenotypeConcordanceStates", "CallState"),
-        ("CallState", "HOM_REF"),
-        ("GenotypeConcordanceStates", "TruthState"),
-        ("TruthState", "NO_CALL"),
-        ("VariantContext", "Type"),
-        ("Type", "INDEL"),
         ("SAMFlag", "SECONDARY_ALIGNMENT"),
         ("VCFHeaderVersion", "VCF4_2"),
-        ("MarkDuplicates", "DuplicateTaggingPolicy"),
-        ("DuplicateTaggingPolicy", "DontTag"),
-        ("BlockCompressedStreamConstants", "BLOCK_HEADER_LENGTH"),
-        ("VCFConstants", "PASSES_FILTERS_v4"),
-        ("VCFConstants", "GENOTYPE_ALLELE_DEPTHS"),
-        ("VCFConstants", "SVTYPE"),
-        ("VCFConstants", "UNFILTERED"),
-        ("VCFConstants", "MISSING_VALUE_v4"),
-        ("VCFConstants", "INFO_FIELD_ARRAY_SEPARATOR_CHAR"),
-        ("VCFConstants", "MAX_GENOTYPE_QUAL"),
-        (
-            "GenotypeLikelihoods",
-            "MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED",
-        ),
-        ("CommonInfo", "NO_LOG10_PERROR"),
-        ("BlockCompressedStreamConstants", "EMPTY_GZIP_BLOCK"),
-        ("BlockCompressedStreamConstants", "BLOCK_LENGTH_OFFSET"),
-        ("SAMUtils", "MAX_PHRED_SCORE"),
-        ("SAMSequenceRecord", "UNKNOWN_SEQUENCE_LENGTH"),
-        ("SAMRecord", "NO_MAPPING_QUALITY"),
-        ("SAMRecord", "NULL_QUALS"),
-        ("SAMRecord", "NULL_QUALS_STRING"),
-        ("TemplateProperties", "ARGUMENTS_POSITIONAL"),
-        ("TemplateProperties", "ARGUMENT_DEFAULT_VALUE"),
-        ("TemplateProperties", "ARGUMENT_TYPE"),
-        ("ReadsFormatWriteOption", "BAM"),
-        ("GenotypeConcordanceSummaryMetrics", "GENOTYPE_CONCORDANCE"),
-        ("GenotypeConcordanceSummaryMetrics", "HET_PPV"),
-        ("GenotypeConcordanceSummaryMetrics", "VAR_SPECIFICITY"),
-        ("VCFHeader", "HEADER_FIELDS"),
         ("HEADER_FIELDS", "INFO"),
-        ("VCFHeader", "REFERENCE_KEY"),
         ("TimeUnit", "SECONDS"),
-        ("VariantContextWriterBuilder", "OutputType"),
-        ("ReservedTagConstants", "XT"),
-        ("SequenceUtil", "VALID_BASES_UPPER"),
-        ("BAMFileConstants", "FIXED_BLOCK_SIZE"),
-        ("GATKConfig", "CONFIG_FILE_VARIABLE_FILE_NAME"),
-        ("CloudStorageFileSystem", "URI_SCHEME"),
-        ("ReferenceContext", "UNINITIALIZED_REFERENCE_ID"),
-        ("SamPairUtil", "PairOrientation"),
-        ("PairOrientation", "FR"),
         ("Options", "INDEX_ON_THE_FLY"),
         ("Options", "DO_NOT_WRITE_GENOTYPES"),
         ("SWOverhangStrategy", "INDEL"),
         ("SWOverhangStrategy", "SOFTCLIP"),
-        ("JexlVCMatchExp", "name"),
-        ("SAMTagAndValue", "tag"),
-        ("SAMTagAndValue", "value"),
-        ("SAMBinaryTagAndValue", "value"),
-        ("BatchCompletionCallbackFunctionArgument", "batchCount"),
-        ("BatchCompletionCallbackFunctionArgument", "totalBatchCount"),
-        ("ReadDataHolder", "readBases"),
-        ("ReadDataHolder", "readQuals"),
-        ("ReadDataHolder", "insertionGOP"),
-        ("ReadDataHolder", "deletionGOP"),
-        ("ReadDataHolder", "overallGCP"),
-        ("HaplotypeDataHolder", "haplotypeBases"),
-        ("PDHMMNativeArguments", "avxLevel"),
-        ("PDHMMNativeArguments", "openMPSetting"),
-        ("Coordinates", "GenomicsDBColumn"),
-        ("Coordinates", "ContigPosition"),
     ] {
         if let Some(fact) = semantic.facts.external_field_for(type_name, field_name) {
             assert_eq!(
@@ -2731,6 +2754,136 @@ class KnownExternalFieldConstantUse {
                 "known external field {type_name}.{field_name} should not use conservative fallback"
             );
         }
+    }
+
+    let sam_header_facts = new_java2rust::external_packs::htsjdk_sam_header_pack_facts();
+    let unknown_sequence_length = sam_header_facts
+        .external_field_for("SAMSequenceRecord", "UNKNOWN_SEQUENCE_LENGTH")
+        .expect("SAM sequence length sentinel should be explained by the SAM header pack");
+    assert_eq!(
+        unknown_sequence_length.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        unknown_sequence_length.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+
+    let hdf5_facts = new_java2rust::external_packs::hdf5_pack_facts();
+    let create_mode = hdf5_facts
+        .external_field_for("OpenMode", "CREATE")
+        .expect("HDF5 open mode should be explained by the HDF5 pack");
+    assert_eq!(create_mode.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(
+        create_mode.field_type,
+        Some(JavaType::Named {
+            name: "OpenMode".to_string(),
+            args: Vec::new(),
+        })
+    );
+
+    let disq_facts = new_java2rust::external_packs::disq_write_pack_facts();
+    for (type_name, field_name) in [
+        ("ReadsFormatWriteOption", "BAM"),
+        ("FileCardinalityWriteOption", "MULTIPLE"),
+        ("FileCardinalityWriteOption", "SINGLE"),
+    ] {
+        let field = disq_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| panic!("{type_name}.{field_name} should be explained by DISQ"));
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+    }
+
+    let intel_gkl_facts = new_java2rust::external_packs::intel_gkl_pack_facts();
+    for (type_name, field_name, expected_ty) in [
+        (
+            "PDHMMNativeArguments",
+            "avxLevel",
+            JavaType::Named {
+                name: "AVXLevel".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "PDHMMNativeArguments",
+            "openMPSetting",
+            JavaType::Named {
+                name: "OpenMPSetting".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "PDHMMNativeArguments",
+            "maxNumberOfThreads",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "PairHMMNativeArguments",
+            "maxNumberOfThreads",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "PairHMMNativeArguments",
+            "useDoublePrecision",
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        (
+            "ReadDataHolder",
+            "readBases",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+        (
+            "ReadDataHolder",
+            "readQuals",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+        (
+            "ReadDataHolder",
+            "insertionGOP",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+        (
+            "ReadDataHolder",
+            "deletionGOP",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+        (
+            "ReadDataHolder",
+            "overallGCP",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+        (
+            "HaplotypeDataHolder",
+            "haplotypeBases",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+        (
+            "HaplotypeDataHolder",
+            "haplotypePDBases",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+        (
+            "BatchCompletionCallbackFunctionArgument",
+            "batchCount",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "BatchCompletionCallbackFunctionArgument",
+            "totalBatchCount",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "SWNativeAlignerResult",
+            "alignment_offset",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        ("SWNativeAlignerResult", "cigar", JavaType::String),
+    ] {
+        let field = intel_gkl_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| panic!("{type_name}.{field_name} should be explained by GKL"));
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
     }
 }
 
@@ -2745,96 +2898,21 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         ("ArrayUtils", "EMPTY_BYTE_ARRAY"),
         ("ArrayUtils", "EMPTY_INT_ARRAY"),
         ("ByteOrder", "LITTLE_ENDIAN"),
-        ("SAMRecord", "NO_ALIGNMENT_CIGAR"),
-        ("SAMRecord", "NO_ALIGNMENT_START"),
-        ("SAMRecord", "NO_ALIGNMENT_REFERENCE_INDEX"),
-        ("SAMRecord", "NO_ALIGNMENT_REFERENCE_NAME"),
-        ("Allele", "NO_CALL"),
-        ("Allele", "SV_SIMPLE_DEL"),
-        ("Allele", "SV_SIMPLE_DUP"),
-        ("OpenMode", "CREATE"),
-        ("LogLevel", "DEBUG"),
-        ("SortOrder", "coordinate"),
-        ("SortOrder", "unsorted"),
         ("Collections", "EMPTY_LIST"),
         ("Collections", "EMPTY_SET"),
         ("Collections", "EMPTY_MAP"),
-        ("CigarOperator", "MATCH_OR_MISMATCH"),
         ("VCFHeaderLineType", "String"),
         ("VCFHeaderLineType", "Integer"),
         ("VCFHeaderLineCount", "A"),
         ("VCFHeaderLineCount", "UNBOUNDED"),
         ("GenotypeType", "HET"),
         ("Strand", "POSITIVE"),
-        ("GenotypeConcordanceStates", "CallState"),
-        ("CallState", "HOM_REF"),
-        ("GenotypeConcordanceStates", "TruthState"),
-        ("TruthState", "NO_CALL"),
-        ("VariantContext", "Type"),
-        ("Type", "INDEL"),
         ("SAMFlag", "SECONDARY_ALIGNMENT"),
         ("VCFHeaderVersion", "VCF4_2"),
-        ("MarkDuplicates", "DuplicateTaggingPolicy"),
-        ("DuplicateTaggingPolicy", "DontTag"),
-        ("BlockCompressedStreamConstants", "BLOCK_HEADER_LENGTH"),
-        ("VCFConstants", "PASSES_FILTERS_v4"),
-        ("VCFConstants", "GENOTYPE_ALLELE_DEPTHS"),
-        ("VCFConstants", "SVTYPE"),
-        ("VCFConstants", "UNFILTERED"),
-        ("VCFConstants", "INFO_FIELD_ARRAY_SEPARATOR_CHAR"),
-        ("VCFConstants", "MAX_GENOTYPE_QUAL"),
-        (
-            "GenotypeLikelihoods",
-            "MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED",
-        ),
-        ("CommonInfo", "NO_LOG10_PERROR"),
-        ("BlockCompressedStreamConstants", "EMPTY_GZIP_BLOCK"),
-        ("BlockCompressedStreamConstants", "BLOCK_LENGTH_OFFSET"),
-        ("SAMUtils", "MAX_PHRED_SCORE"),
-        ("SAMSequenceRecord", "UNKNOWN_SEQUENCE_LENGTH"),
-        ("SAMRecord", "NO_MAPPING_QUALITY"),
-        ("SAMRecord", "NULL_QUALS"),
-        ("SAMRecord", "NULL_QUALS_STRING"),
-        ("TemplateProperties", "ARGUMENTS_POSITIONAL"),
-        ("TemplateProperties", "ARGUMENT_DEFAULT_VALUE"),
-        ("TemplateProperties", "ARGUMENT_TYPE"),
-        ("ReadsFormatWriteOption", "BAM"),
-        ("GenotypeConcordanceSummaryMetrics", "GENOTYPE_CONCORDANCE"),
-        ("GenotypeConcordanceSummaryMetrics", "HET_PPV"),
-        ("GenotypeConcordanceSummaryMetrics", "VAR_SPECIFICITY"),
-        ("VCFHeader", "HEADER_FIELDS"),
         ("HEADER_FIELDS", "INFO"),
-        ("VCFHeader", "REFERENCE_KEY"),
         ("TimeUnit", "SECONDS"),
-        ("VariantContextWriterBuilder", "OutputType"),
-        ("ReservedTagConstants", "XT"),
-        ("SequenceUtil", "VALID_BASES_UPPER"),
-        ("BAMFileConstants", "FIXED_BLOCK_SIZE"),
-        ("GATKConfig", "CONFIG_FILE_VARIABLE_FILE_NAME"),
-        ("CloudStorageFileSystem", "URI_SCHEME"),
-        ("ReferenceContext", "UNINITIALIZED_REFERENCE_ID"),
-        ("HttpFileSystemProvider", "SCHEME"),
-        ("HttpsFileSystemProvider", "SCHEME"),
-        ("Slice", "EMBEDDED_REFERENCE_ABSENT_CONTENT_ID"),
-        ("TabixFormat", "GENERIC_FLAGS"),
-        ("TabixFormat", "ZERO_BASED"),
-        ("Allele", "NON_REF_STRING"),
-        ("Allele", "UNSPECIFIED_ALTERNATE_ALLELE_STRING"),
         ("File", "separator"),
         ("File", "separatorChar"),
-        ("VCFConstants", "NULL_ALLELE"),
-        ("VariantContext", "NO_LOG10_PERROR"),
-        (
-            "ReadLikelihoodCalculationEngine",
-            "DEFAULT_EXPECTED_ERROR_RATE_PER_BASE",
-        ),
-        ("SpecialArgumentsCollection", "SHOW_HIDDEN"),
-        (
-            "BlockCompressedStreamConstants",
-            "DEFAULT_COMPRESSION_LEVEL",
-        ),
-        ("SBIIndexWriter", "DEFAULT_GRANULARITY"),
-        ("TarArchiveOutputStream", "BIGNUMBER_STAR"),
         ("Spliterator", "IMMUTABLE"),
         ("Spliterator", "NONNULL"),
         ("StandardOpenOption", "CREATE_NEW"),
@@ -2842,122 +2920,1595 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         ("AccessMode", "WRITE"),
         ("PosixFilePermission", "GROUP_EXECUTE"),
         ("HttpMethod", "GET"),
-        ("MapperFeature", "ACCEPT_CASE_INSENSITIVE_PROPERTIES"),
-        ("DataFormat", "AVRO"),
-        ("DataSeriesType", "BYTE_ARRAY"),
-        ("CloudStorageConfiguration", "DEFAULT"),
-        ("NullOutputStream", "INSTANCE"),
-        ("NullOutputStream", "NULL_OUTPUT_STREAM"),
-        ("TarArchiveOutputStream", "LONGFILE_GNU"),
         ("Math", "PI"),
-        ("SystemUtils", "OS_ARCH"),
-        ("SystemUtils", "OS_NAME"),
-        ("SystemUtils", "IS_OS_MAC"),
-        ("SystemUtils", "IS_OS_LINUX"),
-        ("Defaults", "COMPRESSION_LEVEL"),
-        ("Defaults", "USE_ASYNC_IO_READ_FOR_SAMTOOLS"),
-        ("Defaults", "USE_ASYNC_IO_WRITE_FOR_SAMTOOLS"),
-        ("Defaults", "USE_ASYNC_IO_WRITE_FOR_TRIBBLE"),
-        ("RetryHandler", "DEFAULT_RETRYABLE_HTTP_CODES"),
-        ("RetryHandler", "DEFAULT_RETRYABLE_EXCEPTIONS"),
-        ("RetryHandler", "DEFALT_RETRYABLE_MESSAGES"),
-        ("ValidationStringency", "LENIENT"),
-        ("IndexFactory", "IndexType"),
-        ("IndexFactory", "IndexBalanceApproach"),
-        ("SamReaderFactory", "Option"),
-        ("VCFCompoundHeaderLine", "SupportedHeaderLineType"),
-        ("BwaMemAligner", "MEM_F_ALL"),
-        ("FileCardinalityWriteOption", "MULTIPLE"),
-        ("FileCardinalityWriteOption", "SINGLE"),
-        ("GenotypesContext", "NO_GENOTYPES"),
-        ("FeatureCodecHeader", "NO_HEADER_END"),
-        ("MessageDigestAlgorithms", "SHA_256"),
-        ("SAMReadGroupRecord", "READ_GROUP_ID_TAG"),
-        ("SAMReadGroupRecord", "READ_GROUP_SAMPLE_TAG"),
-        ("NullWriter", "INSTANCE"),
-        ("DeserializationFeature", "UNWRAP_ROOT_VALUE"),
-        ("JexlMissingValueTreatment", "TREAT_AS_MATCH"),
-        ("JexlMissingValueTreatment", "TREAT_AS_MISMATCH"),
-        ("WDLWorkUnitHandler", "POSITIONAL_ARGS"),
-        ("Genotype", "UNPHASED_ALLELE_SEPARATOR"),
-        ("GenomicsDBImportConfiguration", "ImportConfiguration"),
-        ("GenomicsDBImportConfiguration", "Partition"),
-        ("GenomicsDBVidMapProto", "VidMappingPB"),
-        ("GenomicsDBVidMapProto", "FieldLengthDescriptorComponentPB"),
-        ("ReadSession", "TableReadOptions"),
         ("Option", "CACHE_FILE_BASED_INDEXES"),
         ("Option", "INCLUDE_SOURCE_IN_RECORDS"),
-        ("SupportedHeaderLineType", "FORMAT"),
-        ("SupportedHeaderLineType", "INFO"),
-        ("GenotypeConcordance", "CONTINGENCY_STATE_TAG"),
-        ("VariantContextWriterBuilder", "DEFAULT_OPTIONS"),
-        ("HttpFileSystemProviderSettings", "DEFAULT_SETTINGS"),
         ("Level", "DEBUG"),
         ("Level", "INFO"),
         ("Level", "ERROR"),
         ("Locale", "ENGLISH"),
-        ("FastqConstants", "FIRST_OF_PAIR"),
-        ("FastqConstants", "SECOND_OF_PAIR"),
         ("ElementKind", "FIELD"),
-        ("GenomicsDBExportConfiguration", "ExportConfiguration"),
-        ("ReadLikelihoodCalculationEngine", "MAX_REPEAT_LENGTH"),
-        ("ReservedTagConstants", "PROGRAM_GROUP_ID"),
-        ("ReservedTagConstants", "READ_GROUP_ID"),
-        ("SAMRecord", "NULL_SEQUENCE"),
-        ("IndexType", "TABIX"),
-        ("IndexBalanceApproach", "FOR_SEEK_TIME"),
-        ("SamPairUtil", "PairOrientation"),
-        ("PairOrientation", "FR"),
-        ("FieldValue", "Attribute"),
         ("Attribute", "PRIMITIVE"),
-        ("QueryJobConfiguration", "Priority"),
         ("Priority", "BATCH"),
-        ("BlockCompressedInputStream", "FileTermination"),
-        ("FileTermination", "DEFECTIVE"),
-        ("SAMFileHeader", "GroupOrder"),
-        ("GroupOrder", "query"),
         ("StructuralVariantType", "DEL"),
-        ("GoalType", "MAXIMIZE"),
-        ("Percentile", "EstimationType"),
-        ("EstimationType", "R_1"),
-        ("ReadEnds", "FR"),
         ("StandardCharsets", "US_ASCII"),
         ("Pattern", "CASE_INSENSITIVE"),
         ("RoundingMode", "HALF_UP"),
-        ("DuplicationMetrics", "LIBRARY"),
-        ("DuplicationMetrics", "READ_PAIRS_EXAMINED"),
-        ("DuplicationMetrics", "PERCENT_DUPLICATION"),
-        ("SAMBinaryTagAndValue", "value"),
-        ("SAMBinaryTagAndValue", "tag"),
-        ("ReadDataHolder", "readBases"),
-        ("ReadDataHolder", "readQuals"),
-        ("ReadDataHolder", "insertionGOP"),
-        ("ReadDataHolder", "deletionGOP"),
-        ("ReadDataHolder", "overallGCP"),
-        ("HaplotypeDataHolder", "haplotypeBases"),
-        ("HaplotypeDataHolder", "haplotypePDBases"),
-        ("PDHMMNativeArguments", "avxLevel"),
-        ("PDHMMNativeArguments", "openMPSetting"),
-        ("PDHMMNativeArguments", "maxNumberOfThreads"),
-        ("PairHMMNativeArguments", "maxNumberOfThreads"),
-        ("PairHMMNativeArguments", "useDoublePrecision"),
-        ("GenotypeLikelihoodsAllelePair", "alleleIndex1"),
-        ("GenotypeLikelihoodsAllelePair", "alleleIndex2"),
-        ("SWNativeAlignerResult", "alignment_offset"),
-        ("SWNativeAlignerResult", "cigar"),
-        ("Storage", "SignUrlOption"),
     ] {
         assert_eq!(
             external_field_provenance(type_name, field_name),
             FactProvenance::BuiltinExternalModel
         );
     }
+    let apache_commons_math_optim_facts =
+        new_java2rust::external_packs::apache_commons_math_optim_pack_facts();
+    for field_name in ["MAXIMIZE", "MINIMIZE"] {
+        let field = apache_commons_math_optim_facts
+            .external_field_for("GoalType", field_name)
+            .unwrap_or_else(|| panic!("GoalType.{field_name} should be explained by Commons Math"));
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "GoalType".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance("GoalType", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let picard_metrics_facts = new_java2rust::external_packs::picard_metrics_pack_facts();
+    for (field_name, expected_ty) in [
+        ("LIBRARY", JavaType::String),
+        (
+            "READ_PAIRS_EXAMINED",
+            JavaType::Primitive(PrimitiveType::Long),
+        ),
+        (
+            "PERCENT_DUPLICATION",
+            JavaType::Primitive(PrimitiveType::Double),
+        ),
+    ] {
+        let field = picard_metrics_facts
+            .external_field_for("DuplicationMetrics", field_name)
+            .unwrap_or_else(|| {
+                panic!("DuplicationMetrics.{field_name} should be explained by Picard metrics")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance("DuplicationMetrics", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let broad_http_facts = new_java2rust::external_packs::broad_http_pack_facts();
+    let default_settings = broad_http_facts
+        .external_field_for("HttpFileSystemProviderSettings", "DEFAULT_SETTINGS")
+        .expect("Broad HTTP default settings should be explained by the Broad HTTP pack");
+    assert_eq!(
+        default_settings.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        default_settings.field_type,
+        Some(JavaType::Named {
+            name: "HttpFileSystemProviderSettings".to_string(),
+            args: Vec::new(),
+        })
+    );
+    for type_name in ["HttpFileSystemProvider", "HttpsFileSystemProvider"] {
+        let field = broad_http_facts
+            .external_field_for(type_name, "SCHEME")
+            .unwrap_or_else(|| {
+                panic!("{type_name}.SCHEME should be explained by the Broad HTTP pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(JavaType::String));
+        assert_eq!(
+            external_field_provenance(type_name, "SCHEME"),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for field_name in [
+        "DEFAULT_RETRYABLE_HTTP_CODES",
+        "DEFAULT_RETRYABLE_EXCEPTIONS",
+        "DEFALT_RETRYABLE_MESSAGES",
+    ] {
+        let field = broad_http_facts
+            .external_field_for("RetryHandler", field_name)
+            .unwrap_or_else(|| {
+                panic!("RetryHandler.{field_name} should be explained by the Broad HTTP pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "Object".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance("RetryHandler", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let barclay_help_facts = new_java2rust::external_packs::barclay_help_pack_facts();
+    for field_name in [
+        "ARGUMENTS_POSITIONAL",
+        "ARGUMENT_DEFAULT_VALUE",
+        "ARGUMENT_TYPE",
+    ] {
+        let field = barclay_help_facts
+            .external_field_for("TemplateProperties", field_name)
+            .unwrap_or_else(|| {
+                panic!("TemplateProperties.{field_name} should be explained by Barclay help pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(JavaType::String));
+        assert_eq!(
+            external_field_provenance("TemplateProperties", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let barclay_argparser_facts = new_java2rust::external_packs::barclay_argparser_pack_facts();
+    let show_hidden = barclay_argparser_facts
+        .external_field_for("SpecialArgumentsCollection", "SHOW_HIDDEN")
+        .expect(
+            "SpecialArgumentsCollection.SHOW_HIDDEN should be explained by Barclay argparser pack",
+        );
+    assert_eq!(show_hidden.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(
+        show_hidden.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Boolean))
+    );
+    assert_eq!(
+        external_field_provenance("SpecialArgumentsCollection", "SHOW_HIDDEN"),
+        FactProvenance::ConservativeFallback
+    );
+    let hdf5_facts = new_java2rust::external_packs::hdf5_pack_facts();
+    for (type_name, field_name) in [
+        ("HDF5File", "OpenMode"),
+        ("HDF5File.OpenMode", "READ_ONLY"),
+        ("HDF5File.OpenMode", "CREATE"),
+        ("OpenMode", "READ_ONLY"),
+        ("OpenMode", "CREATE"),
+    ] {
+        let field = hdf5_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| panic!("{type_name}.{field_name} should be explained by HDF5 pack"));
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "OpenMode".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let variantcontext_facts = new_java2rust::external_packs::htsjdk_variantcontext_pack_facts();
+    for (field_name, expected_type) in [
+        (
+            "NO_CALL",
+            JavaType::Named {
+                name: "Allele".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "NON_REF_ALLELE",
+            JavaType::Named {
+                name: "Allele".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "SPAN_DEL",
+            JavaType::Named {
+                name: "Allele".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "SV_SIMPLE_DEL",
+            JavaType::Named {
+                name: "Allele".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "SV_SIMPLE_DUP",
+            JavaType::Named {
+                name: "Allele".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "UNSPECIFIED_ALTERNATE_ALLELE",
+            JavaType::Named {
+                name: "Allele".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("NON_REF_STRING", JavaType::String),
+        ("UNSPECIFIED_ALTERNATE_ALLELE_STRING", JavaType::String),
+    ] {
+        let field = variantcontext_facts
+            .external_field_for("Allele", field_name)
+            .unwrap_or_else(|| {
+                panic!("Allele.{field_name} should be explained by variantcontext pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_type));
+        assert_eq!(
+            external_field_provenance("Allele", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let max_diploid_alt_alleles = variantcontext_facts
+        .external_field_for(
+            "GenotypeLikelihoods",
+            "MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED",
+        )
+        .expect(
+            "GenotypeLikelihoods max alt allele limit should be explained by variantcontext pack",
+        );
+    assert_eq!(
+        max_diploid_alt_alleles.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        max_diploid_alt_alleles.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+    assert_eq!(
+        external_field_provenance(
+            "GenotypeLikelihoods",
+            "MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED"
+        ),
+        FactProvenance::ConservativeFallback
+    );
+    let no_genotypes = variantcontext_facts
+        .external_field_for("GenotypesContext", "NO_GENOTYPES")
+        .expect("GenotypesContext.NO_GENOTYPES should be explained by variantcontext pack");
+    assert_eq!(no_genotypes.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(
+        no_genotypes.field_type,
+        Some(JavaType::Named {
+            name: "GenotypesContext".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        external_field_provenance("GenotypesContext", "NO_GENOTYPES"),
+        FactProvenance::ConservativeFallback
+    );
+    let variant_type = variantcontext_facts
+        .external_field_for("VariantContext", "Type")
+        .expect("VariantContext.Type should be explained by variantcontext pack");
+    assert_eq!(variant_type.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(
+        variant_type.field_type,
+        Some(JavaType::Named {
+            name: "Type".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        external_field_provenance("VariantContext", "Type"),
+        FactProvenance::ConservativeFallback
+    );
+    for type_name in [
+        "CommonInfo",
+        "htsjdk.variant.variantcontext.CommonInfo",
+        "VariantContext",
+        "htsjdk.variant.variantcontext.VariantContext",
+    ] {
+        let field = variantcontext_facts
+            .external_field_for(type_name, "NO_LOG10_PERROR")
+            .unwrap_or_else(|| {
+                panic!("{type_name}.NO_LOG10_PERROR should be explained by variantcontext pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Primitive(PrimitiveType::Double))
+        );
+        assert_eq!(
+            external_field_provenance(type_name, "NO_LOG10_PERROR"),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let unphased_separator = variantcontext_facts
+        .external_field_for("Genotype", "UNPHASED_ALLELE_SEPARATOR")
+        .expect("Genotype.UNPHASED_ALLELE_SEPARATOR should be explained by variantcontext pack");
+    assert_eq!(
+        unphased_separator.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        unphased_separator.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Char))
+    );
+    assert_eq!(
+        external_field_provenance("Genotype", "UNPHASED_ALLELE_SEPARATOR"),
+        FactProvenance::ConservativeFallback
+    );
+    for field_name in ["INDEL", "NO_VARIATION"] {
+        let field = variantcontext_facts
+            .external_field_for("Type", field_name)
+            .unwrap_or_else(|| {
+                panic!("Type.{field_name} should be explained by variantcontext pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "Type".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance("Type", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for field_name in ["alleleIndex1", "alleleIndex2"] {
+        let field = variantcontext_facts
+            .external_field_for("GenotypeLikelihoodsAllelePair", field_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "GenotypeLikelihoodsAllelePair.{field_name} should be explained by variantcontext pack"
+                )
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        );
+        assert_eq!(
+            external_field_provenance("GenotypeLikelihoodsAllelePair", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let sam_bam_facts = new_java2rust::external_packs::htsjdk_sam_bam_pack_facts();
+    let default_granularity = sam_bam_facts
+        .external_field_for("SBIIndexWriter", "DEFAULT_GRANULARITY")
+        .expect("SBIIndexWriter.DEFAULT_GRANULARITY should be explained by SAM BAM pack");
+    assert_eq!(
+        default_granularity.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        default_granularity.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Long))
+    );
+    assert_eq!(
+        external_field_provenance("SBIIndexWriter", "DEFAULT_GRANULARITY"),
+        FactProvenance::ConservativeFallback
+    );
+    let sam_record_facts = new_java2rust::external_packs::htsjdk_sam_record_pack_facts();
+    let cigar_operator = sam_record_facts
+        .external_field_for("CigarOperator", "MATCH_OR_MISMATCH")
+        .expect("CigarOperator.MATCH_OR_MISMATCH should be explained by SAM record pack");
+    assert_eq!(
+        cigar_operator.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        cigar_operator.field_type,
+        Some(JavaType::Named {
+            name: "CigarOperator".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        external_field_provenance("CigarOperator", "MATCH_OR_MISMATCH"),
+        FactProvenance::ConservativeFallback
+    );
+    for (field_name, expected_ty) in [
+        (
+            "NO_ALIGNMENT_CIGAR",
+            JavaType::Named {
+                name: "Cigar".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "NO_ALIGNMENT_START",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "NO_ALIGNMENT_REFERENCE_INDEX",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        ("NO_ALIGNMENT_REFERENCE_NAME", JavaType::String),
+        (
+            "UNKNOWN_MAPPING_QUALITY",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "NO_MAPPING_QUALITY",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "NULL_QUALS",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+        ("NULL_QUALS_STRING", JavaType::String),
+        (
+            "NULL_SEQUENCE",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+    ] {
+        let field = sam_record_facts
+            .external_field_for("SAMRecord", field_name)
+            .unwrap_or_else(|| {
+                panic!("SAMRecord.{field_name} should be explained by SAM record pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance("SAMRecord", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (type_name, field_name, expected_ty) in [
+        ("SAMTagAndValue", "tag", JavaType::String),
+        (
+            "SAMTagAndValue",
+            "value",
+            JavaType::Named {
+                name: "Object".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("SAMBinaryTagAndValue", "tag", JavaType::String),
+        (
+            "SAMBinaryTagAndValue",
+            "value",
+            JavaType::Named {
+                name: "Object".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = sam_record_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by SAM record pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (field_name, expected_type) in [
+        ("name", JavaType::String),
+        (
+            "exp",
+            JavaType::Named {
+                name: "Expression".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = variantcontext_facts
+            .external_field_for("JexlVCMatchExp", field_name)
+            .unwrap_or_else(|| {
+                panic!("JexlVCMatchExp.{field_name} should be explained by variantcontext pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_type));
+        assert_eq!(
+            external_field_provenance("JexlVCMatchExp", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for field_name in ["TREAT_AS_MATCH", "TREAT_AS_MISMATCH"] {
+        let field = variantcontext_facts
+            .external_field_for("JexlMissingValueTreatment", field_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "JexlMissingValueTreatment.{field_name} should be explained by variantcontext pack"
+                )
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "JexlMissingValueTreatment".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance("JexlMissingValueTreatment", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let vcf_facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
+    for (field_name, expected_ty) in [
+        ("PASSES_FILTERS_v4", JavaType::String),
+        ("MISSING_VALUE_v4", JavaType::String),
+        ("GENOTYPE_ALLELE_DEPTHS", JavaType::String),
+        ("SVTYPE", JavaType::String),
+        ("NULL_ALLELE", JavaType::String),
+        ("UNFILTERED", JavaType::String),
+        (
+            "INFO_FIELD_ARRAY_SEPARATOR_CHAR",
+            JavaType::Primitive(PrimitiveType::Char),
+        ),
+        ("MAX_GENOTYPE_QUAL", JavaType::Primitive(PrimitiveType::Int)),
+    ] {
+        let field = vcf_facts
+            .external_field_for("VCFConstants", field_name)
+            .unwrap_or_else(|| panic!("VCFConstants.{field_name} should be explained by VCF pack"));
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance("VCFConstants", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (field_name, expected_ty) in [
+        (
+            "HEADER_FIELDS",
+            JavaType::Named {
+                name: "HEADER_FIELDS".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("REFERENCE_KEY", JavaType::String),
+    ] {
+        let field = vcf_facts
+            .external_field_for("VCFHeader", field_name)
+            .unwrap_or_else(|| panic!("VCFHeader.{field_name} should be explained by VCF pack"));
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance("VCFHeader", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let supported_header_line_type = vcf_facts
+        .external_field_for("VCFCompoundHeaderLine", "SupportedHeaderLineType")
+        .expect("VCFCompoundHeaderLine.SupportedHeaderLineType should be explained by VCF pack");
+    assert_eq!(
+        supported_header_line_type.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        supported_header_line_type.field_type,
+        Some(JavaType::Named {
+            name: "SupportedHeaderLineType".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        external_field_provenance("VCFCompoundHeaderLine", "SupportedHeaderLineType"),
+        FactProvenance::ConservativeFallback
+    );
+    for field_name in ["FORMAT", "INFO"] {
+        let field = vcf_facts
+            .external_field_for("SupportedHeaderLineType", field_name)
+            .unwrap_or_else(|| {
+                panic!("SupportedHeaderLineType.{field_name} should be explained by VCF pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "SupportedHeaderLineType".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance("SupportedHeaderLineType", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let writer_output_type = vcf_facts
+        .external_field_for("VariantContextWriterBuilder", "OutputType")
+        .expect("VariantContextWriterBuilder.OutputType should be explained by VCF pack");
+    assert_eq!(
+        writer_output_type.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        writer_output_type.field_type,
+        Some(JavaType::Named {
+            name: "OutputType".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        external_field_provenance("VariantContextWriterBuilder", "OutputType"),
+        FactProvenance::ConservativeFallback
+    );
+    let default_options = vcf_facts
+        .external_field_for("VariantContextWriterBuilder", "DEFAULT_OPTIONS")
+        .expect("VariantContextWriterBuilder.DEFAULT_OPTIONS should be explained by VCF pack");
+    assert_eq!(
+        default_options.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        default_options.field_type,
+        Some(JavaType::Named {
+            name: "EnumSet".to_string(),
+            args: vec![JavaType::Named {
+                name: "Options".to_string(),
+                args: Vec::new(),
+            }],
+        })
+    );
+    assert_eq!(
+        external_field_provenance("VariantContextWriterBuilder", "DEFAULT_OPTIONS"),
+        FactProvenance::ConservativeFallback
+    );
+    let picard_vcf_facts = new_java2rust::external_packs::picard_vcf_pack_facts();
+    for (field_name, expected_ty) in [
+        (
+            "CallState",
+            JavaType::Named {
+                name: "CallState".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "TruthState",
+            JavaType::Named {
+                name: "TruthState".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = picard_vcf_facts
+            .external_field_for("GenotypeConcordanceStates", field_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "GenotypeConcordanceStates.{field_name} should be explained by Picard VCF pack"
+                )
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance("GenotypeConcordanceStates", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (type_name, field_name, expected_ty) in [
+        (
+            "CallState",
+            "HOM_REF",
+            JavaType::Named {
+                name: "CallState".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "CallState",
+            "HET_REF_VAR1",
+            JavaType::Named {
+                name: "CallState".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "TruthState",
+            "HOM_REF",
+            JavaType::Named {
+                name: "TruthState".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "TruthState",
+            "NO_CALL",
+            JavaType::Named {
+                name: "TruthState".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = picard_vcf_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by Picard VCF pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (type_name, field_name) in [
+        ("GenotypeConcordance", "CONTINGENCY_STATE_TAG"),
+        ("GenotypeConcordanceSummaryMetrics", "GENOTYPE_CONCORDANCE"),
+        (
+            "GenotypeConcordanceSummaryMetrics",
+            "NON_REF_GENOTYPE_CONCORDANCE",
+        ),
+        ("GenotypeConcordanceSummaryMetrics", "HET_PPV"),
+        ("GenotypeConcordanceSummaryMetrics", "HET_SENSITIVITY"),
+        ("GenotypeConcordanceSummaryMetrics", "HOMVAR_PPV"),
+        ("GenotypeConcordanceSummaryMetrics", "HOMVAR_SENSITIVITY"),
+        ("GenotypeConcordanceSummaryMetrics", "VAR_PPV"),
+        ("GenotypeConcordanceSummaryMetrics", "VAR_SENSITIVITY"),
+        ("GenotypeConcordanceSummaryMetrics", "VAR_SPECIFICITY"),
+    ] {
+        let field = picard_vcf_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by Picard VCF pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(JavaType::String));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let picard_markduplicates_facts =
+        new_java2rust::external_packs::picard_markduplicates_pack_facts();
+    let duplicate_tagging_policy = picard_markduplicates_facts
+        .external_field_for("MarkDuplicates", "DuplicateTaggingPolicy")
+        .expect("MarkDuplicates.DuplicateTaggingPolicy should be explained by Picard pack");
+    assert_eq!(
+        duplicate_tagging_policy.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        duplicate_tagging_policy.field_type,
+        Some(JavaType::Named {
+            name: "DuplicateTaggingPolicy".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        external_field_provenance("MarkDuplicates", "DuplicateTaggingPolicy"),
+        FactProvenance::ConservativeFallback
+    );
+    for field_name in ["DontTag", "OpticalOnly", "All"] {
+        let field = picard_markduplicates_facts
+            .external_field_for("DuplicateTaggingPolicy", field_name)
+            .unwrap_or_else(|| {
+                panic!("DuplicateTaggingPolicy.{field_name} should be explained by Picard pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "DuplicateTaggingPolicy".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance("DuplicateTaggingPolicy", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let sam_header_facts = new_java2rust::external_packs::htsjdk_sam_header_pack_facts();
+    for (field_name, expected_ty) in [
+        (
+            "SortOrder",
+            JavaType::Named {
+                name: "SortOrder".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "GroupOrder",
+            JavaType::Named {
+                name: "GroupOrder".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = sam_header_facts
+            .external_field_for("SAMFileHeader", field_name)
+            .unwrap_or_else(|| {
+                panic!("SAMFileHeader.{field_name} should be explained by SAM header pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance("SAMFileHeader", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for field_name in ["READ_GROUP_ID_TAG", "READ_GROUP_SAMPLE_TAG"] {
+        let field = sam_header_facts
+            .external_field_for("SAMReadGroupRecord", field_name)
+            .unwrap_or_else(|| {
+                panic!("SAMReadGroupRecord.{field_name} should be explained by SAM header pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(JavaType::String));
+        assert_eq!(
+            external_field_provenance("SAMReadGroupRecord", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (type_name, field_name, expected_type_name) in [
+        ("SortOrder", "coordinate", "SortOrder"),
+        ("SortOrder", "unsorted", "SortOrder"),
+        ("GroupOrder", "query", "GroupOrder"),
+    ] {
+        let field = sam_header_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by SAM header pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: expected_type_name.to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let samtools_util_facts = new_java2rust::external_packs::htsjdk_samtools_util_pack_facts();
+    for (type_name, field_name, expected_ty) in [
+        (
+            "BlockCompressedInputStream",
+            "FileTermination",
+            JavaType::Named {
+                name: "FileTermination".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "SamPairUtil",
+            "PairOrientation",
+            JavaType::Named {
+                name: "PairOrientation".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "Log",
+            "LogLevel",
+            JavaType::Named {
+                name: "LogLevel".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = samtools_util_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by samtools-util pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (type_name, field_name, expected_ty) in [
+        (
+            "Defaults",
+            "COMPRESSION_LEVEL",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "Defaults",
+            "USE_ASYNC_IO_READ_FOR_SAMTOOLS",
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        (
+            "Defaults",
+            "USE_ASYNC_IO_WRITE_FOR_SAMTOOLS",
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        (
+            "Defaults",
+            "USE_ASYNC_IO_WRITE_FOR_TRIBBLE",
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        (
+            "SAMUtils",
+            "MAX_PHRED_SCORE",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        ("ReservedTagConstants", "XT", JavaType::String),
+        ("ReservedTagConstants", "PROGRAM_GROUP_ID", JavaType::String),
+        ("ReservedTagConstants", "READ_GROUP_ID", JavaType::String),
+        (
+            "BlockCompressedStreamConstants",
+            "BLOCK_HEADER_LENGTH",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "BlockCompressedStreamConstants",
+            "BLOCK_LENGTH_OFFSET",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "BlockCompressedStreamConstants",
+            "DEFAULT_COMPRESSION_LEVEL",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "BlockCompressedStreamConstants",
+            "EMPTY_GZIP_BLOCK",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+        ("FastqConstants", "FIRST_OF_PAIR", JavaType::String),
+        ("FastqConstants", "SECOND_OF_PAIR", JavaType::String),
+        (
+            "htsjdk.samtools.fastq.FastqConstants",
+            "FIRST_OF_PAIR",
+            JavaType::String,
+        ),
+        (
+            "htsjdk.samtools.fastq.FastqConstants",
+            "SECOND_OF_PAIR",
+            JavaType::String,
+        ),
+        (
+            "SequenceUtil",
+            "VALID_BASES_UPPER",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
+    ] {
+        let field = samtools_util_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by samtools-util pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (type_name, field_name, expected_ty) in [
+        (
+            "PairOrientation",
+            "FR",
+            JavaType::Named {
+                name: "PairOrientation".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "PairOrientation",
+            "RF",
+            JavaType::Named {
+                name: "PairOrientation".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "PairOrientation",
+            "TANDEM",
+            JavaType::Named {
+                name: "PairOrientation".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "FileTermination",
+            "DEFECTIVE",
+            JavaType::Named {
+                name: "FileTermination".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "FileTermination",
+            "HAS_TERMINATOR_BLOCK",
+            JavaType::Named {
+                name: "FileTermination".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "LogLevel",
+            "ERROR",
+            JavaType::Named {
+                name: "LogLevel".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "LogLevel",
+            "WARNING",
+            JavaType::Named {
+                name: "LogLevel".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "LogLevel",
+            "INFO",
+            JavaType::Named {
+                name: "LogLevel".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "LogLevel",
+            "DEBUG",
+            JavaType::Named {
+                name: "LogLevel".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = samtools_util_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by samtools-util pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let tribble_feature_facts = new_java2rust::external_packs::htsjdk_tribble_feature_pack_facts();
+    let no_header_end = tribble_feature_facts
+        .external_field_for("FeatureCodecHeader", "NO_HEADER_END")
+        .expect("FeatureCodecHeader.NO_HEADER_END should be explained by tribble feature pack");
+    assert_eq!(
+        no_header_end.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        no_header_end.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Long))
+    );
+    assert_eq!(
+        external_field_provenance("FeatureCodecHeader", "NO_HEADER_END"),
+        FactProvenance::ConservativeFallback
+    );
+    let tribble_index_facts = new_java2rust::external_packs::htsjdk_tribble_index_pack_facts();
+    for (field_name, expected_ty) in [
+        (
+            "IndexType",
+            JavaType::Named {
+                name: "IndexType".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "IndexBalanceApproach",
+            JavaType::Named {
+                name: "IndexBalanceApproach".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = tribble_index_facts
+            .external_field_for("IndexFactory", field_name)
+            .unwrap_or_else(|| {
+                panic!("IndexFactory.{field_name} should be explained by tribble index pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance("IndexFactory", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (type_name, field_name, expected_ty) in [
+        (
+            "IndexType",
+            "TABIX",
+            JavaType::Named {
+                name: "IndexType".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "IndexBalanceApproach",
+            "FOR_SEEK_TIME",
+            JavaType::Named {
+                name: "IndexBalanceApproach".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = tribble_index_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by tribble index pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (type_name, field_name) in [
+        ("TabixFormat", "GENERIC_FLAGS"),
+        ("TabixFormat", "ZERO_BASED"),
+        ("htsjdk.tribble.index.tabix.TabixFormat", "GENERIC_FLAGS"),
+        ("htsjdk.tribble.index.tabix.TabixFormat", "ZERO_BASED"),
+    ] {
+        let field = tribble_index_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by tribble index pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        );
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let sam_bam_facts = new_java2rust::external_packs::htsjdk_sam_bam_pack_facts();
+    let fixed_block_size = sam_bam_facts
+        .external_field_for("BAMFileConstants", "FIXED_BLOCK_SIZE")
+        .expect("BAMFileConstants.FIXED_BLOCK_SIZE should be explained by SAM BAM pack");
+    assert_eq!(
+        fixed_block_size.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        fixed_block_size.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+    assert_eq!(
+        external_field_provenance("BAMFileConstants", "FIXED_BLOCK_SIZE"),
+        FactProvenance::ConservativeFallback
+    );
+    let sam_reader_facts = new_java2rust::external_packs::htsjdk_sam_reader_pack_facts();
+    let reader_option = sam_reader_facts
+        .external_field_for("SamReaderFactory", "Option")
+        .expect("SamReaderFactory.Option should be explained by SAM reader pack");
+    assert_eq!(
+        reader_option.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        reader_option.field_type,
+        Some(JavaType::Named {
+            name: "Option".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        external_field_provenance("SamReaderFactory", "Option"),
+        FactProvenance::ConservativeFallback
+    );
+    for field_name in ["CACHE_FILE_BASED_INDEXES", "INCLUDE_SOURCE_IN_RECORDS"] {
+        let field = sam_reader_facts
+            .external_field_for("SamReaderFactory.Option", field_name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "SamReaderFactory.Option.{field_name} should be explained by SAM reader pack"
+                )
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "Option".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance("SamReaderFactory.Option", field_name),
+            FactProvenance::ConservativeFallback
+        );
+        assert_eq!(
+            external_field_provenance("Option", field_name),
+            FactProvenance::BuiltinExternalModel
+        );
+    }
+    let apache_stats_facts = new_java2rust::external_packs::apache_commons_math_stats_pack_facts();
+    let estimation_type = apache_stats_facts
+        .external_field_for("Percentile", "EstimationType")
+        .expect("Percentile.EstimationType should be explained by Apache Commons stats pack");
+    assert_eq!(
+        estimation_type.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        estimation_type.field_type,
+        Some(JavaType::Named {
+            name: "EstimationType".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        external_field_provenance("Percentile", "EstimationType"),
+        FactProvenance::ConservativeFallback
+    );
+    let r1 = apache_stats_facts
+        .external_field_for("EstimationType", "R_1")
+        .expect("EstimationType.R_1 should be explained by Apache Commons stats pack");
+    assert_eq!(r1.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(
+        r1.field_type,
+        Some(JavaType::Named {
+            name: "EstimationType".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        external_field_provenance("EstimationType", "R_1"),
+        FactProvenance::ConservativeFallback
+    );
+    let commons_compress_facts =
+        new_java2rust::external_packs::apache_commons_compress_pack_facts();
+    for (type_name, field_name, expected_ty) in [
+        (
+            "TarArchiveOutputStream",
+            "BIGNUMBER_STAR",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "TarArchiveOutputStream",
+            "LONGFILE_GNU",
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "NullOutputStream",
+            "INSTANCE",
+            JavaType::Named {
+                name: "OutputStream".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "NullOutputStream",
+            "NULL_OUTPUT_STREAM",
+            JavaType::Named {
+                name: "OutputStream".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = commons_compress_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by Commons Compress pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let commons_lang_facts = new_java2rust::external_packs::apache_commons_lang_pack_facts();
+    for (type_name, field_name, expected_ty) in [
+        ("SystemUtils", "OS_ARCH", JavaType::String),
+        ("SystemUtils", "OS_NAME", JavaType::String),
+        (
+            "SystemUtils",
+            "IS_OS_MAC",
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        (
+            "SystemUtils",
+            "IS_OS_LINUX",
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        (
+            "SystemUtils",
+            "IS_OS_WINDOWS",
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+    ] {
+        let field = commons_lang_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by Commons Lang pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let commons_codec_facts = new_java2rust::external_packs::apache_commons_codec_pack_facts();
+    let sha_256 = commons_codec_facts
+        .external_field_for("MessageDigestAlgorithms", "SHA_256")
+        .expect("MessageDigestAlgorithms.SHA_256 should be explained by Commons Codec pack");
+    assert_eq!(sha_256.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(sha_256.field_type, Some(JavaType::String));
+    assert_eq!(
+        external_field_provenance("MessageDigestAlgorithms", "SHA_256"),
+        FactProvenance::ConservativeFallback
+    );
+    let bigquery_facts = new_java2rust::external_packs::google_bigquery_pack_facts();
+    for (type_name, field_name, expected_ty) in [
+        (
+            "FieldValue",
+            "Attribute",
+            JavaType::Named {
+                name: "Attribute".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "QueryJobConfiguration",
+            "Priority",
+            JavaType::Named {
+                name: "Priority".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = bigquery_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by BigQuery pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    for (type_name, field_name, expected_ty) in [
+        (
+            "FieldValue.Attribute",
+            "PRIMITIVE",
+            JavaType::Named {
+                name: "Attribute".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "QueryJobConfiguration.Priority",
+            "BATCH",
+            JavaType::Named {
+                name: "Priority".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "QueryJobConfiguration.Priority",
+            "INTERACTIVE",
+            JavaType::Named {
+                name: "Priority".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = bigquery_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by BigQuery pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    assert_eq!(
+        external_field_provenance("Attribute", "PRIMITIVE"),
+        FactProvenance::BuiltinExternalModel
+    );
+    assert_eq!(
+        external_field_provenance("Priority", "BATCH"),
+        FactProvenance::BuiltinExternalModel
+    );
+    let bigquery_storage_facts =
+        new_java2rust::external_packs::google_bigquery_storage_pack_facts();
+    for field_name in ["AVRO", "ARROW"] {
+        let field = bigquery_storage_facts
+            .external_field_for("DataFormat", field_name)
+            .unwrap_or_else(|| {
+                panic!("DataFormat.{field_name} should be explained by BigQuery Storage pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "DataFormat".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance("DataFormat", field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let jackson_facts = new_java2rust::external_packs::jackson_databind_pack_facts();
+    for (type_name, field_name) in [
+        ("MapperFeature", "ACCEPT_CASE_INSENSITIVE_PROPERTIES"),
+        ("DeserializationFeature", "UNWRAP_ROOT_VALUE"),
+    ] {
+        let field = jackson_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by Jackson databind pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: type_name.to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let storage_facts = new_java2rust::external_packs::google_storage_pack_facts();
+    let sign_url_option = storage_facts
+        .external_field_for("Storage", "SignUrlOption")
+        .expect("Storage.SignUrlOption should be explained by Google Storage pack");
+    assert_eq!(
+        sign_url_option.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        sign_url_option.field_type,
+        Some(JavaType::Named {
+            name: "SignUrlOption".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        external_field_provenance("Storage", "SignUrlOption"),
+        FactProvenance::ConservativeFallback
+    );
+    let cloud_nio_facts = new_java2rust::external_packs::google_cloud_nio_pack_facts();
+    for (type_name, field_name, expected_ty) in [
+        ("CloudStorageFileSystem", "URI_SCHEME", JavaType::String),
+        (
+            "CloudStorageConfiguration",
+            "DEFAULT",
+            JavaType::Named {
+                name: "CloudStorageConfiguration".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = cloud_nio_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by Google Cloud NIO pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let genomicsdb_facts = new_java2rust::external_packs::genomicsdb_pack_facts();
+    for (type_name, field_name, expected_ty) in [
+        (
+            "Coordinates",
+            "GenomicsDBColumn",
+            JavaType::Named {
+                name: "GenomicsDBColumn".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "Coordinates",
+            "ContigPosition",
+            JavaType::Named {
+                name: "ContigPosition".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "GenomicsDBExportConfiguration",
+            "ExportConfiguration",
+            JavaType::Named {
+                name: "ExportConfiguration".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "GenomicsDBImportConfiguration",
+            "ImportConfiguration",
+            JavaType::Named {
+                name: "ImportConfiguration".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "GenomicsDBImportConfiguration",
+            "Partition",
+            JavaType::Named {
+                name: "Partition".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "GenomicsDBVidMapProto",
+            "VidMappingPB",
+            JavaType::Named {
+                name: "VidMappingPB".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "GenomicsDBVidMapProto",
+            "FieldLengthDescriptorComponentPB",
+            JavaType::Named {
+                name: "FieldLengthDescriptorComponentPB".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "ReadSession",
+            "TableReadOptions",
+            JavaType::Named {
+                name: "TableReadOptions".to_string(),
+                args: Vec::new(),
+            },
+        ),
+    ] {
+        let field = genomicsdb_facts
+            .external_field_for(type_name, field_name)
+            .unwrap_or_else(|| {
+                panic!("{type_name}.{field_name} should be explained by GenomicsDB pack")
+            });
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(
+            external_field_provenance(type_name, field_name),
+            FactProvenance::ConservativeFallback
+        );
+    }
+    let bwa_facts = new_java2rust::external_packs::bwa_pack_facts();
+    let bwa_flags = bwa_facts
+        .external_field_for("BwaMemAligner", "MEM_F_ALL")
+        .expect("BwaMemAligner.MEM_F_ALL should be explained by BWA pack");
+    assert_eq!(bwa_flags.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(
+        bwa_flags.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+    assert_eq!(
+        external_field_provenance("BwaMemAligner", "MEM_F_ALL"),
+        FactProvenance::ConservativeFallback
+    );
     assert_eq!(
         external_field_provenance("ExternalBox", "count"),
         FactProvenance::ConservativeFallback
     );
     assert_eq!(
         external_field_provenance("ExternalEnum", "unsorted"),
+        FactProvenance::ConservativeFallback
+    );
+    assert_eq!(
+        external_field_provenance("SAMSequenceRecord", "UNKNOWN_SEQUENCE_LENGTH"),
+        FactProvenance::ConservativeFallback
+    );
+    assert_eq!(
+        external_field_provenance("HttpFileSystemProviderSettings", "DEFAULT_SETTINGS"),
         FactProvenance::ConservativeFallback
     );
 }
@@ -4249,6 +5800,13 @@ class ExternalAlleleFactoryUse {
     assert_eq!(create.role, ExternalApiRole::Getter);
     assert_eq!(create.receiver_mutability, ReceiverMutabilityFact::ReadOnly);
     assert_eq!(
+        create.return_type,
+        Some(JavaType::Named {
+            name: "Allele".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
         create.return_nullability,
         NullabilityState::DefinitelyNonNull
     );
@@ -4263,6 +5821,7 @@ class ExternalAlleleFactoryUse {
         base_string.receiver_mutability,
         ReceiverMutabilityFact::ReadOnly
     );
+    assert_eq!(base_string.return_type, Some(JavaType::String));
     assert_eq!(
         base_string.return_nullability,
         NullabilityState::DefinitelyNonNull
@@ -4763,6 +6322,7 @@ fn semantic_analysis_reports_external_api_budget_diagnostic() {
             max_external_guess_iterations: Some(1),
             enable_external_api_guesses: true,
             enable_control_flow_facts: true,
+            ..semantic_analysis::SemanticAnalysisConfig::default()
         },
     );
 
@@ -4819,10 +6379,12 @@ fn external_api_user_override_beats_later_name_guess() {
         .push(ExternalApiEffectFact {
             method_name: "setValue".to_string(),
             receiver_type: None,
+            arg_count: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: None,
             return_nullability: NullabilityState::Unknown,
+            thrown: Vec::new(),
             provenance: FactProvenance::UserOverride,
         });
     let semantic =
@@ -4868,10 +6430,12 @@ fn external_api_receiver_specific_override_beats_global_override_in_signature() 
         .push(ExternalApiEffectFact {
             method_name: "setValue".to_string(),
             receiver_type: None,
+            arg_count: None,
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: None,
             return_nullability: NullabilityState::Unknown,
+            thrown: Vec::new(),
             provenance: FactProvenance::UserOverride,
         });
     external_facts
@@ -4879,10 +6443,12 @@ fn external_api_receiver_specific_override_beats_global_override_in_signature() 
         .push(ExternalApiEffectFact {
             method_name: "setValue".to_string(),
             receiver_type: Some("ExternalCounter".to_string()),
+            arg_count: None,
             role: ExternalApiRole::Setter,
             receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
             return_type: None,
             return_nullability: NullabilityState::Unknown,
+            thrown: Vec::new(),
             provenance: FactProvenance::UserOverride,
         });
     let semantic =

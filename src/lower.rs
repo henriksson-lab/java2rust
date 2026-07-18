@@ -3,8 +3,8 @@ use crate::array_lowering::render_array_expr;
 use crate::array_plan::plan_array_expr;
 use crate::call_lowering::{apply_call_target, apply_new_target_with_facts};
 use crate::call_plan::{
-    ArgumentLoweringPlan, CallExprPlan, CallStatementPlan, plan_call_arguments, plan_call_expr,
-    plan_call_statement, plan_constructor_arguments, plan_new_target,
+    ArgumentLoweringPlan, CallExprPlan, CallStatementPlan, plan_call_arguments_with_facts,
+    plan_call_expr, plan_call_statement, plan_constructor_arguments, plan_new_target_with_facts,
 };
 use crate::constructor_plan::{
     ConstructorDelegationPlan, ConstructorFieldValuePlan, plan_constructor_delegation,
@@ -688,6 +688,7 @@ fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
                 args,
                 resolved.as_ref(),
                 ctx.facts,
+                env.type_env(),
             );
             let target = match plan {
                 CallExprPlan::TrivialAccessorGetter {
@@ -699,7 +700,15 @@ fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
             let rust_args = lower_args_with_plan(
                 args,
                 env,
-                plan_call_arguments(resolved.as_ref(), args.len(), ctx.signatures),
+                plan_call_arguments_with_facts(
+                    receiver.as_deref(),
+                    name,
+                    resolved.as_ref(),
+                    args.len(),
+                    ctx.signatures,
+                    ctx.facts,
+                    env.type_env(),
+                ),
                 ctx,
             );
             let lowered_receiver = target
@@ -710,7 +719,13 @@ fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
         Expr::New {
             ty, args, resolved, ..
         } => {
-            let target = plan_new_target(ty, resolved.as_ref(), ctx.representations);
+            let target = plan_new_target_with_facts(
+                ty,
+                resolved.as_ref(),
+                ctx.representations,
+                ctx.facts,
+                args.len(),
+            );
             let rust_args = lower_args_with_plan(
                 args,
                 env,

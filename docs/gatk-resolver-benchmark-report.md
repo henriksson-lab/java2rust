@@ -18205,7 +18205,7 @@ case in the existing tuple constructor provenance helper.
 
 Generalized test coverage:
 
-- `tuple_like_external_constructor_facts_are_builtin_models`;
+- `tuple_like_external_constructor_facts_keep_dependency_tuples_pack_owned`;
 - existing fallback coverage remains in
   `external_constructor_facts_explain_missing_library_constructors_only`.
 
@@ -18213,7 +18213,7 @@ Verification:
 
 ```text
 cargo fmt
-cargo test tuple_like_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test tuple_like_external_constructor_facts_keep_dependency_tuples_pack_owned --test semantic_facts --quiet
 cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
 cargo test apache_commons_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
 cargo test --quiet
@@ -18393,7 +18393,7 @@ Generalized test coverage:
 
 - `jgrapht_algorithm_constructor_facts_are_builtin_models`;
 - existing tuple constructor coverage remains in
-  `tuple_like_external_constructor_facts_are_builtin_models`;
+  `tuple_like_external_constructor_facts_keep_dependency_tuples_pack_owned`;
 - existing fallback coverage remains in
   `external_constructor_facts_explain_missing_library_constructors_only`.
 
@@ -18401,7 +18401,7 @@ Verification:
 
 ```text
 cargo test jgrapht_algorithm_constructor_facts_are_builtin_models --test semantic_facts --quiet
-cargo test tuple_like_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test tuple_like_external_constructor_facts_keep_dependency_tuples_pack_owned --test semantic_facts --quiet
 cargo test external_constructor_facts_explain_missing_library_constructors_only --test semantic_facts --quiet
 cargo fmt
 cargo test --quiet
@@ -19785,7 +19785,7 @@ Generalized rule:
 
 Generalized test coverage:
 
-- `tuple_like_external_constructor_facts_are_builtin_models`;
+- `tuple_like_external_constructor_facts_keep_dependency_tuples_pack_owned`;
 - `htsjdk_external_constructor_facts_are_builtin_models`;
 - `apache_commons_collections_constructor_facts_are_builtin_models`;
 - `kryo_serializer_constructor_facts_are_builtin_models`;
@@ -19795,7 +19795,7 @@ Generalized test coverage:
 Verification:
 
 ```text
-cargo test tuple_like_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test tuple_like_external_constructor_facts_keep_dependency_tuples_pack_owned --test semantic_facts --quiet
 cargo test htsjdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
 cargo test apache_commons_collections_constructor_facts_are_builtin_models --test semantic_facts --quiet
 cargo test kryo_serializer_constructor_facts_are_builtin_models --test semantic_facts --quiet
@@ -20667,7 +20667,7 @@ Generalized rule:
 Generalized test coverage:
 
 - `jdk_external_constructor_facts_are_builtin_models`;
-- `tuple_like_external_constructor_facts_are_builtin_models`;
+- `tuple_like_external_constructor_facts_keep_dependency_tuples_pack_owned`;
 - `apache_commons_collections_constructor_facts_are_builtin_models`;
 - `apache_commons_compress_constructor_facts_are_builtin_models`;
 - `apache_commons_lang_builder_constructor_facts_are_builtin_models`;
@@ -20682,7 +20682,7 @@ Verification:
 
 ```text
 cargo test jdk_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
-cargo test tuple_like_external_constructor_facts_are_builtin_models --test semantic_facts --quiet
+cargo test tuple_like_external_constructor_facts_keep_dependency_tuples_pack_owned --test semantic_facts --quiet
 cargo test apache_commons_collections_constructor_facts_are_builtin_models --test semantic_facts --quiet
 cargo test apache_commons_compress_constructor_facts_are_builtin_models --test semantic_facts --quiet
 cargo test apache_commons_lang_builder_constructor_facts_are_builtin_models --test semantic_facts --quiet
@@ -22304,16 +22304,17 @@ Allele	getBaseString	12
 
 Generalized rule:
 
-- `Allele.getBaseString()` is a builtin external API getter.
+- `Allele.getBaseString()` is a VariantContext pack-owned external API getter.
 - It is read-only.
 - Its return is definitely non-null `String`.
-- The existing return-type path already classifies `getBaseString` as a string
-  domain getter; this slice adds builtin effect provenance and nullability.
+- The generic return-type path can still classify `get*String` methods as
+  string-valued for overload resolution, but receiver-specific API-effect
+  provenance belongs to the HTSJDK pack.
 
 Responsible layer:
 
-- `stdlib`, because this is behavior of a library type outside the translated
-  source corpus.
+- `htsjdk.variant.variantcontext`, because `Allele` is a pack-owned HTSJDK
+  value type and this accessor is part of that library boundary.
 
 Tests added or strengthened:
 
@@ -23060,8 +23061,14 @@ Interpretation:
 
 This run refreshes the dependency-pack section after adding manifest-shaped
 pack declarations, source/fact-provider benchmark attribution, mode-specific
-external-pack counters, pack-owned missing constructor/field diagnostics, and
-`IntervalList` constructor coverage.
+external-pack counters, user-authored manifest inputs, pack-owned missing
+constructor/field diagnostics, explicit modeled field coverage, and
+`IntervalList` constructor coverage. This run uses the built-in packs only;
+the same benchmark command can now also take repeatable `--facts` and
+`--external-pack-manifest` inputs, or `--no-builtin-external-packs` for a
+generic-boundary baseline. Selected built-in packs can be re-added with
+repeatable `--builtin-external-pack PACK_NAME` inputs for controlled HTSJDK or
+crate-mapping benchmark modes.
 
 Command:
 
@@ -23077,7 +23084,7 @@ files_parsed_without_errors	1595
 files_resolved_without_errors	1595
 parser_diagnostics	0
 resolver_diagnostics	0
-semantic_diagnostics	2652
+semantic_diagnostics	2659
 unresolved_method_calls	41937
 external_api_explained_method_calls	40494
 unexplained_method_calls	1443
@@ -23085,26 +23092,41 @@ unresolved_constructors	4177
 external_api_explained_constructors	4125
 anonymous_class_constructors	52
 unexplained_constructors	0
+unexplained_source_constructors	0
+unexplained_non_source_constructors	0
+unresolved_constructor_delegations	0
 unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+unexplained_source_field_accesses	0
+unexplained_non_source_field_accesses	0
 external_api_guesses	17686
-external_pack_api_facts	2001
+external_pack_api_facts	2027
 external_pack_constructor_facts	267
-external_fact_model_pack_api_facts	1991
+external_fact_model_pack_api_facts	2017
 external_fact_model_pack_constructor_facts	257
 rust_crate_mapping_pack_api_facts	10
 rust_crate_mapping_pack_constructor_facts	10
+ffi_boundary_pack_api_facts	0
+ffi_boundary_pack_constructor_facts	0
+conservative_boundary_pack_api_facts	0
+conservative_boundary_pack_constructor_facts	0
 external_pack_explained_method_calls	4234
 external_pack_explained_constructors	478
 external_fact_model_explained_method_calls	4217
 external_fact_model_explained_constructors	463
 rust_crate_mapping_explained_method_calls	17
 rust_crate_mapping_explained_constructors	15
+ffi_boundary_explained_method_calls	0
+ffi_boundary_explained_constructors	0
+conservative_boundary_explained_method_calls	0
+conservative_boundary_explained_constructors	0
 external_constructor_guesses	17
 project_constructor_guesses	45
 source_constructor_guesses	0
 external_field_guesses	0
-external_api_return_nullability_facts	8834
-total_facts	108853
+external_api_return_nullability_facts	8866
+total_facts	108890
 ```
 
 Top external-pack constructor rows after the refresh:
@@ -23170,3 +23192,4761 @@ Interpretation:
   diagnostics. They are useful pressure for expanding `VariantContext`,
   `Genotype`, `Allele`, `GenotypesContext`, `Histogram`, and
   `SAMSequenceRecord` method coverage without adding lowering special cases.
+
+## VariantContext Missing-API Mining Refresh
+
+This run follows up on the highest-volume `variantcontext` method gaps from
+the previous dependency-pack refresh. The implementation moved these calls into
+manifest-owned pack facts and neutral semantic tests: `VariantContext` sample
+genotype lookup, ploidy, integer attributes, alternate allele access,
+symbolic/filter/source/display predicates and getters, `VariantContextBuilder`
+`rmAttribute`, and `Genotype` ploidy/depth/type/indexed allele/attribute/
+display/hom-ref methods.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Summary:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	1795
+unresolved_method_calls	41937
+external_api_explained_method_calls	40981
+unexplained_method_calls	956
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17696
+external_pack_api_facts	2255
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2245
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	10
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	4721
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	4704
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	17
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9106
+total_facts	109146
+```
+
+Remaining top unexplained method receivers:
+
+```text
+getNAlleles	VariantContext	39
+isSymbolic	Allele	30
+hasDP	Genotype	24
+getExtendedAttribute	Genotype	21
+isVariant	VariantContext	18
+getDisplayString	Allele	13
+makeStringArray	HDF5File	13
+getValueLabel	Histogram	10
+getMd5	SAMSequenceRecord	9
+add	GenotypesContext	8
+getAttributeAsDouble	VariantContext	8
+getLikelihoods	Genotype	8
+getSampleNames	VariantContext	8
+contigsMatch	VariantContext	7
+get	Histogram	7
+getFlowOrder	SAMReadGroupRecord	7
+getPhredScaledQual	VariantContext	7
+getPlatformUnit	SAMReadGroupRecord	7
+getStop	VariantContextBuilder	7
+isFiltered	Genotype	7
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `2659` to `1795`.
+- Unexplained method calls fell from `1443` to `956`.
+- External-pack explained method calls rose from `4234` to `4721`.
+- The next useful pack-mining slice should classify the remaining receiver-
+  specific rows rather than adding broad receiverless method-name facts.
+
+## VariantContext Receiver-Specific Mining Refresh
+
+This run follows the next receiver-specific rows from the prior refresh and
+keeps the work inside the selected `htsjdk.variant.variantcontext` pack. The
+new facts cover VariantContext allele counts, variant/sample/contig/quality
+helpers, Allele symbolic/display helpers, Genotype DP/likelihood/filter
+helpers, VariantContextBuilder stop reads, and GenotypesContext mutation.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Summary:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	1388
+unresolved_method_calls	41937
+external_api_explained_method_calls	41204
+unexplained_method_calls	733
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17675
+external_pack_api_facts	2398
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2388
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	10
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	4967
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	4950
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	17
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9252
+total_facts	109271
+```
+
+Remaining top unexplained method receivers:
+
+```text
+create	GenotypesContext	17
+makeStringArray	HDF5File	13
+hasGenotypes	VariantContext	12
+getValueLabel	Histogram	10
+hasLikelihoods	Genotype	10
+getMd5	SAMSequenceRecord	9
+get	Histogram	7
+getFlowOrder	SAMReadGroupRecord	7
+getPlatformUnit	SAMReadGroupRecord	7
+getSequenceIndex	SAMFileHeader	7
+hasGenotype	VariantContext	7
+fromLog10Likelihoods	GenotypeLikelihoods	6
+values	GenotypeType	6
+equals	Allele	5
+getAttributeAsStringList	VariantContext	5
+getReferenceLength	SAMSequenceDictionary	5
+isPhased	Genotype	5
+isPresent	HDF5File	5
+readDouble	HDF5File	5
+getMetaDataLine	VCFHeader	4
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `1795` to `1388`.
+- Unexplained method calls fell from `956` to `733`.
+- External-pack explained method calls rose from `4721` to `4967`.
+- Remaining rows now split across VariantContext/Genotype follow-ups,
+  GenotypesContext factory/static helpers, HDF5 facade gaps, and SAM/Histogram
+  pack methods. The next slice should choose one of those families instead of
+  mixing unrelated packages.
+
+## SAM Header And Histogram Mining Refresh
+
+This run follows the SAM header and samtools-util rows from the previous
+receiver-specific report. The new pack facts cover `SAMSequenceRecord.getMd5`,
+`SAMSequenceDictionary.getReferenceLength`, `SAMFileHeader.getSequenceIndex`,
+`SAMReadGroupRecord.getPlatformUnit`, `SAMReadGroupRecord.getFlowOrder`,
+`Histogram.getValueLabel`, and indexed `Histogram.get`.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Summary:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	1288
+unresolved_method_calls	41937
+external_api_explained_method_calls	41263
+unexplained_method_calls	674
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17678
+external_pack_api_facts	2423
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2413
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	10
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5026
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5009
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	17
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9278
+total_facts	109300
+```
+
+Remaining top unexplained method receivers:
+
+```text
+create	GenotypesContext	17
+makeStringArray	HDF5File	13
+hasGenotypes	VariantContext	12
+increment	Histogram	12
+hasLikelihoods	Genotype	10
+getReadGroup	SAMFileHeader	9
+basesMatch	Allele	7
+hasGenotype	VariantContext	7
+fromLog10Likelihoods	GenotypeLikelihoods	6
+values	GenotypeType	6
+equals	Allele	5
+getAttributeAsStringList	VariantContext	5
+isPhased	Genotype	5
+isPresent	HDF5File	5
+readDouble	HDF5File	5
+getInfoHeaderLine	VCFHeader	4
+getMetaDataLine	VCFHeader	4
+isHomVar	Genotype	4
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `1388` to `1288`.
+- Unexplained method calls fell from `733` to `674`.
+- External-pack explained method calls rose from `4967` to `5026`.
+- Remaining rows are now best split into HDF5 facade coverage, VCF header
+  accessors, and a smaller VariantContext/Genotype/Allele follow-up.
+
+## HDF5 Facade Mining Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh keeps the HDF5 handling in the crate-mapping pack and adds
+GATK-shaped facts for:
+
+- `HDF5File.readDouble` as a read-only scalar double getter that can throw
+  `HDF5Error`;
+- `HDF5File.makeStringArray` as a non-null string-array helper;
+- `HDF5File.isPresent` as a read-only boolean getter.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	1248
+unresolved_method_calls	41937
+external_api_explained_method_calls	41286
+unexplained_method_calls	651
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17678
+external_pack_api_facts	2432
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2413
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	19
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5049
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5009
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	40
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9287
+total_facts	109309
+```
+
+Remaining top unexplained method receivers:
+
+```text
+create	GenotypesContext	17
+isHomVar	Genotype	13
+hasGenotypes	VariantContext	12
+increment	Histogram	12
+hasLikelihoods	Genotype	10
+getReadGroup	SAMFileHeader	9
+clone	SAMFileHeader	8
+getAlleleIndex	VariantContext	8
+basesMatch	Allele	7
+hasGenotype	VariantContext	7
+fromLog10Likelihoods	GenotypeLikelihoods	6
+values	GenotypeType	6
+equals	Allele	5
+getAttributeAsStringList	VariantContext	5
+isPhased	Genotype	5
+getInfoHeaderLine	VCFHeader	4
+getMetaDataLine	VCFHeader	4
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+getAssembly	SAMSequenceRecord	3
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `1288` to `1248`.
+- Unexplained method calls fell from `674` to `651`.
+- External-pack explained method calls rose from `5026` to `5049`.
+- Rust crate-mapped explained method calls rose from `17` to `40`.
+- The previous HDF5 top rows (`makeStringArray`, `isPresent`, and
+  `readDouble`) are no longer in the top unexplained receiver list.
+
+## HTSJDK Receiver-Specific Boundary Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh keeps the next HTSJDK rows in external fact packs rather than
+lowering. The added facts cover:
+
+- `VariantContext.hasGenotypes`, `hasGenotype`, `getAlleleIndex`, and
+  `getAttributeAsStringList`;
+- `Genotype.hasLikelihoods`, `isHomVar`, and `isPhased`;
+- `GenotypeLikelihoods.fromLog10Likelihoods` and `GenotypeType.values`;
+- keyed `VCFHeader.getInfoHeaderLine` and `getMetaDataLine` lookups;
+- `SAMFileHeader.getReadGroup`, `SAMFileHeader.clone`, and
+  `SAMSequenceRecord.getAssembly`.
+
+`Allele.equals` deliberately remains handled by the Java object-method model,
+not by the VariantContext pack, so object method behavior stays centralized.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	1007
+unresolved_method_calls	41937
+external_api_explained_method_calls	41412
+unexplained_method_calls	525
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17677
+external_pack_api_facts	2518
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2499
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	19
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5175
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5135
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	40
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9373
+total_facts	109394
+```
+
+Remaining top unexplained method receivers:
+
+```text
+create	GenotypesContext	17
+increment	Histogram	12
+getSequence	SAMFileHeader	8
+basesMatch	Allele	7
+getAttributeAsList	VariantContext	6
+makeDoubleArray	HDF5File	6
+equals	Allele	5
+getCommonInfo	VariantContext	5
+copy	GenotypesContext	4
+getAttributeAsDoubleList	VariantContext	4
+getMaxPloidy	VariantContext	4
+rmAttributes	VariantContextBuilder	4
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+getSampleNames	GenotypesContext	3
+getSequencingCenter	SAMReadGroupRecord	3
+log10PError	GenotypeBuilder	3
+makeDouble	HDF5File	3
+makeDoubleMatrix	HDF5File	3
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `1248` to `1007`.
+- Unexplained method calls fell from `651` to `525`.
+- External-pack explained method calls rose from `5049` to `5175`.
+- External fact-model explained method calls rose from `5009` to `5135`.
+- The former top rows for `isHomVar`, `hasGenotypes`, `hasLikelihoods`,
+  `getReadGroup`, `getAlleleIndex`, `hasGenotype`, `fromLog10Likelihoods`,
+  `values`, `getAttributeAsStringList`, `isPhased`, `getInfoHeaderLine`,
+  `getMetaDataLine`, and `getAssembly` dropped out of the top unexplained
+  receiver list.
+
+## Boundary Helper Mining Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh keeps another batch of clear receiver-specific APIs in external
+packs:
+
+- `GenotypesContext.create`, `copy`, and `getSampleNames`;
+- `VariantContext.getAttributeAsList`, `getAttributeAsDoubleList`,
+  `getCommonInfo`, and `getMaxPloidy`;
+- `VariantContextBuilder.rmAttributes` and `Allele.basesMatch`;
+- `SAMFileHeader.getSequence` and `SAMReadGroupRecord.getSequencingCenter`;
+- HDF5 `makeDouble`, `makeDoubleArray`, and `makeDoubleMatrix`.
+
+The slice still leaves Java object methods and domain validation methods out
+of the pack-specific API facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	817
+unresolved_method_calls	41937
+external_api_explained_method_calls	41508
+unexplained_method_calls	429
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17683
+external_pack_api_facts	2586
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2560
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	26
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5271
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5217
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	54
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9446
+total_facts	109471
+```
+
+Remaining top unexplained method receivers:
+
+```text
+increment	Histogram	12
+isHet	Genotype	11
+equals	Allele	5
+filter	VariantContextBuilder	5
+filtersWereApplied	VariantContext	5
+getSampleNamesInOrder	VCFHeader	5
+hasAnyAttribute	Genotype	5
+getFilters	VariantContextBuilder	4
+getGenotypes	VariantContextBuilder	4
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+getAttribute	SAMReadGroupRecord	3
+getCount	Histogram	3
+getFilters	Genotype	3
+getReadGroupId	SAMReadGroupRecord	3
+log10PError	GenotypeBuilder	3
+replace	GenotypesContext	3
+addSequence	SAMFileHeader	2
+calculatePLindex	GenotypeLikelihoods	2
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `1007` to `817`.
+- Unexplained method calls fell from `525` to `429`.
+- External-pack explained method calls rose from `5175` to `5271`.
+- External fact-model explained method calls rose from `5135` to `5217`.
+- Rust crate-mapped explained method calls rose from `40` to `54`.
+- The former top rows for `GenotypesContext.create`, `SAMFileHeader.getSequence`,
+  `VariantContext.getAttributeAsList`, HDF5 double helpers,
+  `VariantContext.getCommonInfo`, `GenotypesContext.copy`,
+  `VariantContext.getAttributeAsDoubleList`, `VariantContext.getMaxPloidy`,
+  `VariantContextBuilder.rmAttributes`, `GenotypesContext.getSampleNames`, and
+  `SAMReadGroupRecord.getSequencingCenter` dropped out of the top unexplained
+  receiver list.
+
+## External Pack Helper Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds exact-receiver facts for another set of clear dependency
+APIs:
+
+- `Histogram.increment` and `getCount`;
+- `Genotype.isHet`, `hasAnyAttribute`, and `getFilters`;
+- `GenotypeLikelihoods.calculatePLindex`;
+- `VariantContext.filtersWereApplied`;
+- `VariantContextBuilder.filter`, `getFilters`, and `getGenotypes`;
+- `GenotypeBuilder.log10PError`;
+- `GenotypesContext.replace`;
+- `VCFHeader.getSampleNamesInOrder`;
+- `SAMFileHeader.addSequence`;
+- `SAMReadGroupRecord.getAttribute` and `getReadGroupId`.
+
+The slice still leaves `Allele.equals`, validation helpers, and dictionary
+assertions outside pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	661
+unresolved_method_calls	41937
+external_api_explained_method_calls	41594
+unexplained_method_calls	343
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17683
+external_pack_api_facts	2652
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2626
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	26
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5357
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5303
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	54
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9504
+total_facts	109540
+```
+
+Remaining top unexplained method receivers:
+
+```text
+setSequenceDictionary	VCFHeader	11
+equals	Allele	6
+getNSamples	VariantContext	5
+hasInfoLine	VCFHeader	5
+noGQ	GenotypeBuilder	5
+getFormatHeaderLine	VCFHeader	4
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+getSumOfValues	Histogram	3
+extend	Allele	2
+filters	GenotypeBuilder	2
+getCalledChrCount	VariantContext	2
+getFormatString	VCFHeaderVersion	2
+getHetCount	VariantContext	2
+getHomVarCount	VariantContext	2
+getMax	Histogram	2
+getMedian	Histogram	2
+getMin	Histogram	2
+getProgramRecord	SAMFileHeader	2
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `817` to `661`.
+- Unexplained method calls fell from `429` to `343`.
+- External-pack explained method calls rose from `5271` to `5357`.
+- External fact-model explained method calls rose from `5217` to `5303`.
+- The previous top rows for Histogram increment/count, Genotype
+  heterozygosity/filter/attribute helpers, VariantContextBuilder filter
+  helpers, VCF ordered samples, SAM read-group metadata, GenotypeBuilder
+  `log10PError`, and GenotypesContext replacement dropped out of the top
+  unexplained receiver list.
+
+## External Pack Receiver Helper Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds exact-receiver facts for clear dependency APIs that remained
+near the top of the benchmark after the previous helper slice:
+
+- `VCFHeader.hasInfoLine`, `getFormatHeaderLine`, and `setSequenceDictionary`;
+- `VCFHeaderVersion.getFormatString`;
+- `Histogram.getSumOfValues`, `getMin`, `getMax`, and `getMedian`;
+- `Allele.extend`;
+- `VariantContext.getNSamples`, `getCalledChrCount`, `getHetCount`, and
+  `getHomVarCount`;
+- `GenotypeBuilder.noGQ` and `filters`;
+- `SAMFileHeader.getProgramRecord`.
+
+The slice still deliberately leaves Java object methods such as
+`Allele.equals`, validation helpers such as `VariantContext.validate*`, and
+dictionary assertion helpers outside pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	546
+unresolved_method_calls	41937
+external_api_explained_method_calls	41659
+unexplained_method_calls	278
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2706
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2680
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	26
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5422
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5368
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	54
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9547
+total_facts	109593
+```
+
+Remaining top unexplained method receivers:
+
+```text
+unfiltered	VariantContextBuilder	7
+equals	Allele	6
+isNotFiltered	VariantContext	6
+isMixed	VariantContext	5
+noAttributes	GenotypeBuilder	5
+isMNP	VariantContext	4
+isSimpleInsertion	VariantContext	4
+overlaps	VariantContext	4
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+getLog10PError	VariantContext	3
+getStructuralVariantType	VariantContext	3
+getVCFRecordComparator	VCFHeader	3
+getSAMString	SAMFileHeader	2
+getVersionString	VCFHeaderVersion	2
+hasLog10PError	VariantContext	2
+isMixed	Genotype	2
+isSameDictionary	SAMSequenceDictionary	2
+keySet	Histogram	2
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `661` to `546`.
+- Unexplained method calls fell from `343` to `278`.
+- External-pack explained method calls rose from `5357` to `5422`.
+- External fact-model explained method calls rose from `5303` to `5368`.
+- The previous top rows for VCF sequence dictionary mutation, VCF format
+  metadata lookups, Histogram statistics, VariantContext aggregate counts,
+  Allele extension, GenotypeBuilder cleanup mutators, and SAM program-record
+  lookup dropped out of the top unexplained receiver list.
+
+## External Pack Predicate And Helper Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds exact-receiver facts for the next clear semantic API rows
+without changing lowering:
+
+- VariantContext predicates and helpers: `isNotFiltered`, `isMixed`, `isMNP`,
+  `isSimpleInsertion`, `overlaps`, `getLog10PError`, `hasLog10PError`, and
+  `getStructuralVariantType`;
+- VariantContextBuilder `unfiltered`;
+- Genotype `isMixed`;
+- GenotypeBuilder `noAttributes`;
+- VCF header/version helpers: `getVCFRecordComparator` and
+  `getVersionString`;
+- SAM header `getSAMString`;
+- Histogram `keySet`.
+
+The slice still leaves Java object methods, validation/assertion helpers, and
+dictionary equivalence policy outside pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	431
+unresolved_method_calls	41937
+external_api_explained_method_calls	41723
+unexplained_method_calls	214
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2763
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2737
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	26
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5486
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5432
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	54
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9604
+total_facts	109650
+```
+
+Remaining top unexplained method receivers:
+
+```text
+getAttributeAsIntList	VariantContext	9
+equals	Allele	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+contains	Locatable	3
+getAsPLs	GenotypeLikelihoods	3
+getGQLog10FromLikelihoods	GenotypeLikelihoods	3
+getLengthOnReference	Locatable	3
+getAsVector	GenotypeLikelihoods	2
+isSameDictionary	SAMSequenceDictionary	2
+load	HDF5Library	2
+name	SortOrder	2
+prefillBins	Histogram	2
+readDoubleMatrix	HDF5File	2
+toStringWithoutGenotypes	VariantContext	2
+truncateSequenceName	SAMSequenceRecord	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+addAll	GenotypesContext	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `546` to `431`.
+- Unexplained method calls fell from `278` to `214`.
+- External-pack explained method calls rose from `5422` to `5486`.
+- External fact-model explained method calls rose from `5368` to `5432`.
+- The previous top rows for VariantContext filter/structural predicates, VCF
+  comparator/version helpers, SAM string rendering, Histogram key access, and
+  builder cleanup helpers dropped out of the top unexplained receiver list.
+
+## External Pack Vector And Matrix Helper Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned facts for the next clear pack APIs:
+
+- `VariantContext.getAttributeAsIntList` and `toStringWithoutGenotypes`;
+- `GenotypeLikelihoods.getAsPLs`, `getAsVector`, and
+  `getGQLog10FromLikelihoods`;
+- `GenotypesContext.addAll`;
+- `Locatable.contains` and `getLengthOnReference`;
+- `Histogram.prefillBins`;
+- `SAMSequenceRecord.truncateSequenceName`;
+- `HDF5File.readDoubleMatrix` and `HDF5Library.load`.
+
+The slice still leaves Java object equality, validation/assertion helpers, and
+dictionary equivalence policy outside pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	354
+unresolved_method_calls	41937
+external_api_explained_method_calls	41757
+unexplained_method_calls	180
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2800
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2770
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	30
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5520
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5462
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	58
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9638
+total_facts	109690
+```
+
+Remaining top unexplained method receivers:
+
+```text
+getMetaDataInSortedOrder	VCFHeader	11
+hasAllele	VariantContext	7
+equals	Allele	6
+passFilters	VariantContextBuilder	6
+getIndelLengths	VariantContext	5
+hasID	VariantContext	4
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+getGLIndicesOfAlternateAllele	VariantContext	3
+addSequence	SAMSequenceDictionary	2
+fromPLs	GenotypeLikelihoods	2
+getNGenotypeSamples	VCFHeader	2
+isSameDictionary	SAMSequenceDictionary	2
+name	SortOrder	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+computeEndFromAlleles	VariantContextBuilder	1
+contains	VariantContext	1
+containsSample	GenotypesContext	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `431` to `354`.
+- Unexplained method calls fell from `214` to `180`.
+- External-pack explained method calls rose from `5486` to `5520`.
+- External fact-model explained method calls rose from `5432` to `5462`.
+- Rust crate-mapping explained method calls rose from `54` to `58`.
+- The previous top rows for list-valued int attributes, genotype-likelihood
+  vector conversions, Locatable length/containment, HDF5 load/matrix reads,
+  Histogram prefill, and SAM sequence-name truncation dropped out of the top
+  unexplained receiver list.
+
+## External Pack Membership And Metadata Helper Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned facts for clear HTSJDK APIs verified against
+the local HTSJDK corpus:
+
+- `VCFHeader.getMetaDataInSortedOrder` and `getNGenotypeSamples`;
+- `VariantContext.hasID`, `hasAllele`, `getIndelLengths`,
+  `getGLIndicesOfAlternateAllele`, and `contains`;
+- `VariantContextBuilder.passFilters` and `computeEndFromAlleles`;
+- `GenotypeLikelihoods.fromPLs`;
+- `GenotypesContext.containsSample`;
+- `SAMSequenceDictionary.addSequence`.
+
+The slice still leaves Java object equality, validation/assertion helpers,
+dictionary equivalence, and explicit unsupported APIs outside pack-specific
+facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	268
+unresolved_method_calls	41937
+external_api_explained_method_calls	41802
+unexplained_method_calls	135
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2846
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2816
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	30
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5565
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5507
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	58
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9683
+total_facts	109738
+```
+
+Remaining top unexplained method receivers:
+
+```text
+isMonomorphicInSamples	VariantContext	9
+equals	Allele	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+getComments	SAMFileHeader	3
+hasSymbolicAlleles	VariantContext	3
+isCalled	Allele	3
+getOtherHeaderLine	VCFHeader	2
+isBreakpoint	Allele	2
+isSameDictionary	SAMSequenceDictionary	2
+name	SortOrder	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+contigsMatch	Feature	1
+contigsMatch	Locatable	1
+countAllele	Genotype	1
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+getAlleleIndices	VariantContext	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `354` to `268`.
+- Unexplained method calls fell from `180` to `135`.
+- External-pack explained method calls rose from `5520` to `5565`.
+- External fact-model explained method calls rose from `5462` to `5507`.
+- The previous top rows for VCF sorted metadata/sample counts,
+  VariantContext allele/membership helpers, builder pass-filter/end
+  computation, GenotypeLikelihoods PL construction, GenotypesContext sample
+  membership, and SAM dictionary sequence mutation dropped out of the top
+  unexplained receiver list.
+
+## External Pack Predicate, Header, And Coordinate Helper Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned facts for clear HTSJDK APIs verified against
+the local HTSJDK corpus:
+
+- `VariantContext.isMonomorphicInSamples`, `hasSymbolicAlleles`, and
+  `getAlleleIndices`;
+- `Allele.isCalled` and `isBreakpoint`;
+- `Genotype.countAllele`;
+- `GenotypeLikelihoods.getAllelePair`;
+- `VCFHeader.getOtherHeaderLine`;
+- `SAMFileHeader.getComments`;
+- `Locatable.contigsMatch` and `Feature.contigsMatch`.
+
+The slice continues to leave Java object equality, validation/assertion
+helpers, dictionary equivalence, enum/object naming policy, and explicit
+unsupported APIs outside pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	211
+unresolved_method_calls	41937
+external_api_explained_method_calls	41829
+unexplained_method_calls	108
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2877
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2847
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	30
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5592
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5534
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	58
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9714
+total_facts	109769
+```
+
+Remaining top unexplained method receivers:
+
+```text
+equals	Allele	6
+isPolymorphicInSamples	VariantContext	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+isSimpleDeletion	VariantContext	3
+numLikelihoods	GenotypeLikelihoods	3
+isSameDictionary	SAMSequenceDictionary	2
+name	SortOrder	2
+noGenotypes	VariantContextBuilder	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+getAttributeAsBoolean	VariantContext	1
+getAttributes	VariantContextBuilder	1
+getGenotypesOrderedByName	VariantContext	1
+getLengthOnReference	VariantContext	1
+getMean	Histogram	1
+getMedianAbsoluteDeviation	Histogram	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `268` to `211`.
+- Unexplained method calls fell from `135` to `108`.
+- External-pack explained method calls rose from `5565` to `5592`.
+- External fact-model explained method calls rose from `5507` to `5534`.
+- The previous top rows for monomorphic/sample predicates, symbolic allele
+  checks, called/breakpoint alleles, nullable VCF/SAM header metadata, feature
+  and locatable contig comparison, genotype allele counting, and allele-index
+  list lookup dropped out of the top unexplained receiver list.
+
+## External Pack Statistic And Sample-State Helper Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned facts for clear HTSJDK APIs verified against
+the local HTSJDK corpus:
+
+- `VariantContext.isPolymorphicInSamples`, `isSimpleDeletion`,
+  `getAttributeAsBoolean`, `getGenotypesOrderedByName`, and
+  `getLengthOnReference`;
+- `VariantContextBuilder.noGenotypes`;
+- `GenotypeLikelihoods.numLikelihoods`;
+- `Histogram.getMean` and `getMedianAbsoluteDeviation`.
+
+The slice still leaves Java object equality, validation/assertion helpers,
+dictionary equivalence, enum/object naming policy, shallow-copy builder policy,
+and explicit unsupported APIs outside pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	173
+unresolved_method_calls	41937
+external_api_explained_method_calls	41848
+unexplained_method_calls	89
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2897
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2867
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	30
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5611
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5553
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	58
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9734
+total_facts	109789
+```
+
+Remaining top unexplained method receivers:
+
+```text
+equals	Allele	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+putAttributes	VariantContextBuilder	3
+isSameDictionary	SAMSequenceDictionary	2
+makeWithShallowCopy	GenotypeBuilder	2
+name	SortOrder	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+getAttributes	VariantContextBuilder	1
+getNoCallCount	VariantContext	1
+getScore	BEDFeature	1
+getStandardDeviation	Histogram	1
+hasAlternateAllele	VariantContext	1
+hasFormatLine	VCFHeader	1
+hasGenotypingData	VCFHeader	1
+hasNext	IntervalMergerIterator	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `211` to `173`.
+- Unexplained method calls fell from `108` to `89`.
+- External-pack explained method calls rose from `5592` to `5611`.
+- External fact-model explained method calls rose from `5534` to `5553`.
+- The previous top rows for sample polymorphism, simple deletion,
+  genotype-likelihood count, builder genotype removal, boolean attributes,
+  ordered genotype iteration, VariantContext reference length, and Histogram
+  mean/deviation statistics dropped out of the top unexplained receiver list.
+
+## External Pack Builder, Header, And Statistic Helper Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned facts for clear HTSJDK APIs verified against
+the local HTSJDK corpus:
+
+- `VariantContextBuilder.putAttributes`;
+- `GenotypeBuilder.makeWithShallowCopy`;
+- `VariantContext.getNoCallCount` and `hasAlternateAllele`;
+- `VCFHeader.hasFormatLine` and `hasGenotypingData`;
+- `BEDFeature.getScore`;
+- `Histogram.getStandardDeviation`.
+
+The slice still leaves Java object equality, validation/assertion helpers,
+dictionary equivalence, enum/object naming policy, project-owned iterators,
+and explicit unsupported APIs outside pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	155
+unresolved_method_calls	41937
+external_api_explained_method_calls	41859
+unexplained_method_calls	78
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2908
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2878
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	30
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5622
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5564
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	58
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9745
+total_facts	109800
+```
+
+Remaining top unexplained method receivers:
+
+```text
+equals	Allele	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+isHetNonRef	Genotype	2
+isSameDictionary	SAMSequenceDictionary	2
+isStructuralIndel	VariantContext	2
+name	SortOrder	2
+phased	GenotypeBuilder	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+getAttributes	VariantContextBuilder	1
+hasNext	IntervalMergerIterator	1
+isComplexIndel	VariantContext	1
+isFixedCount	VCFInfoHeaderLine	1
+isNonInformative	Genotype	1
+isNonRefAllele	Allele	1
+isSingleBreakend	Allele	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `173` to `155`.
+- Unexplained method calls fell from `89` to `78`.
+- External-pack explained method calls rose from `5611` to `5622`.
+- External fact-model explained method calls rose from `5553` to `5564`.
+- The previous top rows for builder bulk attributes, shallow-copy genotype
+  construction, no-call counts, alternate-allele predicates, BED score, VCF
+  format/genotyping predicates, and Histogram standard deviation dropped out of
+  the top unexplained receiver list.
+
+## External Pack Predicate, Builder, And Header-Line Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned facts for clear HTSJDK APIs verified against
+the local HTSJDK corpus:
+
+- `Allele.isSingleBreakend` and `isNonRefAllele`;
+- `VariantContext.isComplexIndel` and `isStructuralIndel`;
+- `VariantContextBuilder.getAttributes`;
+- `GenotypeBuilder.phased`;
+- `Genotype.isHetNonRef` and `isNonInformative`;
+- `VCFInfoHeaderLine.isFixedCount` and `VCFFormatHeaderLine.isFixedCount`.
+
+The slice still leaves Java object equality, validation/assertion helpers,
+dictionary equivalence, enum/object naming policy, project-owned iterators,
+and explicit unsupported APIs outside pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	133
+unresolved_method_calls	41937
+external_api_explained_method_calls	41871
+unexplained_method_calls	66
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2920
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2890
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	30
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5634
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5576
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	58
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9757
+total_facts	109812
+```
+
+Remaining top unexplained method receivers:
+
+```text
+equals	Allele	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+subContextFromSamples	VariantContext	3
+isSameDictionary	SAMSequenceDictionary	2
+name	SortOrder	2
+overlaps	Locatable	2
+readStringArray	HDF5File	2
+toStringDecodeGenotypes	VariantContext	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+hasNext	IntervalMergerIterator	1
+isSymbolicOrSV	VariantContext	1
+loc	VariantContextBuilder	1
+minOverlapper	IntervalTree	1
+next	IntervalMergerIterator	1
+noID	VariantContextBuilder	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `155` to `133`.
+- Unexplained method calls fell from `78` to `66`.
+- External-pack explained method calls rose from `5622` to `5634`.
+- External fact-model explained method calls rose from `5564` to `5576`.
+- The previous top rows for allele breakend/non-reference predicates,
+  complex/structural indel predicates, builder attributes, genotype phasing,
+  genotype informativeness predicates, and VCF fixed-count header-line
+  predicates dropped out of the top unexplained receiver list.
+
+## HDF5 String-Array Read Facade Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds a crate-mapped HDF5 facade fact for `HDF5File.readStringArray`
+as a read-only getter returning `String[]` and throwing `HDF5Error`. The mapping
+is owned by the HDF5 external pack and consumed by the normal call/facade
+planning path; no lowering rule inspects HDF5 method names.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	127
+unresolved_method_calls	41937
+external_api_explained_method_calls	41873
+unexplained_method_calls	64
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2924
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2890
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	34
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5636
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5576
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	60
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9757
+total_facts	109816
+```
+
+Remaining top unexplained method receivers:
+
+```text
+equals	Allele	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+subContextFromSamples	VariantContext	3
+isSameDictionary	SAMSequenceDictionary	2
+name	SortOrder	2
+overlaps	Locatable	2
+toStringDecodeGenotypes	VariantContext	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+hasNext	IntervalMergerIterator	1
+isSymbolicOrSV	VariantContext	1
+loc	VariantContextBuilder	1
+minOverlapper	IntervalTree	1
+next	IntervalMergerIterator	1
+noID	VariantContextBuilder	1
+oneIsPrefixOfOther	Allele	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `133` to `127`.
+- Unexplained method calls fell from `66` to `64`.
+- Rust crate-mapping explained method calls rose from `58` to `60`.
+- `readStringArray` dropped out of the unexplained receiver list, confirming
+  that the HDF5 facade pack covers this GATK-shaped call without a lowering
+  special case.
+
+## External Pack Low-Count HTSJDK Helper Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned facts for remaining clear HTSJDK helper APIs
+verified against the local HTSJDK corpus:
+
+- `Locatable.overlaps`;
+- `VariantContext.isSymbolicOrSV`, `subContextFromSamples`, and
+  `toStringDecodeGenotypes`;
+- `VariantContextBuilder.loc` and `noID`;
+- `Allele.oneIsPrefixOfOther`;
+- `SAMFileHeader.setComments`.
+
+The slice still leaves Java equality, validation/assertion helpers, dictionary
+equivalence, enum/object naming policy, bulk SAM header replacement policy, and
+project-owned iterators outside pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	102
+unresolved_method_calls	41937
+external_api_explained_method_calls	41886
+unexplained_method_calls	51
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2937
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2903
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	34
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5649
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5589
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	60
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9768
+total_facts	109829
+```
+
+Remaining top unexplained method receivers:
+
+```text
+equals	Allele	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+setProgramRecords	SAMFileHeader	3
+setReadGroups	SAMFileHeader	3
+isSameDictionary	SAMSequenceDictionary	2
+name	SortOrder	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+hasNext	IntervalMergerIterator	1
+minOverlapper	IntervalTree	1
+next	IntervalMergerIterator	1
+remove	CloseableIterator	1
+sameGenotype	Genotype	1
+setAttribute	SAMFileHeader	1
+setAttribute	SAMReadGroupRecord	1
+setFlowOrder	SAMReadGroupRecord	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `127` to `102`.
+- Unexplained method calls fell from `64` to `51`.
+- External-pack explained method calls rose from `5636` to `5649`.
+- External fact-model explained method calls rose from `5576` to `5589`.
+- The previous rows for `Locatable.overlaps`, `VariantContext` sample/context
+  and symbolic/SV helpers, builder `loc`/`noID`, `Allele.oneIsPrefixOfOther`,
+  and SAM header `setComments` dropped out of the unexplained receiver list.
+
+## External Pack SAM Bulk Mutator And Genotype Predicate Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned facts for clear HTSJDK mutator/predicate APIs
+verified against the local HTSJDK corpus:
+
+- `SAMFileHeader.setReadGroups`, `setProgramRecords`, and `setAttribute`;
+- `SAMReadGroupRecord.setPlatformUnit`, `setFlowOrder`, and `setAttribute`;
+- `Genotype.sameGenotype`.
+
+The slice still leaves Java equality, validation/assertion helpers, dictionary
+equivalence, enum/object naming policy, unsupported decode APIs, selected
+iterator/project-owned methods, and a few low-count external helpers outside
+pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	83
+unresolved_method_calls	41937
+external_api_explained_method_calls	41897
+unexplained_method_calls	40
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2948
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2914
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	34
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5660
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5600
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	60
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9769
+total_facts	109840
+```
+
+Remaining top unexplained method receivers:
+
+```text
+equals	Allele	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+isSameDictionary	SAMSequenceDictionary	2
+name	SortOrder	2
+source	VariantContextBuilder	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+hasNext	IntervalMergerIterator	1
+minOverlapper	IntervalTree	1
+next	IntervalMergerIterator	1
+remove	CloseableIterator	1
+setSequenceLength	SAMSequenceRecord	1
+setSequencingCenter	SAMReadGroupRecord	1
+toProperties	SQLiteConfig	1
+trimByWidth	Histogram	1
+valueOf	VCFHeaderLineType	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `102` to `83`.
+- Unexplained method calls fell from `51` to `40`.
+- External-pack explained method calls rose from `5649` to `5660`.
+- External fact-model explained method calls rose from `5589` to `5600`.
+- The previous rows for SAM header bulk replacement, SAM read-group metadata
+  setters, header/read-group `setAttribute`, and `Genotype.sameGenotype`
+  dropped out of the unexplained receiver list.
+
+## External Pack Low-Count Helper Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned facts for remaining clear low-count external
+APIs verified against the local HTSJDK/GATK corpus:
+
+- `VariantContextBuilder.source`;
+- `SAMSequenceRecord.setSequenceLength`;
+- `SAMReadGroupRecord.setSequencingCenter`;
+- `SQLiteConfig.toProperties`;
+- `Histogram.trimByWidth`;
+- `IntervalTree.minOverlapper`;
+- `VCFHeaderLineType.valueOf`.
+
+The slice still leaves Java equality, validation/assertion helpers, dictionary
+equivalence, enum/object naming policy, unsupported decode APIs, and selected
+iterator/project-owned methods outside pack-specific facts.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	71
+unresolved_method_calls	41937
+external_api_explained_method_calls	41905
+unexplained_method_calls	32
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2956
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2921
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	35
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5668
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5607
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9775
+total_facts	109848
+```
+
+Remaining top unexplained method receivers:
+
+```text
+equals	Allele	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+isSameDictionary	SAMSequenceDictionary	2
+name	SortOrder	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+hasNext	IntervalMergerIterator	1
+next	IntervalMergerIterator	1
+remove	CloseableIterator	1
+values	Histogram	1
+withinDistanceOf	VariantContext	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `83` to `71`.
+- Unexplained method calls fell from `40` to `32`.
+- External-pack explained method calls rose from `5660` to `5668`.
+- External fact-model explained method calls rose from `5600` to `5607`.
+- Rust crate-mapping explained method calls rose from `60` to `61`.
+- The previous rows for builder `source`, SAM sequence/read-group setters,
+  SQLite property conversion, Histogram trimming, IntervalTree overlap lookup,
+  and VCF header-line type parsing dropped out of the unexplained receiver list.
+
+## External Pack Final Low-Count Fact Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned facts for the last two clear external API
+omissions in the top receiver list:
+
+- `Histogram.values`, modeled as a read-only non-null collection getter;
+- `VariantContext.withinDistanceOf`, modeled as a read-only boolean predicate.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	67
+unresolved_method_calls	41937
+external_api_explained_method_calls	41907
+unexplained_method_calls	30
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17682
+external_pack_api_facts	2958
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2923
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	35
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5670
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5609
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9777
+total_facts	109850
+```
+
+Remaining top unexplained method receivers:
+
+```text
+equals	Allele	6
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+isSameDictionary	SAMSequenceDictionary	2
+name	SortOrder	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+hasNext	IntervalMergerIterator	1
+next	IntervalMergerIterator	1
+remove	CloseableIterator	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `71` to `67`.
+- Unexplained method calls fell from `32` to `30`.
+- External-pack explained method calls rose from `5668` to `5670`.
+- External fact-model explained method calls rose from `5607` to `5609`.
+- The previous `Histogram.values` and `VariantContext.withinDistanceOf` rows
+  dropped out.
+- The remaining rows should be handled by cross-cutting Java object,
+  validation/assertion, dictionary-equivalence, enum/object naming,
+  unsupported-decode, and iterator contract policy rather than by adding more
+  receiver-specific pack facts.
+
+## External API Arity-Aware Overload Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds optional argument-count metadata to external API effect facts
+and uses exact-arity lookup during semantic collection and benchmark
+attribution. Existing arity-agnostic facts remain valid fallbacks. The immediate
+GATK-driven API use is HTSJDK `Allele.equals(Allele, boolean)`, which is now a
+pack-owned exact-arity fact, while inherited Java `Object.equals(Object)`
+remains a builtin object-method fact.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	59
+unresolved_method_calls	41937
+external_api_explained_method_calls	41913
+unexplained_method_calls	24
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	18022
+external_pack_api_facts	2964
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2929
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	35
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5677
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5616
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	10023
+total_facts	110274
+```
+
+Remaining top unexplained method receivers:
+
+```text
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+isSameDictionary	SAMSequenceDictionary	2
+name	SortOrder	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+hasNext	IntervalMergerIterator	1
+next	IntervalMergerIterator	1
+remove	CloseableIterator	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `67` to `59`.
+- Unexplained method calls fell from `30` to `24`.
+- External-pack explained method calls rose from `5670` to `5677`.
+- External fact-model explained method calls rose from `5609` to `5616`.
+- Conservative external API fact count increased because overload-aware facts
+  are now tracked per receiver/method/arity instead of collapsing by name.
+- `Allele.equals` dropped out without turning inherited
+  `Object.equals(Object)` into a receiver-specific pack rule.
+
+## External Enum Name Policy Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh keeps Java enum naming APIs as shared external enum policy rather
+than pack-specific lowering rules. It classifies `name()`, `values()`, and
+`valueOf(...)` on known external enum-like types as builtin external model
+facts. Semantic API receiver inference also recovers known external field and
+enum constants such as `SAMFileHeader.SortOrder.coordinate` before classifying
+the following method call, while resolver source-field lookup remains
+protected from generic names like `Options`.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	55
+unresolved_method_calls	41937
+external_api_explained_method_calls	41915
+unexplained_method_calls	22
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17996
+external_pack_api_facts	2964
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2929
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	35
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5677
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5616
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	10024
+total_facts	110278
+```
+
+Remaining top unexplained method receivers:
+
+```text
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+isSameDictionary	SAMSequenceDictionary	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+fullyDecode	VariantContext	1
+hasNext	IntervalMergerIterator	1
+next	IntervalMergerIterator	1
+remove	CloseableIterator	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Pack-owned semantic diagnostics fell from `59` to `55`.
+- Unexplained method calls fell from `24` to `22`.
+- `SortOrder.name` dropped out without adding a receiver-specific
+  `SortOrder.name` pack fact.
+- The remaining rows are validation/assertion policy, dictionary equivalence,
+  explicit unsupported decode behavior, project-owned iterators, and
+  `CloseableIterator.remove`.
+
+## Unsupported External API Attribution Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh changes benchmark attribution only. Pack-declared unsupported APIs
+are now counted as explicit external-boundary explanations instead of
+unexplained method calls, using the same provider-first, builtin-pack fallback
+policy as semantic analysis. This keeps unsupported APIs visible without
+letting them masquerade as missing resolver coverage.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	55
+unresolved_method_calls	41937
+external_api_explained_method_calls	41916
+external_api_unsupported_method_calls	1
+unexplained_method_calls	21
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17996
+external_pack_api_facts	2964
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2929
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	35
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5678
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5617
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	10024
+total_facts	110278
+```
+
+Unsupported external API methods:
+
+```text
+VariantContext	fullyDecode	1
+```
+
+Remaining top unexplained method receivers:
+
+```text
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+isSameDictionary	SAMSequenceDictionary	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+hasNext	IntervalMergerIterator	1
+next	IntervalMergerIterator	1
+remove	CloseableIterator	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Semantic diagnostics are unchanged at `55`; unsupported APIs remain
+  diagnostic facts.
+- Unexplained method calls fell from `22` to `21`.
+- `external_api_unsupported_method_calls` is now a separate visible counter.
+- `VariantContext.fullyDecode` moved out of the unexplained rows and into
+  `top_external_api_unsupported_methods`.
+
+## Samtools Iterator Boundary Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds manifest-owned samtools-util iterator facts for
+`IntervalMergerIterator.hasNext`, `IntervalMergerIterator.next`, and
+side-effecting `CloseableIterator.remove`. These are external pack API facts,
+not lowering rules: the benchmark now treats those calls as explained external
+iterator boundaries.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	49
+unresolved_method_calls	41937
+external_api_explained_method_calls	41919
+external_api_unsupported_method_calls	1
+unexplained_method_calls	18
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17996
+external_pack_api_facts	2967
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2932
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	35
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5681
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5620
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	10026
+total_facts	110281
+```
+
+Remaining top unexplained method receivers:
+
+```text
+validateAlternateAlleles	VariantContext	4
+validateChromosomeCounts	VariantContext	4
+assertSameDictionary	SAMSequenceDictionary	3
+isSameDictionary	SAMSequenceDictionary	2
+validateRSIDs	VariantContext	2
+validateReferenceBases	VariantContext	2
+extraStrictValidation	VariantContext	1
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Semantic diagnostics fell from `55` to `49`.
+- Unexplained method calls fell from `21` to `18`.
+- The iterator rows `IntervalMergerIterator.hasNext`,
+  `IntervalMergerIterator.next`, and `CloseableIterator.remove` dropped out of
+  the unexplained list.
+- The remaining rows are validation/assertion policy and dictionary
+  equivalence, not clear iterator or unsupported-boundary omissions.
+
+## Validation And Dictionary Boundary Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh adds external fact-model entries for the remaining HTSJDK method
+tail:
+
+- `VariantContext.extraStrictValidation`
+- `VariantContext.validateReferenceBases`
+- `VariantContext.validateRSIDs`
+- `VariantContext.validateAlternateAlleles`
+- `VariantContext.validateChromosomeCounts`
+- `SAMSequenceDictionary.assertSameDictionary`
+- `SAMSequenceDictionary.isSameDictionary`
+
+The validation and assertion calls are modeled as read-only checks with thrown
+exception metadata. Dictionary equivalence is modeled as a boolean getter. The
+facts remain in the HTSJDK external packs, so lowering still consumes semantic
+facts instead of recognizing these Java method names directly.
+
+The follow-up argument-boundary refresh keeps the same semantic policy and adds
+borrowed/read-only argument facts for the `VariantContext` validation inputs:
+reported/observed `Allele` values and `Set<String>` RSID sets. This makes
+ownership and coercion planning use the external fact layer instead of
+rediscovering validation argument behavior later.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	13
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+external_api_unsupported_method_calls	1
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+external_api_guesses	17996
+external_pack_api_facts	2977
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2942
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	35
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5699
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5638
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	10028
+total_facts	110291
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Semantic diagnostics fell from `49` to `13`.
+- Unexplained method calls fell from `18` to `0`.
+- The benchmark still reports one explicit unsupported API:
+  `VariantContext.fullyDecode`.
+- Remaining benchmark pressure is no longer unexplained method-call
+  attribution. Next work should focus on the remaining semantic diagnostics,
+  constructor guess classification, anonymous constructors, and whether any
+  external guesses need stronger pack/facade facts.
+
+## Final Missing HTSJDK Pack API Refresh
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh uses the semantic diagnostic summary to handle the remaining
+clear HTSJDK pack gaps without adding call-site-specific lowering rules:
+
+- `Interval.size`
+- `IntervalList.fromFile`
+- `IntervalTree.put`
+- `GenotypeBuilder.noDP`
+- `GenotypeLikelihoods.forEach`
+- `GenotypesContext.iterateInSampleNameOrder`
+- `GenotypesContext.spliterator`
+
+The prior `Allele.getKey` and `Allele.getValue` diagnostics were not modeled
+as Allele APIs. The GATK call site is a `Map.Entry<Allele, List<Haplotype>>`
+enhanced-for variable, so the fix belongs in semantic-analysis scoping. The
+resolver already preserved the generic `Entry` receiver; semantic external API
+collection now visits enhanced-for bodies with the loop variable in the local
+type environment. Regression tests cover both the resolver receiver fact and
+the semantic diagnostic attribution.
+
+Summary counters:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unresolved_method_calls	41937
+external_api_explained_method_calls	41937
+external_api_unsupported_method_calls	1
+unexplained_method_calls	0
+unresolved_constructors	4177
+external_api_explained_constructors	4125
+anonymous_class_constructors	52
+unexplained_constructors	0
+unresolved_field_accesses	0
+external_api_explained_field_accesses	0
+unexplained_field_accesses	0
+external_api_guesses	15741
+external_pack_api_facts	2998
+external_pack_constructor_facts	267
+external_fact_model_pack_api_facts	2963
+external_fact_model_pack_constructor_facts	257
+rust_crate_mapping_pack_api_facts	35
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5699
+external_pack_explained_constructors	478
+external_fact_model_explained_method_calls	5638
+external_fact_model_explained_constructors	463
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_constructor_guesses	17
+project_constructor_guesses	45
+external_api_return_nullability_facts	9461
+total_facts	107529
+```
+
+Top semantic diagnostics:
+
+```text
+external_pack_unsupported_api	VariantContext.fullyDecode is unsupported by external pack htsjdk.variant.variantcontext: requires HTSJDK codec/runtime state; keep as explicit external boundary	2
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Unexplained method calls, constructors, and field accesses are all zero.
+- Semantic diagnostics fell from `13` to `2`.
+- The only remaining semantic diagnostics are the intentional unsupported
+  `VariantContext.fullyDecode` boundary in `SelectVariants.java`.
+- The next benchmark work should shift from method-call coverage to constructor
+  guess classification, anonymous constructors, external guess quality, and
+  representation/slot-shape pressure.
+
+## Constructor Guess Context Classification
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+This refresh keeps the same resolver/semantic behavior, but adds context
+tables for conservative constructor guesses. The benchmark now reports sample
+files, enclosing types, enclosing members, and argument shapes for external and
+project constructor guesses. That makes the next dependency-boundary decision
+auditable without treating a bare constructor name as enough evidence.
+
+Summary counters are unchanged from the previous run:
+
+```text
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	17
+project_constructor_guesses	45
+anonymous_class_constructors	52
+```
+
+Leading external constructor guess contexts:
+
+```text
+Parser	Parser		StorageAPIAvroReader	<init>	2	org/broadinstitute/hellbender/utils/gvs/bigquery/StorageAPIAvroReader.java
+SearchInterval	SearchInterval	Double,Double,Double	OptimizationUtils	max	2	org/broadinstitute/hellbender/utils/OptimizationUtils.java
+UnivariateObjectiveFunction	UnivariateObjectiveFunction	?method_reference	OptimizationUtils	max	2	org/broadinstitute/hellbender/utils/OptimizationUtils.java
+UnmodifiableCollectionsSerializer	UnmodifiableCollectionsSerializer		GATKRegistrator	registerGATKClasses	2	org/broadinstitute/hellbender/engine/spark/GATKRegistrator.java
+```
+
+Leading project constructor guess contexts:
+
+```text
+Connection	Connection	?getTarget,?getOverlapLen,Boolean,Boolean	FermiLiteAssemblyHandler	joinContigsWithConnections	2	org/broadinstitute/hellbender/tools/spark/sv/evidence/FermiLiteAssemblyHandler.java
+SecondaryOrSupplementarySkippingIterator	SecondaryOrSupplementarySkippingIterator	?iterator	CompareBaseQualities	doWork	2	org/broadinstitute/hellbender/tools/validation/CompareBaseQualities.java
+StringHeader	StringHeader	String	CommandLineProgram	instanceMainPostParseArgs	2	org/broadinstitute/hellbender/cmdline/CommandLineProgram.java
+StringHeader	StringHeader	String	F1R2CountsCollector	writeHistograms	2	org/broadinstitute/hellbender/tools/walkers/readorientation/F1R2CountsCollector.java
+```
+
+Interpretation:
+
+- External constructor guesses are now small enough to classify as real
+  external libraries or runtime facades: Avro/BigQuery, Apache Commons Math,
+  Kryo, GCS, VCF reader/header helpers, URL, and doclet infrastructure.
+- Project constructor guesses are mostly GATK/native-wrapper pressure:
+  structural-variant assembly helpers, native HMM argument holders, command
+  line headers, and project iterators.
+- The next implementation slice should use these contexts to decide whether to
+  add pack/facade constructor facts, source summaries, or leave conservative
+  boundaries. It should not promote project/native-wrapper constructors into
+  generic external facts just because they are unresolved.
+
+## VCF Reader Constructor Boundary Closure
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+The constructor-context table showed two remaining HTSJDK VCF constructor
+guesses:
+
+- `VCFFileReader(Path)` in `VcfFuncotationFactory` and `DbSnpBitSetUtil`
+- `VCFSimpleHeaderLine(String, Map<String,String>)` in
+  `GATKVariantContextUtils`
+
+Those are inside the selected `htsjdk.variant.vcf` external fact-model pack,
+so they were modeled as pack-owned constructors rather than conservative
+external guesses. Adding `VCFFileReader` to the pack boundary exposed adjacent
+pack coverage requirements, so this slice also models:
+
+- `VCFFileReader.getFileHeader() -> VCFHeader`
+- `VCFFileReader.iterator() -> CloseableIterator<VariantContext>`
+- `VCFSimpleHeaderLine(String, String, String)`
+
+Summary counters:
+
+```text
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_constructor_facts	271
+external_fact_model_pack_constructor_facts	261
+external_pack_explained_constructors	482
+external_fact_model_explained_constructors	467
+external_constructor_guesses	15
+project_constructor_guesses	43
+external_api_return_nullability_facts	9463
+total_facts	107529
+```
+
+Interpretation:
+
+- Parser and resolver diagnostics remain at zero.
+- Semantic diagnostics remain only the explicit unsupported
+  `VariantContext.fullyDecode` boundary.
+- VCF reader/simple-header constructors are no longer conservative guesses.
+- The first pass briefly created missing-pack diagnostics for
+  `VCFFileReader.getFileHeader`, `VCFFileReader.iterator`, and the 3-arg
+  `VCFSimpleHeaderLine` overload. That was useful signal: once a type enters a
+  selected external pack, adjacent public APIs used by the corpus must be
+  covered or explicitly unsupported.
+
+## Benchmark Mode Control Check
+
+These runs verify that the benchmark modes in
+`docs/gatk-dependency-co-translation-plan.md` are directly runnable. Provider
+facts are reported once in the `fact_providers` section and are not multiplied
+into per-file generated fact counters.
+
+Generic external-boundary baseline:
+
+```text
+cargo run --quiet -- resolver-bench --no-builtin-external-packs /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+external_api_guesses	17820
+external_pack_explained_method_calls	0
+external_pack_explained_constructors	0
+external_fact_model_explained_method_calls	0
+rust_crate_mapping_explained_method_calls	0
+external_api_return_nullability_facts	7127
+total_facts	107572
+object_concrete_struct_representations	1957
+object_dyn_trait_representations	92
+object_closed_enum_representations	218
+object_erased_object_representations	589
+object_representation_diagnostics	660
+```
+
+HTSJDK external fact-model packs only:
+
+```text
+cargo run --quiet -- resolver-bench --no-builtin-external-packs --builtin-external-pack htsjdk.variant.variantcontext --builtin-external-pack htsjdk.variant.vcf --builtin-external-pack htsjdk.samtools.header --builtin-external-pack htsjdk.tribble.feature --builtin-external-pack htsjdk.samtools.util /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+external_pack_manifest_coverage_diagnostics	0
+external_api_guesses	15774
+external_pack_api_facts	0
+external_pack_constructor_facts	0
+external_pack_explained_method_calls	5640
+external_pack_explained_constructors	467
+external_fact_model_explained_method_calls	5640
+external_fact_model_explained_constructors	467
+rust_crate_mapping_explained_method_calls	0
+rust_crate_mapping_explained_constructors	0
+external_api_unsupported_method_calls	1
+external_api_return_nullability_facts	6594
+total_facts	104303
+object_concrete_struct_representations	1954
+object_dyn_trait_representations	92
+object_closed_enum_representations	218
+object_erased_object_representations	593
+object_representation_diagnostics	15224
+fact_providers	builtin-pack:htsjdk.variant.variantcontext=447, builtin-pack:htsjdk.variant.vcf=183, builtin-pack:htsjdk.samtools.header=169, builtin-pack:htsjdk.tribble.feature=60, builtin-pack:htsjdk.samtools.util=197
+```
+
+HDF5/SQLite crate mappings only:
+
+```text
+cargo run --quiet -- resolver-bench --no-builtin-external-packs --builtin-external-pack hdf5 --builtin-external-pack sqlite /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+external_api_guesses	17785
+external_pack_api_facts	0
+external_pack_constructor_facts	0
+external_pack_explained_method_calls	61
+external_pack_explained_constructors	15
+external_fact_model_explained_method_calls	0
+external_fact_model_explained_constructors	0
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_api_return_nullability_facts	7127
+total_facts	107527
+object_concrete_struct_representations	1957
+object_dyn_trait_representations	92
+object_closed_enum_representations	218
+object_erased_object_representations	589
+object_representation_diagnostics	2440
+fact_providers	builtin-pack:hdf5=71, builtin-pack:sqlite=73
+```
+
+Interpretation:
+
+- `--no-builtin-external-packs` gives a clean generic-boundary baseline with no
+  external-pack attribution.
+- HTSJDK fact-model packs and HDF5/SQLite crate mappings can now be measured
+  independently through the same dependency fact-provider path.
+- The HTSJDK-only mode reports the two deliberate
+  `VariantContext.fullyDecode` unsupported-boundary diagnostics, which confirms
+  unsupported pack entries remain explicit when only selected packs are loaded.
+- Object representation counters expose whether a dependency-mode choice
+  changes fallback pressure for concrete structs, dyn traits, closed enums,
+  erased objects, or hierarchy-closure diagnostics.
+- The built-in-all snapshot above remains useful for the default translator
+  configuration, while these controlled runs isolate which pack family caused
+  each benchmark delta.
+
+## Apache Commons Math Optimization Pack Slice
+
+This slice promotes the GATK-shaped Apache Commons Math optimization
+constructors from generic constructor guesses into an explicit external
+fact-model pack:
+
+- `org.apache.commons.math3.optim.univariate.SearchInterval(double,double,double)`
+- `org.apache.commons.math3.optim.univariate.UnivariateObjectiveFunction(function::method)`
+
+The pack owns only the exact selected types for now. That keeps
+`BrentOptimizer`, `UnivariateOptimizer.optimize`, `UnivariatePointValuePair`,
+`MaxEval`, and `GoalType` outside the pack boundary until their used public
+surface can be modeled or explicitly marked unsupported.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	13
+project_constructor_guesses	43
+external_pack_constructor_facts	273
+external_fact_model_pack_constructor_facts	263
+external_pack_explained_constructors	486
+external_fact_model_explained_constructors	471
+external_api_return_nullability_facts	9463
+total_facts	107529
+```
+
+The previous selected-pack run had 15 external constructor guesses. The removed
+rows are `SearchInterval 3` and `UnivariateObjectiveFunction 1`; the remaining
+external constructor tail is now BigQuery/Avro parser setup, documentation
+exceptions, GCS retry settings, Spark/picard helper types, URL, tuple, and
+program-group classes.
+
+## Picard Program-Group Pack Slice
+
+This slice promotes the Picard command-line program-group constructors used by
+`HelpConstants` into an explicit external fact-model pack:
+
+- `picard.cmdline.programgroups.DiagnosticsAndQCProgramGroup`
+- `picard.cmdline.programgroups.IntervalsManipulationProgramGroup`
+- `picard.cmdline.programgroups.OtherProgramGroup`
+- `picard.cmdline.programgroups.ReadDataManipulationProgramGroup`
+- `picard.cmdline.programgroups.ReferenceProgramGroup`
+- `picard.cmdline.programgroups.VariantEvaluationProgramGroup`
+- `picard.cmdline.programgroups.VariantFilteringProgramGroup`
+- `picard.cmdline.programgroups.VariantManipulationProgramGroup`
+
+The pack models each zero-argument constructor and the interface-like
+`getName()`/`getDescription()` getters. This intentionally moves the family
+toward manifest-owned dependency facts rather than expanding the legacy
+`stdlib` Picard constructor helper.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	10
+project_constructor_guesses	43
+external_pack_api_facts	3008
+external_pack_constructor_facts	281
+external_fact_model_pack_api_facts	2973
+external_fact_model_pack_constructor_facts	271
+external_pack_explained_method_calls	5709
+external_pack_explained_constructors	494
+external_fact_model_explained_constructors	479
+external_api_return_nullability_facts	9471
+total_facts	107529
+```
+
+The previous selected-pack run had 13 external constructor guesses. The removed
+rows are `VariantEvaluationProgramGroup 0`,
+`VariantFilteringProgramGroup 0`, and `VariantManipulationProgramGroup 0`.
+The remaining external constructor tail is:
+
+```text
+DocException	2	2
+Builder	0	1
+Parser	0	1
+RetrySettings	5	1
+TempPartsDirectoryWriteOption	1	1
+TruthAndCallStates	2	1
+Tuple4	4	1
+URL	1	1
+UnmodifiableCollectionsSerializer	0	1
+```
+
+## Crate Facade Symbol Mapping Fact Refactor
+
+This refactor separates Rust facade symbol selection from external API effect
+semantics. Mapped external-pack APIs and constructors now emit dedicated
+facade mapping facts; user-authored pack manifests can set `rust=...` for API
+facade functions and `rust-type=...`/`rust=...` for constructor targets. Call
+planning consumes those facts before falling back to manifest-layer defaults,
+so lowering no longer has to infer HDF5, SQLite, or future crate facade names
+from Java method spelling.
+
+The full GATK benchmark is intentionally unchanged as a coverage metric. This
+is a responsibility-boundary improvement, not a new external API coverage
+slice.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	0
+project_constructor_guesses	43
+external_pack_api_facts	3014
+external_pack_constructor_facts	291
+external_fact_model_pack_api_facts	2979
+external_fact_model_pack_constructor_facts	280
+rust_crate_mapping_pack_api_facts	35
+rust_crate_mapping_pack_constructor_facts	10
+external_pack_explained_method_calls	5716
+external_pack_explained_constructors	507
+external_fact_model_explained_method_calls	5655
+external_fact_model_explained_constructors	491
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_api_return_nullability_facts	9477
+total_facts	107528
+```
+
+The remaining semantic diagnostics are still the two deliberate
+`VariantContext.fullyDecode` unsupported-boundary diagnostics.
+
+## Scala Tuple Pack Slice
+
+This slice promotes the Scala tuple arities used by GATK-shaped snippets into
+an explicit external fact-model pack:
+
+- `scala.Tuple2`
+- `Tuple2(A,B)`
+- `_1()`/`_2()` read-only accessors
+- `scala.Tuple3`
+- `Tuple3(A,B,C)`
+- `_1()`/`_2()`/`_3()` read-only accessors
+- `scala.Tuple4`
+- `Tuple4(A,B,C,D)`
+- `_1()`/`_2()`/`_3()`/`_4()` read-only accessors
+
+`Tuple2` and `Tuple3` no longer rely on the older builtin tuple constructor
+coverage. Apache Commons Lang tuple helpers are also pack-owned now, while
+generic tuple projection/type inference remains available to infer element
+types independently of provenance.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	6
+project_constructor_guesses	43
+external_pack_api_facts	3013
+external_pack_constructor_facts	285
+external_fact_model_pack_api_facts	2978
+external_fact_model_pack_constructor_facts	275
+external_pack_explained_method_calls	5715
+external_pack_explained_constructors	500
+external_fact_model_explained_constructors	485
+external_api_return_nullability_facts	9476
+total_facts	107528
+```
+
+The previous selected-pack run had 7 external constructor guesses. The removed
+row is `Tuple4 4` in `CalibrateDragstrModel`. The remaining external
+constructor tail is:
+
+```text
+Builder	0	1
+RetrySettings	5	1
+TempPartsDirectoryWriteOption	1	1
+TruthAndCallStates	2	1
+URL	1	1
+UnmodifiableCollectionsSerializer	0	1
+```
+
+## Kryo Serializers and DISQ Write-Option Pack Slice
+
+This slice migrates two remaining constructor-tail rows out of legacy builtin
+dependency helpers and into explicit external fact-model packs:
+
+- `de.javakaffee.kryoserializers.UnmodifiableCollectionsSerializer()`
+- `org.disq_bio.disq.TempPartsDirectoryWriteOption(String)`
+
+The selected boundaries are intentionally narrow. The Kryo serializers pack
+only owns the collection serializer used by `GATKRegistrator`, and the DISQ
+pack only owns the Spark write-option value used by `ReadsSparkSink`. Adjacent
+Kryo core APIs and broader DISQ reader/writer APIs should be promoted later as
+coherent pack surfaces, not inferred from these two constructors.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	3
+project_constructor_guesses	43
+external_pack_api_facts	3013
+external_pack_constructor_facts	287
+external_fact_model_pack_api_facts	2978
+external_fact_model_pack_constructor_facts	277
+external_pack_explained_method_calls	5715
+external_pack_explained_constructors	503
+external_fact_model_explained_constructors	488
+external_api_return_nullability_facts	9476
+total_facts	107528
+```
+
+The previous selected-pack run had 5 external constructor guesses. The removed
+rows are `UnmodifiableCollectionsSerializer 0` in `GATKRegistrator` and
+`TempPartsDirectoryWriteOption 1` in `ReadsSparkSink`. The remaining external
+constructor tail is:
+
+```text
+Builder	0	1
+RetrySettings	5	1
+TruthAndCallStates	2	1
+```
+
+## Guava ImmutableMap Builder Pack Slice
+
+This slice adds a narrow Guava immutable collection-builder boundary for the
+`AnnotationMap` constructor:
+
+- `com.google.common.collect.ImmutableMap.Builder()`
+- `ImmutableMap.Builder.put(key, value)` as a fluent mutator for exact nested
+  builder receivers
+- `ImmutableMap.Builder.build()` as a read-only getter returning an immutable
+  map value
+
+The current parser collapses `new ImmutableMap.Builder<>()` to the simple
+constructor target `Builder`, so the pack includes `Builder/0` as a
+constructor-only compatibility fact. It does not make the simple `Builder`
+receiver Guava-owned; an initial attempt did that and correctly exposed false
+pack diagnostics for protobuf, GCS, and other unrelated builder workflows.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	2
+project_constructor_guesses	43
+external_pack_api_facts	3013
+external_pack_constructor_facts	288
+external_fact_model_pack_api_facts	2978
+external_fact_model_pack_constructor_facts	277
+external_pack_explained_method_calls	5715
+external_pack_explained_constructors	504
+external_fact_model_explained_constructors	488
+external_api_return_nullability_facts	9476
+total_facts	107528
+```
+
+The previous selected-pack run had 3 external constructor guesses. The removed
+row is `Builder 0` in `AnnotationMap`. The remaining external constructor tail
+is:
+
+```text
+RetrySettings	5	1
+TruthAndCallStates	2	1
+```
+
+## Broad HTTP Retry Settings Pack Slice
+
+This slice adds a narrow Broad HTTP NIO boundary for the GCS retry settings
+workflow used by `BucketUtils`:
+
+- `org.broadinstitute.http.nio.HttpFileSystemProviderSettings`
+- `HttpFileSystemProviderSettings.DEFAULT_SETTINGS`
+- `HttpFileSystemProviderSettings.redirect()` as a read-only getter
+- `HttpFileSystemProviderSettings.RetrySettings`
+- `RetrySettings(long, long, int, double, Predicate)`
+
+The pack owns exact nested and simple aliases needed by the current parser, but
+it does not claim unrelated `Settings` or builder-style names. The goal is to
+model the HTTP dependency surface that GATK actually crosses, not to turn a
+constructor tail row into a generic catch-all.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	1
+project_constructor_guesses	43
+external_pack_api_facts	3014
+external_pack_constructor_facts	290
+external_fact_model_pack_api_facts	2979
+external_fact_model_pack_constructor_facts	279
+external_pack_explained_method_calls	5716
+external_pack_explained_constructors	506
+external_fact_model_explained_method_calls	5655
+external_fact_model_explained_constructors	490
+external_api_return_nullability_facts	9477
+total_facts	107528
+```
+
+The previous selected-pack run had 2 external constructor guesses. The removed
+row is `RetrySettings 5` in `BucketUtils`. The remaining external constructor
+tail is:
+
+```text
+TruthAndCallStates	2	1
+```
+
+## Picard VCF Concordance State Pack Slice
+
+This slice adds a Picard VCF fact-model boundary for the SV concordance tuple
+state used by `SVConcordanceAnnotator`:
+
+- `picard.vcf.GenotypeConcordanceStates`
+- `GenotypeConcordanceStates.TruthAndCallStates`
+- `GenotypeConcordanceStates.TruthState`
+- `GenotypeConcordanceStates.CallState`
+- `TruthAndCallStates(TruthState, CallState)`
+- `TruthAndCallStates.truthState`
+- `TruthAndCallStates.callState`
+
+The pack intentionally models this as an external tuple/value surface. It does
+not make every `TruthState` or `CallState`-like name in source code special;
+the ownership boundary is the Picard concordance API. This keeps field,
+constructor, and object-representation facts in the external pack layer rather
+than in lowering.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	0
+project_constructor_guesses	43
+external_pack_api_facts	3014
+external_pack_constructor_facts	291
+external_fact_model_pack_api_facts	2979
+external_fact_model_pack_constructor_facts	280
+external_pack_explained_method_calls	5716
+external_pack_explained_constructors	507
+external_fact_model_explained_method_calls	5655
+external_fact_model_explained_constructors	491
+external_api_return_nullability_facts	9477
+total_facts	107528
+```
+
+The previous selected-pack run had 1 external constructor guess. The removed
+row is `TruthAndCallStates 2` in `SVConcordanceAnnotator`. The external
+constructor tail is now empty; remaining project constructor guesses are source
+modeling work, and the remaining semantic diagnostics are the two deliberate
+`VariantContext.fullyDecode` unsupported-boundary diagnostics.
+
+## JDK URL Constructor Slice
+
+This slice classifies the remaining `java.net.URL(String)` constructor used by
+`RuntimeUtils.getManifest` as a JDK builtin utility constructor. It is not an
+external GATK dependency pack: the responsibility belongs in the standard
+library model next to URI, File, Manifest, ZipFile, and related audited JDK
+constructors.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	5
+project_constructor_guesses	43
+external_pack_api_facts	3013
+external_pack_constructor_facts	285
+external_fact_model_pack_api_facts	2978
+external_fact_model_pack_constructor_facts	275
+external_pack_explained_method_calls	5715
+external_pack_explained_constructors	500
+external_fact_model_explained_constructors	485
+external_api_return_nullability_facts	9476
+total_facts	107528
+```
+
+The previous selected-pack run had 6 external constructor guesses. The removed
+row is `URL 1` in `RuntimeUtils.getManifest`. The remaining external
+constructor tail is:
+
+```text
+Builder	0	1
+RetrySettings	5	1
+TempPartsDirectoryWriteOption	1	1
+TruthAndCallStates	2	1
+UnmodifiableCollectionsSerializer	0	1
+```
+
+## Barclay DocException Pack Slice
+
+This slice promotes the Barclay doclet exception wrapper used by
+`GATKWDLDoclet` into an exact external fact-model pack:
+
+- `org.broadinstitute.barclay.help.DocException`
+- `DocException(String, Throwable)`
+
+The pack is intentionally exact. It does not own the whole
+`org.broadinstitute.barclay.help` namespace, because the GATK corpus uses many
+Barclay annotation and doclet model types that are not part of this constructor
+tail and are not yet modeled as a coherent public surface.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	7
+project_constructor_guesses	43
+external_pack_constructor_facts	284
+external_fact_model_pack_constructor_facts	274
+external_pack_explained_constructors	499
+external_fact_model_explained_constructors	484
+external_api_return_nullability_facts	9472
+total_facts	107528
+```
+
+The previous selected-pack run had 9 external constructor guesses. The removed
+row is `DocException 2` with two GATK contexts in `GATKWDLDoclet`. The
+remaining external constructor tail is:
+
+```text
+Builder	0	1
+RetrySettings	5	1
+TempPartsDirectoryWriteOption	1	1
+TruthAndCallStates	2	1
+Tuple4	4	1
+URL	1	1
+UnmodifiableCollectionsSerializer	0	1
+```
+
+## Avro Schema Parser Pack Slice
+
+This slice promotes the Avro schema parser workflow used by
+`StorageAPIAvroReader` into an explicit external fact-model pack:
+
+- `new org.apache.avro.Schema.Parser()`
+- `Schema.Parser.parse(String) -> Schema`
+- `new GenericDatumReader(Schema)`
+
+The current parser collapses the nested constructor target to simple `Parser`,
+so the Avro pack temporarily owns `Parser` as a compatibility alias. It does
+not own simple `Schema`: GATK also uses `com.google.cloud.bigquery.Schema`, and
+owning the bare name caused `Schema.getFields()` in `BigQueryUtils` to become a
+false Avro pack gap during the first benchmark attempt.
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	9
+project_constructor_guesses	43
+external_pack_api_facts	3009
+external_pack_constructor_facts	283
+external_fact_model_pack_api_facts	2974
+external_fact_model_pack_constructor_facts	273
+external_pack_explained_method_calls	5711
+external_pack_explained_constructors	497
+external_fact_model_explained_constructors	482
+external_api_return_nullability_facts	9472
+total_facts	107529
+```
+
+The previous selected-pack run had 10 external constructor guesses. The removed
+row is `Parser 0` in `StorageAPIAvroReader`. The remaining external
+constructor tail is:
+
+```text
+DocException	2	2
+Builder	0	1
+RetrySettings	5	1
+TempPartsDirectoryWriteOption	1	1
+TruthAndCallStates	2	1
+Tuple4	4	1
+URL	1	1
+UnmodifiableCollectionsSerializer	0	1
+```
+
+## SQLite Checked Error Facade Slice
+
+This slice keeps SQLite in the Rust crate-mapping boundary, but makes the
+facade more semantically useful for future `Result` planning:
+
+- `SQLiteConfig.createConnection(...)` now carries checked `SQLException`
+  metadata.
+- `SQLiteConnection.prepareStatement`, `createStatement`, `setAutoCommit`,
+  `commit`, `rollback`, and `close` now carry checked `SQLException` metadata.
+- The neutral SQLite workflow now covers `setAutoCommit(boolean)` as the first
+  transaction-configuration follow-up: a receiver-mutating crate-mapped setter
+  with a modeled boolean argument boundary.
+- `SQLiteStatement.execute`, `executeUpdate`, and `executeQuery` now carry
+  checked `SQLException` metadata.
+- Prepared-statement lifecycle policy has started with checked
+  `SQLiteStatement.clearParameters()` and `SQLiteStatement.close()` facade
+  mappings, keeping parameter reset and handle cleanup in the pack layer.
+- The richer result-conversion follow-up has started with checked
+  `SQLiteResultSet.getLong(int)` and `SQLiteResultSet.getBoolean(String)`
+  crate-mapped getters, keeping numeric/boolean conversion in the pack/facade
+  layer rather than in lowering.
+- `SQLiteConfig.toProperties` stays non-throwing because it is a local config
+  conversion rather than a database boundary.
+- Slot-shape and lowering tests now prove SQLite uses the same crate/facade
+  call and constructor planning path as HDF5.
+
+The cooperating `java.sql` semantic pack now covers the database-metadata side
+of the same workflow. `Connection.getMetaData()` returns a non-null
+`DatabaseMetaData`, and `DatabaseMetaData.getDatabaseProductName()`,
+`getTables(...)`, and `getColumns(...)` carry checked `SQLException` metadata
+plus argument-shape facts. This keeps SQLite configuration in the crate-mapped
+pack while generic JDBC metadata remains in the semantic facade pack.
+The same JDBC workflow also covers scalar `ResultSet` conversion through
+`getInt(...)`, `getLong(...)`, `getDouble(...)`, and `getBoolean(...)`, next to
+nullable `getString(...)`, so generic JDBC result conversion stays in the
+semantic pack rather than in lowering. `ResultSet.wasNull()` is modeled there
+as the checked boolean null-state companion for primitive getters.
+
+Controlled HDF5/SQLite crate-mapping benchmark:
+
+```text
+cargo run --quiet -- resolver-bench --no-builtin-external-packs --builtin-external-pack hdf5 --builtin-external-pack sqlite /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_explained_method_calls	61
+external_pack_explained_constructors	15
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_api_return_nullability_facts	7127
+total_facts	107527
+fact_providers	builtin-pack:hdf5=71, builtin-pack:sqlite=73
+top_external_pack_api_methods
+HDF5File	makeStringArray	13
+HDF5File	getFile	11
+HDF5File	makeDoubleArray	6
+HDF5File	isPresent	5
+HDF5File	readDouble	5
+HDF5File	readDoubleArray	5
+HDF5File	makeDouble	4
+HDF5File	makeDoubleMatrix	4
+HDF5File	readDoubleMatrix	2
+HDF5File	readStringArray	2
+HDF5Library	load	2
+SQLiteConfig	setReadOnly	1
+SQLiteConfig	toProperties	1
+top_external_pack_constructor_types
+HDF5File	2	10
+HDF5File	1	2
+HDF5Library	0	2
+SQLiteConfig	0	1
+```
+
+## Manifest Coverage Audit Signal
+
+This refresh adds manifest/fact drift auditing to the resolver benchmark. The
+new `external_pack_manifest_coverage_diagnostics` counter reports whether
+built-in external-pack facts are missing explicit manifest coverage entries,
+emit facts for members marked unsupported, or contain member facts outside
+their declared pack boundaries. Configured external-pack fact providers are
+audited for the same boundary coherence. When a configured provider is named
+`builtin-pack:NAME` or directly matches a built-in pack name, the benchmark
+also audits that provider's actual facts against the built-in manifest instead
+of regenerating built-in facts. A nonzero value means an external pack is no
+longer satisfying the all-or-nothing coverage discipline described in
+`docs/gatk-dependency-co-translation-plan.md`.
+
+Current full GATK benchmark:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1595
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	0
+project_constructor_guesses	43
+external_pack_api_facts	3014
+external_pack_constructor_facts	291
+external_pack_explained_method_calls	5716
+external_pack_explained_constructors	507
+rust_crate_mapping_explained_method_calls	61
+rust_crate_mapping_explained_constructors	15
+external_api_return_nullability_facts	9477
+object_representation_diagnostics	660
+```
+
+The audit is currently clean. The remaining semantic diagnostics are still the
+two deliberate `VariantContext.fullyDecode` unsupported-boundary diagnostics
+in `SelectVariants.java`; remaining constructor pressure is project-owned
+source modeling, not unexplained external dependency coverage.
+
+## Apache HTTP Header Mutation Slice
+
+The new object-representation diagnostic table is available in
+`resolver-bench`, but the full GATK refresh was not completed in this slice.
+Instead, a narrow real-corpus benchmark was run on the GATK `htsgetreader`
+package, which previously exposed `HttpGet.addHeader` as an
+`external_pack_missing_api` diagnostic inside the already-owned
+`org.apache.http` pack.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/htsgetreader
+```
+
+Current narrow-package result after modeling `HttpGet.addHeader`:
+
+```text
+files_seen	6
+files_parsed_without_errors	6
+files_resolved_without_errors	6
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_api_facts	1
+external_pack_constructor_facts	1
+external_fact_model_pack_api_facts	1
+external_fact_model_pack_constructor_facts	1
+external_constructor_guesses	0
+project_constructor_guesses	3
+object_representation_diagnostics	0
+```
+
+This confirms the Apache HTTP pack now covers both the GATK-observed
+`HttpGet(URI)` constructor and the request header mutator without falling
+through to a missing-pack diagnostic.
+
+## Transformer CIGAR SAM Record Slice
+
+The GATK `transformers` package exposed three coherent dependency-pack gaps:
+CIGAR construction was already SAM-record-pack-owned, but CIGAR element access
+and validation methods were still reported as missing APIs inside the same
+`htsjdk.samtools.record` pack; quality/base helpers belonged in the existing
+`htsjdk.samtools.util` pack; and mutable numeric helper methods belonged in the
+existing Apache Commons Lang pack. The fix keeps each surface in its owning
+external pack rather than adding one-off lowering rules.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/transformers
+```
+
+Intermediate narrow-package result after modeling only `Cigar.add`,
+`Cigar.getCigarElement`, `Cigar.getFirstCigarElement`,
+`Cigar.getLastCigarElement`, `Cigar.isValid`, `Cigar.numCigarElements`,
+and `CigarElement.getOperator`:
+
+```text
+files_seen	15
+files_parsed_without_errors	15
+files_resolved_without_errors	15
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	9
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	3
+unexplained_constructors	0
+external_pack_api_facts	11
+external_pack_constructor_facts	4
+external_pack_explained_method_calls	18
+external_pack_explained_constructors	5
+external_constructor_guesses	2
+project_constructor_guesses	13
+object_representation_diagnostics	2
+```
+
+Final narrow-package result for the same command:
+
+```text
+files_seen	15
+files_parsed_without_errors	15
+files_resolved_without_errors	15
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_api_facts	17
+external_pack_constructor_facts	4
+external_pack_explained_method_calls	21
+external_pack_explained_constructors	5
+external_constructor_guesses	2
+project_constructor_guesses	13
+object_representation_diagnostics	2
+```
+
+The previous run for this package had 39 semantic diagnostics. This slice
+drives the package to zero semantic diagnostics while keeping the remaining
+project constructor and external field guesses separate from external-pack
+coverage.
+
+## Utils Read SAM Record Slice
+
+The GATK `utils/read` package is a larger read-adapter stress case for the same
+`htsjdk.samtools.record` boundary. The initial package run showed that most
+missing-pack diagnostics were not independent lowering problems: they were
+SAMRecord, Cigar, and CigarOperator library facts missing from the SAM record
+pack.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils/read
+```
+
+Initial narrow-package result:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	42
+parser_diagnostics	0
+resolver_diagnostics	2
+semantic_diagnostics	892
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	438
+unexplained_constructors	0
+external_pack_api_facts	124
+external_pack_constructor_facts	38
+external_pack_explained_method_calls	290
+external_pack_explained_constructors	78
+external_constructor_guesses	8
+project_constructor_guesses	15
+object_representation_diagnostics	17
+```
+
+Checkpoint after adding the high-volume SAM read surface and the Kryo primitive
+IO slice:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	42
+parser_diagnostics	0
+resolver_diagnostics	2
+semantic_diagnostics	220
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	111
+unexplained_constructors	0
+external_pack_api_facts	266
+external_pack_constructor_facts	38
+external_pack_explained_method_calls	617
+external_pack_explained_constructors	78
+external_constructor_guesses	8
+project_constructor_guesses	15
+object_representation_diagnostics	17
+```
+
+The Kryo primitive IO slice models `Input.readBoolean/readShort/readInt/
+readString` and `Output.writeBoolean/writeShort/writeInt/writeString` in the
+core Kryo pack. A later focused evidence-package refresh extends the same
+serializer workflow to `Input.readByte/readLong/readFloat/readBytes` and
+`Output.writeByte/writeLong/writeFloat/writeBytes`, with typed return facts
+and receiver-state mutation facts.
+
+Current narrow-package result after the SAM flag/reader/writer factory slice:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	42
+parser_diagnostics	0
+resolver_diagnostics	2
+semantic_diagnostics	128
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	65
+unexplained_constructors	0
+external_pack_api_facts	299
+external_pack_constructor_facts	38
+external_pack_explained_method_calls	663
+external_pack_explained_constructors	78
+external_constructor_guesses	8
+project_constructor_guesses	15
+object_representation_diagnostics	17
+```
+
+This slice models the remaining high-count SAMRecord pair/secondary/duplicate
+flag predicates and mutators, mate/reference mutators, `setCigarString`, and
+the SAM reader/writer factory methods used by `utils/read`. The remaining top
+diagnostics are now lower-count adjacent surfaces: additional SAMRecord
+deep-copy/attribute/alignment helpers, samtools-util sequence helpers, Kryo
+`Output.writeAscii`, Commons Collections `MultiMap`, and SAM writer setup such
+as `SAMFileWriterFactory.setCreateIndex`.
+
+Current narrow-package result after the HTSJDK record/util/writer helper slice:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	42
+parser_diagnostics	0
+resolver_diagnostics	2
+semantic_diagnostics	74
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	37
+unexplained_constructors	0
+external_pack_api_facts	325
+external_pack_constructor_facts	38
+external_pack_explained_method_calls	691
+external_pack_explained_constructors	78
+external_constructor_guesses	8
+project_constructor_guesses	15
+object_representation_diagnostics	17
+```
+
+This slice keeps the same responsibility split and adds only pack-owned facts:
+SAMRecord copy/attribute/alignment/string helpers, `CigarOperator.isIndel` and
+`characterToEnum`, `SAMUtils` read utility helpers,
+`SequenceUtil.reverseComplement/calculateSamNmTag`, and
+`SAMFileWriterFactory.setCreateIndex`. The remaining top rows are now smaller
+SAMRecord/header methods, Commons Collections `MultiMap`, Kryo
+`Output.writeAscii`, and a few read utility tails.
+
+Checkpoint after the SAM/Kryo/Commons tail cleanup slice:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	42
+parser_diagnostics	0
+resolver_diagnostics	2
+semantic_diagnostics	25
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	12
+unexplained_constructors	0
+external_pack_api_facts	350
+external_pack_constructor_facts	38
+external_pack_explained_method_calls	716
+external_pack_explained_constructors	78
+external_constructor_guesses	8
+project_constructor_guesses	15
+object_representation_diagnostics	17
+```
+
+Final `utils/read` external-pack result after modeling the remaining
+SAMRecord pair/mate/transient setters, `SamPairUtil` mate-linking helpers,
+`SequenceUtil.sumQualitiesOfMismatches`, `SAMFileWriterFactory.setCreateMd5File`,
+Kryo `Output.writeAscii`, Commons Collections `MultiMap.append/get`, the SAM
+reader factory reference configuration method
+`SamReaderFactory.referenceSequence`, and the HTSJDK
+`SamRecordFilter` anonymous-implementation boundary:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	43
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_api_facts	367
+external_pack_constructor_facts	38
+external_pack_explained_method_calls	728
+external_pack_explained_constructors	78
+external_constructor_guesses	8
+project_constructor_guesses	15
+object_representation_diagnostics	5
+```
+
+Follow-up object-boundary result after preserving qualified declared hierarchy
+types and loading external pack facts for declared superclasses/interfaces:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	43
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_api_facts	367
+external_pack_constructor_facts	38
+external_pack_explained_method_calls	728
+external_pack_explained_constructors	78
+external_constructor_guesses	8
+project_constructor_guesses	15
+object_erased_object_representations	515
+object_representation_diagnostics	4
+```
+
+The `Pair.Serializer extends com.esotericsoftware.kryo.Serializer<Pair>` row
+has dropped out. The fix is a general hierarchy-boundary rule: parser and fact
+collection preserve qualified declared superclasses/interfaces for hierarchy
+facts, and representation-fact discovery loads pack facts for declared
+external hierarchy targets. The Kryo pack still does not claim ambiguous bare
+`Serializer`.
+
+Follow-up HTSJDK util anonymous-boundary result after adding
+`htsjdk.samtools.util.DelegatingIterator` as a samtools-util constructor/API
+and erased-object boundary:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	43
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_api_facts	367
+external_pack_constructor_facts	38
+external_pack_explained_method_calls	728
+external_pack_explained_constructors	78
+external_constructor_guesses	8
+project_constructor_guesses	15
+object_erased_object_representations	523
+object_representation_diagnostics	3
+```
+
+The `DelegatingIterator` anonymous subclass no longer reports
+`unsupported_anonymous_class`. It still appears under
+`top_anonymous_constructor_targets`, which is expected accounting for anonymous
+constructor shapes, not an object-lowering diagnostic.
+
+Follow-up source object-model result after adding a conservative closed-family
+inference for abstract classes whose direct variants are nested subclasses with
+non-public constructors:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	43
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_api_facts	367
+external_pack_constructor_facts	38
+external_pack_explained_method_calls	728
+external_pack_explained_constructors	78
+external_constructor_guesses	8
+project_constructor_guesses	15
+object_closed_enum_representations	9
+object_erased_object_representations	523
+object_representation_diagnostics	1
+```
+
+The `ReadsKey.KeyForFragment` and `ReadsKey.KeyForPair` inheritance rows have
+dropped out through a general source-fact rule. The negative regression keeps
+public/protected nested constructors extensible, so this does not turn ordinary
+Java inheritance into a closed enum.
+
+Follow-up interface object-safety result after treating no-argument
+`copy`/`deepCopy`/`clone` methods that directly return the interface type as
+clone-like dyn-trait candidates:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	43
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_api_facts	367
+external_pack_constructor_facts	38
+external_pack_explained_method_calls	728
+external_pack_explained_constructors	78
+external_constructor_guesses	8
+project_constructor_guesses	15
+object_dyn_trait_representations	3
+object_closed_enum_representations	9
+object_erased_object_representations	522
+object_representation_diagnostics	0
+```
+
+`GATKRead.copy/deepCopy` no longer force erased object representation. Ordinary
+self-returning methods such as `Factory.next(): Factory` remain
+non-object-safe and keep their erased-object fallback.
+
+At this point `utils/read` no longer has external-pack semantic gaps. The
+remaining benchmark pressure is intentionally outside this slice: source/project
+constructor or field guesses.
+Those should be handled as separate pack-owned slices rather than by broadening
+generic stdlib or lowering policy.
+
+Follow-up field ownership accounting result after normalizing explicit-import
+ownership and propagating conservative ownership through type-like static-field
+chains:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	43
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_field_guesses	0
+project_field_guesses	33
+source_field_guesses	0
+```
+
+The previous external field rows for `BaseUtils.Base.*.base` were not external
+library pressure. `BaseUtils` is an omitted project utility, and the resolver
+represents the first receiver as `base_utils`; field fallback attribution now
+compares explicit imports through snake-case aliases and follows type-like
+static fields (`Base`, `A`, `C`, `G`, `T`, `N`) so the full chain remains in
+the project bucket. Neutral regressions cover both the normalized receiver and
+the nested static-field chain:
+
+```text
+cargo test --quiet --test dependency_mode resolver_benchmark_classifies_snake_case_project_field_receiver_as_project
+cargo test --quiet --test dependency_mode resolver_benchmark_propagates_project_field_guess_ownership_through_static_field_chains
+```
+
+Follow-up constructor ownership accounting result after preserving type-like
+dotted constructor names and classifying nested constructor fallbacks through
+their outer type:
+
+```text
+files_seen	43
+files_parsed_without_errors	43
+files_resolved_without_errors	43
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	0
+project_constructor_guesses	22
+source_constructor_guesses	1
+external_field_guesses	0
+project_field_guesses	33
+source_field_guesses	0
+```
+
+The previous external rows for nested project exceptions were not external
+library pressure. `GATKException.ReadAttributeTypeMismatch`,
+`UserException.CouldNotReadInputFile`, and `UserException.MissingReference`
+are owned by project outer types imported from the GATK exception package. The
+remaining external constructor row was the real HTSJDK boundary candidate
+`ReferenceSequenceFileWalker`; the SAM reference pack now owns its
+one-argument constructor plus `getSequenceDictionary` and indexed `get`, so the
+focused `utils/read` benchmark has zero external constructor guesses and zero
+semantic diagnostics. Generic dotted builders such as `CollectionUtil.MultiMap<>`
+continue through existing external-pack matching rather than this non-generic
+nested-constructor ownership rule. Neutral regressions cover both project-owned
+nested constructors and the non-project fallback case, and the SAM reference
+pack tests cover the promoted HTSJDK reference walker surface:
+
+```text
+cargo test --quiet --test dependency_mode resolver_benchmark_classifies_nested_project_constructor_guess_by_outer_import
+cargo test --quiet --test dependency_mode resolver_benchmark_keeps_nested_non_project_constructor_guess_external
+cargo test --quiet --test external_packs htsjdk_sam_reference_pack_declares_reference_boundary
+cargo test --quiet --test external_packs semantic_analysis_uses_sam_reference_pack_for_reference_helpers
+```
+
+## VariantUtils VariantContext Pilot Closure
+
+The `tools/walkers/variantutils` package is the focused GATK benchmark for the
+VariantContext pilot because it exercises `SelectVariants.java`, builder-heavy
+variant utilities, genotype helpers, and VCF metadata. The package exposed one
+remaining VariantContext-owned generic fallback: `VariantContext.Type.values`.
+That is now a pack-owned non-null `Type[]` enum helper.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/variantutils
+```
+
+Result after modeling `Type.values`:
+
+```text
+files_seen	10
+files_parsed_without_errors	10
+files_resolved_without_errors	10
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	59
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_api_unsupported_method_calls	1
+external_pack_api_facts	277
+external_pack_constructor_facts	20
+external_pack_explained_method_calls	702
+external_pack_explained_constructors	36
+external_constructor_guesses	22
+project_constructor_guesses	18
+object_representation_diagnostics	0
+```
+
+The VariantContext pilot acceptance signal is clean for this focused package:
+there are no unexplained method calls and no manifest coverage diagnostics.
+The only VariantContext method diagnostic is the deliberate unsupported
+`VariantContext.fullyDecode` boundary in `SelectVariants.java`. The remaining
+semantic diagnostics are VCF constant fields such as `VCFConstants.DEPTH_KEY`,
+`ALLELE_NUMBER_KEY`, and `ALLELE_COUNT_KEY`; those belong to the
+`htsjdk.variant.vcf` pack.
+
+Result after moving the GATK-observed `VCFConstants` fields into the VCF pack:
+
+```text
+files_seen	10
+files_parsed_without_errors	10
+files_resolved_without_errors	10
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	2
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+unexplained_field_accesses	0
+external_api_unsupported_method_calls	1
+external_api_explained_field_accesses	61
+external_pack_api_facts	277
+external_pack_constructor_facts	20
+external_pack_explained_method_calls	702
+external_pack_explained_constructors	36
+object_representation_diagnostics	0
+```
+
+This closes the focused `variantutils` package for the current
+VariantContext/VCF pilot contract: method, constructor, and field accesses all
+have an explanation, manifest coverage is clean, and the only remaining
+semantic diagnostics are the two deliberate `VariantContext.fullyDecode`
+unsupported-boundary reports in `SelectVariants.java`.
+
+## Utils Spark Jama Matrix Slice
+
+The `utils/spark` package is a narrow benchmark for Spark adapter code that
+also exercises Jama matrix conversion through `SparkConverter.java`. The
+package showed that `Jama.Matrix` was already pack-owned for construction, but
+its zero-argument matrix accessors were still reported as missing pack APIs.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils/spark
+```
+
+Result after modeling `Matrix.numRows`, `Matrix.numCols`, and
+`Matrix.toArray` in the Jama pack and dispatching Jama API effects through the
+shared external-pack path:
+
+```text
+files_seen	3
+files_parsed_without_errors	3
+files_resolved_without_errors	3
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	32
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	16
+unexplained_constructors	0
+unexplained_field_accesses	0
+external_pack_api_facts	20
+external_pack_constructor_facts	8
+external_pack_explained_method_calls	23
+external_pack_explained_constructors	11
+external_constructor_guesses	2
+project_constructor_guesses	5
+object_representation_diagnostics	1
+```
+
+The Jama-specific rows are now gone from `top_semantic_diagnostics`.
+Remaining pack-owned gaps are separate boundaries: `BinaryCodec` and
+`SAMTextHeaderCodec` in HTSJDK samtools packs, and additional Spark runtime
+methods such as `JavaRDD.mapPartitions*`, `JavaRDD.rdd`,
+`JavaSparkContext.hadoopConfiguration`, and `Broadcast.destroy`.
+
+Result after modeling the HTSJDK header-write surface used by
+`SparkUtils.writeBAMHeaderToStream`: `BinaryCodec.writeBytes`,
+`BinaryCodec.writeString`, `BinaryCodec.writeInt`, and
+`SAMTextHeaderCodec.encode` are now pack-owned exact-arity effects.
+
+```text
+files_seen	3
+files_parsed_without_errors	3
+files_resolved_without_errors	3
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	20
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	10
+unexplained_constructors	0
+unexplained_field_accesses	0
+external_pack_api_facts	24
+external_pack_constructor_facts	8
+external_pack_explained_method_calls	29
+external_pack_explained_constructors	11
+external_constructor_guesses	2
+project_constructor_guesses	5
+object_representation_diagnostics	1
+```
+
+The HTSJDK `BinaryCodec` and `SAMTextHeaderCodec` rows are now gone from
+`top_semantic_diagnostics`. The remaining semantic diagnostics in this focused
+package are all Spark runtime methods: `JavaRDD.context`,
+`JavaRDD.getNumPartitions`, `JavaRDD.mapPartitions*`, `JavaRDD.mapToPair`,
+`JavaRDD.rdd`, `JavaRDD.zipPartitions`, `JavaSparkContext.hadoopConfiguration`,
+and `Broadcast.destroy`.
+
+Result after modeling the Spark runtime and pair-RDD surface used by the same
+package: `JavaRDD.context`, `JavaRDD.getNumPartitions`, `JavaRDD.rdd`,
+`JavaRDD.mapPartitions`, `JavaRDD.mapPartitionsWithIndex`,
+`JavaRDD.mapToPair`, `JavaRDD.mapPartitionsToPair`,
+`JavaRDD.zipPartitions`, `JavaSparkContext.hadoopConfiguration`,
+`Broadcast.destroy`, and the follow-on `JavaPairRDD.sortByKey`,
+`JavaPairRDD.keys`, and `JavaPairRDD.mapPartitionsToPair` calls are now
+Spark-pack facts.
+
+```text
+files_seen	3
+files_parsed_without_errors	3
+files_resolved_without_errors	3
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+external_api_unsupported_method_calls	0
+external_api_missing_method_calls	0
+unexplained_method_calls	0
+external_api_unsupported_constructor_calls	0
+external_api_missing_constructor_calls	0
+unexplained_constructors	0
+external_api_unsupported_field_accesses	0
+external_api_missing_field_accesses	0
+unexplained_field_accesses	0
+external_pack_api_facts	39
+external_pack_constructor_facts	8
+external_pack_explained_method_calls	43
+external_pack_explained_constructors	11
+external_constructor_guesses	2
+project_constructor_guesses	5
+object_representation_diagnostics	1
+```
+
+The remaining diagnostic in this focused package is not external-pack
+coverage. It is one object-representation diagnostic for an anonymous
+`AbstractIterator<Tuple2<K, Iterable<V>>>` subclass, which belongs to object
+lowering rather than Spark API modeling.
+
+Result after adding fact-aware anonymous external-boundary representation:
+the Guava `AbstractIterator` target is now an explicitly erased external
+object, and benchmark representation planning imports only builtin pack facts
+for anonymous constructor targets present in the measured source. This avoids
+turning unrelated builtin pack object strategies into diagnostics while
+allowing anonymous implementations of erased external values to remain at the
+dependency boundary.
+
+```text
+files_seen	3
+files_parsed_without_errors	3
+files_resolved_without_errors	3
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+unexplained_field_accesses	0
+external_pack_api_facts	39
+external_pack_constructor_facts	8
+external_pack_explained_method_calls	43
+external_pack_explained_constructors	11
+external_constructor_guesses	2
+project_constructor_guesses	5
+object_erased_object_representations	4
+object_representation_diagnostics	0
+```
+
+The current report format now separates missing pack-owned members from
+generic unexplained resolver gaps with `external_api_missing_*` counters and
+`top_external_api_missing_*` sections. This `utils/spark` slice is a closed
+package after the Spark/Jama/HTSJDK/Guava boundary work, so the missing and
+unsupported counters are all zero. A neutral dependency-mode regression covers
+the positive missing-member case for user-authored pack manifests.
+
+The two remaining constructor guesses in the primary-only run are source
+dependency pressure rather than missing external-library facts. Re-running the
+same Spark package with `utils/read` as a co-translated source root turns those
+constructors into source-dependency resolutions.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench --source-root co-translate:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils/read /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils/spark
+```
+
+Result:
+
+```text
+files_seen	46
+files_parsed_without_errors	46
+files_resolved_without_errors	46
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+source_dependency_resolved_method_calls	4
+source_dependency_resolved_constructors	2
+unexplained_method_calls	0
+unexplained_constructors	0
+unexplained_field_accesses	0
+external_constructor_guesses	8
+project_constructor_guesses	20
+object_erased_object_representations	36
+object_representation_diagnostics	17
+top_source_dependency_method_calls
+GATKRead	get_name	2
+ReadUtils	is_read_name_grouped_bam	2
+top_source_dependency_constructor_types
+ReadCoordinateComparator	1	1
+ReadQueryNameComparator	0	1
+```
+
+The previous co-translate run still had two
+`CigarUtils.countClippedBases` overload ambiguities on `Tail.LEFT` and
+`Tail.RIGHT` inside the `utils/read` dependency root. Those are now covered by
+the shared field/type fact boundary: after source fields, source summaries,
+user facts, and pack fields have precedence, an unresolved type-qualified
+enum-shaped constant can conservatively type as the receiver enum. This keeps
+the fix out of Spark and out of a `countClippedBases` special case while
+allowing source overload resolution to select the `Tail` overload. The run now
+makes the dependency choice explicit: `utils/spark` can be benchmarked alone
+as a small adapter package, but realistic translation needs either
+co-translated or summarized facts for selected `utils/read` classes.
+
+Running the same package with `utils/read` as a source-summary root now proves
+the lighter dependency mode is sufficient for this adapter boundary: summary
+declarations resolve the same two comparator constructors and four dependency
+method calls, while summary-only method bodies no longer create object
+representation diagnostics.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils/read /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils/spark
+```
+
+Key result:
+
+```text
+files_seen	46
+files_resolved_without_errors	3
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+source_summary_facts	65
+source_dependency_resolved_method_calls	4
+source_dependency_resolved_constructors	2
+unexplained_method_calls	0
+unexplained_constructors	0
+external_constructor_guesses	0
+object_closed_enum_representations	8
+object_erased_object_representations	38
+object_representation_diagnostics	0
+```
+
+The remaining project constructor guesses are primary Spark-package source
+pressure (`FeatureDataSource`, `GATKException`, `SimpleInterval`, and
+`UserException`), not `utils/read` dependency pressure.
+
+## Focused GenomicsDB External-Pack And Lambda Receiver Slice
+
+The GenomicsDB package is now closed for the current external-pack milestone.
+The slice models the protobuf/importer builder surface in the
+`com.intel.genomicsdb` pack and the adjacent `ThreadFactoryBuilder` surface in
+the Guava concurrent pack. A remaining `Partition.split` diagnostic was traced
+to semantic receiver guessing inside a stream lambda body, not to a missing
+GenomicsDB API. The semantic external-effect expression walker now leaves
+lambda bodies to resolver-provided typed unresolved-target facts, so a lambda
+parameter named `partition` no longer becomes a false GenomicsDB receiver.
+
+Command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb
+```
+
+Result:
+
+```text
+files_seen	6
+files_parsed_without_errors	6
+files_resolved_without_errors	6
+parser_diagnostics	0
+resolver_diagnostics	0
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+external_api_missing_method_calls	0
+external_api_missing_constructor_calls	0
+external_api_missing_field_accesses	0
+unexplained_method_calls	0
+unexplained_constructors	0
+unexplained_field_accesses	0
+external_pack_api_facts	38
+external_pack_constructor_facts	8
+external_pack_explained_method_calls	50
+external_pack_explained_constructors	10
+external_api_guesses	126
+object_erased_object_representations	20
+object_representation_diagnostics	0
+```
+
+The anonymous `FeatureReader` implementation in this package is now treated as
+an erased external boundary value through the `htsjdk.tribble.feature` pack,
+not as GenomicsDB API behavior or source-class lowering. The same pack owns the
+observed reader lifecycle/query surface: `getHeader`, `query`, `iterator`,
+`getSequenceNames`, `isQueryable`, and `close`. This closes the focused
+GenomicsDB slice for parser, resolver, semantic, missing-pack, unexplained, and
+object-representation diagnostics.
+
+## SQLite/JDBC Pack Composition Slice
+
+The SQLite/JDBC follow-up keeps runtime-specific SQLite configuration separate
+from the generic JDBC facade. The `sqlite` crate-mapping pack owns
+`SQLiteConfig` construction/configuration and `toProperties`; the `java.sql`
+semantic pack owns qualified JDBC receivers for connection, statement,
+result-set, metadata, and close/query effects. A parser import-normalization
+pass qualifies selected `java.sql.*` wildcard/direct imports before semantic
+pack matching, so the pack can own `java.sql.Connection` without globally
+claiming unrelated project-domain `Connection` types. `Class.forName` is not
+owned by this pack; reflection/class loading remains a separate policy.
+
+Controlled SQLite/JDBC benchmark:
+
+```text
+cargo run --quiet -- resolver-bench --no-builtin-external-packs --builtin-external-pack sqlite --builtin-external-pack java.sql /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java
+```
+
+Key result:
+
+```text
+files_seen	1595
+files_parsed_without_errors	1595
+files_resolved_without_errors	1594
+parser_diagnostics	0
+resolver_diagnostics	1
+semantic_diagnostics	0
+external_pack_manifest_coverage_diagnostics	0
+external_api_missing_method_calls	0
+external_api_missing_constructor_calls	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_explained_method_calls	14
+external_fact_model_explained_method_calls	12
+rust_crate_mapping_explained_method_calls	2
+external_pack_explained_constructors	1
+fact_providers	builtin-pack:sqlite=131, builtin-pack:java.sql=44
+```
+
+Top pack-attributed calls in this controlled mode are the expected COSMIC
+database workflow:
+
+```text
+java.sql.ResultSet	getString	3
+java.sql.ResultSet	next	2
+SQLiteConfig	setReadOnly	1
+SQLiteConfig	toProperties	1
+driver_manager	getConnection	1
+java.sql.Connection	close	1
+java.sql.Connection	createStatement	1
+java.sql.ResultSet	getMetaData	1
+java.sql.ResultSetMetaData	getColumnCount	1
+java.sql.ResultSetMetaData	getColumnName	1
+java.sql.Statement	executeQuery	1
+```
+
+The earlier broad-pack attempt produced missing-pack diagnostics for
+`Class.getSimpleName`, reflection helpers, and project-domain
+`Connection.getTarget`-style calls. With qualified JDBC ownership, those are no
+longer attributed to `java.sql`; they return to conservative external/source
+handling until a reflection or project-source policy owns them deliberately.
+
+The first reflection/class-model follow-up keeps that boundary explicit:
+`java.sql` still does not claim project `Connection` or `java.lang.Class`, but
+Java platform facts now model narrow class-token operations independently of
+dependency packs. The covered surface is `Class.getSimpleName()`,
+`getName()`, nullable `getCanonicalName()`, `isAssignableFrom(Class)`, and
+checked `Class.forName(String)` with a non-null `Class` return and
+`ClassNotFoundException`.
+
+The focused SQLite/JDBC regression now extends this workflow beyond the
+original COSMIC-style connection/query surface. The neutral fixture also
+exercises `Connection.getMetaData()`,
+`DatabaseMetaData.getDatabaseProductName()`, `getTables(...)`,
+`getColumns(...)`, scalar `ResultSet` conversion through
+`getInt(...)`/`getLong(...)`/`getDouble(...)`/`getFloat(...)`/
+`getShort(...)`/`getByte(...)`/`getBoolean(...)`, nullable object/blob/
+temporal conversion through `getObject(...)`, `getBytes(...)`,
+`getDate(...)`, and `getTimestamp(...)`, and `ResultSet.wasNull()`. It also
+exercises result-set column metadata through
+`ResultSetMetaData.getColumnName`, `getColumnType`, `getColumnTypeName`, and
+`getColumnClassName`, plus column property metadata through `isNullable`,
+`isSigned`, `isAutoIncrement`, `getPrecision`, `getScale`, and
+`getColumnDisplaySize`. The prepared-statement binding surface now includes
+string, int, double, long, and boolean values through ordinary argument-effect
+facts on `setString`, `setInt`, `setDouble`, `setLong`, and `setBoolean`.
+Heavyweight JDBC result handles are intentionally not treated as ordinary
+nullable reads: `ResultSet.getBlob`, `getClob`, `getArray`, and `getSQLXML`
+now produce java.sql pack-owned unsupported diagnostics until a resource/facade
+mapping is selected.
+With built-ins disabled and only `sqlite` plus
+`java.sql` re-added, the focused benchmark reports:
+
+```text
+rust_crate_mapping_explained_method_calls	2
+external_fact_model_explained_method_calls	51
+external_pack_manifest_coverage_diagnostics	0
+```
+
+This focused signal is intentionally separate from the full controlled GATK
+run above: it proves the added JDBC surface belongs to the `java.sql` semantic
+pack and should not be rediscovered by lowering.
+
+## Source-Summary Nested Graph Boundary Slice
+
+The FermiLite assembly evidence package imports nested dependency types such as
+`FermiLiteAssembly.Contig` and `FermiLiteAssembly.Connection`. Those names are
+not safe external-pack boundaries: `Connection` also appears in unrelated Java
+APIs, and the methods in this package are project/native-wrapper graph APIs.
+The right mechanism is source co-translation or source summaries for the
+dependency that defines the nested graph types.
+
+Regression test:
+
+```text
+cargo test --quiet source_summary_root_resolves_imported_nested_graph_types
+cargo test --quiet source_summary_root_resolves_fermilite_shaped_assembler_graph_boundary
+```
+
+The first fixture is GATK-shaped but neutral: primary source imports
+`AssemblyGraph.Contig` and `AssemblyGraph.Connection` from a source-summary
+dependency, rewrites graph connections, constructs replacement nested values,
+and returns a new graph. With the summary root enabled, that benchmark has:
+
+```text
+unresolved_method_calls	0
+unresolved_constructors	0
+external_api_guesses	0
+source_dependency_resolved_method_calls	11
+source_dependency_resolved_constructors	3
+```
+
+Top source-dependency rows include:
+
+```text
+Contig	get_connections	2
+Connection	get_target	2
+Connection	get_overlap_len	1
+Connection	rc_connection	1
+AssemblyGraph	1	1
+Connection	4	1
+Contig	3	1
+```
+
+The follow-up fixture covers the broader FermiLite-shaped boundary that appears
+in the evidence package: primary source constructs `FermiLiteAssembler`, calls
+`createAssembly`, checks `FermiLiteAssembly.getNContigs`, constructs
+`FermiLiteAssembly(...)`, and rewrites nested `Contig`/`Connection` graph
+values. With the summary root enabled, that benchmark has:
+
+```text
+unresolved_constructors	0
+unexplained_constructors	0
+source_dependency_resolved_method_calls	>= 8
+source_dependency_resolved_constructors	>= 4
+```
+
+It also asserts that `FermiLiteAssembler`, `FermiLiteAssembly`, `Connection`,
+and `Contig` do not appear in `top_external_api_guess_methods`, and that the
+source-dependency constructor table retains the relevant arities:
+
+```text
+FermiLiteAssembler	0
+FermiLiteAssembly	1
+Connection	4
+Contig	3
+```
+
+The benchmark renderer now includes source-dependency context tables for this
+case, for example:
+
+```text
+top_source_dependency_method_contexts
+FermiLiteAssembler	create_assembly	1	UsesFermiAssembly	assemble
+Connection	get_target	0	UsesFermiAssembly	rewrite
+
+top_source_dependency_constructor_contexts
+FermiLiteAssembler	0	UsesFermiAssembly	assemble
+Connection	4	UsesFermiAssembly	rewrite
+```
+
+This proves the existing source-summary path can cover both the nested
+FermiLite-style graph shape and the adjacent assembler/assembly constructor
+boundary without turning `Connection`, `Contig`, or `FermiLiteAssembler` into
+global external-library facts. The real GATK follow-up is therefore to provide
+the actual FermiLite source/summary if available, or keep those calls as
+intentional project/native-wrapper dependency pressure.
+
+## Kryo Primitive Serializer IO Refresh
+
+The focused Spark/SV evidence package showed a coherent pack-owned Kryo gap:
+primitive serializer bodies used `Input.readLong`, `Input.readFloat`,
+`Input.readBytes`, `Input.readByte`, and matching `Output.write*` calls. These
+belong to the existing `com.esotericsoftware.kryo` primitive IO boundary, not
+to GATK-specific lowering or generic stdlib shortcuts.
+
+Regression tests:
+
+```text
+cargo test --quiet kryo_pack_declares_core_serializer_runtime_constructors
+cargo test --quiet semantic_analysis_uses_kryo_pack_for_primitive_io
+```
+
+Focused benchmark:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/spark/sv/evidence
+```
+
+Key movement:
+
+```text
+semantic_diagnostics	113 -> 49
+external_api_missing_method_calls	54 -> 22
+external_pack_api_facts	71 -> 85
+external_api_return_nullability_facts	174 -> 181
+```
+
+The new pack-attributed rows include:
+
+```text
+Input	readLong	6
+Output	writeLong	6
+Input	readFloat	5
+Output	writeFloat	5
+Input	readBytes	3
+Output	writeBytes	3
+```
+
+Remaining Kryo diagnostics in this package are a separate workflow:
+`Kryo.readClassAndObject`, `Kryo.writeClassAndObject`, and `Output.close`.
+Those should be handled as an object-serialization/lifecycle slice, not folded
+into primitive IO.
+
+That follow-up slice is now covered by a neutral object-set serialization
+fixture. It models `Kryo.readClassAndObject` as a nullable `Object` getter,
+`Kryo.writeClassAndObject` as a side-effecting serializer call, and
+`Output.close` as a side-effecting lifecycle call.
+
+Additional regression:
+
+```text
+cargo test --quiet semantic_analysis_uses_kryo_pack_for_object_serialization_and_close
+```
+
+Focused evidence-package movement after the object-serialization/lifecycle
+slice:
+
+```text
+semantic_diagnostics	49 -> 39
+external_api_missing_method_calls	22 -> 17
+external_pack_api_facts	85 -> 88
+external_api_return_nullability_facts	181 -> 182
+```
+
+Kryo no longer appears in `top_external_api_missing_methods` for this focused
+package. The remaining rows are now Spark runtime methods, an HTSJDK SAM-record
+method, and BWA native-wrapper methods.
+
+## Spark Evidence Runtime Tail Refresh
+
+The next focused Spark/SV evidence-package pass closed the remaining Spark
+runtime rows instead of spreading them across generic Java collection rules.
+The modeled surface stays inside the existing `org.apache.spark` pack:
+
+- `Broadcast.value` and `Broadcast.getValue`
+- `JavaRDD.mapPartitions(fn, preservesPartitioning)`
+- `JavaRDD.mapPartitionsToPair(fn, preservesPartitioning)`
+- `JavaRDD.saveAsTextFile` and `JavaRDD.unpersist`
+- `JavaPairRDD.reduceByKey`, `partitionBy`, `mapPartitions`, `filter`,
+  `flatMap`, `map`, and `combineByKey` overloads
+
+Regression tests:
+
+```text
+cargo test --quiet spark_pack_declares_runtime_boundary
+cargo test --quiet semantic_analysis_uses_spark_pack_for_gatk_shaped_runtime_code
+```
+
+Focused evidence-package movement after the Spark refresh:
+
+```text
+semantic_diagnostics	39 -> 10
+external_api_missing_method_calls	17 -> 5
+external_pack_api_facts	88 -> 106
+external_api_return_nullability_facts	182 -> 198
+```
+
+Spark no longer appears in `top_external_api_missing_methods` for this focused
+package. The remaining rows are `Cigar.getPaddedReferenceLength` and the BWA
+native-wrapper calls `alignSeqs`, `setIntraCtgOptions`, and `setZDropOption`.
+
+## Evidence Package HTSJDK CIGAR And BWA Tail Refresh
+
+The final focused Spark/SV evidence-package tail closed the remaining
+pack-owned API rows without adding resolver special cases:
+
+- `Cigar.getPaddedReferenceLength` is now part of the HTSJDK SAM-record pack,
+  next to `getReadLength` and `getReferenceLength`.
+- `BwaMemAligner.alignSeqs`, `setIntraCtgOptions`, and `setZDropOption` are
+  part of the BWA native-wrapper pack.
+- `BwaMemAlignment` is pack-owned as the alignment value returned by BWA. The
+  pack now covers its serializer reconstruction constructor and observed
+  read-only getters, so claiming the type does not create half-modeled external
+  coverage.
+
+Regression tests:
+
+```text
+cargo test --quiet htsjdk_sam_record_pack_declares_record_boundary
+cargo test --quiet bwa_pack_declares_native_wrapper_boundary
+cargo test --quiet semantic_analysis_uses_bwa_pack_for_native_wrappers_and_flags
+```
+
+Focused evidence-package movement after the CIGAR/BWA tail refresh:
+
+```text
+semantic_diagnostics	10 -> 0
+external_api_missing_method_calls	5 -> 0
+external_api_missing_constructor_calls	0 -> 0
+external_pack_api_facts	106 -> 126
+external_pack_constructor_facts	14 -> 15
+external_api_return_nullability_facts	198 -> 216
+```
+
+The focused evidence package now has no parser, resolver, semantic, missing
+method, missing constructor, or missing field diagnostics. Remaining benchmark
+pressure is in generic external guesses, project constructor guesses, and the
+separate object-representation diagnostics for inheritance lowering.
+
+## Evidence Package Source Hierarchy Override Context
+
+The clean external-pack run still reports object-representation diagnostics for
+the `BreakpointEvidence` source hierarchy. This is not an external-library
+coverage gap: `BreakpointEvidence` is a public, non-final source class with
+final observed subclasses, so the source alone does not prove that a closed
+enum is sound.
+
+The benchmark path now plans object diagnostics with the same package-level
+source context used by resolver symbols. This fixes the user-override path for
+primary-source hierarchies: a `ClosedEnum` override for a
+`BreakpointEvidence`-shaped class is validated against sibling source types
+instead of being rejected while benchmarking files that do not contain the
+hierarchy root. The line-oriented external facts path also supports the real
+multi-level shape now: closed-enum variants may be terminal descendants rather
+than only direct subclasses, and represented ancestors cover intermediate
+`extends` edges.
+
+Regression tests:
+
+```text
+cargo test --quiet primary_root_resolves_imported_nested_graph_types_without_external_guesses
+cargo test --quiet primary_source_hierarchy_override_cleans_breakpoint_evidence_shape
+cargo test --quiet --test dependency_mode external_fact_hierarchy_override_cleans_breakpoint_evidence_shape
+cargo test --quiet --test dependency_mode external_fact_closed_enum_override_cleans_multilevel_hierarchy_shape
+```
+
+Without user facts, the focused evidence benchmark remains intentionally
+unchanged:
+
+```text
+semantic_diagnostics	0
+external_api_missing_method_calls	0
+external_api_missing_constructor_calls	0
+object_representation_diagnostics	12
+```
+
+Those object diagnostics are source hierarchy strategy pressure. They should be
+handled by explicit user facts, source-summary facts, or a later closed-world
+proof, not by adding external pack facts.
+
+With the focused `BreakpointEvidence` user fact:
+
+```text
+closed-enum BreakpointEvidence BreakpointEvidenceValue ExternalEvidence TemplateSizeAnomaly SplitRead LargeIndel MateUnmapped InterContigPair OutiesPair SameStrandPair WeirdTemplateSize
+```
+
+the same benchmark reports:
+
+```text
+semantic_diagnostics	0
+external_api_missing_method_calls	0
+external_api_missing_constructor_calls	0
+object_closed_enum_representations	17
+object_representation_diagnostics	0
+configured_provider_hierarchy_override_facts	1
+```
+
+## External Pack Context Tables
+
+Selected dependency-provider runs now expose source-consumer context for both
+modeled and gap/unsupported pack-owned members. The report sections are:
+
+- `top_external_pack_api_method_contexts`
+- `top_external_pack_constructor_contexts`
+- `top_external_pack_field_accesses`
+- `top_external_pack_field_contexts`
+- `top_external_api_unsupported_method_contexts`
+- `top_external_api_unsupported_constructor_contexts`
+- `top_external_api_unsupported_field_contexts`
+- `top_external_api_missing_method_contexts`
+- `top_external_api_missing_constructor_contexts`
+- `top_external_api_missing_field_contexts`
+
+Method rows include receiver type, method, dependency mode, arity, enclosing
+type/member, count, and sample files. Constructor rows include target type,
+receiver type, dependency mode, argument shape, enclosing type/member, count,
+and sample files. Field rows include field name, receiver type, dependency
+mode, enclosing type/member, count, and sample files. External-pack aggregate
+and context rows use external-library modes only: `ExternalFactModel`,
+`RustCrateMapping`, `FfiBoundary`, or `ConservativeBoundary`. If an external
+row cannot recover its pack mode, it renders `UnknownExternalMode`; it does not
+reuse the source-dependency label. Internally this is represented as
+`ExternalReportMode::Known(mode)` or `ExternalReportMode::Unknown`, so the
+distinction is enforced before report rendering.
+
+External-pack field accounting includes both fallback-resolved pack-owned field
+gaps and fields that resolved directly through modeled pack facts. For example,
+an HDF5 pack fixture using `HDF5File.OpenMode.CREATE` contributes explained
+field rows for both the nested `OpenMode` field and the `CREATE` constant even
+though neither needed an unresolved-field fallback. This means
+`external_api_explained_field_accesses`, `top_external_pack_field_accesses`, and
+`top_external_pack_field_contexts` can increase because provider attribution
+improved, not because a new gap was discovered. The regression
+`resolver_benchmark_reports_explained_external_pack_field_contexts` locks in
+that behavior. The companion regression
+`resolver_benchmark_reports_resolved_pack_fields_across_statement_shapes`
+keeps the same accounting independent of whether the modeled field is consumed
+in an assignment, loop, enhanced-for iterable, switch arm, try/catch/finally
+body, array expression, or return expression. Lambda bodies are walked with a
+lambda-local type environment: declared lambda parameter types are visible, and
+untyped parameters still shadow outer or static type-like names. The regression
+`resolver_benchmark_does_not_treat_lambda_params_as_static_pack_receivers`
+prevents benchmark mining from mistaking a lambda parameter named like an
+external type for a pack-owned static field access. The matching
+`source_summary_field_contexts_do_not_treat_lambda_params_as_static_receivers`
+regression keeps source-summary field contexts under the same rule, so an
+imported summary type and a lambda parameter with the same spelling cannot be
+merged into false source-dependency evidence. Anonymous class bodies are walked
+for field provenance as well:
+`resolver_benchmark_reports_pack_fields_inside_anonymous_class_bodies` proves a
+modeled pack field consumed inside an anonymous method appears in the external
+pack field context table for that anonymous member, independent of any separate
+object-representation diagnostic for the anonymous class. The matching
+`source_summary_field_contexts_include_anonymous_class_bodies` regression keeps
+source-summary field contexts symmetric: dependency fields consumed inside
+anonymous methods are attributed to the anonymous member, not only to the outer
+factory method that created the anonymous object. The method-context companion
+`source_summary_method_contexts_include_anonymous_class_bodies` applies the
+same rule to source-summary method calls from anonymous adapter bodies, and
+`source_summary_constructor_contexts_include_anonymous_class_bodies` does the
+same for dependency constructors created inside anonymous methods.
+External-pack method contexts use the same resolver-side member propagation:
+`resolver_benchmark_reports_pack_methods_inside_anonymous_class_bodies` proves
+an unresolved call inside an anonymous method keeps that anonymous method name
+when benchmark attribution maps it to a selected pack. Constructor context rows
+use the same rule:
+`resolver_benchmark_reports_pack_constructors_inside_anonymous_class_bodies`
+keeps pack-owned constructors created inside anonymous methods attributed to
+that anonymous method.
+
+This keeps selected-pack fixture evaluation local and auditable: a neutral
+SQLite, HDF5, HTSJDK, FFI, or conservative-boundary test can prove exactly
+which source member consumed a modeled fact or hit a pack-owned gap without
+running the whole GATK tree.
+
+Source-dependency rows now carry the source-root mode as well:
+
+- `top_source_dependency_method_calls`
+- `top_source_dependency_constructor_types`
+- `top_source_dependency_field_accesses`
+- `top_source_dependency_method_contexts`
+- `top_source_dependency_constructor_contexts`
+- `top_source_dependency_field_contexts`
+
+The mode is `CoTranslateSource` when the dependency root participates as
+emitted source, and `SourceSummary` when it only supplies declarations and
+facts. This keeps source-boundary decisions visible in the same report: if a
+focused package stops looking like an external-pack gap, the benchmark now
+also shows whether the closing dependency should be translated or summarized.
+The aggregate source-dependency rows are backed by dedicated source summary
+types with a required mode, rather than by external-pack rows with an optional
+mode, so selected source roots cannot collapse into an unlabeled
+`SourceDependency` bucket.
+
+Regression tests:
+
+```text
+cargo test --quiet --test dependency_mode parsed_external_pack_manifest_registers_as_dependency_fact_provider
+cargo test --quiet --test dependency_mode parsed_ffi_and_conservative_manifests_keep_mode_specific_benchmark_attribution
+cargo test --quiet --test dependency_mode parsed_crate_mapping_pack_manifest_reports_missing_owned_members_as_pack_gaps
+cargo test --quiet --test dependency_mode parsed_ffi_and_conservative_pack_manifests_report_missing_owned_members_as_pack_gaps
+```
+
+## Evidence Package Source-Summary Helper Boundary
+
+The focused Spark/SV evidence package still has project-helper pressure when it
+is benchmarked as a primary root only. Those rows are not external libraries:
+they are sibling GATK helper classes, public argument-collection fields, and
+GATK exception constructors that live outside the focused primary package.
+
+Primary-only focused command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/spark/sv/evidence
+```
+
+Current primary-only signal:
+
+```text
+semantic_diagnostics	0
+external_api_missing_method_calls	0
+external_api_missing_constructor_calls	0
+external_api_missing_field_accesses	0
+external_constructor_guesses	17
+project_constructor_guesses	51
+external_field_guesses	2
+project_field_guesses	47
+source_field_guesses	0
+object_representation_diagnostics	11
+```
+
+Adding the sibling Spark/SV package and the GATK exceptions package as
+source-summary roots removes that false external pressure:
+
+```text
+cargo run --quiet -- resolver-bench --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/exceptions --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/spark/sv /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/spark/sv/evidence
+```
+
+Current source-summary signal:
+
+```text
+files_seen	95
+PrimarySource files_seen	28
+SourceSummary exceptions files_seen	3
+SourceSummary tools/spark/sv files_seen	64
+external_constructor_guesses	0
+external_field_guesses	0
+project_field_guesses	0
+source_field_guesses	0
+source_dependency_resolved_method_calls	83
+source_dependency_resolved_constructors	58
+source_dependency_resolved_field_accesses	71
+source_summary_facts	208
+```
+
+This supports the dependency-boundary rule: once a focused package’s remaining
+pressure is project helper source, use co-translation or source summaries
+instead of adding external packs. Conservative field fallback is now reported
+as external, project, or source pressure, so omitted sibling-project fields do
+not inflate the external-library bucket. The benchmark assigns overlapping
+source roots by most-specific path, so the broad `tools/spark/sv` summary root
+does not also summarize files from the more-specific primary `evidence` root.
+The neutral regressions are:
+
+```text
+cargo test --quiet --test dependency_mode resolver_benchmark_separates_project_field_guesses_from_external_field_guesses
+cargo test --quiet --test dependency_mode source_summary_roots_resolve_project_helper_fields_and_nested_exception_constructors
+cargo test --quiet --test dependency_mode overlapping_source_summary_root_does_not_duplicate_primary_files
+```
+
+## Variantutils Barclay Nested Exception Alias
+
+The focused `tools/walkers/variantutils` benchmark exposed a pack-owned
+constructor alias gap, not a new external library. The Barclay argparser pack
+already owned `CommandLineException.BadArgumentValue` and
+`CommandLineException.MissingArgument` as nested exception types, but its
+constructor coverage only included the fully qualified names and the simple
+inner names. GATK source uses the nested aliases through
+`CommandLineException.BadArgumentValue(...)` and
+`CommandLineException.MissingArgument(...)`, so those constructors must be
+modeled by the same narrow Barclay pack.
+
+Focused command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/variantutils
+```
+
+Current signal after adding the nested aliases:
+
+```text
+semantic_diagnostics	2
+external_api_missing_constructor_calls	0
+external_pack_manifest_coverage_diagnostics	0
+unexplained_method_calls	0
+unexplained_constructors	0
+external_pack_constructor_facts	20
+external_pack_explained_constructors	36
+```
+
+The two remaining semantic diagnostics are the deliberate unsupported
+`VariantContext.fullyDecode` boundary. The Barclay missing-constructor rows for
+`CommandLineException.BadArgumentValue(String)` and
+`CommandLineException.MissingArgument(String,String)` are gone and now appear
+under `top_external_pack_constructor_contexts`.
+
+Regression tests:
+
+```text
+cargo test --quiet semantic_analysis_uses_barclay_argparser_pack_for_nested_exception_constructors
+cargo test --quiet barclay_argparser_pack_declares_command_line_boundary
+```
+
+## Variantutils Source-Summary Dependency Envelope
+
+The focused `tools/walkers/variantutils` package is clean for external-pack
+missing members. Its remaining constructor and field pressure is GATK-owned
+source dependency pressure: filter helpers, interval helpers, annotation and
+genotyping helpers, and argument-collection fields.
+
+Primary command:
+
+```text
+cargo run --quiet -- resolver-bench /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/variantutils
+```
+
+Primary-only signal:
+
+```text
+semantic_diagnostics	2
+resolver_diagnostics	0
+external_api_missing_method_calls	0
+external_api_missing_constructor_calls	0
+external_api_missing_field_accesses	0
+external_constructor_guesses	11
+project_constructor_guesses	29
+source_constructor_guesses	1
+external_field_guesses	9
+project_field_guesses	17
+```
+
+Adding the relevant GATK helper packages as source summaries moves the helper
+surface out of external fallback. The expanded envelope includes the exception
+and GenomicsDB helper packages so project-owned nested exception constructors
+and `GenomicsDBOptions` are represented as source dependencies instead of
+generic guesses:
+
+```text
+cargo run --quiet -- resolver-bench --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/engine --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/cmdline/argumentcollections --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/annotator --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/haplotypecaller --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/genotyper --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/exceptions --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/variantutils
+```
+
+Current source-summary signal:
+
+```text
+files_seen	768
+files_resolved_without_errors	10
+resolver_diagnostics	0
+semantic_diagnostics	2
+source_summary_facts	1099
+source_dependency_resolved_method_calls	257
+source_dependency_resolved_constructors	82
+source_dependency_resolved_field_accesses	15
+object_dyn_trait_representations	75
+object_erased_object_representations	2128
+object_representation_diagnostics	0
+external_constructor_guesses	0
+project_constructor_guesses	0
+source_constructor_guesses	0
+external_field_guesses	0
+project_field_guesses	0
+source_field_guesses	0
+unexplained_method_calls	0
+unexplained_constructors	0
+unexplained_field_accesses	0
+```
+
+The two semantic diagnostics remain the deliberate
+`VariantContext.fullyDecode` unsupported boundary. The source-summary context
+rows make the dependency decision auditable: constructor rows include
+`UserException`, `BadInput`, `ValidationFailure`, `CouldNotCreateOutputFile`,
+`GenomicsDBOptions`, `CountingVariantFilter`, `VariantAnnotatorEngine`,
+`IndexedSampleList`, and `VariantTypesVariantFilter`; field rows include
+`DbsnpArgumentCollection.dbsnp`,
+`HaplotypeCallerArgumentCollection.standard_args`,
+`StandardCallerArgumentCollection.genotype_args`,
+`StandardCallerArgumentCollection.annotate_all_sites_with_p_ls`,
+`StandardCallerArgumentCollection.output_mode`, and
+`GenotypeCalculationArgumentCollection.standard_confidence_for_calling`.
+
+The object-model signal is now sharper as well. Interface constants, static
+interface methods, and nested helper declarations no longer force the enclosing
+interface into erased-object fallback; they are separate static/member lowering
+work, not instance trait object-safety violations. Interface constants in
+source-summary roots are parsed as implicit public static final fields and
+attributed through source-dependency field contexts even when the static
+receiver is represented by the parser's snake-case type alias. Java-style
+combinators named
+`and`, `or`, `negate`, `andThen`, or `compose` that return the same interface
+are also treated as dyn-trait candidates rather than generic self-returning
+factories. Direct self-typed parameters such as
+`AlleleList.permutation(target)` are object-safe at this layer because they can
+be represented as trait-object parameters; nested generic self parameters stay
+conservative. A source-summary regression now proves both sides at the
+benchmark boundary: direct self parameters stay dyn-trait viable, while
+`List<NestedSelf>` parameters remain erased-object pressure with visible
+object-safety context. Source-summary superclasses used by emitted roots are now
+planned as erased-object framework boundaries, because their bodies are
+intentionally not emitted; co-translated superclasses still produce emitted
+hierarchy pressure. User-authored external pack manifests now get the same
+object-boundary treatment in dependency-mode benchmarks: a neutral runtime
+adapter fixture registers `dep.runtime.Serializer<T>` as a parsed pack-owned
+erased superclass and verifies the provider contributes hierarchy/type
+capability facts without adding package-name lowering checks. Parsed manifests
+can also carry closed-hierarchy and detailed object-safety rows: the manifest
+coverage audit now reports missing or stale open/closed hierarchy facts, a
+direct representation regression proves manifest-owned nested-self facts reject
+a dyn-trait facade request and fall back to erased object representation, and a
+dependency-mode regression verifies those object-safety facts are visible in
+provider benchmark counts.
+Together these rules move the expanded source-summary run from 85
+object-representation diagnostics to 0.
+
+Regression test:
+
+```text
+cargo test --quiet source_summary_roots_resolve_nested_argument_collection_field_chains
+cargo test --quiet --test dependency_mode source_summary_roots_resolve_project_helper_fields_and_nested_exception_constructors
+cargo test --quiet --test slot_shape_design resolve_records_parsed_interface_object_safety_facts
+cargo test --quiet --test slot_shape_design representation_plan_uses_parsed_object_safety_facts_for_interface_fallback
+cargo test --quiet --test object_model object_model_allows_combinator_self_returning_interface_methods
+cargo test --quiet --test dependency_mode primary_extends_source_summary_base_is_erased_boundary_not_inheritance_pressure
+cargo test --quiet --test dependency_mode source_summary_static_interface_members_do_not_create_object_safety_pressure
+cargo test --quiet --test dependency_mode source_summary_object_safety_distinguishes_direct_and_nested_self_parameters
+cargo test --quiet --test dependency_mode external_pack_manifest_erased_superclass_cleans_runtime_adapter_shape
+cargo test --quiet --test slot_shape_design external_pack_manifest_object_safety_facts_drive_representation_fallback
+cargo test --quiet --test dependency_mode external_pack_manifest_object_safety_facts_are_reported_by_dependency_mode
+cargo test --quiet --test external_packs external_pack_manifest_coverage_audit_reports_unclassified_pack_facts
+```

@@ -8,9 +8,10 @@ use new_java2rust::call_lowering::{
 };
 use new_java2rust::call_plan::{
     ArgumentLoweringPlan, CallExprPlan, CallStatementPlan, CallTargetPlan, TrivialAccessorCallPlan,
-    plan_call_arguments, plan_call_expr, plan_call_statement, plan_call_target,
-    plan_constructor_arguments, plan_new_target, plan_trivial_accessor_call,
-    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
+    plan_call_arguments, plan_call_arguments_with_facts, plan_call_expr, plan_call_statement,
+    plan_call_target, plan_call_target_with_facts, plan_constructor_arguments, plan_new_target,
+    plan_new_target_with_facts, plan_trivial_accessor_call, resolved_call_arg_shapes,
+    resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::Coercion;
 use new_java2rust::constructor_plan::{
@@ -40,13 +41,16 @@ use new_java2rust::expr_shape::{
     learn_stmt_shapes, shape_env_for_constructor, shape_env_for_method, shape_env_for_type,
 };
 use new_java2rust::external_facts::parse_external_facts;
+use new_java2rust::external_packs::parse_external_pack_manifest;
 use new_java2rust::facts::{
-    AccessorInlinePolicy, ClosedHierarchyFact, DispatchRequirementFact, DispatchRequirementKind,
-    ExternalApiRole, FactProvenance, FactSet, FieldKey as FactFieldKey, FieldNullabilityFact,
+    AccessorInlinePolicy, CaptureOrigin, CaptureOwnerKind, CaptureSource, ClosedHierarchyFact,
+    ControlFlowFactKind, DispatchRequirementFact, DispatchRequirementKind, ExternalApiEffectFact,
+    ExternalApiRole, ExternalArgumentAliasPolicy, ExternalCrateConstructorMappingFact,
+    FactProvenance, FactSet, FieldKey as FactFieldKey, FieldNullabilityFact,
     FieldNullabilityProvenance, HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy,
     MethodEffectFact, MethodKey as FactMethodKey, NullabilityState, ObjectSafetyViolation,
-    OwnedRecoveryCapability, ReceiverMutabilityFact, TrivialAccessorFact, TrivialAccessorKind,
-    TypeCapabilityOverride,
+    OwnedRecoveryCapability, ReceiverMutabilityFact, RecursionKind, TrivialAccessorFact,
+    TrivialAccessorKind, TypeCapabilityOverride,
 };
 use new_java2rust::item_assembly::{
     constructor_default_field_value, constructor_function_shell, constructor_return_body,
@@ -1725,8 +1729,36 @@ interface Combiner {
     void merge(Combiner other);
 }
 
+interface PredicateLike {
+    PredicateLike and(PredicateLike other);
+    PredicateLike or(PredicateLike other);
+    PredicateLike negate();
+}
+
+interface TransformerLike {
+    TransformerLike andThen(TransformerLike after);
+    TransformerLike compose(TransformerLike before);
+}
+
 interface HasConstant {
     int VERSION = 1;
+}
+
+interface HasStaticFactory {
+    static HasStaticFactory of(String name) { return null; }
+    String name();
+}
+
+interface HasNestedHelper {
+    String name();
+
+    final class Helper {
+        Helper(String value) {}
+    }
+
+    interface NestedFactory {
+        NestedFactory next();
+    }
 }
 
 interface GenericFactory {
@@ -1751,8 +1783,28 @@ interface GenericCombiner {
         name: "Combiner".to_string(),
         args: Vec::new(),
     };
+    let predicate_like_ty = JavaType::Named {
+        name: "PredicateLike".to_string(),
+        args: Vec::new(),
+    };
+    let transformer_like_ty = JavaType::Named {
+        name: "TransformerLike".to_string(),
+        args: Vec::new(),
+    };
     let has_constant_ty = JavaType::Named {
         name: "HasConstant".to_string(),
+        args: Vec::new(),
+    };
+    let has_static_factory_ty = JavaType::Named {
+        name: "HasStaticFactory".to_string(),
+        args: Vec::new(),
+    };
+    let has_nested_helper_ty = JavaType::Named {
+        name: "HasNestedHelper".to_string(),
+        args: Vec::new(),
+    };
+    let nested_factory_ty = JavaType::Named {
+        name: "NestedFactory".to_string(),
         args: Vec::new(),
     };
     let generic_factory_ty = JavaType::Named {
@@ -1777,15 +1829,45 @@ interface GenericCombiner {
             .object_safe_trait
     );
     assert!(
-        !resolved
+        resolved
             .facts
             .type_capabilities_for(&combiner_ty)
             .object_safe_trait
     );
     assert!(
-        !resolved
+        resolved
+            .facts
+            .type_capabilities_for(&predicate_like_ty)
+            .object_safe_trait
+    );
+    assert!(
+        resolved
+            .facts
+            .type_capabilities_for(&transformer_like_ty)
+            .object_safe_trait
+    );
+    assert!(
+        resolved
             .facts
             .type_capabilities_for(&has_constant_ty)
+            .object_safe_trait
+    );
+    assert!(
+        resolved
+            .facts
+            .type_capabilities_for(&has_static_factory_ty)
+            .object_safe_trait
+    );
+    assert!(
+        resolved
+            .facts
+            .type_capabilities_for(&has_nested_helper_ty)
+            .object_safe_trait
+    );
+    assert!(
+        !resolved
+            .facts
+            .type_capabilities_for(&nested_factory_ty)
             .object_safe_trait
     );
     assert!(
@@ -1819,14 +1901,42 @@ interface GenericCombiner {
             .facts
             .type_capability_overrides_for(&combiner_ty)
             .any(|fact| fact.provenance == FactProvenance::ParsedSource
-                && fact.object_safe_trait == Some(false))
+                && fact.object_safe_trait == Some(true))
+    );
+    assert!(
+        resolved
+            .facts
+            .type_capability_overrides_for(&predicate_like_ty)
+            .any(|fact| fact.provenance == FactProvenance::ParsedSource
+                && fact.object_safe_trait == Some(true))
+    );
+    assert!(
+        resolved
+            .facts
+            .type_capability_overrides_for(&transformer_like_ty)
+            .any(|fact| fact.provenance == FactProvenance::ParsedSource
+                && fact.object_safe_trait == Some(true))
     );
     assert!(
         resolved
             .facts
             .type_capability_overrides_for(&has_constant_ty)
             .any(|fact| fact.provenance == FactProvenance::ParsedSource
-                && fact.object_safe_trait == Some(false))
+                && fact.object_safe_trait == Some(true))
+    );
+    assert!(
+        resolved
+            .facts
+            .type_capability_overrides_for(&has_static_factory_ty)
+            .any(|fact| fact.provenance == FactProvenance::ParsedSource
+                && fact.object_safe_trait == Some(true))
+    );
+    assert!(
+        resolved
+            .facts
+            .type_capability_overrides_for(&has_nested_helper_ty)
+            .any(|fact| fact.provenance == FactProvenance::ParsedSource
+                && fact.object_safe_trait == Some(true))
     );
     let factory_safety = resolved
         .facts
@@ -1842,21 +1952,40 @@ interface GenericCombiner {
         .facts
         .object_safety_fact_for_name("Combiner")
         .unwrap();
-    assert_eq!(
-        combiner_safety.violations,
-        vec![ObjectSafetyViolation::SelfReferentialParameter {
-            method_name: "merge".to_string(),
-            param_name: "other".to_string(),
-        }]
-    );
+    assert!(combiner_safety.violations.is_empty());
+    let predicate_like_safety = resolved
+        .facts
+        .object_safety_fact_for_name("PredicateLike")
+        .unwrap();
+    assert!(predicate_like_safety.violations.is_empty());
+    let transformer_like_safety = resolved
+        .facts
+        .object_safety_fact_for_name("TransformerLike")
+        .unwrap();
+    assert!(transformer_like_safety.violations.is_empty());
     let has_constant_safety = resolved
         .facts
         .object_safety_fact_for_name("HasConstant")
         .unwrap();
+    assert!(has_constant_safety.violations.is_empty());
+    let has_static_factory_safety = resolved
+        .facts
+        .object_safety_fact_for_name("HasStaticFactory")
+        .unwrap();
+    assert!(has_static_factory_safety.violations.is_empty());
+    let has_nested_helper_safety = resolved
+        .facts
+        .object_safety_fact_for_name("HasNestedHelper")
+        .unwrap();
+    assert!(has_nested_helper_safety.violations.is_empty());
+    let nested_factory_safety = resolved
+        .facts
+        .object_safety_fact_for_name("NestedFactory")
+        .unwrap();
     assert_eq!(
-        has_constant_safety.violations,
-        vec![ObjectSafetyViolation::FieldMember {
-            field_name: "v_e_r_s_i_o_n".to_string(),
+        nested_factory_safety.violations,
+        vec![ObjectSafetyViolation::SelfReferentialReturn {
+            method_name: "next".to_string(),
         }]
     );
     let generic_factory_safety = resolved
@@ -1975,8 +2104,36 @@ class DefaultCombiner implements Combiner {
     public void merge(Combiner other) {}
 }
 
+interface PredicateLike {
+    PredicateLike and(PredicateLike other);
+    PredicateLike or(PredicateLike other);
+    PredicateLike negate();
+}
+
+interface TransformerLike {
+    TransformerLike andThen(TransformerLike after);
+    TransformerLike compose(TransformerLike before);
+}
+
 interface HasConstant {
     int VERSION = 1;
+}
+
+interface HasStaticFactory {
+    static HasStaticFactory of(String name) { return null; }
+    String name();
+}
+
+interface HasNestedHelper {
+    String name();
+
+    final class Helper {
+        Helper(String value) {}
+    }
+
+    interface NestedFactory {
+        NestedFactory next();
+    }
 }
 
 interface GenericFactory {
@@ -1994,8 +2151,28 @@ interface GenericFactory {
         name: "Combiner".to_string(),
         args: Vec::new(),
     };
+    let predicate_like_ty = JavaType::Named {
+        name: "PredicateLike".to_string(),
+        args: Vec::new(),
+    };
+    let transformer_like_ty = JavaType::Named {
+        name: "TransformerLike".to_string(),
+        args: Vec::new(),
+    };
     let has_constant_ty = JavaType::Named {
         name: "HasConstant".to_string(),
+        args: Vec::new(),
+    };
+    let has_static_factory_ty = JavaType::Named {
+        name: "HasStaticFactory".to_string(),
+        args: Vec::new(),
+    };
+    let has_nested_helper_ty = JavaType::Named {
+        name: "HasNestedHelper".to_string(),
+        args: Vec::new(),
+    };
+    let nested_factory_ty = JavaType::Named {
+        name: "NestedFactory".to_string(),
         args: Vec::new(),
     };
     let generic_factory_ty = JavaType::Named {
@@ -2013,19 +2190,79 @@ interface GenericFactory {
     );
     assert_eq!(
         representations.representation_for(&combiner_ty),
-        ObjectRepresentation::ErasedObject
+        ObjectRepresentation::DynTrait {
+            trait_name: "Combiner".to_string(),
+        }
     );
     assert_eq!(
         representations.dispatch_for(&combiner_ty),
-        DispatchShape::ErasedObject
+        DispatchShape::DynTrait {
+            trait_name: "Combiner".to_string(),
+        }
+    );
+    assert_eq!(
+        representations.representation_for(&predicate_like_ty),
+        ObjectRepresentation::DynTrait {
+            trait_name: "PredicateLike".to_string(),
+        }
+    );
+    assert_eq!(
+        representations.dispatch_for(&predicate_like_ty),
+        DispatchShape::DynTrait {
+            trait_name: "PredicateLike".to_string(),
+        }
+    );
+    assert_eq!(
+        representations.representation_for(&transformer_like_ty),
+        ObjectRepresentation::DynTrait {
+            trait_name: "TransformerLike".to_string(),
+        }
+    );
+    assert_eq!(
+        representations.dispatch_for(&transformer_like_ty),
+        DispatchShape::DynTrait {
+            trait_name: "TransformerLike".to_string(),
+        }
     );
     assert_eq!(
         representations.representation_for(&has_constant_ty),
-        ObjectRepresentation::ErasedObject
+        ObjectRepresentation::DynTrait {
+            trait_name: "HasConstant".to_string(),
+        }
     );
     assert_eq!(
         representations.dispatch_for(&has_constant_ty),
-        DispatchShape::ErasedObject
+        DispatchShape::DynTrait {
+            trait_name: "HasConstant".to_string(),
+        }
+    );
+    assert_eq!(
+        representations.representation_for(&has_static_factory_ty),
+        ObjectRepresentation::DynTrait {
+            trait_name: "HasStaticFactory".to_string(),
+        }
+    );
+    assert_eq!(
+        representations.dispatch_for(&has_static_factory_ty),
+        DispatchShape::DynTrait {
+            trait_name: "HasStaticFactory".to_string(),
+        }
+    );
+    assert_eq!(
+        representations.representation_for(&has_nested_helper_ty),
+        ObjectRepresentation::DynTrait {
+            trait_name: "HasNestedHelper".to_string(),
+        }
+    );
+    assert_eq!(
+        representations.dispatch_for(&has_nested_helper_ty),
+        DispatchShape::DynTrait {
+            trait_name: "HasNestedHelper".to_string(),
+        }
+    );
+    assert_eq!(
+        representations.representation_for(&nested_factory_ty),
+        ObjectRepresentation::ErasedObject
     );
     assert_eq!(
         representations.representation_for(&generic_factory_ty),
@@ -2063,22 +2300,13 @@ interface GenericFactory {
         representations
             .diagnostics_for_program(&resolved.program)
             .iter()
-            .any(
-                |diagnostic| diagnostic.code == "non_object_safe_trait_fallback"
-                    && diagnostic.message.contains("interface Combiner")
-                    && diagnostic
-                        .message
-                        .contains("method merge parameter other mentions the interface type")
-            ),
-    );
-    assert!(
-        representations
-            .diagnostics_for_program(&resolved.program)
-            .iter()
-            .any(
-                |diagnostic| diagnostic.code == "non_object_safe_trait_fallback"
-                    && diagnostic.message.contains("interface HasConstant")
-                    && diagnostic.message.contains("interface field v_e_r_s_i_o_n")
+            .all(
+                |diagnostic| !diagnostic.message.contains("interface HasConstant")
+                    && !diagnostic.message.contains("interface HasStaticFactory")
+                    && !diagnostic.message.contains("interface HasNestedHelper")
+                    && !diagnostic.message.contains("interface PredicateLike")
+                    && !diagnostic.message.contains("interface TransformerLike")
+                    && !diagnostic.message.contains("interface Combiner")
             ),
     );
     assert!(
@@ -3054,6 +3282,93 @@ class Factory {
 }
 
 #[test]
+fn representation_plan_treats_erased_external_anonymous_class_as_boundary_value() {
+    let parsed = parse_java_source(
+        r#"
+class Factory {
+    Object make() {
+        return new AbstractIterator<String>() {
+            protected String computeNext() { return null; }
+        };
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+
+    let without_external_fact = plan_representations(&resolved.program, &resolved.facts);
+    assert!(
+        without_external_fact
+            .diagnostics_for_program(&resolved.program)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "unsupported_anonymous_class"),
+        "anonymous classes without an explicit erased boundary still need representation lowering"
+    );
+
+    let mut facts = resolved.facts.clone();
+    facts.extend_from(new_java2rust::external_packs::guava_immutable_collect_pack_facts());
+    let with_external_fact = plan_representations(&resolved.program, &facts);
+    assert_eq!(
+        with_external_fact.representation_for(&JavaType::Named {
+            name: "AbstractIterator".to_string(),
+            args: Vec::new(),
+        }),
+        ObjectRepresentation::ErasedObject
+    );
+    assert!(
+        !with_external_fact
+            .diagnostics_for_program(&resolved.program)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "unsupported_anonymous_class"),
+        "anonymous implementations of explicitly erased external objects should remain boundary values"
+    );
+}
+
+#[test]
+fn representation_plan_treats_tribble_feature_reader_anonymous_class_as_boundary_value() {
+    let parsed = parse_java_source(
+        r#"
+class Factory {
+    Object make() {
+        return new FeatureReader<String>() {
+            public String next() { return null; }
+            public void close() {}
+        };
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+
+    let without_external_fact = plan_representations(&resolved.program, &resolved.facts);
+    assert!(
+        without_external_fact
+            .diagnostics_for_program(&resolved.program)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "unsupported_anonymous_class"),
+        "anonymous FeatureReader implementations need representation lowering unless the Tribble boundary marks them erased"
+    );
+
+    let mut facts = resolved.facts.clone();
+    facts.extend_from(new_java2rust::external_packs::htsjdk_tribble_feature_pack_facts());
+    let with_external_fact = plan_representations(&resolved.program, &facts);
+    assert_eq!(
+        with_external_fact.representation_for(&JavaType::Named {
+            name: "FeatureReader".to_string(),
+            args: Vec::new(),
+        }),
+        ObjectRepresentation::ErasedObject
+    );
+    assert!(
+        !with_external_fact
+            .diagnostics_for_program(&resolved.program)
+            .iter()
+            .any(|diagnostic| diagnostic.code == "unsupported_anonymous_class"),
+        "anonymous implementations of Tribble FeatureReader should remain erased external boundary values"
+    );
+}
+
+#[test]
 fn representation_plan_applies_user_closed_enum_hierarchy_override() {
     let parsed = parse_java_source(
         r#"
@@ -3560,7 +3875,7 @@ class Other {}
     assert!(policy.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "representation_override_conflict"
             && diagnostic.message.contains("includes Other")
-            && diagnostic.message.contains("direct subtype")
+            && diagnostic.message.contains("subtype")
     }));
     assert!(policy.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "representation_override_conflict"
@@ -3568,7 +3883,10 @@ class Other {}
     }));
     assert!(policy.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "representation_override_conflict"
-            && diagnostic.message.contains("omits source subtype Num")
+            && (diagnostic.message.contains("omits source subtype Num")
+                || diagnostic
+                    .message
+                    .contains("omits terminal source subtype Num"))
     }));
     assert!(unknown_policy.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "representation_override_conflict"
@@ -3609,7 +3927,10 @@ class Num implements Expr {}
     assert!(
         diagnostics.iter().any(
             |diagnostic| diagnostic.code == "representation_override_conflict"
-                && diagnostic.message.contains("omits source subtype Num")
+                && (diagnostic.message.contains("omits source subtype Num")
+                    || diagnostic
+                        .message
+                        .contains("omits terminal source subtype Num"))
         ),
         "{diagnostics:?}"
     );
@@ -6033,6 +6354,142 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         None
     );
 
+    let hdf5_receiver = Expr::Var("hdf5".to_string());
+    let hdf5_facts = new_java2rust::external_packs::hdf5_pack_facts();
+    let mut hdf5_types = TypeEnv::new();
+    hdf5_types.insert_local(
+        "hdf5",
+        JavaType::Named {
+            name: "HDF5File".to_string(),
+            args: Vec::new(),
+        },
+    );
+    hdf5_types.insert_local(
+        "library",
+        JavaType::Named {
+            name: "HDF5Library".to_string(),
+            args: Vec::new(),
+        },
+    );
+    let crate_target = plan_call_target_with_facts(
+        Some(&hdf5_receiver),
+        "writeDoubleArray",
+        None,
+        &hdf5_facts,
+        &hdf5_types,
+    );
+    assert_eq!(crate_target.receiver_expr(), Some(&hdf5_receiver));
+    assert!(matches!(
+        crate_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "hdf5_pure_rust" && rust_name == "write_double_array"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &crate_target,
+            Some(RustExpr::Var("hdf5".to_string())),
+            vec![
+                RustExpr::Literal("\"/metrics\"".to_string()),
+                RustExpr::Var("values".to_string()),
+            ],
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw(
+                "hdf5_pure_rust::write_double_array".to_string()
+            )),
+            args: vec![
+                RustExpr::Var("hdf5".to_string()),
+                RustExpr::Literal("\"/metrics\"".to_string()),
+                RustExpr::Var("values".to_string()),
+            ],
+        }
+    );
+    let hdf5_flush_target = plan_call_target_with_facts(
+        Some(&hdf5_receiver),
+        "flush",
+        None,
+        &hdf5_facts,
+        &hdf5_types,
+    );
+    assert_eq!(hdf5_flush_target.receiver_expr(), Some(&hdf5_receiver));
+    assert!(matches!(
+        hdf5_flush_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "hdf5_pure_rust" && rust_name == "flush"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &hdf5_flush_target,
+            Some(RustExpr::Var("hdf5".to_string())),
+            Vec::new(),
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("hdf5_pure_rust::flush".to_string())),
+            args: vec![RustExpr::Var("hdf5".to_string())],
+        }
+    );
+    let hdf5_library_receiver = Expr::Var("library".to_string());
+    let hdf5_load_target = plan_call_target_with_facts(
+        Some(&hdf5_library_receiver),
+        "load",
+        None,
+        &hdf5_facts,
+        &hdf5_types,
+    );
+    assert_eq!(
+        hdf5_load_target.receiver_expr(),
+        Some(&hdf5_library_receiver)
+    );
+    assert!(matches!(
+        hdf5_load_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "hdf5_pure_rust" && rust_name == "load"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &hdf5_load_target,
+            Some(RustExpr::Var("library".to_string())),
+            Vec::new(),
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("hdf5_pure_rust::load".to_string())),
+            args: vec![RustExpr::Var("library".to_string())],
+        }
+    );
+    let mut override_facts = hdf5_facts.clone();
+    override_facts
+        .external_api_effect_facts
+        .push(ExternalApiEffectFact {
+            method_name: "writeDoubleArray".to_string(),
+            receiver_type: Some("HDF5File".to_string()),
+            arg_count: None,
+            role: ExternalApiRole::Mutator,
+            receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+            return_type: None,
+            return_nullability: NullabilityState::Unknown,
+            thrown: Vec::new(),
+            provenance: FactProvenance::UserOverride,
+        });
+    assert!(matches!(
+        plan_call_target_with_facts(
+            Some(&hdf5_receiver),
+            "writeDoubleArray",
+            None,
+            &override_facts,
+            &hdf5_types,
+        ),
+        CallTargetPlan::FallbackReceiver { rust_name, .. } if rust_name == "write_double_array"
+    ));
+
     let parsed = parse_java_source("class Add {}");
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let representations = plan_representations(&resolved.program, &resolved.facts);
@@ -6048,6 +6505,386 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         apply_new_target(&new_target, Vec::new()),
         RustExpr::Call {
             function: Box::new(RustExpr::Raw("Add::new".to_string())),
+            args: Vec::new(),
+        }
+    );
+    let hdf5_new_target = plan_new_target_with_facts(
+        &JavaType::Named {
+            name: "HDF5File".to_string(),
+            args: Vec::new(),
+        },
+        None,
+        &representations,
+        &hdf5_facts,
+        1,
+    );
+    assert_eq!(
+        hdf5_new_target.external_crate.as_ref().map(|target| (
+            target.crate_name.as_str(),
+            target.type_name.as_str(),
+            target.rust_name.as_str()
+        )),
+        Some(("hdf5_pure_rust", "HDF5File", "new"))
+    );
+    assert_eq!(
+        apply_new_target_with_facts(
+            &hdf5_new_target,
+            vec![RustExpr::Var("file".to_string())],
+            &hdf5_facts
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("hdf5_pure_rust::HDF5File::new".to_string())),
+            args: vec![RustExpr::Var("file".to_string())],
+        }
+    );
+    let mut constructor_mapping_override_facts = hdf5_facts.clone();
+    constructor_mapping_override_facts
+        .external_crate_constructor_mapping_facts
+        .push(ExternalCrateConstructorMappingFact {
+            type_name: "HDF5File".to_string(),
+            arg_count: 1,
+            rust_type_name: Some("FileHandle".to_string()),
+            rust_name: "open_read_only".to_string(),
+            provenance: FactProvenance::UserOverride,
+        });
+    let hdf5_mapping_override_new_target = plan_new_target_with_facts(
+        &JavaType::Named {
+            name: "HDF5File".to_string(),
+            args: Vec::new(),
+        },
+        None,
+        &representations,
+        &constructor_mapping_override_facts,
+        1,
+    );
+    assert_eq!(
+        hdf5_mapping_override_new_target
+            .external_crate
+            .as_ref()
+            .map(|target| (
+                target.crate_name.as_str(),
+                target.type_name.as_str(),
+                target.rust_name.as_str()
+            )),
+        Some(("hdf5_pure_rust", "FileHandle", "open_read_only")),
+        "user crate-constructor mapping facts should override built-in HDF5 facade symbols"
+    );
+    assert_eq!(
+        apply_new_target_with_facts(
+            &hdf5_mapping_override_new_target,
+            vec![RustExpr::Var("file".to_string())],
+            &constructor_mapping_override_facts
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw(
+                "hdf5_pure_rust::FileHandle::open_read_only".to_string()
+            )),
+            args: vec![RustExpr::Var("file".to_string())],
+        }
+    );
+    let mut constructor_override_facts = hdf5_facts.clone();
+    constructor_override_facts.external_constructor_facts.push(
+        new_java2rust::facts::ExternalConstructorFact {
+            type_name: "HDF5File".to_string(),
+            arg_types: Vec::new(),
+            provenance: FactProvenance::UserOverride,
+        },
+    );
+    let hdf5_override_new_target = plan_new_target_with_facts(
+        &JavaType::Named {
+            name: "HDF5File".to_string(),
+            args: Vec::new(),
+        },
+        None,
+        &representations,
+        &constructor_override_facts,
+        1,
+    );
+    assert_eq!(hdf5_override_new_target.external_crate, None);
+
+    let sqlite_receiver = Expr::Var("config".to_string());
+    let sqlite_facts = new_java2rust::external_packs::sqlite_pack_facts();
+    let mut sqlite_types = TypeEnv::new();
+    sqlite_types.insert_local(
+        "config",
+        JavaType::Named {
+            name: "SQLiteConfig".to_string(),
+            args: Vec::new(),
+        },
+    );
+    sqlite_types.insert_local(
+        "statement",
+        JavaType::Named {
+            name: "SQLiteStatement".to_string(),
+            args: Vec::new(),
+        },
+    );
+    sqlite_types.insert_local(
+        "connection",
+        JavaType::Named {
+            name: "SQLiteConnection".to_string(),
+            args: Vec::new(),
+        },
+    );
+    sqlite_types.insert_local(
+        "results",
+        JavaType::Named {
+            name: "SQLiteResultSet".to_string(),
+            args: Vec::new(),
+        },
+    );
+    let sqlite_connect_target = plan_call_target_with_facts(
+        Some(&sqlite_receiver),
+        "createConnection",
+        None,
+        &sqlite_facts,
+        &sqlite_types,
+    );
+    assert_eq!(
+        sqlite_connect_target.receiver_expr(),
+        Some(&sqlite_receiver)
+    );
+    assert!(matches!(
+        sqlite_connect_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "sqlite" && rust_name == "create_connection"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &sqlite_connect_target,
+            Some(RustExpr::Var("config".to_string())),
+            vec![RustExpr::Var("path".to_string())],
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("sqlite::create_connection".to_string())),
+            args: vec![
+                RustExpr::Var("config".to_string()),
+                RustExpr::Var("path".to_string()),
+            ],
+        }
+    );
+    let sqlite_statement_receiver = Expr::Var("statement".to_string());
+    let sqlite_query_target = plan_call_target_with_facts(
+        Some(&sqlite_statement_receiver),
+        "executeQuery",
+        None,
+        &sqlite_facts,
+        &sqlite_types,
+    );
+    assert!(matches!(
+        sqlite_query_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "sqlite" && rust_name == "execute_query"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &sqlite_query_target,
+            Some(RustExpr::Var("statement".to_string())),
+            Vec::new(),
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("sqlite::execute_query".to_string())),
+            args: vec![RustExpr::Var("statement".to_string())],
+        }
+    );
+    let sqlite_clear_parameters_target = plan_call_target_with_facts(
+        Some(&sqlite_statement_receiver),
+        "clearParameters",
+        None,
+        &sqlite_facts,
+        &sqlite_types,
+    );
+    assert!(matches!(
+        sqlite_clear_parameters_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "sqlite" && rust_name == "clear_parameters"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &sqlite_clear_parameters_target,
+            Some(RustExpr::Var("statement".to_string())),
+            Vec::new(),
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("sqlite::clear_parameters".to_string())),
+            args: vec![RustExpr::Var("statement".to_string())],
+        }
+    );
+    let sqlite_statement_close_target = plan_call_target_with_facts(
+        Some(&sqlite_statement_receiver),
+        "close",
+        None,
+        &sqlite_facts,
+        &sqlite_types,
+    );
+    assert!(matches!(
+        sqlite_statement_close_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "sqlite" && rust_name == "close"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &sqlite_statement_close_target,
+            Some(RustExpr::Var("statement".to_string())),
+            Vec::new(),
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("sqlite::close".to_string())),
+            args: vec![RustExpr::Var("statement".to_string())],
+        }
+    );
+    let sqlite_connection_receiver = Expr::Var("connection".to_string());
+    let sqlite_set_auto_commit_target = plan_call_target_with_facts(
+        Some(&sqlite_connection_receiver),
+        "setAutoCommit",
+        None,
+        &sqlite_facts,
+        &sqlite_types,
+    );
+    assert!(matches!(
+        sqlite_set_auto_commit_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "sqlite" && rust_name == "set_auto_commit"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &sqlite_set_auto_commit_target,
+            Some(RustExpr::Var("connection".to_string())),
+            vec![RustExpr::Literal("false".to_string())],
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("sqlite::set_auto_commit".to_string())),
+            args: vec![
+                RustExpr::Var("connection".to_string()),
+                RustExpr::Literal("false".to_string()),
+            ],
+        }
+    );
+    let sqlite_result_receiver = Expr::Var("results".to_string());
+    let sqlite_get_string_target = plan_call_target_with_facts(
+        Some(&sqlite_result_receiver),
+        "getString",
+        None,
+        &sqlite_facts,
+        &sqlite_types,
+    );
+    assert!(matches!(
+        sqlite_get_string_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "sqlite" && rust_name == "get_string"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &sqlite_get_string_target,
+            Some(RustExpr::Var("results".to_string())),
+            vec![RustExpr::Literal("\"sample\"".to_string())],
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("sqlite::get_string".to_string())),
+            args: vec![
+                RustExpr::Var("results".to_string()),
+                RustExpr::Literal("\"sample\"".to_string()),
+            ],
+        }
+    );
+    let sqlite_get_long_target = plan_call_target_with_facts(
+        Some(&sqlite_result_receiver),
+        "getLong",
+        None,
+        &sqlite_facts,
+        &sqlite_types,
+    );
+    assert!(matches!(
+        sqlite_get_long_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "sqlite" && rust_name == "get_long"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &sqlite_get_long_target,
+            Some(RustExpr::Var("results".to_string())),
+            vec![RustExpr::Literal("1".to_string())],
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("sqlite::get_long".to_string())),
+            args: vec![
+                RustExpr::Var("results".to_string()),
+                RustExpr::Literal("1".to_string()),
+            ],
+        }
+    );
+    let sqlite_get_boolean_target = plan_call_target_with_facts(
+        Some(&sqlite_result_receiver),
+        "getBoolean",
+        None,
+        &sqlite_facts,
+        &sqlite_types,
+    );
+    assert!(matches!(
+        sqlite_get_boolean_target,
+        CallTargetPlan::ExternalCrateReceiver {
+            ref crate_name,
+            ref rust_name,
+            ..
+        } if crate_name == "sqlite" && rust_name == "get_boolean"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &sqlite_get_boolean_target,
+            Some(RustExpr::Var("results".to_string())),
+            vec![RustExpr::Literal("\"active\"".to_string())],
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("sqlite::get_boolean".to_string())),
+            args: vec![
+                RustExpr::Var("results".to_string()),
+                RustExpr::Literal("\"active\"".to_string()),
+            ],
+        }
+    );
+    let sqlite_new_target = plan_new_target_with_facts(
+        &JavaType::Named {
+            name: "SQLiteConfig".to_string(),
+            args: Vec::new(),
+        },
+        None,
+        &representations,
+        &sqlite_facts,
+        0,
+    );
+    assert_eq!(
+        sqlite_new_target.external_crate.as_ref().map(|target| (
+            target.crate_name.as_str(),
+            target.type_name.as_str(),
+            target.rust_name.as_str()
+        )),
+        Some(("sqlite", "SQLiteConfig", "new"))
+    );
+    assert_eq!(
+        apply_new_target_with_facts(&sqlite_new_target, Vec::new(), &sqlite_facts),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("sqlite::SQLiteConfig::new".to_string())),
             args: Vec::new(),
         }
     );
@@ -6149,6 +6986,51 @@ class Uses {
         plan_call_arguments(None, 2, &signatures),
         ArgumentLoweringPlan::Unshaped { arg_count: 2 }
     );
+    let mut sqlite_types = TypeEnv::new();
+    sqlite_types.insert_local(
+        "statement",
+        JavaType::Named {
+            name: "SQLiteStatement".to_string(),
+            args: Vec::new(),
+        },
+    );
+    let sqlite_facts = new_java2rust::external_packs::sqlite_pack_facts();
+    let sqlite_bind_args = plan_call_arguments_with_facts(
+        Some(&Expr::Var("statement".to_string())),
+        "bindString",
+        None,
+        2,
+        &signatures,
+        &sqlite_facts,
+        &sqlite_types,
+    );
+    let ArgumentLoweringPlan::Shaped(sqlite_bind_shapes) = sqlite_bind_args else {
+        panic!("SQLite bindString arguments should be shaped by external argument-effect facts");
+    };
+    assert_eq!(
+        sqlite_bind_shapes[0].java_ty,
+        JavaType::Primitive(PrimitiveType::Int)
+    );
+    assert_eq!(sqlite_bind_shapes[0].ownership, OwnershipShape::CopyValue);
+    assert_eq!(sqlite_bind_shapes[1].java_ty, JavaType::String);
+    assert_eq!(
+        sqlite_bind_shapes[1].ownership,
+        OwnershipShape::SharedBorrow
+    );
+    assert_eq!(sqlite_bind_shapes[1].view, ViewShape::Str);
+    assert_eq!(
+        plan_call_arguments_with_facts(
+            Some(&Expr::Var("statement".to_string())),
+            "prepareStatement",
+            None,
+            1,
+            &signatures,
+            &sqlite_facts,
+            &sqlite_types,
+        ),
+        ArgumentLoweringPlan::Unshaped { arg_count: 1 },
+        "external argument facts should shape calls only when the whole argument vector is modeled"
+    );
     assert_eq!(
         resolved_constructor_arg_shapes(&constructor, 1, &signatures),
         constructor_arg_shapes
@@ -6166,6 +7048,7 @@ class Uses {
     let call_plan_source = include_str!("../src/call_plan.rs");
     assert!(call_plan_source.contains("pub enum ArgumentLoweringPlan"));
     assert!(call_plan_source.contains("pub fn plan_call_arguments"));
+    assert!(call_plan_source.contains("pub fn plan_call_arguments_with_facts"));
     assert!(call_plan_source.contains("pub fn plan_constructor_arguments"));
     assert!(call_plan_source.contains("pub fn receiver_expr"));
     assert!(!lower_source.contains("resolved_call_arg_shapes"));
@@ -6175,6 +7058,241 @@ class Uses {
     assert!(!lower_source.contains("CallTargetPlan::FallbackReceiver"));
     assert!(lower_source.contains("lower_args_with_plan"));
     assert!(lower_source.contains(".receiver_expr()"));
+}
+
+#[test]
+fn crate_mapped_external_method_calls_render_through_facade_target() {
+    let translation = translate_source(
+        r#"
+class Hdf5FacadeCall {
+    void write(HDF5File hdf5, double[] values) {
+        hdf5.writeDoubleArray("/metrics", values);
+    }
+
+    void load(HDF5Library library) {
+        library.load();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("hdf5_pure_rust::write_double_array"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("hdf5_pure_rust::load"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("hdf5.write_double_array(\"/metrics\""),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("library.load()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn sqlite_crate_mapped_external_method_calls_render_through_facade_target() {
+    let translation = translate_source(
+        r#"
+class SqliteFacadeCall {
+    Object connect(SQLiteConfig config, String path) {
+        SQLiteConnection connection = config.createConnection(path);
+        SQLiteStatement statement = connection.prepareStatement("select name from samples");
+        statement.bindString(1, path);
+        SQLiteResultSet results = statement.executeQuery();
+        if (results.next()) {
+            results.getLong(1);
+            results.getBoolean("active");
+            return results.getString("name");
+        }
+        statement.clearParameters();
+        statement.close();
+        results.close();
+        return null;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("sqlite::create_connection"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("sqlite::prepare_statement"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("sqlite::bind_string"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("sqlite::execute_query"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("sqlite::clear_parameters"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("sqlite::get_string"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("sqlite::get_long"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("sqlite::get_boolean"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("config.create_connection(path)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("statement.execute_query()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("statement.clear_parameters()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("results.get_string(\"name\")"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("results.get_long(1)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn crate_mapped_external_constructors_render_through_facade_target() {
+    let translation = translate_source(
+        r#"
+class Hdf5FacadeConstructor {
+    HDF5File open(File file) {
+        return new HDF5File(file);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("hdf5_pure_rust::HDF5File::new"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("return HDF5File::new(file)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn sqlite_crate_mapped_external_constructors_render_through_facade_target() {
+    let translation = translate_source(
+        r#"
+class SqliteFacadeConstructor {
+    SQLiteConfig configure() {
+        return new SQLiteConfig();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("sqlite::SQLiteConfig::new"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("return SQLiteConfig::new()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn parsed_crate_mapping_facade_names_are_facts_not_java_snake_case() {
+    let parsed = parse_external_pack_manifest(
+        r#"
+        external-pack dep.io Reader rust-crate-mapping mapped target=dep_io
+        external-pack-api dep.io Reader readNext mapped getter read-only definitely-non-null return=Record rust=fetch_record
+        external-pack-constructor dep.io Reader 0 mapped rust-type=ReaderHandle rust=open_reader
+        "#,
+    );
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "manifest parse should be clean: {:?}",
+        parsed.diagnostics
+    );
+
+    let translation = translate_source_with_facts(
+        r#"
+class ParsedFacadeNames {
+    Object load(Reader reader) {
+        return reader.readNext();
+    }
+
+    Reader open() {
+        return new Reader();
+    }
+}
+"#,
+        &parsed.facts,
+    );
+
+    assert!(
+        translation.rust.contains("dep_io::fetch_record(reader)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("dep_io::read_next"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("dep_io::ReaderHandle::open_reader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("dep_io::Reader::new"),
+        "{}",
+        translation.rust
+    );
 }
 
 #[test]
@@ -6263,6 +7381,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
             &[],
             Some(&resolved_getter),
             &facts,
+            &TypeEnv::new(),
         ),
         CallExprPlan::TrivialAccessorGetter {
             field_name,
@@ -6276,6 +7395,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
             &[],
             Some(&resolved_getter),
             &facts,
+            &TypeEnv::new(),
         ),
         CallExprPlan::Target(CallTargetPlan::InstanceReceiver {
             rust_name: "get_value",
@@ -6935,6 +8055,8 @@ fn external_facts_parser_ingests_closed_world_and_representation_overrides() {
 closed Expr
 closed-enum Expr ExprValue Add Num
 boxed-dyn-trait Sink SinkTrait
+dispatch-requirement RuntimeValue needs-subtype-dispatch
+dispatch-requirement RuntimeValue needs-downcast
 "#,
     );
 
@@ -6974,6 +8096,16 @@ boxed-dyn-trait Sink SinkTrait
     assert!(parsed.facts.dispatch_requirement_facts.iter().any(|fact| {
         fact.type_name == "Sink"
             && fact.requirement == DispatchRequirementKind::NeedsOwnedPolymorphicStorage
+    }));
+    assert!(parsed.facts.dispatch_requirement_facts.iter().any(|fact| {
+        fact.type_name == "RuntimeValue"
+            && fact.requirement == DispatchRequirementKind::NeedsSubtypeDispatch
+            && fact.provenance == FactProvenance::UserOverride
+    }));
+    assert!(parsed.facts.dispatch_requirement_facts.iter().any(|fact| {
+        fact.type_name == "RuntimeValue"
+            && fact.requirement == DispatchRequirementKind::NeedsDowncast
+            && fact.provenance == FactProvenance::UserOverride
     }));
 }
 
@@ -7138,12 +8270,86 @@ object-safety-violation Pack nested-self-param unpack values
 }
 
 #[test]
+fn external_facts_parser_ingests_source_summary_field_type_facts() {
+    let parsed = parse_external_facts(
+        r#"
+external-constructor SummaryBuilder String int
+field GATKConfig.CONFIG_FILE_VARIABLE_FILE_NAME String
+field ReferenceContext UNINITIALIZED_REFERENCE_ID int
+field ReadLikelihoodCalculationEngine.DEFAULT_EXPECTED_ERROR_RATE_PER_BASE double
+"#,
+    );
+
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let constructor = parsed
+        .facts
+        .external_constructor_facts
+        .iter()
+        .find(|fact| fact.type_name == "SummaryBuilder")
+        .expect("source-summary constructor should be parsed as a constructor fact");
+    assert_eq!(constructor.provenance, FactProvenance::UserOverride);
+    assert_eq!(
+        constructor.arg_types,
+        vec![JavaType::String, JavaType::Primitive(PrimitiveType::Int),]
+    );
+    let config = parsed
+        .facts
+        .external_field_for("GATKConfig", "CONFIG_FILE_VARIABLE_FILE_NAME")
+        .expect("GATKConfig constant should be parsed as a field fact");
+    assert_eq!(config.provenance, FactProvenance::UserOverride);
+    assert_eq!(config.field_type, Some(JavaType::String));
+    assert!(
+        parsed
+            .facts
+            .external_field_for("g_a_t_k_config", "CONFIG_FILE_VARIABLE_FILE_NAME")
+            .is_some(),
+        "field facts should be addressable by resolver-canonical receiver spelling"
+    );
+
+    let reference = parsed
+        .facts
+        .external_field_for("ReferenceContext", "UNINITIALIZED_REFERENCE_ID")
+        .expect("ReferenceContext constant should be parsed as a field fact");
+    assert_eq!(
+        reference.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+
+    let error_rate = parsed
+        .facts
+        .external_field_for(
+            "ReadLikelihoodCalculationEngine",
+            "DEFAULT_EXPECTED_ERROR_RATE_PER_BASE",
+        )
+        .expect("ReadLikelihoodCalculationEngine constant should be parsed as a field fact");
+    assert_eq!(
+        error_rate.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Double))
+    );
+}
+
+#[test]
 fn external_facts_parser_ingests_external_api_effect_overrides() {
     let parsed = parse_external_facts(
         r#"
 external-api getValue * getter read-only
 external-api setValue ExternalCounter setter mutates-receiver unknown
 external-api format String getter read-only definitely-non-null
+external-api read NativeHandle getter read-only maybe-null args=1 return=Vec<u8> throws=NativeError,IOException,NativeError
+external-api qualifiedRead dep.variant.NativeHandle getter read-only definitely-non-null args=1 return=String
+external-argument read NativeHandle 0 definitely-non-null read-only borrowed type=String
+external-argument qualifiedRead dep.variant.NativeHandle 0 definitely-non-null read-only borrowed type=String
+external-crate-api NativeHandle read 1 read_record
+external-crate-constructor NativeHandle 1 NativeHandleFacade open
+external-constructor dep.variant.NativeHandle String
+external-crate-api dep.variant.NativeHandle rawRead 0 raw_read_record
+external-crate-constructor dep.variant.NativeHandle 1 NativeHandleFacade open_qualified
+unsupported-api native NativeHandle rawRead requires runtime codec
+unsupported-api native dep.variant.NativeHandle rawDecode requires qualified runtime codec
+unsupported-constructor native NativeHandle 2 requires native open flags
+unsupported-constructor native dep.variant.NativeHandle 2 requires qualified native open flags
+unsupported-field native NativeHandle RAW_HANDLE exposes native pointer
+unsupported-field native dep.variant.NativeHandle RAW_HANDLE exposes qualified native pointer
 "#,
     );
 
@@ -7177,6 +8383,414 @@ external-api format String getter read-only definitely-non-null
         format.return_nullability,
         NullabilityState::DefinitelyNonNull
     );
+
+    let read = parsed
+        .facts
+        .external_api_effect_for_receiver_with_arity(Some("NativeHandle"), "read", Some(1))
+        .unwrap();
+    assert_eq!(read.arg_count, Some(1));
+    assert_eq!(
+        read.return_type,
+        Some(JavaType::Named {
+            name: "Vec".to_string(),
+            args: vec![JavaType::Named {
+                name: "u8".to_string(),
+                args: Vec::new(),
+            }],
+        })
+    );
+    assert_eq!(
+        read.thrown,
+        vec![
+            JavaType::Named {
+                name: "NativeError".to_string(),
+                args: Vec::new(),
+            },
+            JavaType::Named {
+                name: "IOException".to_string(),
+                args: Vec::new(),
+            },
+        ]
+    );
+    let read_argument = parsed
+        .facts
+        .external_api_argument_effect_for_receiver(Some("NativeHandle"), "read", 0)
+        .expect("external-argument should parse as an argument effect fact");
+    assert_eq!(read_argument.parameter_type, Some(JavaType::String));
+    assert_eq!(
+        read_argument.parameter_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+    assert_eq!(
+        read_argument.argument_mutability,
+        ReceiverMutabilityFact::ReadOnly
+    );
+    assert_eq!(
+        read_argument.alias_policy,
+        ExternalArgumentAliasPolicy::Borrowed
+    );
+    assert_eq!(read_argument.provenance, FactProvenance::UserOverride);
+
+    let read_mapping = parsed
+        .facts
+        .external_crate_api_mapping_for_receiver("NativeHandle", "read", Some(1))
+        .expect("external-crate-api should parse as an API mapping fact");
+    assert_eq!(read_mapping.rust_name, "read_record");
+    assert_eq!(read_mapping.arg_count, Some(1));
+    assert_eq!(read_mapping.provenance, FactProvenance::UserOverride);
+
+    let qualified_read = parsed
+        .facts
+        .external_api_effect_for_receiver_with_arity(
+            Some("dep.variant.native_handle"),
+            "qualifiedRead",
+            Some(1),
+        )
+        .expect("external-api lookup should normalize qualified receiver spellings");
+    assert_eq!(qualified_read.return_type, Some(JavaType::String));
+    assert_eq!(qualified_read.provenance, FactProvenance::UserOverride);
+
+    let qualified_read_argument = parsed
+        .facts
+        .external_api_argument_effect_for_receiver(
+            Some("dep.variant.native_handle"),
+            "qualifiedRead",
+            0,
+        )
+        .expect("external-argument lookup should normalize qualified receiver spellings");
+    assert_eq!(
+        qualified_read_argument.parameter_type,
+        Some(JavaType::String)
+    );
+    assert_eq!(
+        qualified_read_argument.alias_policy,
+        ExternalArgumentAliasPolicy::Borrowed
+    );
+    assert_eq!(
+        qualified_read_argument.provenance,
+        FactProvenance::UserOverride
+    );
+
+    let constructor_mapping = parsed
+        .facts
+        .external_crate_constructor_mapping_for("NativeHandle", 1)
+        .expect("external-crate-constructor should parse as a constructor mapping fact");
+    assert_eq!(
+        constructor_mapping.rust_type_name.as_deref(),
+        Some("NativeHandleFacade")
+    );
+    assert_eq!(constructor_mapping.rust_name, "open");
+    assert_eq!(constructor_mapping.provenance, FactProvenance::UserOverride);
+
+    let qualified_constructor = parsed
+        .facts
+        .external_constructor_for("dep.variant.native_handle", &[JavaType::String])
+        .expect("external-constructor lookup should normalize qualified receiver spellings");
+    assert_eq!(
+        qualified_constructor.type_name,
+        "dep.variant.NativeHandle".to_string()
+    );
+    assert_eq!(
+        qualified_constructor.provenance,
+        FactProvenance::UserOverride
+    );
+
+    let qualified_read_mapping = parsed
+        .facts
+        .external_crate_api_mapping_for_receiver("dep.variant.native_handle", "rawRead", Some(0))
+        .expect("external-crate-api lookup should normalize qualified receiver spellings");
+    assert_eq!(qualified_read_mapping.rust_name, "raw_read_record");
+    assert_eq!(
+        qualified_read_mapping.provenance,
+        FactProvenance::UserOverride
+    );
+
+    let qualified_constructor_mapping = parsed
+        .facts
+        .external_crate_constructor_mapping_for("dep.variant.native_handle", 1)
+        .expect("external-crate-constructor lookup should normalize qualified type spellings");
+    assert_eq!(qualified_constructor_mapping.rust_name, "open_qualified");
+    assert_eq!(
+        qualified_constructor_mapping.provenance,
+        FactProvenance::UserOverride
+    );
+
+    let unsupported_api = parsed
+        .facts
+        .unsupported_external_api_for_receiver("NativeHandle", "rawRead")
+        .expect("unsupported-api should parse as an unsupported API fact");
+    assert_eq!(unsupported_api.pack_name, "native");
+    assert_eq!(unsupported_api.reason, "requires runtime codec");
+    assert_eq!(unsupported_api.provenance, FactProvenance::UserOverride);
+
+    let qualified_unsupported_api = parsed
+        .facts
+        .unsupported_external_api_for_receiver("dep.variant.native_handle", "rawDecode")
+        .expect("unsupported-api lookup should normalize qualified receiver spellings");
+    assert_eq!(
+        qualified_unsupported_api.reason,
+        "requires qualified runtime codec"
+    );
+    assert_eq!(
+        qualified_unsupported_api.provenance,
+        FactProvenance::UserOverride
+    );
+
+    let unsupported_constructor = parsed
+        .facts
+        .unsupported_external_constructor_for("NativeHandle", 2)
+        .expect("unsupported-constructor should parse as an unsupported constructor fact");
+    assert_eq!(unsupported_constructor.pack_name, "native");
+    assert_eq!(unsupported_constructor.reason, "requires native open flags");
+    assert_eq!(
+        unsupported_constructor.provenance,
+        FactProvenance::UserOverride
+    );
+
+    let qualified_unsupported_constructor = parsed
+        .facts
+        .unsupported_external_constructor_for("dep.variant.native_handle", 2)
+        .expect("unsupported-constructor lookup should normalize qualified type spellings");
+    assert_eq!(
+        qualified_unsupported_constructor.reason,
+        "requires qualified native open flags"
+    );
+    assert_eq!(
+        qualified_unsupported_constructor.provenance,
+        FactProvenance::UserOverride
+    );
+
+    let unsupported_field = parsed
+        .facts
+        .unsupported_external_field_for("NativeHandle", "RAW_HANDLE")
+        .expect("unsupported-field should parse as an unsupported field fact");
+    assert_eq!(unsupported_field.pack_name, "native");
+    assert_eq!(unsupported_field.reason, "exposes native pointer");
+    assert_eq!(unsupported_field.provenance, FactProvenance::UserOverride);
+
+    let qualified_unsupported_field = parsed
+        .facts
+        .unsupported_external_field_for("dep.variant.native_handle", "RAW_HANDLE")
+        .expect("unsupported-field lookup should normalize qualified type spellings");
+    assert_eq!(
+        qualified_unsupported_field.reason,
+        "exposes qualified native pointer"
+    );
+    assert_eq!(
+        qualified_unsupported_field.provenance,
+        FactProvenance::UserOverride
+    );
+}
+
+#[test]
+fn external_facts_parser_ingests_provider_analysis_facts() {
+    let parsed = parse_external_facts(
+        r#"
+method-effect dep.AnalysisTarget summarize read-only definitely-non-null throws=dep.DecodeError,dep.DecodeError,IOException
+capture method dep.AnalysisTarget summarize 7 lambda capture Runnable capturedName local String true false
+trivial-getter dep.AnalysisTarget getValue value policy=inline-candidate
+trivial-setter dep.AnalysisTarget setValue value value fluent=true policy=preserve-api
+recursion dep.AnalysisTarget summarize dep.AnalysisTarget summarize direct
+control-flow dep.AnalysisTarget summarize tail-recursive-self-call
+dispatch-requirement dep.AnalysisTarget needs-subtype-dispatch
+catch dep.AnalysisTarget summarize 0 dep.DecodeError,IOException assignable=dep.DecodeError,dep.SpecificDecodeError,dep.SpecificDecodeError
+"#,
+    );
+
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+
+    let method_effect = parsed
+        .facts
+        .method_effect_for("dep.AnalysisTarget", "summarize")
+        .expect("method-effect fact should be parsed");
+    assert_eq!(
+        method_effect.receiver_mutability,
+        ReceiverMutabilityFact::ReadOnly
+    );
+    assert_eq!(
+        method_effect.return_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+    assert_eq!(
+        method_effect.thrown,
+        vec![
+            JavaType::Named {
+                name: "DecodeError".to_string(),
+                args: Vec::new(),
+            },
+            JavaType::Named {
+                name: "IOException".to_string(),
+                args: Vec::new(),
+            },
+        ]
+    );
+    assert_eq!(method_effect.provenance, FactProvenance::UserOverride);
+    assert!(
+        parsed
+            .facts
+            .method_effect_for("dep.analysis_target", "summarize")
+            .is_some(),
+        "method-effect lookup should normalize qualified type spellings"
+    );
+
+    let capture_owner = parsed
+        .facts
+        .captures
+        .owners
+        .iter()
+        .find(|owner| owner.id.0 == 7)
+        .expect("capture fact should be parsed");
+    assert_eq!(capture_owner.kind, CaptureOwnerKind::Lambda);
+    assert_eq!(capture_owner.name.as_deref(), Some("capture"));
+    assert_eq!(
+        capture_owner.target_type,
+        Some(JavaType::Named {
+            name: "Runnable".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        capture_owner.origin,
+        CaptureOrigin::Method {
+            type_name: "dep.AnalysisTarget".to_string(),
+            method_name: "summarize".to_string(),
+        }
+    );
+    assert_eq!(capture_owner.captures.len(), 1);
+    assert_eq!(capture_owner.captures[0].name, "capturedName");
+    assert_eq!(capture_owner.captures[0].source, CaptureSource::Local);
+    assert_eq!(capture_owner.captures[0].ty, JavaType::String);
+    assert!(capture_owner.captures[0].effectively_final);
+    assert!(!capture_owner.captures[0].mutable_after_capture);
+
+    let getter = parsed
+        .facts
+        .trivial_accessor_for("dep.AnalysisTarget", "getValue")
+        .expect("trivial-getter fact should be parsed");
+    assert_eq!(
+        getter.kind,
+        TrivialAccessorKind::Getter {
+            field: FactFieldKey {
+                type_name: "dep.AnalysisTarget".to_string(),
+                field_name: "value".to_string(),
+            },
+        }
+    );
+    assert_eq!(getter.inline_policy, AccessorInlinePolicy::InlineCandidate);
+    assert_eq!(getter.provenance, FactProvenance::UserOverride);
+    assert!(
+        parsed
+            .facts
+            .trivial_accessor_for("dep.analysis_target", "getValue")
+            .is_some(),
+        "trivial accessor lookup should normalize qualified type spellings"
+    );
+
+    let setter = parsed
+        .facts
+        .trivial_accessor_for("dep.AnalysisTarget", "setValue")
+        .expect("trivial-setter fact should be parsed");
+    assert_eq!(
+        setter.kind,
+        TrivialAccessorKind::Setter {
+            field: FactFieldKey {
+                type_name: "dep.AnalysisTarget".to_string(),
+                field_name: "value".to_string(),
+            },
+            param_name: "value".to_string(),
+            fluent: true,
+        }
+    );
+    assert_eq!(setter.inline_policy, AccessorInlinePolicy::PreserveApi);
+    assert_eq!(setter.provenance, FactProvenance::UserOverride);
+
+    let recursion = parsed
+        .facts
+        .recursion_facts_for("dep.AnalysisTarget", "summarize");
+    assert_eq!(recursion.len(), 1);
+    assert_eq!(recursion[0].calls.type_name, "dep.AnalysisTarget");
+    assert_eq!(recursion[0].calls.method_name, "summarize");
+    assert_eq!(recursion[0].kind, RecursionKind::Direct);
+    assert_eq!(recursion[0].provenance, FactProvenance::UserOverride);
+    assert_eq!(
+        parsed
+            .facts
+            .recursion_facts_for("dep.analysis_target", "summarize")
+            .len(),
+        1,
+        "recursion fact lookup should normalize qualified type spellings"
+    );
+
+    assert!(parsed.facts.has_control_flow_fact(
+        "dep.AnalysisTarget",
+        "summarize",
+        ControlFlowFactKind::TailRecursiveSelfCall
+    ));
+    assert!(parsed.facts.has_control_flow_fact(
+        "dep.analysis_target",
+        "summarize",
+        ControlFlowFactKind::TailRecursiveSelfCall
+    ));
+    assert!(parsed.facts.control_flow_facts.iter().any(|fact| {
+        fact.method.type_name == "dep.AnalysisTarget"
+            && fact.method.method_name == "summarize"
+            && fact.provenance == FactProvenance::UserOverride
+    }));
+    assert_eq!(
+        parsed
+            .facts
+            .dispatch_requirements_for("dep.analysis_target"),
+        vec![DispatchRequirementKind::NeedsSubtypeDispatch],
+        "dispatch requirement lookup should normalize qualified type spellings"
+    );
+    assert_eq!(
+        parsed
+            .facts
+            .dispatch_requirement_facts_for("dep.analysis_target")
+            .len(),
+        1
+    );
+
+    let catches = parsed
+        .facts
+        .catch_facts_for("dep.AnalysisTarget", "summarize");
+    assert_eq!(catches.len(), 1);
+    assert_eq!(catches[0].clause_index, 0);
+    assert_eq!(
+        catches[0].types,
+        vec![
+            JavaType::Named {
+                name: "DecodeError".to_string(),
+                args: Vec::new(),
+            },
+            JavaType::Named {
+                name: "IOException".to_string(),
+                args: Vec::new(),
+            },
+        ]
+    );
+    assert_eq!(
+        catches[0].assignable_from,
+        vec![
+            JavaType::Named {
+                name: "DecodeError".to_string(),
+                args: Vec::new(),
+            },
+            JavaType::Named {
+                name: "SpecificDecodeError".to_string(),
+                args: Vec::new(),
+            },
+        ]
+    );
+    assert_eq!(catches[0].provenance, FactProvenance::UserOverride);
+    assert_eq!(
+        parsed
+            .facts
+            .catch_facts_for("dep.analysis_target", "summarize")
+            .len(),
+        1,
+        "catch fact lookup should normalize qualified type spellings"
+    );
 }
 
 #[test]
@@ -7185,6 +8799,7 @@ fn external_facts_parser_ingests_field_nullability_overrides() {
         r#"
 field-nullability User name definitely-non-null
 field-nullability Cache.value maybe-null
+field-nullability dep.AnalysisTarget RAW_VALUE definitely-non-null
 "#,
     );
 
@@ -7196,6 +8811,13 @@ field-nullability Cache.value maybe-null
     assert_eq!(
         parsed.facts.field_nullability_for("Cache", "value"),
         Some(NullabilityState::MaybeNull)
+    );
+    assert_eq!(
+        parsed
+            .facts
+            .field_nullability_for("dep.analysis_target", "RAW_VALUE"),
+        Some(NullabilityState::DefinitelyNonNull),
+        "field-nullability lookup should normalize qualified type spellings"
     );
     assert!(parsed.facts.field_nullability_facts.iter().any(|fact| {
         fact.field.type_name == "User"
@@ -7254,6 +8876,63 @@ object-safety-violation Pet self-param accept value
 }
 
 #[test]
+fn external_pack_manifest_object_safety_facts_drive_representation_fallback() {
+    let parsed = parse_external_pack_manifest(
+        r#"
+        external-pack dep.runtime dep.runtime external-fact-model semantic
+        external-pack-object dep.runtime dep.runtime.GenericFactory dyn-trait GenericFactoryTrait
+        external-pack-object-safety dep.runtime dep.runtime.GenericFactory nested-self-return copyAll
+        external-pack-object-safety dep.runtime dep.runtime.GenericFactory nested-self-param acceptAll values
+        "#,
+    );
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "manifest should parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+
+    let policy = object_representation_policy(
+        ObjectRepresentationRequest::DynTraitOverride {
+            type_name: "dep.runtime.GenericFactory".to_string(),
+            trait_name: "GenericFactoryTrait".to_string(),
+        },
+        &parsed.facts,
+    );
+
+    assert_eq!(policy.representation, ObjectRepresentation::ErasedObject);
+    assert_eq!(
+        policy.object_safety,
+        ObjectSafetyPolicy::RejectedNonObjectSafe
+    );
+    assert!(
+        policy.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "non_object_safe_trait_fallback"
+                && diagnostic
+                    .message
+                    .contains("dyn trait representation for dep.runtime.GenericFactory")
+                && diagnostic
+                    .message
+                    .contains("method copyAll returns a type containing the interface type")
+        }),
+        "{:?}",
+        policy.diagnostics
+    );
+    let safety_fact = parsed
+        .facts
+        .object_safety_fact_for_name("dep.runtime.GenericFactory")
+        .expect("manifest should emit an object-safety fact");
+    assert_eq!(safety_fact.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(
+        parsed
+            .facts
+            .object_safety_violation_for_name("dep.runtime.GenericFactory"),
+        Some(ObjectSafetyViolation::NestedSelfReferentialReturn {
+            method_name: "copyAll".to_string(),
+        })
+    );
+}
+
+#[test]
 fn external_capability_facts_drive_existing_shape_policy() {
     let parsed = parse_external_facts(
         r#"
@@ -7286,10 +8965,27 @@ sequence-like ExternalIds ExternalId
 
 #[test]
 fn external_facts_parser_reports_invalid_lines() {
-    let parsed = parse_external_facts("closed Expr maybe\ncopy ExternalId maybe\nunknown Fact\n");
+    let parsed = parse_external_facts(
+        r#"
+closed Expr maybe
+copy ExternalId maybe
+dispatch-requirement Expr maybe
+method-effect Expr call maybe unknown
+capture method Expr call nope lambda capture Runnable value local String true false
+capture method Expr call 1 maybe capture Runnable value local String true false
+capture method Expr call 1 lambda capture Runnable value maybe String true false
+capture method Expr call 1 lambda capture Runnable value local String maybe false
+trivial-getter Expr call value policy=maybe
+trivial-setter Expr call value value fluent=maybe
+recursion Expr call Expr call maybe
+control-flow Expr call maybe
+catch Expr call nope Exception
+unknown Fact
+"#,
+    );
 
     assert!(parsed.diagnostics.has_code("external_fact_parse_error"));
-    assert_eq!(parsed.diagnostics.len(), 3);
+    assert_eq!(parsed.diagnostics.len(), 14);
 }
 
 #[test]
@@ -7585,13 +9281,16 @@ fn signature_constraint_propagation_policy_separates_shape_from_storage_edges() 
     );
 
     let ownership = SignatureConstraint::RequiredOwnership(OwnershipShape::Owned);
+    let nullability = SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull);
     let storage = SignatureConstraint::StorageSlot;
     let mutable = SignatureConstraint::MutableBinding;
 
     assert!(signature_shape_constraint_propagation_policy().allows(&ownership));
+    assert!(signature_shape_constraint_propagation_policy().allows(&nullability));
     assert!(!signature_shape_constraint_propagation_policy().allows(&storage));
     assert!(!signature_shape_constraint_propagation_policy().allows(&mutable));
     assert!(signature_slot_constraint_propagation_policy().allows(&ownership));
+    assert!(signature_slot_constraint_propagation_policy().allows(&nullability));
     assert!(signature_slot_constraint_propagation_policy().allows(&storage));
     assert!(!signature_slot_constraint_propagation_policy().allows(&mutable));
 }
@@ -9647,6 +11346,383 @@ class ExternalReturnLocal {
     assert!(local_constraints.constraints.contains(
         &SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull)
     ));
+}
+
+#[test]
+fn variantcontext_nullable_attribute_getter_flows_into_option_slot_planning() {
+    let parsed = parse_java_source(
+        r#"
+import htsjdk.variant.variantcontext.VariantContext;
+
+class VariantAttributeOptionPlanning {
+    private Object attribute(VariantContext variant) {
+        Object value = variant.getAttribute("DP");
+        return value;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let mut facts = resolved.facts.clone();
+    facts.extend_from(new_java2rust::external_packs::htsjdk_variantcontext_pack_facts());
+
+    let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
+    let method_constraints = constraints
+        .methods
+        .get(&MethodKey {
+            type_name: "VariantAttributeOptionPlanning".to_string(),
+            rust_name: "attribute".to_string(),
+        })
+        .unwrap();
+    let local_constraints = method_constraints
+        .locals
+        .iter()
+        .find(|local| local.name == "value")
+        .unwrap();
+    assert!(
+        local_constraints
+            .constraints
+            .contains(&SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull
+            )),
+        "{local_constraints:?}"
+    );
+
+    let representations = plan_representations(&resolved.program, &facts);
+    let direct_value_shape = solve_signature_shape_with_facts(
+        &representations,
+        SignatureShapeRequest {
+            java_ty: JavaType::Named {
+                name: "Object".to_string(),
+                args: Vec::new(),
+            },
+            role: SignatureSlotRole::Storage,
+            constraints: local_constraints.constraints.clone(),
+        },
+        &facts,
+    )
+    .unwrap();
+    assert_eq!(
+        direct_value_shape.java_ty,
+        optional_java_type(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        })
+    );
+
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "VariantAttributeOptionPlanning")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "attribute" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let method_signature = signatures.method_signature(ty, method).unwrap();
+    let value_shape = signatures
+        .local_shape(&method_signature.locals, "value")
+        .expect("external nullable attribute local should have a solved shape");
+
+    assert_eq!(
+        value_shape.java_ty,
+        optional_java_type(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        signatures.method_return_shape(ty, method).unwrap().java_ty,
+        optional_java_type(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert!(matches!(
+        rust_type_for_slot(value_shape),
+        RustType::Option(_)
+    ));
+}
+
+#[test]
+fn constructor_initialized_variantcontext_field_stays_non_optional() {
+    let parsed = parse_java_source(
+        r#"
+import htsjdk.variant.variantcontext.VariantContext;
+
+class VariantHolder {
+    private VariantContext variant;
+
+    VariantHolder(VariantContext variant) {
+        this.variant = variant;
+    }
+
+    VariantContext current() {
+        return this.variant;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.extend_from(new_java2rust::external_packs::htsjdk_variantcontext_pack_facts());
+    let semantic =
+        new_java2rust::semantic_analysis::analyze_program(&resolved.program, &facts, &facts);
+    let mut facts = facts;
+    facts.extend_from(semantic.facts);
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "VariantHolder")
+        .unwrap();
+    let field = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Field(field) if field.name == "variant" => Some(field),
+            _ => None,
+        })
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "current" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        facts.field_nullability_for("VariantHolder", "variant"),
+        Some(NullabilityState::DefinitelyNonNull)
+    );
+    assert!(
+        field_shape_constraints_with_usage(ty, field, &usage, &facts).contains(
+            &SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull)
+        )
+    );
+    assert_eq!(
+        signatures
+            .field_shape("VariantHolder", "variant")
+            .unwrap()
+            .java_ty,
+        JavaType::Named {
+            name: "VariantContext".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        signatures.method_return_shape(ty, method).unwrap().java_ty,
+        JavaType::Named {
+            name: "VariantContext".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert!(
+        !matches!(
+            rust_type_for_slot(signatures.field_shape("VariantHolder", "variant").unwrap()),
+            RustType::Option(_)
+        ),
+        "constructor-proven non-null external fields should not be optionalized"
+    );
+}
+
+#[test]
+fn variantcontext_external_method_boundary_preserves_facade_shape() {
+    let parsed = parse_java_source(
+        r#"
+import htsjdk.variant.variantcontext.Allele;
+import htsjdk.variant.variantcontext.Genotype;
+import htsjdk.variant.variantcontext.GenotypesContext;
+import htsjdk.variant.variantcontext.VariantContext;
+
+class VariantBoundaryUse {
+    private VariantContext route(
+            VariantBoundary boundary,
+            VariantContext variant) {
+        VariantContext copy = boundary.copy(variant);
+        boundary.consume(copy);
+        return copy;
+    }
+
+    private Allele routeAllele(VariantBoundary boundary, Allele allele) {
+        Allele copy = boundary.copyAllele(allele);
+        boundary.consumeAllele(copy);
+        return copy;
+    }
+
+    private Genotype routeGenotype(VariantBoundary boundary, Genotype genotype) {
+        Genotype copy = boundary.copyGenotype(genotype);
+        boundary.consumeGenotype(copy);
+        return copy;
+    }
+
+    private GenotypesContext routeGenotypes(VariantBoundary boundary, GenotypesContext genotypes) {
+        GenotypesContext copy = boundary.copyGenotypes(genotypes);
+        boundary.consumeGenotypes(copy);
+        return copy;
+    }
+}
+
+class VariantBoundary {}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let external = parse_external_facts(
+        r#"
+external-api copy VariantBoundary getter read-only definitely-non-null args=1 return=VariantContext
+external-api consume VariantBoundary side-effect read-only definitely-non-null args=1
+external-api copyAllele VariantBoundary getter read-only definitely-non-null args=1 return=Allele
+external-api consumeAllele VariantBoundary side-effect read-only definitely-non-null args=1
+external-api copyGenotype VariantBoundary getter read-only definitely-non-null args=1 return=Genotype
+external-api consumeGenotype VariantBoundary side-effect read-only definitely-non-null args=1
+external-api copyGenotypes VariantBoundary getter read-only definitely-non-null args=1 return=GenotypesContext
+external-api consumeGenotypes VariantBoundary side-effect read-only definitely-non-null args=1
+"#,
+    );
+    assert!(
+        external.diagnostics.is_empty(),
+        "{:?}",
+        external.diagnostics
+    );
+    let mut facts = resolved.facts.clone();
+    facts.extend_from(new_java2rust::external_packs::htsjdk_variantcontext_pack_facts());
+    facts.extend_from(external.facts);
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "VariantBoundaryUse")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "route" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let method_signature = signatures.method_signature(ty, method).unwrap();
+    let variant_ty = JavaType::Named {
+        name: "VariantContext".to_string(),
+        args: Vec::new(),
+    };
+    let allele_ty = JavaType::Named {
+        name: "Allele".to_string(),
+        args: Vec::new(),
+    };
+    let genotype_ty = JavaType::Named {
+        name: "Genotype".to_string(),
+        args: Vec::new(),
+    };
+    let genotypes_ty = JavaType::Named {
+        name: "GenotypesContext".to_string(),
+        args: Vec::new(),
+    };
+
+    assert_eq!(
+        facts
+            .external_api_effect_for_receiver(Some("VariantBoundary"), "copy")
+            .unwrap()
+            .return_type,
+        Some(variant_ty.clone())
+    );
+    assert_eq!(
+        facts
+            .external_api_effect_for_receiver(Some("VariantBoundary"), "copyAllele")
+            .unwrap()
+            .return_type,
+        Some(allele_ty.clone())
+    );
+    assert_eq!(
+        facts
+            .external_api_effect_for_receiver(Some("VariantBoundary"), "copyGenotype")
+            .unwrap()
+            .return_type,
+        Some(genotype_ty.clone())
+    );
+    assert_eq!(
+        facts
+            .external_api_effect_for_receiver(Some("VariantBoundary"), "copyGenotypes")
+            .unwrap()
+            .return_type,
+        Some(genotypes_ty.clone())
+    );
+    assert_eq!(
+        signatures
+            .local_shape(&method_signature.locals, "copy")
+            .unwrap()
+            .java_ty,
+        variant_ty.clone()
+    );
+    assert_eq!(
+        signatures.method_return_shape(ty, method).unwrap().java_ty,
+        variant_ty.clone()
+    );
+    assert_eq!(
+        method_signature
+            .params
+            .iter()
+            .find(|param| param.name == "variant")
+            .unwrap()
+            .shape
+            .java_ty,
+        variant_ty
+    );
+
+    for (method_name, param_name, expected_ty) in [
+        ("routeAllele", "allele", allele_ty),
+        ("routeGenotype", "genotype", genotype_ty),
+        ("routeGenotypes", "genotypes", genotypes_ty),
+    ] {
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == method_name => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let method_signature = signatures.method_signature(ty, method).unwrap();
+        assert_eq!(
+            signatures
+                .local_shape(&method_signature.locals, "copy")
+                .unwrap()
+                .java_ty,
+            expected_ty.clone()
+        );
+        assert_eq!(
+            signatures.method_return_shape(ty, method).unwrap().java_ty,
+            expected_ty.clone()
+        );
+        assert_eq!(
+            method_signature
+                .params
+                .iter()
+                .find(|param| param.name == param_name)
+                .unwrap()
+                .shape
+                .java_ty,
+            expected_ty
+        );
+    }
 }
 
 #[test]
@@ -12382,7 +14458,7 @@ fn effective_fact_precedence_queries_are_audited_by_consumer_module() {
         "object_model",
         object_model_source,
         "closed_hierarchy_fact_for_name",
-        1,
+        2,
     );
     assert_count(
         "object_model",

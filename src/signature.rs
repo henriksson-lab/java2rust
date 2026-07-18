@@ -1285,7 +1285,7 @@ fn propagate_method_field_storage_constraints(
                     continue;
                 };
                 for constraint in
-                    field_shape_requirements(constraints, &method_key.type_name, field_name)
+                    field_writer_shape_requirements(constraints, &method_key.type_name, field_name)
                 {
                     pending.push((method_key.clone(), binding.name.clone(), constraint.clone()));
                 }
@@ -1315,9 +1315,11 @@ fn propagate_constructor_field_storage_constraints(
                 let BindingUse::StoredInField { field_name } = use_site else {
                     continue;
                 };
-                for constraint in
-                    field_shape_requirements(constraints, &constructor_key.type_name, field_name)
-                {
+                for constraint in field_writer_shape_requirements(
+                    constraints,
+                    &constructor_key.type_name,
+                    field_name,
+                ) {
                     pending.push((key.clone(), binding.name.clone(), constraint.clone()));
                 }
             }
@@ -1487,6 +1489,19 @@ fn field_shape_requirements<'a>(
         .into_iter()
         .flat_map(|constraints| constraints.iter())
         .filter(|constraint| signature_slot_constraint_propagation_policy().allows(constraint))
+}
+
+fn field_writer_shape_requirements<'a>(
+    constraints: &'a SignatureConstraintState,
+    type_name: &str,
+    field_name: &str,
+) -> impl Iterator<Item = &'a SignatureConstraint> {
+    field_shape_requirements(constraints, type_name, field_name).filter(|constraint| {
+        !matches!(
+            constraint,
+            SignatureConstraint::RequiredStorageNullability(_)
+        )
+    })
 }
 
 fn local_slot_requirements<'a>(
@@ -2837,6 +2852,7 @@ impl SignatureConstraint {
             SignatureConstraint::RequiredOwnership(_)
                 | SignatureConstraint::RequiredView(_)
                 | SignatureConstraint::RequiredDispatch(_)
+                | SignatureConstraint::RequiredStorageNullability(_)
         )
     }
 

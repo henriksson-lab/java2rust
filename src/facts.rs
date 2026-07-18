@@ -15,6 +15,9 @@ pub struct FactSet {
     pub field_nullability_facts: Vec<FieldNullabilityFact>,
     pub trivial_accessor_facts: Vec<TrivialAccessorFact>,
     pub external_api_effect_facts: Vec<ExternalApiEffectFact>,
+    pub external_api_argument_effect_facts: Vec<ExternalApiArgumentEffectFact>,
+    pub external_crate_api_mapping_facts: Vec<ExternalCrateApiMappingFact>,
+    pub external_crate_constructor_mapping_facts: Vec<ExternalCrateConstructorMappingFact>,
     pub external_constructor_facts: Vec<ExternalConstructorFact>,
     pub external_field_facts: Vec<ExternalFieldFact>,
     pub method_effect_facts: Vec<MethodEffectFact>,
@@ -26,6 +29,8 @@ pub struct FactSet {
     pub catch_facts: Vec<CatchFact>,
     pub external_library_packs: Vec<ExternalLibraryPackFact>,
     pub unsupported_external_api_facts: Vec<UnsupportedExternalApiFact>,
+    pub unsupported_external_constructor_facts: Vec<UnsupportedExternalConstructorFact>,
+    pub unsupported_external_field_facts: Vec<UnsupportedExternalFieldFact>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,6 +44,9 @@ pub enum FactKind {
     TrivialAccessor,
     MethodEffect,
     ExternalApiEffect,
+    ExternalApiArgumentEffect,
+    ExternalCrateApiMapping,
+    ExternalCrateConstructorMapping,
     ExternalConstructor,
     ExternalField,
     ControlFlow,
@@ -47,6 +55,8 @@ pub enum FactKind {
     ExceptionHierarchy,
     ExternalLibraryPack,
     UnsupportedExternalApi,
+    UnsupportedExternalConstructor,
+    UnsupportedExternalField,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -86,6 +96,7 @@ pub enum FieldNullabilityProvenance {
     FieldInitializer,
     MethodAssignment,
     ExternalOverride,
+    ExternalLibraryPack,
     ConservativeFallback,
 }
 
@@ -147,10 +158,50 @@ pub enum ExternalApiRole {
 pub struct ExternalApiEffectFact {
     pub method_name: String,
     pub receiver_type: Option<String>,
+    pub arg_count: Option<usize>,
     pub role: ExternalApiRole,
     pub receiver_mutability: ReceiverMutabilityFact,
     pub return_type: Option<JavaType>,
     pub return_nullability: NullabilityState,
+    pub thrown: Vec<JavaType>,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalArgumentAliasPolicy {
+    Unknown,
+    NoAlias,
+    Borrowed,
+    Escapes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalApiArgumentEffectFact {
+    pub method_name: String,
+    pub receiver_type: Option<String>,
+    pub parameter_index: usize,
+    pub parameter_type: Option<JavaType>,
+    pub parameter_nullability: NullabilityState,
+    pub argument_mutability: ReceiverMutabilityFact,
+    pub alias_policy: ExternalArgumentAliasPolicy,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalCrateApiMappingFact {
+    pub receiver_type: String,
+    pub method_name: String,
+    pub arg_count: Option<usize>,
+    pub rust_name: String,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalCrateConstructorMappingFact {
+    pub type_name: String,
+    pub arg_count: usize,
+    pub rust_type_name: Option<String>,
+    pub rust_name: String,
     pub provenance: FactProvenance,
 }
 
@@ -191,6 +242,23 @@ pub struct UnsupportedExternalApiFact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedExternalConstructorFact {
+    pub pack_name: String,
+    pub type_name: String,
+    pub arg_count: usize,
+    pub reason: String,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedExternalFieldFact {
+    pub pack_name: String,
+    pub field: FieldKey,
+    pub reason: String,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalConstructorFact {
     pub type_name: String,
     pub arg_types: Vec<JavaType>,
@@ -200,6 +268,7 @@ pub struct ExternalConstructorFact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalFieldFact {
     pub field: FieldKey,
+    pub field_type: Option<JavaType>,
     pub provenance: FactProvenance,
 }
 
@@ -483,6 +552,12 @@ impl FactSet {
             .extend(other.trivial_accessor_facts);
         self.external_api_effect_facts
             .extend(other.external_api_effect_facts);
+        self.external_api_argument_effect_facts
+            .extend(other.external_api_argument_effect_facts);
+        self.external_crate_api_mapping_facts
+            .extend(other.external_crate_api_mapping_facts);
+        self.external_crate_constructor_mapping_facts
+            .extend(other.external_crate_constructor_mapping_facts);
         self.external_constructor_facts
             .extend(other.external_constructor_facts);
         self.external_field_facts.extend(other.external_field_facts);
@@ -499,6 +574,10 @@ impl FactSet {
             .extend(other.external_library_packs);
         self.unsupported_external_api_facts
             .extend(other.unsupported_external_api_facts);
+        self.unsupported_external_constructor_facts
+            .extend(other.unsupported_external_constructor_facts);
+        self.unsupported_external_field_facts
+            .extend(other.unsupported_external_field_facts);
     }
 
     pub fn field_nullability_for(
@@ -510,13 +589,14 @@ impl FactSet {
             .iter()
             .rev()
             .find(|fact| {
-                fact.field.type_name == type_name
-                    && fact.field.field_name == field_name
+                external_type_name_matches(&fact.field.type_name, type_name)
+                    && external_field_name_matches(&fact.field.field_name, field_name)
                     && fact.provenance == FieldNullabilityProvenance::ExternalOverride
             })
             .or_else(|| {
                 self.field_nullability_facts.iter().rev().find(|fact| {
-                    fact.field.type_name == type_name && fact.field.field_name == field_name
+                    external_type_name_matches(&fact.field.type_name, type_name)
+                        && external_field_name_matches(&fact.field.field_name, field_name)
                 })
             })
             .map(|fact| fact.state)
@@ -527,9 +607,10 @@ impl FactSet {
         type_name: &str,
         method_name: &str,
     ) -> Option<&TrivialAccessorFact> {
-        self.trivial_accessor_facts.iter().rev().find(|fact| {
-            fact.method.type_name == type_name && fact.method.method_name == method_name
-        })
+        self.trivial_accessor_facts
+            .iter()
+            .rev()
+            .find(|fact| method_key_matches(&fact.method, type_name, method_name))
     }
 
     pub fn trivial_getter_field_for(
@@ -576,32 +657,249 @@ impl FactSet {
         receiver_type: Option<&str>,
         method_name: &str,
     ) -> Option<&ExternalApiEffectFact> {
-        self.external_api_effect_facts
+        self.external_api_effect_for_receiver_with_arity(receiver_type, method_name, None)
+    }
+
+    pub fn external_api_effect_for_receiver_with_arity(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_count: Option<usize>,
+    ) -> Option<&ExternalApiEffectFact> {
+        self.find_external_api_effect(
+            receiver_type,
+            method_name,
+            arg_count,
+            Some(FactProvenance::UserOverride),
+        )
+        .or_else(|| {
+            self.find_external_api_effect(
+                None,
+                method_name,
+                arg_count,
+                Some(FactProvenance::UserOverride),
+            )
+        })
+        .or_else(|| self.find_external_api_effect(receiver_type, method_name, arg_count, None))
+        .or_else(|| self.find_external_api_effect(None, method_name, arg_count, None))
+    }
+
+    fn find_external_api_effect(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_count: Option<usize>,
+        provenance: Option<FactProvenance>,
+    ) -> Option<&ExternalApiEffectFact> {
+        arg_count
+            .and_then(|arg_count| {
+                self.external_api_effect_facts.iter().rev().find(|fact| {
+                    fact.method_name == method_name
+                        && external_optional_type_name_matches(
+                            fact.receiver_type.as_deref(),
+                            receiver_type,
+                        )
+                        && fact.arg_count == Some(arg_count)
+                        && provenance.is_none_or(|provenance| fact.provenance == provenance)
+                })
+            })
+            .or_else(|| {
+                self.external_api_effect_facts.iter().rev().find(|fact| {
+                    fact.method_name == method_name
+                        && external_optional_type_name_matches(
+                            fact.receiver_type.as_deref(),
+                            receiver_type,
+                        )
+                        && (arg_count.is_none() || fact.arg_count.is_none())
+                        && provenance.is_none_or(|provenance| fact.provenance == provenance)
+                })
+            })
+    }
+
+    pub fn external_api_argument_effect_for_receiver(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        parameter_index: usize,
+    ) -> Option<&ExternalApiArgumentEffectFact> {
+        self.external_api_argument_effect_facts
             .iter()
             .rev()
             .find(|fact| {
                 fact.method_name == method_name
-                    && fact.receiver_type.as_deref() == receiver_type
+                    && external_optional_type_name_matches(
+                        fact.receiver_type.as_deref(),
+                        receiver_type,
+                    )
+                    && fact.parameter_index == parameter_index
                     && fact.provenance == FactProvenance::UserOverride
             })
             .or_else(|| {
-                self.external_api_effect_facts.iter().rev().find(|fact| {
-                    fact.method_name == method_name
-                        && fact.receiver_type.is_none()
-                        && fact.provenance == FactProvenance::UserOverride
-                })
-            })
-            .or_else(|| {
-                self.external_api_effect_facts.iter().rev().find(|fact| {
-                    fact.method_name == method_name
-                        && fact.receiver_type.as_deref() == receiver_type
-                })
-            })
-            .or_else(|| {
-                self.external_api_effect_facts
+                self.external_api_argument_effect_facts
                     .iter()
                     .rev()
-                    .find(|fact| fact.method_name == method_name && fact.receiver_type.is_none())
+                    .find(|fact| {
+                        fact.method_name == method_name
+                            && fact.receiver_type.is_none()
+                            && fact.parameter_index == parameter_index
+                            && fact.provenance == FactProvenance::UserOverride
+                    })
+            })
+            .or_else(|| {
+                self.external_api_argument_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        fact.method_name == method_name
+                            && external_optional_type_name_matches(
+                                fact.receiver_type.as_deref(),
+                                receiver_type,
+                            )
+                            && fact.parameter_index == parameter_index
+                    })
+            })
+            .or_else(|| {
+                self.external_api_argument_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        fact.method_name == method_name
+                            && fact.receiver_type.is_none()
+                            && fact.parameter_index == parameter_index
+                    })
+            })
+    }
+
+    pub fn external_crate_api_mapping_for_receiver(
+        &self,
+        receiver_type: &str,
+        method_name: &str,
+        arg_count: Option<usize>,
+    ) -> Option<&ExternalCrateApiMappingFact> {
+        self.external_crate_api_mapping_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                external_type_name_directly_matches(&fact.receiver_type, receiver_type)
+                    && fact.method_name == method_name
+                    && fact.arg_count == arg_count
+                    && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.external_crate_api_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_directly_matches(&fact.receiver_type, receiver_type)
+                            && fact.method_name == method_name
+                            && fact.arg_count.is_none()
+                            && fact.provenance == FactProvenance::UserOverride
+                    })
+            })
+            .or_else(|| {
+                self.external_crate_api_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.receiver_type, receiver_type)
+                            && fact.method_name == method_name
+                            && fact.arg_count == arg_count
+                            && fact.provenance == FactProvenance::UserOverride
+                    })
+            })
+            .or_else(|| {
+                self.external_crate_api_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.receiver_type, receiver_type)
+                            && fact.method_name == method_name
+                            && fact.arg_count.is_none()
+                            && fact.provenance == FactProvenance::UserOverride
+                    })
+            })
+            .or_else(|| {
+                self.external_crate_api_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_directly_matches(&fact.receiver_type, receiver_type)
+                            && fact.method_name == method_name
+                            && fact.arg_count == arg_count
+                    })
+            })
+            .or_else(|| {
+                self.external_crate_api_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_directly_matches(&fact.receiver_type, receiver_type)
+                            && fact.method_name == method_name
+                            && fact.arg_count.is_none()
+                    })
+            })
+            .or_else(|| {
+                self.external_crate_api_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.receiver_type, receiver_type)
+                            && fact.method_name == method_name
+                            && fact.arg_count == arg_count
+                    })
+            })
+            .or_else(|| {
+                self.external_crate_api_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.receiver_type, receiver_type)
+                            && fact.method_name == method_name
+                            && fact.arg_count.is_none()
+                    })
+            })
+    }
+
+    pub fn external_crate_constructor_mapping_for(
+        &self,
+        type_name: &str,
+        arg_count: usize,
+    ) -> Option<&ExternalCrateConstructorMappingFact> {
+        self.external_crate_constructor_mapping_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                external_type_name_directly_matches(&fact.type_name, type_name)
+                    && fact.arg_count == arg_count
+                    && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.external_crate_constructor_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.type_name, type_name)
+                            && fact.arg_count == arg_count
+                            && fact.provenance == FactProvenance::UserOverride
+                    })
+            })
+            .or_else(|| {
+                self.external_crate_constructor_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_directly_matches(&fact.type_name, type_name)
+                            && fact.arg_count == arg_count
+                    })
+            })
+            .or_else(|| {
+                self.external_crate_constructor_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.type_name, type_name)
+                            && fact.arg_count == arg_count
+                    })
             })
     }
 
@@ -610,13 +908,8 @@ impl FactSet {
         type_name: &str,
         arg_types: &[JavaType],
     ) -> Option<&ExternalConstructorFact> {
-        self.external_constructor_facts.iter().rev().find(|fact| {
-            fact.type_name == type_name
-                && (fact.arg_types == arg_types
-                    || fact.provenance == FactProvenance::UserOverride
-                    || (fact.provenance == FactProvenance::ExternalLibraryPack
-                        && fact.arg_types.len() == arg_types.len()))
-        })
+        self.find_external_constructor_for(type_name, arg_types, true)
+            .or_else(|| self.find_external_constructor_for(type_name, arg_types, false))
     }
 
     pub fn external_field_for(
@@ -624,16 +917,43 @@ impl FactSet {
         type_name: &str,
         field_name: &str,
     ) -> Option<&ExternalFieldFact> {
-        let canonical_type_name = crate::stdlib::canonical_external_receiver_type_key(type_name);
-        let snake_type_name = crate::parser::to_snake_case(type_name);
-        let canonical_field_name = crate::parser::to_snake_case(field_name);
+        self.find_external_field_for(type_name, field_name, true)
+            .or_else(|| self.find_external_field_for(type_name, field_name, false))
+    }
+
+    fn find_external_constructor_for(
+        &self,
+        type_name: &str,
+        arg_types: &[JavaType],
+        direct_match_only: bool,
+    ) -> Option<&ExternalConstructorFact> {
+        self.external_constructor_facts.iter().rev().find(|fact| {
+            let type_matches = if direct_match_only {
+                external_type_name_directly_matches(&fact.type_name, type_name)
+            } else {
+                external_type_name_matches(&fact.type_name, type_name)
+            };
+            type_matches
+                && (fact.arg_types == arg_types
+                    || fact.provenance == FactProvenance::UserOverride
+                    || (fact.provenance == FactProvenance::ExternalLibraryPack
+                        && fact.arg_types.len() == arg_types.len()))
+        })
+    }
+
+    fn find_external_field_for(
+        &self,
+        type_name: &str,
+        field_name: &str,
+        direct_match_only: bool,
+    ) -> Option<&ExternalFieldFact> {
         self.external_field_facts.iter().rev().find(|fact| {
-            (fact.field.type_name == type_name
-                || fact.field.type_name == canonical_type_name
-                || fact.field.type_name == snake_type_name)
-                && (fact.field.field_name == field_name
-                    || fact.field.field_name == canonical_field_name
-                    || fact.provenance == FactProvenance::UserOverride)
+            let type_matches = if direct_match_only {
+                external_type_name_directly_matches(&fact.field.type_name, type_name)
+            } else {
+                external_type_name_matches(&fact.field.type_name, type_name)
+            };
+            type_matches && external_field_name_matches(&fact.field.field_name, field_name)
         })
     }
 
@@ -655,15 +975,71 @@ impl FactSet {
         self.unsupported_external_api_facts
             .iter()
             .rev()
-            .find(|fact| fact.receiver_type == receiver_type && fact.method_name == method_name)
+            .find(|fact| {
+                external_type_name_directly_matches(&fact.receiver_type, receiver_type)
+                    && fact.method_name == method_name
+            })
+            .or_else(|| {
+                self.unsupported_external_api_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.receiver_type, receiver_type)
+                            && fact.method_name == method_name
+                    })
+            })
+    }
+
+    pub fn unsupported_external_constructor_for(
+        &self,
+        type_name: &str,
+        arg_count: usize,
+    ) -> Option<&UnsupportedExternalConstructorFact> {
+        self.unsupported_external_constructor_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                external_type_name_directly_matches(&fact.type_name, type_name)
+                    && fact.arg_count == arg_count
+            })
+            .or_else(|| {
+                self.unsupported_external_constructor_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.type_name, type_name)
+                            && fact.arg_count == arg_count
+                    })
+            })
+    }
+
+    pub fn unsupported_external_field_for(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<&UnsupportedExternalFieldFact> {
+        self.unsupported_external_field_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                external_type_name_directly_matches(&fact.field.type_name, type_name)
+                    && external_field_name_matches(&fact.field.field_name, field_name)
+            })
+            .or_else(|| {
+                self.unsupported_external_field_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.field.type_name, type_name)
+                            && external_field_name_matches(&fact.field.field_name, field_name)
+                    })
+            })
     }
 
     pub fn recursion_facts_for(&self, type_name: &str, method_name: &str) -> Vec<&RecursionFact> {
         self.recursion_facts
             .iter()
-            .filter(|fact| {
-                fact.method.type_name == type_name && fact.method.method_name == method_name
-            })
+            .filter(|fact| method_key_matches(&fact.method, type_name, method_name))
             .collect()
     }
 
@@ -676,14 +1052,14 @@ impl FactSet {
             .iter()
             .rev()
             .find(|fact| {
-                fact.method.type_name == type_name
-                    && fact.method.method_name == method_name
+                method_key_matches(&fact.method, type_name, method_name)
                     && fact.provenance == FactProvenance::UserOverride
             })
             .or_else(|| {
-                self.method_effect_facts.iter().rev().find(|fact| {
-                    fact.method.type_name == type_name && fact.method.method_name == method_name
-                })
+                self.method_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| method_key_matches(&fact.method, type_name, method_name))
             })
     }
 
@@ -713,16 +1089,16 @@ impl FactSet {
         kind: ControlFlowFactKind,
     ) -> bool {
         self.control_flow_facts.iter().any(|fact| {
-            fact.method.type_name == type_name
-                && fact.method.method_name == method_name
-                && fact.kind == kind
+            method_key_matches(&fact.method, type_name, method_name) && fact.kind == kind
         })
     }
 
     pub fn dispatch_requirements_for(&self, type_name: &str) -> Vec<DispatchRequirementKind> {
         let mut requirements = Vec::new();
         for fact in &self.dispatch_requirement_facts {
-            if fact.type_name == type_name && !requirements.contains(&fact.requirement) {
+            if external_type_name_matches(&fact.type_name, type_name)
+                && !requirements.contains(&fact.requirement)
+            {
                 requirements.push(fact.requirement);
             }
         }
@@ -732,7 +1108,7 @@ impl FactSet {
     pub fn dispatch_requirement_facts_for(&self, type_name: &str) -> Vec<&DispatchRequirementFact> {
         self.dispatch_requirement_facts
             .iter()
-            .filter(|fact| fact.type_name == type_name)
+            .filter(|fact| external_type_name_matches(&fact.type_name, type_name))
             .collect()
     }
 
@@ -740,16 +1116,14 @@ impl FactSet {
         self.exception_facts
             .iter()
             .rev()
-            .find(|fact| fact.type_name == type_name)
+            .find(|fact| external_type_name_matches(&fact.type_name, type_name))
             .map(|fact| fact.kind)
     }
 
     pub fn catch_facts_for(&self, type_name: &str, method_name: &str) -> Vec<&CatchFact> {
         self.catch_facts
             .iter()
-            .filter(|fact| {
-                fact.method.type_name == type_name && fact.method.method_name == method_name
-            })
+            .filter(|fact| method_key_matches(&fact.method, type_name, method_name))
             .collect()
     }
 
@@ -947,6 +1321,81 @@ fn external_pack_owns_type(pack: &ExternalLibraryPackFact, type_name: &str) -> b
         || type_name
             .strip_prefix(&pack.package_prefix)
             .is_some_and(|suffix| suffix.starts_with('.'))
+}
+
+pub(crate) fn external_type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
+    let fact_aliases = external_type_name_aliases(fact_type_name);
+    let query_aliases = external_type_name_aliases(query_type_name);
+    fact_aliases.iter().any(|fact_alias| {
+        query_aliases
+            .iter()
+            .any(|query_alias| query_alias == fact_alias)
+    })
+}
+
+fn external_optional_type_name_matches(
+    fact_type_name: Option<&str>,
+    query_type_name: Option<&str>,
+) -> bool {
+    match (fact_type_name, query_type_name) {
+        (Some(fact_type_name), Some(query_type_name)) => {
+            external_type_name_matches(fact_type_name, query_type_name)
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn external_type_name_aliases(type_name: &str) -> Vec<String> {
+    let mut aliases = external_direct_type_name_aliases(type_name);
+    let simple = type_name.rsplit('.').next().unwrap_or(type_name);
+    let simple_canonical = crate::stdlib::canonical_external_receiver_type_key(simple);
+    let simple_snake = crate::parser::to_snake_case(simple);
+    aliases.extend([simple.to_string(), simple_canonical, simple_snake]);
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn external_type_name_directly_matches(fact_type_name: &str, query_type_name: &str) -> bool {
+    let fact_aliases = external_direct_type_name_aliases(fact_type_name);
+    let query_aliases = external_direct_type_name_aliases(query_type_name);
+    fact_aliases.iter().any(|fact_alias| {
+        query_aliases
+            .iter()
+            .any(|query_alias| query_alias == fact_alias)
+    })
+}
+
+fn external_direct_type_name_aliases(type_name: &str) -> Vec<String> {
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(type_name);
+    let snake = crate::parser::to_snake_case(type_name);
+    let mut aliases = vec![type_name.to_string(), canonical, snake];
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn external_field_name_matches(fact_field_name: &str, query_field_name: &str) -> bool {
+    let fact_aliases = external_field_name_aliases(fact_field_name);
+    let query_aliases = external_field_name_aliases(query_field_name);
+    fact_aliases.iter().any(|fact_alias| {
+        query_aliases
+            .iter()
+            .any(|query_alias| query_alias == fact_alias)
+    })
+}
+
+fn external_field_name_aliases(field_name: &str) -> Vec<String> {
+    let canonical = crate::parser::to_snake_case(field_name);
+    let mut aliases = vec![field_name.to_string(), canonical];
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn method_key_matches(method: &MethodKey, type_name: &str, method_name: &str) -> bool {
+    external_type_name_matches(&method.type_name, type_name) && method.method_name == method_name
 }
 
 fn capability_type_name(java_ty: &JavaType) -> Option<&str> {

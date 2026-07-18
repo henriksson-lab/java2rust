@@ -134,7 +134,6 @@ pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
                 | "EOFException"
                 | "IllegalArgumentException"
                 | "IllegalStateException"
-                | "NotImplementedException"
                 | "NumberFormatException"
                 | "ArrayIndexOutOfBoundsException"
                 | "IndexOutOfBoundsException"
@@ -158,7 +157,6 @@ pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
                 | "IllegalArgumentException"
                 | "IllegalStateException"
                 | "NoSuchElementException"
-                | "NotImplementedException"
                 | "NumberFormatException"
                 | "ArrayIndexOutOfBoundsException"
                 | "IndexOutOfBoundsException"
@@ -405,12 +403,7 @@ fn is_known_feature_type(name: &str) -> bool {
 fn is_known_write_option_type(name: &str) -> bool {
     matches!(
         name.rsplit('.').next().unwrap_or(name),
-        "WriteOption"
-            | "ReadsFormatWriteOption"
-            | "FileCardinalityWriteOption"
-            | "TempPartsDirectoryWriteOption"
-            | "BaiWriteOption"
-            | "SbiWriteOption"
+        "WriteOption" | "BaiWriteOption" | "SbiWriteOption"
     )
 }
 
@@ -433,7 +426,6 @@ fn is_known_throwable_type(name: &str) -> bool {
             | "IllegalArgumentException"
             | "IllegalStateException"
             | "NoSuchElementException"
-            | "NotImplementedException"
             | "NumberFormatException"
             | "ArrayIndexOutOfBoundsException"
             | "IndexOutOfBoundsException"
@@ -590,10 +582,6 @@ pub fn known_external_method_return_type(
             })
         }
         (Some(owner), "getMessage", 0) if is_known_throwable_type(owner) => Some(JavaType::String),
-        (Some("Allele"), "create", 1 | 2) => Some(JavaType::Named {
-            name: "Allele".to_string(),
-            args: Vec::new(),
-        }),
         (Some(owner), "make", 0) => {
             external_builder_product_type(owner).map(|name| JavaType::Named {
                 name,
@@ -739,12 +727,6 @@ pub fn known_external_field_type_for_receiver(
     }
 
     if let Some(receiver) = external_receiver_type_key(receiver_type)
-        && let Some(java_ty) = known_external_nested_enum_type(&receiver, field_name)
-    {
-        return Some(java_ty);
-    }
-
-    if let Some(receiver) = external_receiver_type_key(receiver_type)
         && is_enum_like_external_constant(&receiver, field_name)
     {
         return Some(JavaType::Named {
@@ -752,7 +734,6 @@ pub fn known_external_field_type_for_receiver(
             args: Vec::new(),
         });
     }
-
     match receiver_type {
         JavaType::Named { name, args } if is_pair_like_receiver(name) => {
             match (field_name, args.as_slice()) {
@@ -763,6 +744,18 @@ pub fn known_external_field_type_for_receiver(
         }
         _ => None,
     }
+}
+
+pub fn conservative_external_enum_field_type_for_type_qualifier(
+    receiver: &str,
+    field_name: &str,
+) -> Option<JavaType> {
+    let receiver = canonical_external_receiver_type_key(receiver);
+    let receiver = conservative_external_enum_receiver_type_name(&receiver, field_name)?;
+    Some(JavaType::Named {
+        name: receiver,
+        args: Vec::new(),
+    })
 }
 
 fn known_boolean_constant_field_type(receiver: &str, field_name: &str) -> Option<JavaType> {
@@ -833,12 +826,8 @@ fn is_wrapper_size_constant(receiver: &str, field_name: &str) -> bool {
 
 fn known_typed_constant_field_type(receiver: &str, field_name: &str) -> Option<JavaType> {
     let field_name = canonical_external_field_name(field_name);
+    let qualified_receiver = receiver;
     let receiver = receiver.rsplit('.').next().unwrap_or(receiver);
-    if receiver == "ReadEnds"
-        && matches!(field_name.as_str(), "FF" | "FR" | "RF" | "RR" | "F" | "R")
-    {
-        return Some(JavaType::Primitive(PrimitiveType::Byte));
-    }
     if receiver == "ArrayUtils"
         && let Some(primitive) = array_utils_empty_array_element_type(&field_name)
     {
@@ -846,21 +835,6 @@ fn known_typed_constant_field_type(receiver: &str, field_name: &str) -> Option<J
     }
     if receiver == "Collections"
         && let Some(java_ty) = collections_empty_field_type(&field_name)
-    {
-        return Some(java_ty);
-    }
-    if receiver == "SAMRecord"
-        && let Some(java_ty) = sam_record_static_field_type(&field_name)
-    {
-        return Some(java_ty);
-    }
-    if receiver == "BlockCompressedStreamConstants"
-        && let Some(java_ty) = block_compressed_stream_constant_field_type(&field_name)
-    {
-        return Some(java_ty);
-    }
-    if receiver == "VCFConstants"
-        && let Some(java_ty) = vcf_constant_field_type(&field_name)
     {
         return Some(java_ty);
     }
@@ -872,14 +846,6 @@ fn known_typed_constant_field_type(receiver: &str, field_name: &str) -> Option<J
     {
         return Some(JavaType::String);
     }
-    if receiver == "Allele"
-        && matches!(
-            field_name.as_str(),
-            "NON_REF_STRING" | "UNSPECIFIED_ALTERNATE_ALLELE_STRING"
-        )
-    {
-        return Some(JavaType::String);
-    }
     if receiver == "File" {
         match field_name.as_str() {
             "SEPARATOR" => return Some(JavaType::String),
@@ -887,89 +853,8 @@ fn known_typed_constant_field_type(receiver: &str, field_name: &str) -> Option<J
             _ => {}
         }
     }
-    if receiver == "GenotypeLikelihoods"
-        && matches!(
-            field_name.as_str(),
-            "MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED"
-        )
-    {
-        return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if receiver == "CommonInfo" && matches!(field_name.as_str(), "NO_LOG10_PERROR") {
-        return Some(JavaType::Primitive(PrimitiveType::Double));
-    }
-    if receiver == "VariantContext" && matches!(field_name.as_str(), "NO_LOG10_PERROR") {
-        return Some(JavaType::Primitive(PrimitiveType::Double));
-    }
-    if receiver == "SpecialArgumentsCollection" && matches!(field_name.as_str(), "SHOW_HIDDEN") {
-        return Some(JavaType::Primitive(PrimitiveType::Boolean));
-    }
-    if receiver == "TarArchiveOutputStream"
-        && matches!(field_name.as_str(), "BIGNUMBER_STAR" | "LONGFILE_GNU")
-    {
-        return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if receiver == "SBIIndexWriter" && matches!(field_name.as_str(), "DEFAULT_GRANULARITY") {
-        return Some(JavaType::Primitive(PrimitiveType::Long));
-    }
     if receiver == "Math" && matches!(field_name.as_str(), "PI" | "E") {
         return Some(JavaType::Primitive(PrimitiveType::Double));
-    }
-    if receiver == "SystemUtils" {
-        match field_name.as_str() {
-            "OS_ARCH" | "OS_NAME" => return Some(JavaType::String),
-            "IS_OS_MAC" | "IS_OS_LINUX" | "IS_OS_WINDOWS" => {
-                return Some(JavaType::Primitive(PrimitiveType::Boolean));
-            }
-            _ => {}
-        }
-    }
-    if receiver == "Defaults" {
-        match field_name.as_str() {
-            "COMPRESSION_LEVEL" => return Some(JavaType::Primitive(PrimitiveType::Int)),
-            "USE_ASYNC_IO_READ_FOR_SAMTOOLS"
-            | "USE_ASYNC_IO_WRITE_FOR_SAMTOOLS"
-            | "USE_ASYNC_IO_WRITE_FOR_TRIBBLE" => {
-                return Some(JavaType::Primitive(PrimitiveType::Boolean));
-            }
-            _ => {}
-        }
-    }
-    if receiver == "RetryHandler"
-        && matches!(
-            field_name.as_str(),
-            "DEFAULT_RETRYABLE_HTTP_CODES"
-                | "DEFAULT_RETRYABLE_EXCEPTIONS"
-                | "DEFALT_RETRYABLE_MESSAGES"
-        )
-    {
-        return Some(JavaType::Named {
-            name: "Object".to_string(),
-            args: Vec::new(),
-        });
-    }
-    if receiver == "BwaMemAligner" && matches!(field_name.as_str(), "MEM_F_ALL") {
-        return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if receiver == "FeatureCodecHeader" && matches!(field_name.as_str(), "NO_HEADER_END") {
-        return Some(JavaType::Primitive(PrimitiveType::Long));
-    }
-    if receiver == "MessageDigestAlgorithms" && matches!(field_name.as_str(), "SHA_256") {
-        return Some(JavaType::String);
-    }
-    if receiver == "SAMReadGroupRecord"
-        && matches!(
-            field_name.as_str(),
-            "READ_GROUP_ID_TAG" | "READ_GROUP_SAMPLE_TAG"
-        )
-    {
-        return Some(JavaType::String);
-    }
-    if receiver == "WDLWorkUnitHandler" && matches!(field_name.as_str(), "POSITIONAL_ARGS") {
-        return Some(JavaType::String);
-    }
-    if receiver == "Genotype" && matches!(field_name.as_str(), "UNPHASED_ALLELE_SEPARATOR") {
-        return Some(JavaType::Primitive(PrimitiveType::Char));
     }
     if receiver == "Spliterator"
         && matches!(
@@ -978,115 +863,6 @@ fn known_typed_constant_field_type(receiver: &str, field_name: &str) -> Option<J
         )
     {
         return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if receiver == "SAMUtils" && matches!(field_name.as_str(), "MAX_PHRED_SCORE") {
-        return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if receiver == "SAMSequenceRecord" && matches!(field_name.as_str(), "UNKNOWN_SEQUENCE_LENGTH") {
-        return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if receiver == "TemplateProperties"
-        && matches!(
-            field_name.as_str(),
-            "ARGUMENTS_POSITIONAL" | "ARGUMENT_DEFAULT_VALUE" | "ARGUMENT_TYPE"
-        )
-    {
-        return Some(JavaType::String);
-    }
-    if receiver == "GenotypeConcordanceSummaryMetrics"
-        && matches!(
-            field_name.as_str(),
-            "GENOTYPE_CONCORDANCE"
-                | "NON_REF_GENOTYPE_CONCORDANCE"
-                | "HET_PPV"
-                | "HET_SENSITIVITY"
-                | "HOMVAR_PPV"
-                | "HOMVAR_SENSITIVITY"
-                | "VAR_PPV"
-                | "VAR_SENSITIVITY"
-                | "VAR_SPECIFICITY"
-        )
-    {
-        return Some(JavaType::String);
-    }
-    if receiver == "VCFHeader" {
-        match field_name.as_str() {
-            "REFERENCE_KEY" => return Some(JavaType::String),
-            _ => {}
-        }
-    }
-    if receiver == "ReservedTagConstants" && matches!(field_name.as_str(), "XT") {
-        return Some(JavaType::String);
-    }
-    if receiver == "SequenceUtil" && matches!(field_name.as_str(), "VALID_BASES_UPPER") {
-        return Some(JavaType::Array(Box::new(JavaType::Primitive(
-            PrimitiveType::Byte,
-        ))));
-    }
-    if receiver == "BAMFileConstants" && matches!(field_name.as_str(), "FIXED_BLOCK_SIZE") {
-        return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if receiver == "GATKConfig" && matches!(field_name.as_str(), "CONFIG_FILE_VARIABLE_FILE_NAME") {
-        return Some(JavaType::String);
-    }
-    if receiver == "CloudStorageFileSystem" && matches!(field_name.as_str(), "URI_SCHEME") {
-        return Some(JavaType::String);
-    }
-    if matches!(
-        receiver,
-        "HttpFileSystemProvider" | "HttpsFileSystemProvider"
-    ) && matches!(field_name.as_str(), "SCHEME")
-    {
-        return Some(JavaType::String);
-    }
-    if receiver == "ReferenceContext" && matches!(field_name.as_str(), "UNINITIALIZED_REFERENCE_ID")
-    {
-        return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if receiver == "Slice" && matches!(field_name.as_str(), "EMBEDDED_REFERENCE_ABSENT_CONTENT_ID")
-    {
-        return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if receiver == "TabixFormat" && matches!(field_name.as_str(), "GENERIC_FLAGS" | "ZERO_BASED") {
-        return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if receiver == "GenotypeConcordance" && matches!(field_name.as_str(), "CONTINGENCY_STATE_TAG") {
-        return Some(JavaType::String);
-    }
-    if receiver == "ReadLikelihoodCalculationEngine" {
-        match field_name.as_str() {
-            "MAX_REPEAT_LENGTH" => return Some(JavaType::Primitive(PrimitiveType::Int)),
-            "DEFAULT_EXPECTED_ERROR_RATE_PER_BASE" => {
-                return Some(JavaType::Primitive(PrimitiveType::Double));
-            }
-            _ => {}
-        }
-    }
-    if receiver == "VariantContextWriterBuilder" && matches!(field_name.as_str(), "DEFAULT_OPTIONS")
-    {
-        return Some(JavaType::Named {
-            name: "EnumSet".to_string(),
-            args: vec![JavaType::Named {
-                name: "Options".to_string(),
-                args: Vec::new(),
-            }],
-        });
-    }
-    if receiver == "HttpFileSystemProviderSettings"
-        && matches!(field_name.as_str(), "DEFAULT_SETTINGS")
-    {
-        return Some(JavaType::Named {
-            name: "HttpFileSystemProviderSettings".to_string(),
-            args: Vec::new(),
-        });
-    }
-    if matches!(receiver, "FastqConstants" | "ReservedTagConstants")
-        && matches!(
-            field_name.as_str(),
-            "FIRST_OF_PAIR" | "SECOND_OF_PAIR" | "PROGRAM_GROUP_ID" | "READ_GROUP_ID"
-        )
-    {
-        return Some(JavaType::String);
     }
     let named = match (receiver, field_name.as_str()) {
         ("System", "OUT" | "ERR") => "PrintStream",
@@ -1100,14 +876,14 @@ fn known_typed_constant_field_type(receiver: &str, field_name: &str) -> Option<J
             "UP" | "DOWN" | "CEILING" | "FLOOR" | "HALF_UP" | "HALF_DOWN" | "HALF_EVEN"
             | "UNNECESSARY",
         ) => "RoundingMode",
-        ("ReadsFormatWriteOption", "BAM") => "ReadsFormatWriteOption",
-        ("Option", "CACHE_FILE_BASED_INDEXES" | "INCLUDE_SOURCE_IN_RECORDS") => "Option",
-        ("SupportedHeaderLineType", "FORMAT" | "INFO") => "SupportedHeaderLineType",
+        ("Option", "CACHE_FILE_BASED_INDEXES" | "INCLUDE_SOURCE_IN_RECORDS")
+            if qualified_receiver == "Option" =>
+        {
+            "Option"
+        }
         ("Level", "DEBUG" | "INFO" | "ERROR") => "Level",
         ("Locale", "ENGLISH") => "Locale",
         ("ElementKind", "FIELD") => "ElementKind",
-        ("IndexType", "TABIX") => "IndexType",
-        ("IndexBalanceApproach", "FOR_SEEK_TIME") => "IndexBalanceApproach",
         ("StandardOpenOption", "CREATE_NEW" | "CREATE" | "WRITE" | "READ" | "APPEND") => {
             "StandardOpenOption"
         }
@@ -1118,19 +894,6 @@ fn known_typed_constant_field_type(receiver: &str, field_name: &str) -> Option<J
             | "OWNER_WRITE" | "OTHERS_EXECUTE" | "OTHERS_READ" | "OTHERS_WRITE",
         ) => "PosixFilePermission",
         ("HttpMethod", "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "PATCH") => "HttpMethod",
-        ("MapperFeature", "ACCEPT_CASE_INSENSITIVE_PROPERTIES") => "MapperFeature",
-        ("DataFormat", "AVRO" | "ARROW") => "DataFormat",
-        ("DataSeriesType", "BYTE_ARRAY") => "DataSeriesType",
-        ("CloudStorageConfiguration", "DEFAULT") => "CloudStorageConfiguration",
-        ("NullOutputStream", "INSTANCE" | "NULL_OUTPUT_STREAM") => "OutputStream",
-        ("NullWriter", "INSTANCE") => "Writer",
-        ("ValidationStringency", "LENIENT" | "SILENT" | "STRICT") => "ValidationStringency",
-        ("FileCardinalityWriteOption", "MULTIPLE" | "SINGLE") => "FileCardinalityWriteOption",
-        ("GenotypesContext", "NO_GENOTYPES") => "GenotypesContext",
-        ("DeserializationFeature", "UNWRAP_ROOT_VALUE") => "DeserializationFeature",
-        ("JexlMissingValueTreatment", "TREAT_AS_MATCH" | "TREAT_AS_MISMATCH") => {
-            "JexlMissingValueTreatment"
-        }
         ("TimeUnit", "SECONDS" | "MILLISECONDS" | "MICROSECONDS" | "NANOSECONDS") => "TimeUnit",
         _ => return None,
     };
@@ -1138,53 +901,6 @@ fn known_typed_constant_field_type(receiver: &str, field_name: &str) -> Option<J
         name: named.to_string(),
         args: Vec::new(),
     })
-}
-
-fn block_compressed_stream_constant_field_type(field_name: &str) -> Option<JavaType> {
-    match field_name {
-        "BLOCK_HEADER_LENGTH" | "BLOCK_LENGTH_OFFSET" | "DEFAULT_COMPRESSION_LEVEL" => {
-            Some(JavaType::Primitive(PrimitiveType::Int))
-        }
-        "EMPTY_GZIP_BLOCK" => Some(JavaType::Array(Box::new(JavaType::Primitive(
-            PrimitiveType::Byte,
-        )))),
-        _ => None,
-    }
-}
-
-fn vcf_constant_field_type(field_name: &str) -> Option<JavaType> {
-    match field_name {
-        "PASSES_FILTERS_V4"
-        | "MISSING_VALUE_V4"
-        | "GENOTYPE_ALLELE_DEPTHS"
-        | "SVTYPE"
-        | "NULL_ALLELE"
-        | "UNFILTERED" => Some(JavaType::String),
-        "INFO_FIELD_ARRAY_SEPARATOR_CHAR" => Some(JavaType::Primitive(PrimitiveType::Char)),
-        "MAX_GENOTYPE_QUAL" => Some(JavaType::Primitive(PrimitiveType::Int)),
-        _ => None,
-    }
-}
-
-fn sam_record_static_field_type(field_name: &str) -> Option<JavaType> {
-    match field_name {
-        "NO_ALIGNMENT_CIGAR" => Some(JavaType::Named {
-            name: "Cigar".to_string(),
-            args: Vec::new(),
-        }),
-        "NO_ALIGNMENT_REFERENCE_NAME" | "NULL_QUALS_STRING" => Some(JavaType::String),
-        "NULL_QUALS" => Some(JavaType::Array(Box::new(JavaType::Primitive(
-            PrimitiveType::Byte,
-        )))),
-        "NULL_SEQUENCE" => Some(JavaType::Array(Box::new(JavaType::Primitive(
-            PrimitiveType::Byte,
-        )))),
-        "NO_ALIGNMENT_START"
-        | "NO_ALIGNMENT_REFERENCE_INDEX"
-        | "UNKNOWN_MAPPING_QUALITY"
-        | "NO_MAPPING_QUALITY" => Some(JavaType::Primitive(PrimitiveType::Int)),
-        _ => None,
-    }
 }
 
 fn collections_empty_field_type(field_name: &str) -> Option<JavaType> {
@@ -1235,46 +951,6 @@ fn array_utils_empty_array_element_type(field_name: &str) -> Option<PrimitiveTyp
     }
 }
 
-fn known_external_nested_enum_type(receiver: &str, field_name: &str) -> Option<JavaType> {
-    let nested_name = match (receiver.rsplit('.').next().unwrap_or(receiver), field_name) {
-        ("Log", "LogLevel") => "LogLevel",
-        ("HDF5File", "OpenMode") => "OpenMode",
-        ("SAMFileHeader", "SortOrder") => "SortOrder",
-        ("SAMFileHeader", "GroupOrder") => "GroupOrder",
-        ("FieldValue", "Attribute") => "Attribute",
-        ("QueryJobConfiguration", "Priority") => "Priority",
-        ("BlockCompressedInputStream", "FileTermination") => "FileTermination",
-        ("Percentile", "EstimationType") => "EstimationType",
-        ("VariantContextWriterBuilder", "OutputType") => "OutputType",
-        ("VCFHeader", "HEADER_FIELDS") => "HEADER_FIELDS",
-        ("Coordinates", "GenomicsDBColumn") => "GenomicsDBColumn",
-        ("Coordinates", "ContigPosition") => "ContigPosition",
-        ("GenotypeConcordanceStates", "CallState") => "CallState",
-        ("GenotypeConcordanceStates", "TruthState") => "TruthState",
-        ("VariantContext", "Type") => "Type",
-        ("MarkDuplicates", "DuplicateTaggingPolicy") => "DuplicateTaggingPolicy",
-        ("SamPairUtil", "PairOrientation") => "PairOrientation",
-        ("GenomicsDBExportConfiguration", "ExportConfiguration") => "ExportConfiguration",
-        ("Storage", "SignUrlOption") => "SignUrlOption",
-        ("IndexFactory", "IndexType") => "IndexType",
-        ("IndexFactory", "IndexBalanceApproach") => "IndexBalanceApproach",
-        ("SamReaderFactory", "Option") => "Option",
-        ("VCFCompoundHeaderLine", "SupportedHeaderLineType") => "SupportedHeaderLineType",
-        ("GenomicsDBImportConfiguration", "ImportConfiguration") => "ImportConfiguration",
-        ("GenomicsDBImportConfiguration", "Partition") => "Partition",
-        ("GenomicsDBVidMapProto", "VidMappingPB") => "VidMappingPB",
-        ("GenomicsDBVidMapProto", "FieldLengthDescriptorComponentPB") => {
-            "FieldLengthDescriptorComponentPB"
-        }
-        ("ReadSession", "TableReadOptions") => "TableReadOptions",
-        _ => return None,
-    };
-    Some(JavaType::Named {
-        name: nested_name.to_string(),
-        args: Vec::new(),
-    })
-}
-
 fn known_external_public_data_field_type(receiver: &str, field_name: &str) -> Option<JavaType> {
     let receiver = receiver.rsplit('.').next().unwrap_or(receiver);
     match (receiver, field_name) {
@@ -1286,78 +962,6 @@ fn known_external_public_data_field_type(receiver: &str, field_name: &str) -> Op
             name: "ClassTag$".to_string(),
             args: Vec::new(),
         }),
-        ("DuplicationMetrics", "LIBRARY") => Some(JavaType::String),
-        (
-            "DuplicationMetrics",
-            "UNPAIRED_READS_EXAMINED"
-            | "READ_PAIRS_EXAMINED"
-            | "SECONDARY_OR_SUPPLEMENTARY_RDS"
-            | "UNMAPPED_READS"
-            | "UNPAIRED_READ_DUPLICATES"
-            | "READ_PAIR_DUPLICATES"
-            | "READ_PAIR_OPTICAL_DUPLICATES"
-            | "ESTIMATED_LIBRARY_SIZE",
-        ) => Some(JavaType::Primitive(PrimitiveType::Long)),
-        ("DuplicationMetrics", "PERCENT_DUPLICATION") => {
-            Some(JavaType::Primitive(PrimitiveType::Double))
-        }
-        ("JexlVCMatchExp", "name") => Some(JavaType::String),
-        ("JexlVCMatchExp", "exp") => Some(JavaType::Named {
-            name: "Expression".to_string(),
-            args: Vec::new(),
-        }),
-        ("SAMTagAndValue", "tag") => Some(JavaType::String),
-        ("SAMTagAndValue", "value") => Some(JavaType::Named {
-            name: "Object".to_string(),
-            args: Vec::new(),
-        }),
-        ("SAMBinaryTagAndValue", "value") => Some(JavaType::Named {
-            name: "Object".to_string(),
-            args: Vec::new(),
-        }),
-        ("SAMBinaryTagAndValue", "tag") => Some(JavaType::String),
-        (
-            "ReadDataHolder",
-            "readBases" | "readQuals" | "insertionGOP" | "deletionGOP" | "overallGCP",
-        ) => Some(JavaType::Array(Box::new(JavaType::Primitive(
-            PrimitiveType::Byte,
-        )))),
-        ("HaplotypeDataHolder", "haplotypeBases" | "haplotypePDBases") => Some(JavaType::Array(
-            Box::new(JavaType::Primitive(PrimitiveType::Byte)),
-        )),
-        ("PDHMMNativeArguments", "avxLevel") => Some(JavaType::Named {
-            name: "AVXLevel".to_string(),
-            args: Vec::new(),
-        }),
-        ("PDHMMNativeArguments", "openMPSetting") => Some(JavaType::Named {
-            name: "OpenMPSetting".to_string(),
-            args: Vec::new(),
-        }),
-        ("PDHMMNativeArguments", "maxNumberOfThreads")
-        | ("PairHMMNativeArguments", "maxNumberOfThreads") => {
-            Some(JavaType::Primitive(PrimitiveType::Int))
-        }
-        ("PairHMMNativeArguments", "useDoublePrecision") => {
-            Some(JavaType::Primitive(PrimitiveType::Boolean))
-        }
-        ("GenotypeLikelihoodsAllelePair", "alleleIndex1" | "alleleIndex2") => {
-            Some(JavaType::Primitive(PrimitiveType::Int))
-        }
-        ("TruthAndCallStates", "callState") => Some(JavaType::Named {
-            name: "CallState".to_string(),
-            args: Vec::new(),
-        }),
-        ("TruthAndCallStates", "truthState") => Some(JavaType::Named {
-            name: "TruthState".to_string(),
-            args: Vec::new(),
-        }),
-        ("SWNativeAlignerResult", "alignment_offset") => {
-            Some(JavaType::Primitive(PrimitiveType::Int))
-        }
-        ("SWNativeAlignerResult", "cigar") => Some(JavaType::String),
-        ("BatchCompletionCallbackFunctionArgument", "batchCount" | "totalBatchCount") => {
-            Some(JavaType::Primitive(PrimitiveType::Int))
-        }
         _ => None,
     }
 }
@@ -1374,7 +978,7 @@ fn is_known_string_constant_field(receiver: &str, field_name: &str) -> bool {
     }
 
     match receiver {
-        "VCFConstants" | "GATKVCFConstants" => {
+        "GATKVCFConstants" => {
             field_name.ends_with("_KEY")
                 || field_name.ends_with("_FIELD")
                 || field_name.ends_with("_SEPARATOR")
@@ -2030,50 +1634,100 @@ fn is_path_like_receiver(receiver: &str) -> bool {
 fn is_enum_like_external_constant(receiver: &str, field_name: &str) -> bool {
     let original_field_name = field_name;
     let field_name = canonical_external_field_name(field_name);
+    if matches!(receiver, "Attribute" | "Priority") {
+        return is_enum_constant_name(&field_name);
+    }
     match receiver.rsplit('.').next().unwrap_or(receiver) {
-        "Allele" => is_allele_constant(&field_name) || is_enum_constant_name(&field_name),
-        "CigarOperator" => is_cigar_operator_constant(&field_name),
         "SAMTag" => is_sam_tag_constant(&field_name),
-        "OpenMode"
-        | "LogLevel"
-        | "VCFHeaderLineCount"
+        "VCFHeaderLineCount"
         | "GenotypeType"
         | "Strand"
-        | "CallState"
-        | "TruthState"
-        | "Type"
         | "SAMFlag"
         | "VCFHeaderVersion"
-        | "PairOrientation"
         | "Options"
         | "SWOverhangStrategy"
-        | "Attribute"
-        | "Priority"
-        | "FileTermination"
-        | "GroupOrder"
         | "StructuralVariantType"
-        | "GoalType"
-        | "EstimationType"
         | "Characteristics"
         | "HEADER_FIELDS"
-        | "ReadsFormatWriteOption"
         | "TimeUnit"
         | "OutputType"
         | "Level"
         | "Locale"
-        | "ElementKind"
-        | "IndexType"
-        | "IndexBalanceApproach" => is_enum_constant_name(&field_name),
-        "DuplicateTaggingPolicy" => {
-            is_duplicate_tagging_policy_constant(original_field_name)
-                || is_duplicate_tagging_policy_constant(&field_name)
-        }
+        | "ElementKind" => is_enum_constant_name(&field_name),
         "VCFHeaderLineType" => is_vcf_header_line_type_constant(original_field_name),
-        "SortOrder" => {
-            is_sort_order_constant(original_field_name) || is_sort_order_constant(&field_name)
-        }
         _ => false,
     }
+}
+
+fn conservative_external_enum_receiver_type_name(
+    receiver: &str,
+    field_name: &str,
+) -> Option<String> {
+    let field_name = canonical_external_field_name(field_name);
+    if !is_enum_constant_name(&field_name) || is_conservative_static_data_constant(&field_name) {
+        return None;
+    }
+    let simple_receiver = receiver.rsplit('.').next().unwrap_or(receiver);
+    if is_conservative_static_data_receiver(simple_receiver) {
+        return None;
+    }
+    let type_name = if simple_receiver
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+    {
+        simple_receiver.to_string()
+    } else if simple_receiver
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        upper_camel_from_snake(simple_receiver)
+    } else {
+        return None;
+    };
+    type_name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        .then_some(type_name)
+}
+
+fn is_conservative_static_data_receiver(receiver: &str) -> bool {
+    matches!(
+        receiver,
+        "Constants" | "Defaults" | "Config" | "Configuration"
+    ) || receiver.ends_with("Constants")
+        || receiver.ends_with("_constants")
+        || receiver.ends_with("Config")
+        || receiver.ends_with("_config")
+        || receiver.ends_with("Configuration")
+        || receiver.ends_with("_configuration")
+}
+
+fn is_conservative_static_data_constant(field_name: &str) -> bool {
+    field_name.starts_with("MAX_")
+        || field_name.starts_with("MIN_")
+        || field_name.starts_with("DEFAULT_")
+        || field_name.starts_with("UNKNOWN_")
+        || field_name.starts_with("NO_")
+        || field_name.ends_with("_LENGTH")
+        || field_name.ends_with("_COUNT")
+        || field_name.ends_with("_SIZE")
+}
+
+fn upper_camel_from_snake(name: &str) -> String {
+    let mut out = String::new();
+    let mut uppercase_next = true;
+    for ch in name.chars() {
+        if ch == '_' {
+            uppercase_next = true;
+        } else if uppercase_next {
+            out.push(ch.to_ascii_uppercase());
+            uppercase_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn is_enum_constant_name(field_name: &str) -> bool {
@@ -2091,37 +1745,23 @@ fn is_string_like_constant_name(field_name: &str) -> bool {
 }
 
 fn is_known_external_enum_type(receiver: &str) -> bool {
+    if matches!(receiver, "Attribute" | "Priority") {
+        return true;
+    }
     matches!(
         receiver.rsplit('.').next().unwrap_or(receiver),
-        "Allele"
-            | "CigarOperator"
-            | "SAMTag"
-            | "OpenMode"
-            | "LogLevel"
-            | "SortOrder"
+        "SAMTag"
             | "VCFHeaderLineType"
             | "VCFHeaderLineCount"
             | "GenotypeType"
             | "Strand"
             | "Characteristics"
             | "HEADER_FIELDS"
-            | "CallState"
-            | "TruthState"
-            | "Type"
             | "SAMFlag"
             | "VCFHeaderVersion"
-            | "DuplicateTaggingPolicy"
-            | "PairOrientation"
             | "Options"
             | "SWOverhangStrategy"
-            | "Attribute"
-            | "Priority"
-            | "FileTermination"
-            | "GroupOrder"
             | "StructuralVariantType"
-            | "GoalType"
-            | "EstimationType"
-            | "ReadsFormatWriteOption"
             | "TimeUnit"
             | "OutputType"
     )
@@ -2131,46 +1771,6 @@ fn is_vcf_header_line_type_constant(field_name: &str) -> bool {
     matches!(
         field_name,
         "Integer" | "Float" | "Flag" | "Character" | "String"
-    )
-}
-
-fn is_duplicate_tagging_policy_constant(field_name: &str) -> bool {
-    matches!(field_name, "DontTag" | "OpticalOnly" | "All")
-}
-
-fn is_sort_order_constant(field_name: &str) -> bool {
-    matches!(
-        field_name,
-        "coordinate" | "queryname" | "unsorted" | "unknown" | "duplicate"
-    )
-}
-
-fn is_allele_constant(field_name: &str) -> bool {
-    matches!(
-        field_name,
-        "UNSPECIFIED_ALTERNATE_ALLELE" | "NO_CALL" | "NON_REF_ALLELE" | "SPAN_DEL"
-    )
-}
-
-fn is_cigar_operator_constant(field_name: &str) -> bool {
-    matches!(
-        field_name,
-        "M" | "I"
-            | "D"
-            | "N"
-            | "S"
-            | "H"
-            | "P"
-            | "EQ"
-            | "X"
-            | "MATCH"
-            | "MATCH_OR_MISMATCH"
-            | "INSERTION"
-            | "DELETION"
-            | "SKIPPED_REGION"
-            | "SOFT_CLIP"
-            | "HARD_CLIP"
-            | "PADDING"
     )
 }
 
@@ -2258,7 +1858,6 @@ fn is_string_domain_getter(name: &str) -> bool {
             | "getID"
             | "getReadName"
             | "getSampleName"
-            | "getBaseString"
             | "getScheme"
     )
 }
@@ -2331,6 +1930,7 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
     let name = strip_java_type_modifiers(name);
     match name {
         "string" => "String",
+        "class" => "Class",
         "boolean" => "Boolean",
         "byte" => "Byte",
         "short" => "Short",
@@ -2560,6 +2160,9 @@ pub fn external_api_method_policy(
 }
 
 pub fn external_constructor_provenance(type_name: &str, arg_types: &[JavaType]) -> FactProvenance {
+    if crate::external_packs::external_constructor_for(type_name, arg_types).is_some() {
+        return FactProvenance::ConservativeFallback;
+    }
     if is_known_collection_constructor(type_name, arg_types)
         || is_known_map_constructor(type_name, arg_types)
         || is_known_throwable_constructor(type_name, arg_types)
@@ -2568,33 +2171,6 @@ pub fn external_constructor_provenance(type_name: &str, arg_types: &[JavaType]) 
         || is_known_file_constructor(type_name, arg_types)
         || is_known_format_constructor(type_name, arg_types)
         || is_known_htsjdk_constructor(type_name, arg_types)
-        || is_known_apache_commons_constructor(type_name, arg_types)
-        || is_known_apache_commons_collections_constructor(type_name, arg_types)
-        || is_known_apache_commons_compress_constructor(type_name, arg_types)
-        || is_known_apache_commons_lang_constructor(type_name, arg_types)
-        || is_known_apache_commons_configuration_constructor(type_name, arg_types)
-        || is_known_apache_http_constructor(type_name, arg_types)
-        || is_known_jama_constructor(type_name, arg_types)
-        || is_known_hipparchus_constructor(type_name, arg_types)
-        || is_known_guava_constructor(type_name, arg_types)
-        || is_known_reflections_constructor(type_name, arg_types)
-        || is_known_barclay_constructor(type_name, arg_types)
-        || is_known_fastutil_constructor(type_name, arg_types)
-        || is_known_picard_constructor(type_name, arg_types)
-        || is_known_disq_constructor(type_name, arg_types)
-        || is_known_broad_http_constructor(type_name, arg_types)
-        || is_known_json_constructor(type_name, arg_types)
-        || is_known_intel_gkl_constructor(type_name, arg_types)
-        || is_known_hadoop_constructor(type_name, arg_types)
-        || is_known_opencsv_constructor(type_name, arg_types)
-        || is_known_genomicsdb_constructor(type_name, arg_types)
-        || is_known_avro_constructor(type_name, arg_types)
-        || is_known_hdf5_constructor(type_name, arg_types)
-        || is_known_kryo_constructor(type_name, arg_types)
-        || is_known_bwa_constructor(type_name, arg_types)
-        || is_known_jgrapht_constructor(type_name, arg_types)
-        || is_known_spark_constructor(type_name, arg_types)
-        || is_known_sqlite_constructor(type_name, arg_types)
         || is_known_string_builder_constructor(type_name, arg_types)
         || is_known_tuple_constructor(type_name, arg_types)
     {
@@ -2605,6 +2181,9 @@ pub fn external_constructor_provenance(type_name: &str, arg_types: &[JavaType]) 
 }
 
 pub fn external_field_provenance(type_name: &str, field_name: &str) -> FactProvenance {
+    if crate::external_packs::external_field_for(type_name, field_name).is_some() {
+        return FactProvenance::ConservativeFallback;
+    }
     let receiver_type = JavaType::Named {
         name: type_name.to_string(),
         args: Vec::new(),
@@ -2650,6 +2229,7 @@ fn is_known_jdk_utility_constructor(type_name: &str, arg_types: &[JavaType]) -> 
         "SimpleEntry" => arg_types.len() == 2,
         "StringJoiner" => matches!(arg_types.len(), 1 | 2 | 3),
         "StringTokenizer" => matches!(arg_types.len(), 1 | 2 | 3),
+        "URL" => arg_types.len() == 1,
         "ZipEntry" => arg_types.len() == 1,
         "ZipFile" => arg_types.len() == 1,
         "NullPointerException" => arg_types.len() <= 1,
@@ -2676,306 +2256,8 @@ fn is_known_format_constructor(type_name: &str, arg_types: &[JavaType]) -> bool 
     ) && arg_types.len() <= 2
 }
 
-fn is_known_htsjdk_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "VCFInfoHeaderLine" | "VCFFormatHeaderLine" => {
-            matches!(arg_types.len(), 3 | 4)
-        }
-        "VCFFilterHeaderLine" => arg_types.len() == 2,
-        "VCFHeaderLine" => arg_types.len() == 2,
-        "VCFHeader" => arg_types.len() <= 2,
-        "VCFCodec" => arg_types.is_empty(),
-        "VCFRecordCodec" => arg_types.len() == 2,
-        "CigarElement" => arg_types.len() == 2,
-        "Cigar" => arg_types.len() <= 1,
-        "GenotypeBuilder" => arg_types.len() <= 2,
-        "VariantContextComparator" => arg_types.len() == 1,
-        "VariantContextBuilder" => matches!(arg_types.len(), 0 | 1 | 5),
-        "SeekableBufferedStream" => arg_types.len() == 1,
-        "SeekablePathStream" => arg_types.len() == 1,
-        "BAMRecordCodec" => arg_types.len() == 1,
-        "BlockCompressedInputStream" => matches!(arg_types.len(), 1 | 2),
-        "BlockCompressedOutputStream" => matches!(arg_types.len(), 2 | 3),
-        "BAMIndexer" => arg_types.len() == 2,
-        "BCF2Codec" => arg_types.is_empty(),
-        "FeatureCodecHeader" => arg_types.len() == 2,
-        "BinaryCodec" => arg_types.len() <= 1,
-        "SAMTextHeaderCodec" => arg_types.is_empty(),
-        "MetricsFile" => arg_types.is_empty(),
-        "BufferedLineReader" => arg_types.len() == 1,
-        "AsciiLineReaderIterator" => arg_types.len() == 1,
-        "LineIteratorImpl" => arg_types.len() == 1,
-        "SynchronousLineReader" => arg_types.len() == 1,
-        "DefaultSAMRecordFactory" => arg_types.is_empty(),
-        "ComponentMethods" => arg_types.is_empty(),
-        "FilteringSamIterator" => arg_types.len() == 2,
-        "FastaSequenceFile" => arg_types.len() == 2,
-        "CramContainerIterator" => arg_types.len() == 1,
-        "Container" => arg_types.len() == 3,
-        "SAMRecordCoordinateComparator" | "SAMRecordQueryNameComparator" => arg_types.is_empty(),
-        "SAMSequenceDictionary" => arg_types.len() <= 1,
-        "SAMSequenceRecord" => arg_types.len() == 2,
-        "SAMProgramRecord" => arg_types.len() == 1,
-        "SAMFormatException" => arg_types.len() == 1,
-        "SBIIndexWriter" => arg_types.len() == 2,
-        "CRAMReferenceRegion" => arg_types.len() == 2,
-        "Histogram" => matches!(arg_types.len(), 0 | 2),
-        "Interval" => matches!(arg_types.len(), 1 | 2 | 3 | 5),
-        "PeekableIterator" => arg_types.len() == 1,
-        "MergingIterator" => arg_types.len() == 2,
-        "DefaultingMap" => arg_types.len() == 2,
-        "SamFileHeaderMerger" => arg_types.len() == 3,
-        "MergingSamRecordIterator" => arg_types.len() == 3,
-        "Lazy" => arg_types.len() == 1,
-        "ReferenceSequence" => arg_types.len() == 3,
-        "CodecLineParsingException" => arg_types.len() == 1,
-        "RuntimeIOException" => matches!(arg_types.len(), 1 | 2),
-        "SAMFileHeader" => arg_types.len() <= 1,
-        "SAMReadGroupRecord" => arg_types.len() == 1,
-        "SAMRecord" => arg_types.len() == 1,
-        "SAMFileWriterFactory" => arg_types.is_empty(),
-        "IndexedFastaSequenceFile" => arg_types.len() == 1,
-        "IntervalTree" => arg_types.is_empty(),
-        "IntervalMergerIterator" => arg_types.len() == 4,
-        "FastaReferenceWriterBuilder" => arg_types.is_empty(),
-        "Gff3BaseData" => arg_types.len() == 9,
-        "SimpleFeature" => arg_types.len() == 3,
-        _ => false,
-    }
-}
-
-fn is_known_apache_commons_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "Array2DRowRealMatrix" => matches!(arg_types.len(), 1 | 2),
-        "ArrayRealVector" => matches!(arg_types.len(), 0 | 1 | 2),
-        "DefaultRealMatrixChangingVisitor" => arg_types.is_empty(),
-        "MutableDouble" => matches!(arg_types.len(), 0 | 1),
-        "Mean" => arg_types.is_empty(),
-        "BinomialDistribution" => matches!(arg_types.len(), 2 | 3),
-        "BetaDistribution" => arg_types.len() == 3,
-        "BrentOptimizer" => arg_types.len() == 2,
-        "AbstractIntegerDistribution" => arg_types.len() == 1,
-        "DescriptiveStatistics" => arg_types.is_empty(),
-        "DimensionMismatchException" => arg_types.len() == 2,
-        "EnumeratedDistribution" => arg_types.len() == 2,
-        "ExponentialDistribution" => arg_types.len() == 2,
-        "HypergeometricDistribution" => arg_types.len() == 4,
-        "JDKRandomGenerator" => arg_types.is_empty(),
-        "MaxEval" => arg_types.len() == 1,
-        "Median" => arg_types.is_empty(),
-        "NormalDistribution" => matches!(arg_types.len(), 2 | 3),
-        "Percentile" => matches!(arg_types.len(), 0 | 1),
-        "ChiSquaredDistribution" => matches!(arg_types.len(), 1 | 2),
-        "PoissonDistribution" => arg_types.len() == 1,
-        "SingularValueDecomposition" => arg_types.len() == 1,
-        "StandardDeviation" => arg_types.is_empty(),
-        "TDistribution" => matches!(arg_types.len(), 1 | 2),
-        _ => false,
-    }
-}
-
-fn is_known_apache_commons_collections_constructor(
-    type_name: &str,
-    arg_types: &[JavaType],
-) -> bool {
-    match type_name {
-        "DefaultedMap" => arg_types.len() == 1,
-        "FilterIterator" => arg_types.len() == 2,
-        "SingletonIterator" => arg_types.len() == 1,
-        "MultiMap" => arg_types.is_empty(),
-        _ => false,
-    }
-}
-
-fn is_known_apache_commons_compress_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    (matches!(
-        type_name,
-        "GzipCompressorInputStream"
-            | "GzipCompressorOutputStream"
-            | "TarArchiveInputStream"
-            | "TarArchiveOutputStream"
-    ) && arg_types.len() == 1)
-        || (matches!(type_name, "NullInputStream" | "NullOutputStream") && arg_types.len() <= 1)
-        || (matches!(type_name, "TarArchiveEntry") && matches!(arg_types.len(), 1 | 2))
-}
-
-fn is_known_apache_commons_lang_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "HashCodeBuilder" => arg_types.is_empty(),
-        "MutableInt" => arg_types.len() <= 1,
-        "MutableLong" => arg_types.len() <= 1,
-        "NotImplementedException" => matches!(arg_types.len(), 1 | 2),
-        _ => false,
-    }
-}
-
-fn is_known_apache_commons_configuration_constructor(
-    type_name: &str,
-    arg_types: &[JavaType],
-) -> bool {
-    matches!(type_name, "Configurations") && arg_types.is_empty()
-}
-
-fn is_known_apache_http_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "HttpGet" => arg_types.len() == 1,
-        "PoolingHttpClientConnectionManager" => arg_types.is_empty(),
-        _ => false,
-    }
-}
-
-fn is_known_jama_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(type_name, "Matrix") && matches!(arg_types.len(), 1 | 2)
-}
-
-fn is_known_hipparchus_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(type_name, "EmpiricalDistribution") && arg_types.is_empty()
-}
-
-fn is_known_guava_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(type_name, "ThreadFactoryBuilder") && arg_types.is_empty()
-}
-
-fn is_known_reflections_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(type_name, "Reflections") && arg_types.len() == 1
-}
-
-fn is_known_barclay_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "CommandLineException" => matches!(arg_types.len(), 1 | 2),
-        "BadArgumentValue" => matches!(arg_types.len(), 1 | 2 | 3),
-        "MissingArgument" => matches!(arg_types.len(), 1 | 2),
-        "ClassFinder" => arg_types.is_empty(),
-        "CommandLineArgumentParser" => arg_types.len() == 3,
-        _ => false,
-    }
-}
-
-fn is_known_fastutil_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "Int2ObjectArrayMap" | "Int2ObjectOpenHashMap" | "IntArrayList" => arg_types.len() <= 1,
-        "Int2IntArrayMap" => arg_types.len() == 2,
-        "Object2IntOpenHashMap" => arg_types.len() <= 1,
-        _ => false,
-    }
-}
-
-fn is_known_picard_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "OpticalDuplicateFinder" => matches!(arg_types.len(), 0 | 3),
-        "GenotypeConcordanceCounts" => arg_types.is_empty(),
-        "GenotypeConcordanceSummaryMetrics" => arg_types.len() == 5,
-        "DiagnosticsAndQCProgramGroup" => arg_types.is_empty(),
-        "IntervalsManipulationProgramGroup" => arg_types.is_empty(),
-        "OtherProgramGroup" => arg_types.is_empty(),
-        "ReadDataManipulationProgramGroup" | "ReferenceProgramGroup" => arg_types.is_empty(),
-        _ => false,
-    }
-}
-
-fn is_known_disq_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(
-        type_name,
-        "HtsjdkReadsRdd" | "HtsjdkVariantsRdd" | "HtsjdkReadsTraversalParameters"
-    ) && arg_types.len() == 2
-}
-
-fn is_known_broad_http_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(type_name, "HttpFileSystemProviderSettings") && arg_types.len() == 3
-}
-
-fn is_known_json_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "JSONObject" => arg_types.len() <= 1,
-        "JSONArray" => arg_types.len() <= 1,
-        "JSONTokener" => arg_types.len() == 1,
-        _ => false,
-    }
-}
-
-fn is_known_intel_gkl_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(
-        type_name,
-        "IntelDeflaterFactory"
-            | "IntelInflaterFactory"
-            | "IntelPDHMM"
-            | "IntelPairHmm"
-            | "IntelPairHmmOMP"
-    ) && arg_types.is_empty()
-}
-
-fn is_known_hadoop_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(type_name, "Configuration") && arg_types.is_empty()
-}
-
-fn is_known_opencsv_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "CSVReader" => matches!(arg_types.len(), 1 | 4),
-        "CSVWriter" => matches!(arg_types.len(), 2 | 4),
-        _ => false,
-    }
-}
-
-fn is_known_genomicsdb_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "GenomicsDBFeatureReader" => arg_types.len() == 3,
-        "GenomicsDBImporter" => arg_types.len() == 1,
-        "ImportConfig" => arg_types.len() == 8,
-        _ => false,
-    }
-}
-
-fn is_known_avro_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(type_name, "GenericDatumReader") && arg_types.len() == 1
-}
-
-fn is_known_hdf5_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "HDF5Library" => arg_types.is_empty(),
-        "HDF5File" => matches!(arg_types.len(), 1 | 2),
-        _ => false,
-    }
-}
-
-fn is_known_kryo_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "Kryo" => arg_types.is_empty(),
-        "Input" | "Output" => arg_types.len() == 1,
-        "FieldSerializer" => arg_types.len() == 2,
-        "ImmutableMapSerializer" => arg_types.is_empty(),
-        _ => false,
-    }
-}
-
-fn is_known_bwa_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(type_name, "BwaMemIndex" | "BwaMemAligner") && arg_types.len() == 1
-}
-
-fn is_known_jgrapht_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "IntegerComponentNameProvider" => arg_types.is_empty(),
-        "SimpleGraph" => arg_types.len() == 1,
-        "ConnectivityInspector" | "CycleDetector" | "DefaultDirectedWeightedGraph" => {
-            arg_types.len() == 1
-        }
-        "DOTExporter" => arg_types.len() == 5,
-        _ => false,
-    }
-}
-
-fn is_known_spark_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    match type_name {
-        "SparkConf" => arg_types.is_empty(),
-        "HashPartitioner" | "JavaSparkContext" => arg_types.len() == 1,
-        "JavaRDD" => arg_types.len() == 2,
-        "PartitionGroup" => arg_types.len() == 1,
-        "RowMatrix" => arg_types.len() == 1,
-        _ => false,
-    }
-}
-
-fn is_known_sqlite_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(type_name, "SQLiteConfig") && arg_types.is_empty()
+fn is_known_htsjdk_constructor(_type_name: &str, _arg_types: &[JavaType]) -> bool {
+    false
 }
 
 fn is_known_string_builder_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
@@ -2983,14 +2265,8 @@ fn is_known_string_builder_constructor(type_name: &str, arg_types: &[JavaType]) 
 }
 
 fn is_known_tuple_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
-    matches!(
-        type_name,
-        "Tuple2" | "Pair" | "ImmutablePair" | "MutablePair"
-    ) && arg_types.len() == 2
-        || matches!(
-            type_name,
-            "Tuple3" | "Triple" | "ImmutableTriple" | "MutableTriple"
-        ) && arg_types.len() == 3
+    let _ = (type_name, arg_types);
+    false
 }
 
 fn external_api_method_policy_provenance(
@@ -3001,10 +2277,25 @@ fn external_api_method_policy_provenance(
     if receiver_type.is_some() && is_known_object_inherited_method(name, arg_count) {
         return FactProvenance::BuiltinExternalModel;
     }
+    if receiver_type.is_some_and(|receiver_type| {
+        crate::external_packs::external_api_effect_for_receiver_with_arity(
+            Some(receiver_type),
+            name,
+            Some(arg_count),
+        )
+        .is_some()
+    }) {
+        return FactProvenance::ConservativeFallback;
+    }
     if receiver_type.is_some() && name == "length" && arg_count == 0 {
         return FactProvenance::BuiltinExternalModel;
     }
     if receiver_type.is_some() && arg_count == 0 && is_known_zero_arg_domain_return_getter(name) {
+        return FactProvenance::BuiltinExternalModel;
+    }
+    if receiver_type.is_some_and(is_known_external_enum_type)
+        && matches!((name, arg_count), ("name" | "values", 0) | ("valueOf", 1))
+    {
         return FactProvenance::BuiltinExternalModel;
     }
     if receiver_type.is_some_and(is_collection_api_builtin_method)
@@ -3033,8 +2324,6 @@ fn external_api_method_policy_provenance(
         (_, name, _) if is_known_output_side_effect_method(name) => {
             FactProvenance::BuiltinExternalModel
         }
-        (Some("Allele"), "create", 1 | 2) => FactProvenance::BuiltinExternalModel,
-        (Some("Allele"), "getBaseString", 0) => FactProvenance::BuiltinExternalModel,
         (Some(owner), "apply", 1 | 2) if is_known_apply_functional_interface(owner) => {
             FactProvenance::BuiltinExternalModel
         }
@@ -3117,9 +2406,6 @@ pub fn external_api_method_role(
         return ExternalApiRole::Getter;
     }
     if name == "getAttributeAsString" && matches!(arg_count, 1 | 2) {
-        return ExternalApiRole::Getter;
-    }
-    if receiver_type == Some("Allele") && name == "create" && matches!(arg_count, 1 | 2) {
         return ExternalApiRole::Getter;
     }
     if receiver_type.is_some_and(is_known_apply_functional_interface)
@@ -3261,8 +2547,6 @@ pub fn external_api_return_nullability(
         (Some(owner), "name", 0) if is_known_external_enum_type(owner) => {
             NullabilityState::DefinitelyNonNull
         }
-        (Some("Allele"), "create", 1 | 2) => NullabilityState::DefinitelyNonNull,
-        (Some("Allele"), "getBaseString", 0) => NullabilityState::DefinitelyNonNull,
         (Some(owner), name, arg_count)
             if boxed_number_value_method_return_type(owner, name, arg_count).is_some() =>
         {
@@ -3306,7 +2590,6 @@ pub fn external_api_return_nullability(
         (Some("Iterators"), "forEnumeration", 1) => NullabilityState::DefinitelyNonNull,
         (Some("Files"), "newDirectoryStream", 1 | 2) => NullabilityState::DefinitelyNonNull,
         (Some("System"), "getProperty", 1 | 2) => NullabilityState::MaybeNull,
-        (Some("ImmutablePair" | "Pair"), "of", 2) => NullabilityState::DefinitelyNonNull,
         (Some("ImmutableMap" | "ImmutableSortedMap"), "of", _) => {
             NullabilityState::DefinitelyNonNull
         }
@@ -3390,7 +2673,6 @@ fn static_utility_method_role(
         (Some("Iterators"), "forEnumeration", 1) => ExternalApiRole::Getter,
         (Some("Files"), "newDirectoryStream", 1 | 2) => ExternalApiRole::Getter,
         (Some("System"), "getProperty", 1 | 2) => ExternalApiRole::Getter,
-        (Some("ImmutablePair" | "Pair"), "of", 2) => ExternalApiRole::Getter,
         (Some("ImmutableMap" | "ImmutableSortedMap"), "of", _) => ExternalApiRole::Getter,
         (Some("ListUtils" | "Sets"), "union", 2) => ExternalApiRole::Getter,
         (Some("Collectors"), "toList" | "toSet" | "joining", 0)

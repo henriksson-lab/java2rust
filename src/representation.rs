@@ -14,8 +14,8 @@ pub use crate::object_model::{
     closed_enum_fact_policy, closed_enum_inference_policy, hierarchy_override_application_policy,
     hierarchy_override_representation_policy, hierarchy_override_validation_policy,
     object_hierarchy_edge_diagnostic_policy, object_hierarchy_edge_representation_policy,
-    object_representation_lookup_policy, object_representation_policy, object_safety_fact_policy,
-    plan_object_model_from_input,
+    object_representation_is_user_closed_enum, object_representation_lookup_policy,
+    object_representation_policy, object_safety_fact_policy, plan_object_model_from_input,
 };
 use crate::slot_shape::DispatchShape;
 
@@ -87,10 +87,15 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     for edge in object_plan.hierarchy_edges {
         record_hierarchy_edge(&mut plan, edge);
     }
+    collect_anonymous_erased_boundary_representations(program, &effective_facts, &mut plan);
     plan
 }
 
 impl RepresentationPlan {
+    pub fn type_representations(&self) -> impl Iterator<Item = &TypeRepresentation> {
+        self.types.values()
+    }
+
     pub fn type_representation(&self, type_name: &str) -> Option<&TypeRepresentation> {
         self.types.get(type_name)
     }
@@ -130,7 +135,7 @@ impl RepresentationPlan {
                     .into_iter()
                     .flat_map(|ty| self.diagnostics_for_type(ty)),
             )
-            .chain(anonymous_class_diagnostic_policy(program).diagnostics)
+            .chain(anonymous_class_diagnostic_policy_with_plan(program, Some(self)).diagnostics)
             .collect()
     }
 
@@ -146,9 +151,39 @@ impl RepresentationPlan {
     }
 
     fn hierarchy_edge_is_represented(&self, super_name: &str) -> bool {
-        self.types.get(super_name).is_some_and(|entry| {
+        self.hierarchy_type_is_represented(super_name)
+            || self.hierarchy_type_has_user_closed_enum_ancestor(super_name, &mut BTreeSet::new())
+    }
+
+    fn hierarchy_type_is_represented(&self, type_name: &str) -> bool {
+        self.types.get(type_name).is_some_and(|entry| {
             object_hierarchy_edge_representation_policy(entry.representation.clone()).represented
         })
+    }
+
+    fn hierarchy_type_is_user_closed_enum(&self, type_name: &str) -> bool {
+        self.types.get(type_name).is_some_and(|entry| {
+            object_representation_is_user_closed_enum(
+                &entry.representation,
+                fact_provenance_for_representation(entry.provenance),
+            )
+        })
+    }
+
+    fn hierarchy_type_has_user_closed_enum_ancestor(
+        &self,
+        type_name: &str,
+        visited: &mut BTreeSet<String>,
+    ) -> bool {
+        if !visited.insert(type_name.to_string()) {
+            return false;
+        }
+        self.hierarchy_edges_for_subtype(type_name)
+            .iter()
+            .any(|edge| {
+                self.hierarchy_type_is_user_closed_enum(&edge.super_name)
+                    || self.hierarchy_type_has_user_closed_enum_ancestor(&edge.super_name, visited)
+            })
     }
 
     fn hierarchy_edge_diagnostic_input(&self, ty: &TypeDecl) -> ObjectHierarchyEdgeDiagnosticInput {
@@ -198,36 +233,44 @@ pub fn hierarchy_edge_diagnostic_policy(
 }
 
 pub fn anonymous_class_diagnostic_policy(program: &Program) -> AnonymousClassDiagnosticPolicy {
+    anonymous_class_diagnostic_policy_with_plan(program, None)
+}
+
+fn anonymous_class_diagnostic_policy_with_plan(
+    program: &Program,
+    plan: Option<&RepresentationPlan>,
+) -> AnonymousClassDiagnosticPolicy {
     let mut diagnostics = Vec::new();
     for ty in all_types(program) {
-        collect_anonymous_class_diagnostics_for_type(ty, &mut diagnostics);
+        collect_anonymous_class_diagnostics_for_type(ty, plan, &mut diagnostics);
     }
     AnonymousClassDiagnosticPolicy { diagnostics }
 }
 
 fn collect_anonymous_class_diagnostics_for_type(
     ty: &TypeDecl,
+    plan: Option<&RepresentationPlan>,
     diagnostics: &mut Vec<RepresentationDiagnostic>,
 ) {
     for member in &ty.members {
         match member {
             Member::Field(field) => {
                 if let Some(initializer) = &field.initializer {
-                    collect_anonymous_class_diagnostics_for_expr(initializer, diagnostics);
+                    collect_anonymous_class_diagnostics_for_expr(initializer, plan, diagnostics);
                 }
             }
             Member::Method(method) => {
                 if let Some(body) = &method.body {
-                    collect_anonymous_class_diagnostics_for_block(body, diagnostics);
+                    collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
                 }
             }
             Member::Constructor(ctor) => {
                 if let Some(body) = &ctor.body {
-                    collect_anonymous_class_diagnostics_for_block(body, diagnostics);
+                    collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
                 }
             }
             Member::Type(nested) => {
-                collect_anonymous_class_diagnostics_for_type(nested, diagnostics);
+                collect_anonymous_class_diagnostics_for_type(nested, plan, diagnostics);
             }
             Member::Unsupported { .. } => {}
         }
@@ -236,33 +279,35 @@ fn collect_anonymous_class_diagnostics_for_type(
 
 fn collect_anonymous_class_diagnostics_for_block(
     block: &Block,
+    plan: Option<&RepresentationPlan>,
     diagnostics: &mut Vec<RepresentationDiagnostic>,
 ) {
     for stmt in &block.statements {
-        collect_anonymous_class_diagnostics_for_stmt(stmt, diagnostics);
+        collect_anonymous_class_diagnostics_for_stmt(stmt, plan, diagnostics);
     }
 }
 
 fn collect_anonymous_class_diagnostics_for_stmt(
     stmt: &Stmt,
+    plan: Option<&RepresentationPlan>,
     diagnostics: &mut Vec<RepresentationDiagnostic>,
 ) {
     match stmt {
         Stmt::VarDecl { initializer, .. } => {
             if let Some(initializer) = initializer {
-                collect_anonymous_class_diagnostics_for_expr(initializer, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(initializer, plan, diagnostics);
             }
         }
         Stmt::Assign { target, value } => {
-            collect_anonymous_class_diagnostics_for_expr(target, diagnostics);
-            collect_anonymous_class_diagnostics_for_expr(value, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(target, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(value, plan, diagnostics);
         }
         Stmt::Expr(expr) | Stmt::Throw(expr) => {
-            collect_anonymous_class_diagnostics_for_expr(expr, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
         }
         Stmt::Return(expr) => {
             if let Some(expr) = expr {
-                collect_anonymous_class_diagnostics_for_expr(expr, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
             }
         }
         Stmt::If {
@@ -270,15 +315,15 @@ fn collect_anonymous_class_diagnostics_for_stmt(
             then_block,
             else_block,
         } => {
-            collect_anonymous_class_diagnostics_for_expr(condition, diagnostics);
-            collect_anonymous_class_diagnostics_for_block(then_block, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(condition, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_block(then_block, plan, diagnostics);
             if let Some(else_block) = else_block {
-                collect_anonymous_class_diagnostics_for_block(else_block, diagnostics);
+                collect_anonymous_class_diagnostics_for_block(else_block, plan, diagnostics);
             }
         }
         Stmt::While { condition, body } => {
-            collect_anonymous_class_diagnostics_for_expr(condition, diagnostics);
-            collect_anonymous_class_diagnostics_for_block(body, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(condition, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
         }
         Stmt::For {
             init,
@@ -288,30 +333,30 @@ fn collect_anonymous_class_diagnostics_for_stmt(
             ..
         } => {
             for stmt in init {
-                collect_anonymous_class_diagnostics_for_stmt(stmt, diagnostics);
+                collect_anonymous_class_diagnostics_for_stmt(stmt, plan, diagnostics);
             }
             if let Some(condition) = condition {
-                collect_anonymous_class_diagnostics_for_expr(condition, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(condition, plan, diagnostics);
             }
             for expr in update {
-                collect_anonymous_class_diagnostics_for_expr(expr, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
             }
-            collect_anonymous_class_diagnostics_for_block(body, diagnostics);
+            collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
-            collect_anonymous_class_diagnostics_for_expr(iterable, diagnostics);
-            collect_anonymous_class_diagnostics_for_block(body, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(iterable, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
         }
         Stmt::Switch { selector, cases } => {
-            collect_anonymous_class_diagnostics_for_expr(selector, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(selector, plan, diagnostics);
             for case in cases {
                 for label in &case.labels {
                     if let crate::java_ir::SwitchLabel::Expr(expr) = label {
-                        collect_anonymous_class_diagnostics_for_expr(expr, diagnostics);
+                        collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
                     }
                 }
                 for stmt in &case.statements {
-                    collect_anonymous_class_diagnostics_for_stmt(stmt, diagnostics);
+                    collect_anonymous_class_diagnostics_for_stmt(stmt, plan, diagnostics);
                 }
             }
         }
@@ -322,73 +367,76 @@ fn collect_anonymous_class_diagnostics_for_stmt(
             finally_block,
         } => {
             for resource in resources {
-                collect_anonymous_class_diagnostics_for_stmt(resource, diagnostics);
+                collect_anonymous_class_diagnostics_for_stmt(resource, plan, diagnostics);
             }
-            collect_anonymous_class_diagnostics_for_block(body, diagnostics);
+            collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
             for catch in catches {
-                collect_anonymous_class_diagnostics_for_block(&catch.body, diagnostics);
+                collect_anonymous_class_diagnostics_for_block(&catch.body, plan, diagnostics);
             }
             if let Some(finally_block) = finally_block {
-                collect_anonymous_class_diagnostics_for_block(finally_block, diagnostics);
+                collect_anonymous_class_diagnostics_for_block(finally_block, plan, diagnostics);
             }
         }
-        Stmt::LocalType(ty) => collect_anonymous_class_diagnostics_for_type(ty, diagnostics),
+        Stmt::LocalType(ty) => collect_anonymous_class_diagnostics_for_type(ty, plan, diagnostics),
         Stmt::ConstructorInvocation { args, .. } => {
             for arg in args {
-                collect_anonymous_class_diagnostics_for_expr(arg, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(arg, plan, diagnostics);
             }
         }
-        Stmt::Block(block) => collect_anonymous_class_diagnostics_for_block(block, diagnostics),
+        Stmt::Block(block) => {
+            collect_anonymous_class_diagnostics_for_block(block, plan, diagnostics)
+        }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
     }
 }
 
 fn collect_anonymous_class_diagnostics_for_expr(
     expr: &Expr,
+    plan: Option<&RepresentationPlan>,
     diagnostics: &mut Vec<RepresentationDiagnostic>,
 ) {
     match expr {
         Expr::FieldAccess(receiver, _) => {
-            collect_anonymous_class_diagnostics_for_expr(receiver, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(receiver, plan, diagnostics);
         }
         Expr::ArrayAccess(array, index) => {
-            collect_anonymous_class_diagnostics_for_expr(array, diagnostics);
-            collect_anonymous_class_diagnostics_for_expr(index, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(array, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(index, plan, diagnostics);
         }
         Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
-                collect_anonymous_class_diagnostics_for_expr(expr, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
             }
         }
         Expr::Binary { left, right, .. } => {
-            collect_anonymous_class_diagnostics_for_expr(left, diagnostics);
-            collect_anonymous_class_diagnostics_for_expr(right, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(left, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(right, plan, diagnostics);
         }
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
-            collect_anonymous_class_diagnostics_for_expr(expr, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
         }
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            collect_anonymous_class_diagnostics_for_expr(condition, diagnostics);
-            collect_anonymous_class_diagnostics_for_expr(then_expr, diagnostics);
-            collect_anonymous_class_diagnostics_for_expr(else_expr, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(condition, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(then_expr, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(else_expr, plan, diagnostics);
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
-                collect_anonymous_class_diagnostics_for_expr(receiver, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(receiver, plan, diagnostics);
             }
             for arg in args {
-                collect_anonymous_class_diagnostics_for_expr(arg, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(arg, plan, diagnostics);
             }
         }
         Expr::New { ty, args, body, .. } => {
             for arg in args {
-                collect_anonymous_class_diagnostics_for_expr(arg, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(arg, plan, diagnostics);
             }
-            if body.is_some() {
+            if body.is_some() && !anonymous_class_target_is_erased_boundary(ty, plan) {
                 diagnostics.push(RepresentationDiagnostic {
                     code: "unsupported_anonymous_class",
                     message: format!(
@@ -399,14 +447,14 @@ fn collect_anonymous_class_diagnostics_for_expr(
             }
         }
         Expr::InstanceOf { expr, .. } => {
-            collect_anonymous_class_diagnostics_for_expr(expr, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
         }
         Expr::Lambda { body, .. } => match body {
             LambdaBody::Expr(expr) => {
-                collect_anonymous_class_diagnostics_for_expr(expr, diagnostics)
+                collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics)
             }
             LambdaBody::Block(block) => {
-                collect_anonymous_class_diagnostics_for_block(block, diagnostics);
+                collect_anonymous_class_diagnostics_for_block(block, plan, diagnostics);
             }
         },
         Expr::Literal(_)
@@ -417,6 +465,299 @@ fn collect_anonymous_class_diagnostics_for_expr(
         | Expr::ClassLiteral(_)
         | Expr::Raw(_) => {}
     }
+}
+
+fn anonymous_class_target_is_erased_boundary(
+    ty: &JavaType,
+    plan: Option<&RepresentationPlan>,
+) -> bool {
+    let Some(plan) = plan else {
+        return false;
+    };
+    let policy = plan.representation_lookup_policy(ty);
+    matches!(
+        (&policy.fallback, &policy.representation),
+        (
+            RepresentationLookupFallback::PlannedType,
+            ObjectRepresentation::ErasedObject
+        )
+    )
+}
+
+fn collect_anonymous_erased_boundary_representations(
+    program: &Program,
+    facts: &EffectiveFacts<'_>,
+    plan: &mut RepresentationPlan,
+) {
+    let mut type_names = BTreeSet::new();
+    for ty in all_types(program) {
+        collect_anonymous_erased_boundary_type_names_for_type(ty, facts, &mut type_names);
+    }
+    for type_name in type_names {
+        plan.types
+            .entry(type_name.clone())
+            .or_insert(TypeRepresentation {
+                java_name: type_name,
+                representation: ObjectRepresentation::ErasedObject,
+                provenance: RepresentationProvenance::BuiltinExternalModel,
+                direct_subtypes: Vec::new(),
+            });
+    }
+}
+
+fn collect_anonymous_erased_boundary_type_names_for_type(
+    ty: &TypeDecl,
+    facts: &EffectiveFacts<'_>,
+    type_names: &mut BTreeSet<String>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => {
+                if let Some(initializer) = &field.initializer {
+                    collect_anonymous_erased_boundary_type_names_for_expr(
+                        initializer,
+                        facts,
+                        type_names,
+                    );
+                }
+            }
+            Member::Method(method) => {
+                if let Some(body) = &method.body {
+                    collect_anonymous_erased_boundary_type_names_for_block(body, facts, type_names);
+                }
+            }
+            Member::Constructor(ctor) => {
+                if let Some(body) = &ctor.body {
+                    collect_anonymous_erased_boundary_type_names_for_block(body, facts, type_names);
+                }
+            }
+            Member::Type(nested) => {
+                collect_anonymous_erased_boundary_type_names_for_type(nested, facts, type_names);
+            }
+            Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn collect_anonymous_erased_boundary_type_names_for_block(
+    block: &Block,
+    facts: &EffectiveFacts<'_>,
+    type_names: &mut BTreeSet<String>,
+) {
+    for stmt in &block.statements {
+        collect_anonymous_erased_boundary_type_names_for_stmt(stmt, facts, type_names);
+    }
+}
+
+fn collect_anonymous_erased_boundary_type_names_for_stmt(
+    stmt: &Stmt,
+    facts: &EffectiveFacts<'_>,
+    type_names: &mut BTreeSet<String>,
+) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => {
+            if let Some(initializer) = initializer {
+                collect_anonymous_erased_boundary_type_names_for_expr(
+                    initializer,
+                    facts,
+                    type_names,
+                );
+            }
+        }
+        Stmt::Assign { target, value } => {
+            collect_anonymous_erased_boundary_type_names_for_expr(target, facts, type_names);
+            collect_anonymous_erased_boundary_type_names_for_expr(value, facts, type_names);
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => {
+            collect_anonymous_erased_boundary_type_names_for_expr(expr, facts, type_names);
+        }
+        Stmt::Return(expr) => {
+            if let Some(expr) = expr {
+                collect_anonymous_erased_boundary_type_names_for_expr(expr, facts, type_names);
+            }
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_anonymous_erased_boundary_type_names_for_expr(condition, facts, type_names);
+            collect_anonymous_erased_boundary_type_names_for_block(then_block, facts, type_names);
+            if let Some(else_block) = else_block {
+                collect_anonymous_erased_boundary_type_names_for_block(
+                    else_block, facts, type_names,
+                );
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_anonymous_erased_boundary_type_names_for_expr(condition, facts, type_names);
+            collect_anonymous_erased_boundary_type_names_for_block(body, facts, type_names);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                collect_anonymous_erased_boundary_type_names_for_stmt(stmt, facts, type_names);
+            }
+            if let Some(condition) = condition {
+                collect_anonymous_erased_boundary_type_names_for_expr(condition, facts, type_names);
+            }
+            for expr in update {
+                collect_anonymous_erased_boundary_type_names_for_expr(expr, facts, type_names);
+            }
+            collect_anonymous_erased_boundary_type_names_for_block(body, facts, type_names);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_anonymous_erased_boundary_type_names_for_expr(iterable, facts, type_names);
+            collect_anonymous_erased_boundary_type_names_for_block(body, facts, type_names);
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_anonymous_erased_boundary_type_names_for_expr(selector, facts, type_names);
+            for case in cases {
+                for label in &case.labels {
+                    if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                        collect_anonymous_erased_boundary_type_names_for_expr(
+                            expr, facts, type_names,
+                        );
+                    }
+                }
+                for stmt in &case.statements {
+                    collect_anonymous_erased_boundary_type_names_for_stmt(stmt, facts, type_names);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_anonymous_erased_boundary_type_names_for_stmt(resource, facts, type_names);
+            }
+            collect_anonymous_erased_boundary_type_names_for_block(body, facts, type_names);
+            for catch in catches {
+                collect_anonymous_erased_boundary_type_names_for_block(
+                    &catch.body,
+                    facts,
+                    type_names,
+                );
+            }
+            if let Some(finally_block) = finally_block {
+                collect_anonymous_erased_boundary_type_names_for_block(
+                    finally_block,
+                    facts,
+                    type_names,
+                );
+            }
+        }
+        Stmt::LocalType(ty) => {
+            collect_anonymous_erased_boundary_type_names_for_type(ty, facts, type_names);
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_anonymous_erased_boundary_type_names_for_expr(arg, facts, type_names);
+            }
+        }
+        Stmt::Block(block) => {
+            collect_anonymous_erased_boundary_type_names_for_block(block, facts, type_names);
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_anonymous_erased_boundary_type_names_for_expr(
+    expr: &Expr,
+    facts: &EffectiveFacts<'_>,
+    type_names: &mut BTreeSet<String>,
+) {
+    match expr {
+        Expr::New { ty, args, body, .. } => {
+            for arg in args {
+                collect_anonymous_erased_boundary_type_names_for_expr(arg, facts, type_names);
+            }
+            if body.is_some() {
+                if let Some(type_name) = explicit_erased_object_fact_type_name(ty, facts) {
+                    type_names.insert(type_name.to_string());
+                }
+            }
+        }
+        Expr::FieldAccess(receiver, _) => {
+            collect_anonymous_erased_boundary_type_names_for_expr(receiver, facts, type_names);
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_anonymous_erased_boundary_type_names_for_expr(array, facts, type_names);
+            collect_anonymous_erased_boundary_type_names_for_expr(index, facts, type_names);
+        }
+        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+            for expr in dimensions {
+                collect_anonymous_erased_boundary_type_names_for_expr(expr, facts, type_names);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_anonymous_erased_boundary_type_names_for_expr(left, facts, type_names);
+            collect_anonymous_erased_boundary_type_names_for_expr(right, facts, type_names);
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+            collect_anonymous_erased_boundary_type_names_for_expr(expr, facts, type_names);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_anonymous_erased_boundary_type_names_for_expr(condition, facts, type_names);
+            collect_anonymous_erased_boundary_type_names_for_expr(then_expr, facts, type_names);
+            collect_anonymous_erased_boundary_type_names_for_expr(else_expr, facts, type_names);
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_anonymous_erased_boundary_type_names_for_expr(receiver, facts, type_names);
+            }
+            for arg in args {
+                collect_anonymous_erased_boundary_type_names_for_expr(arg, facts, type_names);
+            }
+        }
+        Expr::InstanceOf { expr, .. } => {
+            collect_anonymous_erased_boundary_type_names_for_expr(expr, facts, type_names);
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => {
+                collect_anonymous_erased_boundary_type_names_for_expr(expr, facts, type_names);
+            }
+            LambdaBody::Block(block) => {
+                collect_anonymous_erased_boundary_type_names_for_block(block, facts, type_names);
+            }
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn explicit_erased_object_fact_type_name<'a>(
+    ty: &'a JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> Option<&'a str> {
+    let JavaType::Named { name, .. } = ty else {
+        return None;
+    };
+    facts
+        .hierarchy_overrides()
+        .iter()
+        .any(|override_fact| {
+            override_fact.type_name == *name
+                && override_fact.strategy == crate::facts::HierarchyStrategy::ErasedObject
+        })
+        .then_some(name.as_str())
 }
 
 pub fn representation_hierarchy_fact_policy(
@@ -457,6 +798,16 @@ fn representation_provenance_for_fact(provenance: FactProvenance) -> Representat
         FactProvenance::CorpusAnalysis => RepresentationProvenance::CorpusAnalysis,
         FactProvenance::UserOverride => RepresentationProvenance::UserOverride,
         FactProvenance::ConservativeFallback => RepresentationProvenance::ConservativeFallback,
+    }
+}
+
+fn fact_provenance_for_representation(provenance: RepresentationProvenance) -> FactProvenance {
+    match provenance {
+        RepresentationProvenance::ParsedSource => FactProvenance::ParsedSource,
+        RepresentationProvenance::BuiltinExternalModel => FactProvenance::BuiltinExternalModel,
+        RepresentationProvenance::CorpusAnalysis => FactProvenance::CorpusAnalysis,
+        RepresentationProvenance::UserOverride => FactProvenance::UserOverride,
+        RepresentationProvenance::ConservativeFallback => FactProvenance::ConservativeFallback,
     }
 }
 

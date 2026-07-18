@@ -33,6 +33,12 @@ interface Named {
 interface Factory {
     Factory next();
 }
+
+interface PredicateLike {
+    PredicateLike and(PredicateLike other);
+    PredicateLike or(PredicateLike other);
+    PredicateLike negate();
+}
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
@@ -40,6 +46,7 @@ interface Factory {
 
     let named = object_plan.strategy_for("Named").unwrap();
     let factory = object_plan.strategy_for("Factory").unwrap();
+    let predicate = object_plan.strategy_for("PredicateLike").unwrap();
 
     assert_eq!(
         named.strategy,
@@ -50,6 +57,13 @@ interface Factory {
     assert_eq!(named.primary_provenance(), FactProvenance::ParsedSource);
     assert_eq!(named.provenance, vec![FactProvenance::ParsedSource]);
     assert_eq!(factory.strategy, ObjectRepresentation::ErasedObject);
+    assert_eq!(
+        predicate.strategy,
+        ObjectRepresentation::DynTrait {
+            trait_name: "PredicateLike".to_string(),
+        }
+    );
+    assert!(predicate.diagnostics.is_empty());
     assert!(factory.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "non_object_safe_trait_fallback"
             && diagnostic.message.contains("interface Factory")
@@ -74,6 +88,114 @@ interface Factory {
             args: Vec::new(),
         }),
         DispatchShape::ErasedObject
+    );
+    assert_eq!(
+        representations.dispatch_for(&JavaType::Named {
+            name: "PredicateLike".to_string(),
+            args: Vec::new(),
+        }),
+        DispatchShape::DynTrait {
+            trait_name: "PredicateLike".to_string(),
+        }
+    );
+}
+
+#[test]
+fn object_model_allows_clone_like_self_returning_interface_methods() {
+    let parsed = parse_java_source(
+        r#"
+interface ReadLike {
+    String name();
+    ReadLike copy();
+    ReadLike deepCopy();
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let read_like = object_plan.strategy_for("ReadLike").unwrap();
+
+    assert_eq!(
+        read_like.strategy,
+        ObjectRepresentation::DynTrait {
+            trait_name: "ReadLike".to_string(),
+        }
+    );
+    assert!(read_like.diagnostics.is_empty());
+    assert_eq!(
+        resolved.facts.object_safe_trait_fact_for_name("ReadLike"),
+        Some(true)
+    );
+}
+
+#[test]
+fn object_model_keeps_general_self_returning_interface_methods_non_object_safe() {
+    let parsed = parse_java_source(
+        r#"
+interface Factory {
+    Factory next();
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let factory = object_plan.strategy_for("Factory").unwrap();
+
+    assert_eq!(factory.strategy, ObjectRepresentation::ErasedObject);
+    assert!(factory.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "non_object_safe_trait_fallback"
+            && diagnostic
+                .message
+                .contains("method next returns the interface type")
+    }));
+}
+
+#[test]
+fn object_model_allows_combinator_self_returning_interface_methods() {
+    let parsed = parse_java_source(
+        r#"
+interface FilterLike {
+    boolean test(String value);
+    FilterLike and(FilterLike other);
+    FilterLike or(FilterLike other);
+    FilterLike negate();
+}
+
+interface TransformerLike {
+    String apply(String value);
+    TransformerLike andThen(TransformerLike after);
+    TransformerLike compose(TransformerLike before);
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let filter = object_plan.strategy_for("FilterLike").unwrap();
+    let transformer = object_plan.strategy_for("TransformerLike").unwrap();
+
+    assert_eq!(
+        filter.strategy,
+        ObjectRepresentation::DynTrait {
+            trait_name: "FilterLike".to_string(),
+        }
+    );
+    assert!(filter.diagnostics.is_empty());
+    assert_eq!(
+        transformer.strategy,
+        ObjectRepresentation::DynTrait {
+            trait_name: "TransformerLike".to_string(),
+        }
+    );
+    assert!(transformer.diagnostics.is_empty());
+    assert_eq!(
+        resolved.facts.object_safe_trait_fact_for_name("FilterLike"),
+        Some(true)
+    );
+    assert_eq!(
+        resolved
+            .facts
+            .object_safe_trait_fact_for_name("TransformerLike"),
+        Some(true)
     );
 }
 
@@ -404,6 +526,82 @@ final class Num implements Expr {}
             },
         ]
     );
+}
+
+#[test]
+fn object_model_infers_closed_enum_for_abstract_nested_non_public_constructor_family() {
+    let parsed = parse_java_source(
+        r#"
+abstract class ReadKey {
+    static class FragmentKey extends ReadKey {
+        FragmentKey(long key) {}
+    }
+
+    static class PairKey extends ReadKey {
+        PairKey(long first, long second) {}
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+
+    assert_eq!(
+        resolved.facts.closed_hierarchy_fact_for_name("ReadKey"),
+        Some(true)
+    );
+    assert!(resolved.facts.is_final_type(&JavaType::Named {
+        name: "FragmentKey".to_string(),
+        args: Vec::new(),
+    }));
+    assert!(resolved.facts.is_final_type(&JavaType::Named {
+        name: "PairKey".to_string(),
+        args: Vec::new(),
+    }));
+
+    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let read_key = object_plan.strategy_for("ReadKey").unwrap();
+
+    assert_eq!(
+        read_key.direct_subtypes,
+        vec!["FragmentKey".to_string(), "PairKey".to_string()]
+    );
+    assert_eq!(
+        read_key.strategy,
+        ObjectRepresentation::ClosedEnum {
+            enum_name: "ReadKeyValue".to_string(),
+            variants: vec!["FragmentKey".to_string(), "PairKey".to_string()],
+        }
+    );
+    assert!(read_key.rejected.is_empty());
+}
+
+#[test]
+fn object_model_does_not_infer_closed_enum_for_public_nested_constructor_family() {
+    let parsed = parse_java_source(
+        r#"
+abstract class OpenBase {
+    static class OpenChild extends OpenBase {
+        public OpenChild() {}
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+
+    assert_eq!(
+        resolved.facts.closed_hierarchy_fact_for_name("OpenBase"),
+        None
+    );
+    assert!(!resolved.facts.is_final_type(&JavaType::Named {
+        name: "OpenChild".to_string(),
+        args: Vec::new(),
+    }));
+
+    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    let open_base = object_plan.strategy_for("OpenBase").unwrap();
+
+    assert_eq!(open_base.direct_subtypes, vec!["OpenChild".to_string()]);
+    assert_eq!(open_base.strategy, ObjectRepresentation::ConcreteStruct);
 }
 
 #[test]
