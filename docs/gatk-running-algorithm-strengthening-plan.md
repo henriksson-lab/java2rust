@@ -6018,6 +6018,46 @@ Acceptance:
     narrows the acceptable implementation: shared support identity must merge
     structured facade declarations, impl methods, trait impls, aliases, and
     fields deliberately, not by stripping duplicate rendered struct lines.
+  - Status: Partial. The focused-package harness now runs
+    `scripts/merge-shared-support-facades.py` after the hardcoded runtime
+    support strip and before module import/lib assembly. The pass only
+    considers duplicate `pub struct`/`pub enum` names from the support prelude
+    before a module's real translated source type, removes those local facade
+    declarations/impls/aliases, emits one crate-root facade surface, and writes
+    merge conflicts to `generated-shared-support-conflicts.tsv`. Alias hoisting
+    covers Java-qualified aliases such as
+    `GenomicsDBVidMapProtoVidMappingPBBuilder = VidMappingPBBuilder`.
+    The focused GenomicsDB gate at
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_shared_facade_merge_v2`
+    removed the cross-module `VidMappingPB`/`GenomicsDBImporter` nominal
+    mismatches and reached `cargo_check_errors=3`. The current combined gate at
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_shared_facade_merge_v4`
+    is `cargo_check_errors=5` after adding more precise
+    `getArrayColumnBounds` return facts; the remaining compile failures are
+    stream-lowering ownership/lifetime errors in a nested `flatMap` closure,
+    not duplicate facade identity. Keep this item open until facade merging is
+    covered by a non-temp regression harness and conflict diagnostics are
+    surfaced as first-class package assembly output.
+
+- [ ] `PKG-ASM-2`: Add regression coverage for shared support facade merging.
+  - Ideal Rust Target: a focused package with two translated files referencing
+    the same external Java type should compile with one crate-root Rust facade
+    type, merged unique inherent methods, deduplicated trait impls, and shared
+    aliases. Module-local real source types with the same simple name must stay
+    local unless they are proved support facades.
+  - Implementation Rule: build a small script-level or integration fixture
+    that generates two focused modules with duplicate support-prelude facades,
+    asserts the generated crate has root declarations/imports, and asserts the
+    per-module files no longer define those duplicate facades. Include a
+    conflict case where two duplicate methods differ and the conflict TSV is
+    produced.
+  - Required Facts: generated module source type, duplicate prelude facade
+    names, alias target, merged method names, and conflict report path.
+  - Owning Layer: focused package assembly owns this; Rust lowering should not
+    receive corpus-specific type aliases to compensate.
+  - Fallback Shape: if the script cannot prove a declaration is a support
+    facade before the source type, leave it module-local.
+  - Evidence: pending.
 
 ## External Parameter Nullability Defaults
 
