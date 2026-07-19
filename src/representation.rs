@@ -85,12 +85,19 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     });
     plan.diagnostics.extend(object_plan.diagnostics);
     for strategy in object_plan.strategies.into_values() {
-        let provenance = representation_provenance_for_fact(strategy.primary_provenance());
+        let primary_provenance = strategy.primary_provenance();
+        let provenance = representation_provenance_for_fact(primary_provenance);
+        let representation = representation_for_strategy_with_external_final_facade_policy(
+            &strategy.root,
+            strategy.strategy,
+            primary_provenance,
+            &effective_facts,
+        );
         plan.types.insert(
             strategy.root.clone(),
             TypeRepresentation {
                 java_name: strategy.root,
-                representation: strategy.strategy,
+                representation,
                 provenance,
                 direct_subtypes: strategy.direct_subtypes,
             },
@@ -101,6 +108,35 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     }
     collect_anonymous_erased_boundary_representations(program, &effective_facts, &mut plan);
     plan
+}
+
+fn representation_for_strategy_with_external_final_facade_policy(
+    type_name: &str,
+    representation: ObjectRepresentation,
+    provenance: FactProvenance,
+    facts: &EffectiveFacts<'_>,
+) -> ObjectRepresentation {
+    if matches!(representation, ObjectRepresentation::ErasedObject)
+        && provenance == FactProvenance::ExternalLibraryPack
+        && external_final_facade_should_keep_concrete_dispatch(
+            &JavaType::Named {
+                name: type_name.to_string(),
+                args: Vec::new(),
+            },
+            facts,
+        )
+    {
+        ObjectRepresentation::ConcreteStruct
+    } else {
+        representation
+    }
+}
+
+fn external_final_facade_should_keep_concrete_dispatch(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    facts.is_final_type(java_ty) && crate::stdlib::java_collection_kind_for_type(java_ty).is_some()
 }
 
 impl RepresentationPlan {

@@ -35,12 +35,14 @@ fn translates_static_import_and_qualified_static_utility_owner() {
         translation.rust
     );
     assert!(
-        translation.rust.contains("pub struct StaticUtility;"),
+        translation
+            .rust
+            .contains("pub type StaticUtility = ExternalLibStaticUtility;"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("self.local_value(path)"),
+        translation.rust.contains("self.local_value(path.clone()"),
         "{}",
         translation.rust
     );
@@ -64,9 +66,7 @@ fn translates_imported_static_utility_owner_without_module_receiver() {
         translation.rust
     );
     assert!(
-        translation
-            .rust
-            .contains("pub type ExternalUtility = ExternalLibExternalUtility;"),
+        translation.rust.contains("pub struct ExternalUtility;"),
         "{}",
         translation.rust
     );
@@ -76,6 +76,67 @@ fn translates_imported_static_utility_owner_without_module_receiver() {
         translation.rust
     );
     assert!(!translation.rust.contains("external_utility::read_value"));
+}
+
+#[test]
+fn imported_static_known_return_declares_chained_facade_surface() {
+    let translation = translate_source(
+        r#"
+import com.google.protobuf.util.JsonFormat;
+
+class JsonFormatUse {
+    void merge(String json, Builder builder) {
+        JsonFormat.parser().merge(json, builder);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub struct Parser;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub fn parser() -> Parser"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn merge<T0, T1>(&self, _arg0: T0, _arg1: T1) -> ()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn imported_static_non_null_validator_returns_first_argument_facade() {
+    let translation = translate_source(
+        r#"
+import org.broadinstitute.hellbender.utils.Utils;
+
+class UtilsNonNullUse {
+    String checked(String path) {
+        return Utils.nonNull(path);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn non_null<T0>(_arg0: T0) -> T0 { _arg0 }"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub fn non_null<R: Default"),
+        "{}",
+        translation.rust
+    );
 }
 
 #[test]
@@ -213,7 +274,7 @@ fn translates_simple_class_shape() {
     assert!(
         translation
             .rust
-            .contains("format!(\"{}:{}\", self.name, self.count)")
+            .contains("format!(\"{}:{}\", self.name, (self.count).to_string())")
     );
 }
 
@@ -221,13 +282,13 @@ fn translates_simple_class_shape() {
 fn translates_expression_precedence_shape() {
     let translation = translate_source(&fixture("01-expressions/ExpressionPrecedence.java"));
     assert!(!translation.diagnostics.has_errors());
-    assert!(translation.rust.contains("let x: i32 = (a + (b * c));"));
-    assert!(translation.rust.contains("let y: i32 = ((a + b) * c);"));
-    assert!(translation.rust.contains("let z: i32 = (x << 1);"));
+    assert!(translation.rust.contains("let x: i32 = a + b * c;"));
+    assert!(translation.rust.contains("let y: i32 = (a + b) * c;"));
+    assert!(translation.rust.contains("let z: i32 = x << 1;"));
     assert!(
         translation
             .rust
-            .contains("return if (z > y) { (z - y) } else { (y - z) };")
+            .contains("return if z > y { z - y } else { y - z };")
     );
 }
 
@@ -283,7 +344,7 @@ fn translates_constructor_delegation_to_resolved_constructor_calls() {
     assert!(
         translation
             .rust
-            .contains("return format!(\"{}:{}\", self.label, self.count);")
+            .contains("return format!(\"{}:{}\", self.label, (self.count).to_string());")
     );
 }
 
@@ -399,12 +460,12 @@ fn translates_simple_stream_sum_to_iterator_chain() {
     assert!(
         translation
             .rust
-            .contains("pub fn positive_sum(&self, values: Vec<i32>) -> i32")
+            .contains("pub fn positive_sum(&self, values: &Vec<i32>) -> i32")
     );
     assert!(
         translation
             .rust
-            .contains("values.iter().filter(|v| (**v > 0)).map(|v| *v).sum::<i32>()")
+            .contains("values.iter().filter(|v| **v > 0).map(|v| *v).sum::<i32>()")
     );
 }
 
@@ -422,7 +483,7 @@ fn translates_map_get_null_ternary_with_borrowed_optional_carrier() {
             .contains("let old: Option<i32> = counts.get(name).copied();")
             && translation
                 .rust
-                .contains("if old.is_none() { 1 } else { (old.unwrap() + 1) }")
+                .contains("if old.is_none() { 1 } else { old.unwrap() + 1 }")
             && translation
                 .rust
                 .contains("counts.insert(name.clone(), if old.is_none()")
@@ -457,7 +518,7 @@ class MapPutPreviousValue {
             .rust
             .contains("let old: Option<String> = values.insert(key, value);")
             && translation.rust.contains("if old.is_none()")
-            && translation.rust.contains("old.unwrap()")
+            && translation.rust.contains("else { old }")
             && !translation.rust.contains("Some(values.insert")
             && !translation.rust.contains("Some(Some("),
         "{}",
@@ -484,7 +545,7 @@ mod generated_tests {
     #[test]
     fn stream_sum_filters_positive_values() {
         let streams = StreamsUse {};
-        assert_eq!(streams.positive_sum(vec![-2, 0, 3, 4]), 7);
+        assert_eq!(streams.positive_sum(&vec![-2, 0, 3, 4]), 7);
     }
 }
 "#
@@ -525,7 +586,7 @@ fn stream_capture_generated_rust_preserves_behavior() {
     assert!(
         translation
             .rust
-            .contains("values.iter().map(|v| (*v + base)).sum::<i32>()"),
+            .contains("values.iter().map(|v| *v + base).sum::<i32>()"),
         "{}",
         translation.rust
     );
@@ -540,7 +601,7 @@ mod generated_tests {
     #[test]
     fn stream_sum_uses_captured_base() {
         let streams = StreamCapturesLocal {};
-        assert_eq!(streams.add_base(vec![1, 2, 3], 10), 36);
+        assert_eq!(streams.add_base(&vec![1, 2, 3], 10), 36);
     }
 }
 "#
@@ -789,12 +850,12 @@ fn translates_stream_find_first_and_any_match_through_slot_coercion() {
     assert!(
         translation
             .rust
-            .contains("pub fn first_long(&self, values: Vec<String>) -> Option<String>")
+            .contains("pub fn first_long(&self, values: &Vec<String>) -> Option<String>")
     );
     assert!(
         translation
             .rust
-            .contains("values.iter().filter(|v| (v.len() as i32 > 3)).next().cloned()")
+            .contains("values.iter().filter(|v| (v.len() as i32) > 3).next().cloned()")
     );
     assert!(
         translation
@@ -823,8 +884,8 @@ mod generated_tests {
     fn stream_find_first_and_any_match() {
         let streams = StreamsFindMatch {};
         let values = vec!["one".to_string(), "three".to_string(), "".to_string()];
-        assert_eq!(streams.first_long(values.clone()), Some("three".to_string()));
-        assert!(streams.has_empty(values));
+        assert_eq!(streams.first_long(&values), Some("three".to_string()));
+        assert!(streams.has_empty(&values));
     }
 }
 "#
@@ -982,7 +1043,7 @@ fn collection_capacity_constructor_uses_with_capacity() {
     assert!(
         translation
             .rust
-            .contains("Vec::with_capacity(self.names.as_ref().unwrap().len() as usize)")
+            .contains("Vec::with_capacity(self.names.as_ref().unwrap().len() as i32 as usize)")
     );
     assert!(!translation.rust.contains("self.names.size()"));
 }

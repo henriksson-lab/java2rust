@@ -1,9 +1,19 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MethodReferencePlan {
-    Constructor { type_name: String },
-    AssociatedFunction { owner: String, method: String },
-    UnboundAccessor { method: String },
-    CurrentReceiverMethod { method: String },
+    Constructor {
+        type_name: String,
+    },
+    AssociatedFunction {
+        owner: String,
+        method: String,
+    },
+    UnboundAccessor {
+        method: String,
+    },
+    CurrentReceiverMethod {
+        method: String,
+        arity: Option<usize>,
+    },
 }
 
 pub fn plan_method_reference(target: &str, method: &str) -> MethodReferencePlan {
@@ -14,7 +24,10 @@ pub fn plan_method_reference(target: &str, method: &str) -> MethodReferencePlan 
         };
     }
     if matches!(target, "this" | "self") {
-        return MethodReferencePlan::CurrentReceiverMethod { method };
+        return MethodReferencePlan::CurrentReceiverMethod {
+            method,
+            arity: None,
+        };
     }
     if looks_like_type_name(target) && looks_like_accessor_method(&method) {
         return MethodReferencePlan::UnboundAccessor { method };
@@ -22,6 +35,16 @@ pub fn plan_method_reference(target: &str, method: &str) -> MethodReferencePlan 
     MethodReferencePlan::AssociatedFunction {
         owner: rust_owner_path(target),
         method,
+    }
+}
+
+pub fn plan_current_receiver_method_reference(
+    method: &str,
+    arity: Option<usize>,
+) -> MethodReferencePlan {
+    MethodReferencePlan::CurrentReceiverMethod {
+        method: crate::parser::to_snake_case(method),
+        arity,
     }
 }
 

@@ -676,6 +676,36 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
     let open_mode = external_field_for("HDF5File", "OpenMode")
         .expect("HDF5File.OpenMode should resolve through builtin field lookup");
     assert_eq!(open_mode.provenance, FactProvenance::ExternalLibraryPack);
+
+    let utils_validate = external_api_effect_for_receiver_with_arity(
+        Some("org.broadinstitute.hellbender.utils.Utils"),
+        "validate",
+        Some(2),
+    )
+    .expect("Utils.validate should resolve through builtin pack member lookup");
+    assert_eq!(utils_validate.role, ExternalApiRole::SideEffect);
+    assert_eq!(utils_validate.return_type, None);
+    assert_eq!(
+        utils_validate.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+
+    let utils_facts = builtin_external_library_packs();
+    let utils_validate_arg0 = utils_facts
+        .external_api_argument_effect_for_receiver(
+            Some("org.broadinstitute.hellbender.utils.Utils"),
+            "validate",
+            0,
+        )
+        .expect("Utils.validate condition argument should be typed by the pack");
+    assert_eq!(
+        utils_validate_arg0.parameter_type,
+        Some(JavaType::Primitive(PrimitiveType::Boolean))
+    );
+    assert_eq!(
+        utils_validate_arg0.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
 }
 
 #[test]
@@ -880,6 +910,26 @@ fn builtin_external_pack_facts_are_generated_from_manifest_boundaries() {
             assert_eq!(field_fact.provenance, FactProvenance::ExternalLibraryPack);
         }
     }
+}
+
+#[test]
+fn htsjdk_util_locatable_pack_strategy_preserves_typed_facade_boundary() {
+    let facts = htsjdk_samtools_util_pack_facts();
+    let qualified = facts
+        .hierarchy_overrides
+        .iter()
+        .find(|fact| fact.type_name == "htsjdk.samtools.util.Locatable")
+        .expect("qualified Locatable should have a pack-owned object strategy");
+    let simple = facts
+        .hierarchy_overrides
+        .iter()
+        .find(|fact| fact.type_name == "Locatable")
+        .expect("simple Locatable should have a pack-owned object strategy");
+
+    assert_eq!(qualified.strategy, HierarchyStrategy::ConcreteStruct);
+    assert_eq!(simple.strategy, HierarchyStrategy::ConcreteStruct);
+    assert_eq!(qualified.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(simple.provenance, FactProvenance::ExternalLibraryPack);
 }
 
 #[test]
@@ -3036,7 +3086,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
     assert_eq!(
         validation.thrown,
         vec![JavaType::Named {
-            name: "InternalCodecException".to_string(),
+            name: "TribbleException.InternalCodecException".to_string(),
             args: Vec::new(),
         }]
     );
@@ -3146,7 +3196,7 @@ class VariantValidationCatchOrder {
     assert_eq!(
         effect.thrown,
         vec![JavaType::Named {
-            name: "InternalCodecException".to_string(),
+            name: "TribbleException.InternalCodecException".to_string(),
             args: Vec::new(),
         }]
     );
@@ -3157,7 +3207,7 @@ class VariantValidationCatchOrder {
     assert_eq!(
         strict_effect.thrown,
         vec![JavaType::Named {
-            name: "InternalCodecException".to_string(),
+            name: "TribbleException.InternalCodecException".to_string(),
             args: Vec::new(),
         }]
     );
@@ -3847,6 +3897,13 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         samples.return_nullability,
         NullabilityState::DefinitelyNonNull
     );
+    assert_eq!(
+        samples.return_type,
+        Some(JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::String],
+        })
+    );
     assert_eq!(samples.provenance, FactProvenance::ExternalLibraryPack);
 
     let ordered_samples = facts
@@ -4149,7 +4206,32 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         .expect("VCFHeader sequence dictionary getter should be modeled by the pack");
     assert_eq!(sequence_dictionary.role, ExternalApiRole::Getter);
     assert_eq!(
+        sequence_dictionary.return_type,
+        Some(JavaType::Named {
+            name: "SAMSequenceDictionary".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
         sequence_dictionary.return_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+
+    let input_metadata = facts
+        .external_api_effect_for_receiver(Some("VCFHeader"), "getMetaDataInInputOrder")
+        .expect("VCFHeader input-order metadata getter should be modeled by the pack");
+    assert_eq!(
+        input_metadata.return_type,
+        Some(JavaType::Named {
+            name: "Set".to_string(),
+            args: vec![JavaType::Named {
+                name: "VCFHeaderLine".to_string(),
+                args: Vec::new(),
+            }],
+        })
+    );
+    assert_eq!(
+        input_metadata.return_nullability,
         NullabilityState::DefinitelyNonNull
     );
 
@@ -5184,14 +5266,14 @@ class AvroSchemaParserUse {
 
     let parser = semantic
         .facts
-        .external_constructor_for("Parser", &[])
+        .external_constructor_for("Schema.Parser", &[])
         .expect("semantic analysis should use the Avro pack for Schema.Parser");
     assert_eq!(parser.provenance, FactProvenance::ExternalLibraryPack);
 
     let parse = semantic
         .facts
-        .external_api_effect_for_receiver(Some("Parser"), "parse")
-        .expect("semantic analysis should use the Avro pack for Parser.parse");
+        .external_api_effect_for_receiver(Some("Schema.Parser"), "parse")
+        .expect("semantic analysis should use the Avro pack for Schema.Parser.parse");
     assert_eq!(
         parse.return_type,
         Some(JavaType::Named {
@@ -7992,7 +8074,7 @@ fn guava_immutable_collect_pack_declares_immutable_map_builder_boundary() {
     assert_eq!(
         put.return_type,
         Some(JavaType::Named {
-            name: "Builder".to_string(),
+            name: "ImmutableMap.Builder".to_string(),
             args: Vec::new(),
         })
     );
@@ -8038,8 +8120,8 @@ class GuavaImmutableMapBuilderUse {
 
     let constructor = semantic
         .facts
-        .external_constructor_for("Builder", &[])
-        .expect("Builder/0 should be explained by the Guava pack");
+        .external_constructor_for("ImmutableMap.Builder", &[])
+        .expect("ImmutableMap.Builder/0 should be explained by the Guava pack");
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
 
     if let Some(build) = semantic
@@ -8200,6 +8282,43 @@ fn broad_http_pack_declares_retry_settings_boundary() {
         ReceiverMutabilityFact::ReadOnly
     );
 
+    let prefetch_wrapper = facts
+        .external_api_effect_for_receiver_with_arity(
+            Some("BucketUtils"),
+            "getPrefetchingWrapper",
+            Some(1),
+        )
+        .expect("BucketUtils.getPrefetchingWrapper(int) should be pack-owned");
+    assert_eq!(
+        prefetch_wrapper.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(prefetch_wrapper.role, ExternalApiRole::Getter);
+    assert_eq!(
+        prefetch_wrapper.receiver_mutability,
+        ReceiverMutabilityFact::ReadOnly
+    );
+    assert_eq!(
+        prefetch_wrapper.return_type,
+        Some(JavaType::Named {
+            name: "Function".to_string(),
+            args: vec![
+                JavaType::Named {
+                    name: "SeekableByteChannel".to_string(),
+                    args: Vec::new(),
+                },
+                JavaType::Named {
+                    name: "SeekableByteChannel".to_string(),
+                    args: Vec::new(),
+                },
+            ],
+        })
+    );
+    assert_eq!(
+        prefetch_wrapper.return_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+
     let default_settings = facts
         .external_field_for("HttpFileSystemProviderSettings", "DEFAULT_SETTINGS")
         .expect("DEFAULT_SETTINGS should be pack-owned");
@@ -8303,6 +8422,39 @@ class BroadHttpRetrySettingsUse {
     assert_eq!(
         retry_constructor.provenance,
         FactProvenance::ExternalLibraryPack
+    );
+}
+
+#[test]
+fn broad_http_pack_emits_function_facade_for_bucket_prefetch_wrapper() {
+    let translation = new_java2rust::translate_source_with_facts(
+        r#"
+import org.broadinstitute.hellbender.utils.gcs.BucketUtils;
+
+class BroadHttpBucketUtilsUse {
+    Object wrapper(int cloudPrefetchBuffer) {
+        return BucketUtils.getPrefetchingWrapper(cloudPrefetchBuffer);
+    }
+}
+"#,
+        &broad_http_pack_facts(),
+    );
+
+    assert!(
+        translation.rust.contains("pub struct Function;"),
+        "Function facade should be declared when a typed imported static method returns Function"
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_prefetching_wrapper<T0>(_arg0: T0) -> Function"),
+        "BucketUtils.getPrefetchingWrapper(int) should emit a concrete Function return"
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("get_prefetching_wrapper<R: Default"),
+        "BucketUtils.getPrefetchingWrapper(int) should not fall back to generic R inference"
     );
 }
 
@@ -10668,18 +10820,64 @@ fn htsjdk_tribble_feature_pack_models_coordinate_getters() {
         })
     );
 
-    let query = facts
-        .external_api_effect_for_receiver(Some("FeatureReader"), "query")
-        .expect("FeatureReader.query should be modeled by the pack");
-    assert_eq!(query.role, ExternalApiRole::Getter);
+    let factory = facts
+        .external_api_effect_for_receiver_with_arity(
+            Some("AbstractFeatureReader"),
+            "getFeatureReader",
+            Some(6),
+        )
+        .expect("AbstractFeatureReader.getFeatureReader/6 should be modeled by the pack");
+    assert_eq!(factory.role, ExternalApiRole::Getter);
     assert_eq!(
-        query.return_type,
+        factory.return_type,
+        Some(JavaType::Named {
+            name: "FeatureReader".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        factory.return_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+    let factory_index_argument = facts
+        .external_api_argument_effect_for_receiver(
+            Some("AbstractFeatureReader"),
+            "getFeatureReader",
+            1,
+        )
+        .expect("AbstractFeatureReader.getFeatureReader/6 index argument should be modeled");
+    assert_eq!(
+        factory_index_argument.parameter_type,
+        Some(JavaType::String)
+    );
+    assert_eq!(
+        factory_index_argument.parameter_nullability,
+        NullabilityState::MaybeNull
+    );
+
+    let query_one = facts
+        .external_api_effect_for_receiver_with_arity(Some("FeatureReader"), "query", Some(1))
+        .expect("FeatureReader.query/1 should be modeled by the pack");
+    assert_eq!(query_one.role, ExternalApiRole::Getter);
+    assert_eq!(
+        query_one.return_type,
         Some(JavaType::Named {
             name: "CloseableIterator".to_string(),
             args: vec![JavaType::Named {
                 name: "Object".to_string(),
                 args: Vec::new(),
             }],
+        })
+    );
+    let query_three = facts
+        .external_api_effect_for_receiver_with_arity(Some("FeatureReader"), "query", Some(3))
+        .expect("FeatureReader.query/3 should be modeled by the pack");
+    assert_eq!(query_three.role, ExternalApiRole::Getter);
+    assert_eq!(
+        query_three.return_type,
+        Some(JavaType::Named {
+            name: "CloseableTribbleIterator".to_string(),
+            args: Vec::new(),
         })
     );
 
@@ -12370,6 +12568,47 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
         );
     }
 
+    let header_lines = facts
+        .external_api_argument_effect_for_receiver(Some("ImportConfig"), "new", 4)
+        .expect("ImportConfig constructor header-line set slot should be pack-owned");
+    assert_eq!(
+        header_lines.parameter_type,
+        Some(JavaType::Named {
+            name: "Set".to_string(),
+            args: vec![JavaType::Named {
+                name: "VCFHeaderLine".to_string(),
+                args: Vec::new(),
+            }],
+        })
+    );
+    assert_eq!(
+        header_lines.parameter_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+    assert_eq!(
+        header_lines.alias_policy,
+        ExternalArgumentAliasPolicy::Escapes
+    );
+
+    let reader_map_callback = facts
+        .external_api_argument_effect_for_receiver(Some("ImportConfig"), "new", 6)
+        .expect("ImportConfig constructor reader-map callback slot should be pack-owned");
+    assert_eq!(
+        reader_map_callback.parameter_type,
+        Some(JavaType::Named {
+            name: "Function".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        reader_map_callback.parameter_nullability,
+        NullabilityState::MaybeNull
+    );
+    assert_eq!(
+        reader_map_callback.alias_policy,
+        ExternalArgumentAliasPolicy::Escapes
+    );
+
     for (type_name, field_name, expected_type) in [
         ("Coordinates", "GenomicsDBColumn", "GenomicsDBColumn"),
         ("Coordinates", "ContigPosition", "ContigPosition"),
@@ -12430,6 +12669,60 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
             "FieldLengthDescriptorComponentPB",
             "newBuilder",
             "FieldLengthDescriptorComponentPB.Builder",
+        ),
+        (
+            "Coordinates.GenomicsDBColumn.Builder",
+            "build",
+            "Coordinates.GenomicsDBColumn",
+        ),
+        ("GenomicsDBColumn.Builder", "build", "GenomicsDBColumn"),
+        (
+            "Coordinates.ContigPosition.Builder",
+            "build",
+            "Coordinates.ContigPosition",
+        ),
+        ("ContigPosition.Builder", "build", "ContigPosition"),
+        (
+            "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+            "build",
+            "GenomicsDBExportConfiguration.ExportConfiguration",
+        ),
+        (
+            "ExportConfiguration.Builder",
+            "build",
+            "ExportConfiguration",
+        ),
+        (
+            "GenomicsDBImportConfiguration.ImportConfiguration.Builder",
+            "build",
+            "GenomicsDBImportConfiguration.ImportConfiguration",
+        ),
+        (
+            "ImportConfiguration.Builder",
+            "build",
+            "ImportConfiguration",
+        ),
+        (
+            "GenomicsDBImportConfiguration.Partition.Builder",
+            "build",
+            "GenomicsDBImportConfiguration.Partition",
+        ),
+        ("Partition.Builder", "build", "Partition"),
+        (
+            "GenomicsDBVidMapProto.VidMappingPB.Builder",
+            "build",
+            "GenomicsDBVidMapProto.VidMappingPB",
+        ),
+        ("VidMappingPB.Builder", "build", "VidMappingPB"),
+        (
+            "GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB.Builder",
+            "build",
+            "GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB",
+        ),
+        (
+            "FieldLengthDescriptorComponentPB.Builder",
+            "build",
+            "FieldLengthDescriptorComponentPB",
         ),
     ] {
         let effect = facts
@@ -12572,6 +12865,20 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
         )
         .expect("GenomicsDBUtils.readEntireFile should be pack-owned");
     assert_eq!(read_file.return_type, Some(JavaType::String));
+
+    let column_bounds = facts
+        .external_api_effect_for_receiver_with_arity(
+            Some("GenomicsDBUtils"),
+            "getArrayColumnBounds",
+            Some(2),
+        )
+        .expect("GenomicsDBUtils.getArrayColumnBounds should be pack-owned");
+    assert_eq!(
+        column_bounds.return_type,
+        Some(JavaType::Array(Box::new(JavaType::Primitive(
+            new_java2rust::java_ir::PrimitiveType::Long
+        ))))
+    );
 
     let gcs_connector = facts
         .external_api_effect_for_receiver_with_arity(
@@ -12758,10 +13065,10 @@ class GenomicsDbPackUse {
         ("Partition", "newBuilder"),
         ("VidMappingPB", "newBuilder"),
         ("VidMappingPB", "toBuilder"),
-        ("VidMappingPB", "getContigsList"),
-        ("VidMappingPB", "getFields"),
-        ("VidMappingPB", "getFieldsCount"),
-        ("FieldInfo", "getName"),
+        ("GenomicsDBVidMapProto.VidMappingPB", "getContigsList"),
+        ("GenomicsDBVidMapProto.VidMappingPB", "getFields"),
+        ("GenomicsDBVidMapProto.VidMappingPB", "getFieldsCount"),
+        ("GenomicsDBVidMapProto.FieldInfo", "getName"),
         ("FieldLengthDescriptorComponentPB", "newBuilder"),
         ("GenomicsDBImporter", "getProtobufVidMapping"),
         ("GenomicsDBImporter", "updateProtobufVidMapping"),
@@ -12792,6 +13099,41 @@ class GenomicsDbPackUse {
             .any(|diagnostic| diagnostic.code == "external_pack_missing_api"),
         "modeled GenomicsDB pack calls should not produce missing-pack diagnostics: {:?}",
         semantic.diagnostics
+    );
+}
+
+#[test]
+fn genomicsdb_import_config_setters_emit_instance_facades_when_local_shadows_import_alias() {
+    let translation = new_java2rust::translate_source_with_facts(
+        r#"
+import com.intel.genomicsdb.importer.model.ImportConfig;
+
+class GenomicsDbImportConfigUse {
+    void configure(ImportConfig importConfig) {
+        importConfig.setOutputCallsetmapJsonFile("callset.json");
+    }
+}
+"#,
+        &genomicsdb_pack_facts(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("import_config.set_output_callsetmap_json_file"),
+        "local ImportConfig receiver should stay an instance call"
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn set_output_callsetmap_json_file<T0>(&self, _arg0: T0) -> ()"),
+        "ImportConfig setter support should be emitted as an instance facade"
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn set_output_callsetmap_json_file<T0>(_arg0: T0) -> ()"),
+        "a local named importConfig should not reserve a static ImportConfig setter facade"
     );
 }
 
@@ -13762,6 +14104,10 @@ class SamtoolsUtilPackUse {
         return value.getLengthOnReference() + value.getEnd() - value.getStart();
     }
 
+    String contig(Locatable value) {
+        return value.getContig();
+    }
+
     boolean contains(Locatable left, Locatable right) {
         return left.contains(right);
     }
@@ -13896,6 +14242,29 @@ class SamtoolsUtilPackUse {
     assert_eq!(
         start.return_nullability,
         NullabilityState::DefinitelyNonNull
+    );
+    assert_eq!(
+        start.return_type,
+        Some(JavaType::Primitive(
+            new_java2rust::java_ir::PrimitiveType::Int
+        ))
+    );
+
+    let contig = semantic
+        .facts
+        .external_api_effect_for_receiver(Some("Locatable"), "getContig")
+        .expect("Locatable contig getter should be modeled by the pack");
+    assert_eq!(contig.return_type, Some(JavaType::String));
+
+    let end = semantic
+        .facts
+        .external_api_effect_for_receiver(Some("Locatable"), "getEnd")
+        .expect("Locatable end getter should be modeled by the pack");
+    assert_eq!(
+        end.return_type,
+        Some(JavaType::Primitive(
+            new_java2rust::java_ir::PrimitiveType::Int
+        ))
     );
 
     let contains = semantic

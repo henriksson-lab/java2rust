@@ -85,6 +85,9 @@ pub enum Coercion {
     BorrowBoxedDynTrait {
         trait_name: String,
     },
+    BorrowConcreteFacade {
+        target_type: String,
+    },
     BoxDynTrait {
         trait_name: String,
     },
@@ -363,6 +366,11 @@ impl DispatchCoercionPolicy {
             DispatchCoercionPolicy::BorrowBoxedDynTrait { trait_name } => {
                 vec![Coercion::BorrowBoxedDynTrait {
                     trait_name: trait_name.clone(),
+                }]
+            }
+            DispatchCoercionPolicy::BorrowConcreteFacade { target_type } => {
+                vec![Coercion::BorrowConcreteFacade {
+                    target_type: target_type.clone(),
                 }]
             }
             DispatchCoercionPolicy::BoxDynTrait { trait_name } => vec![Coercion::BoxDynTrait {
@@ -743,7 +751,15 @@ fn apply_borrowed_element_slot_adapter(
     policy: &BorrowedElementSlotAdapterPolicy,
 ) -> RustExpr {
     if let Some(adapter) = &policy.adapter {
-        apply_borrowed_element_adapter(expr, adapter)
+        let adapted = apply_borrowed_element_adapter(expr, adapter);
+        if matches!(
+            adapter.recovery,
+            BorrowedElementRecoveryPolicy::BorrowElement
+        ) {
+            apply_borrowed_element_target_view(adapted, policy)
+        } else {
+            adapted
+        }
     } else {
         expr
     }
@@ -754,6 +770,7 @@ fn apply_borrowed_element_adapter(
     policy: &BorrowedElementAdapterPolicy,
 ) -> RustExpr {
     let adapted = match (&policy.carrier, &policy.recovery) {
+        (_, BorrowedElementRecoveryPolicy::BorrowElement) => expr,
         (BorrowedElementCarrier::Option, BorrowedElementRecoveryPolicy::StringViewToOwned) => {
             RustExpr::MethodCall {
                 receiver: Box::new(expr),
@@ -813,6 +830,29 @@ fn apply_borrowed_element_adapter(
         ))
     } else {
         adapted
+    }
+}
+
+fn apply_borrowed_element_target_view(
+    expr: RustExpr,
+    policy: &BorrowedElementSlotAdapterPolicy,
+) -> RustExpr {
+    match &policy.target.dispatch {
+        DispatchShape::DynTrait { trait_name } => {
+            RustExpr::Raw(format!("{} as &dyn {trait_name}", emit::emit_expr(&expr)))
+        }
+        DispatchShape::Concrete if policy.target.java_ty != policy.element_shape.java_ty => {
+            match &policy.target.java_ty {
+                crate::java_ir::JavaType::Named { name, .. }
+                | crate::java_ir::JavaType::Unknown(name) => RustExpr::Raw(format!(
+                    "{{ let _java_value = {}; &{} }}",
+                    emit::emit_expr(&expr),
+                    crate::slot_render::rust_name_for_java_named_type(name),
+                )),
+                _ => expr,
+            }
+        }
+        _ => expr,
     }
 }
 
@@ -946,6 +986,10 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             "{}.as_ref() as &dyn {trait_name}",
             emit::emit_expr(&expr)
         )),
+        Coercion::BorrowConcreteFacade { target_type } => RustExpr::Raw(format!(
+            "{{ let _java_value = {}; &{target_type} }}",
+            emit::emit_expr(&expr)
+        )),
         Coercion::BoxDynTrait { trait_name } => RustExpr::Raw(format!(
             "Box::new({}) as Box<dyn {trait_name}>",
             emit::emit_expr(&expr)
@@ -980,11 +1024,10 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             target_dispatch,
             policy,
         } => apply_unsupported_dispatch_coercion(expr, actual_dispatch, target_dispatch, policy),
-        Coercion::WidenPrimitive { to, .. } => RustExpr::Raw(format!(
-            "{} as {}",
-            emit::emit_expr(&expr),
-            rust_primitive_type_name_policy(*to).rust_name
-        )),
+        Coercion::WidenPrimitive { to, .. } => RustExpr::Cast {
+            expr: Box::new(expr),
+            ty: rust_primitive_type_name_policy(*to).rust_name.to_string(),
+        },
         Coercion::WrapOption => RustExpr::Raw(format!("Some({})", emit::emit_expr(&expr))),
         Coercion::UnwrapOption => RustExpr::Raw(format!("{}.unwrap()", emit::emit_expr(&expr))),
         Coercion::UnwrapOptionBorrowed => RustExpr::Raw(format!(

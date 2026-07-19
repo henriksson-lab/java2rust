@@ -12,8 +12,22 @@ pub fn render_method_reference(plan: &MethodReferencePlan) -> RustExpr {
         MethodReferencePlan::UnboundAccessor { method } => {
             RustExpr::Raw(format!("|value| value.{method}()"))
         }
-        MethodReferencePlan::CurrentReceiverMethod { method } => {
-            RustExpr::Raw(format!("|value| self.{method}(value)"))
+        MethodReferencePlan::CurrentReceiverMethod { method, arity } => {
+            let arg_count = arity.unwrap_or(1);
+            let args = (0..arg_count)
+                .map(|index| {
+                    if arg_count == 1 {
+                        "value".to_string()
+                    } else {
+                        format!("arg{index}")
+                    }
+                })
+                .collect::<Vec<_>>();
+            RustExpr::Raw(format!(
+                "|{}| self.{method}({})",
+                args.join(", "),
+                args.join(", ")
+            ))
         }
     }
 }

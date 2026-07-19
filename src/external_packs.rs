@@ -78,6 +78,7 @@ const DISQ_WRITE_PACK: &str = "org.disq_bio.disq";
 const INTEL_GKL_PACK: &str = "com.intel.gkl";
 const GUAVA_IMMUTABLE_COLLECT_PACK: &str = "com.google.common.collect";
 const GUAVA_CONCURRENT_PACK: &str = "com.google.common.util.concurrent";
+const BROAD_HELLBENDER_UTILS_PACK: &str = "org.broadinstitute.hellbender.utils";
 const BROAD_HTTP_PACK: &str = "org.broadinstitute.http.nio";
 const PICARD_VCF_PACK: &str = "picard.vcf";
 const JACKSON_DATABIND_PACK: &str = "com.fasterxml.jackson.databind";
@@ -3771,6 +3772,8 @@ const TRIBBLE_FEATURE_OWNED_TYPES: &[&str] = &[
     "htsjdk.tribble.Feature",
     "htsjdk.tribble.SimpleFeature",
     "htsjdk.tribble.NamedFeature",
+    "htsjdk.tribble.AbstractFeatureReader",
+    "AbstractFeatureReader",
     "htsjdk.tribble.FeatureReader",
     "FeatureReader",
     "htsjdk.tribble.bed.BEDFeature",
@@ -3781,6 +3784,28 @@ const TRIBBLE_FEATURE_OWNED_TYPES: &[&str] = &[
     "htsjdk.tribble.gff.Gff3BaseData",
     "Gff3BaseData",
 ];
+
+const TRIBBLE_FEATURE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
+    ExternalPackArgumentEffect {
+        receiver_type: "htsjdk.tribble.AbstractFeatureReader",
+        method_name: "getFeatureReader",
+        parameter_index: 1,
+        parameter_type: Some("String"),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+    },
+    ExternalPackArgumentEffect {
+        receiver_type: "AbstractFeatureReader",
+        method_name: "getFeatureReader",
+        parameter_index: 1,
+        parameter_type: Some("String"),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+    },
+];
+
 const TRIBBLE_INDEX_OWNED_TYPES: &[&str] = &[
     "htsjdk.tribble.index.IndexFactory",
     "IndexFactory",
@@ -4338,6 +4363,8 @@ const GUAVA_CONCURRENT_OWNED_TYPES: &[&str] = &[
     "com.google.common.util.concurrent.ThreadFactoryBuilder",
     "ThreadFactoryBuilder",
 ];
+const BROAD_HELLBENDER_UTILS_OWNED_TYPES: &[&str] =
+    &["org.broadinstitute.hellbender.utils.Utils", "Utils"];
 const BROAD_HTTP_OWNED_TYPES: &[&str] = &[
     "org.broadinstitute.http.nio.HttpFileSystemProviderSettings",
     "HttpFileSystemProviderSettings",
@@ -4350,6 +4377,8 @@ const BROAD_HTTP_OWNED_TYPES: &[&str] = &[
     "HttpFileSystemProvider",
     "org.broadinstitute.http.nio.HttpsFileSystemProvider",
     "HttpsFileSystemProvider",
+    "org.broadinstitute.hellbender.utils.gcs.BucketUtils",
+    "BucketUtils",
 ];
 const PICARD_VCF_OWNED_TYPES: &[&str] = &[
     "picard.vcf.GenotypeConcordanceStates",
@@ -4381,6 +4410,13 @@ const fn erased_object_strategy(type_name: &'static str) -> ExternalPackObjectSt
     ExternalPackObjectStrategy {
         type_name,
         strategy: ExternalPackObjectStrategyKind::ErasedObject,
+    }
+}
+
+const fn concrete_object_strategy(type_name: &'static str) -> ExternalPackObjectStrategy {
+    ExternalPackObjectStrategy {
+        type_name,
+        strategy: ExternalPackObjectStrategyKind::ConcreteStruct,
     }
 }
 
@@ -5163,6 +5199,8 @@ const BROAD_HTTP_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("HttpFileSystemProvider"),
     cloneable_final_capability("org.broadinstitute.http.nio.HttpsFileSystemProvider"),
     cloneable_final_capability("HttpsFileSystemProvider"),
+    cloneable_final_capability("org.broadinstitute.hellbender.utils.gcs.BucketUtils"),
+    cloneable_final_capability("BucketUtils"),
 ];
 
 const PICARD_VCF_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
@@ -9954,20 +9992,58 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "VCFHeader",
         NullabilityState::MaybeNull,
     ),
-    semantic_typed_effect(
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.AbstractFeatureReader",
+        "getFeatureReader",
+        6,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "FeatureReader",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "AbstractFeatureReader",
+        "getFeatureReader",
+        6,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "FeatureReader",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
         "htsjdk.tribble.FeatureReader",
         "query",
+        1,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "CloseableIterator<Object>",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_typed_effect(
+    semantic_typed_effect_with_arity(
         "FeatureReader",
         "query",
+        1,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "CloseableIterator<Object>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.FeatureReader",
+        "query",
+        3,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "CloseableTribbleIterator",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "FeatureReader",
+        "query",
+        3,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "CloseableTribbleIterator",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -10065,14 +10141,20 @@ const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "CloseableIterator<VariantContext>",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.variant.vcf.VCFHeader",
         "getGenotypeSamples",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<String>",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "VCFHeader",
         "getGenotypeSamples",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<String>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -10263,14 +10345,20 @@ const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::Unknown,
     ),
     semantic_mutator_effect("VariantContextWriter", "close", NullabilityState::Unknown),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.variant.vcf.VCFHeader",
         "getMetaDataInInputOrder",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Set<VCFHeaderLine>",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "VCFHeader",
         "getMetaDataInInputOrder",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Set<VCFHeaderLine>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_getter_effect(
@@ -10441,14 +10529,20 @@ const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getContigLines",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.variant.vcf.VCFHeader",
         "getSequenceDictionary",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMSequenceDictionary",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "VCFHeader",
         "getSequenceDictionary",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMSequenceDictionary",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_mutator_effect(
@@ -13177,60 +13271,118 @@ const SAM_REFERENCE_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const SAMTOOLS_UTIL_API_EFFECTS: &[ExternalPackApiEffect] = &[
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.util.Locatable",
         "getContig",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "Locatable",
         "getContig",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.util.Interval",
         "getContig",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect("Interval", "getContig", NullabilityState::DefinitelyNonNull),
-    semantic_getter_effect(
+    semantic_typed_effect(
+        "Interval",
+        "getContig",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "htsjdk.samtools.util.IntervalList",
         "getContig",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "IntervalList",
         "getContig",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.util.Locatable",
         "getStart",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect("Locatable", "getStart", NullabilityState::DefinitelyNonNull),
-    semantic_getter_effect(
+    semantic_typed_effect(
+        "Locatable",
+        "getStart",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "htsjdk.samtools.util.Interval",
         "getStart",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect("Interval", "getStart", NullabilityState::DefinitelyNonNull),
-    semantic_getter_effect(
+    semantic_typed_effect(
+        "Interval",
+        "getStart",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "htsjdk.samtools.util.IntervalList",
         "getStart",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "IntervalList",
         "getStart",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.util.Locatable",
         "getEnd",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect("Locatable", "getEnd", NullabilityState::DefinitelyNonNull),
+    semantic_typed_effect(
+        "Locatable",
+        "getEnd",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_boolean_getter_effect(
         "htsjdk.samtools.util.Locatable",
         "contains",
@@ -13269,20 +13421,36 @@ const SAMTOOLS_UTIL_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.util.Interval",
         "getEnd",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect("Interval", "getEnd", NullabilityState::DefinitelyNonNull),
-    semantic_getter_effect(
+    semantic_typed_effect(
+        "Interval",
+        "getEnd",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "htsjdk.samtools.util.IntervalList",
         "getEnd",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "IntervalList",
         "getEnd",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_getter_effect(
@@ -13391,6 +13559,18 @@ const SAMTOOLS_UTIL_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_getter_effect("IntervalList", "size", NullabilityState::DefinitelyNonNull),
+    semantic_mutator_effect(
+        "htsjdk.samtools.util.IntervalList",
+        "add",
+        NullabilityState::Unknown,
+    ),
+    semantic_mutator_effect("IntervalList", "add", NullabilityState::Unknown),
+    semantic_mutator_effect(
+        "htsjdk.samtools.util.IntervalList",
+        "write",
+        NullabilityState::Unknown,
+    ),
+    semantic_mutator_effect("IntervalList", "write", NullabilityState::Unknown),
     semantic_typed_effect(
         "htsjdk.samtools.util.IntervalList",
         "fromFile",
@@ -18482,8 +18662,8 @@ const TRIBBLE_INDEX_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
 ];
 
 const SAMTOOLS_UTIL_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
-    erased_object_strategy("htsjdk.samtools.util.Locatable"),
-    erased_object_strategy("Locatable"),
+    concrete_object_strategy("htsjdk.samtools.util.Locatable"),
+    concrete_object_strategy("Locatable"),
     erased_object_strategy("htsjdk.samtools.util.Interval"),
     erased_object_strategy("Interval"),
     erased_object_strategy("htsjdk.samtools.util.IntervalList"),
@@ -19727,6 +19907,42 @@ const GENOMICSDB_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
         "boolean",
     ),
     readonly_borrowed_argument("GenomicsDBUtils", "useGcsHdfsConnector", 0, "boolean"),
+    ExternalPackArgumentEffect {
+        receiver_type: "com.intel.genomicsdb.importer.model.ImportConfig",
+        method_name: "new",
+        parameter_index: 4,
+        parameter_type: Some("Set<VCFHeaderLine>"),
+        parameter_nullability: NullabilityState::DefinitelyNonNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Escapes,
+    },
+    ExternalPackArgumentEffect {
+        receiver_type: "ImportConfig",
+        method_name: "new",
+        parameter_index: 4,
+        parameter_type: Some("Set<VCFHeaderLine>"),
+        parameter_nullability: NullabilityState::DefinitelyNonNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Escapes,
+    },
+    ExternalPackArgumentEffect {
+        receiver_type: "com.intel.genomicsdb.importer.model.ImportConfig",
+        method_name: "new",
+        parameter_index: 6,
+        parameter_type: Some("Function"),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Escapes,
+    },
+    ExternalPackArgumentEffect {
+        receiver_type: "ImportConfig",
+        method_name: "new",
+        parameter_index: 6,
+        parameter_type: Some("Function"),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Escapes,
+    },
 ];
 
 const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
@@ -19746,6 +19962,24 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.genomicsdb.GenomicsDBUtils",
+        "getArrayColumnBounds",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "long[]",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "GenomicsDBUtils",
+        "getArrayColumnBounds",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "long[]",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -19795,11 +20029,43 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
+        "Coordinates.GenomicsDBColumn.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Coordinates.GenomicsDBColumn",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBColumn.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBColumn",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "com.intel.genomicsdb.model.Coordinates.ContigPosition",
         "newBuilder",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "ContigPosition.Builder",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Coordinates.ContigPosition.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Coordinates.ContigPosition",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "ContigPosition.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "ContigPosition",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -19827,6 +20093,22 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBExportConfiguration.ExportConfiguration",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "ExportConfiguration.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "ExportConfiguration",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "com.intel.genomicsdb.model.GenomicsDBImportConfiguration.ImportConfiguration",
         "newBuilder",
         ExternalApiRole::Getter,
@@ -19840,6 +20122,22 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "ImportConfiguration.Builder",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBImportConfiguration.ImportConfiguration.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBImportConfiguration.ImportConfiguration",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "ImportConfiguration.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "ImportConfiguration",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -19859,6 +20157,22 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
+        "GenomicsDBImportConfiguration.Partition.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBImportConfiguration.Partition",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Partition.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Partition",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "newBuilder",
         ExternalApiRole::Getter,
@@ -19875,6 +20189,30 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
+        "GenomicsDBVidMapProto.VidMappingPB",
+        "newBuilder",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBVidMapProto.VidMappingPB.Builder",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBVidMapProto.VidMappingPB.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBVidMapProto.VidMappingPB",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "VidMappingPB.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "VidMappingPB",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "toBuilder",
         ExternalApiRole::Getter,
@@ -19888,6 +20226,14 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "VidMappingPB.Builder",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBVidMapProto.VidMappingPB",
+        "toBuilder",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBVidMapProto.VidMappingPB.Builder",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -19900,6 +20246,14 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
     ),
     semantic_typed_effect(
         "VidMappingPB",
+        "getContigsList",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<GenomicsDBVidMapProto.Chromosome>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBVidMapProto.VidMappingPB",
         "getContigsList",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
@@ -20018,6 +20372,15 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::IndexedGetter,
         ReceiverMutabilityFact::ReadOnly,
         "FieldInfo",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "GenomicsDBVidMapProto.VidMappingPB",
+        "getFields",
+        1,
+        ExternalApiRole::IndexedGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBVidMapProto.FieldInfo",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -20030,6 +20393,14 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
     ),
     semantic_typed_effect(
         "VidMappingPB",
+        "getFieldsCount",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBVidMapProto.VidMappingPB",
         "getFieldsCount",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
@@ -20053,6 +20424,14 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
+        "GenomicsDBVidMapProto.FieldInfo",
+        "getName",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB",
         "newBuilder",
         ExternalApiRole::Getter,
@@ -20066,6 +20445,22 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "FieldLengthDescriptorComponentPB.Builder",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "FieldLengthDescriptorComponentPB.Builder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "FieldLengthDescriptorComponentPB",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -20184,41 +20579,62 @@ const GENOMICSDB_MODELED_APIS: &[ExternalPackModeledApi] = &[
         "newBuilder",
     ),
     modeled_semantic("GenomicsDBColumn", "newBuilder"),
+    modeled_semantic("Coordinates.GenomicsDBColumn.Builder", "build"),
+    modeled_semantic("GenomicsDBColumn.Builder", "build"),
     modeled_semantic(
         "com.intel.genomicsdb.model.Coordinates.ContigPosition",
         "newBuilder",
     ),
     modeled_semantic("ContigPosition", "newBuilder"),
+    modeled_semantic("Coordinates.ContigPosition.Builder", "build"),
+    modeled_semantic("ContigPosition.Builder", "build"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBExportConfiguration.ExportConfiguration",
         "newBuilder",
     ),
     modeled_semantic("ExportConfiguration", "newBuilder"),
     modeled_semantic(
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+        "build",
+    ),
+    modeled_semantic("ExportConfiguration.Builder", "build"),
+    modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBImportConfiguration.ImportConfiguration",
         "newBuilder",
     ),
     modeled_semantic("ImportConfiguration", "newBuilder"),
     modeled_semantic(
+        "GenomicsDBImportConfiguration.ImportConfiguration.Builder",
+        "build",
+    ),
+    modeled_semantic("ImportConfiguration.Builder", "build"),
+    modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBImportConfiguration.Partition",
         "newBuilder",
     ),
     modeled_semantic("Partition", "newBuilder"),
+    modeled_semantic("GenomicsDBImportConfiguration.Partition.Builder", "build"),
+    modeled_semantic("Partition.Builder", "build"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "newBuilder",
     ),
     modeled_semantic("VidMappingPB", "newBuilder"),
+    modeled_semantic("GenomicsDBVidMapProto.VidMappingPB", "newBuilder"),
+    modeled_semantic("GenomicsDBVidMapProto.VidMappingPB.Builder", "build"),
+    modeled_semantic("VidMappingPB.Builder", "build"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "toBuilder",
     ),
     modeled_semantic("VidMappingPB", "toBuilder"),
+    modeled_semantic("GenomicsDBVidMapProto.VidMappingPB", "toBuilder"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "getContigsList",
     ),
     modeled_semantic("VidMappingPB", "getContigsList"),
+    modeled_semantic("GenomicsDBVidMapProto.VidMappingPB", "getContigsList"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
         "getName",
@@ -20254,21 +20670,29 @@ const GENOMICSDB_MODELED_APIS: &[ExternalPackModeledApi] = &[
         "getFields",
     ),
     modeled_semantic("VidMappingPB", "getFields"),
+    modeled_semantic("GenomicsDBVidMapProto.VidMappingPB", "getFields"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "getFieldsCount",
     ),
     modeled_semantic("VidMappingPB", "getFieldsCount"),
+    modeled_semantic("GenomicsDBVidMapProto.VidMappingPB", "getFieldsCount"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.FieldInfo",
         "getName",
     ),
     modeled_semantic("FieldInfo", "getName"),
+    modeled_semantic("GenomicsDBVidMapProto.FieldInfo", "getName"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB",
         "newBuilder",
     ),
     modeled_semantic("FieldLengthDescriptorComponentPB", "newBuilder"),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB.Builder",
+        "build",
+    ),
+    modeled_semantic("FieldLengthDescriptorComponentPB.Builder", "build"),
     modeled_semantic(
         "com.intel.genomicsdb.GenomicsDBImporter",
         "getProtobufVidMapping",
@@ -21283,6 +21707,47 @@ const GUAVA_IMMUTABLE_COLLECT_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("ImmutableMap.Builder", "build"),
 ];
 
+const BROAD_HELLBENDER_UTILS_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
+    readonly_borrowed_argument(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "validate",
+        0,
+        "boolean",
+    ),
+    readonly_borrowed_argument("Utils", "validate", 0, "boolean"),
+    readonly_borrowed_argument(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "validateArg",
+        0,
+        "boolean",
+    ),
+    readonly_borrowed_argument("Utils", "validateArg", 0, "boolean"),
+];
+
+const BROAD_HELLBENDER_UTILS_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_side_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "validate",
+        2,
+        NullabilityState::Unknown,
+    ),
+    semantic_side_effect_with_arity("Utils", "validate", 2, NullabilityState::Unknown),
+    semantic_side_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "validateArg",
+        2,
+        NullabilityState::Unknown,
+    ),
+    semantic_side_effect_with_arity("Utils", "validateArg", 2, NullabilityState::Unknown),
+];
+
+const BROAD_HELLBENDER_UTILS_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "validate"),
+    modeled_semantic("Utils", "validate"),
+    modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "validateArg"),
+    modeled_semantic("Utils", "validateArg"),
+];
+
 const BROAD_HTTP_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
     modeled_semantic_constructor(
         "org.broadinstitute.http.nio.HttpFileSystemProviderSettings",
@@ -21298,6 +21763,24 @@ const BROAD_HTTP_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
 ];
 
 const BROAD_HTTP_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.gcs.BucketUtils",
+        "getPrefetchingWrapper",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Function<SeekableByteChannel, SeekableByteChannel>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "BucketUtils",
+        "getPrefetchingWrapper",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Function<SeekableByteChannel, SeekableByteChannel>",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_typed_effect(
         "org.broadinstitute.http.nio.HttpFileSystemProviderSettings",
         "redirect",
@@ -21317,6 +21800,11 @@ const BROAD_HTTP_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const BROAD_HTTP_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.gcs.BucketUtils",
+        "getPrefetchingWrapper",
+    ),
+    modeled_semantic("BucketUtils", "getPrefetchingWrapper"),
     modeled_semantic(
         "org.broadinstitute.http.nio.HttpFileSystemProviderSettings",
         "redirect",
@@ -22989,6 +23477,8 @@ const TRIBBLE_FEATURE_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("BEDFeature", "getName"),
     modeled_semantic("htsjdk.tribble.bed.BEDFeature", "getScore"),
     modeled_semantic("BEDFeature", "getScore"),
+    modeled_semantic("htsjdk.tribble.AbstractFeatureReader", "getFeatureReader"),
+    modeled_semantic("AbstractFeatureReader", "getFeatureReader"),
     modeled_semantic("htsjdk.tribble.FeatureReader", "getHeader"),
     modeled_semantic("FeatureReader", "getHeader"),
     modeled_semantic("htsjdk.tribble.FeatureReader", "query"),
@@ -23056,6 +23546,10 @@ const SAMTOOLS_UTIL_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("Interval", "size"),
     modeled_semantic("htsjdk.samtools.util.IntervalList", "size"),
     modeled_semantic("IntervalList", "size"),
+    modeled_semantic("htsjdk.samtools.util.IntervalList", "add"),
+    modeled_semantic("IntervalList", "add"),
+    modeled_semantic("htsjdk.samtools.util.IntervalList", "write"),
+    modeled_semantic("IntervalList", "write"),
     modeled_semantic("htsjdk.samtools.util.IntervalList", "fromFile"),
     modeled_semantic("IntervalList", "fromFile"),
     modeled_semantic("htsjdk.samtools.util.IntervalTree", "size"),
@@ -23566,7 +24060,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             object_safety: NO_OBJECT_SAFETY,
             type_capabilities: TRIBBLE_FEATURE_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
-            argument_effects: NO_ARGUMENT_EFFECTS,
+            argument_effects: TRIBBLE_FEATURE_ARGUMENT_EFFECTS,
             exceptions: NO_EXCEPTIONS,
             api_effects: TRIBBLE_FEATURE_API_EFFECTS,
             modeled_apis: TRIBBLE_FEATURE_MODELED_APIS,
@@ -24335,6 +24829,25 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             unsupported_apis: &[],
         },
         ExternalPackManifest {
+            pack_name: BROAD_HELLBENDER_UTILS_PACK,
+            owned_type_patterns: BROAD_HELLBENDER_UTILS_OWNED_TYPES,
+            mode: ExternalLibraryMode::ExternalFactModel,
+            default_coverage: ExternalApiCoverage::Semantic,
+            rust_target: Some("crate::external::broad::hellbender::utils"),
+            object_strategies: &[],
+            closed_hierarchy: NO_CLOSED_HIERARCHY,
+            object_safety: NO_OBJECT_SAFETY,
+            type_capabilities: NO_TYPE_CAPABILITIES,
+            field_nullability: NO_FIELD_NULLABILITY,
+            argument_effects: BROAD_HELLBENDER_UTILS_ARGUMENT_EFFECTS,
+            exceptions: NO_EXCEPTIONS,
+            api_effects: BROAD_HELLBENDER_UTILS_API_EFFECTS,
+            modeled_apis: BROAD_HELLBENDER_UTILS_MODELED_APIS,
+            modeled_constructors: &[],
+            modeled_fields: NO_MODELED_FIELDS,
+            unsupported_apis: &[],
+        },
+        ExternalPackManifest {
             pack_name: BROAD_HTTP_PACK,
             owned_type_patterns: BROAD_HTTP_OWNED_TYPES,
             mode: ExternalLibraryMode::ExternalFactModel,
@@ -24526,6 +25039,7 @@ pub fn builtin_external_library_packs() -> FactSet {
     facts.extend_from(intel_gkl_pack_facts());
     facts.extend_from(guava_immutable_collect_pack_facts());
     facts.extend_from(guava_concurrent_pack_facts());
+    facts.extend_from(broad_hellbender_utils_pack_facts());
     facts.extend_from(broad_http_pack_facts());
     facts.extend_from(picard_vcf_pack_facts());
     facts.extend_from(jackson_databind_pack_facts());
@@ -24705,6 +25219,10 @@ fn builtin_external_pack_fact_sets() -> &'static [(String, FactSet)] {
                 GUAVA_CONCURRENT_PACK.to_string(),
                 guava_concurrent_pack_facts(),
             ),
+            (
+                BROAD_HELLBENDER_UTILS_PACK.to_string(),
+                broad_hellbender_utils_pack_facts(),
+            ),
             (BROAD_HTTP_PACK.to_string(), broad_http_pack_facts()),
             (PICARD_VCF_PACK.to_string(), picard_vcf_pack_facts()),
             (
@@ -24876,20 +25394,36 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
 fn external_receiver_lookup_aliases(receiver_type: &str) -> Vec<String> {
     let canonical = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
     let snake = crate::parser::to_snake_case(receiver_type);
-    let simple = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
-    let simple_canonical = crate::stdlib::canonical_external_receiver_type_key(simple);
-    let simple_snake = crate::parser::to_snake_case(simple);
-    let mut aliases = vec![
-        receiver_type.to_string(),
-        canonical,
-        snake,
-        simple.to_string(),
-        simple_canonical,
-        simple_snake,
-    ];
+    let mut aliases = vec![receiver_type.to_string(), canonical.clone(), snake];
+    if let Some(simple) = package_qualified_simple_alias(receiver_type) {
+        aliases.extend([
+            simple.to_string(),
+            crate::stdlib::canonical_external_receiver_type_key(simple),
+            crate::parser::to_snake_case(simple),
+        ]);
+    }
+    if let Some(simple) = package_qualified_simple_alias(&canonical) {
+        aliases.extend([
+            simple.to_string(),
+            crate::stdlib::canonical_external_receiver_type_key(simple),
+            crate::parser::to_snake_case(simple),
+        ]);
+    }
     aliases.sort();
     aliases.dedup();
     aliases
+}
+
+fn package_qualified_simple_alias(type_name: &str) -> Option<&str> {
+    let (prefix, simple) = type_name.rsplit_once('.')?;
+    if prefix
+        .split('.')
+        .any(|segment| segment.chars().next().is_some_and(char::is_lowercase))
+    {
+        Some(simple)
+    } else {
+        None
+    }
 }
 
 fn external_field_type_lookup_aliases(type_name: &str) -> Vec<String> {
@@ -25625,6 +26159,13 @@ pub fn guava_concurrent_pack_facts() -> FactSet {
 pub fn broad_http_pack_facts() -> FactSet {
     let mut facts = FactSet::default();
     manifest_by_name(BROAD_HTTP_PACK).apply_boundary_facts(&mut facts);
+
+    facts
+}
+
+pub fn broad_hellbender_utils_pack_facts() -> FactSet {
+    let mut facts = FactSet::default();
+    manifest_by_name(BROAD_HELLBENDER_UTILS_PACK).apply_boundary_facts(&mut facts);
 
     facts
 }

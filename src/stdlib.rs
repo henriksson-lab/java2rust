@@ -1,10 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::facts::FactSet;
-use crate::facts::{ExternalApiRole, FactProvenance, NullabilityState, ReceiverMutabilityFact};
-use crate::java_ir::{Block, Expr, JavaType, Member, PrimitiveType, Program, Stmt, WildcardBound};
+use crate::facts::{
+    ExternalApiRole, ExternalArgumentAliasPolicy, FactProvenance, HierarchyStrategy,
+    NullabilityState, ReceiverMutabilityFact,
+};
+use crate::java_ir::{
+    Block, Expr, JavaType, Member, MethodDecl, PrimitiveType, Program, Stmt, TypeDecl,
+    WildcardBound,
+};
+use crate::shape_projection::{
+    apply_borrowed_sequence_content_projection, apply_borrowed_string_content_projection,
+};
 use crate::slot_render::{rust_name_for_java_named_type, rust_type_for_slot_with_facts};
-use crate::slot_shape::RustSlotShape;
+use crate::slot_shape::{MutabilityShape, OwnershipShape, RustSlotShape};
 
 pub fn is_known_jdk_shadow_sensitive_owner(name: &str) -> bool {
     matches!(name, "Objects" | "Collections" | "Integer" | "Paths")
@@ -323,6 +332,74 @@ pub fn java_collection_kind_for_type(ty: &JavaType) -> Option<JavaCollectionKind
     }
 }
 
+pub fn native_collection_constructor_kind_for_type(ty: &JavaType) -> Option<JavaCollectionKind> {
+    let kind = java_collection_kind_for_type(ty)?;
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            let simple = canonical_external_receiver_type_key(name);
+            let simple = simple.rsplit('.').next().unwrap_or(simple.as_str());
+            if matches!(simple, "IntervalList") {
+                None
+            } else {
+                Some(kind)
+            }
+        }
+        _ => None,
+    }
+}
+
+pub fn native_collection_receiver_kind_for_type(ty: &JavaType) -> Option<JavaCollectionKind> {
+    let kind = java_collection_kind_for_type(ty)?;
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            let simple = canonical_external_receiver_type_key(name);
+            let simple = simple.rsplit('.').next().unwrap_or(simple.as_str());
+            if matches!(simple, "IntervalList") {
+                None
+            } else {
+                Some(kind)
+            }
+        }
+        _ => None,
+    }
+}
+
+pub fn native_collection_receiver_mutates(ty: &JavaType, method_name: &str) -> bool {
+    let Some(kind) = native_collection_receiver_kind_for_type(ty) else {
+        return false;
+    };
+    match kind {
+        JavaCollectionKind::List | JavaCollectionKind::Set => matches!(
+            method_name,
+            "add"
+                | "addAll"
+                | "add_all"
+                | "remove"
+                | "removeAll"
+                | "remove_all"
+                | "removeIf"
+                | "remove_if"
+                | "clear"
+                | "insert"
+                | "extend"
+                | "push"
+                | "retain"
+        ),
+        JavaCollectionKind::Map => matches!(
+            method_name,
+            "put"
+                | "putAll"
+                | "put_all"
+                | "remove"
+                | "removeAll"
+                | "remove_all"
+                | "clear"
+                | "insert"
+                | "extend"
+        ),
+    }
+}
+
 pub fn java_map_type_args(ty: &JavaType) -> Option<(&JavaType, &JavaType)> {
     let JavaType::Named { name, args } = ty else {
         return None;
@@ -529,6 +606,19 @@ pub fn known_external_method_return_type(
     name: &str,
     arg_count: usize,
 ) -> Option<JavaType> {
+    if arg_count == 1
+        && name == "submit"
+        && receiver_type
+            .map(canonical_external_receiver_type_key)
+            .is_some_and(|receiver| {
+                receiver.rsplit('.').next().unwrap_or(&receiver) == "ExecutorService"
+            })
+    {
+        return Some(JavaType::Named {
+            name: "Future".to_string(),
+            args: Vec::new(),
+        });
+    }
     if arg_count == 0 {
         if is_string_domain_getter(name) {
             return Some(JavaType::String);
@@ -664,12 +754,29 @@ pub fn known_external_method_return_type(
             Some(JavaType::String)
         }
         (Some(owner), "join", _) if is_string_join_receiver(owner) => Some(JavaType::String),
+        (Some(owner), "parser", 0)
+            if canonical_external_receiver_type_key(owner)
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple == "JsonFormat") =>
+        {
+            Some(JavaType::Named {
+                name: "Parser".to_string(),
+                args: Vec::new(),
+            })
+        }
         (Some("StringUtils"), "isEmpty", 1) => Some(JavaType::Primitive(PrimitiveType::Boolean)),
         (Some("StringUtils"), "split", 2) => Some(JavaType::Array(Box::new(JavaType::String))),
         (Some("Utils"), "split", 2 | 3) => Some(JavaType::Named {
             name: "List".to_string(),
             args: vec![JavaType::String],
         }),
+        (Some(owner), "writeString", 2 | 3) if is_java_nio_files_receiver(owner) => {
+            Some(JavaType::Named {
+                name: "Path".to_string(),
+                args: Vec::new(),
+            })
+        }
         (Some("IOUtils"), "getPath", 1) => Some(JavaType::Named {
             name: "Path".to_string(),
             args: Vec::new(),
@@ -1082,8 +1189,28 @@ fn is_known_string_constant_field(receiver: &str, field_name: &str) -> bool {
                 )
         }
         "FileExtensions" => true,
-        _ => false,
+        _ => is_conventionally_string_constant_field(&field_name),
     }
+}
+
+fn is_conventionally_string_constant_field(field_name: &str) -> bool {
+    field_name.ends_with("_KEY")
+        || field_name.ends_with("_FIELD")
+        || field_name.ends_with("_NAME")
+        || field_name.ends_with("_LONG_NAME")
+        || field_name.ends_with("_SHORT_NAME")
+        || field_name.ends_with("_DELIM")
+        || field_name.ends_with("_DELIMITER")
+        || field_name.ends_with("_SEPARATOR")
+        || field_name.ends_with("_PREFIX")
+        || field_name.ends_with("_SUFFIX")
+        || field_name.ends_with("_REGEX")
+        || field_name.ends_with("_PATTERN")
+        || field_name.ends_with("_EXTENSION")
+        || field_name.ends_with("_PATH")
+        || field_name.ends_with("_URI")
+        || field_name.ends_with("_URL")
+        || matches!(field_name, "NAME" | "DESCRIPTION" | "DOC" | "USAGE")
 }
 
 fn known_argument_sensitive_external_method_return_type(
@@ -1729,6 +1856,13 @@ fn is_path_like_receiver(receiver: &str) -> bool {
     matches!(receiver.rsplit('.').next().unwrap_or(receiver), "Path")
 }
 
+fn is_java_nio_files_receiver(receiver: &str) -> bool {
+    matches!(
+        canonical_external_receiver_type_key(receiver).as_str(),
+        "Files" | "java.nio.file.Files" | "JavaNioFileFiles"
+    )
+}
+
 fn is_enum_like_external_constant(receiver: &str, field_name: &str) -> bool {
     let original_field_name = field_name;
     let field_name = canonical_external_field_name(field_name);
@@ -1755,6 +1889,20 @@ fn is_enum_like_external_constant(receiver: &str, field_name: &str) -> bool {
         "VCFHeaderLineType" => is_vcf_header_line_type_constant(original_field_name),
         _ => false,
     }
+}
+
+fn is_self_typed_external_enum_constant_field(
+    receiver: &str,
+    field_name: &str,
+    field_type: &JavaType,
+) -> bool {
+    let JavaType::Named { name, args } = field_type else {
+        return false;
+    };
+    args.is_empty()
+        && canonical_external_receiver_type_key(name)
+            == canonical_external_receiver_type_key(receiver)
+        && is_enum_constant_name(&canonical_external_field_name(field_name))
 }
 
 fn conservative_external_enum_receiver_type_name(
@@ -1815,6 +1963,22 @@ fn is_conservative_static_data_constant(field_name: &str) -> bool {
 fn upper_camel_from_snake(name: &str) -> String {
     let mut out = String::new();
     let mut uppercase_next = true;
+    for ch in name.chars() {
+        if ch == '_' {
+            uppercase_next = true;
+        } else if uppercase_next {
+            out.push(ch.to_ascii_uppercase());
+            uppercase_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn lower_camel_from_snake(name: &str) -> String {
+    let mut out = String::new();
+    let mut uppercase_next = false;
     for ch in name.chars() {
         if ch == '_' {
             uppercase_next = true;
@@ -1908,6 +2072,7 @@ fn external_receiver_type_key(receiver_type: &JavaType) -> Option<String> {
 fn is_boolean_external_method(name: &str, arg_count: usize) -> bool {
     is_java_bean_boolean_getter(name, arg_count)
         || is_contains_predicate(name, arg_count)
+        || (arg_count == 0 && name.ends_with("Specified"))
         || matches!(
             (name, arg_count),
             ("isEmpty", 0)
@@ -2581,15 +2746,23 @@ pub fn external_api_facade_support_items(
     program: &Program,
     facts: &FactSet,
 ) -> Vec<crate::rust_ir::RustItem> {
-    external_api_facade_support_items_with_local_type_program(program, facts, program)
+    external_api_facade_support_items_with_local_type_program(
+        program,
+        facts,
+        program,
+        &Program::default(),
+    )
 }
 
 pub fn external_api_facade_support_items_with_local_type_program(
     program: &Program,
     facts: &FactSet,
     local_type_program: &Program,
+    source_summary_type_program: &Program,
 ) -> Vec<crate::rust_ir::RustItem> {
     let local_types = local_type_keys_for_program(local_type_program);
+    let emitted_local_types = local_type_keys_for_program(program);
+    let source_summary_types = local_type_keys_for_program(source_summary_type_program);
     let used_calls = collect_program_call_arities(program);
     let used_constructors = collect_program_constructor_arities(program);
     let imported_static_owner_calls = collect_imported_static_owner_calls(program);
@@ -2597,16 +2770,46 @@ pub fn external_api_facade_support_items_with_local_type_program(
     let mut support = ExternalApiFacadeSupport::default();
     support.add_nested_type_aliases_from_fields(facts, &local_types);
     support.add_declared_external_types(program, &local_types);
+    support.add_declared_source_summary_types(program, &source_summary_types, &emitted_local_types);
+    while support.add_source_summary_method_surfaces(
+        source_summary_type_program,
+        &source_summary_types,
+        &emitted_local_types,
+        &used_calls,
+    ) {}
+    support.add_emitted_source_summary_super_method_surfaces(
+        program,
+        source_summary_type_program,
+        &source_summary_types,
+        &used_calls,
+    );
+    support.add_inherited_support_field_types(program, local_type_program, &emitted_local_types);
     support.add_used_external_constructors(facts, &used_constructors, &local_types);
     support.add_used_external_api_facts(
         facts,
         &used_calls,
         &local_types,
+        &source_summary_types,
+        &emitted_local_types,
         &imported_static_owner_calls,
     );
+    while support.add_source_summary_method_surfaces(
+        source_summary_type_program,
+        &source_summary_types,
+        &emitted_local_types,
+        &used_calls,
+    ) {}
+    support.add_emitted_source_summary_super_method_surfaces(
+        program,
+        source_summary_type_program,
+        &source_summary_types,
+        &used_calls,
+    );
     support.add_imported_static_owner_calls(facts, &imported_static_owner_calls, &local_types);
-    support.add_builder_surface_from_used_calls(&used_calls);
+    support.add_known_domain_getter_surfaces_from_used_calls(&used_calls);
+    support.add_builder_surface_from_used_calls(facts, &used_calls);
     support.add_external_field_surfaces(facts, &local_types);
+    support.add_external_dyn_trait_surfaces(facts);
     support.into_items()
 }
 
@@ -2627,9 +2830,123 @@ fn collect_local_type_keys(ty: &crate::java_ir::TypeDecl, types: &mut BTreeSet<S
     }
 }
 
+fn find_program_type_by_key<'a>(program: &'a Program, type_key: &str) -> Option<&'a TypeDecl> {
+    program
+        .types
+        .iter()
+        .find_map(|ty| find_type_by_key_in_type(ty, type_key))
+}
+
+fn find_type_by_key_in_type<'a>(ty: &'a TypeDecl, type_key: &str) -> Option<&'a TypeDecl> {
+    if canonical_external_receiver_type_key(&ty.name) == type_key {
+        return Some(ty);
+    }
+    ty.members.iter().find_map(|member| match member {
+        Member::Type(nested) => find_type_by_key_in_type(nested, type_key),
+        _ => None,
+    })
+}
+
+fn source_summary_method_hierarchy<'a>(
+    ty: &'a TypeDecl,
+    program: &'a Program,
+) -> Vec<&'a MethodDecl> {
+    let mut methods = Vec::new();
+    let mut current = Some(ty);
+    let mut visited = BTreeSet::new();
+    while let Some(ty) = current {
+        let type_key = canonical_external_receiver_type_key(&ty.name);
+        if !visited.insert(type_key) {
+            break;
+        }
+        methods.extend(ty.members.iter().filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        }));
+        current = ty
+            .extends
+            .as_deref()
+            .map(canonical_external_receiver_type_key)
+            .and_then(|super_key| find_program_type_by_key(program, &super_key));
+    }
+    methods
+}
+
+fn source_summary_supertypes_for_emitted_type<'a>(
+    ty: &'a TypeDecl,
+    emitted_program: &'a Program,
+    source_summary_program: &'a Program,
+    source_summary_types: &BTreeSet<String>,
+) -> Vec<&'a TypeDecl> {
+    let mut out = Vec::new();
+    let mut current = ty
+        .extends
+        .as_deref()
+        .map(canonical_external_receiver_type_key);
+    let mut visited = BTreeSet::new();
+    while let Some(type_key) = current {
+        if !visited.insert(type_key.clone()) {
+            break;
+        }
+        if source_summary_types.contains(&type_key) {
+            if let Some(summary_ty) = find_program_type_by_key(source_summary_program, &type_key) {
+                out.push(summary_ty);
+                current = summary_ty
+                    .extends
+                    .as_deref()
+                    .map(canonical_external_receiver_type_key);
+            } else {
+                break;
+            }
+        } else if let Some(local_ty) = find_program_type_by_key(emitted_program, &type_key) {
+            current = local_ty
+                .extends
+                .as_deref()
+                .map(canonical_external_receiver_type_key);
+        } else {
+            break;
+        }
+    }
+    out
+}
+
+fn source_method_hierarchy_contains(
+    program: &Program,
+    ty: &TypeDecl,
+    method_name: &str,
+    arity: usize,
+) -> bool {
+    let mut current = Some(ty);
+    let mut visited = BTreeSet::new();
+    while let Some(ty) = current {
+        let type_key = canonical_external_receiver_type_key(&ty.name);
+        if !visited.insert(type_key) {
+            break;
+        }
+        if ty.members.iter().any(|member| {
+            matches!(
+                member,
+                Member::Method(method)
+                    if method.name == method_name && method.params.len() == arity
+            )
+        }) {
+            return true;
+        }
+        current = ty
+            .extends
+            .as_deref()
+            .map(canonical_external_receiver_type_key)
+            .and_then(|super_key| find_program_type_by_key(program, &super_key));
+    }
+    false
+}
+
 #[derive(Default)]
 struct ExternalApiFacadeSupport {
     opaque_types: BTreeSet<String>,
+    trait_type_names: BTreeSet<String>,
+    traits: BTreeMap<String, ExternalFacadeTrait>,
+    trait_impls: BTreeMap<String, BTreeSet<String>>,
     aliases: BTreeMap<String, String>,
     fields: BTreeMap<String, BTreeMap<String, String>>,
     impls: BTreeMap<String, BTreeSet<String>>,
@@ -2642,6 +2959,12 @@ struct ExternalErasedObjectMethod {
     name: String,
     arg_count: usize,
     return_type: String,
+}
+
+#[derive(Clone)]
+struct ExternalFacadeTrait {
+    trait_name: String,
+    methods: BTreeSet<String>,
 }
 
 impl ExternalApiFacadeSupport {
@@ -2701,6 +3024,332 @@ impl ExternalApiFacadeSupport {
                     self.add_declared_external_types_from_type(nested, local_types)
                 }
                 Member::Unsupported { .. } => {}
+            }
+        }
+    }
+
+    fn add_declared_source_summary_types(
+        &mut self,
+        program: &Program,
+        source_summary_types: &BTreeSet<String>,
+        emitted_local_types: &BTreeSet<String>,
+    ) {
+        for ty in &program.types {
+            self.add_declared_source_summary_types_from_type(
+                ty,
+                source_summary_types,
+                emitted_local_types,
+            );
+        }
+    }
+
+    fn add_declared_source_summary_types_from_type(
+        &mut self,
+        ty: &crate::java_ir::TypeDecl,
+        source_summary_types: &BTreeSet<String>,
+        emitted_local_types: &BTreeSet<String>,
+    ) {
+        for bound in &ty.type_param_bounds {
+            if let Some(bound) = bound {
+                self.add_source_summary_java_type(bound, source_summary_types, emitted_local_types);
+            }
+        }
+        for member in &ty.members {
+            match member {
+                Member::Field(field) => self.add_source_summary_java_type(
+                    &field.ty,
+                    source_summary_types,
+                    emitted_local_types,
+                ),
+                Member::Method(method) => {
+                    self.add_source_summary_java_type(
+                        &method.return_type,
+                        source_summary_types,
+                        emitted_local_types,
+                    );
+                    for bound in &method.type_param_bounds {
+                        if let Some(bound) = bound {
+                            self.add_source_summary_java_type(
+                                bound,
+                                source_summary_types,
+                                emitted_local_types,
+                            );
+                        }
+                    }
+                    for thrown in &method.throws {
+                        self.add_source_summary_java_type(
+                            thrown,
+                            source_summary_types,
+                            emitted_local_types,
+                        );
+                    }
+                    for param in &method.params {
+                        self.add_source_summary_java_type(
+                            &param.ty,
+                            source_summary_types,
+                            emitted_local_types,
+                        );
+                    }
+                }
+                Member::Constructor(constructor) => {
+                    for bound in &constructor.type_param_bounds {
+                        if let Some(bound) = bound {
+                            self.add_source_summary_java_type(
+                                bound,
+                                source_summary_types,
+                                emitted_local_types,
+                            );
+                        }
+                    }
+                    for thrown in &constructor.throws {
+                        self.add_source_summary_java_type(
+                            thrown,
+                            source_summary_types,
+                            emitted_local_types,
+                        );
+                    }
+                    for param in &constructor.params {
+                        self.add_source_summary_java_type(
+                            &param.ty,
+                            source_summary_types,
+                            emitted_local_types,
+                        );
+                    }
+                }
+                Member::Type(nested) => self.add_declared_source_summary_types_from_type(
+                    nested,
+                    source_summary_types,
+                    emitted_local_types,
+                ),
+                Member::Unsupported { .. } => {}
+            }
+        }
+    }
+
+    fn add_source_summary_java_type(
+        &mut self,
+        java_type: &JavaType,
+        source_summary_types: &BTreeSet<String>,
+        emitted_local_types: &BTreeSet<String>,
+    ) {
+        match java_type {
+            JavaType::Named { name, args } => {
+                let type_key = canonical_external_receiver_type_key(name);
+                if source_summary_types.contains(&type_key)
+                    && !emitted_local_types.contains(&type_key)
+                {
+                    self.add_opaque_type(rust_name_for_java_named_type(&type_key));
+                }
+                for arg in args {
+                    self.add_source_summary_java_type(
+                        arg,
+                        source_summary_types,
+                        emitted_local_types,
+                    );
+                }
+            }
+            JavaType::Array(inner) => {
+                self.add_source_summary_java_type(inner, source_summary_types, emitted_local_types)
+            }
+            JavaType::Wildcard(Some(bound)) => match bound {
+                WildcardBound::Extends(inner) | WildcardBound::Super(inner) => self
+                    .add_source_summary_java_type(inner, source_summary_types, emitted_local_types),
+            },
+            JavaType::Primitive(_)
+            | JavaType::Void
+            | JavaType::String
+            | JavaType::Wildcard(None)
+            | JavaType::Unknown(_) => {}
+        }
+    }
+
+    fn add_source_summary_method_surfaces(
+        &mut self,
+        source_summary_program: &Program,
+        source_summary_types: &BTreeSet<String>,
+        emitted_local_types: &BTreeSet<String>,
+        used_calls: &BTreeMap<String, BTreeSet<usize>>,
+    ) -> bool {
+        let mut changed = false;
+        for type_key in source_summary_types {
+            if emitted_local_types.contains(type_key) {
+                continue;
+            }
+            let owner = rust_name_for_java_named_type(type_key);
+            if !valid_external_facade_type_ident(&owner) || !self.opaque_types.contains(&owner) {
+                continue;
+            }
+            let Some(ty) = find_program_type_by_key(source_summary_program, type_key) else {
+                continue;
+            };
+            for method in source_summary_method_hierarchy(ty, source_summary_program) {
+                let rust_method = crate::parser::to_snake_case(&method.name);
+                if !used_calls
+                    .get(&rust_method)
+                    .is_some_and(|arities| arities.contains(&method.params.len()))
+                {
+                    continue;
+                }
+                let return_type = external_facade_return_type(&method.return_type);
+                let opaque_count_before = self.opaque_types.len();
+                self.add_source_summary_java_type(
+                    &method.return_type,
+                    source_summary_types,
+                    emitted_local_types,
+                );
+                self.add_java_type(&method.return_type);
+                for param in &method.params {
+                    self.add_source_summary_java_type(
+                        &param.ty,
+                        source_summary_types,
+                        emitted_local_types,
+                    );
+                    self.add_java_type(&param.ty);
+                }
+                changed |= self.opaque_types.len() != opaque_count_before;
+                let method_body = external_facade_instance_method(
+                    &rust_method,
+                    method.params.len(),
+                    &return_type,
+                );
+                if valid_external_facade_type_ident(&return_type) {
+                    self.add_opaque_type(return_type.clone());
+                }
+                if self.has_method_signature(&owner, &rust_method, method.params.len())
+                    && !self.replace_weak_method_return(
+                        &owner,
+                        &rust_method,
+                        method.params.len(),
+                        &method_body,
+                    )
+                {
+                    continue;
+                }
+                changed = true;
+                self.add_method(owner.clone(), method_body);
+            }
+        }
+        changed
+    }
+
+    fn add_emitted_source_summary_super_method_surfaces(
+        &mut self,
+        program: &Program,
+        source_summary_program: &Program,
+        source_summary_types: &BTreeSet<String>,
+        used_calls: &BTreeMap<String, BTreeSet<usize>>,
+    ) {
+        for ty in &program.types {
+            self.add_emitted_source_summary_super_method_surfaces_for_type(
+                ty,
+                program,
+                source_summary_program,
+                source_summary_types,
+                used_calls,
+            );
+        }
+    }
+
+    fn add_emitted_source_summary_super_method_surfaces_for_type(
+        &mut self,
+        ty: &TypeDecl,
+        program: &Program,
+        source_summary_program: &Program,
+        source_summary_types: &BTreeSet<String>,
+        used_calls: &BTreeMap<String, BTreeSet<usize>>,
+    ) {
+        let type_key = canonical_external_receiver_type_key(&ty.name);
+        let owner = rust_name_for_java_named_type(&type_key);
+        if valid_external_facade_type_ident(&owner) {
+            for summary_super in source_summary_supertypes_for_emitted_type(
+                ty,
+                program,
+                source_summary_program,
+                source_summary_types,
+            ) {
+                for method in source_summary_method_hierarchy(summary_super, source_summary_program)
+                {
+                    let rust_method = crate::parser::to_snake_case(&method.name);
+                    let arity = method.params.len();
+                    if !used_calls
+                        .get(&rust_method)
+                        .is_some_and(|arities| arities.contains(&arity))
+                    {
+                        continue;
+                    }
+                    if source_method_hierarchy_contains(program, ty, &method.name, arity) {
+                        continue;
+                    }
+                    let return_type = external_facade_return_type(&method.return_type);
+                    self.add_java_type(&method.return_type);
+                    for param in &method.params {
+                        self.add_java_type(&param.ty);
+                    }
+                    if valid_external_facade_type_ident(&return_type) {
+                        self.add_opaque_type(return_type.clone());
+                    }
+                    let method_body =
+                        external_facade_instance_method(&rust_method, arity, &return_type);
+                    if self.has_method_signature(&owner, &rust_method, arity)
+                        && !self.replace_weak_method_return(
+                            &owner,
+                            &rust_method,
+                            arity,
+                            &method_body,
+                        )
+                    {
+                        continue;
+                    }
+                    self.add_method(owner.clone(), method_body);
+                }
+            }
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                self.add_emitted_source_summary_super_method_surfaces_for_type(
+                    nested,
+                    program,
+                    source_summary_program,
+                    source_summary_types,
+                    used_calls,
+                );
+            }
+        }
+    }
+
+    fn add_inherited_support_field_types(
+        &mut self,
+        program: &Program,
+        support_program: &Program,
+        emitted_local_types: &BTreeSet<String>,
+    ) {
+        for ty in &program.types {
+            self.add_inherited_support_field_types_for_type(
+                ty,
+                support_program,
+                emitted_local_types,
+            );
+        }
+    }
+
+    fn add_inherited_support_field_types_for_type(
+        &mut self,
+        ty: &crate::java_ir::TypeDecl,
+        support_program: &Program,
+        emitted_local_types: &BTreeSet<String>,
+    ) {
+        for inherited in
+            crate::inherited_members::inherited_instance_field_refs_for_type(ty, support_program)
+        {
+            self.add_declared_java_type(&inherited.field.ty, emitted_local_types);
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                self.add_inherited_support_field_types_for_type(
+                    nested,
+                    support_program,
+                    emitted_local_types,
+                );
             }
         }
     }
@@ -2846,7 +3495,7 @@ impl ExternalApiFacadeSupport {
                 name: type_name.clone(),
                 args: Vec::new(),
             };
-            if java_collection_kind_for_type(&java_type).is_some() {
+            if native_collection_constructor_kind_for_type(&java_type).is_some() {
                 continue;
             }
             let type_key = canonical_external_receiver_type_key(type_name);
@@ -2879,11 +3528,13 @@ impl ExternalApiFacadeSupport {
         facts: &FactSet,
         used_calls: &BTreeMap<String, BTreeSet<usize>>,
         local_types: &BTreeSet<String>,
+        source_summary_types: &BTreeSet<String>,
+        emitted_local_types: &BTreeSet<String>,
         imported_static_owner_calls: &BTreeMap<(String, String), BTreeSet<usize>>,
     ) {
         for fact in &facts.external_api_effect_facts {
-            let rust_method = crate::parser::to_snake_case(&fact.method_name);
-            let Some(arities) = used_calls.get(&rust_method) else {
+            let rust_base_method = crate::parser::to_snake_case(&fact.method_name);
+            let Some(arities) = used_calls.get(&rust_base_method) else {
                 continue;
             };
             if let Some(arg_count) = fact.arg_count
@@ -2895,13 +3546,15 @@ impl ExternalApiFacadeSupport {
                 continue;
             };
             let receiver_key = canonical_external_receiver_type_key(receiver_type);
-            if local_types.contains(&receiver_key) {
+            let receiver_is_summary_only = source_summary_types.contains(&receiver_key)
+                && !emitted_local_types.contains(&receiver_key);
+            if local_types.contains(&receiver_key) && !receiver_is_summary_only {
                 continue;
             }
             if imported_static_owner_call_contains(
                 imported_static_owner_calls,
                 &receiver_key,
-                &rust_method,
+                &rust_base_method,
                 fact.arg_count,
                 arities,
             ) {
@@ -2916,7 +3569,7 @@ impl ExternalApiFacadeSupport {
                 self.add_java_type(return_type);
             }
 
-            if rust_method == "new_builder" {
+            if rust_base_method == "new_builder" {
                 let return_rust = fact
                     .return_type
                     .as_ref()
@@ -2924,7 +3577,7 @@ impl ExternalApiFacadeSupport {
                     .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
                 self.add_method(
                     receiver_rust,
-                    external_facade_static_method(&rust_method, 0, &return_rust),
+                    external_facade_static_method(&rust_base_method, 0, &return_rust),
                 );
             } else if receiver_rust.ends_with("Builder") {
                 continue;
@@ -2932,7 +3585,16 @@ impl ExternalApiFacadeSupport {
                 let arg_count = fact
                     .arg_count
                     .unwrap_or_else(|| arities.iter().next().copied().unwrap_or_default());
-                let return_rust = fact
+                let rust_method = crate::call_plan::external_method_rust_name(
+                    &receiver_key,
+                    &fact.method_name,
+                    arg_count,
+                    facts,
+                );
+                if !valid_rust_method_ident(&rust_method) {
+                    continue;
+                }
+                let mut return_rust = fact
                     .return_type
                     .as_ref()
                     .map(|return_type| {
@@ -2942,6 +3604,19 @@ impl ExternalApiFacadeSupport {
                         )
                     })
                     .unwrap_or_else(|| "()".to_string());
+                self.add_external_argument_types(
+                    facts,
+                    &receiver_key,
+                    &fact.method_name,
+                    arg_count,
+                );
+                if receiver_rust.ends_with("ExecutorService")
+                    && rust_method == "submit"
+                    && arg_count == 1
+                {
+                    self.add_opaque_type("Future".to_string());
+                    return_rust = "Future".to_string();
+                }
                 if fact.provenance != FactProvenance::ConservativeFallback {
                     self.add_erased_object_method(
                         rust_method.clone(),
@@ -2951,8 +3626,31 @@ impl ExternalApiFacadeSupport {
                 }
                 self.add_method(
                     receiver_rust,
-                    external_facade_instance_method(&rust_method, arg_count, &return_rust),
+                    external_facade_instance_method_with_facts(
+                        facts,
+                        &receiver_key,
+                        &fact.method_name,
+                        &rust_method,
+                        arg_count,
+                        &return_rust,
+                    ),
                 );
+            }
+        }
+    }
+
+    fn add_external_argument_types(
+        &mut self,
+        facts: &FactSet,
+        receiver_key: &str,
+        method: &str,
+        arg_count: usize,
+    ) {
+        for index in 0..arg_count {
+            if let Some(java_type) =
+                external_facade_argument_java_type(facts, receiver_key, method, index)
+            {
+                self.add_java_type(&java_type);
             }
         }
     }
@@ -2987,6 +3685,20 @@ impl ExternalApiFacadeSupport {
                 method_owners.push(simple_owner_rust);
             }
             for arg_count in arities {
+                if let Some(effect) = facts.external_api_effect_for_receiver_with_arity(
+                    Some(&owner_key),
+                    method,
+                    Some(*arg_count),
+                ) && let Some(return_type) = &effect.return_type
+                {
+                    self.add_java_type(return_type);
+                }
+                self.add_external_argument_types(facts, &owner_key, method, *arg_count);
+                if let Some(return_type) =
+                    known_imported_static_method_return_type(&owner_key, method, *arg_count)
+                {
+                    self.add_java_type(&return_type);
+                }
                 let method_body = external_facade_imported_static_method_with_facts(
                     facts, &owner_key, method, *arg_count,
                 );
@@ -2998,6 +3710,151 @@ impl ExternalApiFacadeSupport {
                 }
             }
         }
+    }
+
+    fn add_known_domain_getter_surfaces_from_used_calls(
+        &mut self,
+        used_calls: &BTreeMap<String, BTreeSet<usize>>,
+    ) {
+        let opaque_types = self.opaque_types.iter().cloned().collect::<Vec<_>>();
+        for owner in opaque_types {
+            if is_builtin_external_facade_type(&owner) || owner.ends_with("Builder") {
+                continue;
+            }
+            for (rust_method, arities) in used_calls {
+                let java_method = lower_camel_from_snake(rust_method);
+                for arg_count in arities {
+                    if owner.ends_with("ExecutorService")
+                        && rust_method == "submit"
+                        && *arg_count == 1
+                    {
+                        let method_body =
+                            external_facade_instance_method(rust_method, *arg_count, "Future");
+                        if self.has_method_signature(&owner, rust_method, *arg_count) {
+                            self.replace_method_signature(
+                                &owner,
+                                rust_method,
+                                *arg_count,
+                                &method_body,
+                            );
+                        } else {
+                            self.add_method(owner.clone(), method_body);
+                        }
+                        continue;
+                    }
+                    if Self::known_missing_opaque_support_generic_method(
+                        &owner,
+                        &java_method,
+                        *arg_count,
+                    ) {
+                        let method_body =
+                            external_facade_builder_generic_getter(rust_method, *arg_count);
+                        if self.has_method_signature(&owner, rust_method, *arg_count) {
+                            self.replace_method_signature(
+                                &owner,
+                                rust_method,
+                                *arg_count,
+                                &method_body,
+                            );
+                        }
+                        self.add_method(owner.clone(), method_body);
+                        continue;
+                    }
+                    if Self::known_missing_opaque_support_side_effect_method(
+                        &owner,
+                        &java_method,
+                        *arg_count,
+                    ) {
+                        let method_body =
+                            external_facade_instance_method(rust_method, *arg_count, "()");
+                        if !self.has_method_signature(&owner, rust_method, *arg_count) {
+                            self.add_method(owner.clone(), method_body);
+                        }
+                        continue;
+                    }
+                    let Some(return_type) =
+                        known_external_method_return_type(Some(&owner), &java_method, *arg_count)
+                    else {
+                        continue;
+                    };
+                    let return_rust = external_facade_return_type_with_nullability(
+                        &return_type,
+                        NullabilityState::DefinitelyNonNull,
+                    );
+                    if weak_external_facade_return_type(&return_rust) {
+                        continue;
+                    }
+                    self.add_java_type(&return_type);
+                    let method_body =
+                        external_facade_instance_method(rust_method, *arg_count, &return_rust);
+                    if self.has_method_signature(&owner, rust_method, *arg_count)
+                        && !self.replace_weak_method_return(
+                            &owner,
+                            rust_method,
+                            *arg_count,
+                            &method_body,
+                        )
+                    {
+                        continue;
+                    }
+
+                    if !self.has_method_signature(&owner, rust_method, *arg_count)
+                        && Self::known_missing_opaque_support_method_return_type(
+                            &owner,
+                            &java_method,
+                            *arg_count,
+                        )
+                        .is_none()
+                    {
+                        continue;
+                    }
+
+                    if !self.has_method_named(&owner, rust_method) {
+                        self.add_method(owner.clone(), method_body);
+                    }
+                }
+            }
+        }
+    }
+
+    fn known_missing_opaque_support_generic_method(
+        owner: &str,
+        name: &str,
+        arg_count: usize,
+    ) -> bool {
+        owner.ends_with("Future") && name == "get" && arg_count == 0
+    }
+
+    fn known_missing_opaque_support_method_return_type(
+        owner: &str,
+        name: &str,
+        arg_count: usize,
+    ) -> Option<JavaType> {
+        match (owner, name, arg_count) {
+            ("SimpleInterval" | "Interval" | "Locatable", "getContig", 0) => Some(JavaType::String),
+            ("SimpleInterval" | "Interval" | "Locatable", "getStart" | "getEnd", 0) => {
+                Some(JavaType::Primitive(PrimitiveType::Int))
+            }
+            ("IntervalArgumentCollection", "intervalsSpecified", 0) => {
+                Some(JavaType::Primitive(PrimitiveType::Boolean))
+            }
+            ("IntervalArgumentCollection", "getIntervals", 1) => Some(JavaType::Named {
+                name: "List".to_string(),
+                args: vec![JavaType::Named {
+                    name: "SimpleInterval".to_string(),
+                    args: Vec::new(),
+                }],
+            }),
+            _ => None,
+        }
+    }
+
+    fn known_missing_opaque_support_side_effect_method(
+        owner: &str,
+        name: &str,
+        arg_count: usize,
+    ) -> bool {
+        matches!((owner, name, arg_count), ("Parser", "merge", 2))
     }
 
     fn add_external_field_surfaces(&mut self, facts: &FactSet, local_types: &BTreeSet<String>) {
@@ -3016,6 +3873,14 @@ impl ExternalApiFacadeSupport {
             let Some(field_type) = &fact.field_type else {
                 continue;
             };
+            if is_self_typed_external_enum_constant_field(
+                &receiver_key,
+                &fact.field.field_name,
+                field_type,
+            ) {
+                self.add_java_type(field_type);
+                continue;
+            }
             let rust_name = crate::parser::to_snake_case(&fact.field.field_name);
             if !valid_rust_field_ident(&rust_name) {
                 continue;
@@ -3031,6 +3896,7 @@ impl ExternalApiFacadeSupport {
 
     fn add_builder_surface_from_used_calls(
         &mut self,
+        facts: &FactSet,
         used_calls: &BTreeMap<String, BTreeSet<usize>>,
     ) {
         let builder_types = self
@@ -3044,12 +3910,14 @@ impl ExternalApiFacadeSupport {
             for (method, arities) in used_calls {
                 for arg_count in arities {
                     if method == "build" {
+                        let return_type =
+                            self.external_builder_build_return_type(facts, &builder, *arg_count);
                         self.add_method(
                             builder.clone(),
                             external_facade_instance_method(
                                 method,
                                 *arg_count,
-                                "Box<dyn std::any::Any>",
+                                return_type.as_deref().unwrap_or("Box<dyn std::any::Any>"),
                             ),
                         );
                     } else if is_external_facade_builder_fluent_method(method) {
@@ -3066,6 +3934,40 @@ impl ExternalApiFacadeSupport {
                 }
             }
         }
+    }
+
+    fn external_builder_build_return_type(
+        &mut self,
+        facts: &FactSet,
+        builder: &str,
+        arg_count: usize,
+    ) -> Option<String> {
+        let effect = facts
+            .external_api_effect_facts
+            .iter()
+            .rev()
+            .find(|effect| {
+                effect.arg_count.is_none_or(|count| count == arg_count)
+                    && crate::parser::to_snake_case(&effect.method_name) == "build"
+                    && effect.receiver_type.as_deref().is_some_and(|receiver| {
+                        let receiver_rust = rust_name_for_java_named_type(
+                            &canonical_external_receiver_type_key(receiver),
+                        );
+                        receiver_rust == builder
+                            || self
+                                .aliases
+                                .get(&receiver_rust)
+                                .is_some_and(|target| target == builder)
+                    })
+            })?;
+        let return_type = effect.return_type.as_ref()?;
+        let return_rust =
+            external_facade_return_type_with_nullability(return_type, effect.return_nullability);
+        if weak_external_facade_return_type(&return_rust) {
+            return None;
+        }
+        self.add_java_type(return_type);
+        Some(return_rust)
     }
 
     fn add_java_type(&mut self, java_type: &JavaType) {
@@ -3143,6 +4045,75 @@ impl ExternalApiFacadeSupport {
         })
     }
 
+    fn has_method_signature(&self, owner: &str, method: &str, arg_count: usize) -> bool {
+        self.impls.get(owner).is_some_and(|methods| {
+            methods
+                .iter()
+                .any(|body| facade_method_matches_signature(body, method, arg_count))
+        })
+    }
+
+    fn replace_weak_method_return(
+        &mut self,
+        owner: &str,
+        method: &str,
+        arg_count: usize,
+        replacement: &str,
+    ) -> bool {
+        let Some(replacement_return) = facade_method_return_type(replacement, method) else {
+            return false;
+        };
+        if weak_external_facade_return_type(replacement_return) {
+            return false;
+        }
+        let Some(methods) = self.impls.get_mut(owner) else {
+            return false;
+        };
+        let weak_methods = methods
+            .iter()
+            .filter_map(|body| {
+                if !facade_method_matches_signature(body, method, arg_count) {
+                    return None;
+                }
+                let return_type = facade_method_return_type(body, method)?;
+                (weak_external_facade_return_type(return_type)).then(|| body.clone())
+            })
+            .collect::<Vec<_>>();
+        if weak_methods.is_empty() {
+            return false;
+        }
+        for weak in weak_methods {
+            methods.remove(&weak);
+        }
+        true
+    }
+
+    fn replace_method_signature(
+        &mut self,
+        owner: &str,
+        method: &str,
+        arg_count: usize,
+        replacement: &str,
+    ) -> bool {
+        let Some(methods) = self.impls.get_mut(owner) else {
+            return false;
+        };
+        let matching_methods = methods
+            .iter()
+            .filter(|body| facade_method_matches_signature(body, method, arg_count))
+            .cloned()
+            .collect::<Vec<_>>();
+        if matching_methods.is_empty() {
+            return false;
+        }
+        for matching in matching_methods {
+            if matching != replacement {
+                methods.remove(&matching);
+            }
+        }
+        true
+    }
+
     fn add_erased_object_method(&mut self, name: String, arg_count: usize, return_type: String) {
         if self.erased_object_method_conflicts.contains(&name) {
             return;
@@ -3167,10 +4138,98 @@ impl ExternalApiFacadeSupport {
         }
     }
 
+    fn add_external_dyn_trait_surfaces(&mut self, facts: &FactSet) {
+        let mut trait_type_to_name = BTreeMap::new();
+        for override_fact in &facts.hierarchy_overrides {
+            let HierarchyStrategy::DynTrait { trait_name } = &override_fact.strategy else {
+                continue;
+            };
+            let type_key = canonical_external_receiver_type_key(&override_fact.type_name);
+            if !valid_external_facade_type_ident(&type_key)
+                || is_builtin_external_facade_type(&type_key)
+                || !valid_external_facade_type_ident(trait_name)
+            {
+                continue;
+            }
+            self.trait_type_names.insert(type_key.clone());
+            self.traits
+                .entry(type_key.clone())
+                .or_insert_with(|| ExternalFacadeTrait {
+                    trait_name: trait_name.clone(),
+                    methods: BTreeSet::new(),
+                });
+            trait_type_to_name.insert(type_key, trait_name.clone());
+        }
+
+        if trait_type_to_name.is_empty() {
+            return;
+        }
+
+        for effect in &facts.external_api_effect_facts {
+            let Some(receiver) = effect.receiver_type.as_deref() else {
+                continue;
+            };
+            let receiver_key = canonical_external_receiver_type_key(receiver);
+            let Some(trait_surface) = self.traits.get_mut(&receiver_key) else {
+                continue;
+            };
+            let arg_count = effect.arg_count.unwrap_or(0);
+            let rust_method = crate::call_plan::external_method_rust_name(
+                receiver,
+                &effect.method_name,
+                arg_count,
+                facts,
+            );
+            if !valid_rust_method_ident(&rust_method) {
+                continue;
+            }
+            let return_type = effect
+                .return_type
+                .as_ref()
+                .map(|return_type| {
+                    external_facade_return_type_with_nullability(
+                        return_type,
+                        effect.return_nullability,
+                    )
+                })
+                .unwrap_or_else(|| "()".to_string());
+            trait_surface.methods.insert(external_facade_trait_method(
+                &rust_method,
+                arg_count,
+                &return_type,
+            ));
+        }
+
+        for capability in &facts.type_capability_overrides {
+            let implementor = canonical_external_receiver_type_key(&capability.type_name);
+            if !valid_external_facade_type_ident(&implementor)
+                || is_builtin_external_facade_type(&implementor)
+            {
+                continue;
+            }
+            for implemented in &capability.implements {
+                let Some(implemented_name) = java_type_name_for_external_facade(implemented) else {
+                    continue;
+                };
+                let implemented_key = canonical_external_receiver_type_key(implemented_name);
+                let Some(trait_name) = trait_type_to_name.get(&implemented_key) else {
+                    continue;
+                };
+                self.trait_impls
+                    .entry(trait_name.clone())
+                    .or_default()
+                    .insert(implementor.clone());
+            }
+        }
+    }
+
     fn into_items(mut self) -> Vec<crate::rust_ir::RustItem> {
         let alias_names = self.aliases.keys().cloned().collect::<BTreeSet<_>>();
-        self.opaque_types
-            .retain(|name| !alias_names.contains(name) && !is_builtin_external_facade_type(name));
+        self.opaque_types.retain(|name| {
+            !alias_names.contains(name)
+                && !self.trait_type_names.contains(name)
+                && !is_builtin_external_facade_type(name)
+        });
 
         let display_and_eq_types = self.opaque_types.iter().cloned().collect::<Vec<_>>();
         let mut lines = Vec::new();
@@ -3201,6 +4260,17 @@ impl ExternalApiFacadeSupport {
             if !is_builtin_external_facade_type(&alias) && !is_builtin_external_facade_type(&target)
             {
                 lines.push(format!("pub type {alias} = {target};"));
+            }
+        }
+        for trait_surface in self.traits.into_values() {
+            lines.push(external_facade_trait_item(&trait_surface));
+        }
+        for (trait_name, implementors) in self.trait_impls {
+            for implementor in implementors {
+                if self.trait_type_names.contains(&implementor) {
+                    continue;
+                }
+                lines.push(format!("impl {trait_name} for {implementor} {{}}"));
             }
         }
         for (owner, methods) in self.impls {
@@ -3356,12 +4426,98 @@ fn imported_static_owner_type_name(import: &crate::java_ir::ImportDecl) -> Optio
     (!owner.is_empty()).then(|| owner.to_string())
 }
 
+fn add_imported_static_shadow_name(shadows: &mut BTreeSet<String>, name: &str) {
+    shadows.insert(name.to_string());
+    shadows.insert(crate::parser::to_snake_case(name));
+}
+
+fn collect_block_imported_static_shadows(block: &Block, shadows: &mut BTreeSet<String>) {
+    for stmt in &block.statements {
+        collect_stmt_imported_static_shadows(stmt, shadows);
+    }
+}
+
+fn collect_stmt_imported_static_shadows(stmt: &Stmt, shadows: &mut BTreeSet<String>) {
+    match stmt {
+        Stmt::VarDecl { name, .. } => add_imported_static_shadow_name(shadows, name),
+        Stmt::For { init, body, .. } => {
+            for stmt in init {
+                collect_stmt_imported_static_shadows(stmt, shadows);
+            }
+            collect_block_imported_static_shadows(body, shadows);
+        }
+        Stmt::EnhancedFor { var_name, body, .. } => {
+            add_imported_static_shadow_name(shadows, var_name);
+            collect_block_imported_static_shadows(body, shadows);
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_block_imported_static_shadows(then_block, shadows);
+            if let Some(else_block) = else_block {
+                collect_block_imported_static_shadows(else_block, shadows);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::Block(body) => {
+            collect_block_imported_static_shadows(body, shadows);
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for stmt in &case.statements {
+                    collect_stmt_imported_static_shadows(stmt, shadows);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_stmt_imported_static_shadows(resource, shadows);
+            }
+            collect_block_imported_static_shadows(body, shadows);
+            for catch in catches {
+                add_imported_static_shadow_name(shadows, &catch.name);
+                collect_block_imported_static_shadows(&catch.body, shadows);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_block_imported_static_shadows(finally_block, shadows);
+            }
+        }
+        Stmt::LocalType(ty) => {
+            for member in &ty.members {
+                if let Member::Field(field) = member {
+                    add_imported_static_shadow_name(shadows, &field.name);
+                }
+            }
+        }
+        Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return(_)
+        | Stmt::Throw(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
 fn collect_type_imported_static_owner_calls(
     ty: &crate::java_ir::TypeDecl,
     aliases: &BTreeMap<String, String>,
     static_members: &BTreeMap<String, String>,
     calls: &mut BTreeMap<(String, String), BTreeSet<usize>>,
 ) {
+    let mut type_shadows = BTreeSet::new();
+    for member in &ty.members {
+        if let Member::Field(field) = member {
+            add_imported_static_shadow_name(&mut type_shadows, &field.name);
+        }
+    }
     for member in &ty.members {
         match member {
             Member::Field(field) => {
@@ -3370,18 +4526,41 @@ fn collect_type_imported_static_owner_calls(
                         initializer,
                         aliases,
                         static_members,
+                        &type_shadows,
                         calls,
                     );
                 }
             }
             Member::Method(method) => {
                 if let Some(body) = &method.body {
-                    collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+                    let mut shadows = type_shadows.clone();
+                    for param in &method.params {
+                        add_imported_static_shadow_name(&mut shadows, &param.name);
+                    }
+                    collect_block_imported_static_shadows(body, &mut shadows);
+                    collect_block_imported_static_owner_calls(
+                        body,
+                        aliases,
+                        static_members,
+                        &shadows,
+                        calls,
+                    );
                 }
             }
             Member::Constructor(constructor) => {
                 if let Some(body) = &constructor.body {
-                    collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+                    let mut shadows = type_shadows.clone();
+                    for param in &constructor.params {
+                        add_imported_static_shadow_name(&mut shadows, &param.name);
+                    }
+                    collect_block_imported_static_shadows(body, &mut shadows);
+                    collect_block_imported_static_owner_calls(
+                        body,
+                        aliases,
+                        static_members,
+                        &shadows,
+                        calls,
+                    );
                 }
             }
             Member::Type(nested) => {
@@ -3396,10 +4575,11 @@ fn collect_block_imported_static_owner_calls(
     block: &Block,
     aliases: &BTreeMap<String, String>,
     static_members: &BTreeMap<String, String>,
+    shadows: &BTreeSet<String>,
     calls: &mut BTreeMap<(String, String), BTreeSet<usize>>,
 ) {
     for stmt in &block.statements {
-        collect_stmt_imported_static_owner_calls(stmt, aliases, static_members, calls);
+        collect_stmt_imported_static_owner_calls(stmt, aliases, static_members, shadows, calls);
     }
 }
 
@@ -3407,6 +4587,7 @@ fn collect_stmt_imported_static_owner_calls(
     stmt: &Stmt,
     aliases: &BTreeMap<String, String>,
     static_members: &BTreeMap<String, String>,
+    shadows: &BTreeSet<String>,
     calls: &mut BTreeMap<(String, String), BTreeSet<usize>>,
 ) {
     match stmt {
@@ -3417,31 +4598,68 @@ fn collect_stmt_imported_static_owner_calls(
         | Stmt::Expr(expr)
         | Stmt::Throw(expr)
         | Stmt::Return(Some(expr)) => {
-            collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls)
+            collect_expr_imported_static_owner_calls(expr, aliases, static_members, shadows, calls)
         }
         Stmt::Assign { target, value } => {
-            collect_expr_imported_static_owner_calls(target, aliases, static_members, calls);
-            collect_expr_imported_static_owner_calls(value, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(
+                target,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
+            collect_expr_imported_static_owner_calls(
+                value,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
         }
         Stmt::If {
             condition,
             then_block,
             else_block,
         } => {
-            collect_expr_imported_static_owner_calls(condition, aliases, static_members, calls);
-            collect_block_imported_static_owner_calls(then_block, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(
+                condition,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
+            collect_block_imported_static_owner_calls(
+                then_block,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
             if let Some(else_block) = else_block {
                 collect_block_imported_static_owner_calls(
                     else_block,
                     aliases,
                     static_members,
+                    shadows,
                     calls,
                 );
             }
         }
         Stmt::While { condition, body } => {
-            collect_expr_imported_static_owner_calls(condition, aliases, static_members, calls);
-            collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(
+                condition,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
+            collect_block_imported_static_owner_calls(
+                body,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
         }
         Stmt::For {
             init,
@@ -3451,25 +4669,73 @@ fn collect_stmt_imported_static_owner_calls(
             ..
         } => {
             for stmt in init {
-                collect_stmt_imported_static_owner_calls(stmt, aliases, static_members, calls);
+                collect_stmt_imported_static_owner_calls(
+                    stmt,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
             }
             if let Some(condition) = condition {
-                collect_expr_imported_static_owner_calls(condition, aliases, static_members, calls);
+                collect_expr_imported_static_owner_calls(
+                    condition,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
             }
             for expr in update {
-                collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls);
+                collect_expr_imported_static_owner_calls(
+                    expr,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
             }
-            collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+            collect_block_imported_static_owner_calls(
+                body,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
-            collect_expr_imported_static_owner_calls(iterable, aliases, static_members, calls);
-            collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(
+                iterable,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
+            collect_block_imported_static_owner_calls(
+                body,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
         }
         Stmt::Switch { selector, cases } => {
-            collect_expr_imported_static_owner_calls(selector, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(
+                selector,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
             for case in cases {
                 for stmt in &case.statements {
-                    collect_stmt_imported_static_owner_calls(stmt, aliases, static_members, calls);
+                    collect_stmt_imported_static_owner_calls(
+                        stmt,
+                        aliases,
+                        static_members,
+                        shadows,
+                        calls,
+                    );
                 }
             }
         }
@@ -3480,14 +4746,27 @@ fn collect_stmt_imported_static_owner_calls(
             finally_block,
         } => {
             for resource in resources {
-                collect_stmt_imported_static_owner_calls(resource, aliases, static_members, calls);
+                collect_stmt_imported_static_owner_calls(
+                    resource,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
             }
-            collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+            collect_block_imported_static_owner_calls(
+                body,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
             for catch in catches {
                 collect_block_imported_static_owner_calls(
                     &catch.body,
                     aliases,
                     static_members,
+                    shadows,
                     calls,
                 );
             }
@@ -3496,21 +4775,32 @@ fn collect_stmt_imported_static_owner_calls(
                     finally_block,
                     aliases,
                     static_members,
+                    shadows,
                     calls,
                 );
             }
         }
         Stmt::ConstructorInvocation { args, .. } => {
             for arg in args {
-                collect_expr_imported_static_owner_calls(arg, aliases, static_members, calls);
+                collect_expr_imported_static_owner_calls(
+                    arg,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
             }
         }
         Stmt::LocalType(ty) => {
             collect_type_imported_static_owner_calls(ty, aliases, static_members, calls)
         }
-        Stmt::Block(block) => {
-            collect_block_imported_static_owner_calls(block, aliases, static_members, calls)
-        }
+        Stmt::Block(block) => collect_block_imported_static_owner_calls(
+            block,
+            aliases,
+            static_members,
+            shadows,
+            calls,
+        ),
         Stmt::VarDecl {
             initializer: None, ..
         }
@@ -3525,6 +4815,7 @@ fn collect_expr_imported_static_owner_calls(
     expr: &Expr,
     aliases: &BTreeMap<String, String>,
     static_members: &BTreeMap<String, String>,
+    shadows: &BTreeSet<String>,
     calls: &mut BTreeMap<(String, String), BTreeSet<usize>>,
 ) {
     match expr {
@@ -3535,6 +4826,7 @@ fn collect_expr_imported_static_owner_calls(
             ..
         } => {
             if let Some(Expr::Var(receiver_name)) = receiver.as_deref()
+                && !shadows.contains(receiver_name)
                 && let Some(owner) = aliases.get(receiver_name)
             {
                 calls
@@ -3563,18 +4855,46 @@ fn collect_expr_imported_static_owner_calls(
                     .insert(args.len());
             }
             if let Some(receiver) = receiver {
-                collect_expr_imported_static_owner_calls(receiver, aliases, static_members, calls);
+                collect_expr_imported_static_owner_calls(
+                    receiver,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
             }
             for arg in args {
-                collect_expr_imported_static_owner_calls(arg, aliases, static_members, calls);
+                collect_expr_imported_static_owner_calls(
+                    arg,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
             }
         }
-        Expr::FieldAccess(receiver, _) => {
-            collect_expr_imported_static_owner_calls(receiver, aliases, static_members, calls)
-        }
+        Expr::FieldAccess(receiver, _) => collect_expr_imported_static_owner_calls(
+            receiver,
+            aliases,
+            static_members,
+            shadows,
+            calls,
+        ),
         Expr::ArrayAccess(array, index) => {
-            collect_expr_imported_static_owner_calls(array, aliases, static_members, calls);
-            collect_expr_imported_static_owner_calls(index, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(
+                array,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
+            collect_expr_imported_static_owner_calls(
+                index,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
         }
         Expr::ArrayCreation {
             dimensions,
@@ -3582,38 +4902,86 @@ fn collect_expr_imported_static_owner_calls(
             ..
         } => {
             for dimension in dimensions {
-                collect_expr_imported_static_owner_calls(dimension, aliases, static_members, calls);
+                collect_expr_imported_static_owner_calls(
+                    dimension,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
             }
             if let Some(initializer) = initializer {
                 for value in initializer {
-                    collect_expr_imported_static_owner_calls(value, aliases, static_members, calls);
+                    collect_expr_imported_static_owner_calls(
+                        value,
+                        aliases,
+                        static_members,
+                        shadows,
+                        calls,
+                    );
                 }
             }
         }
         Expr::ArrayInitializer(values) => {
             for value in values {
-                collect_expr_imported_static_owner_calls(value, aliases, static_members, calls);
+                collect_expr_imported_static_owner_calls(
+                    value,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
             }
         }
         Expr::Binary { left, right, .. } => {
-            collect_expr_imported_static_owner_calls(left, aliases, static_members, calls);
-            collect_expr_imported_static_owner_calls(right, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(left, aliases, static_members, shadows, calls);
+            collect_expr_imported_static_owner_calls(
+                right,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
         }
         Expr::Unary { expr, .. } => {
-            collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls)
+            collect_expr_imported_static_owner_calls(expr, aliases, static_members, shadows, calls)
         }
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            collect_expr_imported_static_owner_calls(condition, aliases, static_members, calls);
-            collect_expr_imported_static_owner_calls(then_expr, aliases, static_members, calls);
-            collect_expr_imported_static_owner_calls(else_expr, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(
+                condition,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
+            collect_expr_imported_static_owner_calls(
+                then_expr,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
+            collect_expr_imported_static_owner_calls(
+                else_expr,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            );
         }
         Expr::New { args, body, .. } => {
             for arg in args {
-                collect_expr_imported_static_owner_calls(arg, aliases, static_members, calls);
+                collect_expr_imported_static_owner_calls(
+                    arg,
+                    aliases,
+                    static_members,
+                    shadows,
+                    calls,
+                );
             }
             if let Some(body) = body {
                 for member in body {
@@ -3624,6 +4992,7 @@ fn collect_expr_imported_static_owner_calls(
                                     initializer,
                                     aliases,
                                     static_members,
+                                    shadows,
                                     calls,
                                 );
                             }
@@ -3634,6 +5003,7 @@ fn collect_expr_imported_static_owner_calls(
                                     body,
                                     aliases,
                                     static_members,
+                                    shadows,
                                     calls,
                                 );
                             }
@@ -3644,6 +5014,7 @@ fn collect_expr_imported_static_owner_calls(
                                     body,
                                     aliases,
                                     static_members,
+                                    shadows,
                                     calls,
                                 );
                             }
@@ -3660,18 +5031,26 @@ fn collect_expr_imported_static_owner_calls(
             }
         }
         Expr::Cast { expr, .. } => {
-            collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls)
+            collect_expr_imported_static_owner_calls(expr, aliases, static_members, shadows, calls)
         }
         Expr::InstanceOf { expr, .. } => {
-            collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls)
+            collect_expr_imported_static_owner_calls(expr, aliases, static_members, shadows, calls)
         }
         Expr::Lambda { body, .. } => match body {
-            crate::java_ir::LambdaBody::Expr(expr) => {
-                collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls)
-            }
-            crate::java_ir::LambdaBody::Block(block) => {
-                collect_block_imported_static_owner_calls(block, aliases, static_members, calls)
-            }
+            crate::java_ir::LambdaBody::Expr(expr) => collect_expr_imported_static_owner_calls(
+                expr,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            ),
+            crate::java_ir::LambdaBody::Block(block) => collect_block_imported_static_owner_calls(
+                block,
+                aliases,
+                static_members,
+                shadows,
+                calls,
+            ),
         },
         Expr::Literal(_)
         | Expr::Var(_)
@@ -4217,14 +5596,31 @@ fn external_facade_return_type(java_type: &JavaType) -> String {
         JavaType::Void => "()".to_string(),
         JavaType::String => "String".to_string(),
         JavaType::Named { name, .. } if name == "Object" => "Box<dyn std::any::Any>".to_string(),
-        JavaType::Named { name, args }
-            if matches!(name.as_str(), "List" | "Collection" | "Iterable") =>
-        {
+        JavaType::Named { name, args } if matches!(name.as_str(), "List" | "Collection") => {
             let element = args
                 .first()
                 .map(external_facade_return_type)
                 .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
             format!("Vec<{element}>")
+        }
+        JavaType::Named { name, args } if matches!(name.as_str(), "Set" | "HashSet") => {
+            let element = args
+                .first()
+                .map(external_facade_return_type)
+                .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
+            format!("std::collections::HashSet<{element}>")
+        }
+        JavaType::Named { name, args } if matches!(name.as_str(), "Iterable") => {
+            let element = args
+                .first()
+                .map(external_facade_return_type)
+                .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
+            format!("Vec<{element}>")
+        }
+        JavaType::Named { name, .. }
+            if matches!(name.as_str(), "Iterator" | "java.util.Iterator") =>
+        {
+            "CloseableIterator".to_string()
         }
         JavaType::Named { name, .. } => rust_name_for_java_named_type(name),
         JavaType::Array(inner) => format!("Vec<{}>", external_facade_return_type(inner)),
@@ -4253,6 +5649,21 @@ fn external_facade_static_method(name: &str, arg_count: usize, return_type: &str
     format!(
         "    pub fn {name}{} -> {return_type} {{ {} }}",
         external_facade_args(arg_count),
+        external_facade_default_expr(return_type)
+    )
+}
+
+fn external_facade_static_method_with_facts(
+    facts: &FactSet,
+    receiver_key: &str,
+    java_method: &str,
+    rust_method: &str,
+    arg_count: usize,
+    return_type: &str,
+) -> String {
+    format!(
+        "    pub fn {rust_method}{} -> {return_type} {{ {} }}",
+        external_facade_args_with_facts(facts, receiver_key, java_method, arg_count),
         external_facade_default_expr(return_type)
     )
 }
@@ -4307,6 +5718,9 @@ fn external_facade_imported_static_method_with_facts(
     name: &str,
     arg_count: usize,
 ) -> String {
+    if imported_static_method_returns_first_arg(owner_key, name, arg_count) {
+        return external_facade_imported_static_first_arg_method(name, arg_count);
+    }
     if let Some(effect) =
         facts.external_api_effect_for_receiver_with_arity(Some(owner_key), name, Some(arg_count))
     {
@@ -4315,7 +5729,14 @@ fn external_facade_imported_static_method_with_facts(
                 return_type,
                 effect.return_nullability,
             );
-            return external_facade_static_method(name, arg_count, &return_type);
+            return external_facade_static_method_with_facts(
+                facts,
+                owner_key,
+                &effect.method_name,
+                name,
+                arg_count,
+                &return_type,
+            );
         }
         if effect.provenance != FactProvenance::ConservativeFallback
             && matches!(
@@ -4327,10 +5748,66 @@ fn external_facade_imported_static_method_with_facts(
                     | ExternalApiRole::IndexedSetter
             )
         {
-            return external_facade_static_method(name, arg_count, "()");
+            return external_facade_static_method_with_facts(
+                facts,
+                owner_key,
+                &effect.method_name,
+                name,
+                arg_count,
+                "()",
+            );
         }
     }
+    if let Some(return_type) = known_imported_static_method_return_type(owner_key, name, arg_count)
+    {
+        let return_type = external_facade_return_type_with_nullability(
+            &return_type,
+            NullabilityState::DefinitelyNonNull,
+        );
+        return external_facade_static_method_with_facts(
+            facts,
+            owner_key,
+            name,
+            name,
+            arg_count,
+            &return_type,
+        );
+    }
     external_facade_imported_static_method(name, arg_count)
+}
+
+fn known_imported_static_method_return_type(
+    owner_key: &str,
+    name: &str,
+    arg_count: usize,
+) -> Option<JavaType> {
+    let java_name = lower_camel_from_snake(name);
+    known_external_method_return_type(Some(owner_key), &java_name, arg_count).or_else(|| {
+        owner_key.rsplit('.').next().and_then(|simple| {
+            known_external_method_return_type(Some(simple), &java_name, arg_count)
+        })
+    })
+}
+
+fn imported_static_method_returns_first_arg(owner_key: &str, name: &str, arg_count: usize) -> bool {
+    arg_count >= 1
+        && matches!(name, "non_null" | "nonNull")
+        && canonical_external_receiver_type_key(owner_key)
+            .rsplit('.')
+            .next()
+            .is_some_and(|simple| simple == "Utils")
+}
+
+fn external_facade_imported_static_first_arg_method(name: &str, arg_count: usize) -> String {
+    let generics = (0..arg_count)
+        .map(|idx| format!("T{idx}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let args = (0..arg_count)
+        .map(|idx| format!("_arg{idx}: T{idx}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("    pub fn {name}<{generics}>({args}) -> T0 {{ _arg0 }}")
 }
 
 fn imported_static_method_is_side_effect(name: &str) -> bool {
@@ -4347,6 +5824,43 @@ fn external_facade_instance_method(name: &str, arg_count: usize, return_type: &s
         external_facade_self_args(arg_count),
         external_facade_default_expr(return_type)
     )
+}
+
+fn external_facade_instance_method_with_facts(
+    facts: &FactSet,
+    receiver_key: &str,
+    java_method: &str,
+    rust_method: &str,
+    arg_count: usize,
+    return_type: &str,
+) -> String {
+    format!(
+        "    pub fn {rust_method}{} -> {return_type} {{ {} }}",
+        external_facade_self_args_with_facts(facts, receiver_key, java_method, arg_count),
+        external_facade_default_expr(return_type)
+    )
+}
+
+fn external_facade_trait_method(name: &str, arg_count: usize, return_type: &str) -> String {
+    format!(
+        "    fn {name}{} -> {return_type} {{ {} }}",
+        external_facade_self_args(arg_count),
+        external_facade_default_expr(return_type)
+    )
+}
+
+fn external_facade_trait_item(trait_surface: &ExternalFacadeTrait) -> String {
+    let methods = trait_surface
+        .methods
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if methods.is_empty() {
+        format!("pub trait {} {{}}", trait_surface.trait_name)
+    } else {
+        format!("pub trait {} {{\n{}\n}}", trait_surface.trait_name, methods)
+    }
 }
 
 fn external_facade_builder_fluent_method(name: &str, arg_count: usize) -> String {
@@ -4366,6 +5880,29 @@ fn external_facade_builder_generic_getter(name: &str, arg_count: usize) -> Strin
 fn facade_method_has_name(method_body: &str, method: &str) -> bool {
     method_body.contains(&format!(" pub fn {method}<"))
         || method_body.contains(&format!(" pub fn {method}("))
+}
+
+fn facade_method_matches_signature(method_body: &str, method: &str, arg_count: usize) -> bool {
+    facade_method_has_name(method_body, method) && facade_method_arg_count(method_body) == arg_count
+}
+
+fn facade_method_arg_count(method_body: &str) -> usize {
+    method_body.matches("_arg").count()
+}
+
+fn facade_method_return_type<'a>(method_body: &'a str, method: &str) -> Option<&'a str> {
+    if !facade_method_has_name(method_body, method) {
+        return None;
+    }
+    method_body
+        .split(" -> ")
+        .nth(1)
+        .and_then(|rest| rest.split(" {").next())
+        .map(str::trim)
+}
+
+fn weak_external_facade_return_type(return_type: &str) -> bool {
+    matches!(return_type, "()" | "Box<dyn std::any::Any>")
 }
 
 fn external_erased_object_trait_method(method: &ExternalErasedObjectMethod) -> String {
@@ -4390,6 +5927,8 @@ fn external_erased_object_impl_method(method: &ExternalErasedObjectMethod) -> St
 fn external_facade_default_expr(return_type: &str) -> &'static str {
     if return_type.starts_with("Option<") {
         "None"
+    } else if return_type == "()" {
+        "()"
     } else if return_type == "Box<dyn std::any::Any>" {
         "Box::new(())"
     } else {
@@ -4411,6 +5950,15 @@ fn external_facade_args(arg_count: usize) -> String {
             .join(", ");
         format!("<{generics}>({args})")
     }
+}
+
+fn external_facade_args_with_facts(
+    facts: &FactSet,
+    receiver_key: &str,
+    method: &str,
+    arg_count: usize,
+) -> String {
+    external_facade_args_with_fact_prefix(facts, receiver_key, method, arg_count, "")
 }
 
 fn external_facade_generic_args(first_generic: &str, arg_count: usize) -> String {
@@ -4441,6 +5989,138 @@ fn external_facade_self_args(arg_count: usize) -> String {
             .join(", ");
         format!("<{generics}>(&self, {args})")
     }
+}
+
+fn external_facade_self_args_with_facts(
+    facts: &FactSet,
+    receiver_key: &str,
+    method: &str,
+    arg_count: usize,
+) -> String {
+    external_facade_args_with_fact_prefix(facts, receiver_key, method, arg_count, "&self")
+}
+
+fn external_facade_args_with_fact_prefix(
+    facts: &FactSet,
+    receiver_key: &str,
+    method: &str,
+    arg_count: usize,
+    prefix: &str,
+) -> String {
+    if arg_count == 0 {
+        return if prefix.is_empty() {
+            "()".to_string()
+        } else {
+            format!("({prefix})")
+        };
+    }
+
+    let mut generic_params = Vec::new();
+    let mut args = Vec::new();
+    if !prefix.is_empty() {
+        args.push(prefix.to_string());
+    }
+    for index in 0..arg_count {
+        let arg_ty = external_facade_argument_rust_type(facts, receiver_key, method, index)
+            .unwrap_or_else(|| {
+                let generic = format!("T{index}");
+                generic_params.push(generic.clone());
+                generic
+            });
+        args.push(format!("_arg{index}: {arg_ty}"));
+    }
+
+    if generic_params.is_empty() {
+        format!("({})", args.join(", "))
+    } else {
+        format!("<{}>({})", generic_params.join(", "), args.join(", "))
+    }
+}
+
+fn external_facade_argument_rust_type(
+    facts: &FactSet,
+    receiver_key: &str,
+    method: &str,
+    index: usize,
+) -> Option<String> {
+    let effect = external_facade_argument_effect(facts, receiver_key, method, index)?;
+    let shape = external_facade_argument_shape(effect)?;
+    Some(crate::emit::emit_type(&rust_type_for_slot_with_facts(
+        &shape, facts,
+    )))
+}
+
+fn external_facade_argument_java_type(
+    facts: &FactSet,
+    receiver_key: &str,
+    method: &str,
+    index: usize,
+) -> Option<JavaType> {
+    external_facade_argument_effect(facts, receiver_key, method, index)
+        .and_then(|effect| effect.parameter_type.clone())
+}
+
+fn external_facade_argument_nullability(
+    effect: &crate::facts::ExternalApiArgumentEffectFact,
+) -> NullabilityState {
+    effect.parameter_nullability
+}
+
+fn external_facade_argument_shape(
+    effect: &crate::facts::ExternalApiArgumentEffectFact,
+) -> Option<RustSlotShape> {
+    let mut java_ty = effect.parameter_type.clone()?;
+    if matches!(
+        external_facade_argument_nullability(effect),
+        NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+    ) {
+        java_ty = crate::types::optional_java_type(java_ty);
+    }
+    let mut shape = RustSlotShape::conservative(java_ty);
+    if crate::types::optional_element_type(&shape.java_ty).is_none() {
+        match effect.alias_policy {
+            ExternalArgumentAliasPolicy::Borrowed if shape.java_ty == JavaType::String => {
+                apply_borrowed_string_content_projection(&mut shape);
+            }
+            ExternalArgumentAliasPolicy::Borrowed
+                if matches!(shape.java_ty, JavaType::Array(_)) =>
+            {
+                apply_borrowed_sequence_content_projection(&mut shape);
+            }
+            ExternalArgumentAliasPolicy::Borrowed
+                if !matches!(shape.java_ty, JavaType::Primitive(_)) =>
+            {
+                shape.ownership = OwnershipShape::SharedBorrow;
+            }
+            ExternalArgumentAliasPolicy::NoAlias | ExternalArgumentAliasPolicy::Escapes => {
+                if !matches!(shape.java_ty, JavaType::Primitive(_)) {
+                    shape.ownership = OwnershipShape::Owned;
+                }
+            }
+            ExternalArgumentAliasPolicy::Unknown | ExternalArgumentAliasPolicy::Borrowed => {}
+        }
+    }
+    if effect.argument_mutability == ReceiverMutabilityFact::MutatesReceiver
+        && !matches!(shape.java_ty, JavaType::Primitive(_))
+    {
+        shape.ownership = OwnershipShape::MutableBorrow;
+        shape.mutability = MutabilityShape::Mutable;
+    }
+    Some(shape)
+}
+
+fn external_facade_argument_effect<'a>(
+    facts: &'a FactSet,
+    receiver_key: &str,
+    method: &str,
+    index: usize,
+) -> Option<&'a crate::facts::ExternalApiArgumentEffectFact> {
+    facts
+        .external_api_argument_effect_for_receiver(Some(receiver_key), method, index)
+        .or_else(|| {
+            let java_method = lower_camel_from_snake(method);
+            facts.external_api_argument_effect_for_receiver(Some(receiver_key), &java_method, index)
+        })
 }
 
 fn external_facade_generic_self_args(first_generic: &str, arg_count: usize) -> String {
@@ -4511,6 +6191,13 @@ fn valid_external_facade_type_ident(name: &str) -> bool {
         && !is_builtin_external_facade_type(name)
 }
 
+fn java_type_name_for_external_facade(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        _ => None,
+    }
+}
+
 pub fn external_static_string_constant_support_items(
     program: &Program,
     facts: &FactSet,
@@ -4523,9 +6210,23 @@ pub fn external_static_string_constant_support_items_with_local_type_program(
     facts: &FactSet,
     local_type_program: &Program,
 ) -> Vec<crate::rust_ir::RustItem> {
-    let local_types = local_type_keys_for_program(program);
+    external_static_string_constant_support_items_with_local_type_program_and_declared_owners(
+        program,
+        facts,
+        local_type_program,
+        &BTreeSet::new(),
+    )
+}
+
+pub fn external_static_string_constant_support_items_with_local_type_program_and_declared_owners(
+    program: &Program,
+    facts: &FactSet,
+    local_type_program: &Program,
+    declared_owners: &BTreeSet<String>,
+) -> Vec<crate::rust_ir::RustItem> {
+    let local_types = local_type_keys_for_program(local_type_program);
     let local_static_string_values = static_string_constant_values_for_program(local_type_program);
-    let mut constants_by_owner: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut constants_by_owner: BTreeMap<String, BTreeMap<String, JavaType>> = BTreeMap::new();
     collect_external_static_string_constants_program(
         program,
         facts,
@@ -4539,9 +6240,51 @@ pub fn external_static_string_constant_support_items_with_local_type_program(
                 &owner,
                 fields,
                 &local_static_string_values,
+                declared_owners,
             )
         })
         .collect()
+}
+
+pub fn support_item_declared_type_names(items: &[crate::rust_ir::RustItem]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for item in items {
+        match item {
+            crate::rust_ir::RustItem::Struct(strukt) => {
+                names.insert(strukt.name.clone());
+            }
+            crate::rust_ir::RustItem::Raw(raw) => {
+                collect_raw_support_declared_type_names(raw, &mut names);
+            }
+            crate::rust_ir::RustItem::Impl(_)
+            | crate::rust_ir::RustItem::Function(_)
+            | crate::rust_ir::RustItem::Comment(_) => {}
+        }
+    }
+    names
+}
+
+fn collect_raw_support_declared_type_names(raw: &str, names: &mut BTreeSet<String>) {
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("pub ") else {
+            continue;
+        };
+        let Some(name) = rest
+            .strip_prefix("struct ")
+            .or_else(|| rest.strip_prefix("enum "))
+            .or_else(|| rest.strip_prefix("type "))
+        else {
+            continue;
+        };
+        let name = name
+            .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+            .next()
+            .unwrap_or_default();
+        if valid_external_facade_type_ident(name) {
+            names.insert(name.to_string());
+        }
+    }
 }
 
 fn static_string_constant_values_for_program(
@@ -4581,7 +6324,7 @@ fn collect_external_static_string_constants_program(
     program: &Program,
     facts: &FactSet,
     local_types: &BTreeSet<String>,
-    constants_by_owner: &mut BTreeMap<String, BTreeSet<String>>,
+    constants_by_owner: &mut BTreeMap<String, BTreeMap<String, JavaType>>,
 ) {
     for ty in &program.types {
         collect_external_static_string_constants_type(ty, facts, local_types, constants_by_owner);
@@ -4592,7 +6335,7 @@ fn collect_external_static_string_constants_type(
     ty: &crate::java_ir::TypeDecl,
     facts: &FactSet,
     local_types: &BTreeSet<String>,
-    constants_by_owner: &mut BTreeMap<String, BTreeSet<String>>,
+    constants_by_owner: &mut BTreeMap<String, BTreeMap<String, JavaType>>,
 ) {
     for member in &ty.members {
         match member {
@@ -4641,7 +6384,7 @@ fn collect_external_static_string_constants_block(
     block: &Block,
     facts: &FactSet,
     local_types: &BTreeSet<String>,
-    constants_by_owner: &mut BTreeMap<String, BTreeSet<String>>,
+    constants_by_owner: &mut BTreeMap<String, BTreeMap<String, JavaType>>,
 ) {
     for stmt in &block.statements {
         collect_external_static_string_constants_stmt(stmt, facts, local_types, constants_by_owner);
@@ -4652,7 +6395,7 @@ fn collect_external_static_string_constants_stmt(
     stmt: &Stmt,
     facts: &FactSet,
     local_types: &BTreeSet<String>,
-    constants_by_owner: &mut BTreeMap<String, BTreeSet<String>>,
+    constants_by_owner: &mut BTreeMap<String, BTreeMap<String, JavaType>>,
 ) {
     match stmt {
         Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
@@ -4866,17 +6609,18 @@ fn collect_external_static_string_constants_expr(
     expr: &Expr,
     facts: &FactSet,
     local_types: &BTreeSet<String>,
-    constants_by_owner: &mut BTreeMap<String, BTreeSet<String>>,
+    constants_by_owner: &mut BTreeMap<String, BTreeMap<String, JavaType>>,
 ) {
     match expr {
         Expr::FieldAccess(receiver, field) => {
-            if let Some(owner) = external_static_string_constant_owner(receiver, field, facts)
+            if let Some((owner, field_type)) =
+                external_static_constant_owner(receiver, field, facts)
                 && !local_types.contains(&owner)
             {
                 constants_by_owner
                     .entry(owner)
                     .or_default()
-                    .insert(canonical_external_field_name(field));
+                    .insert(canonical_external_field_name(field), field_type);
             }
             collect_external_static_string_constants_expr(
                 receiver,
@@ -5074,16 +6818,15 @@ fn collect_external_static_string_constants_expr(
     }
 }
 
-fn external_static_string_constant_owner(
+fn external_static_constant_owner(
     receiver: &Expr,
     field: &str,
     facts: &FactSet,
-) -> Option<String> {
-    let Expr::Var(receiver_name) = receiver else {
-        return None;
-    };
+) -> Option<(String, JavaType)> {
+    let receiver_name = static_constant_receiver_java_name(receiver)?;
     let lookup_owner = canonical_external_receiver_type_key(receiver_name);
-    let rust_owner = static_constant_rust_owner(receiver_name)?;
+    let rust_owner =
+        static_constant_rust_owner(receiver_name.rsplit('.').next().unwrap_or(receiver_name))?;
     if !valid_rust_type_ident(&rust_owner) {
         return None;
     }
@@ -5096,8 +6839,21 @@ fn external_static_string_constant_owner(
                 args: Vec::new(),
             };
             known_external_field_type_for_receiver(&receiver_type, field)
+        })
+        .or_else(|| {
+            crate::external_packs::external_field_for(&lookup_owner, field)
+                .and_then(|fact| fact.field_type)
         })?;
-    (field_type == JavaType::String).then_some(rust_owner)
+    static_constant_rust_type(&field_type)?;
+    Some((rust_owner, field_type))
+}
+
+fn static_constant_receiver_java_name(receiver: &Expr) -> Option<&str> {
+    match receiver {
+        Expr::Var(receiver_name) => Some(receiver_name),
+        Expr::FieldAccess(_, field) => Some(field),
+        _ => None,
+    }
 }
 
 fn static_constant_rust_owner(receiver_name: &str) -> Option<String> {
@@ -5117,27 +6873,75 @@ fn static_constant_rust_owner(receiver_name: &str) -> Option<String> {
 
 fn external_static_string_constant_support_item(
     owner: &str,
-    fields: BTreeSet<String>,
+    fields: BTreeMap<String, JavaType>,
     local_static_string_values: &BTreeMap<(String, String), String>,
+    declared_owners: &BTreeSet<String>,
 ) -> Option<crate::rust_ir::RustItem> {
     let consts = fields
         .into_iter()
-        .filter(|field| valid_rust_const_ident(field))
-        .map(|field| {
-            let value = local_static_string_values
-                .get(&(owner.to_string(), field.clone()))
-                .cloned()
-                .unwrap_or_else(|| field.clone());
-            format!("    pub const {field}: &'static str = {value:?};")
+        .filter(|(field, _)| valid_rust_const_ident(field))
+        .filter_map(|(field, field_type)| {
+            let rust_type = static_constant_rust_type(&field_type)?;
+            let value = static_constant_default_value(
+                owner,
+                &field,
+                &field_type,
+                local_static_string_values,
+            )?;
+            Some(format!("    pub const {field}: {rust_type} = {value};"))
         })
         .collect::<Vec<_>>();
     if consts.is_empty() {
         return None;
     }
-    Some(crate::rust_ir::RustItem::Raw(format!(
-        "pub struct {owner};\n\nimpl {owner} {{\n{}\n}}",
-        consts.join("\n")
-    )))
+    let impl_block = format!("impl {owner} {{\n{}\n}}", consts.join("\n"));
+    let raw = if declared_owners.contains(owner) {
+        impl_block
+    } else {
+        format!("pub struct {owner};\n\n{impl_block}")
+    };
+    Some(crate::rust_ir::RustItem::Raw(raw))
+}
+
+fn static_constant_rust_type(java_ty: &JavaType) -> Option<&'static str> {
+    match java_ty {
+        JavaType::String => Some("&'static str"),
+        JavaType::Primitive(PrimitiveType::Boolean) => Some("bool"),
+        JavaType::Primitive(PrimitiveType::Byte) => Some("i8"),
+        JavaType::Primitive(PrimitiveType::Short) => Some("i16"),
+        JavaType::Primitive(PrimitiveType::Int) => Some("i32"),
+        JavaType::Primitive(PrimitiveType::Long) => Some("i64"),
+        JavaType::Primitive(PrimitiveType::Float) => Some("f32"),
+        JavaType::Primitive(PrimitiveType::Double) => Some("f64"),
+        JavaType::Primitive(PrimitiveType::Char) => Some("char"),
+        _ => None,
+    }
+}
+
+fn static_constant_default_value(
+    owner: &str,
+    field: &str,
+    java_ty: &JavaType,
+    local_static_string_values: &BTreeMap<(String, String), String>,
+) -> Option<String> {
+    match java_ty {
+        JavaType::String => {
+            let value = local_static_string_values
+                .get(&(owner.to_string(), field.to_string()))
+                .cloned()
+                .unwrap_or_else(|| field.to_string());
+            Some(format!("{value:?}"))
+        }
+        JavaType::Primitive(PrimitiveType::Boolean) => Some("false".to_string()),
+        JavaType::Primitive(PrimitiveType::Byte)
+        | JavaType::Primitive(PrimitiveType::Short)
+        | JavaType::Primitive(PrimitiveType::Int) => Some("0".to_string()),
+        JavaType::Primitive(PrimitiveType::Long) => Some("0i64".to_string()),
+        JavaType::Primitive(PrimitiveType::Float) => Some("0.0f32".to_string()),
+        JavaType::Primitive(PrimitiveType::Double) => Some("0.0f64".to_string()),
+        JavaType::Primitive(PrimitiveType::Char) => Some("'\\0'".to_string()),
+        _ => None,
+    }
 }
 
 fn valid_rust_type_ident(name: &str) -> bool {
@@ -5162,6 +6966,10 @@ fn valid_rust_field_ident(name: &str) -> bool {
         .next()
         .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn valid_rust_method_ident(name: &str) -> bool {
+    valid_rust_field_ident(name)
 }
 
 pub fn program_uses_java_platform_facades(program: &Program) -> bool {
@@ -6410,6 +8218,9 @@ pub fn external_api_return_nullability(
         }
         (Some("Collections"), "singletonMap", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Iterators"), "forEnumeration", 1) => NullabilityState::DefinitelyNonNull,
+        (Some(owner), "writeString", 2 | 3) if is_java_nio_files_receiver(owner) => {
+            NullabilityState::DefinitelyNonNull
+        }
         (Some("Files"), "newDirectoryStream", 1 | 2) => NullabilityState::DefinitelyNonNull,
         (Some("System"), "getProperty", 1 | 2) => NullabilityState::MaybeNull,
         (Some("ImmutableMap" | "ImmutableSortedMap"), "of", _) => {
@@ -6506,6 +8317,9 @@ fn static_utility_method_role(
         (Some("Collections"), "singletonMap", 2) => ExternalApiRole::Getter,
         (Some("Collections"), "sort" | "shuffle" | "reverse", _) => ExternalApiRole::Mutator,
         (Some("Iterators"), "forEnumeration", 1) => ExternalApiRole::Getter,
+        (Some(owner), "writeString", 2 | 3) if is_java_nio_files_receiver(owner) => {
+            ExternalApiRole::Mutator
+        }
         (Some("Files"), "newDirectoryStream", 1 | 2) => ExternalApiRole::Getter,
         (Some("System"), "getProperty", 1 | 2) => ExternalApiRole::Getter,
         (Some("ImmutableMap" | "ImmutableSortedMap"), "of", _) => ExternalApiRole::Getter,

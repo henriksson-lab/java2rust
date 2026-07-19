@@ -129,6 +129,10 @@ pub enum RustExpr {
         op: String,
         expr: Box<RustExpr>,
     },
+    Cast {
+        expr: Box<RustExpr>,
+        ty: String,
+    },
     If {
         condition: Box<RustExpr>,
         then_expr: Box<RustExpr>,

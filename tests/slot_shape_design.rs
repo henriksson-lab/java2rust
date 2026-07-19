@@ -10,13 +10,13 @@ use new_java2rust::call_plan::{
     ArgumentLoweringPlan, CallExceptionPropagationPlan, CallExprPlan, CallStatementPlan,
     CallTargetPlan, NativeCollectionMethod, NativeCollectionNewTarget,
     NativeCollectionStaticMethod, NativeJavaInstanceMethod, NativeJavaStaticMethod,
-    TrivialAccessorCallPlan, external_call_lowered_type, native_collection_arg_shapes,
-    native_collection_arg_shapes_with_facts, native_collection_lowered_type, plan_call_arguments,
-    plan_call_arguments_with_facts, plan_call_arguments_with_facts_and_args,
-    plan_call_exception_propagation, plan_call_expr, plan_call_statement, plan_call_target,
-    plan_call_target_with_facts, plan_constructor_arguments, plan_new_target,
-    plan_new_target_with_facts, plan_trivial_accessor_call, resolved_call_arg_shapes,
-    resolved_constructor_arg_shapes,
+    TrivialAccessorCallPlan, external_call_lowered_type, external_constructor_arg_shapes,
+    native_collection_arg_shapes, native_collection_arg_shapes_with_facts,
+    native_collection_lowered_type, plan_call_arguments, plan_call_arguments_with_facts,
+    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation, plan_call_expr,
+    plan_call_statement, plan_call_target, plan_call_target_with_facts, plan_constructor_arguments,
+    plan_new_target, plan_new_target_with_facts, plan_trivial_accessor_call,
+    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::Coercion;
 use new_java2rust::constructor_plan::{
@@ -117,7 +117,7 @@ use new_java2rust::representation_lowering::{
     trait_impl_emissions_for_type_with_facts, trait_impl_method_message_policy, type_emission_for,
     type_emission_for_with_facts,
 };
-use new_java2rust::resolve::resolve_program;
+use new_java2rust::resolve::{resolve_program, resolve_program_with_source_program_and_facts};
 use new_java2rust::rewrite::{
     AssignmentConditionNormalizedShape, AssignmentInConditionPlan, ControlFlowRewritePlan,
     MethodControlFlowPlan, NullTestKind, TailRecursiveLoopPlan, TailRecursiveNormalizedShape,
@@ -267,7 +267,9 @@ use new_java2rust::usage::{
     call_argument_boundary_policy, call_argument_use_boundary_policy, call_result_boundary_policy,
     constructor_invocation_boundary_policy, method_api_boundary_policy,
 };
-use new_java2rust::{emit, translate_source, translate_source_with_facts};
+use new_java2rust::{
+    emit, translate_source, translate_source_with_context_sources, translate_source_with_facts,
+};
 
 #[test]
 fn slot_shape_keeps_string_ownership_and_view_as_separate_axes() {
@@ -1214,10 +1216,24 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
         name: "ExternalReader".to_string(),
         args: Vec::new(),
     };
+    let final_payload = JavaType::Named {
+        name: "ExternalOwner.Payload".to_string(),
+        args: Vec::new(),
+    };
+    let concrete_facade = JavaType::Named {
+        name: "IntervalList".to_string(),
+        args: Vec::new(),
+    };
     let map_ty = JavaType::Named {
         name: "Map".to_string(),
         args: vec![JavaType::String, erased_handle.clone()],
     };
+    let final_payload_map_ty = JavaType::Named {
+        name: "Map".to_string(),
+        args: vec![JavaType::String, final_payload.clone()],
+    };
+    let final_payload_list_ty = list_java_type(final_payload.clone());
+    let facade_list_ty = list_java_type(concrete_facade.clone());
     let list_ty = list_java_type(erased_handle.clone());
     let optional_ty = optional_java_type(erased_handle.clone());
     let mut facts = FactSet::default();
@@ -1226,6 +1242,44 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
         strategy: HierarchyStrategy::ErasedObject,
         provenance: FactProvenance::ExternalLibraryPack,
     });
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "IntervalList".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "ExternalOwner.Payload".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "IntervalList".to_string(),
+            copy: None,
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: Some(false),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "ExternalOwner.Payload".to_string(),
+            copy: None,
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: Some(false),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
 
     assert_eq!(
         native_java_rust_type_policy(&erased_handle, &facts),
@@ -1234,8 +1288,18 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
         }
     );
     assert_eq!(
+        native_java_rust_type_policy(&concrete_facade, &facts),
+        NativeJavaRustTypePolicy::Named {
+            name: "IntervalList".to_string(),
+        }
+    );
+    assert_eq!(
         rust_type_for_java_type_with_facts(&map_ty, &facts),
         RustType::Raw("std::collections::HashMap<String, Box<dyn std::any::Any>>".to_string())
+    );
+    assert_eq!(
+        rust_type_for_java_type_with_facts(&final_payload_map_ty, &facts),
+        RustType::Raw("std::collections::HashMap<String, ExternalOwnerPayload>".to_string())
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(&list_ty, &facts),
@@ -1244,10 +1308,20 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
         )))
     );
     assert_eq!(
+        rust_type_for_java_type_with_facts(&final_payload_list_ty, &facts),
+        RustType::Vec(Box::new(RustType::Named(
+            "ExternalOwnerPayload".to_string()
+        )))
+    );
+    assert_eq!(
         rust_type_for_java_type_with_facts(&optional_ty, &facts),
         RustType::Option(Box::new(RustType::Raw(
             "Box<dyn std::any::Any>".to_string()
         )))
+    );
+    assert_eq!(
+        rust_type_for_java_type_with_facts(&facade_list_ty, &facts),
+        RustType::Vec(Box::new(RustType::Named("IntervalList".to_string())))
     );
 
     let effective_facts_source = include_str!("../src/effective_facts.rs");
@@ -1255,6 +1329,82 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
     assert!(effective_facts_source.contains("object_representation_override_strategy_for"));
     assert!(slot_render_source.contains("object_representation_override_strategy_for"));
     assert!(!slot_render_source.contains("representation_for("));
+}
+
+#[test]
+fn native_map_get_into_final_facade_local_keeps_value_shape() {
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "ExternalOwner.Payload".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "ExternalOwner.Payload".to_string(),
+            copy: None,
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: Some(false),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let source = r#"
+import java.util.Map;
+
+class NativeMapFinalFacadeValueUse {
+    String label(Map<String, ExternalOwner.Payload> payloads, String name) {
+        ExternalOwner.Payload payload = payloads.get(name);
+        return payload.getName();
+    }
+}
+"#;
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let representations = plan_representations(&resolved.program, &facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+    let ty = &resolved.program.types[0];
+    let method = match &ty.members[0] {
+        Member::Method(method) => method,
+        _ => panic!("expected method"),
+    };
+    let local_shape = signatures.required_local_shape(
+        signatures.method_local_shapes_or_empty(ty, method),
+        "payload",
+    );
+    assert_eq!(local_shape.dispatch, DispatchShape::Concrete);
+    assert_eq!(local_shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(local_shape.view, ViewShape::Native);
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains(
+            "let payload: &ExternalOwnerPayload = payloads.get(&name).expect(\"Java null receiver\");"
+        ) && translation.rust.contains("return payload.get_name();")
+            && !translation
+                .rust
+                .contains("let payload: Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
 }
 
 #[test]
@@ -3732,7 +3882,11 @@ class StaticLoggerBoundaryUse {
         "{}",
         translation.rust
     );
-    assert!(!translation.rust.contains("Self::logger"), "{}", translation.rust);
+    assert!(
+        !translation.rust.contains("Self::logger"),
+        "{}",
+        translation.rust
+    );
 }
 
 #[test]
@@ -4649,6 +4803,100 @@ class Use {
 
     assert!(rust.contains("let stable: i32 = 1;"), "{rust}");
     assert!(rust.contains("let mut changed: i32 = stable;"), "{rust}");
+}
+
+#[test]
+fn signature_plan_marks_final_native_map_receiver_mutation_local_mutable() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.SortedMap;
+import java.util.TreeMap;
+
+class Use {
+    SortedMap<String, Integer> build(String key, int value) {
+        final SortedMap<String, Integer> sampleToReaderMap = new TreeMap<>();
+        run(() -> {
+            sampleToReaderMap.put(key, value);
+        });
+        return sampleToReaderMap;
+    }
+    void run(Runnable runnable) {}
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let signatures = solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "build" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let method_signature = signatures.method_signature(ty, method).unwrap();
+
+    assert_eq!(
+        signatures.local_binding_mutability(&method_signature.locals, "sample_to_reader_map"),
+        Some(true)
+    );
+}
+
+#[test]
+fn signature_plan_marks_arrays_sort_target_local_mutable() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.Arrays;
+
+class Use {
+    int firstSorted() {
+        int[] values = {2, 1};
+        Arrays.sort(values);
+        return values[0];
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "firstSorted" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let method_signature = signatures.method_signature(ty, method).unwrap();
+
+    assert_eq!(
+        signatures.local_binding_mutability(&method_signature.locals, "values"),
+        Some(true)
+    );
+
+    let lowered = lower_program_with_plans(
+        &resolved.program,
+        resolved.diagnostics,
+        &FactSet::default(),
+        &usage,
+        &representations,
+        &signatures,
+    );
+    let rust = emit::emit_file(&lowered.file);
+
+    assert!(rust.contains("let mut values"), "{rust}");
+    assert!(rust.contains("values.sort();"), "{rust}");
 }
 
 #[test]
@@ -7574,6 +7822,27 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         None
     );
 
+    let super_target = plan_call_target_with_facts(
+        Some(&Expr::Super),
+        "readName",
+        Some(&resolved_instance),
+        &FactSet::default(),
+        &new_java2rust::types::TypeEnv::default(),
+    );
+    assert!(matches!(
+        super_target,
+        CallTargetPlan::SuperBoundary {
+            ref rust_name,
+            return_type: JavaType::String,
+            propagates_result: false,
+        } if rust_name == "read_name"
+    ));
+    assert_eq!(super_target.receiver_expr(), None);
+    assert_eq!(
+        apply_call_target(&super_target, None, Vec::new()),
+        RustExpr::Raw("Default::default()".to_string())
+    );
+
     let hdf5_receiver = Expr::Var("hdf5".to_string());
     let hdf5_facts = new_java2rust::external_packs::hdf5_pack_facts();
     let mut hdf5_types = TypeEnv::new();
@@ -7770,11 +8039,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             Some(RustExpr::Var("values".to_string())),
             Vec::new(),
         ),
-        RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Var("values".to_string())),
-            method: "len".to_string(),
-            args: Vec::new(),
-        }
+        RustExpr::Raw("values.len() as i32".to_string())
     );
     assert!(matches!(
         plan_call_target_with_facts(
@@ -7911,6 +8176,52 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         erased_map_insert_shapes[1].view,
         ViewShape::ErasedObjectView
     );
+    let final_product = JavaType::Named {
+        name: "ExternalProduct".to_string(),
+        args: Vec::new(),
+    };
+    let mut final_facade_collection_types = TypeEnv::new();
+    final_facade_collection_types.insert_local(
+        "products",
+        JavaType::Named {
+            name: "List".to_string(),
+            args: vec![final_product.clone()],
+        },
+    );
+    let mut final_facade_facts = FactSet::default();
+    final_facade_facts
+        .hierarchy_overrides
+        .push(HierarchyOverride {
+            type_name: "ExternalProduct".to_string(),
+            strategy: HierarchyStrategy::ErasedObject,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    final_facade_facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "ExternalProduct".to_string(),
+            copy: None,
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: None,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    let products = Expr::Var("products".to_string());
+    let final_list_push_shapes = native_collection_arg_shapes_with_facts(
+        Some(&products),
+        "add",
+        1,
+        &final_facade_collection_types,
+        &final_facade_facts,
+    )
+    .expect("final erased facade Vec push should use the rendered concrete element slot");
+    assert_eq!(final_list_push_shapes[0].java_ty, final_product);
+    assert_eq!(final_list_push_shapes[0].dispatch, DispatchShape::Concrete);
+    assert_eq!(final_list_push_shapes[0].view, ViewShape::Native);
     let Some(map_get_shapes) =
         native_collection_arg_shapes(Some(&counts), "get", 1, &collection_types)
     else {
@@ -8295,6 +8606,43 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         ),
         RustExpr::Raw("Vec::with_capacity(names.as_ref().unwrap().len() as usize)".to_string())
     );
+
+    let mut external_constructor_facts = FactSet::default();
+    external_constructor_facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            receiver_type: Some("ExternalConfig".to_string()),
+            method_name: "new".to_string(),
+            parameter_index: 1,
+            parameter_type: Some(JavaType::Named {
+                name: "Function".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::MaybeNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    let constructor_shapes = external_constructor_arg_shapes(
+        &JavaType::Named {
+            name: "ExternalConfig".to_string(),
+            args: Vec::new(),
+        },
+        "new",
+        3,
+        &external_constructor_facts,
+    )
+    .expect("one constructor argument fact should shape all constructor slots");
+    assert!(constructor_shapes[0].optional_element_type().is_none());
+    assert_eq!(
+        constructor_shapes[1].optional_element_type(),
+        Some(JavaType::Named {
+            name: "Function".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert!(constructor_shapes[2].optional_element_type().is_none());
+
     let map_new_target = plan_new_target_with_facts(
         &JavaType::Named {
             name: "HashMap".to_string(),
@@ -8316,6 +8664,29 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         RustExpr::Call {
             function: Box::new(RustExpr::Raw("std::collections::HashMap::new".to_string())),
             args: Vec::new(),
+        }
+    );
+    let interval_list_target = plan_new_target_with_facts(
+        &JavaType::Named {
+            name: "IntervalList".to_string(),
+            args: Vec::new(),
+        },
+        None,
+        &representations,
+        &new_java2rust::external_packs::htsjdk_samtools_util_pack_facts(),
+        1,
+    );
+    assert_eq!(interval_list_target.native_collection, None);
+    assert_eq!(interval_list_target.rust_name, "new");
+    assert_eq!(
+        apply_new_target_with_facts(
+            &interval_list_target,
+            vec![RustExpr::Var("dictionary".to_string())],
+            &new_java2rust::external_packs::htsjdk_samtools_util_pack_facts()
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("IntervalList::new".to_string())),
+            args: vec![RustExpr::Var("dictionary".to_string())],
         }
     );
     let hdf5_new_target = plan_new_target_with_facts(
@@ -9067,7 +9438,7 @@ class StaticImportTypedReturn {
     assert!(
         translation
             .rust
-            .contains("pub fn read_value<T0>(_arg0: T0) -> String"),
+            .contains("pub fn read_value(_arg0: &str) -> String"),
         "{}",
         translation.rust
     );
@@ -9078,6 +9449,221 @@ class StaticImportTypedReturn {
     );
     assert!(
         !translation.rust.contains("pub fn read_value<T0>(&self"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn static_external_facade_uses_nullable_argument_fact_without_call_site_type_hack() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "read".to_string(),
+        receiver_type: Some("external.lib.ReaderFactory".to_string()),
+        arg_count: Some(6),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "read".to_string(),
+            receiver_type: Some("external.lib.ReaderFactory".to_string()),
+            parameter_index: 1,
+            parameter_type: Some(JavaType::String),
+            parameter_nullability: NullabilityState::MaybeNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::UserOverride,
+        });
+
+    let translation = translate_source_with_facts(
+        r#"
+import external.lib.ReaderFactory;
+
+class NullableExternalArgument {
+    String read(String path, Object codec, Object wrapper) {
+        return ReaderFactory.read(path, null, codec, false, wrapper, wrapper);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains("ReaderFactory::read(path, None"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(", None, codec, false"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("None::<"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn read<T0, T2, T3, T4, T5>(_arg0: T0, _arg1: Option<String>, _arg2: T2, _arg3: T3, _arg4: T4, _arg5: T5) -> String"
+        ),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_static_validation_facade_uses_side_effect_fact_return() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "validate".to_string(),
+        receiver_type: Some("org.example.validation.Utils".to_string()),
+        arg_count: Some(2),
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: None,
+        return_nullability: NullabilityState::Unknown,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "validate".to_string(),
+            receiver_type: Some("org.example.validation.Utils".to_string()),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::Primitive(PrimitiveType::Boolean)),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let translation = translate_source_with_facts(
+        r#"
+import org.example.validation.Utils;
+
+class ExternalValidationUse {
+    void check(boolean ok, Object message) {
+        Utils.validate(ok, message);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("Utils::validate(ok, message);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn validate<T1>(_arg0: bool, _arg1: T1) -> () { () }"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub fn validate<R: Default"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn java_platform_files_write_string_facade_uses_known_path_return() {
+    let translation = translate_source(
+        r#"
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+class JavaPlatformFileWrite {
+    void write(Path path, String contents) {
+        Files.writeString(path, contents);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Files::write_string(path, contents);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn write_string<T0, T1>(_arg0: T0, _arg1: T1) -> Path"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub fn write_string<R: Default"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn branch_scoped_same_name_locals_keep_declared_type_specific_shapes() {
+    let translation = translate_source(
+        r#"
+class SameNameBranchLocalTypes {
+    String read() {
+        return "header";
+    }
+
+    int count() {
+        return 1;
+    }
+
+    void sinkString(String value) {
+    }
+
+    void sinkCount(int value) {
+    }
+
+    void run(boolean flag) {
+        if (flag) {
+            String header = read();
+            sinkString(header);
+        } else {
+            int header = count();
+            sinkCount(header);
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let header: String = self.read();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("let header: i32 = self.count();"),
         "{}",
         translation.rust
     );
@@ -9150,7 +9736,7 @@ class StaticImportFqnFactReturn {
     assert!(
         translation
             .rust
-            .contains("pub fn is_genomics_d_b_array<T0, T1>(_arg0: T0, _arg1: T1) -> bool"),
+            .contains("pub fn is_genomics_d_b_array(_arg0: &str, _arg1: &str) -> bool"),
         "{}",
         translation.rust
     );
@@ -9229,6 +9815,256 @@ class ExternalConstructorCaller {
     );
     assert!(
         !translation.rust.contains("ExternalBox::new(label"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_method_support_uses_arity_names_for_overloaded_facades() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "query".to_string(),
+        receiver_type: Some("ExternalCursor".to_string()),
+        arg_count: Some(1),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "ExternalIterator".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "query".to_string(),
+        receiver_type: Some("ExternalCursor".to_string()),
+        arg_count: Some(3),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "ExternalRangeIterator".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(
+        r#"
+class ExternalMethodCaller {
+    ExternalIterator single(ExternalCursor cursor, String contig) {
+        return cursor.query(contig);
+    }
+
+    ExternalRangeIterator range(ExternalCursor cursor, String contig, int start, int end) {
+        return cursor.query(contig, start, end);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("cursor.query_1(contig)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("cursor.query_3(contig, start, end)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn query_1<T0>(&self, _arg0: T0) -> ExternalIterator"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn query_3<T0, T1, T2>(&self, _arg0: T0, _arg1: T1, _arg2: T2) -> ExternalRangeIterator"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub fn query<T0, T1, T2>(&self"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn domain_collection_facade_constructor_is_not_native_collection_constructor() {
+    let facts = new_java2rust::external_packs::htsjdk_samtools_util_pack_facts();
+    let translation = translate_source_with_facts(
+        r#"
+import htsjdk.samtools.SAMSequenceDictionary;
+import htsjdk.samtools.util.IntervalList;
+
+class DomainCollectionConstructorUse {
+    IntervalList make(SAMSequenceDictionary dictionary) {
+        IntervalList intervals = new IntervalList(dictionary);
+        intervals.add(new Interval("chr1", 1, 2));
+        intervals.write("out.interval_list");
+        return intervals;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("IntervalList::new(dictionary)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("intervals.add("),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("intervals.write("),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("intervals.push("),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new<T0>(_arg0: T0) -> Self"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn add<T0>(&self, _arg0: T0)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn write<T0>(&self, _arg0: T0)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn pack_enabled_final_domain_facade_local_stays_concrete_not_erased() {
+    let facts = new_java2rust::external_packs::htsjdk_samtools_util_pack_facts();
+    let translation = translate_source_with_facts(
+        r#"
+import htsjdk.samtools.SAMSequenceDictionary;
+import htsjdk.samtools.util.IntervalList;
+
+class PackEnabledDomainFacadeUse {
+    IntervalList make(SAMSequenceDictionary dictionary) {
+        IntervalList intervals = new IntervalList(dictionary);
+        intervals.add(new Interval("chr1", 1, 2));
+        return intervals;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let mut intervals: IntervalList = IntervalList::new(dictionary);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("let mut intervals: Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("intervals.add("),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains(
+            "Box::new(Interval::new_3(\"chr1\".to_string(), 1, 2)) as Box<dyn std::any::Any>"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("intervals.add(Interval::new_3(\"chr1\".to_string(), 1, 2));"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_enum_constant_facades_do_not_emit_recursive_storage_fields() {
+    let facts = new_java2rust::external_packs::htsjdk_samtools_util_pack_facts();
+    let translation = translate_source_with_facts(
+        r#"
+import htsjdk.samtools.SamPairUtil.PairOrientation;
+
+class ExternalEnumConstantUse {
+    PairOrientation value() {
+        return PairOrientation.FR;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("pub struct PairOrientation;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub struct PairOrientation {"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub f_r: PairOrientation"),
         "{}",
         translation.rust
     );
@@ -9920,6 +10756,20 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
             ..
         }) if param_names == vec!["name", "item"]
     ));
+    assert!(matches!(
+        plan_call_statement(
+            &Expr::Call {
+                receiver: Some(Box::new(Expr::Var("Arrays".to_string()))),
+                name: "sort".to_string(),
+                args: vec![Expr::Var("values".to_string())],
+                resolved: None,
+            },
+            &facts,
+        ),
+        Some(CallStatementPlan::NativeArraysSort {
+            target: Expr::Var(name),
+        }) if name == "values"
+    ));
 
     let mut preserve_api_facts = facts.clone();
     preserve_api_facts.trivial_accessor_facts[0].inline_policy = AccessorInlinePolicy::PreserveApi;
@@ -9947,6 +10797,36 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
             ..
         })
     ));
+}
+
+#[test]
+fn arrays_sort_statement_lowers_to_mutating_rust_sort() {
+    let source = r#"
+import java.util.Arrays;
+
+class ArraysSortUse {
+    void sortValues(int[] values) {
+        Arrays.sort(values);
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("values.sort();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("Arrays::sort"),
+        "{}",
+        translation.rust
+    );
 }
 
 #[test]
@@ -13779,6 +14659,58 @@ class Holder {
         }))]
     );
     assert_eq!(
+        constructor_return_body(
+            ty,
+            vec![
+                ("reader".to_string(), RustExpr::Var("reader".to_string())),
+                (
+                    "query".to_string(),
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("reader".to_string())),
+                        method: "query_3".to_string(),
+                        args: Vec::new(),
+                    },
+                ),
+            ],
+        ),
+        vec![RustStmt::Return(Some(RustExpr::StructLit {
+            name: "Holder".to_string(),
+            fields: vec![
+                (
+                    "query".to_string(),
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("reader".to_string())),
+                        method: "query_3".to_string(),
+                        args: Vec::new(),
+                    },
+                ),
+                ("reader".to_string(), RustExpr::Var("reader".to_string())),
+            ],
+        }))]
+    );
+    assert_eq!(
+        constructor_return_body(
+            ty,
+            vec![
+                ("reader".to_string(), RustExpr::Raw("reader".to_string())),
+                (
+                    "query".to_string(),
+                    RustExpr::Raw("Some(reader.query_3(contig, start, end))".to_string()),
+                ),
+            ],
+        ),
+        vec![RustStmt::Return(Some(RustExpr::StructLit {
+            name: "Holder".to_string(),
+            fields: vec![
+                (
+                    "query".to_string(),
+                    RustExpr::Raw("Some(reader.query_3(contig, start, end))".to_string()),
+                ),
+                ("reader".to_string(), RustExpr::Raw("reader".to_string())),
+            ],
+        }))]
+    );
+    assert_eq!(
         delegating_constructor_return_body(
             "new_with_name",
             vec![RustExpr::Var("name".to_string())],
@@ -13799,6 +14731,47 @@ class Holder {
                 PrimitiveType::Int
             )))
         )
+    );
+
+    let implicit_ctor_translation = translate_source(
+        r#"
+class ImplicitDefaultConstructorCaller {
+    ImplicitDefaultConstructorTarget make() {
+        return new ImplicitDefaultConstructorTarget();
+    }
+}
+
+class ImplicitDefaultConstructorTarget {
+    int count = 7;
+    String name;
+}
+"#,
+    );
+    assert!(
+        !implicit_ctor_translation.diagnostics.has_errors(),
+        "{:?}",
+        implicit_ctor_translation.diagnostics
+    );
+    assert!(
+        implicit_ctor_translation
+            .rust
+            .contains("pub fn new() -> ImplicitDefaultConstructorTarget"),
+        "{}",
+        implicit_ctor_translation.rust
+    );
+    assert!(
+        implicit_ctor_translation.rust.contains(
+            "return ImplicitDefaultConstructorTarget { count: 7, name: Default::default() };"
+        ),
+        "{}",
+        implicit_ctor_translation.rust
+    );
+    assert!(
+        implicit_ctor_translation
+            .rust
+            .contains("return ImplicitDefaultConstructorTarget::new();"),
+        "{}",
+        implicit_ctor_translation.rust
     );
 
     let method_body = vec![RustStmt::Return(Some(RustExpr::Var("value".to_string())))];
@@ -15024,8 +15997,12 @@ fn constructor_assigned_local_keeps_owned_storage_despite_borrowed_external_uses
 class DeferredExternalStorage {
     private void run(Config config) {
         Importer importer;
-        importer = new Importer(config);
-        Helper.update(importer);
+        try {
+            importer = new Importer(config);
+            Helper.update(importer);
+        } catch (Exception ex) {
+            throw ex;
+        }
     }
 }
 "#,
@@ -15089,6 +16066,158 @@ class DeferredExternalStorage {
         .expect("constructor-assigned local should have a solved shape");
 
     assert_eq!(importer_shape.ownership, OwnershipShape::Owned);
+
+    let translation = translate_source_with_facts(
+        r#"
+class DeferredExternalStorage {
+    private void run(Config config) {
+        Importer importer;
+        try {
+            importer = new Importer(config);
+            Helper.update(importer);
+        } catch (Exception ex) {
+            throw ex;
+        }
+    }
+}
+"#,
+        &facts,
+    );
+    assert!(
+        translation.rust.contains("let mut importer: Importer")
+            && !translation.rust.contains("let mut importer: &Importer;"),
+        "constructor-assigned local should render owned storage before borrowed uses:\n{}",
+        translation.rust
+    );
+
+    let genomicsdb_translation = translate_source_with_facts(
+        r#"
+import com.intel.genomicsdb.GenomicsDBImporter;
+import com.intel.genomicsdb.importer.model.ImportConfig;
+
+class DeferredGenomicsDbStorage {
+    private void run(ImportConfig config) {
+        GenomicsDBImporter importer;
+        try {
+            importer = new GenomicsDBImporter(config);
+            importer.executeImport(1);
+        } catch (Exception ex) {
+            throw ex;
+        }
+    }
+}
+"#,
+        &new_java2rust::external_packs::genomicsdb_pack_facts(),
+    );
+    assert!(
+        genomicsdb_translation
+            .rust
+            .contains("let mut importer: GenomicsDBImporter")
+            && !genomicsdb_translation
+                .rust
+                .contains("let mut importer: &GenomicsDBImporter;"),
+        "pack-owned constructor-assigned local should render owned storage:\n{}",
+        genomicsdb_translation.rust
+    );
+
+    let helper_parsed = parse_java_source(
+        r#"
+class DeferredExternalStorageWithHelper {
+    private void run(Config config, Interval[] intervals) {
+        Importer importer;
+        try {
+            importer = new Importer(config);
+            inspect(importer, intervals);
+            importer.executeImport(1);
+        } catch (Exception ex) {
+            throw ex;
+        }
+    }
+
+    private static void inspect(Importer importer, Interval[] intervals) {
+        importer.describe();
+        int count = intervals.length;
+    }
+}
+"#,
+    );
+    let helper_resolved = resolve_program(&helper_parsed.program, helper_parsed.diagnostics);
+    let helper_external = parse_external_facts(
+        "\
+external-api describe Importer getter read-only definitely-non-null
+external-api executeImport Importer side-effect unknown
+",
+    );
+    assert!(
+        helper_external.diagnostics.is_empty(),
+        "{:?}",
+        helper_external.diagnostics
+    );
+    let mut helper_facts = helper_resolved.facts.clone();
+    helper_facts.extend_from(helper_external.facts);
+    let helper_usage = analyze_usage(&helper_resolved.program);
+    let helper_representations = plan_representations(&helper_resolved.program, &helper_facts);
+    let helper_signatures = solve_signatures_with_facts(
+        &helper_resolved.program,
+        &helper_representations,
+        &helper_usage,
+        &helper_facts,
+    );
+    let helper_ty = helper_resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "DeferredExternalStorageWithHelper")
+        .unwrap();
+    let helper_method = helper_ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let helper_method_signature = helper_signatures
+        .method_signature(helper_ty, helper_method)
+        .unwrap();
+    let helper_importer_shape = helper_signatures
+        .local_shape(&helper_method_signature.locals, "importer")
+        .expect("constructor-assigned helper local should have a solved shape");
+
+    assert_eq!(helper_importer_shape.ownership, OwnershipShape::Owned);
+
+    let helper_translation = translate_source_with_facts(
+        r#"
+class DeferredExternalStorageWithHelper {
+    private void run(Config config, Interval[] intervals) {
+        Importer importer;
+        try {
+            importer = new Importer(config);
+            inspect(importer, intervals);
+            importer.executeImport(1);
+        } catch (Exception ex) {
+            throw ex;
+        }
+    }
+
+    private static void inspect(Importer importer, Interval[] intervals) {
+        importer.describe();
+        int count = intervals.length;
+    }
+}
+"#,
+        &helper_facts,
+    );
+    assert!(
+        helper_translation
+            .rust
+            .contains("let mut importer: Importer")
+            && !helper_translation
+                .rust
+                .contains("let mut importer: &Importer;"),
+        "constructor-assigned local should stay owned even when an internal helper borrows it:\n{}",
+        helper_translation.rust
+    );
 }
 
 #[test]
@@ -15392,6 +16521,94 @@ class NullablePathOverloadArgument {
         "{:?}",
         method_param_shape_constraints(ty, method, &method.params[1], &usage, &resolved.facts)
     );
+}
+
+#[test]
+fn direct_null_call_argument_marks_resolved_method_parameter_nullable() {
+    let parsed = parse_java_source(
+        r#"
+import java.nio.file.Path;
+
+class DirectNullMethodArgument {
+    void call(Path path) {
+        target(path, null);
+    }
+
+    void target(Path path, Path optionalIndex) {
+        use(path);
+    }
+
+    void use(Path path) {
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "DirectNullMethodArgument")
+        .unwrap();
+    let target = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "target" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let target_signature = signatures.method_signature(ty, target).unwrap();
+
+    assert!(matches!(
+        rust_type_for_slot(&target_signature.params[1].shape),
+        RustType::Option(_)
+    ));
+}
+
+#[test]
+fn direct_null_constructor_delegation_marks_resolved_constructor_parameter_nullable() {
+    let parsed = parse_java_source(
+        r#"
+import java.nio.file.Path;
+
+class DirectNullConstructorDelegation {
+    DirectNullConstructorDelegation() {
+        this(null);
+    }
+
+    DirectNullConstructorDelegation(Path optionalPath) {
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "DirectNullConstructorDelegation")
+        .unwrap();
+    let delegated = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Constructor(constructor) if constructor.params.len() == 1 => Some(constructor),
+            _ => None,
+        })
+        .unwrap();
+    let constructor_signature = signatures.constructor_signature(ty, delegated).unwrap();
+
+    assert!(matches!(
+        rust_type_for_slot(&constructor_signature.params[0].shape),
+        RustType::Option(_)
+    ));
 }
 
 #[test]
@@ -16959,6 +18176,10 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         name: "ExternalExpr".to_string(),
         args: Vec::new(),
     };
+    let final_erased_facade = JavaType::Named {
+        name: "FinalFacade".to_string(),
+        args: Vec::new(),
+    };
     facts.hierarchy_overrides.push(HierarchyOverride {
         type_name: "ExternalExpr".to_string(),
         strategy: HierarchyStrategy::ClosedEnum {
@@ -16967,6 +18188,25 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         },
         provenance: FactProvenance::UserOverride,
     });
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "FinalFacade".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "FinalFacade".to_string(),
+            copy: None,
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: None,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
 
     let public_copy =
         signature_boundary_policy(SignatureBoundaryKind::PublicApi, &external_id, &facts);
@@ -16990,6 +18230,11 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         &enum_overridden_object,
         &facts,
     );
+    let public_final_erased_facade = signature_boundary_policy(
+        SignatureBoundaryKind::PublicApi,
+        &final_erased_facade,
+        &facts,
+    );
     let escaping_unknown_object = signature_boundary_policy(
         SignatureBoundaryKind::EscapingStorage,
         &unknown_object,
@@ -17011,6 +18256,8 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         signature_boundary_representation_policy(&wildcard_object, &facts);
     let enum_override_representation_policy =
         signature_boundary_representation_policy(&enum_overridden_object, &facts);
+    let final_erased_facade_representation_policy =
+        signature_boundary_representation_policy(&final_erased_facade, &facts);
     let native_representation_fact_policy =
         signature_boundary_representation_fact_policy(&external_id, &facts);
     let interface_representation_fact_policy =
@@ -17021,6 +18268,8 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         signature_boundary_representation_fact_policy(&wildcard_object, &facts);
     let enum_override_representation_fact_policy =
         signature_boundary_representation_fact_policy(&enum_overridden_object, &facts);
+    let final_erased_facade_representation_fact_policy =
+        signature_boundary_representation_fact_policy(&final_erased_facade, &facts);
     let effective_facts = EffectiveFacts::new(&facts);
     let interface_effective_representation_fact_policy =
         signature_boundary_representation_fact_policy_with_effective_facts(
@@ -17084,6 +18333,13 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         }
     );
     assert_eq!(
+        final_erased_facade_representation_fact_policy,
+        SignatureBoundaryRepresentationFactPolicy {
+            java_ty: final_erased_facade.clone(),
+            object_representation_facts: true,
+        }
+    );
+    assert_eq!(
         native_representation_policy,
         SignatureBoundaryRepresentationPolicy {
             java_ty: external_id.clone(),
@@ -17116,6 +18372,13 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         SignatureBoundaryRepresentationPolicy {
             java_ty: enum_overridden_object.clone(),
             preserve_object_representation: true,
+        }
+    );
+    assert_eq!(
+        final_erased_facade_representation_policy,
+        SignatureBoundaryRepresentationPolicy {
+            java_ty: final_erased_facade.clone(),
+            preserve_object_representation: false,
         }
     );
     assert_eq!(
@@ -17204,6 +18467,19 @@ fn signature_boundary_policy_owns_public_unknown_and_escape_constraints() {
         SignatureBoundaryFallback::PreserveObjectRepresentation
     );
     assert!(unknown_enum_overridden_object.constraints.is_empty());
+    assert_eq!(
+        public_final_erased_facade.fallback,
+        SignatureBoundaryFallback::ConservativeNative
+    );
+    assert_eq!(
+        public_final_erased_facade.constraints,
+        vec![
+            SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+            SignatureConstraint::RequiredView(ViewShape::Native),
+            SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+        ]
+    );
+
     assert_eq!(
         escaping_unknown_object.fallback,
         SignatureBoundaryFallback::PreserveObjectRepresentationEscapingStorage
@@ -17307,6 +18583,25 @@ fn signature_public_unknown_fallback_is_type_aware_across_java_type_categories()
         strategy: HierarchyStrategy::ErasedObject,
         provenance: FactProvenance::ExternalLibraryPack,
     });
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "FinalFacade".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "FinalFacade".to_string(),
+            copy: None,
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: None,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
     facts
         .owned_recovery_capability_facts
         .push(OwnedRecoveryCapabilityFact {
@@ -17435,6 +18730,19 @@ fn signature_public_unknown_fallback_is_type_aware_across_java_type_categories()
             },
             SignatureBoundaryFallback::PreserveObjectRepresentation,
             Vec::new(),
+        ),
+        (
+            "exact final erased facade",
+            JavaType::Named {
+                name: "FinalFacade".to_string(),
+                args: Vec::new(),
+            },
+            SignatureBoundaryFallback::ConservativeNative,
+            vec![
+                SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+                SignatureConstraint::RequiredView(ViewShape::Native),
+                SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+            ],
         ),
     ];
 
@@ -17847,7 +19155,8 @@ class PublicReturnPolicySource {
         method_return_boundary_policy(
             public_ty,
             public_method,
-            &new_java2rust::usage::UsageFacts::default()
+            &new_java2rust::usage::UsageFacts::default(),
+            &FactSet::default(),
         ),
         MethodReturnBoundaryPolicy {
             type_name: "PublicReturnPolicySource".to_string(),
@@ -17884,7 +19193,7 @@ class Helper {
         .unwrap();
 
     assert_eq!(
-        method_return_boundary_policy(unknown_ty, unknown_method, &usage),
+        method_return_boundary_policy(unknown_ty, unknown_method, &usage, &FactSet::default()),
         MethodReturnBoundaryPolicy {
             type_name: "UnknownReturnPolicySource".to_string(),
             method_name: "load".to_string(),
@@ -18077,7 +19386,7 @@ class BoundaryRoleFixture {
         Some(SignatureBoundaryKind::PublicApi)
     );
     assert_eq!(
-        method_return_boundary_policy(ty, expose, &usage).kind,
+        method_return_boundary_policy(ty, expose, &usage, &FactSet::default()).kind,
         Some(SignatureBoundaryKind::PublicApi)
     );
     assert_eq!(
@@ -19619,6 +20928,231 @@ class UseExternalConstant {
 }
 
 #[test]
+fn external_static_primitive_constant_support_is_generated_from_field_facts() {
+    let source = r#"
+class UseExternalPrimitiveConstantCaller {
+    UseExternalPrimitiveConstant make() {
+        return new UseExternalPrimitiveConstant();
+    }
+}
+
+class UseExternalPrimitiveConstant {
+    int count = ExternalCounts.MAX_COUNT;
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FactFieldKey {
+            type_name: "external_counts".to_string(),
+            field_name: "MAX_COUNT".to_string(),
+        },
+        field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("pub struct ExternalCounts"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub const MAX_COUNT: i32 = 0;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("ExternalCounts::MAX_COUNT"),
+        "{}",
+        translation.rust
+    );
+
+    let builtin_translation = translate_source(
+        r#"
+import htsjdk.variant.variantcontext.GenotypeLikelihoods;
+
+class BuiltinPrimitiveConstantCaller {
+    BuiltinPrimitiveConstant make() {
+        return new BuiltinPrimitiveConstant();
+    }
+}
+
+class BuiltinPrimitiveConstant {
+    int count = GenotypeLikelihoods.MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED;
+}
+"#,
+    );
+    assert!(
+        builtin_translation
+            .rust
+            .contains("pub struct GenotypeLikelihoods"),
+        "{}",
+        builtin_translation.rust
+    );
+    assert!(
+        builtin_translation
+            .rust
+            .contains("pub const MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED: i32 = 0;"),
+        "{}",
+        builtin_translation.rust
+    );
+    assert!(
+        builtin_translation
+            .rust
+            .contains("GenotypeLikelihoods::MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED"),
+        "{}",
+        builtin_translation.rust
+    );
+}
+
+#[test]
+fn static_string_constant_support_extends_existing_opaque_facade_owner() {
+    let source = r#"
+class ExternalConstantFacadeCollision {
+    void accept(ExternalConstants constants) {
+    }
+
+    String key() {
+        return ExternalConstants.NAME;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FactFieldKey {
+            type_name: "external_constants".to_string(),
+            field_name: "NAME".to_string(),
+        },
+        field_type: Some(JavaType::String),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert_eq!(
+        translation
+            .rust
+            .matches("pub struct ExternalConstants")
+            .count(),
+        1,
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("impl ExternalConstants {\n    pub const NAME: &'static str = \"NAME\";"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn context_static_string_constant_owner_stays_sibling_source_type() {
+    let source = r#"
+class UsesSiblingStaticConstant {
+    SiblingConstants make() {
+        return new SiblingConstants();
+    }
+
+    String key() {
+        return SiblingConstants.NAME;
+    }
+}
+"#;
+    let sibling = r#"
+class SiblingConstants {
+    public static final String NAME = "name";
+}
+"#
+    .to_string();
+
+    let translation =
+        translate_source_with_context_sources(source, &[sibling], &FactSet::default());
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("SiblingConstants::NAME"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub struct SiblingConstants;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn conventional_external_static_string_constants_are_typed_and_supported() {
+    let source = r#"
+class UseExternalStringConstants {
+    String message() {
+        return CommandNames.INPUT_LONG_NAME + ExternalDelimiters.FIELD_DELIM;
+    }
+
+    void configure(HeaderBuilder builder) {
+        builder.addDelimiter(ExternalDelimiters.FIELD_DELIM);
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("pub struct CommandNames"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub const INPUT_LONG_NAME: &'static str = \"INPUT_LONG_NAME\";"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub struct ExternalDelimiters"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub const FIELD_DELIM: &'static str = \"FIELD_DELIM\";"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("CommandNames::INPUT_LONG_NAME"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("ExternalDelimiters::FIELD_DELIM"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_support_struct_fields_are_generated_from_field_facts() {
     let source = r#"
 class UseExternalRecord {
@@ -19679,12 +21213,66 @@ class UseExternalBuilder {
         return builder.build();
     }
 
+    ExternalFactory.Product makeProduct(ExternalFactory.Product.Builder builder) {
+        return builder.build();
+    }
+
     Object rebuild(Object value) {
         return value.toBuilder();
+    }
+
+    public static ExternalFactory.Product expose(ExternalFactory.Product product) {
+        return product.toBuilder().build();
+    }
+
+    public static HashMap<String, Integer> indexes(ExternalFactory.Product product) {
+        HashMap<String, Integer> result = new HashMap<>();
+        for (int i = 0; i < product.getFieldsCount(); ++i) {
+            result.put(product.getFields(i).getName(), i);
+        }
+        return result;
     }
 }
 "#;
     let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "ExternalFactory.Product".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "ExternalFactory.Product".to_string(),
+            copy: None,
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: None,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "ExternalFactory.Product.Builder".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "ExternalFactory.Product.Builder".to_string(),
+            copy: None,
+            clone: Some(true),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: Some(true),
+            object_safe_trait: None,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
     facts.external_field_facts.push(ExternalFieldFact {
         field: FactFieldKey {
             type_name: "ExternalFactory".to_string(),
@@ -19720,6 +21308,81 @@ class UseExternalBuilder {
             name: "Product.Builder".to_string(),
             args: Vec::new(),
         }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "build".to_string(),
+        receiver_type: Some("ExternalFactory.Product.Builder".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "ExternalFactory.Product".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getFieldsCount".to_string(),
+        receiver_type: Some("ExternalFactory.Product".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getFieldsCount".to_string(),
+        receiver_type: Some("Product".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getFields".to_string(),
+        receiver_type: Some("ExternalFactory.Product".to_string()),
+        arg_count: Some(1),
+        role: ExternalApiRole::IndexedGetter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "ExternalFactory.FieldInfo".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getFields".to_string(),
+        receiver_type: Some("Product".to_string()),
+        arg_count: Some(1),
+        role: ExternalApiRole::IndexedGetter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "ExternalFactory.FieldInfo".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getName".to_string(),
+        receiver_type: Some("ExternalFactory.FieldInfo".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
         return_nullability: NullabilityState::DefinitelyNonNull,
         thrown: Vec::new(),
         provenance: FactProvenance::ExternalLibraryPack,
@@ -19765,7 +21428,19 @@ class UseExternalBuilder {
     assert!(
         translation
             .rust
-            .contains("pub fn build(&self) -> Box<dyn std::any::Any>"),
+            .contains("pub fn build(&self) -> ExternalFactoryProduct"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn make_product(&self, builder: &ExternalFactoryProductBuilder) -> ExternalFactoryProduct"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("return builder.build();"),
         "{}",
         translation.rust
     );
@@ -19780,6 +21455,34 @@ class UseExternalBuilder {
         translation
             .rust
             .contains("fn to_builder(&self) -> ProductBuilder"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn expose(product: ExternalFactoryProduct) -> ExternalFactoryProduct"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return product.to_builder().build();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn indexes(product: &ExternalFactoryProduct) -> std::collections::HashMap<String, i32>"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("product.get_fields(i).get_name()"),
         "{}",
         translation.rust
     );
@@ -20410,6 +22113,21 @@ fn indexed_shape_projects_borrowed_slice_elements_without_lowering_rules() {
 }
 
 #[test]
+fn indexed_shape_projects_owned_container_non_copy_reads_as_borrows() {
+    let mut env = ShapeEnv::new();
+    let values_shape = RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::String)));
+    let projected_shape = indexed_read_shape(&values_shape);
+    env.insert_local_shape("values", values_shape);
+
+    let element_shape = infer_expr_shape(&parse_expr("values[0]"), &env);
+
+    assert_eq!(projected_shape, element_shape);
+    assert_eq!(element_shape.java_ty, JavaType::String);
+    assert_eq!(element_shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(element_shape.view, ViewShape::Native);
+}
+
+#[test]
 fn indexed_assignment_target_shape_projects_storage_element_shape() {
     let mut env = ShapeEnv::new();
     let mut values_shape = RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::String)));
@@ -20534,8 +22252,8 @@ fn indexed_element_projection_policy_owns_copy_and_borrowed_element_axes() {
     assert_eq!(
         indexed_element_projection_policy(
             JavaType::String,
-            OwnershipShape::SharedBorrow,
-            &ViewShape::Slice,
+            OwnershipShape::Owned,
+            &ViewShape::Native,
             &FactSet::default(),
         )
         .ownership,
@@ -20952,6 +22670,18 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             &call_facts,
             &new_java2rust::types::TypeEnv::default(),
             Some("Owner"),
+        ),
+        CallExceptionPropagationPlan::PropagateResult
+    );
+    assert_eq!(
+        plan_call_exception_propagation(
+            None,
+            "readHeaderFromPath",
+            &[Expr::Var("path".to_string())],
+            None,
+            &call_facts,
+            &new_java2rust::types::TypeEnv::default(),
+            Some("Reader"),
         ),
         CallExceptionPropagationPlan::PropagateResult
     );
@@ -21448,7 +23178,7 @@ class TryFinallyUnit {
             RustType::Unit,
             vec![RustStmt::Raw("let input = open_input();".to_string())],
             vec![RustStmt::Raw("copy_chunk(&mut input)?;".to_string())],
-            vec!["input".to_string()],
+            vec![RustStmt::Raw("input.close()?;".to_string())],
             false,
         ),
         RustStmt::Raw(
@@ -21463,7 +23193,7 @@ class TryFinallyUnit {
                 Some(RustExpr::Raw("reader.read_line()".to_string())),
                 true,
             )],
-            vec!["reader".to_string()],
+            vec![RustStmt::Raw("reader.close()?;".to_string())],
             true,
         ),
         RustStmt::Raw(
@@ -21479,6 +23209,59 @@ class TryFinallyUnit {
         RustStmt::Raw(
             "{\n    let __java_try_result = (|| -> Result<(), JavaException> {\n        resource.read()?;\n        return Ok(());\n    })();\n    resource.close();\n    __java_try_result?;\n\n}".to_string()
         )
+    );
+    let twr_close_source = r#"
+class TryResourceModeledClose {
+    String read() throws IOException {
+        try (FeatureReader reader = openReader()) {
+            return "ok";
+        } catch (IOException ex) {
+            throw ex;
+        }
+    }
+
+    FeatureReader openReader() {
+        return null;
+    }
+}
+"#;
+    let mut unit_close_facts = FactSet::default();
+    unit_close_facts
+        .external_api_effect_facts
+        .push(ExternalApiEffectFact {
+            method_name: "close".to_string(),
+            receiver_type: Some("FeatureReader".to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::SideEffect,
+            receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+            return_type: None,
+            return_nullability: NullabilityState::Unknown,
+            thrown: Vec::new(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    let unit_close_translation = translate_source_with_facts(twr_close_source, &unit_close_facts);
+    assert!(
+        unit_close_translation.rust.contains("reader.close();"),
+        "{}",
+        unit_close_translation.rust
+    );
+    assert!(
+        !unit_close_translation.rust.contains("reader.close()?;"),
+        "{}",
+        unit_close_translation.rust
+    );
+
+    let mut throwing_close_facts = unit_close_facts.clone();
+    throwing_close_facts.external_api_effect_facts[0].thrown = vec![JavaType::Named {
+        name: "IOException".to_string(),
+        args: Vec::new(),
+    }];
+    let throwing_close_translation =
+        translate_source_with_facts(twr_close_source, &throwing_close_facts);
+    assert!(
+        throwing_close_translation.rust.contains("reader.close()?;"),
+        "{}",
+        throwing_close_translation.rust
     );
     let catch_source = r#"
 class ExceptionSubclassCatchOrder {
@@ -22519,6 +24302,13 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         render_method_reference(&plan_method_reference("this", "emit")),
         RustExpr::Raw("|value| self.emit(value)".to_string())
     );
+    assert_eq!(
+        render_method_reference(&MethodReferencePlan::CurrentReceiverMethod {
+            method: "emit".to_string(),
+            arity: Some(3),
+        }),
+        RustExpr::Raw("|arg0, arg1, arg2| self.emit(arg0, arg1, arg2)".to_string())
+    );
 
     let lower_source = include_str!("../src/lower.rs");
     let plan_source = include_str!("../src/method_reference_plan.rs");
@@ -22528,6 +24318,136 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(plan_source.contains("pub enum MethodReferencePlan"));
     assert!(!plan_source.contains("RustExpr"));
     assert!(lowering_source.contains("pub fn render_method_reference"));
+}
+
+#[test]
+fn nullable_external_constructor_callback_slot_wraps_method_reference_branch() {
+    let mut facts = FactSet::default();
+    facts
+        .external_constructor_facts
+        .push(ExternalConstructorFact {
+            type_name: "ExternalConfig".to_string(),
+            arg_types: vec![
+                JavaType::Unknown("_".to_string()),
+                JavaType::Unknown("_".to_string()),
+                JavaType::Unknown("_".to_string()),
+            ],
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            receiver_type: Some("ExternalConfig".to_string()),
+            method_name: "new".to_string(),
+            parameter_index: 1,
+            parameter_type: Some(JavaType::Named {
+                name: "Function".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::MaybeNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let translation = translate_source_with_facts(
+        r#"
+class ExternalConstructorCallbackUse {
+    Object readerFactory(Object readers, int begin, int end) {
+        return readers;
+    }
+
+    Object configure(boolean bypass) {
+        return new ExternalConfig("workspace", bypass ? null : this::readerFactory, 7);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains("ExternalConfig::new"),
+        "constructor call should remain an external constructor boundary:\n{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("if bypass { None } else { Some("),
+        "nullable constructor callback slot should wrap the non-null branch once:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("if bypass { None } else { |value|"),
+        "method reference branch must not bypass optional slot conversion:\n{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Some(|arg0, arg1, arg2| self.reader_factory(arg0, arg1, arg2))"),
+        "current-receiver method reference should use the source method arity:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains(".downcast::<Function>()"),
+        "callback slot conversion should not downcast a target-typed method reference:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_constructor_owned_set_param_clones_optional_self_field_element() {
+    let mut facts = FactSet::default();
+    facts
+        .external_constructor_facts
+        .push(ExternalConstructorFact {
+            type_name: "ExternalConfig".to_string(),
+            arg_types: vec![JavaType::Unknown("_".to_string())],
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            receiver_type: Some("ExternalConfig".to_string()),
+            method_name: "new".to_string(),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::Named {
+                name: "Set".to_string(),
+                args: vec![JavaType::Named {
+                    name: "HeaderLine".to_string(),
+                    args: Vec::new(),
+                }],
+            }),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let translation = translate_source_with_facts(
+        r#"
+import java.util.Set;
+
+class HeaderLine {}
+class ExternalConstructorSetUse {
+    Set<HeaderLine> lines;
+
+    Object configure() {
+        return new ExternalConfig(lines);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "ExternalConfig::new(self.lines.as_ref().expect(\"Java null receiver\").clone()"
+        ) && !translation.rust.contains("self.lines.unwrap()"),
+        "typed external constructor set parameter should recover owned value without moving self field:\n{}",
+        translation.rust
+    );
 }
 
 #[test]
@@ -22698,7 +24618,46 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
         RustExpr::Binary {
             op: "*".to_string(),
             left: Box::new(RustExpr::Var("acc".to_string())),
-            right: Box::new(RustExpr::Raw("n as i64".to_string())),
+            right: Box::new(RustExpr::Cast {
+                expr: Box::new(RustExpr::Var("n".to_string())),
+                ty: "i64".to_string(),
+            }),
+        }
+    );
+    assert_eq!(
+        plan_numeric_binary_promotion(
+            new_java2rust::java_ir::BinaryOp::Lt,
+            &JavaType::Primitive(PrimitiveType::Int),
+            &JavaType::Primitive(PrimitiveType::Long),
+        ),
+        Some(NumericBinaryPromotionPlan {
+            promoted: PrimitiveType::Long,
+            left: vec![new_java2rust::coercion::Coercion::WidenPrimitive {
+                from: PrimitiveType::Int,
+                to: PrimitiveType::Long,
+            }],
+            right: Vec::new(),
+        })
+    );
+    assert_eq!(
+        lower_numeric_binary_expr(
+            new_java2rust::java_ir::BinaryOp::Lt,
+            RustExpr::Var("end".to_string()),
+            RustExpr::Var("limit".to_string()),
+            plan_numeric_binary_promotion(
+                new_java2rust::java_ir::BinaryOp::Lt,
+                &JavaType::Primitive(PrimitiveType::Int),
+                &JavaType::Primitive(PrimitiveType::Long),
+            )
+            .unwrap(),
+        ),
+        RustExpr::Binary {
+            op: "<".to_string(),
+            left: Box::new(RustExpr::Cast {
+                expr: Box::new(RustExpr::Var("end".to_string())),
+                ty: "i64".to_string(),
+            }),
+            right: Box::new(RustExpr::Var("limit".to_string())),
         }
     );
     let string_shape = RustSlotShape::conservative(JavaType::String);
@@ -23242,7 +25201,7 @@ class Group {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "groups.iter().flat_map(|group| { let mut names = group.names(); names.iter().filter(|name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
+            "groups.iter().flat_map(|group| { let names = group.names(); names.iter().filter(|name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
                 .to_string()
         )
     );
@@ -23265,7 +25224,27 @@ fn stream_plan_accepts_value_returning_block_lambdas() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value| { let mut trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
+            "values.iter().map(|value| { let trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn stream_plan_keeps_mut_for_assigned_block_lambda_locals() {
+    let mut env = TypeEnv::new();
+    env.insert_local("values", list_java_type(JavaType::String));
+    let expr = parse_expr(
+        "values.stream().map(value -> { String trimmed = value.trim(); trimmed = trimmed.toLowerCase(); return trimmed; }).collect(Collectors.toList())",
+    );
+
+    let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
+    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw(
+            "values.iter().map(|value| { let mut trimmed = value.trim(); trimmed = trimmed.to_lowercase(); trimmed }).collect::<Vec<_>>()"
                 .to_string()
         )
     );
@@ -23374,15 +25353,24 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value| { let mut pieces = value.split(\",\").collect::<Vec<_>>(); if (pieces.len() as i32 != 3) { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
+            "values.iter().map(|value| { let pieces = value.split(\",\").collect::<Vec<_>>(); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
                 .to_string()
         )
     );
+    let mut env = ShapeEnv::new();
+    env.insert_local_shape(
+        "vid_map_p_b",
+        RustSlotShape::conservative(JavaType::Named {
+            name: "VidMapPB".to_string(),
+            args: Vec::new(),
+        }),
+    );
     assert_eq!(
-        emit_stream_lambda_body(
+        emit_stream_lambda_body_with_context(
             &parse_expr("vid_map_p_b.getContigsList()"),
             "partition",
             StreamLambdaValue::BorrowedItem,
+            StreamRenderContext::new(&env),
         ),
         Some("vid_map_p_b.get_contigs_list()".to_string())
     );

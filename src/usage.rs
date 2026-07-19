@@ -157,6 +157,8 @@ pub struct CallSiteUse {
     pub name: String,
     pub arg_count: usize,
     pub result_returned: bool,
+    pub receiver_is_self: bool,
+    pub null_arg_indices: Vec<usize>,
     pub boundary: CallArgumentBoundary,
     pub resolved: Option<ResolvedCall>,
 }
@@ -165,6 +167,7 @@ pub struct CallSiteUse {
 pub struct ConstructorCallSiteUse {
     pub name: String,
     pub arg_count: usize,
+    pub null_arg_indices: Vec<usize>,
     pub boundary: CallArgumentBoundary,
     pub resolved: Option<ResolvedConstructor>,
 }
@@ -209,7 +212,48 @@ pub fn analyze_usage_with_facts(program: &Program, semantic_facts: &FactSet) -> 
     for ty in &program.types {
         analyze_type_usage(ty, &mut facts, semantic_facts);
     }
+    propagate_self_mutability_through_self_calls(&mut facts);
     facts
+}
+
+fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
+    loop {
+        let mutating_methods = facts
+            .methods
+            .iter()
+            .chain(facts.methods_by_rust_name.iter())
+            .filter_map(|(key, usage)| {
+                usage
+                    .mutates_self
+                    .then(|| (key.type_name.clone(), key.method_name.clone()))
+            })
+            .collect::<HashSet<_>>();
+        let mut changed = false;
+        for usage in facts
+            .methods
+            .values_mut()
+            .chain(facts.methods_by_rust_name.values_mut())
+        {
+            if usage.mutates_self {
+                continue;
+            }
+            if usage.call_sites.iter().any(|call_site| {
+                call_site.receiver_is_self
+                    && call_site.resolved.as_ref().is_some_and(|resolved| {
+                        mutating_methods.contains(&(
+                            resolved.declaring_type.clone(),
+                            resolved.rust_name.clone(),
+                        ))
+                    })
+            }) {
+                usage.mutates_self = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 pub fn build_call_graph(program: &Program) -> CallGraph {
@@ -1150,6 +1194,7 @@ fn analyze_stmt(
             facts.constructor_call_sites.push(ConstructorCallSiteUse {
                 name: "constructor".to_string(),
                 arg_count: args.len(),
+                null_arg_indices: null_argument_indices(args),
                 boundary: policy.boundary,
                 resolved: resolved.clone(),
             });
@@ -1290,6 +1335,19 @@ fn analyze_nested_argument_expr(
     );
 }
 
+fn call_receiver_is_self(receiver: Option<&Expr>) -> bool {
+    matches!(receiver, None | Some(Expr::This) | Some(Expr::Super))
+}
+
+fn null_argument_indices(args: &[Expr]) -> Vec<usize> {
+    args.iter()
+        .enumerate()
+        .filter_map(|(index, arg)| {
+            matches!(arg, Expr::Literal(crate::java_ir::Literal::Null)).then_some(index)
+        })
+        .collect()
+}
+
 fn analyze_expr_with_context(
     expr: &Expr,
     facts: &mut MethodUsageFacts,
@@ -1340,6 +1398,8 @@ fn analyze_expr_with_context(
                 name: name.clone(),
                 arg_count: args.len(),
                 result_returned,
+                receiver_is_self: call_receiver_is_self(receiver.as_deref()),
+                null_arg_indices: null_argument_indices(args),
                 boundary: policy.boundary,
                 resolved: resolved.clone(),
             });
@@ -1542,7 +1602,15 @@ fn analyze_expr_with_context(
                 );
             }
         }
-        Expr::Lambda { .. } => {}
+        Expr::Lambda { params, body } => analyze_lambda_body(
+            params,
+            body,
+            facts,
+            current_type,
+            internal_methods,
+            field_names,
+            semantic_facts,
+        ),
         Expr::Var(name) => record_use(facts, name, BindingUse::ContentRead),
         Expr::Literal(_)
         | Expr::This
@@ -1550,6 +1618,65 @@ fn analyze_expr_with_context(
         | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
         | Expr::Raw(_) => {}
+    }
+}
+
+fn analyze_lambda_body(
+    params: &[crate::java_ir::LambdaParam],
+    body: &LambdaBody,
+    facts: &mut MethodUsageFacts,
+    current_type: &str,
+    internal_methods: &HashSet<String>,
+    field_names: &HashSet<String>,
+    semantic_facts: &FactSet,
+) {
+    let saved_params = params
+        .iter()
+        .map(|param| {
+            let saved = facts.bindings.remove(&param.name);
+            facts.bindings.insert(
+                param.name.clone(),
+                BindingUseFacts {
+                    name: param.name.clone(),
+                    java_ty: param
+                        .ty
+                        .clone()
+                        .unwrap_or_else(|| JavaType::Unknown("lambda parameter".to_string())),
+                    uses: Vec::new(),
+                },
+            );
+            (param.name.clone(), saved)
+        })
+        .collect::<Vec<_>>();
+
+    match body {
+        LambdaBody::Expr(expr) => analyze_expr(
+            expr,
+            facts,
+            current_type,
+            internal_methods,
+            field_names,
+            semantic_facts,
+        ),
+        LambdaBody::Block(block) => {
+            for stmt in &block.statements {
+                analyze_stmt(
+                    stmt,
+                    facts,
+                    current_type,
+                    internal_methods,
+                    field_names,
+                    semantic_facts,
+                );
+            }
+        }
+    }
+
+    for (name, saved) in saved_params {
+        facts.bindings.remove(&name);
+        if let Some(saved) = saved {
+            facts.bindings.insert(name, saved);
+        }
     }
 }
 

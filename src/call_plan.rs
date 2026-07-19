@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::conversion_plan::LoweredType;
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::{
@@ -33,6 +35,9 @@ pub enum CallTargetPlan<'a> {
     InstanceSelf {
         rust_name: &'a str,
     },
+    FallbackSelf {
+        rust_name: String,
+    },
     FallbackReceiver {
         receiver: &'a Expr,
         rust_name: String,
@@ -62,6 +67,11 @@ pub enum CallTargetPlan<'a> {
         crate_name: String,
         rust_name: String,
     },
+    SuperBoundary {
+        rust_name: String,
+        return_type: JavaType,
+        propagates_result: bool,
+    },
 }
 
 impl<'a> CallTargetPlan<'a> {
@@ -75,10 +85,12 @@ impl<'a> CallTargetPlan<'a> {
             CallTargetPlan::StaticSelf { .. }
             | CallTargetPlan::StaticOwner { .. }
             | CallTargetPlan::InstanceSelf { .. }
+            | CallTargetPlan::FallbackSelf { .. }
             | CallTargetPlan::FallbackFree { .. }
             | CallTargetPlan::JavaClassStatic { .. }
             | CallTargetPlan::NativeCollectionStatic { .. }
-            | CallTargetPlan::NativeJavaStatic { .. } => None,
+            | CallTargetPlan::NativeJavaStatic { .. }
+            | CallTargetPlan::SuperBoundary { .. } => None,
         }
     }
 
@@ -278,6 +290,9 @@ pub enum CallStatementPlan<'a> {
         param_names: Vec<String>,
         body: &'a LambdaBody,
     },
+    NativeArraysSort {
+        target: &'a Expr,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,6 +348,12 @@ pub fn plan_call_exception_propagation(
     {
         return CallExceptionPropagationPlan::PropagateResult;
     }
+    if receiver.is_none()
+        && let Some(current_type) = current_type
+        && facts.method_has_thrown_exceptions(current_type, name)
+    {
+        return CallExceptionPropagationPlan::PropagateResult;
+    }
 
     if let Some(effect) = external_call_effect(receiver, name, args, facts, types, current_type)
         && !effect.thrown.is_empty()
@@ -362,8 +383,13 @@ pub fn plan_call_expr<'a>(
         };
     }
 
-    CallExprPlan::Target(plan_call_target_with_facts(
-        receiver, name, resolved, facts, types,
+    CallExprPlan::Target(plan_call_target_with_facts_and_arity(
+        receiver,
+        name,
+        args.len(),
+        resolved,
+        facts,
+        types,
     ))
 }
 
@@ -379,6 +405,18 @@ pub fn apply_fallback_receiver_rust_name<'a>(
             receiver,
             rust_name,
         }),
+        (plan, _) => plan,
+    }
+}
+
+pub fn apply_fallback_self_rust_name<'a>(
+    plan: CallExprPlan<'a>,
+    fallback_rust_name: Option<String>,
+) -> CallExprPlan<'a> {
+    match (plan, fallback_rust_name) {
+        (CallExprPlan::Target(CallTargetPlan::FallbackFree { .. }), Some(rust_name)) => {
+            CallExprPlan::Target(CallTargetPlan::FallbackSelf { rust_name })
+        }
         (plan, _) => plan,
     }
 }
@@ -515,6 +553,9 @@ pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallSt
     if let Some(plan) = plan_iterable_for_each_statement(receiver.as_deref(), name, args) {
         return Some(plan);
     }
+    if let Some(plan) = plan_native_arrays_sort_statement(receiver.as_deref(), name, args) {
+        return Some(plan);
+    }
     match plan_trivial_accessor_call(receiver.as_deref(), name, args, resolved.as_ref(), facts) {
         Some(TrivialAccessorCallPlan::Setter {
             receiver,
@@ -527,6 +568,23 @@ pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallSt
         }),
         Some(TrivialAccessorCallPlan::Getter { .. }) | None => None,
     }
+}
+
+fn plan_native_arrays_sort_statement<'a>(
+    receiver: Option<&'a Expr>,
+    name: &str,
+    args: &'a [Expr],
+) -> Option<CallStatementPlan<'a>> {
+    let Some(Expr::Var(receiver_name)) = receiver else {
+        return None;
+    };
+    if crate::stdlib::canonical_external_receiver_type_key(receiver_name) != "Arrays"
+        || name != "sort"
+        || args.len() != 1
+    {
+        return None;
+    }
+    Some(CallStatementPlan::NativeArraysSort { target: &args[0] })
 }
 
 fn plan_iterable_for_each_statement<'a>(
@@ -576,6 +634,29 @@ pub fn plan_call_target_with_facts<'a>(
     facts: &FactSet,
     types: &TypeEnv,
 ) -> CallTargetPlan<'a> {
+    plan_call_target_with_facts_and_arity(receiver, name, 0, resolved, facts, types)
+}
+
+pub fn plan_call_target_with_facts_and_arity<'a>(
+    receiver: Option<&'a Expr>,
+    name: &'a str,
+    arg_count: usize,
+    resolved: Option<&'a ResolvedCall>,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> CallTargetPlan<'a> {
+    if matches!(receiver, Some(Expr::Super))
+        && let Some(call) = resolved
+        && matches!(call.kind, CallKind::Instance)
+    {
+        return CallTargetPlan::SuperBoundary {
+            rust_name: call.rust_name.clone(),
+            return_type: call.return_type.clone(),
+            propagates_result: facts
+                .method_has_thrown_exceptions(&call.declaring_type, &call.rust_name),
+        };
+    }
+
     if let Some(receiver) = receiver
         && let Some(target) = plan_java_logging_facade_call(receiver, name)
     {
@@ -583,7 +664,8 @@ pub fn plan_call_target_with_facts<'a>(
     }
 
     if let Some(receiver) = receiver
-        && let Some(target) = plan_external_crate_receiver_call(receiver, name, facts, types)
+        && let Some(target) =
+            plan_external_crate_receiver_call(receiver, name, arg_count, facts, types)
     {
         return target;
     }
@@ -655,7 +737,10 @@ pub fn plan_call_target_with_facts<'a>(
         }
         CallTargetPlan::FallbackReceiver {
             receiver,
-            rust_name: crate::parser::to_snake_case(name),
+            rust_name: external_method_rust_name_for_receiver(
+                receiver, name, arg_count, facts, types,
+            )
+            .unwrap_or_else(|| crate::parser::to_snake_case(name)),
         }
     } else {
         if let Some(owner) = types.static_member_import_owner(name) {
@@ -816,7 +901,7 @@ fn plan_native_collection_receiver_call<'a>(
 ) -> Option<CallTargetPlan<'a>> {
     let receiver_ty = infer_expr_type(receiver, types);
     let receiver_ty = effective_native_collection_receiver_type(&receiver_ty);
-    let kind = crate::stdlib::java_collection_kind_for_type(&receiver_ty)?;
+    let kind = crate::stdlib::native_collection_receiver_kind_for_type(&receiver_ty)?;
     let method = match (kind, name) {
         (_, "size") => NativeCollectionMethod::Len,
         (_, "isEmpty") => NativeCollectionMethod::IsEmpty,
@@ -902,6 +987,7 @@ fn plan_java_class_static_call<'a>(
 fn plan_external_crate_receiver_call<'a>(
     receiver: &'a Expr,
     name: &str,
+    arg_count: usize,
     facts: &FactSet,
     types: &TypeEnv,
 ) -> Option<CallTargetPlan<'a>> {
@@ -911,10 +997,14 @@ fn plan_external_crate_receiver_call<'a>(
         _ => return None,
     };
     let effect = facts
-        .external_api_effect_for_receiver(Some(&receiver_name), name)
+        .external_api_effect_for_receiver_with_arity(Some(&receiver_name), name, Some(arg_count))
         .cloned()
         .or_else(|| {
-            crate::external_packs::external_api_effect_for_receiver(Some(&receiver_name), name)
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                Some(&receiver_name),
+                name,
+                Some(arg_count),
+            )
         })?;
     if effect.provenance != FactProvenance::ExternalLibraryPack {
         return None;
@@ -941,7 +1031,7 @@ fn plan_external_crate_receiver_call<'a>(
         crate_name: pack.rust_target.clone()?,
         rust_name: mapping
             .map(|mapping| mapping.rust_name)
-            .unwrap_or_else(|| crate::parser::to_snake_case(name)),
+            .unwrap_or_else(|| external_method_rust_name(&receiver_name, name, arg_count, facts)),
     })
 }
 
@@ -1024,6 +1114,95 @@ pub fn unresolved_constructor_rust_name_for_facts(
     constructor_rust_name(owner_ty, None, facts, arg_count)
 }
 
+pub fn external_method_rust_name(
+    receiver_type: &str,
+    method_name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> String {
+    let base = crate::parser::to_snake_case(method_name);
+    if external_method_needs_arity_name(receiver_type, method_name, facts) {
+        format!("{base}_{arg_count}")
+    } else {
+        base
+    }
+}
+
+fn external_method_rust_name_for_receiver(
+    receiver: &Expr,
+    method_name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<String> {
+    let receiver_type = external_receiver_expr_type_key(receiver, facts, types)?;
+    Some(external_method_rust_name(
+        &receiver_type,
+        method_name,
+        arg_count,
+        facts,
+    ))
+}
+
+fn external_method_needs_arity_name(
+    receiver_type: &str,
+    method_name: &str,
+    facts: &FactSet,
+) -> bool {
+    let mut arities = external_method_arities_for(facts, receiver_type, method_name);
+    arities.extend(external_method_arities_for(
+        &crate::external_packs::builtin_external_library_packs(),
+        receiver_type,
+        method_name,
+    ));
+    arities.len() > 1
+}
+
+fn external_method_arities_for(
+    facts: &FactSet,
+    receiver_type: &str,
+    method_name: &str,
+) -> BTreeSet<usize> {
+    facts
+        .external_api_effect_facts
+        .iter()
+        .filter_map(|fact| {
+            let fact_receiver = fact.receiver_type.as_deref()?;
+            if !external_method_receiver_matches(fact_receiver, receiver_type)
+                || !external_method_name_matches(&fact.method_name, method_name)
+            {
+                return None;
+            }
+            fact.arg_count
+        })
+        .collect()
+}
+
+fn external_method_receiver_matches(fact_receiver: &str, query_receiver: &str) -> bool {
+    if fact_receiver == query_receiver {
+        return true;
+    }
+    let fact_key = crate::stdlib::canonical_external_receiver_type_key(fact_receiver);
+    let query_key = crate::stdlib::canonical_external_receiver_type_key(query_receiver);
+    if fact_key == query_key {
+        return true;
+    }
+    fact_key
+        .rsplit('.')
+        .next()
+        .is_some_and(|simple| simple == query_key)
+        || query_key
+            .rsplit('.')
+            .next()
+            .is_some_and(|simple| simple == fact_key)
+}
+
+fn external_method_name_matches(fact_method_name: &str, query_method_name: &str) -> bool {
+    fact_method_name == query_method_name
+        || crate::parser::to_snake_case(fact_method_name)
+            == crate::parser::to_snake_case(query_method_name)
+}
+
 fn external_constructor_needs_arity_name(type_name: &str, facts: &FactSet) -> bool {
     let arities = facts
         .external_constructor_facts
@@ -1057,7 +1236,7 @@ fn plan_native_collection_constructor(
     ty: &JavaType,
     arg_count: usize,
 ) -> Option<NativeCollectionNewTarget> {
-    let kind = crate::stdlib::java_collection_kind_for_type(ty)?;
+    let kind = crate::stdlib::native_collection_constructor_kind_for_type(ty)?;
     match arg_count {
         0 => Some(NativeCollectionNewTarget::Empty { kind }),
         1 => Some(NativeCollectionNewTarget::FromSingleArg { kind }),
@@ -1070,7 +1249,7 @@ fn plan_native_collection_constructor_for_args(
     args: &[Expr],
     types: &TypeEnv,
 ) -> Option<NativeCollectionNewTarget> {
-    let kind = crate::stdlib::java_collection_kind_for_type(ty)?;
+    let kind = crate::stdlib::native_collection_constructor_kind_for_type(ty)?;
     match args {
         [] => Some(NativeCollectionNewTarget::Empty { kind }),
         [arg] if is_integral_capacity_arg(arg, types) => {
@@ -1336,7 +1515,8 @@ fn storage_arg_shape_with_effective_facts(
     if matches!(
         facts.object_representation_override_strategy_for(&java_ty),
         Some(HierarchyStrategy::ErasedObject)
-    ) {
+    ) && !facts.is_final_type(&java_ty)
+    {
         apply_required_dispatch(&mut shape, DispatchShape::ErasedObject);
     }
     shape
@@ -1372,14 +1552,48 @@ pub fn external_call_arg_shapes(
     facts: &FactSet,
     types: &TypeEnv,
 ) -> Option<Vec<RustSlotShape>> {
+    let effective_facts = EffectiveFacts::new(facts);
     let receiver_name = external_call_argument_receiver_key(receiver, name, types);
+    let receiver_ty = receiver.map(|receiver| infer_expr_type(receiver, types));
     (0..arg_count)
         .map(|index| {
             facts
                 .external_api_argument_effect_for_receiver(receiver_name.as_deref(), name, index)
-                .map(argument_shape_from_external_effect)
+                .map(|effect| {
+                    argument_shape_from_external_effect(
+                        effect,
+                        receiver_ty.as_ref(),
+                        &effective_facts,
+                    )
+                })
         })
         .collect()
+}
+
+pub fn external_constructor_arg_shapes(
+    ty: &JavaType,
+    rust_name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> Option<Vec<RustSlotShape>> {
+    let effective_facts = EffectiveFacts::new(facts);
+    let receiver_name = java_type_name(ty)?;
+    let mut saw_fact = false;
+    let shapes = (0..arg_count)
+        .map(|index| {
+            if let Some(effect) = facts.external_api_argument_effect_for_receiver(
+                Some(receiver_name),
+                rust_name,
+                index,
+            ) {
+                saw_fact = true;
+                argument_shape_from_external_effect(effect, Some(ty), &effective_facts)
+            } else {
+                RustSlotShape::conservative(JavaType::Unknown(format!("{rust_name}:arg{index}")))
+            }
+        })
+        .collect();
+    saw_fact.then_some(shapes)
 }
 
 fn external_call_argument_receiver_key(
@@ -1544,12 +1758,33 @@ fn static_field_shape_for_expr<'a>(
         .or_else(|| signatures.field_shape(&owner_upper, &field_snake))
 }
 
-fn argument_shape_from_external_effect(effect: &ExternalApiArgumentEffectFact) -> RustSlotShape {
-    let java_ty = effect
+fn argument_shape_from_external_effect(
+    effect: &ExternalApiArgumentEffectFact,
+    receiver_ty: Option<&JavaType>,
+    facts: &EffectiveFacts<'_>,
+) -> RustSlotShape {
+    let mut java_ty = effect
         .parameter_type
         .clone()
         .unwrap_or_else(|| JavaType::Unknown("Object".to_string()));
+    if matches!(
+        effect.parameter_nullability,
+        NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+    ) {
+        java_ty = crate::types::optional_java_type(java_ty);
+    }
     let mut shape = RustSlotShape::conservative(java_ty);
+
+    if effect.parameter_type.is_none()
+        && receiver_ty.is_some_and(|receiver_ty| {
+            external_generic_facade_receiver_keeps_argument_concrete(receiver_ty, facts)
+        })
+    {
+        if !matches!(shape.java_ty, JavaType::Primitive(_)) {
+            shape.ownership = OwnershipShape::Owned;
+        }
+        return shape;
+    }
 
     match effect.alias_policy {
         ExternalArgumentAliasPolicy::Borrowed if shape.java_ty == JavaType::String => {
@@ -1579,6 +1814,14 @@ fn argument_shape_from_external_effect(effect: &ExternalApiArgumentEffectFact) -
     }
 
     shape
+}
+
+fn external_generic_facade_receiver_keeps_argument_concrete(
+    receiver_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    facts.is_final_type(receiver_ty)
+        && crate::stdlib::java_collection_kind_for_type(receiver_ty).is_some()
 }
 
 pub fn resolved_constructor_arg_shapes(

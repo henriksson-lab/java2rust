@@ -49,6 +49,7 @@ pub enum SlotValueRustTypePolicy {
     BoxedDynTrait { trait_name: String },
     ErasedObject,
     DynTrait { trait_name: String },
+    ConcreteDispatch { java_ty: JavaType },
     NativeDispatch { java_ty: JavaType },
     DynTraitView { trait_name: String },
     BoxedDynTraitView { trait_name: String },
@@ -208,7 +209,7 @@ fn slot_dispatch_rust_type_policy(shape: &RustSlotShape) -> SlotValueRustTypePol
         DispatchShape::DynTrait { trait_name } => SlotValueRustTypePolicy::DynTrait {
             trait_name: trait_name.clone(),
         },
-        DispatchShape::Concrete => SlotValueRustTypePolicy::NativeDispatch {
+        DispatchShape::Concrete => SlotValueRustTypePolicy::ConcreteDispatch {
             java_ty: shape.java_ty.clone(),
         },
     }
@@ -238,6 +239,15 @@ pub fn render_slot_value_rust_type_policy_with_effective_facts(
         SlotValueRustTypePolicy::DynTrait { trait_name }
         | SlotValueRustTypePolicy::DynTraitView { trait_name } => {
             RustType::Raw(format!("dyn {trait_name}"))
+        }
+        SlotValueRustTypePolicy::ConcreteDispatch { java_ty } => {
+            if erased_final_facade_generic_arg_should_keep_named_type(java_ty, facts)
+                && let JavaType::Named { name, .. } = java_ty
+            {
+                RustType::Named(rust_name_for_java_named_type(name))
+            } else {
+                rust_type_for_java_type_with_effective_facts(java_ty, facts)
+            }
         }
         SlotValueRustTypePolicy::NativeDispatch { java_ty } => {
             rust_type_for_java_type_with_effective_facts(java_ty, facts)
@@ -405,7 +415,8 @@ pub fn native_java_rust_type_policy_with_effective_facts(
     if matches!(
         facts.object_representation_override_strategy_for(ty),
         Some(HierarchyStrategy::ErasedObject)
-    ) {
+    ) && !external_final_facade_should_keep_named_type(ty, facts)
+    {
         return NativeJavaRustTypePolicy::Direct {
             ty: RustType::Raw("Box<dyn std::any::Any>".to_string()),
         };
@@ -488,10 +499,10 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             NativeJavaRustTypePolicy::Direct {
                 ty: RustType::Raw(format!(
                     "std::collections::HashMap<{}, {}>",
-                    crate::emit::emit_type(&rust_type_for_java_type_with_effective_facts(
+                    crate::emit::emit_type(&rust_type_for_java_generic_arg_with_effective_facts(
                         key, facts
                     )),
-                    crate::emit::emit_type(&rust_type_for_java_type_with_effective_facts(
+                    crate::emit::emit_type(&rust_type_for_java_generic_arg_with_effective_facts(
                         value, facts
                     ))
                 )),
@@ -555,6 +566,35 @@ pub fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustType
     }
 }
 
+fn external_final_facade_should_keep_named_type(ty: &JavaType, facts: &EffectiveFacts<'_>) -> bool {
+    matches!(
+        facts.object_representation_override_strategy_for(ty),
+        Some(HierarchyStrategy::ErasedObject)
+    ) && facts.is_final_type(ty)
+}
+
+fn erased_final_facade_generic_arg_should_keep_named_type(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    matches!(
+        facts.object_representation_override_strategy_for(ty),
+        Some(HierarchyStrategy::ErasedObject)
+    ) && facts.is_final_type(ty)
+}
+
+fn rust_type_for_java_generic_arg_with_effective_facts(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> RustType {
+    if erased_final_facade_generic_arg_should_keep_named_type(ty, facts)
+        && let JavaType::Named { name, .. } = ty
+    {
+        return RustType::Named(rust_name_for_java_named_type(name));
+    }
+    rust_type_for_java_type_with_effective_facts(ty, facts)
+}
+
 pub fn rust_name_for_java_named_type(name: &str) -> String {
     if !name.contains('.') {
         return name.to_string();
@@ -598,7 +638,7 @@ pub fn render_native_java_rust_type_policy_with_effective_facts(
             container,
             element_ty,
         } => {
-            let element_ty = rust_type_for_java_type_with_effective_facts(element_ty, facts);
+            let element_ty = rust_type_for_java_generic_arg_with_effective_facts(element_ty, facts);
             match container {
                 NativeSequenceContainer::Vec => RustType::Vec(Box::new(element_ty)),
                 NativeSequenceContainer::HashSet => RustType::Raw(format!(

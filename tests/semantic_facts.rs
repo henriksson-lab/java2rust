@@ -10,6 +10,8 @@ use new_java2rust::facts::{
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::object_model::plan_object_model;
+use new_java2rust::parser::parse_java_source;
+use new_java2rust::resolve::resolve_program;
 use new_java2rust::rewrite::{
     AssignmentConditionNormalizedShape, ControlFlowRewritePlan, NullTestKind,
     TailRecursiveNormalizedShape,
@@ -19,7 +21,9 @@ use new_java2rust::stdlib::{
     canonical_external_receiver_type_key, external_api_method_policy, external_field_provenance,
 };
 use new_java2rust::types::optional_java_type;
-use new_java2rust::usage::{BindingUse, CallArgumentBoundary, FieldUse, UsageMethodKey};
+use new_java2rust::usage::{
+    BindingUse, CallArgumentBoundary, FieldUse, UsageMethodKey, analyze_usage,
+};
 use new_java2rust::{
     emit, exception_plan, external_facts, lower, parser, representation, resolve,
     semantic_analysis, signature, translate_source, translate_source_with_facts,
@@ -687,6 +691,45 @@ fn usage_treats_native_collection_field_mutators_as_self_mutation() {
 }
 
 #[test]
+fn usage_propagates_self_mutability_through_same_receiver_calls() {
+    let parsed = parse_java_source(
+        r#"
+class SelfMutabilityPropagation {
+    int count;
+
+    void outer() {
+        middle();
+    }
+
+    void middle() {
+        this.inner();
+    }
+
+    void inner() {
+        count = count + 1;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+
+    for method_name in ["outer", "middle", "inner"] {
+        let method_usage = usage
+            .methods
+            .get(&new_java2rust::usage::UsageMethodKey {
+                type_name: "SelfMutabilityPropagation".to_string(),
+                method_name: method_name.to_string(),
+            })
+            .unwrap();
+        assert!(
+            method_usage.mutates_self,
+            "{method_name} should inherit mutating receiver pressure through same-receiver calls: {method_usage:?}"
+        );
+    }
+}
+
+#[test]
 fn method_throw_effects_propagate_through_source_call_graph() {
     let semantic = analyze(&idiom_gap("ThrowingCallChainResultShell.java"));
 
@@ -750,6 +793,33 @@ class IOException extends Exception {
         semantic
             .facts
             .method_has_thrown_exceptions("RecursiveThrowPropagation", "leaf")
+    );
+}
+
+#[test]
+fn lambda_block_throw_marks_enclosing_method_throwing() {
+    let semantic = analyze(
+        r#"
+import java.util.Map;
+
+class LambdaThrowPropagation {
+    void waitAll(Map<String, Future> futures) {
+        futures.forEach((name, future) -> {
+            try {
+                future.get();
+            } catch (ExecutionException e) {
+                throw new UserException("bad", e);
+            }
+        });
+    }
+}
+"#,
+    );
+
+    assert!(
+        semantic
+            .facts
+            .method_has_thrown_exceptions("LambdaThrowPropagation", "waitAll")
     );
 }
 

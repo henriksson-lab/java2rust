@@ -28226,6 +28226,379 @@ unsupported_method_reference	0
 unsupported_array_creation	0
 ```
 
+## Focused Rust Compile Gate: GenomicsDB Final Facade Public Boundary
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_final_facade_public_boundary_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	19
+```
+
+Ideal Rust Target:
+
+Exact final external facades that are declared as concrete Java types should
+stay concrete in Rust signatures, including public utility methods:
+
+```text
+fn get_protobuf_vid_mapping_from_json_file(...) -> Result<GenomicsDBVidMapProtoVidMappingPB, JavaException>
+fn get_field_name_to_list_index_in_protobuf_vid_mapping_object(value: &GenomicsDBVidMapProtoVidMappingPB) -> HashMap<String, i32>
+```
+
+They should not fall back to `Box<dyn Any>` unless the declared Java boundary
+is actually `Object`, wildcard, interface-like, or non-final erased runtime
+state.
+
+Implementation Rule:
+
+`signature` applies exact-final erased-facade constraints to public method
+returns and read-only public parameters when facts prove the declared Java type
+is final. `slot_render` keeps such facades as named Rust types instead of
+mapping them through the erased-object carrier.
+
+Evidence:
+
+- `external_nested_builder_facade_support_is_generated_from_facts_and_used_calls`
+  now covers a public final facade return and a public read-only final facade
+  receiver.
+- `signature_public_unknown_fallback_is_type_aware_across_java_type_categories`
+  distinguishes exact final erased facades from raw `Object`, wildcard,
+  interface, enum, and non-final erased-object boundaries.
+- The focused gate clears the previous `VidMappingPB.get_fields` and
+  `VidMappingPB.to_builder` erased-receiver errors.
+
+New Bottleneck:
+
+The gate regresses versus the prior 17-error baseline because concrete public
+facade returns expose duplicate per-module external support types:
+`GATKGenomicsDBUtils` returns its module-local `VidMappingPB`, while
+`GenomicsDBImport` expects a distinct module-local `VidMappingPB`. External
+facade support needs crate-level ownership, with duplicate per-module support
+suppressed or imported from that owner, before broad concrete facade boundaries
+can improve the package compile gate.
+
+## Focused Rust Compile Gate: GenomicsDB Numeric Relational Promotion
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_numeric_relational_promotion_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	35
+```
+
+Ideal Rust Target:
+
+Java primitive numeric comparison should use Java binary numeric promotion
+before Rust comparison spelling. In the GenomicsDB interval check, an `int`
+coordinate getter compared with a `long` contig length should render as:
+
+```text
+((interval.get_end() as i64) < contig_length)
+```
+
+Implementation Rule:
+
+`operator_lowering` now includes ordered relational operators in the shared
+numeric binary promotion plan. `coercion` renders primitive widening with a
+parenthesized cast, so `<` after `as i64` is parsed as a comparison in Rust
+rather than generic argument syntax.
+
+Evidence:
+
+- `operator_lowering_owns_binary_and_unary_rust_spelling` proves helper-level
+  `int < long` promotion and parenthesized primitive widening.
+- `translates_java_numeric_relational_promotion_before_rust_comparison` proves
+  a neutral Java snippet emits `return ((end as i64) < limit);`.
+- The focused GenomicsDB gate moves from the comparable
+  `cargo_check_errors=36` gate to `35`. The latest `E0308` bucket drops from
+  `17` to `16`.
+- Generated `GenomicsDBImport` now contains
+  `((interval.get_end() as i64) < contig_length)`, and the prior
+  `i32`/`i64` comparison mismatch is gone without a replacement Rust parse
+  error.
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	1
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: GenomicsDB Ternary Refined Receiver
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_ternary_refined_receiver_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	34
+```
+
+Ideal Rust Target:
+
+A Java ternary null-test should refine the non-null branch before call receiver
+adaptation. For a nullable `Path`:
+
+```text
+path == null ? null : path.toAbsolutePath().toUri().toString()
+```
+
+the Rust target should call methods on the already unwrapped branch value:
+
+```text
+if path.is_none() { None } else { Some(path.unwrap().to_absolute_path().to_uri().to_string()) }
+```
+
+It should not render `path.unwrap().as_ref().unwrap()`, because the receiver is
+no longer an `Option` after the branch-local unwrap.
+
+Implementation Rule:
+
+`lower` now passes ternary branch `ExprRefinements` into call receiver
+adaptation. When the receiver is a local proved non-null by the branch
+refinement, optional instance receiver adaptation is skipped. Ordinary optional
+receiver calls outside a recognized branch still use the existing
+`as_ref()`/`as_mut()` adaptation policy.
+
+Evidence:
+
+- `nullable_ternary_call_receiver_uses_branch_refinement_before_optional_adapter`
+  proves the neutral `java.nio.file.Path` shape and rejects
+  `path.unwrap().as_ref().unwrap()`.
+- The focused GenomicsDB gate moves from `cargo_check_errors=35` to `34`.
+- The previous top-error row
+  `no method named as_ref found for struct Path` is gone.
+- Generated `get_reader_from_path` now contains
+  `variant_index_path.unwrap().to_absolute_path().to_uri().to_string()`.
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	1
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: GenomicsDB Stream Block Return Locals
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_stream_block_return_locals_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	32
+```
+
+Ideal Rust Target:
+
+Stream block-lambda locals declared before the final return expression should
+be visible to that return expression:
+
+```text
+map(|interval| {
+    let mut begin_builder = GenomicsDBColumn::new_builder();
+    let mut end_builder = GenomicsDBColumn::new_builder();
+    self.create_partition_with_begin_and_end(begin_builder.build(), end_builder.build())
+})
+```
+
+The return expression should not treat `beginBuilder` or `endBuilder` as static
+owner names.
+
+Implementation Rule:
+
+`stream_lowering` now renders a block-lambda prefix together with the local-name
+set introduced by the prefix. The final return expression is rendered with that
+same local set, so static-owner detection does not reclassify prefix locals.
+
+Evidence:
+
+- `stream_block_lambda_return_uses_declared_local_receiver_not_static_owner`
+  proves a neutral builder-style stream lambda emits `builder.build()` and
+  rejects static-owner `Builder::build()` forms.
+- The focused GenomicsDB gate moves from `cargo_check_errors=34` to `32`.
+- The previous undeclared `BeginBuilder` and `EndBuilder` rows are gone.
+- Generated `generate_partition_list_from_intervals` now contains
+  `self.create_partition_with_begin_and_end(begin_builder.build(), end_builder.build())`.
+
+Residual:
+
+The same generated line now exposes the next real boundary:
+`generate_partition_list_from_intervals` expects `Vec<Partition>` but the helper
+still returns `Box<dyn Any>`. That belongs to return-shape/facade typing, not
+stream local receiver classification.
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	1
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: GenomicsDB Arrays Sort Mutability
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_arrays_sort_mutability_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	35
+```
+
+Ideal Rust Target:
+
+Java `Arrays.sort(values);` should mutate the Rust sequence in place:
+
+```text
+let mut values = vec![2, 1];
+values.sort();
+```
+
+It should not render as `Arrays::sort(...)`, and it should not sort a cloned
+temporary. The sorted local must be declared mutable by the signature/local
+binding plan.
+
+Implementation Rule:
+
+`call_plan` now recognizes one-argument `Arrays.sort` as
+`CallStatementPlan::NativeArraysSort`. `lower` renders the planned target as
+`.sort()`. `signature` treats the first argument of `Arrays.sort` as an
+assignment target while collecting mutated locals, so the local declaration
+gets `let mut` before rendering.
+
+Evidence:
+
+- `arrays_sort_statement_lowers_to_mutating_rust_sort` passes.
+- `signature_plan_marks_arrays_sort_target_local_mutable` passes.
+- `cargo check --quiet` passes for the translator crate.
+- The focused GenomicsDB gate moves from
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_conventional_static_strings_v1`
+  at `cargo_check_errors=36` to
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_arrays_sort_mutability_v1`
+  at `cargo_check_errors=35`.
+- Generated evidence:
+
+```text
+let mut partitions: Vec<String> =
+    GenomicsDBUtils::list_genomics_d_b_arrays(...);
+partitions.sort();
+```
+
+Remaining top compile-error buckets:
+
+```text
+15	error[E0308]: mismatched types
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no method named `push` found for struct `IntervalList`
+1	error[E0599]: no method named `intervals_specified` found for struct `IntervalArgumentCollection`
+1	error[E0599]: no method named `get` found for reference `&generated_00004_GenomicsDBImport::Future`
+1	error[E0599]: no method named `get_intervals` found for struct `IntervalArgumentCollection`
+1	error[E0433]: failed to resolve: use of undeclared type `BeginBuilder`
+1	error[E0433]: failed to resolve: use of undeclared type `EndBuilder`
+```
+
 ## Focused Context Gate: Package-Filtered Engine Summary
 
 Command:
@@ -28331,28 +28704,371 @@ unsupported_method_reference	0
 unsupported_array_creation	0
 ```
 
-Top compile buckets:
+## Focused Rust Compile Gate: GenomicsDB Inherited Support Field Type Shells
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_inherited_type_shells_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	57
+```
+
+Ideal Rust Target:
+
+Flattened inherited fields whose types come from non-emitted support context
+should have minimal opaque Rust shells:
+
+```text
+progress_meter: ProgressMeter
+
+#[derive(Clone, Debug, Default)]
+pub struct ProgressMeter;
+```
+
+This keeps the emitted primary struct legal without pretending to translate
+the full support superclass body.
+
+Implementation Rule:
+
+External facade support generation now scans inherited instance fields from
+the support program for each emitted primary type and adds their declared Java
+field types using the emitted primary program as the local-type suppression
+set. It reuses the existing opaque facade renderer and does not emit direct
+sibling source fields as opaque support.
+
+Evidence:
+
+- `inherited_source_summary_field_types_emit_opaque_support_shells`
+- The focused GenomicsDB gate moves from `cargo_check_errors=63` to `57`.
+- Inherited engine field types such as `ProgressMeter`,
+  `IntervalArgumentCollection`, `ReadInputArgumentCollection`,
+  `ReadsDataSource`, `ReferenceDataSource`, `FeatureManager`, and
+  `SequenceDictionaryValidationArgumentCollection` are now emitted as opaque
+  support structs.
+
+Remaining structural residual:
+
+Direct fields whose types are source-summary-only, for example
+`Option<FeatureInput>`, still need an explicit distinction between full source
+context and source-summary context before broad direct-field opaque shell
+emission. Otherwise we would violate the existing sibling source-type guard.
+
+## Focused Rust Compile Gate: GenomicsDB Direct Summary Type Shells And Selected Method Surfaces
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_summary_method_surfaces_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	56
+```
+
+Ideal Rust Target:
+
+Primary declarations that reference source-summary-only types should emit an
+opaque shell for the selected type, while full context sibling types remain
+real source references:
+
+```text
+header_override: Option<FeatureInput>
+
+#[derive(Clone, Debug, Default)]
+pub struct FeatureInput;
+```
+
+When the selected summary shell has a used method in its summary hierarchy,
+emit only that method surface:
+
+```text
+impl FeatureInput {
+    pub fn to_path(&self) -> Path { Default::default() }
+}
+```
+
+Implementation Rule:
+
+Translation now carries a separate source-summary program in addition to the
+merged support program. Facade support emits direct declaration shells only for
+types present in the summary-only set and absent from the emitted primary set.
+It then scans summary method hierarchies only for already-selected opaque
+shells, filters by used Rust method name and arity, and emits facade instance
+methods through the existing external facade renderer.
+
+Evidence:
+
+- `source_summary_direct_field_type_emits_opaque_support_shell`
+- `source_summary_opaque_type_gets_used_inherited_method_surface`
+- `context_translation_does_not_emit_opaque_facade_for_sibling_source_type`
+- The focused GenomicsDB gate moves from `cargo_check_errors=57` to `56`.
+- `FeatureInput` is now emitted as an opaque shell, and its inherited
+  `toPath()` summary method is available as `FeatureInput::to_path` without
+  pulling the whole `org.broadinstitute.hellbender.engine` summary package into
+  facade method support.
+
+Remaining top buckets:
 
 ```text
 23	error[E0308]: mismatched types
-21	error[E0599]: no function or associated item named `logger` found for struct `GenomicsDBImport` in the current scope
 3	error[E0433]: failed to resolve: use of undeclared type `StandardArgumentDefinitions`
-2	error[E0599]: no method named `get_default_tool_v_c_f_header_lines` found for mutable reference `&mut GenomicsDBImport` in the current scope
-2	error[E0433]: failed to resolve: use of unresolved module or unlinked crate `interval_argument_collection`
+2	error[E0599]: no method named `get_default_tool_v_c_f_header_lines` found for mutable reference `&mut GenomicsDBImport`
 2	error[E0433]: failed to resolve: use of undeclared type `AnnotationUtils`
-2	error[E0425]: cannot find value `cloud_prefetch_buffer` in this scope
-2	error[E0425]: cannot find value `cloud_index_prefetch_buffer` in this scope
 2	error[E0423]: expected value, found module `super`
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no method named `set_records_between_time_checks` found for struct `ProgressMeter`
+1	error[E0599]: no method named `push` found for struct `IntervalList`
+1	error[E0599]: no method named `intervals_specified` found for struct `IntervalArgumentCollection`
+1	error[E0599]: no method named `get_intervals` found for struct `IntervalArgumentCollection`
+1	error[E0599]: no method named `as_ref` found for struct `Path`
+1	error[E0599]: no function or associated item named `new` found for struct `GenomicsDBArgumentCollection`
+1	error[E0433]: failed to resolve: use of undeclared type `EndBuilder`
+1	error[E0433]: failed to resolve: use of undeclared type `BeginBuilder`
+1	error[E0433]: failed to resolve: use of undeclared type `Arrays`
+1	error[E0425]: cannot find function `get_reader_from_path` in this scope
+```
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	1
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
 ```
 
 Interpretation:
 
-The previous engine-context attempt did not reach compilation because
-translation stayed in per-file body solving with partial fragments only. This
-gate completes and exposes concrete follow-up rules: `super` dispatch,
-receiverless inherited fields, inherited methods such as
-`getDefaultToolVCFHeaderLines`, framework logger/static facade policy, and
-remaining cross-module external facades.
+The gate completes and exposes concrete follow-up rules: typed slot
+unification for the mismatched-type bucket, source-summary static/constant
+facades such as `StandardArgumentDefinitions`, `AnnotationUtils`, `Arrays`,
+builder support for `BeginBuilder`/`EndBuilder`, `super` dispatch, inherited
+methods such as `getDefaultToolVCFHeaderLines`, and remaining source-summary
+collection/domain facades such as `IntervalList`, `IntervalArgumentCollection`,
+and `ProgressMeter`.
+
+## Focused Rust Compile Gate: GenomicsDB Super Boundary And Self Mutability
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_super_boundary_mutability_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	54
+```
+
+Ideal Rust Target:
+
+Source-summary superclass calls should not render raw Rust `super.method()`
+syntax. A throwing void superclass hook can lower as an explicit no-op result
+boundary:
+
+```text
+Ok(())?;
+```
+
+When the same method calls mutating helpers on `self`, the solved Rust receiver
+should be mutable:
+
+```text
+pub fn on_startup(&mut self) -> Result<(), JavaException>
+```
+
+Implementation Rule:
+
+`call_plan` now selects a `SuperBoundary` target for resolved instance calls
+whose receiver is `Expr::Super`, and `call_lowering` renders that target from
+the resolved Java return type plus thrown-exception facts. Separately, `usage`
+records whether each call site is an implicit/`this`/`super` same-receiver
+call and runs a finite fixed point that propagates `mutates_self` through
+resolved same-receiver method calls before signature solving.
+
+Evidence:
+
+- `source_summary_super_calls_lower_to_boundary_defaults_not_raw_super_receiver`
+- `call_plan_owns_call_and_new_target_selection_before_argument_lowering`
+- `usage_propagates_self_mutability_through_same_receiver_calls`
+- The focused GenomicsDB gate moves from `cargo_check_errors=56` to `54`.
+- The new compile log has no `expected value, found module super` diagnostics.
+- The new compile log has no `cannot borrow *self as mutable` diagnostics, and
+  generated `GenomicsDBImport` emits `pub fn on_startup(&mut self)`.
+
+Remaining top buckets:
+
+```text
+23	error[E0308]: mismatched types
+3	error[E0433]: failed to resolve: use of undeclared type `StandardArgumentDefinitions`
+2	error[E0599]: no method named `get_default_tool_v_c_f_header_lines` found for mutable reference `&mut GenomicsDBImport`
+2	error[E0433]: failed to resolve: use of undeclared type `AnnotationUtils`
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no method named `set_records_between_time_checks` found for struct `ProgressMeter`
+1	error[E0599]: no method named `push` found for struct `IntervalList`
+1	error[E0599]: no method named `intervals_specified` found for struct `IntervalArgumentCollection`
+1	error[E0599]: no method named `get_intervals` found for struct `IntervalArgumentCollection`
+1	error[E0599]: no method named `as_ref` found for struct `Path`
+1	error[E0599]: no function or associated item named `new` found for struct `GenomicsDBArgumentCollection`
+1	error[E0433]: failed to resolve: use of undeclared type `EndBuilder`
+1	error[E0433]: failed to resolve: use of undeclared type `BeginBuilder`
+1	error[E0433]: failed to resolve: use of undeclared type `Arrays`
+1	error[E0425]: cannot find function `get_reader_from_path` in this scope
+```
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	1
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: GenomicsDB Direct Null Argument Signature
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_null_arg_signature_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	52
+```
+
+Ideal Rust Target:
+
+Literal Java `null` passed to a resolved reference parameter should shape the
+callee slot as optional before lowering:
+
+```text
+pub fn create_export_configuration(..., options: Option<GenomicsDBOptions>)
+Self::create_export_configuration(..., None)
+
+pub fn new_path(reference: Option<Path>) -> GenomicsDBOptions
+Self::new_path(None)
+```
+
+Implementation Rule:
+
+`usage` records literal-null argument indexes on method-call and constructor
+delegation call-site facts. `signature` consumes those indexes during its
+propagation sweep and adds `RequiredStorageNullability(MaybeNull)` to the
+resolved method parameter or same-class delegated constructor parameter.
+Literal nulls do not travel through binding-use propagation because they have
+no source binding.
+
+Evidence:
+
+- `direct_null_call_argument_marks_resolved_method_parameter_nullable`
+- `direct_null_constructor_delegation_marks_resolved_constructor_parameter_nullable`
+- `ternary_null_test_marks_overloaded_path_parameter_nullable`
+- The focused GenomicsDB gate moves from `cargo_check_errors=54` to `52`.
+- The previous `None` passed to `GenomicsDBOptions` and `Path` parameter
+  mismatches are gone; generated signatures now use `Option<GenomicsDBOptions>`
+  and `Option<Path>`.
+
+Remaining top buckets:
+
+```text
+21	error[E0308]: mismatched types
+3	error[E0433]: failed to resolve: use of undeclared type `StandardArgumentDefinitions`
+2	error[E0599]: no method named `get_default_tool_v_c_f_header_lines` found for mutable reference `&mut GenomicsDBImport`
+2	error[E0433]: failed to resolve: use of undeclared type `AnnotationUtils`
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no method named `set_records_between_time_checks` found for struct `ProgressMeter`
+1	error[E0599]: no method named `push` found for struct `IntervalList`
+1	error[E0599]: no method named `intervals_specified` found for struct `IntervalArgumentCollection`
+1	error[E0599]: no method named `get_intervals` found for struct `IntervalArgumentCollection`
+1	error[E0599]: no method named `as_ref` found for struct `Path`
+1	error[E0599]: no function or associated item named `new` found for struct `GenomicsDBArgumentCollection`
+1	error[E0433]: failed to resolve: use of undeclared type `EndBuilder`
+1	error[E0433]: failed to resolve: use of undeclared type `BeginBuilder`
+1	error[E0433]: failed to resolve: use of undeclared type `Arrays`
+1	error[E0425]: cannot find function `get_reader_from_path` in this scope
+```
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	1
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
 
 ## Focused Rust Compile Gate: GenomicsDB Erased Void Facades And Reused Map Clone
 
@@ -28486,6 +29202,2280 @@ Invalid-pattern counts remain zero:
 ```text
 compile_error_placeholder	0
 invalid_java_cast_downcast	0
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: GenomicsDB Static Scalar And Implicit Constructor
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_static_scalar_implicit_ctor_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	17
+```
+
+Ideal Rust Target:
+
+When Java uses an implicit zero-argument constructor on a co-translated source
+class, Rust should expose a normal associated constructor on that source type:
+
+```rust
+impl GenomicsDBArgumentCollection {
+    pub fn new() -> GenomicsDBArgumentCollection { ... }
+}
+```
+
+Static constants referenced by that constructor should remain typed associated
+constant accesses. External scalar constants need a support owner:
+
+```rust
+pub struct GenotypeLikelihoods;
+
+impl GenotypeLikelihoods {
+    pub const MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED: i32 = 0;
+}
+```
+
+Implementation Rule:
+
+Static constant support now scans current usages but suppresses owners present
+in the co-translated source context. That prevents local support shells from
+shadowing sibling source types. The same pass carries field types and emits
+const-safe scalar support for `String` and primitive external fields, using
+built-in field metadata as a fallback when a focused gate has not enabled the
+whole owning pack.
+
+Constructor lowering emits a synthetic implicit default constructor only when
+the support context contains an actual zero-argument `new Type()` use. The body
+uses the normal constructor field-value plan, so field initializers and defaults
+remain owned by constructor initialization rather than by call lowering.
+
+Evidence:
+
+- `context_static_string_constant_owner_stays_sibling_source_type`
+- `external_static_primitive_constant_support_is_generated_from_field_facts`
+- `item_assembly_owns_struct_impl_and_function_shells_from_signatures`
+- The focused GenomicsDB gate moves from `cargo_check_errors=18` to `17`.
+- The prior `GenomicsDBArgumentCollection::new` missing item row is gone.
+- The prior undeclared `GenotypeLikelihoods` row is gone.
+- Generated evidence:
+
+```text
+pub struct GenotypeLikelihoods;
+pub const MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED: i32 = 0;
+pub fn new() -> GenomicsDBArgumentCollection
+GenomicsDBArgumentCollection::new()
+```
+
+Top remaining compile errors:
+
+```text
+count	error
+5	error[E0308]: mismatched types
+3	error[E0599]: no method named `to_builder` found for struct `Box<(dyn Any + 'static)>` in the current scope
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no method named `get_fields` found for reference `&Box<(dyn Any + 'static)>` in the current scope
+1	error[E0308]: `if` and `else` have incompatible types
+1	error[E0283]: type annotations needed
+1	error[E0061]: this method takes 3 arguments but 1 argument was supplied
+1	error: could not compile `new-java2rust-focused-output` (lib) due to 16 previous errors; 11 warnings emitted
+```
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: GenomicsDB Try-Resource Unit Cleanup
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_twr_unit_cleanup_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	18
+```
+
+Ideal Rust Target:
+
+Try-with-resources cleanup should close resources in reverse declaration order,
+but the cleanup call itself should use ordinary Rust result propagation only
+when the call facts say the cleanup can throw:
+
+```rust
+reader.close();
+```
+
+for a modeled unit/infallible facade method, and:
+
+```rust
+reader.close()?;
+```
+
+when `close` has a thrown-effect fact.
+
+Implementation Rule:
+
+`lower` now plans each generated resource cleanup call through
+`CallExceptionPropagationPlan`. `exception_lowering` receives rendered cleanup
+statements and only owns reverse-order scope assembly. This keeps `?` selection
+near emission, based on call facts and operator/result context, instead of
+hardcoding a Java `close` rule into the try-with-resources structure.
+
+Evidence:
+
+- `exception_lowering_policy_owns_result_support_ok_and_err_shapes` covers both
+  `FeatureReader.close` with `thrown=[]` and with `thrown=[IOException]`.
+- The focused GenomicsDB gate moves from `cargo_check_errors=19` to `18`.
+- The previous `E0277` bucket for `reader.close()?` on `()` is gone.
+- Generated cleanup now contains:
+
+```text
+src/generated/00004_GenomicsDBImport.rs:3164: reader.close();
+```
+
+Top remaining compile errors:
+
+```text
+count	error
+5	error[E0308]: mismatched types
+3	error[E0599]: no method named `to_builder` found for struct `Box<(dyn Any + 'static)>` in the current scope
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no method named `get_fields` found for reference `&Box<(dyn Any + 'static)>` in the current scope
+1	error[E0599]: no function or associated item named `new` found for struct `generated_00005_GenomicsDBOptions::GenomicsDBArgumentCollection` in the current scope
+1	error[E0308]: `if` and `else` have incompatible types
+1	error[E0283]: type annotations needed
+1	error[E0061]: this method takes 3 arguments but 1 argument was supplied
+1	error: could not compile `new-java2rust-focused-output` (lib) due to 17 previous errors; 11 warnings emitted
+```
+
+## Focused Rust Compile Gate: GenomicsDB Static Constant Facade Owner
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_static_const_facade_owner_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	19
+```
+
+Ideal Rust Target:
+
+When an opaque facade support owner already exists, static string constants
+should extend that owner with an impl block:
+
+```text
+pub struct GenotypeCalculationArgumentCollection;
+
+impl GenotypeCalculationArgumentCollection {
+    pub fn new() -> Self { Default::default() }
+}
+
+impl GenotypeCalculationArgumentCollection {
+    pub const MAX_ALTERNATE_ALLELES_LONG_NAME: &'static str = "...";
+}
+```
+
+The generated file should not contain a second `pub struct
+GenotypeCalculationArgumentCollection;` from static-constant support.
+
+Implementation Rule:
+
+`lower` now emits opaque facade support first, collects the support type names
+declared by those items, and passes that inventory into static string constant
+support generation. `stdlib` renders static constants as impl-only support when
+the owner is already declared, and preserves the existing struct+impl fallback
+for standalone static constant owners.
+
+Evidence:
+
+- `static_string_constant_support_extends_existing_opaque_facade_owner` passes.
+- `cargo check --quiet` passes.
+- The focused GenomicsDB gate moves from `cargo_check_errors=20` to `19`.
+- The previous `E0428` row for duplicate
+  `GenotypeCalculationArgumentCollection` is gone.
+- Generated `00005_GenomicsDBOptions.rs` contains one
+  `pub struct GenotypeCalculationArgumentCollection;`, one constructor impl,
+  and one static-constant impl.
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: GenomicsDB Stream Parentheses
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_stream_parens_v3 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	20
+```
+
+Ideal Rust Target:
+
+Stream closures should render with normal Rust operator precedence:
+
+```text
+.filter(|x| x.get_tiledb_column_offset() >= lo && x.get_tiledb_column_offset() <= hi)
+```
+
+They should not keep Java-origin wrapper parentheses around the whole closure
+body or around `if` conditions. Cast subexpressions should still be
+parenthesized when Rust precedence requires it, such as `(value.len() as i32) !=
+3`.
+
+Implementation Rule:
+
+`stream_lowering` now gives its direct Java-expression lambda renderer a
+precedence model matching the main `RustExpr` emitter. Binary and unary stream
+lambda expressions are rendered without outer parentheses at closure-body or
+condition position, while lower-precedence children are still parenthesized.
+This keeps cleanup in the late emission layer and avoids semantic or
+corpus-specific de-parenthesizing rules.
+
+Evidence:
+
+- `cargo test --test fixtures --quiet` passes.
+- `cargo test stream_plan_fuses_nullable_map_with_non_null_filter_shape --test slot_shape_design --quiet`
+  passes.
+- `cargo check --quiet` passes.
+- The focused GenomicsDB gate has zero `warning: unnecessary parentheses` rows.
+  The remaining 11 warnings are all `variable does not need to be mutable`.
+- `cargo_check_errors` remains at 20, so this was a warning cleanup rather than
+  a compile-error change.
+
+## Focused Rust Compile Gate: Lambda-Captured Map Mutability
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_lambda_capture_map_mut_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	21
+```
+
+Ideal Rust Target:
+
+Java `final` collection locals captured by lambdas should still become mutable
+Rust bindings when the lambda mutates collection contents:
+
+```text
+let mut sample_to_reader_map: HashMap<String, FeatureReader> = HashMap::new();
+sample_to_reader_map.insert(sample_name, reader);
+```
+
+Implementation Rule:
+
+`usage` now analyzes lambda bodies into the enclosing callable binding facts
+while temporarily scoping lambda parameters. `stdlib` owns the native collection
+receiver mutator list. `signature` consumes `ReceiverForCall` facts on native
+collection locals and emits `MutableBinding`; it does not force a mutable-borrow
+shape for owned locals.
+
+Evidence:
+
+- `signature_plan_marks_final_native_map_receiver_mutation_local_mutable`
+  covers a captured lambda mutation of a `final SortedMap`.
+- `final_sorted_map_receiver_mutation_declares_rust_local_mutable` covers
+  direct emitted Rust for the same Java final/content-mutability distinction.
+- The focused GenomicsDB gate moves from `cargo_check_errors=23` to `21`.
+- `sample_to_reader_map` now emits as `let mut`.
+- The previous `E0596 cannot borrow sample_to_reader_map as mutable` bucket is
+  gone. The previous moved `variant_path` row is also gone in this gate.
+- At this gate, unnecessary-parentheses warnings were still the two raw stream
+  closure warnings tracked under `EMIT-2`; those are cleared by the later
+  GenomicsDB Stream Parentheses gate.
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: Try/Catch Future-Use Clone
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_try_catch_future_use_clone_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	20
+```
+
+Ideal Rust Target:
+
+If Java moves a value into a try-body call and a catch arm later reads that same
+binding, Rust should preserve ownership with the existing clone-recovery path:
+
+```text
+let lines = Files::read_all_lines(path.clone());
+...
+Err(e) => return Err(JavaException::new(..., format!("{}", path)))
+```
+
+Implementation Rule:
+
+Try/catch lowering collects outer binding names read by catch bodies and stores
+them in the lowering context while rendering the try body. The normal
+`adapt_reused_owned_argument` path treats those names as future uses, so owned
+argument moves get the same audited clone used for ordinary reused arguments.
+This is a control-flow ownership rule in lowering, not a special case for
+`Files.readAllLines` or GATK path types.
+
+Evidence:
+
+- `TryCatchReusesMovedArgument.java` verifies the neutral pattern.
+- `try_catch_reused_moved_argument_clones_before_try_body_move` passes.
+- `cargo check --quiet` passes.
+- The focused GenomicsDB gate moves from `cargo_check_errors=21` to `20`.
+- `SampleNameMap` now emits
+  `Files::read_all_lines(sample_to_file_map_path.clone()/* TODO(translation): validate added clone */)`.
+- The previous `E0382 borrow of moved value: sample_to_file_map_path` row is
+  gone.
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: Cast Expression Precedence
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_cast_expr_precedence_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	23
+```
+
+Ideal Rust Target:
+
+Primitive widening casts should be printed from Rust precedence, not from
+Java-origin parentheses:
+
+```text
+let contig_length: i64 = vid_contig.get_length() as i64;
+(end as i64) < limit
+acc * (n as i64)
+```
+
+Implementation Rule:
+
+`RustExpr::Cast` owns Rust `as` precedence. Primitive widening coercions and
+native collection length casts now lower to this structured expression instead
+of raw strings like `(value as i64)`. The emitter can therefore drop assignment
+position parentheses while keeping binary operand parentheses where Rust syntax
+requires them.
+
+Evidence:
+
+- `emit::tests::casts_drop_statement_position_parentheses_but_keep_binary_operand_parentheses`
+  covers statement, comparison, and multiplication contexts.
+- `operator_lowering_owns_binary_and_unary_rust_spelling` and
+  `coercion_planner_owns_index_and_shape_widening` pass with structured cast
+  expressions.
+- `cargo check --quiet` passes.
+- The focused GenomicsDB gate removes the assigned-cast warning:
+  `let contig_length: i64 = vid_contig.get_length() as i64;`.
+- At this gate, remaining unnecessary-parentheses warnings were two raw stream
+  closure strings, not structured `RustExpr` precedence failures. They are
+  cleared by the later GenomicsDB Stream Parentheses gate.
+
+## Focused Rust Compile Gate: Indexed String Borrow And Clone
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_indexed_string_borrow_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	23
+```
+
+Ideal Rust Target:
+
+Java indexed reads from a translated `String[]`/`Vec<String>` should be Rust
+borrowed element reads. The target slot decides the adapter:
+
+```text
+Some(split[0].clone())          // Option<String>
+Some(split[0].as_str())         // Option<&str>
+let sample: String = split[0].clone();
+split[1].trim().is_empty()      // borrowed receiver, no clone
+```
+
+Implementation Rule:
+
+`shape_projection::indexed_read_shape` projects non-copy indexed elements as
+`SharedBorrow`. `lower_array_access_expr_for_slot` routes array-access syntax
+through the same borrowed-element slot conversion boundary as sequence `get`.
+`conversion_plan` also accepts borrowed native `String` to borrowed string-view
+coercion, so optional string-view slots render the element adapter before
+`Some(...)`.
+
+Evidence:
+
+- `indexed_shape_projects_owned_container_non_copy_reads_as_borrows` proves the
+  shape projection.
+- `borrowed_native_string_can_coerce_to_string_view` proves borrowed
+  `String`-to-`&str` coercion.
+- `indexed_string_array_reads_clone_only_for_owned_slots` proves a neutral
+  Java fixture clones only for owned indexed string slots.
+- The focused GenomicsDB gate moves from `cargo_check_errors=25` to `23`.
+- The previous `cannot move out of index of Vec<String>` bucket is gone.
+- Generated `SampleNameMap` now emits
+  `Some(split[0 as usize].clone())` and
+  `let sample: String = split[0 as usize].clone();`.
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: Try Catch Fallthrough Completion
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_try_ok_arm_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	25
+```
+
+Ideal Rust Target:
+
+A fall-through Java `try/catch` in a throwing `void` method should lower as a
+statement-level `match` followed by the normal method epilogue:
+
+```text
+match (|| -> Result<(), JavaException> {
+    ...
+    return Ok(());
+})() {
+    Ok(()) => {}
+    Err(ex) if ex.is_instance(&["IllegalArgumentException"]) => {
+        return Err(ex);
+    }
+    Err(ex) => return Err(ex),
+}
+return Ok(());
+```
+
+The `Ok(())` arm should not be forced to carry the whole method result. Its
+meaning is local success of the try body, not method termination.
+
+Implementation Rule:
+
+`exception_plan` now classifies supported `try/catch` and try-with-resources
+statements as terminating only when their planned try body completion is
+`Terminates`. Fall-through unit try blocks therefore allow `lower_method` to
+insert the ordinary `return Ok(());` epilogue.
+
+Evidence:
+
+- `simple_rethrow_catch_generated_rust_compiles`,
+  `simple_cause_chaining_generated_rust_compiles`, and
+  `internal_throwing_call_in_try_generated_rust_compiles` pass.
+- The previous focused GenomicsDB residual shaped like `Ok(()) => {}` expected
+  `Result<(), JavaException>` is gone from `compile.log`.
+- Remaining top buckets are now external/slot issues: boxed `Any` fallback
+  receivers for GenomicsDB protobuf surfaces, duplicate generated support
+  shells, moved `Path`/`String` values, missing mutable map inference, and
+  external facade generic defaults.
+- At this gate, parentheses warnings remained at three after the precedence
+  emitter work:
+  assigned `as` cast, closure-body conjunction, and an `if` condition generated
+  inside a stream closure.
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: Callback Throw Projection and Precedence Emitter
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_precedence_emit_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	20
+```
+
+The script count includes the final compiler summary line; the generated crate
+still reports 19 previous compile errors. The top compile-error buckets remain:
+
+```text
+7	error[E0308]: mismatched types
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0596]: cannot borrow `sample_to_reader_map` as mutable, as it is not declared as mutable
+1	error[E0382]: borrow of moved value: `variant_path`
+1	error[E0277]: the `?` operator can only be applied to values that implement `Try`
+```
+
+Ideal Rust Target:
+
+Synchronous callback throws should affect the enclosing method result shape, but
+deferred callback throws should stay inside their future/result carrier:
+
+```text
+pub fn get_feature_readers_in_parallel(...) -> Result<HashMap<String, FeatureReader>, JavaException>
+```
+
+Rust expression rendering should also remove Java-origin cosmetic parentheses:
+
+```text
+while i < limit { ... }
+if self.ready && !self.closed { ... }
+return -1;
+```
+
+Implementation Rule:
+
+Semantic analysis projects lambda thrown effects into the enclosing method only
+for callbacks that execute at the current call boundary. Known deferred methods
+such as `submit`, `execute`, `supplyAsync`, and `runAsync` suppress that
+projection so their failures remain attached to the submitted closure.
+
+The Rust emitter now uses `RustExpr` precedence to decide parentheses for
+binary and unary expressions. Lowering must therefore preserve structured
+`RustExpr` nodes when it wants this cleanup; raw snippets remain verbatim until
+they get their own structured representation.
+
+Evidence:
+
+- `lambda_block_throw_marks_enclosing_method_throwing` covers semantic facts
+  for a throwing `forEach` lambda.
+- `foreach_lambda_throw_wraps_enclosing_method_in_result` covers the resulting
+  `Result<..., JavaException>` method signature and `Ok(readers)` return.
+- `executor_submit_future_slot_shapes_block_lambda_result` guards the deferred
+  `submit` boundary so it does not over-wrap the containing method.
+- `emit::tests::binary_expressions_do_not_emit_outer_parentheses`,
+  `emit::tests::lower_precedence_children_still_get_parentheses`, and
+  `emit::tests::unary_expressions_do_not_emit_outer_parentheses` cover the
+  precedence emitter.
+- Focused GATK unnecessary-parentheses warnings drop from 55 in
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_lambda_throw_method_result_v2/compile.log`
+  to 3 in
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_precedence_emit_v1/compile.log`.
+  Total emitted warnings fall to 14.
+
+Invalid-pattern counts remain stable:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+Residual:
+
+Those unnecessary-parentheses warnings were inside raw closure or inline
+snippets, for example the raw stream/partition closure around
+`partition_info.len() as i32 != 3`. They are cleared by the later GenomicsDB
+Stream Parentheses gate using precedence-aware stream expression rendering, not
+by a string-stripping pass.
+
+## Focused Rust Compile Gate: Executor Submit Future Slot
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_submit_future_slot_v5 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	21
+```
+
+Ideal Rust Target:
+
+When Java inserts `executor.submit(() -> { ... return value; })` into a
+`Future<T>` slot, the closure body should be shaped as producing `T`, and the
+surrounding `submit` call should produce the `Future` facade. The lambda return
+target must not leak from the enclosing method return type.
+
+Implementation Rule:
+
+`lower` detects shaped `submit(lambda)` calls before generic external-call
+lowering. If the target slot is `Future<T>`, it lowers the lambda with
+`current_return_shape = T`. `stdlib` emits the opaque external support method
+`ExecutorService::submit<T0>(&self, T0) -> Future` from the external API support
+surface so the call result is no longer `()`.
+
+Evidence:
+
+- `executor_submit_future_slot_shapes_block_lambda_result` proves the nested
+  try wrapper uses `Result<Reader, JavaException>` rather than the enclosing
+  `Result<HashMap<String, Reader>, JavaException>`.
+- `cargo check --quiet` passes.
+- `cargo test executor_submit --test idiom_gaps --quiet` passes.
+- The focused GenomicsDB gate moves from 23 to 21 compile errors.
+- Generated support now includes:
+
+```text
+impl ExecutorService {
+    pub fn shutdown_now(&self) -> () { Default::default() }
+    pub fn submit<T0>(&self, _arg0: T0) -> Future { Default::default() }
+}
+```
+
+Top compile-error buckets after this slice:
+
+```text
+10	error[E0308]: mismatched types
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no function or associated item named `new` found for struct `generated_00005_GenomicsDBOptions::GenomicsDBArgumentCollection` in the current scope
+1	error[E0428]: the name `GenotypeCalculationArgumentCollection` is defined multiple times
+1	error[E0308]: `if` and `else` have incompatible types
+1	error[E0283]: type annotations needed
+1	error[E0277]: the `?` operator can only be applied to values that implement `Try`
+1	error[E0061]: this method takes 3 arguments but 1 supplied
+```
+
+Invalid-pattern counts remain stable:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+Residual:
+
+This slice intentionally only propagates the value target. The next executor
+callback slice should carry exceptions through the closure as
+`Result<T, JavaException>` so catch arms do not return `Err(...)` where the
+closure value target is `T`.
+
+## Focused Rust Compile Gate: Executor Submit Result Carrier
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_submit_result_carrier_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	20
+```
+
+Ideal Rust Target:
+
+A value-returning Java `submit` callback that can throw should return a Rust
+`Result<T, JavaException>` inside the closure. Normal Java `return value;`
+becomes `return Ok(value);`, caught exceptions become `return Err(...)`, and
+uncaught Java exceptions propagate as `Err(ex)`.
+
+Implementation Rule:
+
+The `submit`/`Future<T>` lowering path now invokes lambda block lowering with a
+callback-local result carrier. Existing `lower_stmt`, `lower_try_stmt`, and
+`try_catch_stmt` own the actual return/try/catch rendering, so the rule is not a
+GATK-specific catch-arm rewrite.
+
+Evidence:
+
+- `executor_submit_future_slot_shapes_block_lambda_result` now also asserts
+  `Ok(value) => return Ok(value)` and a `return Err(...)` catch arm.
+- `cargo check --quiet` passes.
+- `cargo test executor_submit --test idiom_gaps --quiet` passes.
+- The focused GenomicsDB gate moves from 21 to 20 compile errors.
+- Generated executor callback evidence:
+
+```text
+match (|| -> Result<Box<dyn std::any::Any>, JavaException> {
+    return Ok(Box::new(InitializedQueryWrapper::new(...)) as Box<dyn std::any::Any>);
+})() {
+    Ok(value) => return Ok(value),
+    Err(e) if e.is_instance(&["IOException"]) => {
+        return Err(JavaException::with_cause(...));
+    }
+    Err(ex) => return Err(ex),
+}
+```
+
+Top compile-error buckets after this slice:
+
+```text
+9	error[E0308]: mismatched types
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no function or associated item named `new` found for struct `generated_00005_GenomicsDBOptions::GenomicsDBArgumentCollection` in the current scope
+1	error[E0428]: the name `GenotypeCalculationArgumentCollection` is defined multiple times
+1	error[E0308]: `if` and `else` have incompatible types
+1	error[E0283]: type annotations needed
+1	error[E0277]: the `?` operator can only be applied to values that implement `Try`
+1	error[E0061]: this method takes 3 arguments but 1 supplied
+```
+
+Invalid-pattern counts remain stable:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+Residual:
+
+The remaining executor-adjacent failures are now separate rules. The next
+callback-local slot slice should preserve nullable method results as
+`Option<T>` locals when they flow into optional parameters, and the later
+`Future.get()` catch still returns `Err(...)` from a method whose signature is
+not yet `Result<..., JavaException>`.
+
+## Focused Rust Compile Gate: Callback Optional Local Slot
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_callback_optional_local_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	19
+```
+
+Ideal Rust Target:
+
+Callback-local variables initialized from nullable planned method calls should
+keep the optional carrier when the value later flows into an optional slot:
+
+```text
+let variant_index_path: Option<Path> =
+    sample_name_map.get_v_c_f_index_for_sample_as_path(sample_name);
+self.get_reader_from_path(variant_path, variant_index_path)?;
+```
+
+The emitted Rust should not assign `Option<Path>` to `Path`, and should not
+wrap an already-optional value as `Some(variant_index_path)`.
+
+Implementation Rule:
+
+`lower` now makes callback-local fallback planning initializer-aware. When a
+callback local has no solver-provided `LocalPlan`, lowering asks the signature
+plan for receiverless current-type and receiver method-call return shapes
+before falling back to the declared Java type. Slot conversion uses the same
+planned method-call shape before deciding optional wrap/unwrap coercions.
+
+Evidence:
+
+- `nullable_method_result_in_callback_local_stays_optional_for_optional_arg_slot`
+  proves a neutral callback local initialized from a nullable method result
+  stays `Option<Path>` and flows into an optional argument without `Some(...)`.
+- `cargo check --quiet` passes.
+- `cargo test nullable_method_result_in_callback_local_stays_optional_for_optional_arg_slot --test idiom_gaps --quiet` passes.
+- `cargo test executor_submit --test idiom_gaps --quiet` passes.
+- The focused GenomicsDB gate moves from 20 to 19 compile errors.
+- Generated GenomicsDB evidence:
+
+```text
+let mut variant_index_path: Option<Path> =
+    self.sample_name_map.as_ref().unwrap()
+        .get_v_c_f_index_for_sample_as_path(sample_name.clone());
+return Ok(Box::new(InitializedQueryWrapper::new(
+    self.get_reader_from_path(variant_path, variant_index_path)?,
+    ...
+)) as Box<dyn std::any::Any>);
+```
+
+Top compile-error buckets after this slice:
+
+```text
+8	error[E0308]: mismatched types
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no function or associated item named `new` found for struct `generated_00005_GenomicsDBOptions::GenomicsDBArgumentCollection` in the current scope
+1	error[E0428]: the name `GenotypeCalculationArgumentCollection` is defined multiple times
+1	error[E0308]: `if` and `else` have incompatible types
+1	error[E0283]: type annotations needed
+1	error[E0277]: the `?` operator can only be applied to values that implement `Try`
+1	error[E0061]: this method takes 3 arguments but 1 supplied
+```
+
+Invalid-pattern counts remain stable:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+Residual:
+
+The remaining executor-adjacent failure is the later `Future.get()` catch:
+`get_feature_readers_in_parallel` still returns a plain `HashMap`, but the
+catch arm returns `Err(...)`. That belongs to method exception signature
+propagation, not optional local slot shaping.
+
+## Focused Rust Compile Gate: Borrowed Concrete Facade View
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_concrete_facade_zst_view_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	23
+```
+
+Ideal Rust Target:
+
+A Java concrete subtype borrowed from a collection should be accepted by a
+read-only facade-supertype parameter without cloning or a constructor-specific
+rewrite. For the observed `InitializedQueryWrapper` call, the target signature
+stays `fn new(..., interval: &Locatable)`, and the `SimpleInterval` collection
+element is adapted at the argument slot.
+
+Implementation Rule:
+
+Constructor argument lowering now falls back to the planned constructor
+signature when resolver metadata is missing but the constructed type and Rust
+constructor name are known. The slot conversion planner then recognizes
+concrete-to-concrete shared-borrow facade coercions when hierarchy or known
+structural subtype facts prove assignability. Rendering preserves evaluation
+of the source value and borrows the zero-sized facade boundary.
+
+Evidence:
+
+- `optional_borrowed_concrete_element_unwraps_to_concrete_facade_target`
+  covers the conversion and rendering policy.
+- `cargo check --quiet` passes for the translator.
+- The focused GenomicsDB gate moves from the previous best
+  `cargo_check_errors=24` to `23`.
+- The generated `InitializedQueryWrapper::new` call now renders the second
+  argument as a shaped `&Locatable` facade view:
+
+```text
+{ let _java_value = self.intervals.as_ref().unwrap().get(0).expect("Java null receiver"); &Locatable }
+```
+
+Top compile-error buckets after this slice:
+
+```text
+12	error[E0308]: mismatched types
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no function or associated item named `new` found for struct `generated_00005_GenomicsDBOptions::GenomicsDBArgumentCollection` in the current scope
+1	error[E0428]: the name `GenotypeCalculationArgumentCollection` is defined multiple times
+1	error[E0308]: `if` and `else` have incompatible types
+1	error[E0283]: type annotations needed
+1	error[E0277]: the `?` operator can only be applied to values that implement `Try`
+1	error[E0061]: this method takes 3 arguments but 1 argument was supplied
+```
+
+Warning triage:
+
+The `compile.log` warning stream is dominated by late emission cleanup:
+unnecessary parentheses around `if`/`while` conditions, block return values,
+assigned values, closure bodies, and method/function arguments. These are
+operator-priority/rendering issues that can be handled near emission. The unit
+type lines in the same log are different: they correspond to real
+`Result`/`Future` block result mismatches and should stay in the semantic or
+block-lowering work queue, not the parenthesis cleanup queue.
+
+## Focused Rust Compile Gate: HTSJDK Locatable Facade Boundary
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_locatable_concrete_facade_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	27
+```
+
+Ideal Rust Target:
+
+HTSJDK `Locatable` parameters with known coordinate getters should remain typed
+facade parameters, for example `interval: &Locatable`, so translated calls to
+`get_contig`, `get_start`, and `get_end` do not target `&Box<dyn Any>`.
+
+Implementation Rule:
+
+`external_packs` declares simple and qualified `Locatable` as concrete
+external facade strategies in the samtools-util pack. The typed getter facts
+already existed; the strategy fact lets signature planning preserve the facade
+slot instead of the erased fallback.
+
+Evidence:
+
+- `htsjdk_util_locatable_pack_strategy_preserves_typed_facade_boundary` covers
+  the pack fact.
+- `external_pack_typed_locatable_coordinate_getters_support_numeric_and_string_use`
+  still typechecks generated getter support.
+- `cargo check --quiet` passes.
+- The focused GenomicsDB gate moves from the comparable 29-error baseline at
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_typed_builder_products_v4`
+  to 27 errors. The three missing `get_contig`/`get_start`/`get_end` methods
+  on `&Box<dyn Any>` are gone.
+
+Invalid-pattern counts are unchanged from that baseline:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+Remaining primary bottleneck in this cluster: `FeatureReader.query` still needs
+an external overload/facade method-shape rule, because Rust cannot expose the
+one-argument and three-argument Java overloads with the same inherent method
+name.
+
+## Focused Rust Compile Gate: External Method Overloads And Field Order
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_external_method_overload_field_order_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	25
+```
+
+Ideal Rust Target:
+
+External Java method overloads should avoid illegal Rust overloading by using
+arity-specific method names only when a receiver/method family has multiple
+modeled arities. Constructor struct literals should also evaluate sibling field
+initializers that read a local before moving that local into a field.
+
+Implementation Rule:
+
+`call_plan` selects arity-specific external method names, `stdlib` emits
+matching support methods from the same helper, and the HTSJDK feature pack
+models `FeatureReader.query/1` and `FeatureReader.query/3` separately.
+`item_assembly` delays direct variable-move struct fields after sibling field
+expressions that read that variable.
+
+Evidence:
+
+- `external_method_support_uses_arity_names_for_overloaded_facades`
+- `htsjdk_tribble_feature_pack_models_coordinate_getters`
+- `item_assembly_owns_struct_impl_and_function_shells_from_signatures`
+- `cargo check --quiet`
+
+The focused GenomicsDB gate moves from 27 errors at the Locatable facade
+boundary slice to 25 errors here. Generated `FeatureReader` support now emits
+`query_1` and `query_3`, `InitializedQueryWrapper` calls `reader.query_3(...)`,
+and the struct literal orders `query: Some(reader.query_3(...))` before
+`reader: reader`. The previous three-argument `query` overload mismatch and
+the `borrow of moved value: reader` residual are gone.
+
+Invalid-pattern counts are unchanged:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+Remaining visible bottlenecks include `create_sample_to_reader_map` functional
+adapter arity, receiverless `get_reader_from_path` inside an executor lambda,
+duplicate generated option/argument collection shells, and unresolved
+`Box<dyn Any>` default/type-inference residuals.
+
+## Focused Rust Compile Gate: Lambda Self Receiver And Nested Result Args
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_lambda_self_receiver_result_arg_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	24
+```
+
+Ideal Rust Target:
+
+Receiverless Java helper calls inside instance lambdas should bind to the
+current Rust receiver, and nested calls that can throw should propagate through
+`?` even when they are unshaped constructor/call arguments.
+
+Implementation Rule:
+
+`lower` now lets unresolved receiverless calls use the current type's signature
+plan. `call_plan` represents that fallback as `FallbackSelf`, and
+`call_lowering` renders it as `self.method(...)`. `lower_unshaped_argument`
+now applies the same exception-propagation check as slot-shaped expressions,
+and `plan_call_exception_propagation` recognizes current-type thrown facts for
+unresolved receiverless calls.
+
+Evidence:
+
+- `executor_submit_lambda_receiverless_helper_call_uses_current_self`
+- `unshaped_constructor_argument_call_that_throws_propagates_result`
+- `exception_lowering_policy_owns_result_support_ok_and_err_shapes`
+- `cargo check --quiet`
+
+The focused GenomicsDB gate moves from 25 errors at
+`/tmp/new_java2rust_gatk_genomicsdb_compile_gate_external_method_overload_field_order_v2`
+to 24 errors at
+`/tmp/new_java2rust_gatk_genomicsdb_compile_gate_lambda_self_receiver_v1` after
+the receiver binding fix. The later nested-`Result` argument fix keeps the gate
+at 24 errors but changes the generated line to:
+
+```text
+InitializedQueryWrapper::new(self.get_reader_from_path(...)?,
+    self.intervals.as_ref().unwrap().get(0))
+```
+
+The remaining error on that line is now the separate collection/interface
+adaptation problem: `List.get(0)` is represented as `Option<&SimpleInterval>`
+while the constructor expects `&Locatable`.
+
+Invalid-pattern counts remain unchanged:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: GenomicsDB Typed Builder Products
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_typed_builder_products_v4 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	30
+```
+
+Ideal Rust Target:
+
+Java protobuf-style builder terminals should return their concrete product
+facade when external facts prove the product:
+
+```text
+pub fn create_partition_with_begin_and_end(
+    &self,
+    begin: CoordinatesGenomicsDBColumn,
+    end: CoordinatesGenomicsDBColumn,
+) -> GenomicsDBImportConfigurationPartition
+```
+
+Collection insertion should then use the concrete value:
+
+```text
+config_partitions.push(self.create_partition_with_begin_and_end(
+    begin_builder.build(),
+    end_builder.build(),
+));
+```
+
+Implementation Rule:
+
+The GenomicsDB external pack declares typed `build` facts for protobuf-style
+builders. External facade support generation consumes those facts, including
+nested alias matches. Signature planning keeps exact final erased facades
+concrete for private/internal method params and returns, while public/protected
+boundaries keep the conservative erased fallback. Native collection argument
+planning keeps final erased facade elements concrete so `Vec<T>::push` receives
+the same element type that `slot_render` emits for `Vec<T>`.
+
+Evidence:
+
+- `external_nested_builder_facade_support_is_generated_from_facts_and_used_calls`
+- `genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers`
+- `call_plan_owns_call_and_new_target_selection_before_argument_lowering`
+- `cargo check --quiet`
+
+The focused GenomicsDB gate moves from the previous
+`/tmp/new_java2rust_gatk_genomicsdb_compile_gate_stream_block_return_locals_v1`
+result of `cargo_check_errors=32` to `cargo_check_errors=30`; `E0308` drops
+from `16` to `14`. Generated `GenomicsDBImport` now has concrete
+`create_partition_with_begin_and_end`, direct `config_partitions.push(...)`,
+and the interval stream returns concrete partition values.
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	2
+concrete_none_assignment	0
+java_add_all_call	0
+java_size_call	0
+java_put_call	0
+unsupported_lambda	0
+unsupported_method_reference	0
+unsupported_array_creation	0
+```
+
+## Focused Rust Compile Gate: GenomicsDB Future Get Instance Facade
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_future_get_instance_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	36
+```
+
+Ideal Rust Target:
+
+Java future-like instance calls should stay instance calls in Rust and let the
+target slot infer the generic result:
+
+```text
+let reader: FeatureReader = future.get();
+```
+
+The generated facade should therefore expose:
+
+```text
+pub fn get<T: Default>(&self) -> T
+```
+
+Implementation Rule:
+
+`stdlib` now treats opaque facade owners ending in `Future` plus a used
+zero-arity `get` call as a generic instance facade surface. The rule replaces
+any already-inserted same-signature generic static fallback before adding the
+instance method, so imported simple aliases and fully qualified support aliases
+do not preserve `pub fn get<R: Default>() -> R`.
+
+Evidence:
+
+- `selected_opaque_future_get_is_generic_instance_surface` covers an imported
+  `java.util.concurrent.Future` value and rejects the static generic fallback.
+- The focused GenomicsDB gate moves from `cargo_check_errors=37` to `36`.
+- The old `no method named get` bucket for `&Future` is gone.
+- Generated support now contains both:
+
+```text
+impl Future {
+    pub fn get<T: Default>(&self) -> T { Default::default() }
+}
+
+impl JavaUtilConcurrentFuture {
+    pub fn get<T: Default>(&self) -> T { Default::default() }
+}
+```
+
+Residual:
+
+The gate still has one invalid-pattern file from an existing
+`invalid_java_cast_downcast` residual. The largest remaining compile buckets are
+erased-object propagation (`Box<dyn Any>` receivers), method-level
+`Result`/exception return-shape mismatches, missing builder/constructor
+facades, and cross-file duplicate type naming.
+
+## Focused Rust Compile Gate: GenomicsDB Final Facade Generic Args
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_final_domain_collection_arg_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	39
+```
+
+Ideal Rust Target:
+
+Concrete final domain facade methods with generic stub parameters should
+receive typed Rust arguments. In the GenomicsDB slice, `IntervalList.add(...)`
+should not force loop variables or `new Interval(...)` values through
+`Box<dyn Any>` before calling the facade.
+
+Implementation Rule:
+
+`lower` treats unknown argument slots on proven concrete final collection-like
+facade receivers as generic facade parameters. Each argument is lowered against
+its own inferred shape, while explicit external argument facts and true erased
+object boundaries continue through normal slot/coercion planning.
+
+Evidence:
+
+- `pack_enabled_final_domain_facade_local_stays_concrete_not_erased` proves
+  pack-enabled `IntervalList.add(new Interval(...))` emits
+  `intervals.add(Interval::new_3(...))` instead of boxing an erased tuple.
+- The focused GenomicsDB gate moves from `cargo_check_errors=40` at
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_final_domain_collection_facade_v1`
+  to `cargo_check_errors=39` at
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_final_domain_collection_arg_v1`.
+- Generated `GenomicsDBImport.write_interval_list_to_file` now contains
+  `output_list.add(Interval::new_1(i));`.
+- The prior `lifetime may not live long enough` compile bucket from
+  `output_list.add(Box::new(i) as Box<dyn std::any::Any>)` is gone.
+
+Remaining top buckets:
+
+```text
+16	error[E0308]: mismatched types
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no method named `intervals_specified` found for struct `IntervalArgumentCollection`
+1	error[E0599]: no method named `get` found for reference `&generated_00004_GenomicsDBImport::Future`
+1	error[E0599]: no method named `get_start` found for reference `&Box<(dyn Any + 'static)>`
+1	error[E0599]: no method named `get_name` found for struct `Box<(dyn Any + 'static)>`
+1	error[E0599]: no method named `get_intervals` found for struct `IntervalArgumentCollection`
+1	error[E0599]: no method named `get_end` found for reference `&Box<(dyn Any + 'static)>`
+1	error[E0599]: no method named `get_contig` found for reference `&Box<(dyn Any + 'static)>`
+```
+
+## Focused Rust Compile Gate: GenomicsDB Known Opaque Support Surfaces
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_known_opaque_surfaces_v3 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	37
+```
+
+Ideal Rust Target:
+
+Selected opaque support shells should expose only the owner-specific known
+methods that are actually used. In the GenomicsDB slice,
+`IntervalArgumentCollection` needs `intervals_specified() -> bool` and
+`get_intervals(...) -> Vec<SimpleInterval>`, and `SimpleInterval` needs typed
+locatable getters. Unrelated opaque types should not inherit those methods.
+
+Implementation Rule:
+
+`stdlib` keeps weak-return strengthening for existing facade surfaces, but
+missing surfaces now require an owner-specific known-method table plus a used
+call arity. The generic known return table may describe Java-like names, but
+it does not by itself add methods to every opaque type.
+
+Evidence:
+
+- `selected_opaque_support_type_gets_used_known_method_surfaces_by_arity`
+  proves both the positive owner-specific methods and the negative unrelated
+  opaque-type case.
+- The focused GenomicsDB gate moves from `cargo_check_errors=39` at
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_final_domain_collection_arg_v1`
+  to `cargo_check_errors=37` at
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_known_opaque_surfaces_v3`.
+- Generated `GenomicsDBImport` contains
+  `impl IntervalArgumentCollection` with `get_intervals<T0>(...) ->
+  Vec<SimpleInterval>` and `intervals_specified(&self) -> bool`.
+- The previous missing-method buckets for
+  `IntervalArgumentCollection.intervals_specified` and
+  `IntervalArgumentCollection.get_intervals` are gone.
+
+Remaining top buckets:
+
+```text
+16	error[E0308]: mismatched types
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no method named `get` found for reference `&generated_00004_GenomicsDBImport::Future`
+1	error[E0599]: no method named `get_start` found for reference `&Box<(dyn Any + 'static)>`
+1	error[E0599]: no method named `get_name` found for struct `Box<(dyn Any + 'static)>`
+1	error[E0599]: no method named `get_end` found for reference `&Box<(dyn Any + 'static)>`
+1	error[E0599]: no method named `get_contig` found for reference `&Box<(dyn Any + 'static)>`
+```
+
+## Focused Rust Compile Gate: GenomicsDB External Enum Constant Facades
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_enum_constant_facade_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	40
+```
+
+Ideal Rust Target:
+
+External enum-like Java constants should not become recursive Rust storage.
+For HTSJDK constants such as `PairOrientation.FR`, `LogLevel.INFO`, and
+`FileTermination.HAS_TERMINATOR_BLOCK`, the generated facade shell should stay
+finite, for example:
+
+```text
+pub struct PairOrientation;
+```
+
+It should not render:
+
+```text
+pub struct PairOrientation {
+    pub f_r: PairOrientation,
+}
+```
+
+Implementation Rule:
+
+External facade support now detects self-typed uppercase field facts on the
+same external receiver and treats them as static enum constants rather than
+instance fields. The field facts remain available to resolver/type logic, but
+`stdlib` skips them when constructing facade struct storage.
+
+Evidence:
+
+- `external_enum_constant_facades_do_not_emit_recursive_storage_fields` proves
+  the neutral HTSJDK-shaped case emits a zero-sized `PairOrientation` facade
+  and no recursive `f_r: PairOrientation` storage.
+- With `com.intel.genomicsdb` plus `htsjdk.samtools.util`, the focused
+  GenomicsDB gate moves from
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_domain_collection_facade_htsjdk_v1`
+  at `cargo_check_errors=94` to
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_enum_constant_facade_v1`
+  at `cargo_check_errors=40`.
+- The previous recursive-type buckets are gone: no `E0072` recursive
+  `PairOrientation`/`LogLevel`/`FileTermination`, no `E0391` drop-check
+  cycles, and no recursion-limit tail errors for those facade shells.
+
+Remaining pack-enabled bottlenecks:
+
+- The top bucket is now `17x E0308` mismatched types.
+- `IntervalList` has the required `add` and `write` facade methods when
+  `htsjdk.samtools.util` is enabled, but the full pack currently pushes this
+  call site through erased `Box<dyn Any>`:
+  `let mut output_list: Box<dyn std::any::Any> = IntervalList::new(...)`.
+- The next structural issue is representation/slot selection for concrete
+  domain facades under pack-enabled object facts, not enum constant storage.
+
+## Focused Rust Compile Gate: GenomicsDB Conventional Static String Constants
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_conventional_static_strings_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	36
+```
+
+Ideal Rust Target:
+
+External Java string constants whose dependency declaration is outside the
+translated/source-summary envelope should still lower as normal Rust associated
+constants when the field shape is clear from Java constant conventions:
+
+```text
+StandardArgumentDefinitions::VARIANT_LONG_NAME
+AnnotationUtils::ALLELE_SPECIFIC_RAW_DELIM
+AnnotationUtils::ALLELE_SPECIFIC_REDUCED_DELIM
+```
+
+The support surface should be the same one used for explicitly typed external
+field facts:
+
+```text
+pub struct AnnotationUtils;
+
+impl AnnotationUtils {
+    pub const ALLELE_SPECIFIC_RAW_DELIM: &'static str =
+        "ALLELE_SPECIFIC_RAW_DELIM";
+}
+```
+
+Implementation Rule:
+
+`stdlib::known_external_field_type_for_receiver` now treats unresolved external
+all-caps fields with string-like suffixes, such as `_LONG_NAME` and `_DELIM`,
+as `JavaType::String` after numeric, boolean, explicit pack, and more specific
+built-in field models have priority. The existing member-access planner then
+projects the constant as a borrowed string, and the existing external static
+string support generator emits the associated constants. No lowering rule
+mentions `StandardArgumentDefinitions`, `AnnotationUtils`, or GATK.
+
+Evidence:
+
+- `conventional_external_static_string_constants_are_typed_and_supported`
+  passes and covers neutral `_LONG_NAME` and `_DELIM` owners.
+- `cargo check --quiet` passes for the translator crate.
+- The focused GenomicsDB gate moves from
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_emitted_summary_super_methods_v1`
+  at `cargo_check_errors=40` to
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_conventional_static_strings_v1`
+  at `cargo_check_errors=36`.
+- The previous unresolved `StandardArgumentDefinitions` and `AnnotationUtils`
+  buckets are gone. Generated evidence includes:
+
+```text
+pub struct StandardArgumentDefinitions;
+pub const VARIANT_LONG_NAME: &'static str = "VARIANT_LONG_NAME";
+
+pub struct AnnotationUtils;
+pub const ALLELE_SPECIFIC_RAW_DELIM: &'static str =
+    "ALLELE_SPECIFIC_RAW_DELIM";
+pub const ALLELE_SPECIFIC_REDUCED_DELIM: &'static str =
+    "ALLELE_SPECIFIC_REDUCED_DELIM";
+```
+
+Remaining top compile-error buckets:
+
+```text
+15	error[E0308]: mismatched types
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no method named `push` found for struct `IntervalList`
+1	error[E0599]: no method named `intervals_specified` found for struct `IntervalArgumentCollection`
+1	error[E0599]: no method named `get` found for reference `&generated_00004_GenomicsDBImport::Future`
+1	error[E0599]: no method named `get_intervals` found for struct `IntervalArgumentCollection`
+1	error[E0433]: failed to resolve: use of undeclared type `Arrays`
+```
+
+## Focused Rust Compile Gate: GenomicsDB Typed VCF And Domain Getter Surfaces
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_domain_getter_surfaces_v3 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	42
+```
+
+Ideal Rust Target:
+
+Known external and opaque-domain getters should expose concrete Rust return
+types at the facade boundary:
+
+```text
+header.get_genotype_samples() -> Vec<String>
+interval.get_contig() -> String
+interval.get_start() -> i32
+interval.get_end() -> i32
+```
+
+Downstream Rust should then use ordinary collection, string, and numeric
+operations rather than carrying `()` or `Box<dyn Any>` into later lowering.
+
+Implementation Rule:
+
+The HTSJDK VCF pack now models `VCFHeader.getGenotypeSamples()` as
+`List<String>`. External facade support also has a weak-method strengthening
+pass: when an opaque support type already has a weak zero-argument method
+surface and `known_external_method_return_type` knows the domain return, the
+weak method is replaced with the concrete return. The pass does not add every
+known getter to every opaque type, and it skips name conflicts with existing
+static/helper methods.
+
+Evidence:
+
+- `htsjdk_vcf_pack_models_header_getters_and_mutators`
+- `external_pack_typed_string_list_getter_supports_indexed_sample_access`
+- `htsjdk_samtools_util_pack_models_locatable_interval_and_iterator_effects`
+- `external_pack_typed_locatable_coordinate_getters_support_numeric_and_string_use`
+- The focused GenomicsDB gate moves from
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_optional_external_receiver_v1`
+  at `cargo_check_errors=46` to
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_domain_getter_surfaces_v3`
+  at `cargo_check_errors=42`.
+- Removed top buckets include `no method named get found for unit type ()`,
+  `String: Borrow<()>`, and ``()`` not implementing `Display`.
+- Generated `SimpleInterval` now exposes `get_contig() -> String`,
+  `get_start() -> i32`, and `get_end() -> i32`.
+
+## Focused Rust Compile Gate: GenomicsDB Emitted Source-Summary Super Methods
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_emitted_summary_super_methods_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	40
+```
+
+Ideal Rust Target:
+
+Translated subtypes of source-summary superclasses should receive the inherited
+method surface directly:
+
+```text
+impl GenomicsDBImport {
+    pub fn get_default_tool_v_c_f_header_lines(
+        &self,
+    ) -> std::collections::HashSet<VCFHeaderLine> { ... }
+}
+```
+
+When that inherited method is used as the source for `addAll` into a mutable
+`self` field, the source should be evaluated before the mutable borrow:
+
+```text
+let source = self.get_default_tool_v_c_f_header_lines();
+self.merged_header_lines.as_mut().unwrap().extend(source);
+```
+
+Implementation Rule:
+
+External facade support now walks emitted type superclass chains into
+source-summary types and emits used inherited methods on the emitted subtype
+when the translated local hierarchy does not already provide them. Native
+collection `addAll` statement lowering also inserts a temporary when the
+extend receiver is a mutable `self` field and the source expression reads
+`self`.
+
+Evidence:
+
+- `emitted_type_extending_source_summary_super_gets_inherited_method_surface`
+- The focused GenomicsDB gate moves from
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_domain_getter_surfaces_v3`
+  at `cargo_check_errors=42` to
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_emitted_summary_super_methods_v1`
+  at `cargo_check_errors=40`.
+- The previous two
+  `no method named get_default_tool_v_c_f_header_lines` errors are gone.
+- Generated `GenomicsDBImport` now emits
+  `get_default_tool_v_c_f_header_lines(&self) ->
+  std::collections::HashSet<VCFHeaderLine>`.
+- Both merged-header extension sites now evaluate
+  `self.get_default_tool_v_c_f_header_lines()` into
+  `__java2rust_add_all_source` before mutably extending
+  `self.merged_header_lines`.
+
+## Focused Rust Compile Gate: GenomicsDB Late Source-Summary Return Surfaces
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_summary_return_surface_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	51
+```
+
+Ideal Rust Target:
+
+When an external fact makes a source-summary return type reachable, the
+reachable summary shell should receive only the used methods from its summary
+hierarchy. Method return types discovered that way should also select their
+support shells when needed:
+
+```text
+pub struct SAMFileHeader;
+
+impl ReadsDataSource {
+    pub fn get_header(&self) -> SAMFileHeader { Default::default() }
+}
+```
+
+Raw Java `Iterator` at a facade boundary should not become Rust's concrete
+`Iterator` trait name. It should use an explicit opaque iterator boundary such
+as `CloseableIterator`.
+
+Implementation Rule:
+
+`stdlib` now saturates selected source-summary method surfaces until no new
+opaque shells or stronger method surfaces are added. Summary method return and
+parameter types feed back into facade support selection. Weak generated methods
+are replaced only for the same method name and arity, and only when the
+replacement return type is stronger than `()` or `Box<dyn Any>`. Facade return
+rendering maps Java `Iterator`/`java.util.Iterator` to `CloseableIterator`.
+
+Evidence:
+
+- `source_summary_method_surface_can_be_added_after_external_return_selects_type`
+  covers late summary-shell selection, external non-summary return shell
+  emission, and Java raw iterator facade returns.
+- The focused GenomicsDB gate moves from the prior best
+  `cargo_check_errors=52` to `51`.
+- The earlier regressed gate had introduced `cannot find type SAMFileHeader`
+  and `expected a type, found a trait` for raw `Iterator`; both are gone in
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_summary_return_surface_v2`.
+- The removed top bucket versus the 52-error baseline is
+  `ProgressMeter.set_records_between_time_checks`. The remaining top bucket is
+  still `21` `E0308` mismatched-type errors, with weak `VCFHeader` surfaces
+  returning `()` among the next source-summary/external-boundary targets.
+
+## Focused Rust Compile Gate: GenomicsDB VCF Typed Getter Facades
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_vcf_typed_getters_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	48
+```
+
+Ideal Rust Target:
+
+Known external-pack getters should expose typed facade returns:
+
+```text
+impl VCFHeader {
+    pub fn get_meta_data_in_input_order(&self) -> std::collections::HashSet<VCFHeaderLine> { ... }
+    pub fn get_sequence_dictionary(&self) -> SAMSequenceDictionary { ... }
+}
+```
+
+The generated code should not use `()` for these known HTSJDK VCF APIs.
+
+Implementation Rule:
+
+The HTSJDK VCF external pack now carries return types for
+`VCFHeader.getMetaDataInInputOrder` and `VCFHeader.getSequenceDictionary`.
+Facade return projection maps Java `Set<T>`/`HashSet<T>` to
+`std::collections::HashSet<T>`, keeping the method-specific knowledge in
+`external_packs` and the Rust collection spelling in `stdlib`.
+
+Evidence:
+
+- `htsjdk_vcf_pack_models_header_getters_and_mutators`
+- `external_pack_typed_set_and_dictionary_getters_shape_facade_returns`
+- The focused GenomicsDB gate moves from `cargo_check_errors=51` to `48`.
+- The `E0308` mismatched-type bucket drops from `21` to `16`.
+- `VCFHeader::get_meta_data_in_input_order` now returns
+  `std::collections::HashSet<VCFHeaderLine>`, and
+  `VCFHeader::get_sequence_dictionary` now returns `SAMSequenceDictionary`.
+
+New exposed residual:
+
+Two errors now report `no method named get_sequence_dictionary found for enum
+Option<T>`. These are not weak-return errors anymore; they are optional receiver
+adaptation gaps where `header.getSequenceDictionary()` should lower like the
+nearby `header.as_ref().unwrap().getMetaDataInInputOrder()` call.
+
+## Focused Rust Compile Gate: GenomicsDB Optional External Receiver Adaptation
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_optional_external_receiver_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	46
+```
+
+Ideal Rust Target:
+
+Typed external calls on optional receivers should use the same receiver
+adaptation as ordinary instance calls:
+
+```text
+header.as_ref().unwrap().get_sequence_dictionary()
+```
+
+They should not emit a method call directly on `Option<T>`:
+
+```text
+header.get_sequence_dictionary()
+```
+
+Implementation Rule:
+
+The typed external-call fast path in `lower_external_call_expr_for_slot` now
+uses `adapt_call_target_receiver` before `apply_call_target`, matching ordinary
+call lowering. Optional receiver handling therefore remains a slot-shape
+decision, not a VCF/GATK-specific rewrite.
+
+Evidence:
+
+- `optional_local_external_receiver_getter_is_unwrapped_before_call`
+- The focused GenomicsDB gate moves from `cargo_check_errors=48` to `46`.
+- The two previous
+  `no method named get_sequence_dictionary found for enum Option<T>` errors
+  are gone.
+- Generated GenomicsDBImport now emits
+  `header.as_ref().unwrap().get_sequence_dictionary()` at both residual header
+  dictionary sites.
+
+## Focused Rust Compile Gate: GenomicsDB Static Logger Field Facade
+
+Command:
+
+```text
+./scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_logger_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	63
+```
+
+Ideal Rust Target:
+
+Java logging through a static logger field should use the existing no-op
+logging facade:
+
+```text
+logger.info(message) -> logger::info(message)
+logger.warn(message) -> logger::warn(message)
+logger.debug(message) -> logger::debug(message)
+```
+
+It should not emit an unresolved Rust value such as `Self::logger.info(...)`
+when the logger object itself is only a side-effect boundary.
+
+Implementation Rule:
+
+`call_plan` recognizes receiver calls whose receiver canonicalizes to
+`logger`/`Logger` and whose method is a known logging side-effect method before
+fallback receiver lowering. The selected target is a static-owner facade call
+with owner `logger`, so `call_lowering` renders `logger::method(...)` through
+the existing platform-facade support module.
+
+Evidence:
+
+- `java_logging_facade_supports_static_logger_field_calls`
+- `java_logging_facade_supports_inherited_logger_calls`
+- The focused GenomicsDB gate moves from `cargo_check_errors=84` to `63`.
+- The previous 21-error bucket
+  `no function or associated item named logger for GenomicsDBImport` is gone.
+
+Remaining top buckets:
+
+```text
+23	error[E0308]: mismatched types
+3	error[E0433]: failed to resolve: use of undeclared type `StandardArgumentDefinitions`
+2	error[E0599]: no method named `get_default_tool_v_c_f_header_lines` found for mutable reference `&mut GenomicsDBImport`
+2	error[E0433]: failed to resolve: use of undeclared type `AnnotationUtils`
+2	error[E0423]: expected value, found module `super`
+2	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+```
+
+Invalid-pattern counts:
+
+```text
+compile_error_placeholder	0
+invalid_java_cast_downcast	1
 concrete_none_assignment	0
 java_add_all_call	0
 java_size_call	0
@@ -33522,3 +36512,830 @@ unsupported_lambda	0
 unsupported_method_reference	0
 unsupported_array_creation	0
 ```
+
+## Focused Rust Compile Gate: Stream Lambda Local Mutability Slice
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_stream_unused_mut_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	19
+```
+
+Ideal Rust Target:
+
+Stream lambda block locals should use `let` unless the lambda body actually
+reassigns the local:
+
+```text
+values.iter().map(|value| {
+    let pieces = value.split(",").collect::<Vec<_>>();
+    ...
+})
+```
+
+Assigned locals still need mutable Rust bindings:
+
+```text
+values.iter().map(|value| {
+    let mut trimmed = value.trim();
+    trimmed = trimmed.to_lowercase();
+    trimmed
+})
+```
+
+Implementation Rule:
+
+`stream_lowering` now computes mutated lambda-local names from assignment and
+update-expression targets before rendering stream lambda block prefix
+statements. It renders `let mut` only for those mutated stream locals. This is
+kept inside stream lowering because these closure bodies are still rendered as
+stream adapter text rather than ordinary `RustStmt` blocks.
+
+Evidence:
+
+- `stream_plan_lowers_flat_map_block_returning_stream_pipeline`,
+  `stream_plan_accepts_value_returning_block_lambdas`, and
+  `stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map` now
+  expect read-only closure locals without `mut`.
+- `stream_plan_keeps_mut_for_assigned_block_lambda_locals` proves reassigned
+  lambda locals still emit `let mut`.
+- The focused GenomicsDB gate keeps the same top compile-error profile as
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_raw_paren_emit_v2`:
+  `cargo_check_errors=19`.
+- Warnings fall from 11 to 4. The remaining warnings are ordinary method-body
+  `unused_mut` rows, not stream closure locals.
+
+Top compile errors remain:
+
+```text
+count	error
+4	error[E0308]: mismatched types
+3	error[E0282]: type annotations needed
+2	error[E0277]: the trait bound `dyn Any: Default` is not satisfied
+1	error[E0599]: no method named `set_use_samples_in_order` found for struct `ImportConfig` in the current scope
+1	error[E0599]: no method named `set_output_vidmap_json_file` found for struct `ImportConfig` in the current scope
+1	error[E0599]: no method named `set_output_vcf_header_file` found for struct `ImportConfig` in the current scope
+1	error[E0599]: no method named `set_output_callsetmap_json_file` found for struct `ImportConfig` in the current scope
+1	error[E0599]: no method named `set_function_to_call_on_batch_completion` found for struct `ImportConfig` in the current scope
+1	error[E0308]: `if` and `else` have incompatible types
+1	error[E0308]: `?` operator has incompatible types
+1	error[E0283]: type annotations needed
+1	error[E0061]: this method takes 3 arguments but 1 argument was supplied
+1	error: could not compile `new-java2rust-focused-output` (lib) due to 18 previous errors; 4 warnings emitted
+```
+
+## Focused Rust Compile Gate: BucketUtils Prefetch Wrapper Boundary Slice
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_bucketutils_prefetch_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	17
+```
+
+Ideal Rust Target:
+
+Imported static external calls with known return types should emit concrete
+facade signatures and declare their returned opaque facade types:
+
+```text
+pub struct Function;
+
+impl BucketUtils {
+    pub fn get_prefetching_wrapper<T0>(_arg0: T0) -> Function { Default::default() }
+}
+```
+
+The call site should then pass a `Function` value into the modeled external
+reader factory instead of relying on generic `R: Default` inference.
+
+Implementation Rule:
+
+The Broad HTTP/GCS external pack now owns
+`BucketUtils.getPrefetchingWrapper(int)` as a semantic API with return type
+`Function<SeekableByteChannel, SeekableByteChannel>` and non-null
+nullability. External support generation registers return Java types while
+adding fact-backed imported static owner calls, so the returned opaque facade
+is declared before the generated support method mentions it. This keeps the
+mapping at the external fact/support boundary rather than adding a GATK
+call-site rewrite.
+
+Evidence:
+
+- `broad_http_pack_declares_retry_settings_boundary` asserts the pack-owned
+  `BucketUtils.getPrefetchingWrapper(int)` return fact.
+- `broad_http_pack_emits_function_facade_for_bucket_prefetch_wrapper` proves
+  emitted support includes `pub struct Function;`, emits
+  `get_prefetching_wrapper<T0>(...) -> Function`, and does not emit the old
+  generic `get_prefetching_wrapper<R: Default, ...>` fallback.
+- `cargo check --quiet` passes for the transpiler crate.
+- The focused GenomicsDB gate moves from
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_feature_reader_factory_v1`
+  at `cargo_check_errors=18` to
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_bucketutils_prefetch_v2`
+  at `cargo_check_errors=17`.
+
+Top compile errors now:
+
+```text
+count	error
+4	error[E0308]: mismatched types
+3	error[E0282]: type annotations needed
+1	error[E0599]: no method named `set_use_samples_in_order` found for struct `ImportConfig` in the current scope
+1	error[E0599]: no method named `set_output_vidmap_json_file` found for struct `ImportConfig` in the current scope
+1	error[E0599]: no method named `set_output_vcf_header_file` found for struct `ImportConfig` in the current scope
+1	error[E0599]: no method named `set_output_callsetmap_json_file` found for struct `ImportConfig` in the current scope
+1	error[E0599]: no method named `set_function_to_call_on_batch_completion` found for struct `ImportConfig` in the current scope
+1	error[E0308]: `if` and `else` have incompatible types
+1	error[E0308]: `?` operator has incompatible types
+1	error[E0283]: type annotations needed
+1	error[E0061]: this method takes 3 arguments but 1 argument was supplied
+1	error: could not compile `new-java2rust-focused-output` (lib) due to 16 previous errors; 4 warnings emitted
+```
+
+## Focused Rust Compile Gate: ImportConfig Instance Setter Facade Slice
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_importconfig_instance_setters_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	12
+```
+
+Ideal Rust Target:
+
+External instance mutators should emit instance facade methods even when a
+local variable name normalizes to the same Rust spelling as an imported class
+alias:
+
+```text
+let mut import_config: ImportConfig = ...;
+import_config.set_output_callsetmap_json_file(path);
+
+impl ImportConfig {
+    pub fn set_output_callsetmap_json_file<T0>(&self, _arg0: T0) -> () { Default::default() }
+}
+```
+
+The local receiver should not reserve a static associated function such as
+`ImportConfig::set_output_callsetmap_json_file(...)`.
+
+Implementation Rule:
+
+Imported-static support discovery now carries a member-scope shadow set while
+traversing call receivers. Fields, params, locals, enhanced-for variables,
+resources, and catch bindings are inserted under both Java spelling and
+snake-case Rust spelling. If a call receiver variable is shadowed, it cannot
+match a normal-import owner alias; real imported type-owner calls still match
+through the existing alias and qualified-owner paths.
+
+Evidence:
+
+- `genomicsdb_import_config_setters_emit_instance_facades_when_local_shadows_import_alias`
+  proves `ImportConfig importConfig` emits an instance setter facade and not a
+  static setter fallback.
+- `translates_imported_static_utility_owner_without_module_receiver` still
+  proves ordinary imported static owner calls work.
+- `broad_http_pack_emits_function_facade_for_bucket_prefetch_wrapper` still
+  proves fact-backed imported static returns work for `BucketUtils`.
+- `cargo check --quiet` passes for the transpiler crate.
+- The focused GenomicsDB gate moves from
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_bucketutils_prefetch_v2`
+  at `cargo_check_errors=17` to
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_importconfig_instance_setters_v1`
+  at `cargo_check_errors=12`. The five previous `ImportConfig` setter
+  `E0599` rows are gone.
+
+Top compile errors now:
+
+```text
+count	error
+4	error[E0308]: mismatched types
+3	error[E0282]: type annotations needed
+1	error[E0308]: `if` and `else` have incompatible types
+1	error[E0308]: `?` operator has incompatible types
+1	error[E0283]: type annotations needed
+1	error[E0061]: this method takes 3 arguments but 1 argument was supplied
+1	error: could not compile `new-java2rust-focused-output` (lib) due to 11 previous errors; 4 warnings emitted
+```
+
+## Focused Rust Compile Gate: Imported Static Known Returns Slice
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_static_known_returns_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	10
+```
+
+Ideal Rust Target:
+
+Known imported static Java utilities should expose concrete or passthrough
+facade signatures instead of asking Rust to infer an unconstrained return:
+
+```text
+pub struct Parser;
+
+impl JsonFormat {
+    pub fn parser() -> Parser { Default::default() }
+}
+
+impl Parser {
+    pub fn merge<T0, T1>(&self, _arg0: T0, _arg1: T1) -> () { Default::default() }
+}
+
+impl Utils {
+    pub fn non_null<T0>(_arg0: T0) -> T0 { _arg0 }
+}
+```
+
+Implementation Rule:
+
+Imported static support generation now registers known external return types
+for static owner calls and renders known first-argument passthrough validators
+before using the generic fallback. Opaque facades returned by known static
+methods can also receive known side-effect instance methods, which lets
+`JsonFormat.parser().merge(...)` typecheck without a pack-specific call-site
+rewrite.
+
+Evidence:
+
+- `imported_static_known_return_declares_chained_facade_surface` proves
+  `JsonFormat.parser().merge(...)` declares `Parser`, emits
+  `parser() -> Parser`, and emits `Parser::merge(...) -> ()`.
+- `imported_static_non_null_validator_returns_first_argument_facade` proves
+  GATK `Utils.nonNull(value)` emits `T0 -> T0` and not `R: Default`.
+- `cargo check --quiet` passes for the transpiler crate.
+- The focused GenomicsDB gate moves from
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_importconfig_instance_setters_v1`
+  at `cargo_check_errors=12` to
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_static_known_returns_v1`
+  at `cargo_check_errors=10`.
+
+Top compile errors now:
+
+```text
+count	error
+4	error[E0308]: mismatched types
+2	error[E0282]: type annotations needed
+1	error[E0308]: `if` and `else` have incompatible types
+1	error[E0308]: `?` operator has incompatible types
+1	error[E0061]: this method takes 3 arguments but 1 argument was supplied
+1	error: could not compile `new-java2rust-focused-output` (lib) due to 9 previous errors; 4 warnings emitted
+```
+
+## Focused GenomicsDB Gate: Late Unit Expression Cleanup
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_emit_unit_cleanup_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	10
+```
+
+Ideal Rust Target:
+
+Bare unit expressions introduced by Java statement/block lowering should not be
+printed as Rust statement noise. Statement-position `()` should disappear, and
+`return ();` should become `return;`. Semantic carriers such as `Ok(())` must
+remain intact because they are the actual value at a `Result<(), E>` boundary.
+
+Implementation Rule:
+
+The Rust emitter recognizes bare `RustExpr::Raw("()")`, including redundant
+balanced outer parentheses, only at statement rendering boundaries. It elides
+unit expression statements and rewrites unit returns to bare `return;`. The
+general expression emitter still renders `()` in expression position, and it
+does not rewrite larger expressions that contain unit, such as `Ok(())`.
+
+Evidence:
+
+- `emit::tests::statement_position_unit_expressions_are_elided` proves
+  statement-position `()` and `(())` render to no statement.
+- `emit::tests::return_unit_expr_renders_as_bare_return` proves `return ();`
+  becomes `return;` while `return Ok(());` is preserved.
+- `cargo check --quiet` passes for the transpiler crate.
+- Focused GenomicsDB remains at `cargo_check_errors=10`, matching the prior
+  gate, and `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_emit_unit_cleanup_v1/compile.log`
+  has no `unnecessary parentheses`, `unneeded unit`, or `unused unit` warnings.
+  The only warning rows are the four ordinary method-body `unused_mut` rows
+  tracked by `EMIT-4`.
+
+## Focused GenomicsDB Gate: Optional Cast Return Carrier
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_optional_cast_return_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	10
+```
+
+Ideal Rust Target:
+
+When Java casts a nullable external getter result to `T` and returns it through
+a solved `Option<T>` Rust slot, the emitted code should keep the getter's
+optional carrier. For example,
+`return (VCFHeader) reader.getHeader();` in a throwing nullable-return method
+should become `return Ok(reader.get_header());`, not
+`return Ok(Some(reader.get_header()));`.
+
+Implementation Rule:
+
+Slot-aware lowering now bypasses a Java cast to `T` when the target slot is
+`Option<T>` and the cast source is already shaped as the same optional Java
+type. The source shape is obtained through external API return facts before
+falling back to ordinary expression inference, so the rule applies to nullable
+external getters in general rather than to a specific library method.
+
+Evidence:
+
+- `typed_feature_reader_header_cast_uses_external_pack_return_fact` now expects
+  `return reader.get_header();` and rejects `Some(reader.get_header())`.
+- `object_return_from_typed_external_getter_erases_once_at_boundary` still
+  proves optional typed external getters erase once at an `Object` boundary.
+- `cargo check --quiet` passes for the transpiler crate.
+- The focused GenomicsDB gate remains at `cargo_check_errors=10`; the top
+  bucket shifts from four to three plain `E0308` mismatches, and
+  `get_header_from_path` now emits `return Ok(reader.get_header());`.
+
+## Focused GenomicsDB Gate: Nullable External Argument Facade Slot
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_nullable_external_arg_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	9
+```
+
+Ideal Rust Target:
+
+External-library argument facts should shape nullable parameters at the facade
+boundary, so Java `null` can remain ordinary Rust `None`:
+
+```text
+pub fn get_feature_reader<T0, T2, T3, T4, T5>(
+    _arg0: T0,
+    _arg1: Option<String>,
+    _arg2: T2,
+    _arg3: T3,
+    _arg4: T4,
+    _arg5: T5,
+) -> FeatureReader
+```
+
+The call site should not need an invented `None::<T>` annotation.
+
+Implementation Rule:
+
+`ExternalApiArgumentEffectFact.parameter_nullability` is now applied when
+`call_plan` turns external argument effects into slot shapes. The external
+facade renderer also consumes the same argument facts, rendering only modeled
+argument positions as concrete Rust types and leaving unmodeled positions
+generic. The htsjdk tribble feature pack models
+`AbstractFeatureReader.getFeatureReader` parameter 1 as nullable `String`.
+
+Evidence:
+
+- `static_external_facade_uses_nullable_argument_fact_without_call_site_type_hack`
+  proves a neutral external static facade renders `_arg1: Option<String>` and
+  the call site passes plain `None`.
+- `htsjdk_tribble_feature_pack_models_coordinate_getters` proves the built-in
+  tribble pack exports the nullable index-argument fact.
+- The focused GenomicsDB gate moves from `cargo_check_errors=10` to `9`.
+- Generated `HtsjdkTribbleAbstractFeatureReader::get_feature_reader` now has
+  `_arg1: Option<String>`, and generated calls contain plain `None` or
+  `variant_index_u_r_i`; `compile.log` has no `None::<T>` row.
+
+## Focused GenomicsDB Gate: Utils Validation Void Facade
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_utils_validate_void_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	9
+```
+
+Ideal Rust Target:
+
+External validation utilities should be unit-returning side-effect facades, so
+Java `Utils.validate(condition, message)` renders as:
+
+```text
+Utils::validate(condition, message);
+
+pub fn validate<T1>(_arg0: bool, _arg1: T1) -> () { () }
+```
+
+The message slot remains generic unless the external facts prove a specific
+overload-safe type.
+
+Implementation Rule:
+
+The Broad Hellbender utility external pack now owns `Utils.validate` and
+`Utils.validateArg` as arity-two side-effect APIs with no return type. Facade
+generation consumes those API-effect facts before using the generic imported
+static fallback, and consumes the argument-effect fact for the boolean
+condition slot without forcing the overload-sensitive message slot.
+
+Evidence:
+
+- `builtin_external_member_lookup_uses_cached_pack_facts` proves the built-in
+  pack facts expose `Utils.validate` as side effect with no return type.
+- `external_static_validation_facade_uses_side_effect_fact_return` proves a
+  neutral validation call emits a unit facade and avoids `R: Default`.
+- Generated GenomicsDB output now contains
+  `pub fn validate<T1>(_arg0: bool, _arg1: T1) -> () { () }` and
+  `Utils::validate(header.is_some(), format!(...));`.
+- The total focused gate remains at `cargo_check_errors=9`; the previous
+  validation inference blocker is gone, and the first remaining inference
+  blocker is `Files::write_string<R: Default, ...>`.
+
+## Focused GenomicsDB Gate: Java Files writeString Return Facade
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_files_write_string_return_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	8
+```
+
+Ideal Rust Target:
+
+Java `Files.writeString(path, contents)` should eventually lower to an
+exception-aware Rust filesystem write boundary. Until that mapping exists, the
+facade fallback should at least expose the concrete Java return type:
+
+```text
+Files::write_string(path, contents);
+
+pub fn write_string<T0, T1>(_arg0: T0, _arg1: T1) -> Path
+```
+
+It should not require Rust to infer a generic `R: Default` return in statement
+position.
+
+Implementation Rule:
+
+`Files.writeString` is modeled in the Java platform static utility tables with
+return type `Path`, non-null return nullability, and mutator role. Facade
+generation therefore chooses a concrete support method before falling back to
+generic imported-static support. Argument slots remain generic in this slice so
+the existing `Option<String>` local-shape residual is not hidden by an
+argument-specific workaround.
+
+Evidence:
+
+- `java_platform_files_write_string_facade_uses_known_path_return` proves the
+  neutral emitted facade shape and rejects `pub fn write_string<R: Default`.
+- Generated GenomicsDB support now contains
+  `pub fn write_string<T0, T1>(_arg0: T0, _arg1: T1) -> Path`.
+- The focused GenomicsDB gate moves from `cargo_check_errors=9` to `8`; the
+  previous `Files::write_string<R: Default, ...>` inference blocker is gone.
+  Remaining top blockers are duplicate opaque external type identities
+  (`VidMappingPB`, `GenomicsDBImporter`), stream closure callback arity/option
+  shape, and one invalid Java-cast downcast pattern.
+
+## Rejected Probe: Raw Shared Support Identity Hoist
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_shared_support_identity_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	611
+```
+
+Ideal Rust Target:
+
+Duplicate external support facade names across generated modules should have a
+single crate identity, while each module's required method surface should
+contribute to that same type without duplicate impl conflicts.
+
+Implementation Rule:
+
+The attempted harness-only strategy stripped duplicate support-prelude unit
+struct declarations in non-owner modules and imported a canonical crate type.
+This was insufficient because support surfaces are not just declarations:
+modules also emit inherent methods and trait impls for those types. Merging the
+declaration text without structured method/trait deduplication produced
+hundreds of duplicate method and conflicting trait implementation errors.
+
+Evidence:
+
+- The gate regressed from `cargo_check_errors=8` to `611`.
+- Top errors included duplicate inherent methods such as `size`, `put`, `get`,
+  `build`, and conflicting `PartialEq`/`Eq`/`Hash`/`Display` impls for shared
+  facade types.
+- The probe was backed out. The next acceptable implementation must introduce
+  structured package-level support ownership or structured facade-surface
+  merging rather than raw rendered-Rust declaration stripping.
+
+## Focused GenomicsDB Gate: External Nullable Constructor Callback
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_ext_null_arity_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	7
+```
+
+Ideal Rust Target:
+
+The `ImportConfig` constructor callback argument should be an optional callback
+slot. Java `bypass ? null : this::createSampleToReaderMap` should therefore
+render as a single optional expression:
+
+```text
+if bypass {
+    None
+} else {
+    Some(|arg0, arg1, arg2| self.create_sample_to_reader_map(arg0, arg1, arg2))
+}
+```
+
+It should not render an incompatible `None` versus bare closure branch, should
+not infer a one-argument closure from `this::method`, and should not downcast a
+closure into an opaque `Function` facade.
+
+Implementation Rule:
+
+External constructor argument facts are consumed through
+`external_constructor_arg_shapes`. A modeled nullable constructor slot becomes
+an optional target shape; unmodeled neighboring external constructor parameters
+remain conservative non-optional slots. Callback expressions are target-shaped
+before optional wrapping, so `conversion_plan` owns `Some(...)` insertion and
+does not insert a callback downcast. Current-receiver method references obtain
+arity from the source method signature when lowering in a target slot.
+
+Evidence:
+
+- `genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers` proves
+  the GenomicsDB pack owns `ImportConfig::new` parameter 6 as a nullable
+  escaping `Function` slot.
+- `call_plan_owns_call_and_new_target_selection_before_argument_lowering`
+  proves one constructor argument fact shapes all constructor slots while
+  unmodeled external constructor parameters remain non-optional.
+- `nullable_external_constructor_callback_slot_wraps_method_reference_branch`
+  proves the nullable ternary method-reference argument lowers to
+  `None`/`Some(|arg0, arg1, arg2| ...)` and rejects `.downcast::<Function>()`.
+- The focused GenomicsDB gate moves from `cargo_check_errors=8` to `7`. The
+  generated `ImportConfig::new` line now contains
+  `if self.bypass_feature_reader { None } else { Some(|arg0, arg1, arg2|
+  self.create_sample_to_reader_map(arg0, arg1, arg2)) }`.
+  Remaining top errors are duplicate/inference issues, a nullable field move
+  out of `self.merged_header_lines`, one `?` type mismatch, and the existing
+  invalid Java-cast downcast pattern.
+
+## Focused GenomicsDB Gate: ImportConfig Header-Line Set Slot
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_importconfig_header_lines_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	6
+```
+
+Ideal Rust Target:
+
+The `ImportConfig` constructor header-line parameter should be a non-null owned
+set slot. When Java passes an optional/self field value such as
+`mergedHeaderLines`, generated Rust should borrow the optional field, unwrap
+with the normal Java-null panic boundary, and clone the element into the owned
+constructor slot:
+
+```text
+self.merged_header_lines
+    .as_ref()
+    .expect("Java null receiver")
+    .clone()
+```
+
+It should not call `self.merged_header_lines.unwrap()`, because that moves an
+`Option<HashSet<_>>` out of `&mut self`.
+
+Implementation Rule:
+
+External constructor parameter facts should provide enough target type
+information for ordinary slot conversion to recover owned values from optional
+self fields. The GenomicsDB pack now models `ImportConfig::new` parameter 4 as
+`Set<VCFHeaderLine>`, definitely non-null, escaping. The existing
+optional-self-field owned recovery then handles the conversion generically.
+
+Evidence:
+
+- `genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers` proves
+  the pack owns `ImportConfig::new` parameter 4 as
+  `Set<VCFHeaderLine>`, definitely non-null, escaping.
+- `external_constructor_owned_set_param_clones_optional_self_field_element`
+  proves a neutral external constructor set parameter recovers an owned value
+  from an optional self field without moving the field.
+- The focused GenomicsDB gate moves from `cargo_check_errors=7` to `6`. The
+  generated constructor line now contains
+  `self.merged_header_lines.as_ref().expect("Java null receiver").clone()`.
+  The previous `E0507` move out of `self.merged_header_lines` is gone.
+  Remaining compile errors are the cross-module `VidMappingPB`/`GenomicsDBImporter`
+  identity mismatches and the stream iterator element inference rows.

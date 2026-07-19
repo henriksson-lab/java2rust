@@ -416,6 +416,21 @@ Rules:
 - `set(row, column, value)` is indexed mutation.
 - User-provided external facts override guesses and produce conflict
   diagnostics if they contradict source-proven facts.
+- External reference and callback parameters are assumed non-null unless a
+  nullable fact or observed `null` call site proves otherwise. The assumption
+  is stored as a fact with provenance, not re-created in lowering.
+- Observed `null` at a resolved external owner/kind/arity/parameter slot makes
+  that slot nullable. Non-null arguments into that optional slot are adapted at
+  the conversion boundary with `Some(...)`; null arguments become `None`.
+- External/user/source-summary facts may explicitly mark parameters nullable
+  or non-null. If an explicit non-null fact conflicts with observed `null`, the
+  semantic fact layer emits a conflict diagnostic and uses the safe optional
+  shape unless a future override policy deliberately changes that priority.
+- Callback parameter facts carry both nullability and the functional signature.
+  For example, a nullable constructor callback taking
+  `(Map<String, URI>, int, int)` and returning a reader map is one slot fact;
+  method-reference lowering consumes that target signature instead of guessing
+  arity from the Java syntax.
 
 Acceptance:
 
@@ -423,6 +438,9 @@ Acceptance:
 - Receiver mutability planning can query the fact instead of matching method
   names.
 - No new external API name heuristics are added to lowering.
+- External parameter nullability tests prove the default non-null case, the
+  observed-null optional case, `Some(...)` wrapping for non-null alternatives,
+  and conflict diagnostics for contradictory explicit facts.
 
 ## Phase 6: Hierarchy And Exception Facts
 

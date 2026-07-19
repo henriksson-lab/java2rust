@@ -324,8 +324,7 @@ pub fn learn_stmt_shapes(
 ) {
     match stmt {
         Stmt::VarDecl { ty, name, .. } => {
-            let shape = signatures
-                .local_shape(locals, name)
+            let shape = local_shape_for_declared_type(signatures, locals, name, ty)
                 .cloned()
                 .unwrap_or_else(|| fallback_local_shape_from_declared_type(ty));
             env.insert_local_shape(name.clone(), shape);
@@ -351,6 +350,19 @@ pub fn learn_stmt_shapes(
         }
         _ => {}
     }
+}
+
+fn local_shape_for_declared_type<'a>(
+    signatures: &'a SignaturePlan,
+    locals: &'a [LocalPlan],
+    name: &str,
+    declared_ty: &JavaType,
+) -> Option<&'a RustSlotShape> {
+    locals
+        .iter()
+        .find(|local| local.name == name && local.java_ty == *declared_ty)
+        .map(|local| &local.shape)
+        .or_else(|| signatures.local_shape(locals, name))
 }
 
 fn insert_param_shapes(env: &mut ShapeEnv, params: &[ParamPlan]) {

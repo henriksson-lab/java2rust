@@ -79,7 +79,7 @@ pub fn translate_source(source: &str) -> Translation {
 
 pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Translation {
     let parsed = parser::parse_java_source(source);
-    translate_parsed_source_with_context(parsed, None, None, None, external_facts)
+    translate_parsed_source_with_context(parsed, None, None, None, None, external_facts)
 }
 
 pub fn translate_source_with_context_sources(
@@ -117,6 +117,7 @@ pub fn translate_source_with_context_sources_and_summary_sources(
     let parsed = parser::parse_java_source(source);
     let mut source_program = parsed.program.clone();
     let mut semantic_program = parsed.program.clone();
+    let mut summary_program = Program::default();
     let mut summary_facts = FactSet::default();
     let mut context_diagnostics = DiagnosticBag::new();
     for context_source in context_sources {
@@ -131,12 +132,14 @@ pub fn translate_source_with_context_sources_and_summary_sources(
         summary_facts.extend_from(resolve::declaration_facts_from_program(
             &summary_parsed.program,
         ));
+        merge_program_context(&mut summary_program, summary_parsed.program.clone());
         merge_program_context(&mut source_program, summary_parsed.program);
     }
     let source_program_context =
         (!context_sources.is_empty() || !summary_sources.is_empty()).then_some(source_program);
     let semantic_program_context = (!context_sources.is_empty()).then_some(semantic_program);
     let support_program_context = source_program_context.clone();
+    let summary_program_context = (!summary_sources.is_empty()).then_some(summary_program);
     let mut effective_external_facts = external_facts.clone();
     effective_external_facts.extend_from(summary_facts);
     let mut translation = translate_parsed_source_with_context(
@@ -144,6 +147,7 @@ pub fn translate_source_with_context_sources_and_summary_sources(
         source_program_context,
         semantic_program_context,
         support_program_context,
+        summary_program_context,
         &effective_external_facts,
     );
     translation.diagnostics.extend(context_diagnostics);
@@ -155,6 +159,7 @@ fn translate_parsed_source_with_context(
     source_program_context: Option<Program>,
     semantic_program_context: Option<Program>,
     support_program_context: Option<Program>,
+    summary_program_context: Option<Program>,
     external_facts: &FactSet,
 ) -> Translation {
     let source_program = source_program_context.as_ref().unwrap_or(&parsed.program);
@@ -181,6 +186,10 @@ fn translate_parsed_source_with_context(
     let support_program = support_program_context
         .as_ref()
         .unwrap_or(&semantic_program);
+    let empty_summary_program = Program::default();
+    let summary_program = summary_program_context
+        .as_ref()
+        .unwrap_or(&empty_summary_program);
     let signatures = signature::solve_signatures_with_facts_and_support_context(
         &semantic_program,
         &representations,
@@ -197,6 +206,7 @@ fn translate_parsed_source_with_context(
         &signatures,
         &semantic.control_flow_plans,
         support_program,
+        summary_program,
     );
     for diagnostic in semantic.diagnostics {
         lowered

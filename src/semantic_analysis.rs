@@ -2397,6 +2397,7 @@ fn collect_thrown_exception_types_from_stmt(
             if let Some(ty) = thrown_exception_type_from_expr(expr, exception_env) {
                 push_unique_java_type(thrown, ty);
             }
+            collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
         }
         Stmt::If {
             then_block,
@@ -2457,15 +2458,133 @@ fn collect_thrown_exception_types_from_stmt(
                 }
             }
         }
-        Stmt::VarDecl { .. }
-        | Stmt::Assign { .. }
-        | Stmt::Expr(_)
-        | Stmt::Return(_)
+        Stmt::VarDecl { initializer, .. } => {
+            if let Some(initializer) = initializer {
+                collect_thrown_exception_types_from_expr(initializer, exception_env, thrown);
+            }
+        }
+        Stmt::Assign { target, value } => {
+            collect_thrown_exception_types_from_expr(target, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(value, exception_env, thrown);
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
+            collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+        }
+        Stmt::Return(None)
         | Stmt::ConstructorInvocation { .. }
         | Stmt::Break(_)
         | Stmt::Continue(_)
         | Stmt::Unsupported(_) => {}
     }
+}
+
+fn collect_thrown_exception_types_from_expr(
+    expr: &Expr,
+    exception_env: &mut HashMap<String, JavaType>,
+    thrown: &mut Vec<JavaType>,
+) {
+    match expr {
+        Expr::FieldAccess(receiver, _) => {
+            collect_thrown_exception_types_from_expr(receiver, exception_env, thrown);
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_thrown_exception_types_from_expr(array, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(index, exception_env, thrown);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_thrown_exception_types_from_expr(dimension, exception_env, thrown);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+                }
+            }
+        }
+        Expr::ArrayInitializer(values) => {
+            for value in values {
+                collect_thrown_exception_types_from_expr(value, exception_env, thrown);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_thrown_exception_types_from_expr(left, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(right, exception_env, thrown);
+        }
+        Expr::Unary { expr, .. } => {
+            collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_thrown_exception_types_from_expr(condition, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(then_expr, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(else_expr, exception_env, thrown);
+        }
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            if let Some(receiver) = receiver {
+                collect_thrown_exception_types_from_expr(receiver, exception_env, thrown);
+            }
+            for arg in args {
+                if let Expr::Lambda { body, .. } = arg {
+                    if !call_captures_lambda_for_deferred_throw_projection(name) {
+                        collect_thrown_exception_types_from_lambda_body(
+                            body,
+                            exception_env,
+                            thrown,
+                        );
+                    }
+                } else {
+                    collect_thrown_exception_types_from_expr(arg, exception_env, thrown);
+                }
+            }
+        }
+        Expr::New { args, .. } => {
+            for arg in args {
+                collect_thrown_exception_types_from_expr(arg, exception_env, thrown);
+            }
+        }
+        Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+        }
+        Expr::Lambda { .. } => {}
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::MethodReference { .. }
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn collect_thrown_exception_types_from_lambda_body(
+    body: &LambdaBody,
+    exception_env: &mut HashMap<String, JavaType>,
+    thrown: &mut Vec<JavaType>,
+) {
+    match body {
+        LambdaBody::Expr(expr) => {
+            collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+        }
+        LambdaBody::Block(block) => {
+            collect_thrown_exception_types_from_block(block, exception_env, thrown);
+        }
+    }
+}
+
+fn call_captures_lambda_for_deferred_throw_projection(name: &str) -> bool {
+    matches!(name, "submit" | "execute" | "supplyAsync" | "runAsync")
 }
 
 fn thrown_exception_type_from_expr(

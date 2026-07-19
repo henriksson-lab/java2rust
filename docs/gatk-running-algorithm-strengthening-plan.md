@@ -263,6 +263,21 @@ Example rule shape for external static constants:
 - **Fallback Shape**: if the field type is unknown, keep the value in an
   unknown/opaque shape and allow conversion planning to emit a structured
   unsupported or erased-object boundary rather than guessing a typed cast.
+- **Implemented Extension**: external static support now covers const-safe
+  scalar field facts, not only strings. `String` constants render as
+  `&'static str`, primitive constants render as Rust primitive associated
+  constants, and owners present in the co-translated source context are
+  suppressed so sibling source types keep ownership of their constants and
+  constructors. Built-in external field metadata can provide the field type
+  even when the focused gate has not enabled that full external pack.
+- **Evidence**:
+  `context_static_string_constant_owner_stays_sibling_source_type`,
+  `external_static_primitive_constant_support_is_generated_from_field_facts`,
+  and focused gate
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_static_scalar_implicit_ctor_v2`.
+  In that gate, `GenomicsDBArgumentCollection::new()` is emitted on the real
+  sibling source type, `GenotypeLikelihoods` gets a typed scalar support
+  constant, and `cargo_check_errors` moves from `18` to `17`.
 
 ## Trackable Work
 
@@ -1042,6 +1057,679 @@ even if the generated Rust count improves.
     `inherited_source_summary_instance_fields_are_flattened_into_primary_struct`
     proves a summary-only superclass field is emitted in the primary struct,
     initialized from the inherited declaration, and read as `self.field`.
+  - Inherited support field type shell rule:
+    - Ideal Rust Target: when an inherited source-support field is flattened
+      into an emitted Rust struct and its Java type is not otherwise emitted,
+      the generated Rust should include a minimal opaque support shell such as
+      `#[derive(Clone, Debug, Default)] pub struct ProgressMeter;`. The field
+      type should therefore compile as `progress_meter: ProgressMeter` without
+      requiring the whole superclass or dependency body to be lowered.
+    - Implementation Rule: external facade support generation scans inherited
+      instance fields discovered from the support program for each emitted
+      type, adds their declared Java field types using only the emitted primary
+      program as the local-type suppression set, and reuses the existing
+      opaque facade item renderer. It does not change direct sibling source
+      fields or lower methods from the support body.
+    - Required Facts: emitted primary type set, support superclass field
+      declarations, inherited-field flattening plan, Java field type, and
+      builtin facade-type exclusion.
+    - Owning Layer: `inherited_members` owns support-field discovery;
+      `stdlib` owns opaque external facade support item emission; `lower` only
+      requests facade support items before emitting translated types.
+    - Fallback Shape: if a field type is local to the emitted primary program
+      or is a builtin facade type, no extra opaque shell is emitted. Direct
+      source-summary field types still require a source-summary/full-context
+      distinction before broad shell emission.
+    - Evidence:
+      `inherited_source_summary_field_types_emit_opaque_support_shells` and
+      the focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_inherited_type_shells_v1`,
+      where `cargo_check_errors` moved from `63` to `57` and inherited engine
+      field types such as `ProgressMeter`, `IntervalArgumentCollection`,
+      `ReadInputArgumentCollection`, `ReadsDataSource`,
+      `ReferenceDataSource`, `FeatureManager`, and
+      `SequenceDictionaryValidationArgumentCollection` are emitted as opaque
+      support structs.
+  - Direct source-summary type shell rule:
+    - Ideal Rust Target: when an emitted primary declaration references a type
+      that is available only through source-summary context, the Rust output
+      should include a minimal opaque shell for that summary type while still
+      suppressing shells for full co-translated sibling context. For example,
+      a primary field `FeatureInput headerOverride` should become
+      `header_override: Option<FeatureInput>` plus
+      `#[derive(Clone, Debug, Default)] pub struct FeatureInput;` when
+      `FeatureInput` came from source-summary context, but not when it came
+      from full context.
+    - Implementation Rule: translation carries a separate summary-only
+      program alongside the merged support program. External facade support
+      computes emitted local types, full support local types, and
+      source-summary types separately. It emits opaque shells for primary
+      declarations whose type key appears in the summary-only set and not in
+      the emitted primary set, while preserving the existing full-context
+      sibling suppression rule.
+    - Required Facts: emitted primary type set, full support type set,
+      source-summary-only type set, declared Java field/method/constructor
+      types, and builtin facade-type exclusion.
+    - Owning Layer: `lib` owns context separation; `lower` passes the summary
+      context to support generation; `stdlib` owns opaque facade shell
+      emission. Resolvers and renderers do not inspect source-root labels.
+    - Fallback Shape: if source-summary provenance is unavailable, the type is
+      treated like ordinary full support context and no direct opaque shell is
+      emitted.
+    - Evidence:
+      `source_summary_direct_field_type_emits_opaque_support_shell` proves
+      summary-only field types emit shells while full-context sibling types do
+      not.
+  - Selected source-summary method surface rule:
+    - Ideal Rust Target: an opaque source-summary shell should expose only the
+      summary-declared or summary-inherited methods that are actually called
+      on that selected shell. A summary-only `FeatureInput extends GATKPath`
+      whose inherited `toPath()` is used should emit
+      `impl FeatureInput { pub fn to_path(&self) -> Path { ... } }`, but the
+      translator should not emit methods for every type in the summary root.
+    - Implementation Rule: facade support first selects opaque shells from
+      emitted primary declarations and inherited support fields. It then scans
+      the source-summary method hierarchy only for those selected shells,
+      filters methods by used Rust method name and arity, and emits generic
+      instance facade methods with return types projected through the existing
+      external facade type renderer.
+    - Required Facts: selected opaque shell set, source-summary superclass
+      chain, parsed method names, arities, return types, and used call arities
+      from the emitted primary program.
+    - Owning Layer: `stdlib` owns source-summary facade method surfaces;
+      `inherited_members` owns field-based shell selection; `call_plan` and
+      lowering continue to render ordinary method calls.
+    - Fallback Shape: if a method is not in the selected shell's summary
+      hierarchy or its arity is not used by the primary output, no facade
+      method is emitted and the compile gate exposes the missing surface.
+  - Evidence:
+      `source_summary_opaque_type_gets_used_inherited_method_surface` and the
+      focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_summary_method_surfaces_v2`,
+      where `cargo_check_errors` moved from `57` to `56` and
+      `FeatureInput::to_path` is emitted without pulling the entire
+      source-summary package surface into opaque support.
+  - Late-selected source-summary return surface rule:
+    - Ideal Rust Target: when an external fact selects a source-summary return
+      type after the first facade-support pass, that returned shell should get
+      the same narrow, used-only method surface as a directly selected
+      summary shell. If a selected summary method returns a dependency type
+      outside the summary envelope, the generated Rust should still emit a
+      minimal support shell for that return type, for example
+      `pub struct SAMFileHeader;` plus
+      `pub fn get_header(&self) -> SAMFileHeader`. Java raw iterator return
+      types should not render as Rust's prelude `Iterator` trait in concrete
+      return position; they should use an explicit opaque iterator boundary
+      such as `CloseableIterator`.
+    - Implementation Rule: `stdlib` runs source-summary method-surface
+      selection as a finite saturation step over the selected opaque shell
+      set. Each emitted summary method contributes its return and parameter
+      Java types back into facade support selection, including rendered
+      facade boundary types. Existing weak external methods are replaced only
+      when the Java method name and arity match and the replacement return
+      type is stronger than `()` or `Box<dyn Any>`. Facade return rendering
+      maps Java `Iterator`/`java.util.Iterator` to the explicit
+      `CloseableIterator` boundary instead of the Rust trait name.
+    - Required Facts: selected opaque shell set, source-summary method
+      hierarchy, used method name and arity, Java return and parameter types,
+      external facade return renderer, and weak-return classification.
+    - Owning Layer: `stdlib` owns facade support saturation and weak method
+      replacement; `slot_render` still owns ordinary source signature
+      rendering; call lowering only consumes the resulting method surface.
+    - Fallback Shape: if a summary method is unused, no method surface is
+      emitted. If a return type cannot be rendered as a valid facade boundary,
+      the existing external fallback remains responsible for the compile
+      diagnostic.
+    - Evidence:
+      `source_summary_method_surface_can_be_added_after_external_return_selects_type`
+      covers a late-selected summary shell, a summary method returning an
+      external non-summary type, and Java raw `Iterator` facade returns. The
+      focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_summary_return_surface_v2`
+      moves from the prior best `cargo_check_errors=52` to `51`; the earlier
+      invalid `SAMFileHeader` and raw Rust `Iterator` regressions are gone.
+  - External-pack typed collection/dictionary getter rule:
+    - Ideal Rust Target: external-library getters with known collection or
+      dictionary returns should expose concrete Rust facade return types. For
+      example, HTSJDK `VCFHeader.getMetaDataInInputOrder()` should render as
+      `std::collections::HashSet<VCFHeaderLine>`, and
+      `VCFHeader.getSequenceDictionary()` should render as
+      `SAMSequenceDictionary`, not as `()` or `Box<dyn Any>`. HTSJDK
+      `VCFHeader.getGenotypeSamples()` should render as `Vec<String>`, so
+      indexed sample access composes through ordinary `Vec::get`.
+    - Implementation Rule: external pack facts must carry the Java return
+      type when the pack knows it. Facade support renders Java `Set<T>` and
+      `HashSet<T>` as `std::collections::HashSet<T>`, while preserving the
+      existing `Vec<T>` projection for list-like returns. Lowering consumes
+      only the planned method surface; it does not recognize specific HTSJDK
+      method names.
+    - Required Facts: external API effect receiver, method name, arity,
+      return Java type, return nullability, and facade collection projection.
+    - Owning Layer: `external_packs` owns HTSJDK API return facts; `stdlib`
+      owns facade return projection; call lowering only renders the selected
+      method call.
+    - Fallback Shape: if the pack lacks a return type, the external facade
+      remains a weak boundary and compile diagnostics expose the missing
+      precision. Unknown collection element types still use the existing
+      erased-object fallback.
+    - Evidence:
+      `htsjdk_vcf_pack_models_header_getters_and_mutators` now asserts typed
+      returns for `VCFHeader.getMetaDataInInputOrder` and
+      `VCFHeader.getSequenceDictionary`.
+      `external_pack_typed_set_and_dictionary_getters_shape_facade_returns`
+      proves generated facade support typechecks for these returns.
+      `external_pack_typed_string_list_getter_supports_indexed_sample_access`
+      proves typed list returns support immediate Java `List.get(0)` use. The
+      focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_vcf_typed_getters_v1`
+      moves from `cargo_check_errors=51` to `48`; the `E0308` bucket drops
+      from `21` to `16`. The later
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_domain_getter_surfaces_v3`
+      gate includes this list-return precision and removes the previous
+      `no method named get found for unit type ()` residual.
+  - Imported static external return facade rule:
+    - Ideal Rust Target: a Java imported static call whose external pack knows
+      the return type should emit a concrete support method and declare any
+      required opaque return facade once. For example,
+      `BucketUtils.getPrefetchingWrapper(int)` should render as
+      `BucketUtils::get_prefetching_wrapper(...) -> Function`, with
+      `pub struct Function;` available in support, not as a generic
+      `R: Default` stub that asks Rust inference to rediscover a Java API
+      boundary.
+    - Implementation Rule: external pack API-effect facts carry the receiver,
+      method, arity, return Java type, and return nullability for imported
+      static methods. `stdlib` registers the fact-backed return Java type while
+      adding imported static owner calls, then emits the support method through
+      the normal external facade renderer. Lowering only renders the static
+      call selected by call planning; it does not special-case `BucketUtils`,
+      GATK, or functional interfaces.
+    - Required Facts: imported static owner alias, method name, arity,
+      external API effect return type, return nullability, and facade type
+      projection.
+    - Owning Layer: `external_packs` owns library-specific return facts;
+      `stdlib` owns opaque facade declaration and support-method emission;
+      call lowering owns only the already-selected call syntax.
+    - Fallback Shape: if an external pack does not know the return type, the
+      previous generic `R: Default` imported-static fallback remains as
+      compile-gate pressure. If the return facade is too weak to model yet,
+      the pack may intentionally choose `Object` and get `Box<dyn Any>`, but
+      that decision belongs to the pack fact, not the call site.
+    - Evidence:
+      `broad_http_pack_declares_retry_settings_boundary` now proves
+      `BucketUtils.getPrefetchingWrapper(int)` is pack-owned and returns
+      non-null `Function<SeekableByteChannel, SeekableByteChannel>`.
+      `broad_http_pack_emits_function_facade_for_bucket_prefetch_wrapper`
+      proves emitted support declares `Function` and no longer emits a generic
+      `get_prefetching_wrapper<R: Default, ...>` fallback. The focused
+      GenomicsDB gate moves from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_feature_reader_factory_v1`
+      at `cargo_check_errors=18` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_bucketutils_prefetch_v2`
+      at `cargo_check_errors=17`; the `Function` missing-type and
+      `BucketUtils` generic inference residuals are gone.
+  - Imported static owner shadowing rule:
+    - Ideal Rust Target: a Java local, parameter, catch binding, field, or
+      enhanced-for binding whose name normalizes to the same Rust spelling as
+      an imported type should still call instance methods through an instance
+      facade. For example, `ImportConfig importConfig; importConfig.setX(...)`
+      should emit `import_config.set_x(...)` and support
+      `impl ImportConfig { pub fn set_x<T0>(&self, _arg0: T0) -> () { ... } }`,
+      not reserve a static `ImportConfig::set_x(...)` support method.
+    - Implementation Rule: imported-static support discovery threads a
+      member-scope shadow set through expression traversal. The shadow set is
+      built from fields, params, local declarations, enhanced-for variables,
+      resources, and catch bindings, storing both Java spelling and
+      snake-case Rust spelling. A receiver variable that appears in this set
+      cannot match a normal-import owner alias, while real type-owner calls
+      such as `BucketUtils.getPrefetchingWrapper(...)` still match the import
+      alias path.
+    - Required Facts: normal import aliases, static import member owners,
+      member-scope shadow names, call receiver variable spelling, method
+      arity, and external API effect role.
+    - Owning Layer: `stdlib` owns support-surface discovery and static-owner
+      collection. External packs own whether a method is mutator/getter/etc.,
+      but they do not decide whether a receiver token is a local value or a
+      type owner. Lowering only emits the resolved instance/static call shape.
+    - Fallback Shape: when shadow evidence is unavailable, preserving the
+      existing static-owner candidate is acceptable because it keeps imported
+      utility calls working. If a future lexical edge case appears, extend the
+      shadow collector rather than adding method-name exceptions.
+    - Evidence:
+      `genomicsdb_import_config_setters_emit_instance_facades_when_local_shadows_import_alias`
+      proves an `ImportConfig importConfig` parameter emits an instance setter
+      facade and does not emit the static associated-function setter fallback.
+      `translates_imported_static_utility_owner_without_module_receiver` and
+      `broad_http_pack_emits_function_facade_for_bucket_prefetch_wrapper`
+      continue to prove real imported static owner calls still work. The
+      focused GenomicsDB gate moves from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_bucketutils_prefetch_v2`
+      at `cargo_check_errors=17` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_importconfig_instance_setters_v1`
+      at `cargo_check_errors=12`; the five `ImportConfig` setter `E0599`
+      rows are gone.
+  - Known imported static return and passthrough facade rule:
+    - Ideal Rust Target: known Java static utilities should not emit
+      unconstrained `R: Default` support stubs when the Java API already
+      defines either a concrete return facade or a type-preserving
+      passthrough. For example, `JsonFormat.parser()` should return `Parser`
+      and expose `Parser::merge(...) -> ()`, while GATK
+      `Utils.nonNull(value)` should render as `fn non_null<T0>(value: T0) ->
+      T0` so statement-position validation and expression-position
+      passthrough both compile.
+    - Implementation Rule: imported static support first checks pack facts,
+      then known external return facts, then known first-argument passthrough
+      utilities before falling back to generic `R: Default`. Known imported
+      static returns are also registered as opaque facade types, so chained
+      calls can receive support methods. Returned opaque facades may declare
+      known side-effect instance methods such as `Parser.merge` through the
+      same support-surface path.
+    - Required Facts: imported static owner, method name, arity, known return
+      Java type, passthrough classification, and chained facade method role.
+    - Owning Layer: `stdlib` owns Java platform/general utility support shapes
+      that are not specific to one co-translated source package. External
+      packs still override with precise facts when a dependency pack owns the
+      API. Lowering only renders the static call and chained instance call.
+    - Fallback Shape: if no fact or known utility shape exists, keep the
+      generic `R: Default` fallback as compile-gate pressure. Do not add
+      call-site type annotations to silence inference; the API boundary should
+      be modeled once.
+    - Evidence:
+      `imported_static_known_return_declares_chained_facade_surface` proves
+      `JsonFormat.parser().merge(...)` declares `Parser`, emits
+      `parser() -> Parser`, and emits `Parser::merge(...) -> ()`.
+      `imported_static_non_null_validator_returns_first_argument_facade`
+      proves GATK `Utils.nonNull` emits `T0 -> T0` and not `R: Default`.
+      The focused GenomicsDB gate moves from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_importconfig_instance_setters_v1`
+      at `cargo_check_errors=12` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_static_known_returns_v1`
+      at `cargo_check_errors=10`; the `JsonFormat::parser` and
+      `Utils::non_null` generic inference rows are gone.
+  - Typed external call optional receiver adaptation rule:
+    - Ideal Rust Target: a Java local or field represented as `Option<T>` in
+      Rust should be unwrapped through the normal receiver access path before
+      a read-only external instance call. For example,
+      `header.getSequenceDictionary()` where `header` is
+      `Option<VCFHeader>` should render as
+      `header.as_ref().unwrap().get_sequence_dictionary()`, not
+      `header.get_sequence_dictionary()`.
+    - Implementation Rule: all external-call lowering paths must use the
+      shared call-target receiver adaptation before applying the target. The
+      typed external call fast path in `lower_external_call_expr_for_slot`
+      consumes the same `adapt_call_target_receiver` helper as ordinary call
+      lowering, so optional receiver handling is selected from the slot shape
+      and target kind rather than from a method-specific branch.
+    - Required Facts: call target kind, receiver expression, receiver slot
+      shape, external API return type, and optional storage shape.
+    - Owning Layer: `lower` owns receiver adaptation reuse across call
+      lowering paths; `signature` owns the optional local/field shape; external
+      packs only provide the return fact that makes the typed fast path active.
+    - Fallback Shape: if the receiver shape is not optional, the receiver is
+      emitted unchanged. If the call is unsupported or unresolved, the
+      existing fallback/diagnostic path remains responsible.
+    - Evidence:
+      `optional_local_external_receiver_getter_is_unwrapped_before_call`
+      proves a direct typed external call on an optional local lowers through
+      `as_ref().unwrap()`. The focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_optional_external_receiver_v1`
+      moves from `cargo_check_errors=48` to `46`; the two
+      `Option<VCFHeader>.get_sequence_dictionary` errors are gone.
+  - Weak opaque domain getter strengthening rule:
+    - Ideal Rust Target: when an opaque external/source-summary support type
+      already has a weak method surface for a known zero-argument domain
+      getter, generated Rust should expose the domain value type directly. For
+      example, `SimpleInterval.getContig()`, `getStart()`, and `getEnd()`
+      should render as `String`, `i32`, and `i32`; downstream map lookups,
+      formatting, and numeric comparisons should then use ordinary Rust types.
+    - Implementation Rule: external facade support may replace an existing
+      weak instance method (`()` or `Box<dyn Any>`) with the
+      `known_external_method_return_type` result for the same name and arity.
+      It must not add every known getter to every opaque type, and it must not
+      create an instance method when the type already has a non-matching
+      static/helper method of that name.
+    - Required Facts: used call name/arity, opaque support type method
+      surface, weak-return classification, and known domain getter return
+      table.
+    - Owning Layer: `stdlib` owns weak facade method replacement and the
+      known domain getter table; external packs own explicit API facts when a
+      library-specific return is known; lowering only consumes the resulting
+      method signature.
+    - Fallback Shape: if no weak method surface exists for that owner, no
+      method is added. If an existing method is already concrete or conflicts
+      by name with a static/helper method, the support pass leaves it alone and
+      the focused compile gate exposes any remaining type gap.
+    - Evidence:
+      `external_pack_typed_locatable_coordinate_getters_support_numeric_and_string_use`
+      proves typed coordinate getter facades typecheck for generic
+      `Locatable` use. The focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_domain_getter_surfaces_v3`
+      moves from `cargo_check_errors=46` to `42`; the prior
+      `String: Borrow<()>`, `() doesn't implement Display`, and
+      `get found for unit type ()` buckets are gone. Generated
+      `SimpleInterval` now exposes `get_contig() -> String`,
+      `get_start() -> i32`, and `get_end() -> i32`.
+      `selected_opaque_support_type_gets_used_known_method_surfaces_by_arity`
+      extends this rule to selected opaque support shells with owner-specific
+      known method surfaces and used arities: `IntervalArgumentCollection`
+      gets `intervals_specified() -> bool` and
+      `get_intervals(...) -> Vec<SimpleInterval>`, while unrelated opaque
+      shells do not get those methods. The same regression keeps
+      `SimpleInterval` locatable getters owner-specific. The focused
+      GenomicsDB gate with `com.intel.genomicsdb` and
+      `htsjdk.samtools.util` packs moves from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_final_domain_collection_arg_v1`
+      at `cargo_check_errors=39` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_known_opaque_surfaces_v3`
+      at `cargo_check_errors=37`; the missing
+      `IntervalArgumentCollection.intervals_specified` and
+      `IntervalArgumentCollection.get_intervals` buckets are gone.
+  - External locatable facade boundary rule:
+    - Ideal Rust Target: a Java parameter typed as an external domain
+      interface with known value getters should preserve a typed facade
+      boundary when the translated body calls those getters. For HTSJDK
+      `Locatable`, the target shape for a read-only helper is
+      `fn new(reader: ..., interval: &Locatable) -> ...`, so calls such as
+      `interval.get_contig()`, `interval.get_start()`, and
+      `interval.get_end()` are ordinary typed facade calls, not method calls
+      on `&Box<dyn Any>`.
+    - Implementation Rule: the HTSJDK samtools-util external pack declares
+      `Locatable` and `htsjdk.samtools.util.Locatable` as concrete external
+      facade strategies instead of erased-object strategies. The existing
+      signature and support-surface pipeline then preserves the concrete
+      parameter slot and renders the typed getter methods from external API
+      facts. This rule is deliberately pack-owned and narrow; it does not
+      promote broad GenomicsDB concrete facades before the shared facade
+      identity follow-up is implemented.
+    - Required Facts: external object strategy for the receiver type,
+      external API effects for `getContig`, `getStart`, and `getEnd`, and the
+      translated method parameter's Java type.
+    - Owning Layer: `external_packs` owns the library-specific object strategy
+      and typed method facts; `signature` consumes the representation fact;
+      `stdlib` emits the facade support methods; lowering only renders the
+      selected slot and method calls.
+    - Fallback Shape: external interfaces without a pack-owned concrete,
+      dyn-trait, closed-enum, or crate-mapped strategy remain erased-object
+      boundaries with explicit compile-gate pressure. Broad concrete promotion
+      remains blocked until shared external facade identity is available.
+    - Evidence:
+      `htsjdk_util_locatable_pack_strategy_preserves_typed_facade_boundary`
+      proves both simple and qualified `Locatable` pack facts use
+      `HierarchyStrategy::ConcreteStruct`.
+      `external_pack_typed_locatable_coordinate_getters_support_numeric_and_string_use`
+      continues to prove the typed getter facade typechecks. `cargo check`
+      passes. The focused GenomicsDB gate moves from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_typed_builder_products_v4`
+      at `cargo_check_errors=29` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_locatable_concrete_facade_v1`
+      at `cargo_check_errors=27`; the previous three `&Box<dyn Any>` missing
+      `get_contig`, `get_start`, and `get_end` errors are gone. The remaining
+      `InitializedQueryWrapper` error is now the separate
+      `FeatureReader.query` overload/facade method-shape problem.
+  - Borrowed concrete facade view coercion rule:
+    - Ideal Rust Target: when a borrowed concrete value is passed to a
+      read-only facade-supertype parameter, generated Rust should adapt at the
+      slot boundary without cloning, downcasting, or introducing a
+      constructor-specific rewrite. For example, a `Vec<SimpleInterval>.get(0)`
+      flowing to `&Locatable` should become a borrowed facade view expression
+      that preserves Java null/index checks and lets the callee keep its typed
+      `&Locatable` signature.
+    - Implementation Rule: `conversion_plan` treats a concrete-to-concrete
+      read-only argument as a borrowed concrete facade coercion when hierarchy
+      facts or known structural subtype facts prove the actual Java type is a
+      subtype of the target Java type. `lower` uses constructor-signature
+      fallback by constructed type and selected Rust constructor name when a
+      `new` expression's resolver metadata is missing, so constructor
+      arguments still receive the callee slot shapes. `coercion` renders the
+      facade view as a zero-sized borrowed facade value while preserving
+      evaluation of the actual Java value.
+    - Required Facts: actual slot shape, target slot shape, concrete dispatch
+      on both sides, shared-borrow target ownership, hierarchy/subtype or
+      structural assignability fact, and constructor signature for shaped
+      constructor argument lowering.
+    - Owning Layer: `conversion_plan` owns the facade-view coercion decision;
+      `lower` owns constructor signature fallback before argument lowering;
+      `coercion` owns rendering the view expression; external packs and
+      source facts own subtype evidence.
+    - Fallback Shape: if subtype evidence is unavailable, the normal
+      dispatch/ownership coercion path remains in force and any mismatch is
+      left to structured conversion diagnostics or the compile gate. Broad
+      dyn-trait promotion for `Locatable` remains deferred because it causes
+      owned positions such as `Vec<Locatable>` to require a larger trait-object
+      representation pass.
+    - Evidence:
+      `optional_borrowed_concrete_element_unwraps_to_concrete_facade_target`
+      proves an optional borrowed concrete element can feed a borrowed
+      concrete facade target without owned recovery, and
+      `htsjdk_util_locatable_pack_strategy_preserves_typed_facade_boundary`
+      keeps the HTSJDK pack strategy concrete. `cargo check` passes. The
+      focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_concrete_facade_zst_view_v1`
+      moves from `cargo_check_errors=24` to `23`; the previous
+      `Option<&SimpleInterval>`/`&Locatable` mismatch is gone. A broad
+      dyn-trait probe for `Locatable` regressed to `cargo_check_errors=83`
+      because owned `Locatable` positions became invalid trait object values,
+      so that strategy is intentionally not used for this slice.
+  - External facade overloaded method arity naming rule:
+    - Ideal Rust Target: Java external instance overloads should become stable
+      Rust method names when Rust cannot overload by arity. For a
+      `FeatureReader` facade, one-argument and three-argument Java `query`
+      overloads should be emitted as `query_1(...)` and
+      `query_3(chr, start, end)`, with the three-argument range query
+      returning `CloseableTribbleIterator`.
+    - Implementation Rule: `call_plan` owns external overloaded method naming
+      from receiver type, Java method name, arity, and external API facts. If
+      multiple external API arities exist for the same receiver/method family,
+      fallback receiver and external-crate receiver targets use
+      `{snake_method}_{arity}`. `stdlib` uses the same call-plan helper when
+      emitting external facade support from external API facts. External packs
+      must model overloaded methods with explicit arities and return types.
+    - Required Facts: receiver Java type, method name, argument count,
+      external API effect arities for that receiver/method family, and
+      external API return types/nullability.
+    - Owning Layer: `call_plan` owns call-target Rust names; `external_packs`
+      owns library overload facts; `stdlib` owns facade support emission and
+      consumes the call-plan naming helper; lowering only applies the selected
+      target name.
+    - Fallback Shape: methods with a single modeled arity keep the ordinary
+      snake-case Rust name. If no external facts exist, fallback receiver calls
+      keep the existing snake-case target and compile-gate pressure remains
+      visible.
+    - Evidence:
+      `external_method_support_uses_arity_names_for_overloaded_facades`
+      proves neutral external `query` overloads emit `query_1`/`query_3` and
+      call the three-argument overload through `cursor.query_3(...)`.
+      `htsjdk_tribble_feature_pack_models_coordinate_getters` proves the
+      HTSJDK `FeatureReader.query` one- and three-argument facts are distinct,
+      with `query/3` returning `CloseableTribbleIterator`. `cargo check`
+      passes. The focused GenomicsDB gate moves from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_locatable_concrete_facade_v1`
+      at `cargo_check_errors=27` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_external_method_overload_arity_v1`
+      at `cargo_check_errors=26`; the prior three-argument `query` arity and
+      `CloseableIterator`/`CloseableTribbleIterator` mismatch is gone.
+  - Struct literal direct-move field ordering rule:
+    - Ideal Rust Target: constructor field initialization should not move a
+      local into one field before another field initializer reads that local.
+      For a Java constructor assigning `this.reader = reader` and
+      `this.query = reader.query(...)`, the Rust struct literal should evaluate
+      the query before moving the reader:
+      `InitializedQueryWrapper { interval: ..., query: Some(reader.query_3(...)), reader }`.
+    - Implementation Rule: `item_assembly` reorders only direct variable-move
+      struct fields after sibling fields whose expressions read that variable.
+      Structured `RustExpr::Var` and raw identifier moves are both recognized;
+      raw sibling expressions are scanned by identifier token so generated
+      fallback expressions participate in the same ordering rule.
+    - Required Facts: assembled constructor field expressions and direct
+      variable-move detection. No Java-specific method or class name is
+      required.
+    - Owning Layer: `item_assembly` owns final struct literal field ordering;
+      constructor planning still owns field-value selection; lowering still
+      owns expression lowering for each field.
+    - Fallback Shape: if the moved value is not referenced by any sibling
+      field expression, field order is preserved. Non-direct move expressions
+      are not reordered, avoiding changes to side-effect evaluation order.
+    - Evidence:
+      `item_assembly_owns_struct_impl_and_function_shells_from_signatures`
+      now covers structured and raw direct-move fields being delayed after
+      sibling reads. `cargo check` passes. The focused GenomicsDB gate moves
+      from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_external_method_overload_arity_v1`
+      at `cargo_check_errors=26` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_external_method_overload_field_order_v2`
+      at `cargo_check_errors=25`; the `borrow of moved value: reader`
+      residual is gone, and generated `InitializedQueryWrapper` now places
+      `query: Some(reader.query_3(...))` before `reader: reader`.
+  - Receiverless current-type call binding in lambdas:
+    - Ideal Rust Target: a receiverless Java helper call inside an instance
+      lambda should bind to the current Rust receiver when the current type has
+      a matching method. For example, `submit(() -> helper(value))` inside an
+      instance method should render `submit(|| { self.helper(value.as_str()) })`,
+      not a free `helper(value)` call.
+    - Implementation Rule: unresolved receiverless calls use the current
+      type's signature plan as a fallback. When such a fallback signature is
+      found, `call_plan` rewrites the fallback free target to an owned
+      `FallbackSelf` target and `call_lowering` renders it as
+      `self.{method}(...)`. Argument shape fallback continues to use the same
+      signature plan, so borrowed string adapters and other slot adapters are
+      still selected by the signature layer.
+    - Required Facts: current type, current signature plan, Java method name,
+      argument count, and unresolved receiverless call shape.
+    - Owning Layer: `lower` owns applying current-callable fallback signature
+      context; `call_plan` owns the `FallbackSelf` target shape;
+      `call_lowering` owns rendering that target. Lambda lowering only
+      preserves the current lowering context.
+    - Fallback Shape: if no current-type signature matches, keep the existing
+      fallback free call and let the compile gate expose the missing binding.
+    - Evidence:
+      `executor_submit_lambda_receiverless_helper_call_uses_current_self`
+      proves receiverless helper calls inside executor block lambdas render
+      through `self.helper(...)`. `cargo check` passes. The focused GenomicsDB
+      gate moves from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_external_method_overload_field_order_v2`
+      at `cargo_check_errors=25` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_lambda_self_receiver_v1`
+      at `cargo_check_errors=24`; the previous `cannot find function
+      get_reader_from_path` residual is gone.
+  - Unshaped throwing argument propagation rule:
+    - Ideal Rust Target: a Java call that can throw and appears as an
+      argument to another expression should still propagate through `?` when
+      the surrounding Rust function returns `Result`. For example,
+      `Wrapper::new(self.open(path)?, path)` is the target, not
+      `Wrapper::new(self.open(path), path)`.
+    - Implementation Rule: `lower_unshaped_argument` applies the same
+      `slot_expr_needs_result_propagation` check as slot-shaped expression
+      lowering. `plan_call_exception_propagation` also recognizes unresolved
+      receiverless calls to the current type when method-effect facts prove
+      the method throws.
+    - Required Facts: current type, method-effect thrown facts, unresolved or
+      resolved call name, argument count, and enclosing `Result` lowering
+      context.
+    - Owning Layer: `call_plan` owns exception-propagation classification;
+      `lower` owns applying `?` to unshaped argument expressions; exception
+      planning still owns method `Result` shells.
+    - Fallback Shape: calls with no resolved, external, or current-type
+      thrown fact are left unchanged. Non-`Result` context remains exposed by
+      the compile gate or exception diagnostics.
+    - Evidence:
+      `unshaped_constructor_argument_call_that_throws_propagates_result`
+      proves nested constructor arguments propagate `self.open(...) ?` through
+      the unshaped path, and
+      `exception_lowering_policy_owns_result_support_ok_and_err_shapes`
+      covers receiverless current-type exception classification.
+      `cargo check` passes. The focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_lambda_self_receiver_result_arg_v2`
+      remains at `cargo_check_errors=24`, but generated
+      `InitializedQueryWrapper::new(self.get_reader_from_path(...)? , ...)`
+      now has the required `?`. The remaining error on that expression is the
+      separate `Option<&SimpleInterval>` to `&Locatable` interface/collection
+      element adaptation problem.
+  - Emitted subtype source-summary super method surface rule:
+    - Ideal Rust Target: when translated Java source extends a superclass that
+      is present only as source-summary context, inherited methods used by the
+      translated subtype should be callable directly on the emitted Rust type.
+      For example, a translated `GenomicsDBImport extends GATKTool` should
+      expose
+      `get_default_tool_v_c_f_header_lines(&self) -> HashSet<VCFHeaderLine>`
+      on `GenomicsDBImport`, because Rust will not inherit inherent methods
+      from an opaque `GATKTool` shell.
+    - Implementation Rule: external facade support walks emitted type
+      superclass chains until they cross into source-summary types. For used
+      method names/arities found in that source-summary hierarchy, it emits an
+      inherent facade method on the emitted subtype unless the translated
+      source already declares or inherits that method locally.
+    - Required Facts: emitted type hierarchy, source-summary type hierarchy,
+      used call name/arity, Java method return/parameter types, and local
+      method override detection.
+    - Owning Layer: `stdlib` owns support-surface emission for source-summary
+      boundaries. The source-summary parser owns the Java method signatures;
+      lowering only calls the method selected by normal call planning.
+    - Fallback Shape: if the summary superclass is unavailable, if the method
+      is unused, or if the emitted local hierarchy already provides the method,
+      no extra subtype surface is emitted. The compile gate exposes any
+      remaining missing inherited surface.
+    - Evidence:
+      `emitted_type_extending_source_summary_super_gets_inherited_method_surface`
+      proves an emitted subtype gets a concrete inherited summary method
+      surface. The focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_emitted_summary_super_methods_v1`
+      moves from `cargo_check_errors=42` to `40`; the two previous
+      `get_default_tool_v_c_f_header_lines` method-not-found errors are gone.
+  - Native collection extend self-read temp rule:
+    - Ideal Rust Target: when Java `field.addAll(source())` lowers to Rust and
+      the target is a mutable `self` field while the source expression reads
+      `self`, the source should be evaluated before the mutable borrow:
+      `let tmp = self.source(); self.field.as_mut().unwrap().extend(tmp);`.
+      This preserves Java evaluation order and satisfies Rust's borrow rules.
+    - Implementation Rule: native collection `addAll` statement lowering
+      detects mutable self-field receivers whose source expression reads
+      `self`. It emits a temporary for the lowered extend source before
+      rendering the mutable receiver `.extend(...)` call.
+    - Required Facts: native collection method plan, receiver expression,
+      field membership from the shape environment, and source-expression
+      self-read detection.
+    - Owning Layer: `lower` owns statement-level evaluation ordering for
+      native collection operations. Signature and source-summary support only
+      determine the method/slot shapes.
+    - Fallback Shape: if the receiver is not a self field, or if the source
+      does not read `self`, the existing single-expression `.extend(...)`
+      lowering is preserved.
+    - Evidence:
+      `emitted_type_extending_source_summary_super_gets_inherited_method_surface`
+      cargo-checks the generated Rust for the inherited `addAll` use. In the
+      focused GenomicsDB gate, the two merged-header extension sites now emit
+      `let __java2rust_add_all_source =
+      self.get_default_tool_v_c_f_header_lines();` before mutably extending
+      `self.merged_header_lines`.
+  - Source-summary `super` boundary call rule:
+    - Ideal Rust Target: Java `super.method(...)` against a superclass that is
+      present only as source-summary/support context must not render as raw
+      Rust `super.method(...)`, because Rust has no corresponding inherited
+      object receiver and the superclass body is intentionally not emitted. A
+      throwing void hook should become a no-op `Result` boundary such as
+      `Ok(())?;`; an inherited value query in a contextual return slot may use
+      `Default::default()` as the explicit external-boundary fallback.
+    - Implementation Rule: `call_plan` selects a distinct `SuperBoundary`
+      target for resolved instance calls whose receiver is `Expr::Super`.
+      `call_lowering` renders that boundary from the resolved Java return type
+      and method-effect thrown-exception facts, instead of lowering the
+      receiver expression. Resolver facts still treat `super` as current-type
+      hierarchy pressure; only the Rust call target changes.
+    - Required Facts: resolved declaring type, resolved Rust method name,
+      Java return type, thrown-exception method effect, and receiver expression
+      identity.
+    - Owning Layer: `resolve` owns method resolution; `call_plan` owns the
+      `super` target classification; `call_lowering` owns fallback Rust
+      expression spelling. `expr_render` must not decide `super` call syntax.
+    - Fallback Shape: if a `super` call is unresolved, existing unresolved
+      target diagnostics/fallbacks remain visible. The boundary rule does not
+      guess a real Rust superclass dispatch.
+    - Evidence:
+      `source_summary_super_calls_lower_to_boundary_defaults_not_raw_super_receiver`
+      covers both throwing void and value-returning summary-super calls, and
+      `call_plan_owns_call_and_new_target_selection_before_argument_lowering`
+      asserts the `SuperBoundary` target shape. The focused GenomicsDB gate at
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_super_boundary_mutability_v1`
+      has no `expected value, found module super` diagnostics.
 
 - [x] `OBJ-6`: Strengthen closed-world enum proof.
   - Owner: `src/representation.rs`, `src/facts.rs`
@@ -1401,6 +2089,34 @@ even if the generated Rust count improves.
     `signature_boundary_constraints_cover_params_locals_fields_returns_and_receivers`,
     existing capture boundary tests, and
     `signature_dependency_graph_records_captured_value_nodes_from_facts`.
+  - Same-receiver mutability propagation rule:
+    - Ideal Rust Target: a Java method that calls a mutating helper on the
+      same receiver should render with `&mut self` even when the method body
+      does not assign fields directly. For example, `outer() { middle(); }`,
+      `middle() { this.inner(); }`, and `inner() { count++; }` should make all
+      three Rust methods mutable receivers, so callers do not hit late borrow
+      checker errors.
+    - Implementation Rule: `usage` records whether each resolved call site is
+      an implicit/`this`/`super` same-receiver call, then runs a finite
+      fixed-point over Java-name and Rust-name method usage maps. If a
+      same-receiver call reaches a method already known to mutate `self`, the
+      caller is marked `mutates_self`; signature solving then consumes the
+      normal receiver-mutability fact path.
+    - Required Facts: call receiver identity, resolved declaring type,
+      resolved Rust method name, direct field mutation facts, and method usage
+      maps keyed by Java and Rust names.
+    - Owning Layer: `usage` owns mutability propagation; `semantic_analysis`
+      exposes method receiver effects; `signature` turns those effects into
+      `ReceiverPlan::Mutable`; lowering only consumes solved receiver plans.
+    - Fallback Shape: unresolved or non-self receiver calls do not propagate
+      receiver mutability. They remain governed by external API mutability
+      facts or conservative slot policy.
+    - Evidence:
+      `usage_propagates_self_mutability_through_same_receiver_calls` covers a
+      neutral transitive self-call chain. The focused GenomicsDB gate at
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_super_boundary_mutability_v1`
+      emits `pub fn on_startup(&mut self)` and has no
+      `cannot borrow *self as mutable` diagnostics.
 
 - [x] `SIG-2`: Make public/unknown API fallback type-aware across all Java types.
   - Owner: `src/signature.rs`, `src/slot_shape.rs`
@@ -1470,6 +2186,37 @@ even if the generated Rust count improves.
     `field_nullability_shape_policy_optionalizes_only_nullable_reference_storage`,
     `variantcontext_nullable_attribute_getter_flows_into_option_slot_planning`,
     and `constructor_initialized_variantcontext_field_stays_non_optional`.
+  - Direct null call-argument rule:
+    - Ideal Rust Target: when Java passes literal `null` to a resolved
+      reference-typed method or same-class constructor parameter, the resolved
+      callee slot should be nullable at the signature level. For example,
+      `target(path, null)` should solve the second parameter as `Option<Path>`,
+      and `this(null)` should solve the delegated constructor parameter as
+      `Option<T>`. Lowering should then render ordinary `None` at the call
+      site without a per-call special case.
+    - Implementation Rule: `usage` records literal-null argument indexes on
+      call-site facts. The signature propagation sweep consumes those indexes
+      and adds `RequiredStorageNullability(MaybeNull)` to the resolved method
+      parameter or same-class delegated constructor parameter. This propagation
+      is independent of binding-use propagation because literal `null` has no
+      source binding node.
+    - Required Facts: resolved method/constructor target, argument index,
+      literal-null actual, call-site boundary, and callee parameter inventory.
+    - Owning Layer: `usage` owns null-argument observation; `signature` owns
+      nullable parameter constraints and slot solving; conversion/lowering only
+      render the solved `Option<T>` shape.
+    - Fallback Shape: unresolved external calls keep existing unknown-boundary
+      behavior. Ordinary `super(...)` constructor delegation remains under the
+      constructor-inheritance plan and is not guessed by this rule.
+    - Evidence:
+      `direct_null_call_argument_marks_resolved_method_parameter_nullable`,
+      `direct_null_constructor_delegation_marks_resolved_constructor_parameter_nullable`,
+      and the existing `ternary_null_test_marks_overloaded_path_parameter_nullable`
+      cover direct-null and null-tested parameter pressure. The focused
+      GenomicsDB gate at
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_null_arg_signature_v1`
+      moves from `cargo_check_errors=54` to `52`; the previous
+      `None`-to-`GenomicsDBOptions` and `None`-to-`Path` mismatches are gone.
 
 - [x] `SIG-4`: Co-solve getter/setter elimination with field ownership.
   - Owner: `src/semantic_analysis.rs`, `src/signature.rs`,
@@ -1541,10 +2288,22 @@ even if the generated Rust count improves.
     fallback; otherwise it stays conservative. Coverage includes
     `external_argument_effects_shape_method_params_in_signature_solver`,
     `external_setter_effect_requires_mutable_receiver_binding_in_signature`,
+    `static_external_facade_uses_nullable_argument_fact_without_call_site_type_hack`,
+    `htsjdk_tribble_feature_pack_models_coordinate_getters`,
     `external_api_user_override_beats_later_name_guess`,
     `external_api_receiver_specific_override_beats_global_override_in_signature`,
     `external_collection_api_effects_are_receiver_specific_facts`,
     and `external_map_api_effects_distinguish_read_and_write_methods`.
+    `call_plan` now applies `parameter_nullability` when converting external
+    argument effects into slot shapes, and external facade support renders
+    concrete argument positions from the same facts while leaving unmodeled
+    positions generic. The GenomicsDB focused gate
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_nullable_external_arg_v1`
+    moves from `cargo_check_errors=10` to `9`; the former
+    `AbstractFeatureReader::get_feature_reader(..., None::<T>, ...)` inference
+    error is gone, and the generated facade has
+    `_arg1: Option<String>` with call sites passing plain `None` or the
+    concrete index URI.
     Local storage uses a narrower receiver-mutability projection: a local
     mutated through an external receiver call remains an owned storage value
     with `binding_mutable=true`, rather than becoming an `&mut T` local slot.
@@ -1916,16 +2675,163 @@ even if the generated Rust count improves.
     `MapEntrySetFirstKeyFromNullableField.java`. The focused GenomicsDB gate
     for the map-entry fallback reports `cargo_check_errors=301`, zero tracked
     invalid patterns, and the `java_collection_api` idiom signal drops to
-    `3` occurrences in `1` file; the remaining collection signal is in
-    `GATKGenomicsDBUtils`, not the `SampleNameMap` entry-chain call.
-    Java collection and map `size()` receiver calls now render as
-    `.len() as i32` in `call_lowering`, preserving Java `int` return width
-    instead of leaking Rust `usize` into public Java-shaped slots. Coverage
+	    `3` occurrences in `1` file; the remaining collection signal is in
+	    `GATKGenomicsDBUtils`, not the `SampleNameMap` entry-chain call.
+	    Native collection receiver mutability now also flows through lambda
+	    captures. If Java captures a `final SortedMap<K,V>` in a lambda and calls
+	    `put`, Rust still needs `let mut` for the local collection binding because
+	    Java `final` forbids rebinding, not content mutation. `usage` analyzes
+	    lambda bodies with scoped lambda parameters, `stdlib` owns the native
+	    collection mutator list, and `signature` converts captured receiver
+	    mutation facts into `MutableBinding` for the local plan.
+	    Coverage includes
+	    `signature_plan_marks_final_native_map_receiver_mutation_local_mutable`
+	    and `FinalSortedMapReceiverMutation.java`. The focused GenomicsDB gate at
+	    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_lambda_capture_map_mut_v1`
+	    moves from `cargo_check_errors=23` to `21`, emits
+	    `let mut sample_to_reader_map`, removes the `E0596` bucket, and also
+	    removes the previous moved `variant_path` bucket exposed by callback usage.
+	    Java collection and map `size()` receiver calls now render as
+	    `.len() as i32` in `call_lowering`, preserving Java `int` return width
+	    instead of leaking Rust `usize` into public Java-shaped slots. Coverage
     includes `MapSizeReturnInt.java`, `CollectionAddAllAndSize.java`, and
     `constructor_initialized_sorted_map_field_is_not_optional_carrier`. The
     focused GenomicsDB gate for this slice reports
     `cargo_check_errors=110`, down from `111`, with zero tracked invalid
     patterns.
+    Native `Arrays.sort` statements are now planned as mutating Rust sequence
+    operations:
+    - Ideal Rust Target: Java `Arrays.sort(values);` should mutate the Rust
+      sequence in place:
+
+      ```text
+      let mut values = vec![2, 1];
+      values.sort();
+      ```
+
+      It should not render as `Arrays::sort(values.clone())`, because Rust has
+      no Java `Arrays` namespace and sorting a clone loses Java's mutation
+      semantics. The sorted binding must be mutable when it is a local.
+    - Implementation Rule: `call_plan` recognizes one-argument
+      `Arrays.sort` as a `CallStatementPlan::NativeArraysSort` before generic
+      static-owner fallback. `lower` renders the planned target as
+      `.sort()`. `signature` treats the first argument of `Arrays.sort` as an
+      assignment target for local binding mutability, so local declarations
+      receive `let mut` through the normal local plan.
+    - Required Facts: unshadowed `Arrays` static receiver, method name `sort`,
+      single mutable sequence argument, and local binding mutability for a
+      local target.
+    - Owning Layer: `call_plan` owns static collection statement
+      classification; `signature` owns local mutability; `lower` renders the
+      planned statement. Argument lowering does not decide to clone or consume
+      the target.
+    - Fallback Shape: comparator and range overloads remain outside this rule
+      until they have explicit ordering/comparator plans. Non-`Ord` element
+      types should later select `sort_by` or a structured unsupported
+      diagnostic rather than silently using `.sort()`.
+    - Evidence:
+      `arrays_sort_statement_lowers_to_mutating_rust_sort` proves neutral
+      translation uses `values.sort();`;
+      `signature_plan_marks_arrays_sort_target_local_mutable` proves the
+      sorted local is declared mutable; and the focused GenomicsDB gate moves
+      from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_conventional_static_strings_v1`
+      at `cargo_check_errors=36` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_arrays_sort_mutability_v1`
+      at `cargo_check_errors=35`. Generated `GenomicsDBImport` now contains
+      `let mut partitions: Vec<String>` followed by `partitions.sort();`.
+    Domain collection facades and external enum constants now have separate
+    support responsibilities:
+    - Ideal Rust Target: Java domain collection types such as
+      `htsjdk.samtools.util.IntervalList` should remain domain facades when
+      their Rust representation has not been proven to be a native collection.
+      `new IntervalList(dictionary)` should render as
+      `IntervalList::new(dictionary)`, and receiver calls such as
+      `intervals.add(interval)` and `intervals.write(path)` should stay on the
+      facade surface. Java enum-like static constants such as
+      `PairOrientation.FR`, `LogLevel.INFO`, and
+      `FileTermination.HAS_TERMINATOR_BLOCK` should be typed tokens or
+      associated constants, not recursive Rust struct storage. In particular,
+      Rust must not emit `pub struct PairOrientation { pub f_r:
+      PairOrientation }`.
+    - Implementation Rule: `stdlib` now distinguishes collection-like domain
+      facades from native Rust collection constructors and receiver calls via
+      native-only collection helpers. `call_plan` uses those helpers for
+      native collection lowering, so `IntervalList` no longer becomes a
+      native `Vec` constructor or `.push()` target. External facade support
+      still consumes external-pack field facts for typing, but skips
+      self-typed enum-like static constants when constructing facade struct
+      fields, preventing recursive `struct` shells while preserving the
+      field facts for resolver/type decisions.
+    - Required Facts: concrete target-slot type for facade constructor
+      rendering, receiver type evidence for non-native domain collection
+      calls, and external-pack field facts for enum-like constants. A
+      self-typed uppercase field on the same external receiver is treated as a
+      static enum constant rather than instance storage.
+    - Owning Layer: `stdlib` owns native-vs-domain collection classification
+      and external facade shell construction; `call_plan` owns native
+      collection call/constructor selection; `lower` owns slot-aware concrete
+      external constructor rendering. External-pack facts describe available
+      surfaces but do not decide native collection lowering.
+    - Fallback Shape: if the concrete domain facade representation cannot be
+      proven, the value may still fall back to erased `Box<dyn Any>` at
+      boundary slots. That fallback is allowed, but it must not reintroduce
+      recursive facade structs or native collection methods on domain types.
+    - Evidence:
+      `domain_collection_facade_constructor_is_not_native_collection_constructor`
+      proves `IntervalList::new(dictionary)`, `intervals.add(...)`, and
+      `intervals.write(...)` are emitted without `intervals.push(...)`.
+      `external_enum_constant_facades_do_not_emit_recursive_storage_fields`
+      proves pack-owned enum constants do not generate recursive
+      `PairOrientation` storage. The focused GenomicsDB gate with
+      `com.intel.genomicsdb` and `htsjdk.samtools.util` packs moves from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_domain_collection_facade_htsjdk_v1`
+      at `cargo_check_errors=94` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_enum_constant_facade_v1`
+      at `cargo_check_errors=40`; the prior `E0072`/`E0391` recursive
+      `PairOrientation`, `LogLevel`, and `FileTermination` buckets are gone.
+    External generic facade arguments now have their own slot rule:
+    - Ideal Rust Target: a concrete final domain facade method whose external
+      surface is modeled as generic should accept typed Rust arguments without
+      forcing them through `Box<dyn Any>`. For example, Java
+      `outputList.add(new Interval(...))` on `IntervalList` should render as
+      `output_list.add(Interval::new_...(...));`, and Java enhanced-for
+      values passed to that facade should remain ordinary typed or borrowed
+      Rust values such as `output_list.add(Interval::new_1(i));`. The generic
+      facade method itself already abstracts over `T0`; argument lowering
+      should not erase the value before calling it.
+    - Implementation Rule: `lower` detects fallback/external calls whose
+      receiver is a concrete final collection-like domain facade and whose
+      argument plan has unknown placeholder slots. In that context, unknown
+      argument slots are treated as generic facade parameters, so each
+      argument is lowered against its own inferred actual shape. Explicitly
+      modeled external parameter types still use their fact-owned slot shapes;
+      true erased storage boundaries remain represented through the normal
+      dispatch/coercion plan.
+    - Required Facts: receiver expression type, final-type facts,
+      collection-like domain facade classification, inferred argument shape,
+      constructor facts for concrete external values, and explicit external
+      argument facts when the API really owns a parameter type.
+    - Owning Layer: `call_plan` owns external argument facts and native
+      collection exclusion; `lower` owns the generic-facade call-site
+      adaptation because it has both the chosen call target and the concrete
+      argument expression. `coercion` still owns real erased-object conversion.
+    - Fallback Shape: if the receiver cannot be proven to be a concrete final
+      domain facade, or if the external pack states an explicit erased/object
+      parameter, the existing erased-boundary behavior remains available.
+    - Evidence:
+      `pack_enabled_final_domain_facade_local_stays_concrete_not_erased`
+      now proves `IntervalList.add(new Interval(...))` emits
+      `intervals.add(Interval::new_3(...))` rather than boxing a tuple as
+      `Box<dyn Any>`. The focused GenomicsDB gate with `com.intel.genomicsdb`
+      and `htsjdk.samtools.util` packs moves from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_final_domain_collection_facade_v1`
+      at `cargo_check_errors=40` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_final_domain_collection_arg_v1`
+      at `cargo_check_errors=39`; the prior `lifetime may not live long
+      enough` bucket caused by `output_list.add(Box::new(i) as Box<dyn Any>)`
+      is gone, and generated `GenomicsDBImport` now emits
+      `output_list.add(Interval::new_1(i));`.
     Native map insertion now has its own expression carrier rule:
     - Ideal Rust Target: Java `Map.put(k, v)` used as an expression should
       preserve Java's "previous value or null" result as Rust `Option<V>`.
@@ -1983,12 +2889,50 @@ even if the generated Rust count improves.
       `htsjdk.tribble.feature` and `com.intel.genomicsdb` packs moves from
       `cargo_check_errors=146` to `145` at
       `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_map_insert_get_carrier`;
-      the `E0308` mismatched-type bucket drops from `54` to `47`. Remaining
-      move errors in `SampleNameMap` are now constructor/string ownership
-      issues such as `URI::new(vcf_path)` consuming Java strings that are used
-      later, not map carrier mismatches.
-    Constructor arguments that consume reused Java bindings have their own
-    ownership rule:
+	      the `E0308` mismatched-type bucket drops from `54` to `47`. Remaining
+	      move errors in `SampleNameMap` are now constructor/string ownership
+	      issues such as `URI::new(vcf_path)` consuming Java strings that are used
+	      later, not map carrier mismatches.
+	    Indexed reads now have their own borrowed-element ownership rule:
+	    - Ideal Rust Target: Java `values[i]` over a Rust `Vec<String>` or
+	      translated Java `String[]` should be treated as a borrowed element read.
+	      If the target slot is owned `String`, render `values[i].clone()`. If the
+	      target slot is `Option<&str>`, render `Some(values[i].as_str())`. If the
+	      target slot is a borrowed receiver such as `.trim()`, keep the indexed
+	      receiver borrowed and do not clone.
+	    - Implementation Rule: `shape_projection::indexed_read_shape` projects
+	      non-copy indexed read elements as `SharedBorrow` regardless of container
+	      ownership; copy-capable elements still project as `CopyValue`.
+	      `lower_array_access_expr_for_slot` mirrors the existing `List.get`
+	      slot path: it renders the indexed expression once, marks the actual as a
+	      borrowed sequence element, and delegates owned clone, string-view, and
+	      optional wrapping decisions to `conversion_plan`/`coercion`. The string
+	      view policy now also handles borrowed native `String` to `&str`, not only
+	      owned `String` to `&str`.
+	    - Required Facts: indexed receiver sequence element type, copy capability,
+	      target slot ownership/view/nullability, and existing type capability
+	      overrides for value-semantics external elements.
+	    - Owning Layer: `shape_projection` owns indexed-read shape; `lower` owns
+	      connecting array-access syntax to the slot conversion boundary;
+	      `conversion_plan` owns borrowed-to-owned clone and borrowed-string-view
+	      adaptation; `expr_render` only renders `target[index]`.
+	    - Fallback Shape: if the receiver is not sequence-like, retain ordinary
+	      expression lowering and let existing diagnostics expose the unresolved
+	      shape.
+	    - Evidence:
+	      `indexed_shape_projects_owned_container_non_copy_reads_as_borrows`,
+	      `borrowed_native_string_can_coerce_to_string_view`, and
+	      `indexed_string_array_reads_clone_only_for_owned_slots` pass. The focused
+	      GenomicsDB gate moves from
+	      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_try_ok_arm_v1` at
+	      `cargo_check_errors=25` to
+	      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_indexed_string_borrow_v1`
+	      at `cargo_check_errors=23`; the previous two `cannot move out of index
+	      of Vec<String>` errors are gone. Generated `SampleNameMap` now emits
+	      `Some(split[0 as usize].clone())` for the owned optional sample-name
+	      slot and `let sample: String = split[0 as usize].clone();`.
+	    Constructor arguments that consume reused Java bindings have their own
+	    ownership rule:
     - Ideal Rust Target: a Java constructor call should not consume a binding
       that Java can still read later. If the Rust constructor slot requires an
       owned value and usage facts show the source binding is reused, the ideal
@@ -2465,6 +3409,41 @@ even if the generated Rust count improves.
     GenomicsDB gate now reports zero tracked invalid-pattern buckets; remaining
     failures are real unresolved imports/external facades, field naming, and
     slot-shape/type mismatches.
+    A later `submit`/`Future` result-slot refresh propagates the expected
+    call-result slot into value-returning callback arguments. For
+    `ExecutorService.submit(...)` in a `Future<T>` result slot, the ideal Rust
+    target is a closure whose local return and nested try/catch `Ok` carrier
+    are shaped as `T`, while the surrounding `submit` call returns the
+    `Future` facade. The implementation rule is split: `lower` derives the
+    callback return slot from the shaped `Future<T>` call result before generic
+    external-call lowering, and `stdlib` emits
+    `ExecutorService::submit<T0>(&self, T0) -> Future` from the external API
+    support surface. The slice is covered by
+    `executor_submit_future_slot_shapes_block_lambda_result`; the focused
+    GenomicsDB gate drops from 23 to 21 compile errors. Remaining callback
+    failures are true exception-carrier issues. A follow-up result-carrier
+    refresh lowers throwing value-returning `submit` callbacks as
+    `Result<T, JavaException>` closures, so normal returns become `Ok(value)`,
+    catch arms return `Err(...)`, and uncaught Java exceptions return
+    `Err(ex)`. The same regression now checks `Ok(value) => return Ok(value)`
+    and `return Err(...)`; the focused GenomicsDB gate drops from 21 to 20
+    compile errors. Remaining executor-adjacent failures are now separate
+    rules: optional `Path` assignment for `getVCFIndexForSampleAsPath`, and
+    later `Future.get()` catch propagation from a method whose signature is not
+    yet `Result<..., JavaException>`.
+    A follow-up callback-local optional shape refresh keeps callback locals
+    initialized from nullable planned method calls as `Option<T>` when the
+    signature solver has no callback-local plan. The ideal Rust target is
+    `let variant_index_path: Option<Path> = ...get_v_c_f_index_for_sample_as_path(...)`
+    followed by passing `variant_index_path` directly to an `Option<Path>`
+    parameter, not `Some(variant_index_path)` and not an invalid `Path` local.
+    The implementation rule is owned by `lower`: fallback lambda-local shape
+    planning asks the current signature plan for receiverless and receiver
+    method-call return shapes, and slot conversion uses those planned shapes
+    before optional wrap/unwrap decisions. The regression
+    `nullable_method_result_in_callback_local_stays_optional_for_optional_arg_slot`
+    covers the neutral case; the focused GenomicsDB gate drops from 20 to 19
+    compile errors.
 
 - [x] `COERCE-1`: Remove typed downcast paths when concrete types are known,
   including external primitive and array getters.
@@ -3197,6 +4176,40 @@ even if the generated Rust count improves.
       removed; remaining errors are dominated by general mismatched-type,
       unresolved external module, constructor support, and optional/path
       coercion buckets.
+    Existing opaque facade owners now receive static string constants through
+    additional impl blocks instead of duplicate support structs:
+    - Ideal Rust Target: if support generation already emitted
+      `pub struct ExternalConstants;` for an opaque external or source-summary
+      facade, a later static string constant surface should extend that type as
+      `impl ExternalConstants { pub const NAME: &'static str = "NAME"; }`. It
+      should not emit a second `pub struct ExternalConstants;`.
+    - Implementation Rule: `lower` assembles opaque facade support before
+      static string constant support, asks `stdlib` for the type names declared
+      by those support items, and passes that set into static-constant support
+      generation. Static-constant support emits only an impl block for owners
+      already declared by prior support, while preserving the old struct+impl
+      fallback for standalone constant owners.
+    - Required Facts: current support item inventory, generated facade owner
+      names, static constant owner and field names, local static string values,
+      and Rust identifier validity.
+    - Owning Layer: `lower` owns support-item assembly order and passes the
+      declared-owner inventory; `stdlib` owns opaque facade and static-constant
+      support item rendering. Resolver, semantic facts, and ordinary lowering
+      do not special-case duplicate type names.
+    - Fallback Shape: if no prior support item declares the owner,
+      static-constant support still emits the conservative `pub struct Owner;`
+      plus impl block. If a prior support item declares the owner, the static
+      constant support item must be impl-only.
+    - Evidence:
+      `static_string_constant_support_extends_existing_opaque_facade_owner`
+      passes. `cargo check --quiet` passes. The focused GenomicsDB gate moves
+      from `cargo_check_errors=20` to `19` at
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_static_const_facade_owner_v2`;
+      the previous `E0428` duplicate
+      `GenotypeCalculationArgumentCollection` row is gone, and generated
+      `00005_GenomicsDBOptions.rs` now has one `pub struct
+      GenotypeCalculationArgumentCollection;` plus separate constructor and
+      static-constant impl blocks.
     and final reference fields with non-null initializers produce non-null
     semantic field facts even when the class has constructors.
   - Focused Gate: the GenomicsDB gate with the optional display/string-pattern
@@ -3265,6 +4278,38 @@ even if the generated Rust count improves.
     gate drops from `cargo_check_errors=244` to `223`; the former top
     `logger` missing-module bucket is gone, and invalid-pattern buckets remain
     zero.
+  - Static logger field rule:
+    - Ideal Rust Target: Java logging calls through a static logger field such
+      as `private static final Logger logger = LogManager.getLogger(T.class);`
+      should lower to the same no-op logging facade as inherited or external
+      logger calls: `logger::info(message)`, `logger::warn(message)`,
+      `logger::debug(message)`, `logger::error(message)`, or
+      `logger::trace(message)`. The logger field itself should not force an
+      emitted Rust instance field, associated const, external crate, or
+      unresolved `Self::logger` value when the only observable behavior is a
+      logging side effect.
+    - Implementation Rule: `call_plan` recognizes receiver calls whose
+      receiver canonicalizes to `logger`/`Logger` and whose method is a known
+      Java logging side-effect method before fallback receiver lowering. It
+      plans those calls as `CallTargetPlan::StaticOwner { owner: "logger",
+      rust_name }`, so `call_lowering` renders the existing facade call. The
+      rule is selected from receiver/method capability, not from GATK class
+      names or rendered `Self::logger` text.
+    - Required Facts: receiver expression name, canonical receiver key,
+      logging method name, positive argument arity, and platform-facade support
+      detection for logger calls.
+    - Owning Layer: `call_plan` owns logger facade target selection;
+      `call_lowering` only renders the selected static-owner call; `stdlib`
+      owns the no-op logger facade support item and support detection.
+    - Fallback Shape: non-logging calls on `logger` or unknown logging-like
+      receivers continue through ordinary resolved/fallback receiver planning.
+    - Evidence:
+      `java_logging_facade_supports_static_logger_field_calls`,
+      `java_logging_facade_supports_inherited_logger_calls`, and the focused
+      GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_logger_v1`, where
+      `cargo_check_errors` moved from `84` to `63` and the
+      `Self::logger`/missing associated item bucket disappeared.
   - Focused Gate Update: Java `String.join(delimiter, values)` is now a native
     Java static call target rather than fallback associated-function syntax.
     The ideal Rust target is `values.join(delimiter)` for iterable/string
@@ -3327,6 +4372,52 @@ even if the generated Rust count improves.
       `cargo_check_errors=219` to `201`; the unresolved `GATKVCFConstants`
       owner bucket is gone, the constant arguments render with `.to_string()`
       in `String` slots, and invalid-pattern buckets remain zero.
+  - Focused Gate Update: conventionally named external static string constants
+    now become typed field facts even when no dependency pack or selected
+    source-summary package supplies the literal declaration.
+    - Ideal Rust Target: Java dependency constants such as
+      `CommandNames.INPUT_LONG_NAME` and `ExternalDelimiters.FIELD_DELIM`
+      should become ordinary Rust associated constants with borrowed string
+      shape:
+
+      ```text
+      CommandNames::INPUT_LONG_NAME
+      ExternalDelimiters::FIELD_DELIM
+      ```
+
+      Those constants should be available through the same support facade as
+      explicitly modeled external `String` fields. A hand-written Rust boundary
+      would use `pub const FIELD: &'static str`, then rely on normal slot
+      conversion if an owned `String` is required.
+    - Implementation Rule: `stdlib::known_external_field_type_for_receiver`
+      treats unresolved external all-caps fields with conventionally string
+      suffixes, including `_KEY`, `_FIELD`, `_NAME`, `_LONG_NAME`,
+      `_SHORT_NAME`, `_DELIM`, `_DELIMITER`, `_SEPARATOR`, `_PREFIX`,
+      `_SUFFIX`, `_REGEX`, `_PATTERN`, `_EXTENSION`, `_PATH`, `_URI`, and
+      `_URL`, as `JavaType::String` after numeric, boolean, explicit pack, and
+      more specific built-in field models have had priority. Existing
+      member-access planning and support emission consume that typed fact; no
+      call-site or GATK-name-specific lowering rule is added.
+    - Required Facts: static/type receiver shape, all-caps Java constant
+      spelling, no local or field shadowing of the receiver, and absence of a
+      stronger explicit field type fact.
+    - Owning Layer: `stdlib` owns the conservative external field type
+      heuristic; `member_access_plan` owns borrowed static string shape;
+      `external_static_string_constant_support_items` owns facade emission;
+      lowering only renders the planned associated-constant access.
+    - Fallback Shape: constants without known types and without string-like
+      names remain unknown. If a dependency pack later supplies a precise field
+      type or literal value, that fact should override the convention.
+    - Evidence:
+      `conventional_external_static_string_constants_are_typed_and_supported`
+      proves neutral `_LONG_NAME` and `_DELIM` owners emit support facades.
+      The focused GenomicsDB gate moves from
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_emitted_summary_super_methods_v1`
+      at `cargo_check_errors=40` to
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_conventional_static_strings_v1`
+      at `cargo_check_errors=36`; the unresolved
+      `StandardArgumentDefinitions` and `AnnotationUtils` owner buckets are
+      gone.
   - Design Slice: nested Java type identity is now preserved through parsing
     and projected to valid Rust owner-specific type names instead of collapsing
     all nested classes to their final segment.
@@ -3420,6 +4511,193 @@ even if the generated Rust count improves.
       `Contig` getter residuals are gone, and the remaining map residual is an
       erased-object propagation problem (`Box<dyn Any>`), not missing external
       getter support.
+  - Future-Family Generic Instance Facade Slice:
+    - Ideal Rust Target: Java future-like dependency values should expose
+      `get()` as an instance method whose Rust result type is inferred from
+      the assignment, return, argument, or local target slot:
+      `let reader: FeatureReader = future.get();`. The facade should therefore
+      render `pub fn get<T: Default>(&self) -> T`, not an associated function
+      such as `Future::get::<T>()`. Imported simple aliases and fully qualified
+      facade names should share the same instance surface.
+    - Implementation Rule: `stdlib` treats opaque facade owners ending in
+      `Future` and a used zero-arity `get` call as a known generic instance
+      surface. This rule runs in generated facade support and replaces any
+      preexisting same-signature generic static fallback before inserting the
+      instance method, so imported-static fallback collection cannot freeze the
+      wrong ownership shape. Lowering remains a consumer: it continues to emit
+      normal instance calls and lets the Rust target slot infer `T`.
+    - Required Facts: used call name and arity, opaque facade owner names,
+      imported type aliases, and the target slot type at the call site.
+    - Owning Layer: `stdlib` owns generated facade method shape and replacement
+      ordering. `call_plan`/`lower` own only the fact that the Java syntax is an
+      instance call. Slot/type inference owns the concrete `T` chosen by Rust.
+    - Fallback Shape: if the owner is not known future-like, keep the ordinary
+      external facade fallback or require an external API fact. Do not add a
+      call-site rewrite for `find/get`-like names, because ownership and
+      generic result inference should be centralized in the support surface.
+    - Evidence:
+      `selected_opaque_future_get_is_generic_instance_surface` covers both
+      `Future` and `java.util.concurrent.Future` facade aliases and rejects the
+      old `pub fn get<R: Default>() -> R` static fallback. The focused
+      GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_future_get_instance_v2`
+      moves from `cargo_check_errors=37` to `36`; the prior `no method named
+      get` bucket is gone, and generated `Future` plus
+      `JavaUtilConcurrentFuture` support both render
+      `pub fn get<T: Default>(&self) -> T`.
+  - Numeric relational promotion rule:
+    - Ideal Rust Target: Java numeric relational comparisons should compare
+      operands at Java's promoted primitive type before emitting Rust. For an
+      `int` getter compared to a `long` local, the Rust target is:
+      `((interval.get_end() as i64) < contig_length)`. The cast must be
+      parenthesized so Rust parses `<` as a comparison, not as generic
+      arguments on the cast target.
+    - Implementation Rule: `operator_lowering` applies the same primitive
+      promotion plan to ordered relational operators (`<`, `<=`, `>`, `>=`)
+      that it already applies to arithmetic and bitwise numeric operators.
+      `coercion` renders primitive widening as a parenthesized cast expression
+      so binary-expression rendering can compose it safely in any operator
+      context.
+    - Required Facts: inferred Java operand primitive types and the Java
+      binary operator. No package, method-name, or GATK-specific facts are
+      required.
+    - Owning Layer: `types` owns operand type inference;
+      `operator_lowering` owns numeric promotion choice for Java binary
+      operators; `coercion` owns cast spelling. Lowering only wires the
+      inferred operands and selected operator plan together.
+    - Fallback Shape: nonnumeric or unknown ordered comparisons continue
+      through the existing ordered-comparison fallback, including the native
+      collection length cast rule. Missing type facts should surface as a
+      focused type-inference gap rather than a call-site-specific cast.
+    - Evidence:
+      `operator_lowering_owns_binary_and_unary_rust_spelling` now proves
+      `int < long` selects `Long` promotion and renders `(end as i64) < limit`.
+      `translates_java_numeric_relational_promotion_before_rust_comparison`
+      proves a neutral Java snippet emits `return ((end as i64) < limit);`.
+      The focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_numeric_relational_promotion_v2`
+      moves from `cargo_check_errors=36` to `35` relative to the comparable
+      future/facade gate and drops the latest `E0308` bucket from `17` to
+      `16`; the prior `interval.get_end() < contig_length` `i32`/`i64`
+      mismatch is gone with no replacement Rust parse error.
+  - Ternary null-refined receiver adaptation rule:
+    - Ideal Rust Target: a Java null-guarded ternary branch should treat the
+      tested local as non-null inside the non-null branch before receiver
+      adaptation. For
+      `path == null ? null : path.toAbsolutePath().toUri().toString()`, the
+      Rust target is
+      `if path.is_none() { None } else { Some(path.unwrap().to_absolute_path().to_uri().to_string()) }`.
+      It must not emit `path.unwrap().as_ref().unwrap()`, because the branch
+      refinement has already consumed the optional carrier.
+    - Implementation Rule: call receiver adaptation now consumes
+      `ExprRefinements`. When the receiver expression is a local marked
+      non-null by the ternary null-refinement plan, optional instance receiver
+      adaptation is skipped. The existing lowerer still owns the actual
+      `unwrap()` spelling for the refined bare local, and ordinary optional
+      calls outside a proven branch still adapt through `as_ref()`/`as_mut()`.
+    - Required Facts: ternary condition shape, tested local name, branch
+      polarity, receiver expression, and call target optional-adapter policy.
+    - Owning Layer: `nullability_plan` owns branch refinement selection;
+      `lower` owns threading refinements into call receiver adaptation; call
+      planning and external packs do not special-case `Path` or any GATK API.
+    - Fallback Shape: if the condition is not a recognized local/null
+      comparison, receiver adaptation remains unchanged and optional receivers
+      are still unwrapped by the normal call-target policy.
+    - Evidence:
+      `nullable_ternary_call_receiver_uses_branch_refinement_before_optional_adapter`
+      proves a neutral `java.nio.file.Path` ternary emits
+      `path.unwrap().to_absolute_path().to_uri().to_string()` and rejects
+      `path.unwrap().as_ref().unwrap()`. The focused GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_ternary_refined_receiver_v1`
+      moves from `cargo_check_errors=35` to `34`; the previous
+      `no method named as_ref found for struct Path` top-error row is gone,
+      and generated `get_reader_from_path` now emits
+      `variant_index_path.unwrap().to_absolute_path().to_uri().to_string()`.
+  - Stream block-lambda prefix local receiver rule:
+    - Ideal Rust Target: block-lambda locals declared before the final return
+      expression should be visible to that return expression. A Java stream
+      body such as
+      `map(x -> { Builder builder = Owner.newBuilder(); ...; return builder.build(); })`
+      should emit `builder.build()`, not `Builder::build()` or
+      `OwnerBuilder::build()`. Local receiver identity must survive the block
+      prefix.
+    - Implementation Rule: `stream_lowering` now renders a block-lambda prefix
+      together with the local-name set it introduces, then renders the final
+      return expression with that same local set. Static-owner detection still
+      applies for real static owners, but it no longer runs before prefix
+      locals are known.
+    - Required Facts: lambda parameter name, block prefix statements, local
+      declarations introduced by the prefix, and the return expression. No
+      package-specific owner names are required.
+    - Owning Layer: `stream_lowering` owns stream closure rendering and its
+      local-name environment; `call_plan` still owns ordinary call target
+      classification outside stream closure rendering.
+    - Fallback Shape: if a block-lambda statement cannot be rendered as a
+      prefix statement, the existing stream fallback remains responsible. This
+      rule only changes the local environment passed to already-rendered return
+      expressions.
+    - Evidence:
+      `stream_block_lambda_return_uses_declared_local_receiver_not_static_owner`
+      proves a neutral builder-style stream lambda emits `builder.build()` and
+      rejects `ProductBuilder::build()`/`Builder::build()`. The focused
+      GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_stream_block_return_locals_v1`
+      moves from `cargo_check_errors=34` to `32`; the previous undeclared
+      `BeginBuilder` and `EndBuilder` rows are gone. Generated
+      `generate_partition_list_from_intervals` now emits
+      `self.create_partition_with_begin_and_end(begin_builder.build(), end_builder.build())`.
+      The remaining related error is the real return-shape mismatch
+      `Vec<Partition>` vs `Vec<Box<dyn Any>>`, not local receiver resolution.
+  - Typed External Builder Product Slice:
+    - Ideal Rust Target:
+      Fact-backed Java builder terminals such as
+      `GenomicsDBImportConfiguration.Partition.Builder.build()` should return
+      the builder product facade, not `Box<dyn Any>`. A private helper declared
+      as returning a final facade should keep that exact Rust return type:
+      `fn create_partition_with_begin_and_end(...) ->
+      GenomicsDBImportConfigurationPartition`. A `Vec<Partition>` push should
+      pass the concrete helper result directly, not box it first.
+    - Implementation Rule:
+      `external_packs` owns typed `build` return facts for GenomicsDB
+      protobuf-style builders. `stdlib` consumes those facts when generating
+      opaque facade support, matching nested aliases such as
+      `GenomicsDBImportConfigurationPartitionBuilder` to their concrete builder
+      implementation. `signature` keeps exact final erased facades concrete for
+      method params and returns when facts prove the declared type is final,
+      including public read-only borrowed parameters. Public `Object`, wildcard,
+      interface, and non-final erased boundaries remain conservative. `call_plan`
+      keeps final erased facade collection elements concrete so `Vec<T>::push`
+      uses the same slot shape that `slot_render` renders for `Vec<T>`.
+    - Evidence:
+      `external_nested_builder_facade_support_is_generated_from_facts_and_used_calls`
+      proves typed builder `build` support and a concrete private helper
+      return. `genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers`
+      proves GenomicsDB builder product facts are pack-owned.
+      `call_plan_owns_call_and_new_target_selection_before_argument_lowering`
+      proves final erased facade list-push arguments stay concrete while
+      non-final erased map values still use erased-object dispatch. The focused
+      GenomicsDB gate
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_typed_builder_products_v4`
+      moves from `cargo_check_errors=32` to `30`; `E0308` drops from `16` to
+      `14`. Generated `GenomicsDBImport` now emits concrete
+      `create_partition_with_begin_and_end`, direct `config_partitions.push(...)`,
+      and stream `.collect::<Vec<_>>()` over `Partition` results.
+      `external_nested_builder_facade_support_is_generated_from_facts_and_used_calls`
+      now also proves a public final facade return and a public read-only final
+      facade receiver render as named facade boundaries instead of
+      `Box<dyn Any>`.
+    - Follow-up: the focused gate at
+      `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_final_facade_public_boundary_v2`
+      clears the `VidMappingPB.get_fields`/`to_builder` erased-receiver bucket,
+      but exposes crate-level external facade ownership as the next blocking
+      design issue. `GATKGenomicsDBUtils::get_protobuf_vid_mapping_from_json_file`
+      returns the `VidMappingPB` support type generated in its module, while
+      `GenomicsDBImport` expects its own module-local `VidMappingPB`. The
+      package harness currently hoists only a fixed platform support set
+      (`JavaException`, `Path`, `URI`, `File`, `IOUtils`). To make concrete
+      external facades viable across modules, external-pack facade structs,
+      aliases, and impl surfaces need one crate-level owner and duplicate
+      per-module support must be suppressed or imported from that owner.
   - Java Object Boundary Slice:
     - Ideal Rust Target: a Java `Object` value slot should not render as a
       missing Rust type named `Object`. When no more precise source trait,
@@ -3584,6 +4862,35 @@ even if the generated Rust count improves.
       `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_nullable_return_generic_v1`
       remains at `cargo_check_errors=68`, matching the previous
       chromosome-getter baseline without regressing it.
+      Optional external getters under explicit Java casts now preserve the
+      optional carrier at optional return slots:
+      - Ideal Rust Target: if Java writes `return (VCFHeader) reader.getHeader();`
+        and the solved Rust return slot is `Option<VCFHeader>`, generated Rust
+        should return the getter carrier directly: `return reader.get_header();`
+        or, in throwing methods, `return Ok(reader.get_header());`. It should
+        not emit `Some(reader.get_header())`, because the external facade
+        already models the Java nullable getter as `Option<VCFHeader>`.
+      - Implementation Rule: `lower_expr_for_slot` treats casts to `T` as a
+        carrier no-op when the target slot is `Option<T>` and the cast source is
+        already shaped as the same optional Java type. The source shape is read
+        first through `external_call_lowered_type`, then through ordinary shape
+        inference, so the rule is fact-driven and not tied to `FeatureReader` or
+        any method name.
+      - Required Facts: target slot optional element type, Java cast target
+        type, external call return type/nullability, and fallback expression
+        shape.
+      - Owning Layer: `lower` owns slot-aware cast bypass; external packs own
+        nullable getter facts; coercion still owns ordinary `T` to `Option<T>`
+        wrapping when the source is not already optional.
+      - Evidence:
+        `typed_feature_reader_header_cast_uses_external_pack_return_fact` now
+        expects direct optional getter return and rejects
+        `Some(reader.get_header())`. The focused GenomicsDB gate at
+        `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_optional_cast_return_v1`
+        still has `cargo_check_errors=10`, but the specific
+        `expected VCFHeader, found Option<VCFHeader>` error in
+        `get_header_from_path` is gone; generated code now emits
+        `return Ok(reader.get_header());`.
       Constructor-assigned locals now keep produced object storage owned even
       when later uses are borrowed:
       - Ideal Rust Target: a Java local declared before assignment and filled
@@ -3927,6 +5234,75 @@ even if the generated Rust count improves.
     GenomicsDB focused gate drops from `cargo_check_errors=223` to `220`, and
     the `expected JavaException, found String` constructor residual is gone.
 
+- [x] `EXC-1C`: Project synchronous callback lambda throws into enclosing method
+  result carriers.
+  - Owner: `src/semantic_analysis.rs`, `src/lower.rs`
+  - Ideal Rust Target: Java callbacks that execute synchronously at the call
+    boundary, such as collection `forEach`, should make the enclosing Rust
+    method return `Result<..., JavaException>` when the callback can throw. The
+    callback body should still lower through a local `Result<(), JavaException>`
+    carrier so catch arms can use ordinary `return Err(...)` inside the
+    enclosing method. Deferred boundaries such as `executor.submit(...)` should
+    not force the caller method to become throwing; their failures belong to the
+    submitted future/result carrier.
+  - Implementation Rule: thrown-effect collection descends into lambda bodies
+    only from call sites whose callback executes at the current boundary, while
+    known deferred execution methods (`submit`, `execute`, `supplyAsync`,
+    `runAsync`) suppress enclosing-method throw projection. Lowering consumes
+    the resulting method thrown-effect fact through the normal `Result`
+    signature and exception-plan paths; it does not special-case `forEach` at
+    return rendering time.
+  - Required Facts: call name, lambda body thrown types, deferred callback
+    boundary names, method return shape, and existing catch hierarchy facts.
+  - Owning Layer: semantic analysis owns whether a lambda throw reaches the
+    enclosing method; exception/signature planning owns the `Result` carrier;
+    lower owns only rendering the planned callback and catch shape.
+  - Fallback Shape: unknown callback calls conservatively project lambda throws
+    unless they are known deferred boundaries. This may over-wrap some
+    framework callback APIs, but avoids losing exceptional control flow; precise
+    external API facts can later override the boundary classification.
+	  - Evidence: `lambda_block_throw_marks_enclosing_method_throwing` proves
+	    semantic facts see throws inside a `forEach` lambda;
+	    `foreach_lambda_throw_wraps_enclosing_method_in_result` proves the Rust
+	    method signature becomes `Result<..., JavaException>` and returns
+	    `Ok(readers)`; `executor_submit_future_slot_shapes_block_lambda_result`
+	    proves `submit` remains a future/result-carrier boundary rather than
+	    wrapping the containing method. The GenomicsDB focused gate
+	    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_lambda_throw_method_result_v2`
+	    keeps the effective compile-error state at 19 previous errors while fixing
+	    `get_feature_readers_in_parallel` to return
+	    `Result<HashMap<..., ...>, JavaException>`.
+
+- [x] `EXC-1D`: Classify fall-through try/catch blocks as fall-through for
+  method epilogue insertion.
+  - Owner: `src/exception_plan.rs`, `src/lower.rs`
+  - Ideal Rust Target: a Java `void` method that throws through
+    `Result<(), JavaException>` and ends with a `try/catch` whose try body can
+    fall through should keep the generated `match` as a statement and then emit
+    the normal `return Ok(());` method epilogue. Catch arms still return
+    `Err(...)` early, but the successful `Ok(())` arm does not need to be a
+    terminal expression.
+  - Implementation Rule: `exception_plan` treats a supported `try/catch` or
+    try-with-resources statement as terminating only when the planned try body
+    completion is `Terminates`. Fall-through unit try/catch blocks remain
+    supported, but they no longer suppress the method-level `Ok(())` epilogue
+    owned by `lower_method`.
+  - Required Facts: planned try statement kind, planned try body completion, and
+    method exception carrier state.
+  - Owning Layer: `exception_plan` owns control-completion classification;
+    `lower_method` owns epilogue insertion; `exception_lowering` owns only the
+    match spelling.
+  - Fallback Shape: unsupported try/catch/finally shapes still use the existing
+    unsupported marker rather than guessing completion.
+  - Evidence: `simple_rethrow_catch_generated_rust_compiles`,
+    `simple_cause_chaining_generated_rust_compiles`, and
+    `internal_throwing_call_in_try_generated_rust_compiles` pass. In the focused
+    GenomicsDB gate
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_try_ok_arm_v1`, the previous
+    `Ok(()) => {}` mismatched-type error is gone; remaining failures are
+    ownership, external facade, duplicate support shell, and unresolved receiver
+    shape issues.
+
 - [ ] `EXC-2`: Lower try/catch/finally after throw-only support.
   - Owner: `src/exception_lowering.rs`, `src/lower.rs`, `src/facts.rs`
   - Ideal Rust Target: Java exception control flow should become ordinary
@@ -4031,10 +5407,20 @@ even if the generated Rust count improves.
     `ExceptionBaseCatchCoversSubclass.java`,
     `ExceptionCauseChaining.java`, `ExceptionRethrowSpecific.java`, and
     `ExceptionRuntimeCheckedHierarchy.java` now verify ordered catch guards,
-    rethrow/cause rendering, and superclass catch guards expanded with known
-    subclass names instead of the old unsupported try/catch marker.
-    `CauseRuntimeRethrow.java` covers the Java completion/cause idiom
-    `throw (ce.getCause() instanceof RuntimeException ? (RuntimeException)
+	    rethrow/cause rendering, and superclass catch guards expanded with known
+	    subclass names instead of the old unsupported try/catch marker.
+	    `TryCatchReusesMovedArgument.java` verifies that catch-body future uses are
+	    visible while lowering the try body: if an owned argument is moved into a
+	    try-body call and later read by a catch arm, the call receives the normal
+	    owned-recovery clone rather than moving the only value. The focused
+	    GenomicsDB gate at
+	    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_try_catch_future_use_clone_v1`
+	    moves from `cargo_check_errors=21` to `20`; the previous
+	    `borrow of moved value: sample_to_file_map_path` bucket is gone, and
+	    `SampleNameMap` now emits
+	    `Files::read_all_lines(sample_to_file_map_path.clone()/* TODO(translation): validate added clone */)`.
+	    `CauseRuntimeRethrow.java` covers the Java completion/cause idiom
+	    `throw (ce.getCause() instanceof RuntimeException ? (RuntimeException)
     ce.getCause() : ce)` and verifies that the generated Rust uses
     `ce.cause_or_self_if_instance(&["RuntimeException"])` instead of a nominal
     `downcast::<RuntimeException>()`. The focused GenomicsDB compile gate with
@@ -4079,7 +5465,14 @@ even if the generated Rust count improves.
     from raw syntax while rendering individual statements. External resource
     method calls such as `close`, `getHeader`, or `readLine` remain external
     API/facade responsibilities after the resource scope is structurally
-    correct.
+    correct. Cleanup propagation is a late call-emission decision: `lower`
+    plans each resource `close` call through the shared
+    `CallExceptionPropagationPlan`, and `exception_lowering` renders the
+    already-planned cleanup statements in reverse declaration order. A modeled
+    void/infallible cleanup becomes `reader.close();`; a cleanup with a
+    thrown-effect fact remains `reader.close()?;`. The renderer should not
+    blindly attach `?` to every cleanup call, because facade methods with return
+    type `()` are valid Rust side-effect calls.
   - Evidence: resources with `close`, early return, catch, and finally fixtures
     do not emit placeholder syntax.
   - Status: Partial. `exception_plan` now recognizes a conservative
@@ -4100,6 +5493,14 @@ even if the generated Rust count improves.
     `try_placeholder	0` and shows `getHeaderFromPath` as a structured
     try-with-resources `Result<Option<VCFHeader>, JavaException>` scope rather
     than `compile_error!("unsupported Java statement: try/catch/finally")`.
+    `exception_lowering_policy_owns_result_support_ok_and_err_shapes` now also
+    covers external try-with-resources cleanup where `FeatureReader.close` has
+    `thrown=[]` versus `thrown=[IOException]`, proving the `?` choice is made
+    from call facts instead of a hardcoded close rule. The focused GenomicsDB
+    gate `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_twr_unit_cleanup_v1`
+    moves from `cargo_check_errors=19` to `18`; the `E0277` diagnostic for
+    `reader.close()?` on `()` is gone and generated cleanup now contains
+    `reader.close();`.
     `finally` composition remains unsupported until a value-capturing plan and
     finalizer/suppressed-exception policy are added. Identifier hygiene for
     Java locals that are Rust keywords is a separate parser/name-hygiene task,
@@ -4148,6 +5549,16 @@ even if the generated Rust count improves.
     `UnableToCreateGenomicsDBWorkspace` constructor no longer emits
     `compile_error!("unsupported Java constructor: super(...) requires
     inheritance lowering")`.
+    Classes with no explicit Java constructors now receive a synthetic Rust
+    `pub fn new() -> Type` only when the co-translated support context contains
+    an actual zero-argument `new Type()` use. The constructor reuses the normal
+    field-initializer/default field-value plan instead of call-lowering
+    fabricating a fallback. This preserves Java's implicit default constructor
+    for used source types such as `GenomicsDBArgumentCollection`, while avoiding
+    broad emission of risky default constructors for large framework classes
+    whose inherited initializers still need unresolved instance context.
+    `item_assembly_owns_struct_impl_and_function_shells_from_signatures` covers
+    the neutral implicit-constructor shape.
   - Residual: ordinary `super(...)` still needs inheritance-aware
     initialization, inherited fields need a base-state composition plan, and
     arbitrary trailing statements after `this(...)` remain unsupported unless
@@ -4325,6 +5736,400 @@ Acceptance:
 - It captures top compile errors in a machine-readable file.
 - It gives the next implementation slice an owning layer instead of a generic
   "GATK does not compile" result.
+
+## Emitter Quality
+
+- [x] `EMIT-1`: Render Rust expression parentheses from precedence, not Java
+  syntax.
+  - Owner: `src/emit.rs`
+  - Ideal Rust Target: generated Rust should look like hand-written Rust for
+    ordinary operator expressions: `if a && b`, `while i < n`, `return -1;`,
+    and `(a + b) * c` only when parentheses are required to preserve meaning.
+    Java-origin parenthesized expressions should not survive as noisy Rust
+    warnings when the structured Rust expression already carries operator
+    precedence.
+  - Implementation Rule: the Rust emitter assigns precedence to `RustExpr`
+    variants and prints child expressions with parentheses only when the child
+    precedence is lower than the parent, or when a right-hand binary child of
+    equal precedence would change associativity. Semantic lowering and
+    conversion planning must keep producing structured `RustExpr::Binary` and
+    `RustExpr::Unary` nodes when they want this cleanup; raw snippets remain
+    outside the precedence printer until they are promoted to structured IR.
+  - Required Facts: Rust operator token, child expression kind, parent
+    precedence, and right-child associativity position.
+  - Owning Layer: `emit` owns Rust syntax precedence and cosmetic parentheses.
+    Parser, semantic analysis, coercion, and lowering own meaning and should
+    not add ad hoc de-parenthesizing rules for individual Java constructs.
+  - Fallback Shape: when lowering emits `RustExpr::Raw`, the emitter preserves
+    it verbatim. If a warning remains in raw output, the fix is to move that
+    construct into structured Rust IR or add a narrow raw-fragment renderer, not
+    to strip parentheses by string search.
+  - Evidence: `emit::tests::binary_expressions_do_not_emit_outer_parentheses`,
+    `emit::tests::lower_precedence_children_still_get_parentheses`,
+    `emit::tests::unary_expressions_do_not_emit_outer_parentheses`, and
+    `emit::tests::casts_drop_statement_position_parentheses_but_keep_binary_operand_parentheses`
+    cover the rule. `RustExpr::Cast` now lets primitive widening print
+    `let x: i64 = value as i64;` in assignment position while preserving
+    `(value as i64) < limit` and `acc * (value as i64)` where Rust precedence
+    requires parentheses. The GenomicsDB `compile.log` warnings about `if (...)`,
+    `while (...)`, `return (...)`, assigned `(-1)`, and simple unary wrappers
+    are therefore an emitter concern; remaining warnings identify raw snippets
+    or constructs not yet represented as structured `RustExpr` trees.
+
+- [x] `EMIT-2`: Promote stream closure bodies out of raw strings.
+  - Owner: `src/stream_lowering.rs`
+  - Ideal Rust Target: stream closures should render as ordinary Rust closures
+    whose condition and body expressions participate in precedence rendering:
+    `.filter(|x| x.start() >= lo && x.end() <= hi)` and
+    `.map(|partition| { let parts = ...; if parts.len() as i32 != 3 { None } else { ... } })`.
+  - Implementation Rule: stream lowering carries enough expression structure to
+    render Java lambda expressions with Rust precedence before they are appended
+    to stream adapter text. The stream lambda renderer assigns precedence to
+    binary, unary, call, field, array, and cast-like fragments and only adds
+    parentheses when a child expression would otherwise bind incorrectly. It
+    does not repair generated closure text with search-and-replace.
+  - Required Facts: closure parameter names, lowered local statements, lowered
+    condition expression, lowered tail expression, and target stream adapter.
+  - Fallback Shape: raw stream fragments that bypass the lambda expression
+    renderer remain verbatim. If they produce `unused_parens`, the fix is to
+    route that fragment through structured stream expression rendering or the
+    main `RustExpr` emitter, not to strip parentheses by string search.
+  - Evidence: `tests/fixtures.rs` now expects stream closures such as
+    `.filter(|v| **v > 0)` and `.map(|v| *v + base)` without outer binary
+    parentheses, while preserving cast operand parentheses such as
+    `.filter(|v| (v.len() as i32) > 3)`. The focused GenomicsDB gate at
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_stream_parens_v3` has zero
+    `warning: unnecessary parentheses` rows; the remaining warnings are
+    `unused_mut`.
+
+- [x] `EMIT-3`: Render stream lambda local `mut` from local reassignment, not
+  from Java declaration defaults.
+  - Owner: `src/stream_lowering.rs`
+  - Ideal Rust Target: temporary locals inside iterator closures should look
+    like hand-written Rust: `let parts = value.split(",").collect::<Vec<_>>();`
+    when the binding is only read, and `let mut current = ...; current = ...;`
+    only when the lambda body reassigns the binding.
+  - Implementation Rule: stream lambda rendering computes the set of mutated
+    lambda-local names from assignments and pre/post increment/decrement inside
+    the Java lambda block before rendering prefix statements. `VarDecl`
+    statements render `let mut` only when the corresponding local is in that
+    set. This rule is limited to stream-lambda local text; broader method-body
+    local mutability remains owned by `signature`/ordinary statement lowering.
+  - Required Facts: lambda block statements, local declaration names, assignment
+    targets, update-expression targets, and snake-case Rust local names.
+  - Owning Layer: `stream_lowering` owns stream closure text that has not yet
+    been promoted to ordinary `RustStmt` blocks. It may decide closure-local
+    `mut` spelling for that text, but it must not override method-level local
+    mutability facts.
+  - Fallback Shape: non-stream method locals continue to use
+    `LocalPlan::binding_mutable`. If those produce `unused_mut`, the next fix
+    must improve the local mutability fact or lower the construct to structured
+    Rust that can prove whether a mutable receiver is required.
+  - Evidence:
+    `stream_plan_lowers_flat_map_block_returning_stream_pipeline`,
+    `stream_plan_accepts_value_returning_block_lambdas`, and
+    `stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map` now
+    expect read-only stream temporaries without `mut`.
+    `stream_plan_keeps_mut_for_assigned_block_lambda_locals` proves reassigned
+    lambda locals still keep `let mut`. The focused GenomicsDB gate at
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_stream_unused_mut_v1`
+    keeps `cargo_check_errors=19` and reduces total warnings from 11 to 4.
+
+- [ ] `EMIT-4`: Narrow ordinary method-body local `mut` without breaking
+  mutable receiver and assignment cases.
+  - Owner: `src/signature.rs`, `src/lower.rs`, and only then `src/emit.rs` if a
+    final Rust-IR check is still needed.
+  - Ideal Rust Target: ordinary method locals should use `let mut` exactly when
+    Rust requires mutable binding syntax: direct reassignment, assignment to a
+    field/index through that binding, passing as `&mut`, or calling a known
+    mutable-receiver Rust API such as native collection `insert`, `sort`, or
+    `push`. Generated facade setter calls that take `&self` should not force
+    `let mut`.
+  - Implementation Rule: do not apply a broad emitter-only `mut` removal pass.
+    A trial broad pass regressed the GenomicsDB gate from 19 to 45 errors by
+    dropping required `mut` from raw assignment/update patterns and native map
+    mutation sites. The next implementation must classify ordinary locals by
+    structured binding use and receiver mutability facts before changing
+    emitted declarations.
+  - Required Facts: local assignment targets, raw assignment/update fallback
+    sites, native collection mutating method facts, external receiver
+    mutability facts, and whether the lowered call actually requires `&mut
+    self`.
+  - Fallback Shape: keep `let mut` rather than risking compile errors. An
+    `unused_mut` warning is preferable to dropping a required mutable binding.
+  - Evidence: current remaining GenomicsDB warnings are four ordinary
+    method-body `unused_mut` rows in
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_stream_unused_mut_v1`.
+
+- [ ] `EMIT-5`: Resolve cosmetic `()`/parenthesis warnings at the final
+  expression/block rendering boundary.
+  - Owner: `src/emit.rs`, `src/statement_render.rs`, and block-completion
+    planning in `src/lower.rs` only where the warning reflects a real unit
+    block shape.
+  - Ideal Rust Target: generated Rust should not contain syntactically
+    redundant wrappers such as `if (condition)`, `while (condition)`,
+    `return (value);`, or expression-position `{ ...; () }` when the unit value
+    is only an artifact of Java statement/block lowering. Rust precedence
+    should still preserve necessary parentheses, such as
+    `(value as i64) < limit`, and explicit unit should remain when it is the
+    meaningful return value of a closure, callback, or fall-through branch.
+  - Implementation Rule: treat these warnings as late syntax/block-shape
+    normalization. The `RustExpr` emitter owns operator-priority parentheses;
+    statement/block rendering owns redundant return/condition wrappers and
+    fall-through unit expression elision. Earlier semantic layers should emit
+    structured expressions and block completion facts, not local string fixes.
+  - Required Facts: Rust expression precedence, statement position, block
+    completion kind, expected expression type, and whether `()` is an explicit
+    semantic value or a lowering artifact.
+  - Owning Layer: `emit` owns expression precedence; `statement_render` and
+    `lower_method` own statement-position unit elision; exception/stream
+    lowering own callback and try/catch result carriers. No Java library pack
+    or call-lowering rule should strip parentheses or unit values by method
+    name.
+  - Fallback Shape: keep explicit `()` or parentheses when removing them would
+    change type, precedence, associativity, control flow, or callback return
+    shape. A warning is acceptable until the source construct is represented as
+    structured Rust IR with enough completion facts.
+  - Evidence: the existing `EMIT-1` and `EMIT-2` tests cover precedence-based
+    parenthesis removal; current GenomicsDB compile gates still report four
+    warnings, so `EMIT-5` remains open as the catch-all for non-precedence
+    unit/block cleanup. `emit::tests::statement_position_unit_expressions_are_elided`
+    and `emit::tests::return_unit_expr_renders_as_bare_return` cover the first
+    late cleanup slice: bare statement-position `()` is dropped, `return ();`
+    becomes `return;`, and result/callback carriers such as `Ok(())` are
+    preserved.
+
+## External Utility Facades
+
+- [x] `EXT-UTIL-1`: Render external validation utilities as side-effect
+  facade methods, not generic-return placeholders.
+  - Ideal Rust Target: a Java static validation call such as
+    `Utils.validate(condition, message)` or `Utils.validateArg(condition,
+    message)` should render as an ordinary Rust side-effect call:
+    `Utils::validate(condition, message);` with a facade like
+    `pub fn validate<T1>(_arg0: bool, _arg1: T1) -> () { () }`. The condition
+    argument should be concrete `bool`; the message argument may remain generic
+    unless facts prove a specific `String`, supplier, or error type overload.
+    The call must not require `R: Default` inference.
+  - Implementation Rule: external pack API-effect facts with `return_type:
+    None` and role `SideEffect` own the unit return shape. Facade generation
+    consumes those facts for static/imported static methods and renders `()`
+    before falling back to generic `R: Default`. Argument-effect facts may
+    concrete only the slots they prove, leaving unmodeled overload-sensitive
+    positions generic.
+  - Required Facts: resolved static owner, method name/arity, API role,
+    absent return type, receiver mutability, and per-argument type facts for
+    slots that are safe across overloads.
+  - Owning Layer: external library packs own `Utils.validate` and
+    `Utils.validateArg` side-effect facts; `stdlib` facade generation owns the
+    fallback order from facts to generic placeholders; lowering only emits the
+    resolved call.
+  - Fallback Shape: if no fact is available, imported static utility methods
+    keep the existing generic facade fallback or the name-prefix side-effect
+    heuristic for `validate_*`. Unknown message overloads remain generic
+    instead of being forced to `&str`.
+  - Evidence: `builtin_external_member_lookup_uses_cached_pack_facts` proves
+    the built-in Broad Hellbender utility pack exports
+    `Utils.validate(boolean, ...)` as a side-effect API with no return type and
+    a concrete boolean condition argument.
+    `external_static_validation_facade_uses_side_effect_fact_return` proves a
+    neutral static validation call emits `pub fn validate<T1>(_arg0: bool,
+    _arg1: T1) -> () { () }` and avoids `R: Default`. The focused GenomicsDB
+    gate at
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_utils_validate_void_v2`
+    remains at `cargo_check_errors=9`, but the previous
+    `Utils::validate(header.is_some(), ...)` generic return inference issue is
+    gone. The first remaining inference blocker is now
+    `Files::write_string<R: Default, ...>`.
+
+- [x] `EXT-UTIL-2`: Render Java platform file-write static utilities with a
+  concrete return facade.
+  - Ideal Rust Target: Java `Files.writeString(path, contents)` should
+    ultimately map to a Rust filesystem write boundary such as
+    `std::fs::write(path, contents)?;` when exception/result lowering and
+    path/string conversions are available. At the current external-facade
+    phase, the maintainable fallback is a fact-backed Java-platform facade:
+    `Files::write_string(path, contents);` with support
+    `pub fn write_string<T0, T1>(_arg0: T0, _arg1: T1) -> Path {
+    Default::default() }`. The facade should not ask Rust to infer
+    `R: Default` for an ignored Java return value.
+  - Implementation Rule: Java platform static utility return facts own the
+    concrete Java return type for `Files.writeString`. The facade generator
+    consumes those facts before the generic imported-static fallback. Argument
+    slots may remain generic until `CharSequence`/`Option<String>` recovery and
+    path borrowing are modeled without fighting local nullability bugs.
+  - Required Facts: resolved static owner, method name/arity, Java platform
+    method return type, return nullability, and static utility role.
+  - Owning Layer: `stdlib` owns Java platform static utility signatures;
+    `stdlib` facade generation owns support method rendering; lowering only
+    emits the selected static call.
+  - Fallback Shape: if the Java platform method is unknown, keep the existing
+    `R: Default` fallback. If content/path argument shape facts are unknown,
+    keep those arguments generic rather than inserting a misleading borrow or
+    unwrap.
+  - Evidence:
+    `java_platform_files_write_string_facade_uses_known_path_return` proves a
+    neutral `java.nio.file.Files.writeString(Path, String)` call emits
+    `Files::write_string(path, contents);`, generates
+    `pub fn write_string<T0, T1>(_arg0: T0, _arg1: T1) -> Path`, and avoids
+    the generic `R: Default` facade. The focused GenomicsDB gate at
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_files_write_string_return_v1`
+    moves from `cargo_check_errors=9` to `8`; the previous
+    `Files::write_string<R: Default, ...>` inference blocker is gone.
+
+## Package Crate Assembly
+
+- [ ] `PKG-ASM-1`: Give duplicate external support facades one crate identity
+  across focused-package modules.
+  - Ideal Rust Target: when two translated Java files reference the same
+    external facade type, generated Rust should have one nominal crate type and
+    all module-specific support methods should attach to that type. For
+    example, calls crossing `GATKGenomicsDBUtils` and `GenomicsDBImport`
+    should use a single `crate::VidMappingPB` and a single
+    `crate::GenomicsDBImporter`, not distinct
+    `generated_00001_*::VidMappingPB` and
+    `generated_00004_*::VidMappingPB` types.
+  - Implementation Rule: package/crate assembly owns support-facade identity
+    across independently translated files. The short-term focused gate harness
+    may unify duplicate declarations only when they are proven to be
+    support-prelude declarations before a module's real translated source
+    type. It must not alias all duplicate simple names, because real source
+    classes from different packages can share a Rust name. Longer-term Rust
+    lowering should split module lowering from shared support generation so
+    the support registry is structured rather than parsed from rendered Rust.
+  - Required Facts: generated module name, real translated source type for the
+    module, support-prelude declared type names, duplicate support type counts,
+    and deterministic canonical owner module for each duplicate support type.
+  - Owning Layer: crate assembly owns cross-module support identity;
+    `stdlib` owns per-program facade surfaces; `lower` should eventually expose
+    shared-support emission as a first-class phase. Individual call lowering
+    must not paper over duplicate identities with casts.
+  - Fallback Shape: if a duplicate type is not proved to be a support-prelude
+    facade, leave it module-local and let the compile gate report the nominal
+    mismatch. If duplicate method impls conflict after unification, record the
+    surface-merge conflict instead of silently dropping methods.
+  - Evidence: a raw harness-level duplicate support-prelude unification probe
+    was rejected after the focused GenomicsDB gate regressed from
+    `cargo_check_errors=8` to `611` at
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_shared_support_identity_v1`.
+    The regression was dominated by duplicate inherent methods and conflicting
+    trait impls after method surfaces from several modules were attached to
+    the same raw-text-unified facade type. This keeps `PKG-ASM-1` open and
+    narrows the acceptable implementation: shared support identity must merge
+    structured facade declarations, impl methods, trait impls, aliases, and
+    fields deliberately, not by stripping duplicate rendered struct lines.
+
+## External Parameter Nullability Defaults
+
+- [ ] `EXT-NULL-1`: Default external reference and callback parameters to
+  non-null unless facts prove or strongly suggest nullable.
+  - Ideal Rust Target: external library calls should expose ordinary Rust
+    parameter shapes by default: `T`, `&T`, `&mut T`, or `F: Fn...`, not
+    `Option<T>`/`Option<F>` everywhere. If a Java call site passes `null`, or
+    an external/user/source-summary fact marks that parameter nullable, the Rust
+    slot becomes optional and non-null branch values are wrapped once at the
+    slot boundary. For example, a Java constructor argument such as
+    `bypass ? null : this::createSampleToReaderMap` should target
+    `Option<callback>`; the non-null branch should become `Some(...)`, and the
+    method reference should be adapted against the callback facts, such as
+    `(Map<String, URI>, int, int) -> reader map`.
+  - Implementation Rule: parameter nullability is selected by ordered facts,
+    not by ad hoc lowering. Primitive parameters are always non-null. For
+    external reference/callback parameters, observed `null` at any resolved
+    owner/kind/arity/parameter slot makes the slot nullable. Explicit external
+    pack facts, user facts, source-summary annotations, or source bodies may
+    also mark the slot nullable or non-null; a contradiction with an observed
+    `null` call site should emit a conflict diagnostic and choose the safe
+    optional shape unless a future explicit override policy says otherwise. If
+    no nullable evidence exists, the slot is `DefinitelyNonNull` with
+    provenance `AssumedNonNullExternalDefault`. This rule applies only to
+    parameters; return nullability is governed by return facts.
+  - Required Facts: resolved callable owner, callable kind
+    (constructor/static/instance), method name where applicable, arity,
+    parameter index, Java parameter category (primitive/reference/callback),
+    observed call-site nullness, source-summary/annotation nullability, and
+    external or user fact provenance.
+  - Owning Layer: `semantic_analysis`/usage records observed call-site
+    nullness; `external_packs` and future user fact injection own declared
+    external parameter facts; `signature`/slot-shape planning chooses
+    optional versus non-optional parameter shape; `conversion_plan` wraps
+    `Some(...)`/`None` at the argument boundary; method-reference planning
+    consumes callback slot signature facts for arity and argument types.
+    Rendering must not rediscover nullable external parameters from raw
+    expression strings.
+  - Fallback Shape: when an external reference/callback parameter has no
+    nullable evidence, assume non-null and record the assumption. When nullable
+    evidence exists but the target callback or reference type is unknown, emit
+    `Option<T>`/`Option<F>` with generic arguments plus a diagnostic rather
+    than forcing a non-null slot. Future injected facts may replace the
+    conservative generic shape without changing lowering.
+  - Evidence: add tests proving a neutral external constructor callback
+    parameter remains non-optional, the same parameter becomes optional when
+    any call passes `null`, non-null alternatives in a nullable ternary are
+    wrapped with `Some(...)`, and explicit fact injection can mark a parameter
+    nullable/non-null with conflict diagnostics. This item is open until the
+    focused GenomicsDB import constructor no longer emits an incompatible
+    `None` versus closure branch or a one-argument method-reference callback
+    for the reader-map constructor parameter.
+  - Status: Partial. Constructor argument shaping now consumes external
+    argument facts through `external_constructor_arg_shapes`, defaulting
+    unmodeled neighboring external constructor parameters to conservative
+    non-optional slots. `conversion_plan` treats lambdas and method references
+    as target-shaped callback expressions before optional wrapping, and
+    method-reference planning can render current-receiver method references
+    with arity from the current type signature. The GenomicsDB pack now marks
+    `ImportConfig::new` parameter 6 as a nullable escaping `Function` slot.
+    `nullable_external_constructor_callback_slot_wraps_method_reference_branch`
+    proves `bypass ? null : this::readerFactory` lowers to
+    `None`/`Some(|arg0, arg1, arg2| ...)` without a callback downcast.
+    `call_plan_owns_call_and_new_target_selection_before_argument_lowering`
+    proves one constructor argument fact shapes all constructor slots while
+    unmodeled neighbors remain non-optional. The focused GenomicsDB gate at
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_ext_null_arity_v1` moves
+    from `cargo_check_errors=8` to `7`; the previous incompatible
+    `None`/closure branch, one-argument callback, and `Function` downcast on
+    the `ImportConfig::new` argument are gone. This item remains open because
+    general observed-null fact production and explicit injected-fact conflict
+    diagnostics are not implemented yet.
+  - Follow-up Status: Partial. The GenomicsDB pack now also models
+    `ImportConfig::new` parameter 4 as a non-null escaping
+    `Set<VCFHeaderLine>` slot. This gives the existing optional-self-field
+    recovery a typed owned target, so Java `mergedHeaderLines` passed to that
+    constructor lowers as
+    `self.merged_header_lines.as_ref().expect("Java null receiver").clone()`
+    rather than moving out of `self`. The neutral
+    `external_constructor_owned_set_param_clones_optional_self_field_element`
+    test covers the same pattern for an external constructor with a typed
+    owned set parameter. The focused GenomicsDB gate at
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_importconfig_header_lines_v1`
+    moves from `cargo_check_errors=7` to `6`; the `E0507` move out of
+    `self.merged_header_lines` is gone.
+
+- [ ] `EXT-NULL-2`: Produce observed-null external parameter facts and conflict
+  diagnostics.
+  - Ideal Rust Target: if any translated call site passes Java `null` to a
+    resolved external reference/callback parameter, later call sites for the
+    same external callable slot should consistently target `Option<_>`.
+    Explicit user or external facts should be able to mark a slot nullable or
+    non-null, and contradictory source evidence should produce a visible
+    diagnostic rather than silently picking whichever fact was inserted last.
+  - Implementation Rule: `semantic_analysis` records finite call-slot
+    nullability evidence keyed by external receiver/constructor type, callable
+    kind, rendered method/constructor name, arity, and parameter index.
+    `FactSet` merges that evidence with external/user facts using the
+    documented priority: observed `null` requires a safe optional shape unless
+    a future override policy explicitly escalates the contradiction.
+  - Required Facts: resolved external callable identity, arity, parameter
+    index, argument expression nullability, external/user fact provenance, and
+    diagnostic location.
+  - Owning Layer: `semantic_analysis` owns observed evidence and diagnostics;
+    `facts` owns merge/query behavior; `signature` and `conversion_plan`
+    remain consumers.
+  - Fallback Shape: if the callable identity cannot be resolved, keep the
+    current conservative per-call shape and emit no global fact.
+  - Evidence: add tests where one external call passes `null` and another
+    non-null call to the same slot becomes optional, plus tests for explicit
+    non-null facts conflicting with observed null.
 
 ## Clearing Rules
 

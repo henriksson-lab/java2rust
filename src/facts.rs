@@ -751,6 +751,16 @@ impl FactSet {
         arg_count: Option<usize>,
         provenance: Option<FactProvenance>,
     ) -> Option<&ExternalApiEffectFact> {
+        if let Some(receiver_type) = receiver_type
+            && let Some(effect) = self.find_exact_receiver_external_api_effect(
+                receiver_type,
+                method_name,
+                arg_count,
+                provenance,
+            )
+        {
+            return Some(effect);
+        }
         if provenance.is_none() {
             if let Some(effect) = arg_count.and_then(|arg_count| {
                 self.external_api_effect_facts.iter().rev().find(|fact| {
@@ -796,6 +806,32 @@ impl FactSet {
                             fact.receiver_type.as_deref(),
                             receiver_type,
                         )
+                        && (arg_count.is_none() || fact.arg_count.is_none())
+                        && provenance.is_none_or(|provenance| fact.provenance == provenance)
+                })
+            })
+    }
+
+    fn find_exact_receiver_external_api_effect(
+        &self,
+        receiver_type: &str,
+        method_name: &str,
+        arg_count: Option<usize>,
+        provenance: Option<FactProvenance>,
+    ) -> Option<&ExternalApiEffectFact> {
+        arg_count
+            .and_then(|arg_count| {
+                self.external_api_effect_facts.iter().rev().find(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && fact.receiver_type.as_deref() == Some(receiver_type)
+                        && fact.arg_count == Some(arg_count)
+                        && provenance.is_none_or(|provenance| fact.provenance == provenance)
+                })
+            })
+            .or_else(|| {
+                self.external_api_effect_facts.iter().rev().find(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && fact.receiver_type.as_deref() == Some(receiver_type)
                         && (arg_count.is_none() || fact.arg_count.is_none())
                         && provenance.is_none_or(|provenance| fact.provenance == provenance)
                 })
@@ -1527,25 +1563,36 @@ fn external_method_name_matches(fact_method_name: &str, query_method_name: &str)
 
 fn external_type_name_aliases(type_name: &str) -> Vec<String> {
     let mut aliases = external_direct_type_name_aliases(type_name);
-    let simple = type_name.rsplit('.').next().unwrap_or(type_name);
-    let simple_canonical = crate::stdlib::canonical_external_receiver_type_key(simple);
-    let simple_snake = crate::parser::to_snake_case(simple);
     let canonical = crate::stdlib::canonical_external_receiver_type_key(type_name);
-    let canonical_simple = canonical.rsplit('.').next().unwrap_or(&canonical);
-    let canonical_simple_canonical =
-        crate::stdlib::canonical_external_receiver_type_key(canonical_simple);
-    let canonical_simple_snake = crate::parser::to_snake_case(canonical_simple);
-    aliases.extend([
-        simple.to_string(),
-        simple_canonical,
-        simple_snake,
-        canonical_simple.to_string(),
-        canonical_simple_canonical,
-        canonical_simple_snake,
-    ]);
+    if let Some(simple) = package_qualified_simple_alias(type_name) {
+        aliases.extend([
+            simple.to_string(),
+            crate::stdlib::canonical_external_receiver_type_key(simple),
+            crate::parser::to_snake_case(simple),
+        ]);
+    }
+    if let Some(canonical_simple) = package_qualified_simple_alias(&canonical) {
+        aliases.extend([
+            canonical_simple.to_string(),
+            crate::stdlib::canonical_external_receiver_type_key(canonical_simple),
+            crate::parser::to_snake_case(canonical_simple),
+        ]);
+    }
     aliases.sort();
     aliases.dedup();
     aliases
+}
+
+fn package_qualified_simple_alias(type_name: &str) -> Option<&str> {
+    let (prefix, simple) = type_name.rsplit_once('.')?;
+    if prefix
+        .split('.')
+        .any(|segment| segment.chars().next().is_some_and(char::is_lowercase))
+    {
+        Some(simple)
+    } else {
+        None
+    }
 }
 
 fn external_type_name_directly_matches(fact_type_name: &str, query_type_name: &str) -> bool {

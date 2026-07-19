@@ -80,8 +80,88 @@ pub fn constructor_function_shell_with_facts(
 pub fn constructor_return_body(ty: &TypeDecl, fields: Vec<(String, RustExpr)>) -> Vec<RustStmt> {
     vec![RustStmt::Return(Some(RustExpr::StructLit {
         name: ty.name.clone(),
-        fields,
+        fields: reorder_struct_literal_moves_after_reads(fields),
     }))]
+}
+
+fn reorder_struct_literal_moves_after_reads(
+    fields: Vec<(String, RustExpr)>,
+) -> Vec<(String, RustExpr)> {
+    let mut deferred = Vec::new();
+    let mut ordered = Vec::new();
+    for (index, (field_name, expr)) in fields.iter().cloned().enumerate() {
+        if let Some(var_name) = rust_expr_direct_move_var(&expr)
+            && fields
+                .iter()
+                .enumerate()
+                .filter(|(other_index, _)| *other_index != index)
+                .any(|(_, (_, other_expr))| rust_expr_reads_var(other_expr, &var_name))
+        {
+            deferred.push((field_name, expr));
+            continue;
+        }
+        ordered.push((field_name, expr));
+    }
+    ordered.extend(deferred);
+    ordered
+}
+
+fn rust_expr_direct_move_var(expr: &RustExpr) -> Option<String> {
+    match expr {
+        RustExpr::Var(name) => Some(name.clone()),
+        RustExpr::Raw(text) if valid_rust_identifier(text) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn rust_expr_reads_var(expr: &RustExpr, var_name: &str) -> bool {
+    match expr {
+        RustExpr::Var(name) => name == var_name,
+        RustExpr::Field(receiver, _) => rust_expr_reads_var(receiver, var_name),
+        RustExpr::Index(target, index) => {
+            rust_expr_reads_var(target, var_name) || rust_expr_reads_var(index, var_name)
+        }
+        RustExpr::Unary { expr, .. } => rust_expr_reads_var(expr, var_name),
+        RustExpr::Cast { expr, .. } => rust_expr_reads_var(expr, var_name),
+        RustExpr::Binary { left, right, .. } => {
+            rust_expr_reads_var(left, var_name) || rust_expr_reads_var(right, var_name)
+        }
+        RustExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rust_expr_reads_var(condition, var_name)
+                || rust_expr_reads_var(then_expr, var_name)
+                || rust_expr_reads_var(else_expr, var_name)
+        }
+        RustExpr::Call { function, args } => {
+            rust_expr_reads_var(function, var_name)
+                || args.iter().any(|arg| rust_expr_reads_var(arg, var_name))
+        }
+        RustExpr::MethodCall { receiver, args, .. } => {
+            rust_expr_reads_var(receiver, var_name)
+                || args.iter().any(|arg| rust_expr_reads_var(arg, var_name))
+        }
+        RustExpr::StructLit { fields, .. } => fields
+            .iter()
+            .any(|(_, field_expr)| rust_expr_reads_var(field_expr, var_name)),
+        RustExpr::Raw(text) => raw_rust_expr_mentions_identifier(text, var_name),
+        RustExpr::Literal(_) => false,
+    }
+}
+
+fn valid_rust_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn raw_rust_expr_mentions_identifier(text: &str, ident: &str) -> bool {
+    text.split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .any(|token| token == ident)
 }
 
 pub fn constructor_default_field_value(

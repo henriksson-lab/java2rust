@@ -44,6 +44,11 @@ pub fn apply_call_target(
             method: rust_name.to_string(),
             args,
         },
+        CallTargetPlan::FallbackSelf { rust_name } => RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("self".to_string())),
+            method: rust_name.clone(),
+            args,
+        },
         CallTargetPlan::FallbackFree { rust_name } => RustExpr::Call {
             function: Box::new(RustExpr::Var(rust_name.clone())),
             args,
@@ -83,6 +88,19 @@ pub fn apply_call_target(
                 args: facade_args,
             }
         }
+        CallTargetPlan::SuperBoundary {
+            return_type,
+            propagates_result,
+            ..
+        } => apply_super_boundary_call(return_type, *propagates_result),
+    }
+}
+
+fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) -> RustExpr {
+    match (return_type, propagates_result) {
+        (JavaType::Void, true) => RustExpr::Raw("Ok(())".to_string()),
+        (JavaType::Void, false) => RustExpr::Raw("()".to_string()),
+        _ => RustExpr::Raw("Default::default()".to_string()),
     }
 }
 
@@ -415,6 +433,7 @@ pub fn borrowed_sequence_extend_arg(
 ) -> RustExpr {
     let arg = emit::emit_expr(&arg);
     match borrowed_element_recovery_policy(element_shape, facts) {
+        BorrowedElementRecoveryPolicy::BorrowElement => RustExpr::Raw(format!("{arg}.iter()")),
         BorrowedElementRecoveryPolicy::StringViewToOwned => {
             RustExpr::Raw(format!("{arg}.iter().map(|v| v.to_string())"))
         }

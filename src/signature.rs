@@ -4,8 +4,8 @@ use crate::effective_facts::EffectiveFacts;
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
     CaptureOrigin, CaptureSource, DispatchRequirementKind, ExternalApiArgumentEffectFact,
-    ExternalArgumentAliasPolicy, FactSet, NullabilityState, OwnedRecoveryCapability,
-    ReceiverMutabilityFact,
+    ExternalArgumentAliasPolicy, FactSet, HierarchyStrategy, NullabilityState,
+    OwnedRecoveryCapability, ReceiverMutabilityFact,
 };
 use crate::graph::strongly_connected_components;
 use crate::java_ir::{
@@ -35,7 +35,7 @@ use crate::slot_shape::{
 use crate::types::{optional_element_type, optional_java_type};
 use crate::usage::{
     BindingUse, BindingUseFacts, CallArgumentBoundary, FieldUse, MethodUsageFacts,
-    UsageConstructorKey, UsageFacts, UsageMethodKey,
+    ReturnedCallResultUse, UsageConstructorKey, UsageFacts, UsageMethodKey,
 };
 
 pub type SolvedSlotShape = RustSlotShape;
@@ -1942,6 +1942,7 @@ fn apply_signature_propagation_sweep(
         | propagate_call_argument_constraints_to_callees(constraints, usage)
         | propagate_constructor_call_argument_constraints_to_callees(constraints, usage)
         | propagate_constructor_delegation_argument_constraints_to_callees(constraints, usage)
+        | propagate_null_call_argument_constraints_to_callees(constraints, usage)
         | propagate_call_result_constraints_to_bindings(constraints, usage)
         | propagate_constructor_call_result_constraints_to_bindings(constraints, usage)
         | propagate_call_result_constraints_to_fields(constraints, usage)
@@ -2449,6 +2450,100 @@ fn propagate_constructor_delegation_argument_constraints_to_callees(
         if let Some(param_name) = param_name {
             changed |=
                 add_constructor_param_constraint(constraints, &callee_key, &param_name, constraint);
+        }
+    }
+    changed
+}
+
+fn propagate_null_call_argument_constraints_to_callees(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+) -> bool {
+    let mut method_pending = Vec::new();
+    let mut constructor_pending = Vec::new();
+    for method_usage in usage.methods.values() {
+        for call_site in &method_usage.call_sites {
+            let Some(resolved) = &call_site.resolved else {
+                continue;
+            };
+            let callee_key = MethodKey {
+                type_name: resolved.declaring_type.clone(),
+                rust_name: resolved.rust_name.clone(),
+            };
+            if !constraints.methods.contains_key(&callee_key) {
+                continue;
+            }
+            for arg_index in &call_site.null_arg_indices {
+                method_pending.push((callee_key.clone(), *arg_index));
+            }
+        }
+    }
+    for constructor_usage in usage.constructors.values() {
+        for call_site in &constructor_usage.call_sites {
+            let Some(resolved) = &call_site.resolved else {
+                continue;
+            };
+            let callee_key = MethodKey {
+                type_name: resolved.declaring_type.clone(),
+                rust_name: resolved.rust_name.clone(),
+            };
+            if !constraints.methods.contains_key(&callee_key) {
+                continue;
+            }
+            for arg_index in &call_site.null_arg_indices {
+                method_pending.push((callee_key.clone(), *arg_index));
+            }
+        }
+        for call_site in &constructor_usage.constructor_call_sites {
+            if call_site.boundary != CallArgumentBoundary::InternalSameType {
+                continue;
+            }
+            let Some(resolved) = &call_site.resolved else {
+                continue;
+            };
+            let callee_key = ConstructorKey {
+                type_name: resolved.declaring_type.clone(),
+                rust_name: resolved.rust_name.clone(),
+            };
+            if !constraints.constructors.contains_key(&callee_key) {
+                continue;
+            }
+            for arg_index in &call_site.null_arg_indices {
+                constructor_pending.push((callee_key.clone(), *arg_index));
+            }
+        }
+    }
+
+    let nullability = SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull);
+    let mut changed = false;
+    for (callee_key, arg_index) in method_pending {
+        let param_name = constraints
+            .methods
+            .get(&callee_key)
+            .and_then(|method_constraints| method_constraints.param_names.get(arg_index))
+            .cloned();
+        if let Some(param_name) = param_name {
+            changed |= add_method_param_constraint(
+                constraints,
+                &callee_key,
+                &param_name,
+                nullability.clone(),
+            );
+        }
+    }
+    for (callee_key, arg_index) in constructor_pending {
+        let param_name = constraints
+            .constructors
+            .get(&callee_key)
+            .and_then(|constructor_constraints| constructor_constraints.param_names.get(arg_index))
+            .cloned();
+        if let Some(param_name) = param_name {
+            changed |= add_constructor_param_constraint(
+                constraints,
+                &callee_key,
+                &param_name,
+                nullability.clone(),
+            );
         }
     }
     changed
@@ -4081,6 +4176,13 @@ pub fn method_param_shape_constraints(
     {
         boundary_kind = None;
     }
+    if boundary_kind == Some(SignatureBoundaryKind::UnknownApi)
+        && binding.is_some_and(|binding| {
+            binding_is_fully_modeled_by_readonly_external_receivers(binding, facts)
+        })
+    {
+        boundary_kind = None;
+    }
     let mut constraints =
         signature_slot_baseline_policy(&param.ty, boundary_kind, facts).constraints;
     if let Some(binding) = binding {
@@ -4105,6 +4207,10 @@ pub fn method_param_shape_constraints(
             &source_binding_nullability_constraints(body, &param.name),
         );
     }
+    push_unique_signature_constraints(
+        &mut constraints,
+        &internal_exact_final_erased_facade_constraints(&param.ty, facts),
+    );
     if boundary_kind.is_none() {
         constraints.extend(
             method_param_borrowed_content_policy_with_facts(ty, method, param, usage, facts)
@@ -4202,7 +4308,8 @@ pub fn signature_boundary_representation_policy_with_effective_facts(
         preserve_object_representation: matches!(
             java_ty,
             JavaType::Unknown(_) | JavaType::Wildcard(_)
-        ) || fact_policy.object_representation_facts,
+        ) || (fact_policy.object_representation_facts
+            && !exact_final_erased_facade_boundary_should_use_native(java_ty, facts)),
     }
 }
 
@@ -4268,10 +4375,14 @@ pub fn signature_native_boundary_policy_with_effective_facts(
     let owner_requirement = capability
         .capability_ownership
         .unwrap_or_else(|| conservative_ownership(java_ty));
-    let constraints = vec![
+    let mut constraints = vec![
         SignatureConstraint::RequiredOwnership(owner_requirement),
         SignatureConstraint::RequiredView(ViewShape::Native),
     ];
+    push_unique_signature_constraints(
+        &mut constraints,
+        &exact_final_erased_facade_native_boundary_constraints(java_ty, facts),
+    );
     SignatureNativeBoundaryPolicy {
         java_ty: java_ty.clone(),
         required_ownership: owner_requirement,
@@ -4348,6 +4459,31 @@ fn signature_erased_object_boundary_constraints_with_effective_facts(
         SignatureConstraint::RequiredDispatch(DispatchShape::ErasedObject),
         SignatureConstraint::RequiredView(ViewShape::ErasedObjectView),
     ]
+}
+
+fn exact_final_erased_facade_boundary_should_use_native(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    !is_declared_java_object_type(java_ty)
+        && matches!(java_ty, JavaType::Named { .. })
+        && matches!(
+            facts.object_representation_override_strategy_for(java_ty),
+            Some(HierarchyStrategy::ErasedObject)
+        )
+        && facts.is_final_type(java_ty)
+}
+
+fn exact_final_erased_facade_native_boundary_constraints(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> Vec<SignatureConstraint> {
+    if !exact_final_erased_facade_boundary_should_use_native(java_ty, facts) {
+        return Vec::new();
+    }
+    vec![SignatureConstraint::RequiredDispatch(
+        DispatchShape::Concrete,
+    )]
 }
 
 fn is_declared_java_object_type(java_ty: &JavaType) -> bool {
@@ -6006,6 +6142,63 @@ fn source_expr_nullability_state(expr: &Expr) -> Option<NullabilityState> {
     }
 }
 
+fn initializer_proves_declared_non_null(
+    expr: &Expr,
+    declared_ty: &JavaType,
+    facts: &FactSet,
+) -> bool {
+    matches!(
+        source_expr_nullability_state(expr),
+        Some(NullabilityState::DefinitelyNonNull)
+    ) || external_initializer_proves_declared_non_null(expr, declared_ty, facts)
+}
+
+fn external_initializer_proves_declared_non_null(
+    expr: &Expr,
+    declared_ty: &JavaType,
+    facts: &FactSet,
+) -> bool {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return false;
+    };
+    let Some(receiver_key) = static_initializer_receiver_key(receiver) else {
+        return false;
+    };
+    facts
+        .external_api_effect_for_receiver_with_arity(Some(&receiver_key), name, Some(args.len()))
+        .is_some_and(|effect| {
+            effect.return_type.as_ref() == Some(declared_ty)
+                && effect.return_nullability == NullabilityState::DefinitelyNonNull
+        })
+}
+
+fn static_initializer_receiver_key(receiver: &Expr) -> Option<String> {
+    match receiver {
+        Expr::Var(name) => Some(crate::stdlib::canonical_external_receiver_type_key(name)),
+        Expr::FieldAccess(_, _) => static_initializer_receiver_java_name(receiver)
+            .map(|name| crate::stdlib::canonical_external_receiver_type_key(&name)),
+        _ => None,
+    }
+}
+
+fn static_initializer_receiver_java_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Var(name) => Some(name.clone()),
+        Expr::FieldAccess(receiver, field) => Some(format!(
+            "{}.{}",
+            static_initializer_receiver_java_name(receiver)?,
+            field
+        )),
+        _ => None,
+    }
+}
+
 fn merge_binding_nullability_state(
     states: &mut HashMap<String, NullabilityState>,
     name: &str,
@@ -6026,6 +6219,7 @@ fn collect_local_constraint_sets(
     let mut locals = Vec::new();
     let mutated = collect_mutated_local_names(block);
     let source_nullability = collect_binding_nullability_constraint_map(block);
+    let duplicate_names = collect_duplicate_declared_local_names(block);
     collect_local_constraint_sets_from_stmts(
         &block.statements,
         &mutated,
@@ -6033,9 +6227,74 @@ fn collect_local_constraint_sets(
         facts,
         captured,
         &source_nullability,
+        &duplicate_names,
         &mut locals,
     );
     locals
+}
+
+fn collect_duplicate_declared_local_names(block: &crate::java_ir::Block) -> HashSet<String> {
+    let mut counts = HashMap::<String, usize>::new();
+    collect_declared_local_name_counts(&block.statements, &mut counts);
+    counts
+        .into_iter()
+        .filter_map(|(name, count)| (count > 1).then_some(name))
+        .collect()
+}
+
+fn collect_declared_local_name_counts(
+    statements: &[crate::java_ir::Stmt],
+    counts: &mut HashMap<String, usize>,
+) {
+    use crate::java_ir::Stmt;
+    for stmt in statements {
+        match stmt {
+            Stmt::VarDecl { name, .. } => {
+                *counts.entry(name.clone()).or_default() += 1;
+            }
+            Stmt::For { init, body, .. } => {
+                collect_declared_local_name_counts(init, counts);
+                collect_declared_local_name_counts(&body.statements, counts);
+            }
+            Stmt::EnhancedFor { var_name, body, .. } => {
+                *counts.entry(var_name.clone()).or_default() += 1;
+                collect_declared_local_name_counts(&body.statements, counts);
+            }
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_declared_local_name_counts(&then_block.statements, counts);
+                if let Some(else_block) = else_block {
+                    collect_declared_local_name_counts(&else_block.statements, counts);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::Block(body) => {
+                collect_declared_local_name_counts(&body.statements, counts);
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    collect_declared_local_name_counts(&case.statements, counts);
+                }
+            }
+            Stmt::Try {
+                resources, body, ..
+            } => {
+                collect_declared_local_name_counts(resources, counts);
+                collect_declared_local_name_counts(&body.statements, counts);
+            }
+            Stmt::LocalType(_)
+            | Stmt::Assign { .. }
+            | Stmt::Expr(_)
+            | Stmt::Return(_)
+            | Stmt::Throw(_)
+            | Stmt::ConstructorInvocation { .. }
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => {}
+        }
+    }
 }
 
 fn collect_local_constraint_sets_from_stmts(
@@ -6045,15 +6304,30 @@ fn collect_local_constraint_sets_from_stmts(
     facts: &FactSet,
     captured: &HashSet<String>,
     source_nullability: &HashMap<String, Vec<SignatureConstraint>>,
+    duplicate_names: &HashSet<String>,
     locals: &mut Vec<LocalConstraintSet>,
 ) {
     use crate::java_ir::Stmt;
     for stmt in statements {
         match stmt {
-            Stmt::VarDecl { ty, name, .. } => {
+            Stmt::VarDecl {
+                ty,
+                name,
+                initializer,
+            } => {
+                let usage = if duplicate_names.contains(name) {
+                    None
+                } else {
+                    usage
+                };
                 let mut constraints =
                     local_shape_constraints_with_usage(name, ty, mutated, usage, facts);
-                if let Some(source_constraints) = source_nullability.get(name) {
+                if !(duplicate_names.contains(name)
+                    && initializer.as_ref().is_some_and(|initializer| {
+                        initializer_proves_declared_non_null(initializer, ty, facts)
+                    }))
+                    && let Some(source_constraints) = source_nullability.get(name)
+                {
                     push_unique_signature_constraints(&mut constraints, source_constraints);
                 }
                 apply_capture_constraints(&mut constraints, captured, name, ty, facts);
@@ -6071,6 +6345,7 @@ fn collect_local_constraint_sets_from_stmts(
                     facts,
                     captured,
                     source_nullability,
+                    duplicate_names,
                     locals,
                 );
                 collect_local_constraint_sets_from_stmts(
@@ -6080,6 +6355,7 @@ fn collect_local_constraint_sets_from_stmts(
                     facts,
                     captured,
                     source_nullability,
+                    duplicate_names,
                     locals,
                 );
             }
@@ -6089,9 +6365,16 @@ fn collect_local_constraint_sets_from_stmts(
                 body,
                 ..
             } => {
+                let usage = if duplicate_names.contains(var_name) {
+                    None
+                } else {
+                    usage
+                };
                 let mut constraints =
                     local_shape_constraints_with_usage(var_name, var_type, mutated, usage, facts);
-                if let Some(source_constraints) = source_nullability.get(var_name) {
+                if !duplicate_names.contains(var_name)
+                    && let Some(source_constraints) = source_nullability.get(var_name)
+                {
                     push_unique_signature_constraints(&mut constraints, source_constraints);
                 }
                 apply_capture_constraints(&mut constraints, captured, var_name, var_type, facts);
@@ -6107,6 +6390,7 @@ fn collect_local_constraint_sets_from_stmts(
                     facts,
                     captured,
                     source_nullability,
+                    duplicate_names,
                     locals,
                 );
             }
@@ -6122,6 +6406,7 @@ fn collect_local_constraint_sets_from_stmts(
                     facts,
                     captured,
                     source_nullability,
+                    duplicate_names,
                     locals,
                 );
                 if let Some(else_block) = else_block {
@@ -6132,6 +6417,7 @@ fn collect_local_constraint_sets_from_stmts(
                         facts,
                         captured,
                         source_nullability,
+                        duplicate_names,
                         locals,
                     );
                 }
@@ -6144,6 +6430,7 @@ fn collect_local_constraint_sets_from_stmts(
                     facts,
                     captured,
                     source_nullability,
+                    duplicate_names,
                     locals,
                 );
             }
@@ -6156,6 +6443,7 @@ fn collect_local_constraint_sets_from_stmts(
                         facts,
                         captured,
                         source_nullability,
+                        duplicate_names,
                         locals,
                     );
                 }
@@ -6170,6 +6458,7 @@ fn collect_local_constraint_sets_from_stmts(
                     facts,
                     captured,
                     source_nullability,
+                    duplicate_names,
                     locals,
                 );
                 collect_local_constraint_sets_from_stmts(
@@ -6179,6 +6468,7 @@ fn collect_local_constraint_sets_from_stmts(
                     facts,
                     captured,
                     source_nullability,
+                    duplicate_names,
                     locals,
                 );
             }
@@ -6227,7 +6517,7 @@ fn collect_local_plans_from_stmts(
                     name,
                     ty,
                     representations,
-                    local_constraints_for(constraints, name),
+                    local_constraints_for_declared_type(constraints, name, ty),
                     facts,
                 ));
             }
@@ -6251,7 +6541,7 @@ fn collect_local_plans_from_stmts(
                     var_name,
                     var_type,
                     representations,
-                    local_constraints_for(constraints, var_name),
+                    local_constraints_for_declared_type(constraints, var_name, var_type),
                     facts,
                 ));
                 collect_local_plans_from_stmts(
@@ -6346,6 +6636,18 @@ fn local_constraints_for<'a>(
         .unwrap_or(&[])
 }
 
+fn local_constraints_for_declared_type<'a>(
+    constraints: &'a [LocalConstraintSet],
+    name: &str,
+    declared_ty: &JavaType,
+) -> &'a [SignatureConstraint] {
+    constraints
+        .iter()
+        .find(|constraints| constraints.name == name && constraints.java_ty == *declared_ty)
+        .map(|constraints| constraints.constraints.as_slice())
+        .unwrap_or_else(|| local_constraints_for(constraints, name))
+}
+
 pub fn local_shape_constraints(name: &str, mutated: &HashSet<String>) -> Vec<SignatureConstraint> {
     if mutated.contains(name) {
         vec![SignatureConstraint::MutableBinding]
@@ -6395,7 +6697,19 @@ fn local_shape_constraints_with_usage_and_effective_facts(
         );
         push_unique_signature_constraints(
             &mut constraints,
+            &native_collection_receiver_binding_constraints(binding),
+        );
+        push_unique_signature_constraints(
+            &mut constraints,
             &external_call_return_binding_constraints(binding, facts),
+        );
+        push_unique_signature_constraints(
+            &mut constraints,
+            &native_map_get_final_facade_value_binding_constraints(
+                binding,
+                java_ty,
+                effective_facts,
+            ),
         );
     }
     if let Some(kind) = usage
@@ -6408,6 +6722,59 @@ fn local_shape_constraints_with_usage_and_effective_facts(
         );
     }
     constraints
+}
+
+fn native_map_get_final_facade_value_binding_constraints(
+    binding: &BindingUseFacts,
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> Vec<SignatureConstraint> {
+    let assigned_from_matching_map_get = binding.uses.iter().any(|usage| {
+        let BindingUse::AssignedFromCall {
+            name,
+            receiver_type: Some(receiver_type),
+            ..
+        } = usage
+        else {
+            return false;
+        };
+        if name != "get" {
+            return false;
+        }
+        crate::stdlib::java_map_type_args(receiver_type)
+            .is_some_and(|(_, value_ty)| value_ty == java_ty)
+    });
+    if !assigned_from_matching_map_get {
+        return Vec::new();
+    }
+    if !matches!(
+        facts.object_representation_override_strategy_for(java_ty),
+        Some(HierarchyStrategy::ErasedObject)
+    ) || !facts.is_final_type(java_ty)
+    {
+        return Vec::new();
+    }
+    vec![
+        SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+        SignatureConstraint::RequiredView(ViewShape::Native),
+        SignatureConstraint::RequiredOwnership(OwnershipShape::SharedBorrow),
+    ]
+}
+
+fn native_collection_receiver_binding_constraints(
+    binding: &BindingUseFacts,
+) -> Vec<SignatureConstraint> {
+    if binding.uses.iter().any(|usage| {
+        matches!(
+            usage,
+            BindingUse::ReceiverForCall { name, .. }
+                if crate::stdlib::native_collection_receiver_mutates(&binding.java_ty, name)
+        )
+    }) {
+        vec![SignatureConstraint::MutableBinding]
+    } else {
+        Vec::new()
+    }
 }
 
 fn constructor_assigned_local_storage_constraints(
@@ -6751,10 +7118,15 @@ fn local_plan(
     constraints: &[SignatureConstraint],
     facts: &FactSet,
 ) -> LocalPlan {
-    LocalPlan {
-        name: name.to_string(),
-        java_ty: java_ty.clone(),
-        shape: solve_signature_shape_with_facts(
+    let shape = if local_constraints_select_concrete_borrowed_value(constraints) {
+        let mut shape =
+            apply_signature_constraints(RustSlotShape::conservative(java_ty.clone()), constraints);
+        apply_required_dispatch(&mut shape, DispatchShape::Concrete);
+        apply_required_view(&mut shape, ViewShape::Native);
+        apply_required_ownership(&mut shape, OwnershipShape::SharedBorrow);
+        shape
+    } else {
+        solve_signature_shape_with_facts(
             representations,
             SignatureShapeRequest {
                 java_ty: java_ty.clone(),
@@ -6763,9 +7135,27 @@ fn local_plan(
             },
             facts,
         )
-        .expect("local signature shape is always present"),
+        .expect("local signature shape is always present")
+    };
+    LocalPlan {
+        name: name.to_string(),
+        java_ty: java_ty.clone(),
+        shape,
         binding_mutable: signature_constraints_require_mutable_binding(constraints),
     }
+}
+
+fn local_constraints_select_concrete_borrowed_value(constraints: &[SignatureConstraint]) -> bool {
+    constraints.contains(&SignatureConstraint::RequiredDispatch(
+        DispatchShape::Concrete,
+    )) && constraints.contains(&SignatureConstraint::RequiredView(ViewShape::Native))
+        && constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::SharedBorrow,
+        ))
+        && !constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::Owned,
+        ))
+        && !constraints.contains(&SignatureConstraint::StorageSlot)
 }
 
 fn collect_mutated_local_names(block: &Block) -> HashSet<String> {
@@ -6916,7 +7306,15 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
                 collect_mutated_local_names_from_expr(expr, mutated);
             }
         }
-        Expr::Call { receiver, args, .. } => {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            if is_arrays_sort_call(receiver.as_deref(), name, args) {
+                collect_assignment_target_name(&args[0], mutated);
+            }
             if let Some(receiver) = receiver {
                 collect_mutated_local_names_from_expr(receiver, mutated);
             }
@@ -6938,6 +7336,15 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
         | Expr::ClassLiteral(_)
         | Expr::Raw(_) => {}
     }
+}
+
+fn is_arrays_sort_call(receiver: Option<&Expr>, name: &str, args: &[Expr]) -> bool {
+    let Some(Expr::Var(receiver_name)) = receiver else {
+        return false;
+    };
+    crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Arrays"
+        && name == "sort"
+        && args.len() == 1
 }
 
 fn collect_assignment_target_name(expr: &Expr, mutated: &mut HashSet<String>) {
@@ -7020,7 +7427,7 @@ pub fn method_return_shape_constraints(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
-    let boundary_kind = method_return_boundary_policy(ty, method, usage).kind;
+    let boundary_kind = method_return_boundary_policy(ty, method, usage, facts).kind;
     let mut constraints =
         signature_slot_baseline_policy(&method.return_type, boundary_kind, facts).constraints;
     if !matches!(method.return_type, JavaType::Void)
@@ -7043,6 +7450,10 @@ pub fn method_return_shape_constraints(
         &external_call_return_method_return_constraints(ty, method, usage, facts),
     );
     if boundary_kind.is_none() {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &internal_exact_final_erased_facade_constraints(&method.return_type, facts),
+        );
         constraints.extend(
             borrowed_return_content_policy_from_param_with_facts(ty, method, usage, facts)
                 .map(signature_constraints_for_borrowed_content_policy)
@@ -7050,6 +7461,27 @@ pub fn method_return_shape_constraints(
         );
     }
     constraints
+}
+
+fn internal_exact_final_erased_facade_constraints(
+    java_ty: &JavaType,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let effective_facts = EffectiveFacts::new(facts);
+    if matches!(java_ty, JavaType::Void) || is_declared_java_object_type(java_ty) {
+        return Vec::new();
+    }
+    if !matches!(
+        effective_facts.object_representation_override_strategy_for(java_ty),
+        Some(HierarchyStrategy::ErasedObject)
+    ) || !effective_facts.is_final_type(java_ty)
+    {
+        return Vec::new();
+    }
+    vec![
+        SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+        SignatureConstraint::RequiredView(ViewShape::Native),
+    ]
 }
 
 pub fn external_call_return_method_return_constraints(
@@ -7083,6 +7515,7 @@ pub fn method_return_boundary_policy(
     ty: &TypeDecl,
     method: &MethodDecl,
     usage: &UsageFacts,
+    facts: &FactSet,
 ) -> MethodReturnBoundaryPolicy {
     let mut kind = None;
     if signature_member_api_boundary_policy(&method.modifiers).public_api {
@@ -7092,12 +7525,18 @@ pub fn method_return_boundary_policy(
         type_name: ty.name.clone(),
         method_name: method.name.clone(),
     }) {
-        let returns_unknown_call_result = method_usage.call_sites.iter().any(|call_site| {
-            call_site.result_returned && call_site.boundary == CallArgumentBoundary::Unknown
-        }) || method_usage
-            .returned_call_results
-            .iter()
-            .any(|returned| returned.boundary == CallArgumentBoundary::Unknown);
+        let returns_unknown_call_result = (method_usage.returned_call_results.is_empty()
+            && method_usage.call_sites.iter().any(|call_site| {
+                call_site.result_returned && call_site.boundary == CallArgumentBoundary::Unknown
+            }))
+            || method_usage.returned_call_results.iter().any(|returned| {
+                returned.boundary == CallArgumentBoundary::Unknown
+                    && !returned_external_call_result_matches_declared_return(
+                        returned,
+                        &method.return_type,
+                        facts,
+                    )
+            });
         kind = merge_signature_boundary_kind_policy(
             kind,
             returns_unknown_call_result.then_some(SignatureBoundaryKind::UnknownApi),
@@ -7108,6 +7547,50 @@ pub fn method_return_boundary_policy(
         type_name: ty.name.clone(),
         method_name: method.name.clone(),
         kind,
+    }
+}
+
+fn returned_external_call_result_matches_declared_return(
+    returned: &ReturnedCallResultUse,
+    declared_return: &JavaType,
+    facts: &FactSet,
+) -> bool {
+    let receiver_type = returned
+        .receiver_type
+        .as_ref()
+        .and_then(|receiver| match receiver {
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name.as_str()),
+            _ => None,
+        });
+    let Some(effect) = facts.external_api_effect_for_receiver(receiver_type, &returned.name) else {
+        return false;
+    };
+    let Some(return_type) = effect.return_type.as_ref() else {
+        return false;
+    };
+    java_types_match_with_external_aliases(return_type, declared_return)
+}
+
+fn java_types_match_with_external_aliases(left: &JavaType, right: &JavaType) -> bool {
+    match (left, right) {
+        (
+            JavaType::Named {
+                name: left,
+                args: left_args,
+            },
+            JavaType::Named {
+                name: right,
+                args: right_args,
+            },
+        ) => {
+            crate::facts::external_type_name_matches(left, right)
+                && left_args.len() == right_args.len()
+                && left_args
+                    .iter()
+                    .zip(right_args)
+                    .all(|(left, right)| java_types_match_with_external_aliases(left, right))
+        }
+        _ => left == right,
     }
 }
 

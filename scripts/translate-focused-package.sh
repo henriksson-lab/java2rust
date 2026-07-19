@@ -318,7 +318,8 @@ type_counts_path="$out_dir/generated-type-counts.tsv"
 unique_types_path="$out_dir/generated-unique-types.tsv"
 shared_support_path="$out_dir/generated-shared-support.rs"
 shared_support_types_path="$out_dir/generated-shared-support-types.tsv"
-rm -f "$module_types_path" "$type_counts_path" "$unique_types_path" "$shared_support_path" "$shared_support_types_path"
+shared_support_conflicts_path="$out_dir/generated-shared-support-conflicts.tsv"
+rm -f "$module_types_path" "$type_counts_path" "$unique_types_path" "$shared_support_path" "$shared_support_types_path" "$shared_support_conflicts_path"
 
 strip_shared_support_items() {
   local rust_path="$1"
@@ -686,6 +687,12 @@ if [[ -s "$shared_support_path" ]]; then
 else
   touch "$shared_support_path" "$shared_support_types_path"
 fi
+
+python3 "$repo_root/scripts/merge-shared-support-facades.py" \
+  --generated-dir "$generated_dir" \
+  --shared-support "$shared_support_path" \
+  --shared-types "$shared_support_types_path" \
+  --conflicts "$shared_support_conflicts_path"
 
 for i in "${!java_files[@]}"; do
   index="$((i + 1))"

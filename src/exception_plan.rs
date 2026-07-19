@@ -243,9 +243,15 @@ fn stmt_terminates_with_exception_boundary(stmt: &Stmt) -> bool {
             body,
             catches,
             finally_block,
-        } => !matches!(
+        } => matches!(
             plan_try_stmt(resources, body, catches, finally_block.as_ref()),
-            TryStmtPlan::Unsupported | TryStmtPlan::FinallyOnly { .. }
+            TryStmtPlan::CatchOnly {
+                completion: TryBlockCompletion::Terminates,
+                ..
+            } | TryStmtPlan::WithResources {
+                completion: TryBlockCompletion::Terminates,
+                ..
+            }
         ),
         _ => false,
     }

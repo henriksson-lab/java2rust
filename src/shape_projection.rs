@@ -325,19 +325,15 @@ pub fn indexed_element_projection_policy(
 
 pub fn indexed_element_projection_policy_with_effective_facts(
     element_ty: JavaType,
-    container_ownership: OwnershipShape,
-    container_view: &ViewShape,
+    _container_ownership: OwnershipShape,
+    _container_view: &ViewShape,
     facts: &EffectiveFacts,
 ) -> IndexedElementProjectionPolicy {
     let capability = shape_projection_capability_policy_with_effective_facts(&element_ty, facts);
     let projected_ownership = if capability.value_semantics {
         OwnershipShape::CopyValue
-    } else if container_ownership == OwnershipShape::SharedBorrow
-        || *container_view == ViewShape::Slice
-    {
-        OwnershipShape::SharedBorrow
     } else {
-        OwnershipShape::Owned
+        OwnershipShape::SharedBorrow
     };
     IndexedElementProjectionPolicy {
         element_ty,

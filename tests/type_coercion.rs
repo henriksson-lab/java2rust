@@ -716,6 +716,27 @@ fn coercion_planner_owns_index_and_shape_widening() {
 }
 
 #[test]
+fn borrowed_native_string_can_coerce_to_string_view() {
+    let mut actual = RustSlotShape::conservative(JavaType::String);
+    actual.ownership = OwnershipShape::SharedBorrow;
+    actual.view = ViewShape::Native;
+    let mut target = RustSlotShape::conservative(JavaType::String);
+    target.ownership = OwnershipShape::SharedBorrow;
+    target.view = ViewShape::Str;
+
+    let plan = shape_coercion_plan(&actual, &target);
+
+    assert_eq!(plan.coercions(), vec![Coercion::AsStr]);
+    assert_eq!(
+        apply_shape_coercion_plan(
+            RustExpr::Raw("parts[0]".to_string()),
+            &shape_coercion_plan_with_facts(&actual, &target, &FactSet::default())
+        ),
+        RustExpr::Raw("parts[0].as_str()".to_string())
+    );
+}
+
+#[test]
 fn shape_coercion_plan_keeps_axis_policy_decisions_inspectable() {
     let actual = RustSlotShape::conservative(JavaType::String);
     let mut target = RustSlotShape::conservative(optional_java_type(JavaType::String));
@@ -4172,6 +4193,106 @@ fn optional_borrowed_element_adapter_unwraps_to_concrete_copy_target() {
     assert_eq!(
         apply_slot_conversion_plan(RustExpr::Raw("values.get(&key)".to_string()), &plan),
         RustExpr::Raw("values.get(&key).copied().expect(\"Java null receiver\")".to_string())
+    );
+}
+
+#[test]
+fn optional_borrowed_concrete_element_unwraps_to_dyn_trait_target() {
+    let simple_interval = JavaType::Named {
+        name: "SimpleInterval".to_string(),
+        args: Vec::new(),
+    };
+    let locatable = JavaType::Named {
+        name: "Locatable".to_string(),
+        args: Vec::new(),
+    };
+    let mut element_shape = RustSlotShape::conservative(simple_interval.clone());
+    element_shape.ownership = OwnershipShape::SharedBorrow;
+    let option_shape = RustSlotShape::conservative(optional_java_type(simple_interval));
+    let mut target = RustSlotShape::conservative(locatable);
+    target.ownership = OwnershipShape::SharedBorrow;
+    target.view = ViewShape::DynTraitView;
+    target.dispatch = DispatchShape::DynTrait {
+        trait_name: "Locatable".to_string(),
+    };
+    let expected_element_shape = element_shape.clone();
+
+    let plan = lowered_slot_conversion_plan_with_facts(
+        &LoweredType::OptionalElementBorrow {
+            option_shape: Box::new(option_shape.clone()),
+            element_shape: Box::new(element_shape.clone()),
+        },
+        &Slot::Argument(target.clone()),
+        &FactSet::default(),
+    );
+
+    assert_eq!(
+        plan,
+        SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
+            target,
+            carrier_shape: option_shape,
+            element_shape,
+            carrier: BorrowedElementCarrier::Option,
+            matches: true,
+            adapter: Some(BorrowedElementAdapterPolicy {
+                carrier: BorrowedElementCarrier::Option,
+                element_shape: expected_element_shape,
+                recovery: BorrowedElementRecoveryPolicy::BorrowElement,
+                unwrap_carrier: true,
+            }),
+        })
+    );
+    assert_eq!(
+        apply_slot_conversion_plan(RustExpr::Raw("intervals.get(0)".to_string()), &plan),
+        RustExpr::Raw(
+            "intervals.get(0).expect(\"Java null receiver\") as &dyn Locatable".to_string()
+        )
+    );
+}
+
+#[test]
+fn optional_borrowed_concrete_element_unwraps_to_concrete_facade_target() {
+    let simple_interval = JavaType::Named {
+        name: "SimpleInterval".to_string(),
+        args: Vec::new(),
+    };
+    let locatable = JavaType::Named {
+        name: "Locatable".to_string(),
+        args: Vec::new(),
+    };
+    let mut element_shape = RustSlotShape::conservative(simple_interval.clone());
+    element_shape.ownership = OwnershipShape::SharedBorrow;
+    let option_shape = RustSlotShape::conservative(optional_java_type(simple_interval));
+    let mut target = RustSlotShape::conservative(locatable);
+    target.ownership = OwnershipShape::SharedBorrow;
+
+    let plan = lowered_slot_conversion_plan_with_facts(
+        &LoweredType::OptionalElementBorrow {
+            option_shape: Box::new(option_shape),
+            element_shape: Box::new(element_shape),
+        },
+        &Slot::Argument(target),
+        &FactSet::default(),
+    );
+
+    assert!(matches!(
+        plan,
+        SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
+            matches: true,
+            adapter: Some(BorrowedElementAdapterPolicy {
+                recovery: BorrowedElementRecoveryPolicy::BorrowElement,
+                unwrap_carrier: true,
+                ..
+            }),
+            ..
+        })
+    ));
+    assert_eq!(
+        apply_slot_conversion_plan(RustExpr::Raw("intervals.get(0)".to_string()), &plan),
+        RustExpr::Raw(
+            "{ let _java_value = intervals.get(0).expect(\"Java null receiver\"); &Locatable }"
+                .to_string()
+        )
     );
 }
 

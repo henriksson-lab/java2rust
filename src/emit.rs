@@ -113,7 +113,9 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
         RustStmt::Assign { target, value } => {
             format!("{pad}{} = {};\n", emit_expr(target), emit_expr(value))
         }
+        RustStmt::Expr(expr) if is_unit_expr(expr) => String::new(),
         RustStmt::Expr(expr) => format!("{pad}{};\n", emit_expr(expr)),
+        RustStmt::Return(Some(expr)) if is_unit_expr(expr) => format!("{pad}return;\n"),
         RustStmt::Return(Some(expr)) => format!("{pad}return {};\n", emit_expr(expr)),
         RustStmt::Return(None) => format!("{pad}return;\n"),
         RustStmt::If {
@@ -164,28 +166,45 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
 }
 
 pub fn emit_expr(expr: &RustExpr) -> String {
-    match expr {
+    emit_expr_prec(expr, 0, false)
+}
+
+fn emit_expr_prec(expr: &RustExpr, parent_prec: u8, right_child: bool) -> String {
+    let rendered = match expr {
         RustExpr::Literal(value) => value.clone(),
         RustExpr::Var(name) => name.clone(),
-        RustExpr::Field(receiver, field) => format!("{}.{}", emit_expr(receiver), field),
-        RustExpr::Index(array, index) => format!("{}[{}]", emit_expr(array), emit_expr(index)),
-        RustExpr::Binary { op, left, right } => {
-            format!("({} {op} {})", emit_expr(left), emit_expr(right))
+        RustExpr::Field(receiver, field) => {
+            format!("{}.{}", emit_expr_prec(receiver, 11, false), field)
         }
-        RustExpr::Unary { op, expr } => format!("({op}{})", emit_expr(expr)),
+        RustExpr::Index(array, index) => {
+            format!(
+                "{}[{}]",
+                emit_expr_prec(array, 11, false),
+                emit_expr_prec(index, 0, false)
+            )
+        }
+        RustExpr::Binary { op, left, right } => format!(
+            "{} {op} {}",
+            emit_expr_prec(left, binary_precedence(op), false),
+            emit_expr_prec(right, binary_precedence(op), true)
+        ),
+        RustExpr::Unary { op, expr } => format!("{op}{}", emit_expr_prec(expr, 10, false)),
+        RustExpr::Cast { expr, ty } => {
+            format!("{} as {ty}", emit_expr_prec(expr, 7, false))
+        }
         RustExpr::If {
             condition,
             then_expr,
             else_expr,
         } => format!(
             "if {} {{ {} }} else {{ {} }}",
-            emit_expr(condition),
-            emit_expr(then_expr),
-            emit_expr(else_expr)
+            emit_expr_prec(condition, 0, false),
+            emit_expr_prec(then_expr, 0, false),
+            emit_expr_prec(else_expr, 0, false)
         ),
         RustExpr::Call { function, args } => format!(
             "{}({})",
-            emit_expr(function),
+            emit_expr_prec(function, 11, false),
             args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
         ),
         RustExpr::MethodCall {
@@ -194,7 +213,7 @@ pub fn emit_expr(expr: &RustExpr) -> String {
             args,
         } => format!(
             "{}.{}({})",
-            emit_expr(receiver),
+            emit_expr_prec(receiver, 11, false),
             method,
             args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
         ),
@@ -206,7 +225,247 @@ pub fn emit_expr(expr: &RustExpr) -> String {
                 .join(", ");
             format!("{name} {{ {fields} }}")
         }
-        RustExpr::Raw(raw) => raw.clone(),
+        RustExpr::Raw(raw) => normalize_raw_expr_for_context(raw, parent_prec),
+    };
+
+    if expr_needs_parentheses(expr, parent_prec, right_child) {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
+}
+
+fn expr_needs_parentheses(expr: &RustExpr, parent_prec: u8, right_child: bool) -> bool {
+    let own_prec = expr_precedence(expr);
+    own_prec < parent_prec
+        || (right_child
+            && own_prec == parent_prec
+            && matches!(expr, RustExpr::Binary { op, .. } if !is_associative_binary_op(op)))
+}
+
+fn normalize_raw_expr_for_context(raw: &str, parent_prec: u8) -> String {
+    if parent_prec == 0 {
+        strip_redundant_outer_parentheses(raw).to_string()
+    } else {
+        raw.to_string()
+    }
+}
+
+fn strip_redundant_outer_parentheses(raw: &str) -> &str {
+    let mut trimmed = raw.trim();
+    while let Some(inner) = strip_one_balanced_outer_parentheses(trimmed) {
+        trimmed = inner.trim();
+    }
+    trimmed
+}
+
+fn strip_one_balanced_outer_parentheses(raw: &str) -> Option<&str> {
+    if !raw.starts_with('(') || !raw.ends_with(')') {
+        return None;
+    }
+    let inner = raw[1..raw.len() - 1].trim();
+    if inner.is_empty() {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    for (index, ch) in raw.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string || in_char {
+            if ch == '\\' {
+                escaped = true;
+            } else if in_string && ch == '"' {
+                in_string = false;
+            } else if in_char && ch == '\'' {
+                in_char = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '\'' => in_char = true,
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 && index != raw.len() - 1 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        Some(&raw[1..raw.len() - 1])
+    } else {
+        None
+    }
+}
+
+fn is_unit_expr(expr: &RustExpr) -> bool {
+    matches!(expr, RustExpr::Raw(raw) if strip_redundant_outer_parentheses(raw) == "()")
+}
+
+fn expr_precedence(expr: &RustExpr) -> u8 {
+    match expr {
+        RustExpr::Binary { op, .. } => binary_precedence(op),
+        RustExpr::Cast { .. } => 6,
+        RustExpr::Unary { .. } => 10,
+        RustExpr::Field(_, _)
+        | RustExpr::Index(_, _)
+        | RustExpr::Call { .. }
+        | RustExpr::MethodCall { .. } => 11,
+        RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::StructLit { .. } | RustExpr::Raw(_) => {
+            12
+        }
+        RustExpr::If { .. } => 1,
+    }
+}
+
+fn binary_precedence(op: &str) -> u8 {
+    match op {
+        "=" => 1,
+        "||" => 2,
+        "&&" => 3,
+        "|" => 4,
+        "^" => 5,
+        "&" => 6,
+        "==" | "!=" | "<" | "<=" | ">" | ">=" => 7,
+        "<<" | ">>" => 8,
+        "+" | "-" => 9,
+        "*" | "/" | "%" => 10,
+        _ => 1,
+    }
+}
+
+fn is_associative_binary_op(op: &str) -> bool {
+    matches!(op, "&&" | "||" | "&" | "|" | "^" | "+" | "*")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn var(name: &str) -> RustExpr {
+        RustExpr::Var(name.to_string())
+    }
+
+    fn binary(op: &str, left: RustExpr, right: RustExpr) -> RustExpr {
+        RustExpr::Binary {
+            op: op.to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    #[test]
+    fn binary_expressions_do_not_emit_outer_parentheses() {
+        let expr = binary("&&", binary("<", var("i"), var("n")), var("ready"));
+
+        assert_eq!(emit_expr(&expr), "i < n && ready");
+    }
+
+    #[test]
+    fn lower_precedence_children_still_get_parentheses() {
+        let expr = binary("*", binary("+", var("a"), var("b")), var("c"));
+
+        assert_eq!(emit_expr(&expr), "(a + b) * c");
+    }
+
+    #[test]
+    fn unary_expressions_do_not_emit_outer_parentheses() {
+        let expr = RustExpr::Unary {
+            op: "!".to_string(),
+            expr: Box::new(var("done")),
+        };
+
+        assert_eq!(emit_expr(&expr), "!done");
+    }
+
+    #[test]
+    fn casts_drop_statement_position_parentheses_but_keep_binary_operand_parentheses() {
+        let cast = RustExpr::Cast {
+            expr: Box::new(var("end")),
+            ty: "i64".to_string(),
+        };
+
+        assert_eq!(emit_expr(&cast), "end as i64");
+        assert_eq!(
+            emit_expr(&binary("<", cast.clone(), var("limit"))),
+            "(end as i64) < limit"
+        );
+        assert_eq!(
+            emit_expr(&binary("*", var("acc"), cast)),
+            "acc * (end as i64)"
+        );
+    }
+
+    #[test]
+    fn raw_expressions_drop_redundant_outer_parentheses_only_at_expression_boundary() {
+        assert_eq!(
+            emit_expr(&RustExpr::Raw(
+                "(field_idx < vid_map_p_b.get_fields_count())".to_string()
+            )),
+            "field_idx < vid_map_p_b.get_fields_count()"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Raw(
+                "((sample_name_map.is_some() && ready) && !done)".to_string()
+            )),
+            "(sample_name_map.is_some() && ready) && !done"
+        );
+
+        let expr = binary(
+            "*",
+            RustExpr::Raw("(a + b)".to_string()),
+            RustExpr::Var("c".to_string()),
+        );
+        assert_eq!(emit_expr(&expr), "(a + b) * c");
+    }
+
+    #[test]
+    fn raw_parentheses_strip_is_balanced_and_string_aware() {
+        assert_eq!(emit_expr(&RustExpr::Raw("()".to_string())), "()");
+        assert_eq!(emit_expr(&RustExpr::Raw("(())".to_string())), "()");
+        assert_eq!(
+            emit_expr(&RustExpr::Raw("(path.contains(\"()\"))".to_string())),
+            "path.contains(\"()\")"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Raw("(left) || (right)".to_string())),
+            "(left) || (right)"
+        );
+    }
+
+    #[test]
+    fn statement_position_unit_expressions_are_elided() {
+        assert_eq!(
+            emit_stmt(&RustStmt::Expr(RustExpr::Raw("()".to_string())), 1),
+            ""
+        );
+        assert_eq!(
+            emit_stmt(&RustStmt::Expr(RustExpr::Raw("(())".to_string())), 1),
+            ""
+        );
+    }
+
+    #[test]
+    fn return_unit_expr_renders_as_bare_return() {
+        assert_eq!(
+            emit_stmt(&RustStmt::Return(Some(RustExpr::Raw("()".to_string()))), 1),
+            "    return;\n"
+        );
+        assert_eq!(
+            emit_stmt(
+                &RustStmt::Return(Some(RustExpr::Raw("Ok(())".to_string()))),
+                1
+            ),
+            "    return Ok(());\n"
+        );
     }
 }
 

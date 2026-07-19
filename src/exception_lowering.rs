@@ -134,7 +134,7 @@ pub fn try_with_resources_scope_stmt(
     ok_type: RustType,
     resource_initializers: Vec<RustStmt>,
     body: Vec<RustStmt>,
-    resource_names: Vec<String>,
+    resource_cleanup_stmts: Vec<RustStmt>,
     body_terminates_with_value: bool,
 ) -> RustStmt {
     let mut scope_body = resource_initializers;
@@ -147,8 +147,8 @@ pub fn try_with_resources_scope_stmt(
         crate::emit::emit_type(&exception_result_type(ok_type)),
         crate::emit::emit_statements(&body_with_ok, 1)
     )));
-    for name in resource_names.into_iter().rev() {
-        scope_body.push(RustStmt::Raw(format!("{name}.close()?;")));
+    for cleanup_stmt in resource_cleanup_stmts.into_iter().rev() {
+        scope_body.push(cleanup_stmt);
     }
     if body_terminates_with_value {
         scope_body.push(RustStmt::Raw("return __java_twr_result;".to_string()));

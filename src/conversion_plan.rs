@@ -529,6 +529,9 @@ pub enum DispatchCoercionPolicy {
     BorrowBoxedDynTrait {
         trait_name: String,
     },
+    BorrowConcreteFacade {
+        target_type: String,
+    },
     BoxDynTrait {
         trait_name: String,
     },
@@ -602,6 +605,7 @@ pub enum BorrowedElementRecoveryFallbackPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BorrowedElementRecoveryPolicy {
+    BorrowElement,
     StringViewToOwned,
     CopyElements,
     CloneElements {
@@ -618,6 +622,7 @@ impl BorrowedElementRecoveryPolicy {
         element_shape: &RustSlotShape,
     ) -> Vec<ConversionDiagnostic> {
         match self {
+            BorrowedElementRecoveryPolicy::BorrowElement => Vec::new(),
             BorrowedElementRecoveryPolicy::Unsupported { policy } => {
                 vec![borrowed_element_recovery_fallback_diagnostic(
                     policy,
@@ -996,6 +1001,13 @@ pub fn view_coercion_policy_with_effective_facts(
         return ViewCoercionPolicy::NoViewChange;
     }
     if actual.ownership == OwnershipShape::Owned
+        && actual.view == ViewShape::Native
+        && target.ownership == OwnershipShape::SharedBorrow
+        && target.view == ViewShape::Str
+    {
+        return ViewCoercionPolicy::BorrowStringView;
+    }
+    if actual.ownership == OwnershipShape::SharedBorrow
         && actual.view == ViewShape::Native
         && target.ownership == OwnershipShape::SharedBorrow
         && target.view == ViewShape::Str
@@ -1421,10 +1433,24 @@ pub fn borrowed_element_slot_adapter_policy(
     };
     let element_matches = matches!(carrier, BorrowedElementCarrier::Option)
         && target.optional_element_type().is_none()
-        && borrowed_element_target_matches_element(target, element_shape);
+        && borrowed_element_target_matches_element(target, element_shape, facts);
     let matches = carrier_matches || element_matches;
     let adapter = matches.then(|| {
-        borrowed_element_adapter_policy_with_unwrap(carrier, element_shape, facts, element_matches)
+        if element_matches && target.ownership == OwnershipShape::SharedBorrow {
+            BorrowedElementAdapterPolicy {
+                carrier,
+                element_shape: element_shape.clone(),
+                recovery: BorrowedElementRecoveryPolicy::BorrowElement,
+                unwrap_carrier: true,
+            }
+        } else {
+            borrowed_element_adapter_policy_with_unwrap(
+                carrier,
+                element_shape,
+                facts,
+                element_matches,
+            )
+        }
     });
     BorrowedElementSlotAdapterPolicy {
         target: target.clone(),
@@ -1439,9 +1465,14 @@ pub fn borrowed_element_slot_adapter_policy(
 fn borrowed_element_target_matches_element(
     target: &RustSlotShape,
     element_shape: &RustSlotShape,
+    facts: &FactSet,
 ) -> bool {
     target.java_ty == element_shape.java_ty
         || boxed_primitive_element_matches_target(&element_shape.java_ty, &target.java_ty)
+        || facts
+            .hierarchy_subtype_policy(&element_shape.java_ty, &target.java_ty)
+            .reaches
+        || known_structural_element_matches_target(&element_shape.java_ty, &target.java_ty)
 }
 
 fn boxed_primitive_element_matches_target(element_ty: &JavaType, target_ty: &JavaType) -> bool {
@@ -1453,6 +1484,15 @@ fn boxed_primitive_element_matches_target(element_ty: &JavaType, target_ty: &Jav
         }
         _ => false,
     }
+}
+
+fn known_structural_element_matches_target(element_ty: &JavaType, target_ty: &JavaType) -> bool {
+    let (JavaType::Named { name: element, .. }, JavaType::Named { name: target, .. }) =
+        (element_ty, target_ty)
+    else {
+        return false;
+    };
+    crate::stdlib::is_known_java_subtype(element, target)
 }
 
 pub fn dispatch_coercion_policy(
@@ -1483,7 +1523,16 @@ pub fn dispatch_coercion_policy_with_facts(
     }
     match (&actual.dispatch, &target.dispatch) {
         (DispatchShape::Concrete, DispatchShape::Concrete) => {
-            DispatchCoercionPolicy::NoDispatchChange
+            if actual.java_ty != target.java_ty
+                && target.ownership == OwnershipShape::SharedBorrow
+                && borrowed_element_target_matches_element(target, actual, facts)
+                && let Some(target_type) =
+                    rust_nominal_type_name_policy(&target.java_ty).target_type
+            {
+                DispatchCoercionPolicy::BorrowConcreteFacade { target_type }
+            } else {
+                DispatchCoercionPolicy::NoDispatchChange
+            }
         }
         (DispatchShape::ErasedObject, DispatchShape::ErasedObject) => {
             DispatchCoercionPolicy::NoDispatchChange
@@ -2422,6 +2471,14 @@ pub fn actual_shape_for_slot_expr_with_slot(
     slot: &Slot,
 ) -> RustSlotShape {
     let actual = actual_shape_for_slot_expr(expr, env, ctx);
+    if matches!(expr, Expr::Lambda { .. } | Expr::MethodReference { .. })
+        && let Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target) = slot
+    {
+        if let Some(element_ty) = target.optional_element_type() {
+            return optional_element_slot_shape(target, element_ty);
+        }
+        return target.clone();
+    }
     if matches!(expr, Expr::Call { .. })
         && let Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target) = slot
         && target.optional_element_type().is_some()

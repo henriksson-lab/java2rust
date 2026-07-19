@@ -67,6 +67,10 @@ pub fn plan_numeric_binary_promotion(
             | BinaryOp::BitAnd
             | BinaryOp::BitOr
             | BinaryOp::BitXor
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
     ) {
         return None;
     }

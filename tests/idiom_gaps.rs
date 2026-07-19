@@ -104,6 +104,30 @@ fn documents_java_string_method_spelling_gap() {
 }
 
 #[test]
+fn translates_java_numeric_relational_promotion_before_rust_comparison() {
+    let translation = translate_source(
+        r#"
+class NumericRelationalPromotion {
+    boolean beforeLimit(int end, long limit) {
+        return end < limit;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return ((end as i64) < limit);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("return (end < limit);"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn fallback_static_call_uses_translated_signature_arg_shapes() {
     let mut facts = FactSet::default();
     facts
@@ -313,6 +337,37 @@ fn java_string_split_with_limit_uses_runtime_helper() {
 }
 
 #[test]
+fn indexed_string_array_reads_clone_only_for_owned_slots() {
+    let translation = translate_source(&idiom_gap("IndexedStringArrayOwnership.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("self.valid(Some(parts[0 as usize].as_str()))")
+            && translation
+                .rust
+                .contains("let sample: String = parts[0 as usize].clone()")
+            && translation
+                .rust
+                .contains("parts[1 as usize].trim().is_empty()")
+            && !translation.rust.contains(
+                "parts[1 as usize].clone()/* TODO(translation): validate added clone */.trim()"
+            ),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "indexed-string-array-ownership",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn nullable_path_overload_argument_uses_option_param_and_non_optional_resolve_sibling() {
     let translation = translate_source(&idiom_gap("NullablePathOverloadArgument.java"));
 
@@ -415,10 +470,9 @@ fn typed_feature_reader_header_cast_uses_external_pack_return_fact() {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("return Some(reader.get_header());")
+        translation.rust.contains("return reader.get_header();")
             && !translation.rust.contains("downcast::<VCFHeader>()")
+            && !translation.rust.contains("Some(reader.get_header())")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
@@ -433,11 +487,14 @@ fn object_return_from_typed_external_getter_erases_once_at_boundary() {
     );
 
     assert!(
-        translation.rust.contains(
-            "pub fn header(&self, reader: Box<dyn std::any::Any>) -> Option<Box<dyn std::any::Any>>"
-        ) && translation.rust.contains(
-            "return reader.get_header().map(|value| Box::new(value) as Box<dyn std::any::Any>);"
-        ) && !translation.rust.contains("downcast::<VCFHeader>()")
+        translation.rust.contains("pub fn header(&self, reader:")
+            && translation
+                .rust
+                .contains("-> Option<Box<dyn std::any::Any>>")
+            && translation.rust.contains(
+                "return reader.get_header().map(|value| Box::new(value) as Box<dyn std::any::Any>);"
+            )
+            && !translation.rust.contains("downcast::<VCFHeader>()")
             && !translation.rust.contains("invalid Java cast")
             && !translation.rust.contains("-> Object"),
         "{}",
@@ -498,6 +555,31 @@ class TernaryNullBranchRefinement {
             && !translation
                 .rust
                 .contains("if missing { None } else { value }"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn nullable_ternary_call_receiver_uses_branch_refinement_before_optional_adapter() {
+    let translation = translate_source(
+        r#"
+import java.nio.file.Path;
+
+class TernaryNullReceiverRefinement {
+    String maybeUri(Path path) {
+        return path == null ? null : path.toAbsolutePath().toUri().toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("path.unwrap().to_absolute_path().to_uri().to_string()")
+            && !translation.rust.contains("path.unwrap().as_ref().unwrap()")
+            && !translation.rust.contains("path.unwrap().as_ref().expect"),
         "{}",
         translation.rust
     );
@@ -790,6 +872,156 @@ fn translates_executor_submit_block_lambda_as_closure() {
             && !translation
                 .rust
                 .contains("unsupported Java expression: lambda"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn executor_submit_lambda_receiverless_helper_call_uses_current_self() {
+    let translation = translate_source(
+        r#"
+class ExecutorSubmitReceiverlessHelper {
+    Executor service;
+
+    String helper(String value) {
+        return value.trim();
+    }
+
+    Object run(String input) {
+        return service.submit(() -> {
+            String value = input;
+            return helper(value);
+        });
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".submit(|| {")
+            && translation
+                .rust
+                .contains("return self.helper(value.as_str());")
+            && !translation.rust.contains("return helper(value")
+            && !translation
+                .rust
+                .contains("unsupported Java expression: lambda"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn executor_submit_future_slot_shapes_block_lambda_result() {
+    let translation = translate_source(
+        r#"
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.Future;
+
+class ExecutorSubmitFutureSlot {
+    ExecutorService executor;
+
+    Map<String, Reader> run(String name) {
+        Map<String, Reader> readers = new LinkedHashMap<>();
+        Map<String, Future<Reader>> futures = new LinkedHashMap<>();
+        futures.put(name, executor.submit(() -> {
+            try {
+                return new Reader();
+            } catch (IOException e) {
+                throw new RuntimeException("bad", e);
+            }
+        }));
+        return readers;
+    }
+}
+
+class Reader {
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".submit(|| {")
+            && translation
+                .rust
+                .contains("match (|| -> Result<Reader, JavaException>")
+            && translation.rust.contains("Ok(value) => return Ok(value)")
+            && translation
+                .rust
+                .contains("return Err(JavaException::with_cause(\"RuntimeException\"")
+            && !translation
+                .rust
+                .contains("Result<std::collections::HashMap<String, Reader>, JavaException>")
+            && !translation
+                .rust
+                .contains(".submit(|| {\n    match (|| -> Result<(), JavaException>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn unshaped_constructor_argument_call_that_throws_propagates_result() {
+    let translation = translate_source(
+        r#"
+class UnshapedThrowingConstructorArg {
+    Reader open(String path) throws IOException {
+        return new Reader(path);
+    }
+
+    Wrapper wrap(String path) throws IOException {
+        return new Wrapper(open(path), path);
+    }
+}
+
+class Reader {
+    Reader(String path) {}
+}
+
+class Wrapper {
+    Wrapper(Reader reader, String path) {}
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Wrapper::new(self.open(path.clone()")
+            && translation.rust.contains(")?, path.clone()")
+            && !translation
+                .rust
+                .contains("Wrapper::new(self.open(path), path)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn stream_block_lambda_return_uses_declared_local_receiver_not_static_owner() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+import java.util.stream.Collectors;
+
+class StreamBlockLambdaLocalReceiver {
+    List<Product> buildAll(List<String> names) {
+        return names.stream().map(name -> {
+            ProductBuilder builder = Product.newBuilder();
+            builder.setName(name);
+            return builder.build();
+        }).collect(Collectors.toList());
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("builder.build()")
+            && !translation.rust.contains("ProductBuilder::build()")
+            && !translation.rust.contains("Builder::build()"),
         "{}",
         translation.rust
     );
@@ -1370,6 +1602,763 @@ class SiblingSource {
 }
 
 #[test]
+fn source_summary_direct_field_type_emits_opaque_support_shell() {
+    let caller = r#"
+class UsesSummaryInput {
+    FeatureInput headerOverride;
+}
+"#;
+    let summary = r#"
+class FeatureInput {
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        caller,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("header_override: Option<FeatureInput>,")
+            && translation.rust.contains("pub struct FeatureInput;"),
+        "{}",
+        translation.rust
+    );
+
+    let full_context_translation =
+        translate_source_with_context_sources(caller, &[summary.to_string()], &FactSet::default());
+    assert!(
+        full_context_translation
+            .rust
+            .contains("header_override: Option<FeatureInput>,")
+            && !full_context_translation
+                .rust
+                .contains("pub struct FeatureInput;"),
+        "{}",
+        full_context_translation.rust
+    );
+}
+
+#[test]
+fn source_summary_opaque_type_gets_used_inherited_method_surface() {
+    let caller = r#"
+class UsesSummaryInputMethod {
+    FeatureInput headerOverride;
+
+    Path headerPath() {
+        return headerOverride.toPath();
+    }
+}
+"#;
+    let summary = r#"
+class FeatureInput extends GATKPath {
+}
+
+class GATKPath {
+    Path toPath() {
+        return new Path();
+    }
+}
+
+class Path {
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        caller,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("pub struct FeatureInput;")
+            && translation.rust.contains("impl FeatureInput")
+            && translation.rust.contains("pub fn to_path(&self) -> Path")
+            && translation
+                .rust
+                .contains("self.header_override.as_ref().unwrap().to_path()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_summary_method_surface_can_be_added_after_external_return_selects_type() {
+    let caller = r#"
+class LateSummarySurfaceUse {
+    Reader reader;
+
+    Dictionary read() {
+        return reader.header().dictionary();
+    }
+
+    SAMFileHeader readHeader() {
+        return reader.header().samHeader();
+    }
+
+    void touchIterator() {
+        reader.header().iterator();
+    }
+}
+"#;
+    let summary = r#"
+class Reader {
+}
+
+class Header {
+    Dictionary dictionary() {
+        return new Dictionary();
+    }
+
+    SAMFileHeader samHeader() {
+        return null;
+    }
+
+    Iterator iterator() {
+        return null;
+    }
+}
+
+class Dictionary {
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "header".to_string(),
+        receiver_type: Some("Reader".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "Header".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation =
+        translate_source_with_context_summary_sources(caller, &[summary.to_string()], &facts);
+
+    assert!(
+        translation.rust.contains("pub struct Header;")
+            && translation.rust.contains("pub struct Dictionary;")
+            && translation.rust.contains("pub struct SAMFileHeader;")
+            && translation.rust.contains("pub struct CloseableIterator;")
+            && translation
+                .rust
+                .contains("pub fn dictionary(&self) -> Dictionary")
+            && translation
+                .rust
+                .contains("pub fn sam_header(&self) -> SAMFileHeader")
+            && translation
+                .rust
+                .contains("pub fn iterator(&self) -> CloseableIterator")
+            && !translation.rust.contains("pub fn dictionary(&self) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "late_source_summary_surface",
+        vec![GeneratedCrateModule {
+            name: "late_source_summary_surface",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn typechecks_late_source_summary_surface() {
+        let fixture = LateSummarySurfaceUse { reader: Some(Reader) };
+        let _: Dictionary = fixture.read();
+        let _: SAMFileHeader = fixture.read_header();
+        fixture.touch_iterator();
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn selected_opaque_support_type_gets_used_known_method_surfaces_by_arity() {
+    let caller = r#"
+class UsesIntervalArgumentCollectionSurface {
+    IntervalArgumentCollection intervals;
+    OtherOpaque other;
+
+    boolean hasIntervals() {
+        return intervals.intervalsSpecified();
+    }
+
+    List<SimpleInterval> readIntervals(SAMSequenceDictionary dictionary) {
+        return intervals.getIntervals(dictionary);
+    }
+
+    void touchOther() {
+        other.toString();
+    }
+
+    String contig(SimpleInterval interval) {
+        return interval.getContig();
+    }
+
+    int span(SimpleInterval interval) {
+        return interval.getEnd() - interval.getStart();
+    }
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        caller,
+        &Vec::<String>::new(),
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub struct IntervalArgumentCollection;")
+            && translation
+                .rust
+                .contains("pub fn intervals_specified(&self) -> bool")
+            && translation
+                .rust
+                .contains("pub fn get_intervals<T0>(&self, _arg0: T0) -> Vec<SimpleInterval>")
+            && translation
+                .rust
+                .contains("self.intervals.as_ref().unwrap().intervals_specified()")
+            && translation
+                .rust
+                .contains("self.intervals.as_ref().unwrap().get_intervals(dictionary)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("impl SimpleInterval")
+            && translation
+                .rust
+                .contains("pub fn get_contig(&self) -> String")
+            && translation.rust.contains("pub fn get_start(&self) -> i32")
+            && translation.rust.contains("pub fn get_end(&self) -> i32"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub struct OtherOpaque;")
+            && !translation
+                .rust
+                .contains("impl OtherOpaque {\n    pub fn get_intervals"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn selected_opaque_future_get_is_generic_instance_surface() {
+    let source = r#"
+import java.util.concurrent.Future;
+
+class FutureGetUse {
+    Future<FeatureReader> future;
+
+    FeatureReader read() {
+        return future.get();
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get<T: Default>(&self) -> T"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("self.future.as_ref().unwrap().get()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub fn get<R: Default>() -> R"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn emitted_type_extending_source_summary_super_gets_inherited_method_surface() {
+    let caller = r#"
+import java.util.Set;
+
+class ImportTool extends GatkTool {
+    Set<VCFHeaderLine> lines;
+
+    void mergeDefaults() {
+        lines.addAll(getDefaultToolVCFHeaderLines());
+    }
+}
+"#;
+    let summary = r#"
+import java.util.Set;
+
+class GatkTool {
+    protected Set<VCFHeaderLine> getDefaultToolVCFHeaderLines() {
+        return null;
+    }
+}
+
+class VCFHeaderLine {
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        caller,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("impl ImportTool")
+            && translation
+                .rust
+                .contains("pub fn get_default_tool_v_c_f_header_lines(&self) -> std::collections::HashSet<VCFHeaderLine>")
+            && translation
+                .rust
+                .contains("self.get_default_tool_v_c_f_header_lines()")
+            && !translation
+                .rust
+                .contains("pub fn get_default_tool_v_c_f_header_lines(&self) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "emitted_source_summary_super_method_surface",
+        vec![GeneratedCrateModule {
+            name: "emitted_source_summary_super_method_surface",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn typechecks_emitted_super_method_surface() {
+        let mut fixture = ImportTool { lines: Some(HashSet::new()) };
+        fixture.merge_defaults();
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn external_pack_typed_set_and_dictionary_getters_shape_facade_returns() {
+    let source = r#"
+import htsjdk.samtools.SAMSequenceDictionary;
+import htsjdk.variant.vcf.VCFHeader;
+import htsjdk.variant.vcf.VCFHeaderLine;
+import java.util.Set;
+
+class TypedExternalGetterUse {
+    Set<VCFHeaderLine> lines(VCFHeader header) {
+        return header.getMetaDataInInputOrder();
+    }
+
+    SAMSequenceDictionary dictionary(VCFHeader header) {
+        return header.getSequenceDictionary();
+    }
+}
+"#;
+    let pack_facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
+    let mut facts = FactSet::default();
+    for method_name in ["getMetaDataInInputOrder", "getSequenceDictionary"] {
+        facts.external_api_effect_facts.push(
+            pack_facts
+                .external_api_effect_for_receiver(Some("VCFHeader"), method_name)
+                .unwrap_or_else(|| panic!("VCFHeader.{method_name} should be pack-owned"))
+                .clone(),
+        );
+    }
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation.rust.contains(
+            "pub fn get_meta_data_in_input_order(&self) -> std::collections::HashSet<VCFHeaderLine>"
+        ) && translation
+            .rust
+            .contains("pub fn get_sequence_dictionary(&self) -> SAMSequenceDictionary")
+            && !translation
+                .rust
+                .contains("pub fn get_meta_data_in_input_order(&self) -> ()")
+            && !translation
+                .rust
+                .contains("pub fn get_sequence_dictionary(&self) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "typed_external_vcf_getters",
+        vec![GeneratedCrateModule {
+            name: "typed_external_vcf_getters",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn typechecks_typed_external_getters() {
+        let fixture = TypedExternalGetterUse {};
+        let _: HashSet<VCFHeaderLine> = fixture.lines(&VCFHeader);
+        let _: SAMSequenceDictionary = fixture.dictionary(&VCFHeader);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn optional_local_external_receiver_getter_is_unwrapped_before_call() {
+    let source = r#"
+import htsjdk.samtools.SAMSequenceDictionary;
+import htsjdk.variant.vcf.VCFHeader;
+
+class OptionalExternalReceiverGetterUse {
+    VCFHeader maybeHeader() {
+        return null;
+    }
+
+    SAMSequenceDictionary dictionary() {
+        VCFHeader header = maybeHeader();
+        return header.getSequenceDictionary();
+    }
+}
+"#;
+    let pack_facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(
+        pack_facts
+            .external_api_effect_for_receiver(Some("VCFHeader"), "getSequenceDictionary")
+            .expect("VCFHeader.getSequenceDictionary should be pack-owned")
+            .clone(),
+    );
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("header.as_ref().unwrap().get_sequence_dictionary()")
+            && !translation
+                .rust
+                .contains("return header.get_sequence_dictionary()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_external_receiver_getter",
+        vec![GeneratedCrateModule {
+            name: "optional_external_receiver_getter",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn typechecks_optional_receiver_getter() {
+        let fixture = OptionalExternalReceiverGetterUse {};
+        let _: SAMSequenceDictionary = fixture.dictionary();
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn nullable_method_result_in_callback_local_stays_optional_for_optional_arg_slot() {
+    let translation = translate_source(
+        r#"
+class NullableCallbackLocalSlot {
+    ExecutorService executor;
+
+    Path maybePath(String name) {
+        return null;
+    }
+
+    Reader openWithIndex(String name, Path index) {
+        if (index == null) {
+            return new Reader();
+        }
+        return new Reader();
+    }
+
+    Future run(String name) {
+        return executor.submit(() -> {
+            Path path = maybePath(name);
+            return openWithIndex(name, path);
+        });
+    }
+}
+
+class Path {
+}
+
+class Reader {
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut path: Option<Path> = self.maybe_path(name);")
+            && translation
+                .rust
+                .contains("self.open_with_index(name, path)")
+            && !translation
+                .rust
+                .contains("let mut path: Path = self.maybe_path")
+            && !translation.rust.contains("Some(path"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn foreach_lambda_throw_wraps_enclosing_method_in_result() {
+    let translation = translate_source(
+        r#"
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.Future;
+
+class FutureGetForEachCatchThrow {
+    Map<String, Reader> run(Map<String, Future<Reader>> futures) {
+        Map<String, Reader> readers = new LinkedHashMap<>();
+        futures.forEach((name, future) -> {
+            try {
+                Reader reader = future.get();
+                readers.put(name, reader);
+            } catch (ExecutionException e) {
+                throw new UserException("bad", e);
+            }
+        });
+        return readers;
+    }
+}
+
+class Reader {
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn run(&self, futures: std::collections::HashMap<String, Future>) -> Result<std::collections::HashMap<String, Reader>, JavaException>"
+        ) && translation
+            .rust
+            .contains("Err(e) if e.is_instance(&[\"ExecutionException\"])")
+            && translation.rust.contains("return Err(JavaException::with_cause(\"UserException\"")
+            && translation.rust.contains("return Ok(readers);"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_pack_typed_string_list_getter_supports_indexed_sample_access() {
+    let source = r#"
+import htsjdk.variant.vcf.VCFHeader;
+
+class TypedExternalStringListGetterUse {
+    String firstSample(VCFHeader header) {
+        return header.getGenotypeSamples().get(0);
+    }
+}
+"#;
+    let pack_facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(
+        pack_facts
+            .external_api_effect_for_receiver(Some("VCFHeader"), "getGenotypeSamples")
+            .expect("VCFHeader.getGenotypeSamples should be pack-owned")
+            .clone(),
+    );
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_genotype_samples(&self) -> Vec<String>")
+            && translation
+                .rust
+                .contains("get_genotype_samples().get(0 as usize)")
+            && !translation
+                .rust
+                .contains("pub fn get_genotype_samples(&self) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "typed_external_string_list_getter",
+        vec![GeneratedCrateModule {
+            name: "typed_external_string_list_getter",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn typechecks_indexed_string_list_getter() {
+        let fixture = TypedExternalStringListGetterUse {};
+        let _: String = fixture.first_sample(&VCFHeader);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn external_pack_typed_locatable_coordinate_getters_support_numeric_and_string_use() {
+    let source = r#"
+import htsjdk.samtools.util.Locatable;
+
+class TypedExternalLocatableGetterUse {
+    String describe(Locatable interval) {
+        return interval.getContig() + ":" + interval.getStart() + "-" + interval.getEnd();
+    }
+
+    boolean startsAtOne(Locatable interval) {
+        return interval.getStart() == 1;
+    }
+}
+"#;
+    let pack_facts = new_java2rust::external_packs::htsjdk_samtools_util_pack_facts();
+    let mut facts = FactSet::default();
+    for method_name in ["getContig", "getStart", "getEnd"] {
+        facts.external_api_effect_facts.push(
+            pack_facts
+                .external_api_effect_for_receiver(Some("Locatable"), method_name)
+                .unwrap_or_else(|| panic!("Locatable.{method_name} should be pack-owned"))
+                .clone(),
+        );
+    }
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_contig(&self) -> String")
+            && translation.rust.contains("pub fn get_start(&self) -> i32")
+            && translation.rust.contains("pub fn get_end(&self) -> i32")
+            && !translation.rust.contains("pub fn get_contig(&self) -> ()")
+            && !translation.rust.contains("pub fn get_start(&self) -> ()")
+            && !translation.rust.contains("pub fn get_end(&self) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "typed_external_locatable_getters",
+        vec![GeneratedCrateModule {
+            name: "typed_external_locatable_getters",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn typechecks_coordinate_getters() {
+        let fixture = TypedExternalLocatableGetterUse {};
+        let _: String = fixture.describe(&Locatable);
+        let _: bool = fixture.starts_at_one(&Locatable);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn source_summary_super_calls_lower_to_boundary_defaults_not_raw_super_receiver() {
+    let caller = r#"
+class SummarySuperCaller extends SummaryBase {
+    void startup() throws IOException {
+        super.startup();
+    }
+
+    String inheritedLabel() {
+        return super.label();
+    }
+}
+"#;
+    let summary = r#"
+class SummaryBase {
+    void startup() throws IOException {
+    }
+
+    String label() {
+        return "base";
+    }
+}
+
+class IOException extends Exception {
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        caller,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(!translation.rust.contains("super."), "{}", translation.rust);
+    assert!(
+        translation.rust.contains("Ok(())?;")
+            && translation.rust.contains("return Default::default();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_summary_super_boundary",
+        vec![GeneratedCrateModule {
+            name: "source_summary_super_boundary",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn typechecks_source_summary_super_boundary() {
+        let fixture = SummarySuperCaller {};
+        let _: String = fixture.inherited_label();
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn summary_context_translation_resolves_sibling_symbols_without_lowering_bodies() {
     let caller = r#"
 class SummaryContextCaller {
@@ -1854,6 +2843,34 @@ fn documents_diamond_nested_unknowns_gap() {
             && !translation.rust.contains("let out: Map")
             && !translation.rust.contains(".put(")
             && !translation.rust.contains("ArrayList::new(values)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn final_sorted_map_receiver_mutation_declares_rust_local_mutable() {
+    let translation = translate_source(&idiom_gap("FinalSortedMapReceiverMutation.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut out: std::collections::HashMap<String, i32> = std::collections::HashMap::new();")
+            && translation.rust.contains("out.insert(key, value);")
+            && !translation.rust.contains("let out: std::collections::HashMap"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn try_catch_reused_moved_argument_clones_before_try_body_move() {
+    let translation = translate_source(&idiom_gap("TryCatchReusesMovedArgument.java"));
+
+    assert!(
+        translation.rust.contains(
+            "Files::read_all_lines(path.clone()/* TODO(translation): validate added clone */)"
+        ) && translation.rust.contains("path.to_string()"),
         "{}",
         translation.rust
     );
@@ -2929,6 +3946,49 @@ public class BaseCounter {
         translation
             .rust
             .contains("return (self.inherited_count + self.local_count);"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn inherited_source_summary_field_types_emit_opaque_support_shells() {
+    let target = r#"
+public class ChildWithToolState extends BaseWithToolState {
+    public void touch() {
+        progressMeter.record();
+    }
+}
+"#;
+    let summary = r#"
+public class BaseWithToolState {
+    protected ProgressMeter progressMeter = new ProgressMeter();
+}
+
+public class ProgressMeter {
+    public void record() {
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_summary_sources(
+        target,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("progress_meter: ProgressMeter"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub struct ProgressMeter;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("self.progress_meter.record();"),
         "{}",
         translation.rust
     );
