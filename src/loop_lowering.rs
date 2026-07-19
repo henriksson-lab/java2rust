@@ -1,3 +1,4 @@
+use crate::rewrite::NullTestKind;
 use crate::rust_ir::{RustExpr, RustStmt};
 
 pub fn assemble_for_loop(
@@ -18,6 +19,51 @@ pub fn continue_with_updates(update_exprs: &[RustExpr]) -> Vec<RustStmt> {
         .map(RustStmt::Expr)
         .chain(std::iter::once(RustStmt::Continue(None)))
         .collect()
+}
+
+pub fn assignment_condition_loop(
+    local_name: &str,
+    assigned_value: RustExpr,
+    null_test: NullTestKind,
+    mut body: Vec<RustStmt>,
+) -> RustStmt {
+    let local = RustExpr::Var(local_name.to_string());
+    let break_condition = match null_test {
+        NullTestKind::NotNull => RustExpr::MethodCall {
+            receiver: Box::new(local.clone()),
+            method: "is_none".to_string(),
+            args: Vec::new(),
+        },
+        NullTestKind::IsNull => RustExpr::MethodCall {
+            receiver: Box::new(local.clone()),
+            method: "is_some".to_string(),
+            args: Vec::new(),
+        },
+    };
+    let mut loop_body = vec![
+        RustStmt::Assign {
+            target: local.clone(),
+            value: assigned_value,
+        },
+        RustStmt::If {
+            condition: break_condition,
+            then_body: vec![RustStmt::Break(None)],
+            else_body: Vec::new(),
+        },
+    ];
+    if null_test == NullTestKind::NotNull {
+        loop_body.push(RustStmt::Let {
+            mutable: false,
+            name: local_name.to_string(),
+            ty: None,
+            value: Some(RustExpr::Raw(format!("{local_name}.as_ref().unwrap()"))),
+        });
+    }
+    loop_body.append(&mut body);
+    RustStmt::Loop {
+        label: None,
+        body: loop_body,
+    }
 }
 
 fn default_for_condition() -> RustExpr {

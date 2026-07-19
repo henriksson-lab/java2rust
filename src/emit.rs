@@ -35,6 +35,15 @@ fn emit_struct(strukt: &RustStruct) -> String {
 
 fn emit_impl(imp: &RustImpl) -> String {
     let mut out = format!("impl {} {{\n", imp.target);
+    for associated_const in &imp.associated_consts {
+        let vis = if associated_const.is_pub { "pub " } else { "" };
+        out.push_str(&format!(
+            "    {vis}const {}: {} = {};\n\n",
+            associated_const.name,
+            emit_type(&associated_const.ty),
+            emit_expr(&associated_const.value)
+        ));
+    }
     for function in &imp.functions {
         out.push_str(&emit_function(function, 1));
         out.push('\n');

@@ -4,7 +4,8 @@ use crate::facts::FactSet;
 use crate::java_ir::{Expr, JavaType, Member, MethodDecl, Modifier, Stmt, TypeDecl};
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
-    indexed_assignment_shape_with_facts, indexed_read_shape_with_facts,
+    borrowed_string_content_shape, indexed_assignment_shape_with_facts,
+    indexed_read_shape_with_facts,
     project_java_value_shape as project_java_value_shape_with_representations,
 };
 use crate::signature::{
@@ -18,6 +19,7 @@ pub struct ShapeEnv {
     types: TypeEnv,
     local_shapes: HashMap<String, RustSlotShape>,
     field_shapes: HashMap<String, RustSlotShape>,
+    static_field_names: HashMap<String, String>,
 }
 
 impl ShapeEnv {
@@ -49,10 +51,72 @@ impl ShapeEnv {
         self.local_shapes.insert(name, shape);
     }
 
+    pub fn insert_static_type_alias(
+        &mut self,
+        alias: impl Into<String>,
+        type_name: impl Into<String>,
+    ) {
+        self.types.insert_static_type_alias(alias, type_name);
+    }
+
+    pub fn insert_static_member_import(
+        &mut self,
+        member: impl Into<String>,
+        owner_type: impl Into<String>,
+    ) {
+        self.types.insert_static_member_import(member, owner_type);
+    }
+
     pub fn insert_field_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
         let name = name.into();
+        let alias = crate::parser::to_snake_case(&name);
         self.types.insert_field(name.clone(), shape.java_ty.clone());
-        self.field_shapes.insert(name, shape);
+        self.field_shapes.insert(name.clone(), shape.clone());
+        self.types
+            .insert_field(alias.clone(), shape.java_ty.clone());
+        self.field_shapes.insert(alias, shape);
+    }
+
+    pub fn insert_type_field_shape(
+        &mut self,
+        type_name: impl Into<String>,
+        field_name: impl Into<String>,
+        shape: RustSlotShape,
+    ) {
+        let type_name = type_name.into();
+        let field_name = field_name.into();
+        let type_name_alias = crate::parser::to_snake_case(&type_name);
+        let alias = crate::parser::to_snake_case(&field_name);
+        self.types
+            .insert_type_field(type_name.clone(), field_name.clone(), shape.java_ty.clone());
+        self.types
+            .insert_type_field(type_name.clone(), alias.clone(), shape.java_ty.clone());
+        if type_name_alias != type_name {
+            self.types.insert_type_field(
+                type_name_alias.clone(),
+                field_name,
+                shape.java_ty.clone(),
+            );
+            self.types
+                .insert_type_field(type_name_alias, alias, shape.java_ty.clone());
+        }
+    }
+
+    pub fn insert_static_field_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
+        let name = name.into();
+        let shape = if matches!(shape.java_ty, JavaType::String) {
+            borrowed_string_content_shape()
+        } else {
+            shape
+        };
+        let alias = crate::parser::to_snake_case(&name);
+        self.types.insert_field(name.clone(), shape.java_ty.clone());
+        self.field_shapes.insert(name.clone(), shape.clone());
+        self.types
+            .insert_field(alias.clone(), shape.java_ty.clone());
+        self.field_shapes.insert(alias.clone(), shape);
+        self.static_field_names.insert(name.clone(), name.clone());
+        self.static_field_names.insert(alias, name);
     }
 
     pub fn local_type(&self, name: &str) -> Option<&JavaType> {
@@ -70,6 +134,18 @@ impl ShapeEnv {
     pub fn field_shape(&self, name: &str) -> Option<&RustSlotShape> {
         self.field_shapes.get(name)
     }
+
+    pub fn is_static_field(&self, name: &str) -> bool {
+        self.static_field_names.contains_key(name)
+    }
+
+    pub fn static_field_access_name(&self, name: &str) -> Option<&str> {
+        self.static_field_names.get(name).map(String::as_str)
+    }
+}
+
+pub fn fallback_local_shape_from_declared_type(ty: &JavaType) -> RustSlotShape {
+    RustSlotShape::conservative(ty.clone())
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -122,26 +198,33 @@ pub fn infer_expr_shape_with_context(
             .field_shape(field)
             .cloned()
             .unwrap_or_else(|| RustSlotShape::conservative(infer_expr_type(expr, env.type_env()))),
-        Expr::FieldAccess(receiver, field)
-            if planned_member_access_shape(receiver, field, env).is_some() =>
-        {
-            planned_member_access_shape(receiver, field, env)
-                .expect("checked planned member access")
-        }
         Expr::FieldAccess(receiver, field) => infer_field_access_shape(receiver, field, env, ctx)
+            .or_else(|| planned_member_access_shape(receiver, field, env))
             .unwrap_or_else(|| RustSlotShape::conservative(infer_expr_type(expr, env.type_env()))),
         Expr::ArrayAccess(array, _) => infer_indexed_expr_shape(array, env, ctx),
         Expr::Call {
+            receiver,
+            name,
+            args,
             resolved: Some(call),
-            ..
-        } => ctx
-            .signatures
-            .and_then(|signatures| {
-                signatures.method_return_shape_by_rust_name(&call.declaring_type, &call.rust_name)
+        } => borrowed_string_view_call_shape(receiver.as_deref(), name, args, env)
+            .or_else(|| {
+                ctx.signatures.and_then(|signatures| {
+                    signatures
+                        .method_return_shape_by_rust_name(&call.declaring_type, &call.rust_name)
+                })
             })
             .unwrap_or_else(|| {
                 value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))
             }),
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved: None,
+        } => borrowed_string_view_call_shape(receiver.as_deref(), name, args, env).unwrap_or_else(
+            || value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env())),
+        ),
         Expr::New {
             ty,
             resolved: Some(resolved),
@@ -162,14 +245,43 @@ pub fn infer_expr_shape_with_context(
     }
 }
 
+fn borrowed_string_view_call_shape(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+) -> Option<RustSlotShape> {
+    if !crate::stdlib::is_borrowed_string_view_method(name, args.len()) {
+        return None;
+    }
+    let receiver_ty = receiver.map(|receiver| infer_expr_type(receiver, env.type_env()))?;
+    let effective_receiver_ty =
+        crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+    if !matches!(effective_receiver_ty, JavaType::String) {
+        return None;
+    }
+    Some(crate::shape_projection::borrowed_string_content_shape())
+}
+
 pub fn shape_env_for_type(ty: &TypeDecl, signatures: &SignaturePlan) -> ShapeEnv {
+    shape_env_for_type_with_fields(ty, signatures, true)
+}
+
+fn shape_env_for_type_with_fields(
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    include_instance_fields: bool,
+) -> ShapeEnv {
     let mut env = ShapeEnv::new();
     for member in &ty.members {
         if let Member::Field(field) = member {
-            env.insert_field_shape(
-                field.name.clone(),
-                signatures.required_field_shape(&ty.name, &field.name),
-            );
+            let shape = signatures.required_field_shape(&ty.name, &field.name);
+            env.insert_type_field_shape(&ty.name, field.name.clone(), shape.clone());
+            if is_static_final_field(field) {
+                env.insert_static_field_shape(field.name.clone(), shape);
+            } else if include_instance_fields {
+                env.insert_field_shape(field.name.clone(), shape);
+            }
         }
     }
     env
@@ -192,12 +304,16 @@ pub fn shape_env_for_method(
     signatures: &SignaturePlan,
 ) -> ShapeEnv {
     let mut env = if method.modifiers.contains(&Modifier::Static) {
-        ShapeEnv::new()
+        shape_env_for_type_with_fields(ty, signatures, false)
     } else {
         shape_env_for_type(ty, signatures)
     };
     insert_param_shapes(&mut env, &method_signature.params);
     env
+}
+
+fn is_static_final_field(field: &crate::java_ir::FieldDecl) -> bool {
+    field.modifiers.contains(&Modifier::Static) && field.modifiers.contains(&Modifier::Final)
 }
 
 pub fn learn_stmt_shapes(
@@ -207,8 +323,11 @@ pub fn learn_stmt_shapes(
     signatures: &SignaturePlan,
 ) {
     match stmt {
-        Stmt::VarDecl { name, .. } => {
-            let shape = signatures.required_local_shape(locals, name);
+        Stmt::VarDecl { ty, name, .. } => {
+            let shape = signatures
+                .local_shape(locals, name)
+                .cloned()
+                .unwrap_or_else(|| fallback_local_shape_from_declared_type(ty));
             env.insert_local_shape(name.clone(), shape);
         }
         Stmt::For { init, .. } => {
@@ -250,11 +369,36 @@ fn infer_field_access_shape(
     env: &ShapeEnv,
     ctx: ExprShapeContext<'_>,
 ) -> Option<RustSlotShape> {
-    let JavaType::Named { name, .. } = infer_expr_type(receiver, env.type_env()) else {
-        return None;
+    if let Some(signatures) = ctx.signatures
+        && let Some(crate::member_access_plan::MemberAccessPlan {
+            op: crate::member_access_plan::MemberAccessOp::StaticConstant { owner },
+            ..
+        }) = crate::member_access_plan::plan_member_access(receiver, field, env.type_env())
+    {
+        if let Some(shape) = signatures
+            .field_shape(&owner, field)
+            .or_else(|| signatures.field_shape(&owner, &crate::parser::to_snake_case(field)))
+        {
+            if matches!(shape.java_ty, JavaType::String) {
+                return Some(borrowed_string_content_shape());
+            }
+            return Some(shape.clone());
+        }
+    }
+    let receiver_ty = infer_expr_type(receiver, env.type_env());
+    let name = match receiver_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        _ => return None,
     };
-    ctx.signatures
-        .and_then(|signatures| signatures.field_shape(&name, field).cloned())
+    if env.local_type(&name).is_some() || env.field_type(&name).is_some() {
+        return None;
+    }
+    ctx.signatures.and_then(|signatures| {
+        signatures
+            .field_shape(&name, field)
+            .or_else(|| signatures.field_shape(&name, &crate::parser::to_snake_case(field)))
+            .cloned()
+    })
 }
 
 fn planned_member_access_shape(

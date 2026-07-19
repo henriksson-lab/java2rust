@@ -82,6 +82,19 @@ pub fn type_emission_for_with_facts_and_exceptions(
         ObjectRepresentation::DynTrait { trait_name } => RepresentationTypeEmission::RawRustItem(
             trait_item_for_type(ty, trait_name, signatures, facts, exceptions),
         ),
+        ObjectRepresentation::JavaEnum {
+            enum_name,
+            variants,
+        } => {
+            let variants = variants
+                .iter()
+                .map(|variant| format!("    {variant},"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            RepresentationTypeEmission::RawRustItem(format!(
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum {enum_name} {{\n{variants}\n}}"
+            ))
+        }
         ObjectRepresentation::ClosedEnum {
             enum_name,
             variants,
@@ -99,6 +112,33 @@ pub fn type_emission_for_with_facts_and_exceptions(
             "pub type {} = Box<dyn std::any::Any>;",
             ty.name
         )),
+    }
+}
+
+pub fn type_emission_for_program_with_facts_and_exceptions(
+    representations: &RepresentationPlan,
+    program: &Program,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+) -> RepresentationTypeEmission {
+    let Some(representation) = representations.type_representation(&ty.name) else {
+        return RepresentationTypeEmission::LowerAsConcreteStruct;
+    };
+    match &representation.representation {
+        ObjectRepresentation::DynTrait { trait_name } => {
+            RepresentationTypeEmission::RawRustItem(trait_item_for_type_with_program(
+                ty, trait_name, program, signatures, facts, exceptions,
+            ))
+        }
+        _ => type_emission_for_with_facts_and_exceptions(
+            representations,
+            ty,
+            signatures,
+            facts,
+            exceptions,
+        ),
     }
 }
 
@@ -126,6 +166,27 @@ pub fn raw_type_item_for_with_facts_and_exceptions(
 ) -> Option<String> {
     match type_emission_for_with_facts_and_exceptions(
         representations,
+        ty,
+        signatures,
+        facts,
+        exceptions,
+    ) {
+        RepresentationTypeEmission::RawRustItem(item) => Some(item),
+        RepresentationTypeEmission::LowerAsConcreteStruct => None,
+    }
+}
+
+pub fn raw_type_item_for_program_with_facts_and_exceptions(
+    representations: &RepresentationPlan,
+    program: &Program,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+) -> Option<String> {
+    match type_emission_for_program_with_facts_and_exceptions(
+        representations,
+        program,
         ty,
         signatures,
         facts,
@@ -187,6 +248,7 @@ pub fn trait_impl_emissions_for_type_with_facts_and_exceptions(
             Some(trait_impl_for_type(
                 ty,
                 interface,
+                program,
                 &trait_name,
                 signatures,
                 facts,
@@ -224,9 +286,40 @@ fn trait_item_for_type(
     }
 }
 
+fn trait_item_for_type_with_program(
+    ty: &TypeDecl,
+    trait_name: &str,
+    program: &Program,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+) -> String {
+    let methods = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) => Some(trait_method_signature_with_receiver(
+                ty,
+                method,
+                signatures,
+                facts,
+                exceptions.method_plan(ty, method),
+                trait_method_receiver_plan(ty, method, program, signatures),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if methods.is_empty() {
+        format!("pub trait {trait_name} {{}}")
+    } else {
+        format!("pub trait {trait_name} {{\n{}\n}}", methods.join("\n"))
+    }
+}
+
 fn trait_impl_for_type(
     ty: &TypeDecl,
     interface: &TypeDecl,
+    program: &Program,
     trait_name: &str,
     signatures: &SignaturePlan,
     facts: &FactSet,
@@ -240,6 +333,7 @@ fn trait_impl_for_type(
                 ty,
                 interface,
                 interface_method,
+                trait_method_receiver_plan(interface, interface_method, program, signatures),
                 signatures,
                 facts,
                 exceptions.method_plan(interface, interface_method),
@@ -262,16 +356,18 @@ fn trait_impl_method(
     ty: &TypeDecl,
     interface: &TypeDecl,
     interface_method: &MethodDecl,
+    trait_receiver: Option<ReceiverPlan>,
     signatures: &SignaturePlan,
     facts: &FactSet,
     interface_exceptions: MethodExceptionPlan,
 ) -> String {
-    let signature = trait_method_signature(
+    let signature = trait_method_signature_with_receiver(
         interface,
         interface_method,
         signatures,
         facts,
         interface_exceptions,
+        trait_receiver,
     );
     let candidates = implementing_method_candidates(ty, interface_method);
     if candidates.is_empty() {
@@ -393,10 +489,21 @@ fn trait_method_signature(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
 ) -> String {
+    trait_method_signature_with_receiver(ty, method, signatures, facts, exceptions, None)
+}
+
+fn trait_method_signature_with_receiver(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+    receiver_override: Option<ReceiverPlan>,
+) -> String {
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
     if !method.modifiers.contains(&Modifier::Static) {
-        params.push(match signature.receiver {
+        params.push(match receiver_override.unwrap_or(signature.receiver) {
             ReceiverPlan::Mutable => "&mut self".to_string(),
             ReceiverPlan::Shared | ReceiverPlan::None => "&self".to_string(),
         });
@@ -417,6 +524,44 @@ fn trait_method_signature(
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
     format!("    fn {rust_name}({}){return_type};", params.join(", "))
+}
+
+fn trait_method_receiver_plan(
+    interface: &TypeDecl,
+    interface_method: &MethodDecl,
+    program: &Program,
+    signatures: &SignaturePlan,
+) -> Option<ReceiverPlan> {
+    if interface_method.modifiers.contains(&Modifier::Static) {
+        return None;
+    }
+    let interface_receiver = signatures
+        .required_method_signature(interface, interface_method)
+        .receiver;
+    let mut receiver = interface_receiver;
+    for implementor in program.types.iter().filter(|ty| {
+        ty.kind == TypeKind::Class
+            && ty
+                .implements
+                .iter()
+                .any(|implemented| implemented == &interface.name)
+    }) {
+        let Some(implementation) = implementing_method_candidates(implementor, interface_method)
+            .into_iter()
+            .find(|candidate| {
+                trait_impl_method_compatibility_error(interface_method, candidate).is_none()
+            })
+        else {
+            continue;
+        };
+        let implementation_receiver = signatures
+            .required_method_signature(implementor, implementation)
+            .receiver;
+        if implementation_receiver == ReceiverPlan::Mutable {
+            receiver = ReceiverPlan::Mutable;
+        }
+    }
+    Some(receiver)
 }
 
 fn trait_method_return_type_with_exception_plan(

@@ -1,3 +1,4 @@
+use crate::conversion_plan::ConversionDiagnostic;
 use crate::diagnostics::Severity;
 use crate::facts::FactSet;
 use crate::java_ir::Program;
@@ -10,6 +11,16 @@ pub struct LoweringDiagnosticPlan {
     pub severity: Severity,
     pub code: &'static str,
     pub message: String,
+}
+
+pub fn lowering_diagnostic_from_conversion_diagnostic(
+    diagnostic: ConversionDiagnostic,
+) -> LoweringDiagnosticPlan {
+    LoweringDiagnosticPlan {
+        severity: Severity::Unsupported,
+        code: diagnostic.code,
+        message: diagnostic.message,
+    }
 }
 
 pub fn collect_lowering_diagnostic_plans(

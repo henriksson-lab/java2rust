@@ -1,15 +1,22 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::effective_facts::EffectiveFacts;
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
-    CaptureOrigin, CaptureSource, DispatchRequirementKind, FactSet, NullabilityState,
-    OwnedRecoveryCapability, ReceiverMutabilityFact,
+    CaptureOrigin, CaptureSource, DispatchRequirementKind, ExternalApiArgumentEffectFact,
+    ExternalArgumentAliasPolicy, FactSet, NullabilityState, OwnedRecoveryCapability,
+    ReceiverMutabilityFact,
 };
+use crate::graph::strongly_connected_components;
 use crate::java_ir::{
-    Block, ConstructorDecl, Expr, FieldDecl, JavaType, MethodDecl, Modifier, Param, Program, Stmt,
-    TypeDecl, UnaryOp,
+    BinaryOp, Block, ConstructorDecl, Expr, FieldDecl, JavaType, Literal, MethodDecl, Modifier,
+    Param, Program, Stmt, TypeDecl, UnaryOp,
 };
+use crate::lattice::{
+    dispatch_shape_lattice_rank, join_ranked_lattice, ownership_lattice_rank,
+    storage_nullability_lattice_rank, view_lattice_rank,
+};
+use crate::loop_plan::{PostLoopRefinementPlan, plan_while_stmt, post_loop_refinement_for_while};
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
     DispatchRequirementProjectionRole, apply_required_dispatch, apply_required_ownership,
@@ -30,6 +37,8 @@ use crate::usage::{
     BindingUse, BindingUseFacts, CallArgumentBoundary, FieldUse, MethodUsageFacts,
     UsageConstructorKey, UsageFacts, UsageMethodKey,
 };
+
+pub type SolvedSlotShape = RustSlotShape;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SignaturePlan {
@@ -119,6 +128,21 @@ pub enum SignatureBoundaryKind {
     EscapingStorage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SignatureBoundaryRole {
+    MethodParam,
+    MethodReturn,
+    ConstructorParam,
+    MethodLocal,
+    ConstructorLocal,
+    Field,
+    MethodReceiver,
+    CapturedValue,
+    CallArgument,
+    CallResult,
+    ConstructorInvocation,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureBoundaryFallback {
     ConservativeNative,
@@ -133,6 +157,13 @@ pub struct SignatureBoundaryPolicy {
     pub java_ty: JavaType,
     pub fallback: SignatureBoundaryFallback,
     pub constraints: Vec<SignatureConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureBoundaryRolePolicy {
+    pub role: SignatureBoundaryRole,
+    pub constraint_owner: &'static str,
+    pub participates_in_dependency_graph: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +199,74 @@ pub struct SignatureSlotBaselinePolicy {
     pub capability_constraints: Vec<SignatureConstraint>,
     pub boundary_constraints: Vec<SignatureConstraint>,
     pub constraints: Vec<SignatureConstraint>,
+}
+
+pub fn signature_boundary_role_policies() -> Vec<SignatureBoundaryRolePolicy> {
+    use SignatureBoundaryRole::*;
+    vec![
+        SignatureBoundaryRolePolicy {
+            role: MethodParam,
+            constraint_owner: "method_param_shape_constraints",
+            participates_in_dependency_graph: true,
+        },
+        SignatureBoundaryRolePolicy {
+            role: MethodReturn,
+            constraint_owner: "method_return_shape_constraints",
+            participates_in_dependency_graph: true,
+        },
+        SignatureBoundaryRolePolicy {
+            role: ConstructorParam,
+            constraint_owner: "constructor_param_shape_constraints",
+            participates_in_dependency_graph: true,
+        },
+        SignatureBoundaryRolePolicy {
+            role: MethodLocal,
+            constraint_owner: "local_shape_constraints_with_usage",
+            participates_in_dependency_graph: true,
+        },
+        SignatureBoundaryRolePolicy {
+            role: ConstructorLocal,
+            constraint_owner: "local_shape_constraints_with_usage",
+            participates_in_dependency_graph: true,
+        },
+        SignatureBoundaryRolePolicy {
+            role: Field,
+            constraint_owner: "field_shape_constraints_with_usage",
+            participates_in_dependency_graph: true,
+        },
+        SignatureBoundaryRolePolicy {
+            role: MethodReceiver,
+            constraint_owner: "receiver_constraints_with_facts_or_usage",
+            participates_in_dependency_graph: true,
+        },
+        SignatureBoundaryRolePolicy {
+            role: CapturedValue,
+            constraint_owner: "apply_capture_constraints",
+            participates_in_dependency_graph: true,
+        },
+        SignatureBoundaryRolePolicy {
+            role: CallArgument,
+            constraint_owner: "add_call_argument_dependency_edges",
+            participates_in_dependency_graph: true,
+        },
+        SignatureBoundaryRolePolicy {
+            role: CallResult,
+            constraint_owner: "external_call_return_binding_constraints",
+            participates_in_dependency_graph: true,
+        },
+        SignatureBoundaryRolePolicy {
+            role: ConstructorInvocation,
+            constraint_owner: "constructor_param_shape_constraints",
+            participates_in_dependency_graph: true,
+        },
+    ]
+}
+
+pub fn signature_boundary_role_policy(role: SignatureBoundaryRole) -> SignatureBoundaryRolePolicy {
+    signature_boundary_role_policies()
+        .into_iter()
+        .find(|policy| policy.role == role)
+        .expect("all signature boundary roles must have a policy")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +322,39 @@ pub struct SignatureConstraintConflict {
     pub rejected: SignatureConstraint,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignatureConstraintProvenance {
+    OwnedRequirement,
+    BorrowedRequirement,
+    MutableBorrowRequirement,
+    CopyRequirement,
+    NativeViewRequirement,
+    StringViewRequirement,
+    SliceViewRequirement,
+    DynTraitViewRequirement,
+    EnumViewRequirement,
+    ErasedObjectRequirement,
+    ConcreteDispatchRequirement,
+    DynTraitRequirement,
+    BoxedDynTraitRequirement,
+    ClosedEnumRequirement,
+    OptionalStorageRequirement,
+    NonNullStorageRequirement,
+    UnknownStorageRequirement,
+    MutableBindingRequirement,
+    StorageSlotRequirement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureConstraintConflictDiagnostic {
+    pub axis: SignatureConstraintAxis,
+    pub kept: SignatureConstraint,
+    pub rejected: SignatureConstraint,
+    pub kept_provenance: SignatureConstraintProvenance,
+    pub rejected_provenance: SignatureConstraintProvenance,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureRequirementMerge<T> {
     pub kept: T,
@@ -247,10 +379,22 @@ pub struct SignatureDispatchRequirementPriorityPolicy {
     pub rank: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignatureBoundaryKindPriorityPolicy {
+    pub requirement: SignatureBoundaryKind,
+    pub rank: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureBoundaryKindMerge {
     pub kept: Option<SignatureBoundaryKind>,
     pub rejected: Option<SignatureBoundaryKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignatureFlagMerge {
+    pub kept: bool,
+    pub changed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,7 +443,12 @@ pub enum SignatureOwnedRecoveryPolicy {
     NotRequired,
     ProvenByCopy,
     ProvenByExplicitClone,
+    ProvenByCloneBoxAdapter,
+    ProvenByFactoryCopy,
+    ProvenByImmutableSharedHandle,
     AuditConservativeClone,
+    UnsupportedFacadeOwnedExternalHandle,
+    UnsupportedFfiOwnedHandle,
     UnsupportedNonCloneable,
 }
 
@@ -328,6 +477,33 @@ pub struct SignatureFixpointResult {
     pub constraints: SignatureConstraintState,
     pub iterations: usize,
     pub diagnostics: Vec<SignatureDiagnostic>,
+    pub dependency_sccs: SignatureDependencySccAnalysis,
+    pub pass_plan: SignatureSolverPassPlan,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SignatureFixpointDomainStats {
+    pub slot_count: usize,
+    pub unique_constraint_count: usize,
+    pub iteration_budget: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignatureSaturationReport {
+    pub domain_stats: SignatureFixpointDomainStats,
+    pub iterations: usize,
+    pub diagnostics: usize,
+    pub dependency_stats: SignatureDependencySccStats,
+    pub pass_stats: SignatureSolverPassStats,
+    pub join_conflicts: usize,
+    pub top_fallback_reasons: Vec<SignatureReportCount>,
+    pub top_conflict_axes: Vec<SignatureReportCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureReportCount {
+    pub label: String,
+    pub count: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -368,6 +544,121 @@ pub enum ReceiverConstraint {
     MutableReceiver,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignatureDependencyGraph {
+    pub nodes: HashSet<SignatureDependencyNode>,
+    pub edges: Vec<SignatureDependencyEdge>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignatureDependencySccAnalysis {
+    pub components: Vec<Vec<SignatureDependencyNode>>,
+    pub component_successors: Vec<Vec<usize>>,
+    pub component_by_node: HashMap<SignatureDependencyNode, usize>,
+    pub stats: SignatureDependencySccStats,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SignatureDependencySccStats {
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub component_count: usize,
+    pub cyclic_component_count: usize,
+    pub max_component_size: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignatureSolverPassPlan {
+    pub component_order: Vec<usize>,
+    pub cyclic_components: HashSet<usize>,
+    pub stats: SignatureSolverPassStats,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SignatureSolverPassStats {
+    pub planned_components: usize,
+    pub cyclic_components: usize,
+    pub max_component_size: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SignatureCallableKey {
+    Method(MethodKey),
+    Constructor(ConstructorKey),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SignatureDependencyNode {
+    MethodParam {
+        method: MethodKey,
+        name: String,
+        index: usize,
+    },
+    MethodReturn {
+        method: MethodKey,
+    },
+    MethodLocal {
+        method: MethodKey,
+        name: String,
+    },
+    MethodReceiver {
+        method: MethodKey,
+    },
+    ConstructorParam {
+        constructor: ConstructorKey,
+        name: String,
+        index: usize,
+    },
+    ConstructorLocal {
+        constructor: ConstructorKey,
+        name: String,
+    },
+    Field {
+        field: FieldKey,
+    },
+    CapturedValue {
+        owner: SignatureCallableKey,
+        name: String,
+    },
+    CallArg {
+        caller: SignatureCallableKey,
+        call_index: usize,
+        arg_index: usize,
+    },
+    CallResult {
+        caller: SignatureCallableKey,
+        call_index: usize,
+    },
+    UnknownBoundaryArg {
+        caller: SignatureCallableKey,
+        call_index: usize,
+        arg_index: usize,
+    },
+    UnknownBoundaryResult {
+        caller: SignatureCallableKey,
+        call_index: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureDependencyEdge {
+    pub from: SignatureDependencyNode,
+    pub to: SignatureDependencyNode,
+    pub kind: SignatureDependencyEdgeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SignatureDependencyEdgeKind {
+    LocalAlias,
+    FieldStorage,
+    MethodReturn,
+    CallArgument,
+    CallResult,
+    ConstructorDelegationArgument,
+    UnknownBoundary,
+    Receiver,
+}
+
 pub fn solve_signatures(
     program: &Program,
     representations: &RepresentationPlan,
@@ -382,10 +673,21 @@ pub fn solve_signatures_with_facts(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> SignaturePlan {
+    solve_signatures_with_facts_and_support_context(program, representations, usage, facts, program)
+}
+
+pub fn solve_signatures_with_facts_and_support_context(
+    program: &Program,
+    representations: &RepresentationPlan,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    support_program: &Program,
+) -> SignaturePlan {
     let constraints = collect_signature_constraints(program, usage, facts);
     let result = solve_signature_constraints_to_fixpoint_result(constraints, usage);
     build_signature_plan_from_constraints(
         program,
+        support_program,
         representations,
         &result.constraints,
         result.iterations,
@@ -406,6 +708,974 @@ pub fn collect_signature_constraints(
     constraints
 }
 
+pub fn build_signature_dependency_graph(
+    constraints: &SignatureConstraintState,
+    usage: &UsageFacts,
+) -> SignatureDependencyGraph {
+    build_signature_dependency_graph_with_facts(constraints, usage, &FactSet::default())
+}
+
+pub fn build_signature_dependency_graph_with_facts(
+    constraints: &SignatureConstraintState,
+    usage: &UsageFacts,
+    facts: &FactSet,
+) -> SignatureDependencyGraph {
+    let mut graph = SignatureDependencyGraph::default();
+    add_signature_slot_nodes(constraints, &mut graph);
+    add_method_usage_dependency_edges(constraints, usage, &mut graph);
+    add_constructor_usage_dependency_edges(constraints, usage, &mut graph);
+    add_capture_dependency_nodes(constraints, facts, &mut graph);
+    graph
+}
+
+pub fn analyze_signature_dependency_sccs(
+    graph: &SignatureDependencyGraph,
+) -> SignatureDependencySccAnalysis {
+    let mut successors = HashMap::<SignatureDependencyNode, Vec<SignatureDependencyNode>>::new();
+    for edge in &graph.edges {
+        successors
+            .entry(edge.from.clone())
+            .or_default()
+            .push(edge.to.clone());
+    }
+
+    let scc = strongly_connected_components(graph.nodes.iter().cloned(), |node| {
+        successors.get(node).cloned().unwrap_or_default()
+    });
+    let stats = SignatureDependencySccStats {
+        node_count: graph.nodes.len(),
+        edge_count: graph.edges.len(),
+        component_count: scc.components.len(),
+        cyclic_component_count: scc
+            .components
+            .iter()
+            .filter(|component| {
+                component.len() > 1
+                    || component.first().is_some_and(|node| {
+                        successors.get(node).is_some_and(|next| next.contains(node))
+                    })
+            })
+            .count(),
+        max_component_size: scc.components.iter().map(Vec::len).max().unwrap_or(0),
+    };
+
+    SignatureDependencySccAnalysis {
+        components: scc.components,
+        component_successors: scc.component_successors,
+        component_by_node: scc.component_by_node,
+        stats,
+    }
+}
+
+pub fn plan_signature_solver_passes(
+    analysis: &SignatureDependencySccAnalysis,
+) -> SignatureSolverPassPlan {
+    let mut order = Vec::new();
+    let mut visited = HashSet::new();
+    for component_index in 0..analysis.components.len() {
+        push_signature_component_postorder(
+            component_index,
+            &analysis.component_successors,
+            &mut visited,
+            &mut order,
+        );
+    }
+    order.reverse();
+
+    let cyclic_components = analysis
+        .components
+        .iter()
+        .enumerate()
+        .filter_map(|(index, component)| {
+            if component.len() > 1
+                || component.first().is_some_and(|node| {
+                    analysis
+                        .component_by_node
+                        .get(node)
+                        .is_some_and(|component| *component == index)
+                        && analysis.component_successors[index].contains(&index)
+                })
+            {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect::<HashSet<_>>();
+    let stats = SignatureSolverPassStats {
+        planned_components: order.len(),
+        cyclic_components: analysis.stats.cyclic_component_count,
+        max_component_size: analysis.stats.max_component_size,
+    };
+
+    SignatureSolverPassPlan {
+        component_order: order,
+        cyclic_components,
+        stats,
+    }
+}
+
+fn push_signature_component_postorder(
+    component_index: usize,
+    successors: &[Vec<usize>],
+    visited: &mut HashSet<usize>,
+    order: &mut Vec<usize>,
+) {
+    if !visited.insert(component_index) {
+        return;
+    }
+    for successor in successors.get(component_index).into_iter().flatten() {
+        push_signature_component_postorder(*successor, successors, visited, order);
+    }
+    order.push(component_index);
+}
+
+fn add_signature_slot_nodes(
+    constraints: &SignatureConstraintState,
+    graph: &mut SignatureDependencyGraph,
+) {
+    for (method, method_constraints) in &constraints.methods {
+        add_signature_dependency_node(
+            graph,
+            SignatureDependencyNode::MethodReceiver {
+                method: method.clone(),
+            },
+        );
+        add_signature_dependency_node(
+            graph,
+            SignatureDependencyNode::MethodReturn {
+                method: method.clone(),
+            },
+        );
+        for (index, name) in method_constraints.param_names.iter().enumerate() {
+            add_signature_dependency_node(
+                graph,
+                SignatureDependencyNode::MethodParam {
+                    method: method.clone(),
+                    name: name.clone(),
+                    index,
+                },
+            );
+        }
+        for local in &method_constraints.locals {
+            add_signature_dependency_node(
+                graph,
+                SignatureDependencyNode::MethodLocal {
+                    method: method.clone(),
+                    name: local.name.clone(),
+                },
+            );
+        }
+    }
+    for (constructor, constructor_constraints) in &constraints.constructors {
+        for (index, name) in constructor_constraints.param_names.iter().enumerate() {
+            add_signature_dependency_node(
+                graph,
+                SignatureDependencyNode::ConstructorParam {
+                    constructor: constructor.clone(),
+                    name: name.clone(),
+                    index,
+                },
+            );
+        }
+        for local in &constructor_constraints.locals {
+            add_signature_dependency_node(
+                graph,
+                SignatureDependencyNode::ConstructorLocal {
+                    constructor: constructor.clone(),
+                    name: local.name.clone(),
+                },
+            );
+        }
+    }
+    for field in constraints.fields.keys() {
+        add_signature_dependency_node(
+            graph,
+            SignatureDependencyNode::Field {
+                field: field.clone(),
+            },
+        );
+    }
+}
+
+fn add_method_usage_dependency_edges(
+    constraints: &SignatureConstraintState,
+    usage: &UsageFacts,
+    graph: &mut SignatureDependencyGraph,
+) {
+    for (usage_key, method_usage) in &usage.methods {
+        let Some(method) = method_key_for_usage(constraints, usage_key) else {
+            continue;
+        };
+        let caller = SignatureCallableKey::Method(method.clone());
+        for (call_index, call_site) in method_usage.call_sites.iter().enumerate() {
+            let result = SignatureDependencyNode::CallResult {
+                caller: caller.clone(),
+                call_index,
+            };
+            add_signature_dependency_node(graph, result.clone());
+            if call_site.boundary == CallArgumentBoundary::Unknown {
+                add_signature_dependency_edge(
+                    graph,
+                    SignatureDependencyNode::UnknownBoundaryResult {
+                        caller: caller.clone(),
+                        call_index,
+                    },
+                    result.clone(),
+                    SignatureDependencyEdgeKind::UnknownBoundary,
+                );
+            }
+            if let Some(resolved) = &call_site.resolved {
+                add_signature_dependency_edge(
+                    graph,
+                    SignatureDependencyNode::MethodReturn {
+                        method: MethodKey {
+                            type_name: resolved.declaring_type.clone(),
+                            rust_name: resolved.rust_name.clone(),
+                        },
+                    },
+                    result,
+                    SignatureDependencyEdgeKind::CallResult,
+                );
+            }
+        }
+        add_method_binding_dependency_edges(constraints, method_usage, &method, &caller, graph);
+        add_method_field_dependency_edges(method_usage, &method, &caller, graph);
+        for returned in &method_usage.returned_call_results {
+            for (call_index, call_site) in method_usage.call_sites.iter().enumerate() {
+                if call_site.name == returned.name && call_site.boundary == returned.boundary {
+                    add_signature_dependency_edge(
+                        graph,
+                        SignatureDependencyNode::CallResult {
+                            caller: caller.clone(),
+                            call_index,
+                        },
+                        SignatureDependencyNode::MethodReturn {
+                            method: method.clone(),
+                        },
+                        SignatureDependencyEdgeKind::CallResult,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn add_constructor_usage_dependency_edges(
+    constraints: &SignatureConstraintState,
+    usage: &UsageFacts,
+    graph: &mut SignatureDependencyGraph,
+) {
+    for (usage_key, constructor_usage) in &usage.constructors {
+        let constructor = ConstructorKey {
+            type_name: usage_key.type_name.clone(),
+            rust_name: usage_key.rust_name.clone(),
+        };
+        if !constraints.constructors.contains_key(&constructor) {
+            continue;
+        }
+        let caller = SignatureCallableKey::Constructor(constructor.clone());
+        for (call_index, call_site) in constructor_usage.call_sites.iter().enumerate() {
+            let result = SignatureDependencyNode::CallResult {
+                caller: caller.clone(),
+                call_index,
+            };
+            add_signature_dependency_node(graph, result.clone());
+            if call_site.boundary == CallArgumentBoundary::Unknown {
+                add_signature_dependency_edge(
+                    graph,
+                    SignatureDependencyNode::UnknownBoundaryResult {
+                        caller: caller.clone(),
+                        call_index,
+                    },
+                    result.clone(),
+                    SignatureDependencyEdgeKind::UnknownBoundary,
+                );
+            }
+            if let Some(resolved) = &call_site.resolved {
+                add_signature_dependency_edge(
+                    graph,
+                    SignatureDependencyNode::MethodReturn {
+                        method: MethodKey {
+                            type_name: resolved.declaring_type.clone(),
+                            rust_name: resolved.rust_name.clone(),
+                        },
+                    },
+                    result,
+                    SignatureDependencyEdgeKind::CallResult,
+                );
+            }
+        }
+        for (call_index, call_site) in constructor_usage.constructor_call_sites.iter().enumerate() {
+            let call_index = constructor_call_dependency_index(constructor_usage, call_index);
+            if let Some(resolved) = &call_site.resolved {
+                for arg_index in 0..call_site.arg_count {
+                    add_signature_dependency_edge(
+                        graph,
+                        SignatureDependencyNode::CallArg {
+                            caller: caller.clone(),
+                            call_index,
+                            arg_index,
+                        },
+                        SignatureDependencyNode::ConstructorParam {
+                            constructor: ConstructorKey {
+                                type_name: resolved.declaring_type.clone(),
+                                rust_name: resolved.rust_name.clone(),
+                            },
+                            name: constructor_param_name_for_resolved(
+                                constraints,
+                                resolved,
+                                arg_index,
+                            ),
+                            index: arg_index,
+                        },
+                        SignatureDependencyEdgeKind::ConstructorDelegationArgument,
+                    );
+                }
+            }
+        }
+        add_constructor_binding_dependency_edges(
+            constraints,
+            constructor_usage,
+            &constructor,
+            &caller,
+            graph,
+        );
+        add_constructor_field_dependency_edges(constructor_usage, &constructor, &caller, graph);
+    }
+}
+
+fn add_capture_dependency_nodes(
+    constraints: &SignatureConstraintState,
+    facts: &FactSet,
+    graph: &mut SignatureDependencyGraph,
+) {
+    for owner in &facts.captures.owners {
+        let Some(callable) = capture_owner_callable(constraints, &owner.origin) else {
+            continue;
+        };
+        for capture in &owner.captures {
+            let captured = SignatureDependencyNode::CapturedValue {
+                owner: callable.clone(),
+                name: capture.name.clone(),
+            };
+            add_signature_dependency_node(graph, captured.clone());
+            if let Some(source) = capture_source_dependency_node(
+                constraints,
+                &callable,
+                &capture.name,
+                capture.source,
+            ) {
+                add_bidirectional_signature_dependency_edge(
+                    graph,
+                    source,
+                    captured,
+                    SignatureDependencyEdgeKind::LocalAlias,
+                );
+            }
+        }
+    }
+}
+
+fn capture_owner_callable(
+    constraints: &SignatureConstraintState,
+    origin: &CaptureOrigin,
+) -> Option<SignatureCallableKey> {
+    match origin {
+        CaptureOrigin::Method {
+            type_name,
+            method_name,
+        } => method_key_for_usage(
+            constraints,
+            &UsageMethodKey {
+                type_name: type_name.clone(),
+                method_name: method_name.clone(),
+            },
+        )
+        .map(SignatureCallableKey::Method),
+        CaptureOrigin::Constructor { type_name } => constraints
+            .constructors
+            .keys()
+            .find(|constructor| constructor.type_name == *type_name)
+            .cloned()
+            .map(SignatureCallableKey::Constructor),
+        CaptureOrigin::Type { .. } => None,
+    }
+}
+
+fn capture_source_dependency_node(
+    constraints: &SignatureConstraintState,
+    callable: &SignatureCallableKey,
+    name: &str,
+    source: CaptureSource,
+) -> Option<SignatureDependencyNode> {
+    match (callable, source) {
+        (SignatureCallableKey::Method(method), CaptureSource::Parameter | CaptureSource::Local) => {
+            method_binding_dependency_node(constraints, method, name)
+        }
+        (SignatureCallableKey::Method(method), CaptureSource::ThisField) => {
+            Some(SignatureDependencyNode::Field {
+                field: FieldKey {
+                    type_name: method.type_name.clone(),
+                    field_name: name.to_string(),
+                },
+            })
+        }
+        (
+            SignatureCallableKey::Constructor(constructor),
+            CaptureSource::Parameter | CaptureSource::Local,
+        ) => constructor_binding_dependency_node(constraints, constructor, name),
+        (SignatureCallableKey::Constructor(constructor), CaptureSource::ThisField) => {
+            Some(SignatureDependencyNode::Field {
+                field: FieldKey {
+                    type_name: constructor.type_name.clone(),
+                    field_name: name.to_string(),
+                },
+            })
+        }
+        (_, CaptureSource::OuterThis) => None,
+    }
+}
+
+fn add_method_binding_dependency_edges(
+    constraints: &SignatureConstraintState,
+    method_usage: &MethodUsageFacts,
+    method: &MethodKey,
+    caller: &SignatureCallableKey,
+    graph: &mut SignatureDependencyGraph,
+) {
+    for binding in method_usage.bindings.values() {
+        let Some(binding_node) = method_binding_dependency_node(constraints, method, &binding.name)
+        else {
+            continue;
+        };
+        for use_site in &binding.uses {
+            match use_site {
+                BindingUse::AssignedToLocal { local_name } => {
+                    let local = SignatureDependencyNode::MethodLocal {
+                        method: method.clone(),
+                        name: local_name.clone(),
+                    };
+                    add_bidirectional_signature_dependency_edge(
+                        graph,
+                        binding_node.clone(),
+                        local,
+                        SignatureDependencyEdgeKind::LocalAlias,
+                    );
+                }
+                BindingUse::PassedToCall {
+                    name,
+                    arg_index,
+                    boundary,
+                } => {
+                    for call_index in matching_method_call_indexes(method_usage, name, *boundary) {
+                        add_call_argument_dependency_edges(
+                            graph,
+                            caller,
+                            call_index,
+                            *arg_index,
+                            *boundary,
+                            binding_node.clone(),
+                            method_call_param_target(
+                                constraints,
+                                method_usage,
+                                call_index,
+                                *arg_index,
+                            ),
+                            SignatureDependencyEdgeKind::CallArgument,
+                        );
+                    }
+                }
+                BindingUse::ReceiverForCall { name, boundary } => {
+                    for call_index in matching_method_call_indexes(method_usage, name, *boundary) {
+                        add_signature_dependency_edge(
+                            graph,
+                            binding_node.clone(),
+                            SignatureDependencyNode::CallArg {
+                                caller: caller.clone(),
+                                call_index,
+                                arg_index: usize::MAX,
+                            },
+                            SignatureDependencyEdgeKind::Receiver,
+                        );
+                    }
+                }
+                BindingUse::AssignedFromCall { name, boundary, .. } => {
+                    for call_index in matching_method_call_indexes(method_usage, name, *boundary) {
+                        add_signature_dependency_edge(
+                            graph,
+                            SignatureDependencyNode::CallResult {
+                                caller: caller.clone(),
+                                call_index,
+                            },
+                            binding_node.clone(),
+                            SignatureDependencyEdgeKind::CallResult,
+                        );
+                    }
+                }
+                BindingUse::StoredInField { field_name } => {
+                    add_bidirectional_signature_dependency_edge(
+                        graph,
+                        binding_node.clone(),
+                        SignatureDependencyNode::Field {
+                            field: FieldKey {
+                                type_name: method.type_name.clone(),
+                                field_name: field_name.clone(),
+                            },
+                        },
+                        SignatureDependencyEdgeKind::FieldStorage,
+                    );
+                }
+                BindingUse::Returned => {
+                    add_bidirectional_signature_dependency_edge(
+                        graph,
+                        binding_node.clone(),
+                        SignatureDependencyNode::MethodReturn {
+                            method: method.clone(),
+                        },
+                        SignatureDependencyEdgeKind::MethodReturn,
+                    );
+                }
+                BindingUse::ContentRead | BindingUse::Mutated => {}
+            }
+        }
+    }
+}
+
+fn add_constructor_binding_dependency_edges(
+    constraints: &SignatureConstraintState,
+    constructor_usage: &MethodUsageFacts,
+    constructor: &ConstructorKey,
+    caller: &SignatureCallableKey,
+    graph: &mut SignatureDependencyGraph,
+) {
+    for binding in constructor_usage.bindings.values() {
+        let Some(binding_node) =
+            constructor_binding_dependency_node(constraints, constructor, &binding.name)
+        else {
+            continue;
+        };
+        for use_site in &binding.uses {
+            match use_site {
+                BindingUse::AssignedToLocal { local_name } => {
+                    let local = SignatureDependencyNode::ConstructorLocal {
+                        constructor: constructor.clone(),
+                        name: local_name.clone(),
+                    };
+                    add_bidirectional_signature_dependency_edge(
+                        graph,
+                        binding_node.clone(),
+                        local,
+                        SignatureDependencyEdgeKind::LocalAlias,
+                    );
+                }
+                BindingUse::PassedToCall {
+                    name,
+                    arg_index,
+                    boundary,
+                } => {
+                    for call_index in
+                        matching_method_call_indexes(constructor_usage, name, *boundary)
+                    {
+                        add_call_argument_dependency_edges(
+                            graph,
+                            caller,
+                            call_index,
+                            *arg_index,
+                            *boundary,
+                            binding_node.clone(),
+                            method_call_param_target(
+                                constraints,
+                                constructor_usage,
+                                call_index,
+                                *arg_index,
+                            ),
+                            SignatureDependencyEdgeKind::CallArgument,
+                        );
+                    }
+                    for call_index in
+                        matching_constructor_call_indexes(constructor_usage, name, *boundary)
+                    {
+                        add_call_argument_dependency_edges(
+                            graph,
+                            caller,
+                            call_index,
+                            *arg_index,
+                            *boundary,
+                            binding_node.clone(),
+                            None,
+                            SignatureDependencyEdgeKind::ConstructorDelegationArgument,
+                        );
+                    }
+                }
+                BindingUse::AssignedFromCall { name, boundary, .. } => {
+                    for call_index in
+                        matching_method_call_indexes(constructor_usage, name, *boundary)
+                    {
+                        add_signature_dependency_edge(
+                            graph,
+                            SignatureDependencyNode::CallResult {
+                                caller: caller.clone(),
+                                call_index,
+                            },
+                            binding_node.clone(),
+                            SignatureDependencyEdgeKind::CallResult,
+                        );
+                    }
+                }
+                BindingUse::StoredInField { field_name } => {
+                    add_bidirectional_signature_dependency_edge(
+                        graph,
+                        binding_node.clone(),
+                        SignatureDependencyNode::Field {
+                            field: FieldKey {
+                                type_name: constructor.type_name.clone(),
+                                field_name: field_name.clone(),
+                            },
+                        },
+                        SignatureDependencyEdgeKind::FieldStorage,
+                    );
+                }
+                BindingUse::ContentRead
+                | BindingUse::ReceiverForCall { .. }
+                | BindingUse::Returned
+                | BindingUse::Mutated => {}
+            }
+        }
+    }
+}
+
+fn add_method_field_dependency_edges(
+    method_usage: &MethodUsageFacts,
+    method: &MethodKey,
+    caller: &SignatureCallableKey,
+    graph: &mut SignatureDependencyGraph,
+) {
+    for field_use in &method_usage.field_uses {
+        match field_use {
+            FieldUse::AssignedFromCall {
+                field_name,
+                name,
+                boundary,
+                ..
+            } => {
+                for call_index in matching_method_call_indexes(method_usage, name, *boundary) {
+                    add_signature_dependency_edge(
+                        graph,
+                        SignatureDependencyNode::CallResult {
+                            caller: caller.clone(),
+                            call_index,
+                        },
+                        SignatureDependencyNode::Field {
+                            field: FieldKey {
+                                type_name: method.type_name.clone(),
+                                field_name: field_name.clone(),
+                            },
+                        },
+                        SignatureDependencyEdgeKind::CallResult,
+                    );
+                }
+            }
+            FieldUse::PassedToCall {
+                field_name,
+                name,
+                arg_index,
+                boundary,
+            } => {
+                let field = SignatureDependencyNode::Field {
+                    field: FieldKey {
+                        type_name: method.type_name.clone(),
+                        field_name: field_name.clone(),
+                    },
+                };
+                for call_index in matching_method_call_indexes(method_usage, name, *boundary) {
+                    add_call_argument_dependency_edges(
+                        graph,
+                        caller,
+                        call_index,
+                        *arg_index,
+                        *boundary,
+                        field.clone(),
+                        None,
+                        SignatureDependencyEdgeKind::CallArgument,
+                    );
+                }
+            }
+            FieldUse::Returned { field_name } => {
+                add_bidirectional_signature_dependency_edge(
+                    graph,
+                    SignatureDependencyNode::Field {
+                        field: FieldKey {
+                            type_name: method.type_name.clone(),
+                            field_name: field_name.clone(),
+                        },
+                    },
+                    SignatureDependencyNode::MethodReturn {
+                        method: method.clone(),
+                    },
+                    SignatureDependencyEdgeKind::MethodReturn,
+                );
+            }
+        }
+    }
+}
+
+fn add_constructor_field_dependency_edges(
+    constructor_usage: &MethodUsageFacts,
+    constructor: &ConstructorKey,
+    caller: &SignatureCallableKey,
+    graph: &mut SignatureDependencyGraph,
+) {
+    for field_use in &constructor_usage.field_uses {
+        match field_use {
+            FieldUse::AssignedFromCall {
+                field_name,
+                name,
+                boundary,
+                ..
+            } => {
+                for call_index in matching_method_call_indexes(constructor_usage, name, *boundary) {
+                    add_signature_dependency_edge(
+                        graph,
+                        SignatureDependencyNode::CallResult {
+                            caller: caller.clone(),
+                            call_index,
+                        },
+                        SignatureDependencyNode::Field {
+                            field: FieldKey {
+                                type_name: constructor.type_name.clone(),
+                                field_name: field_name.clone(),
+                            },
+                        },
+                        SignatureDependencyEdgeKind::CallResult,
+                    );
+                }
+            }
+            FieldUse::PassedToCall {
+                field_name,
+                name,
+                arg_index,
+                boundary,
+            } => {
+                let field = SignatureDependencyNode::Field {
+                    field: FieldKey {
+                        type_name: constructor.type_name.clone(),
+                        field_name: field_name.clone(),
+                    },
+                };
+                for call_index in matching_method_call_indexes(constructor_usage, name, *boundary) {
+                    add_call_argument_dependency_edges(
+                        graph,
+                        caller,
+                        call_index,
+                        *arg_index,
+                        *boundary,
+                        field.clone(),
+                        None,
+                        SignatureDependencyEdgeKind::CallArgument,
+                    );
+                }
+            }
+            FieldUse::Returned { .. } => {}
+        }
+    }
+}
+
+fn add_call_argument_dependency_edges(
+    graph: &mut SignatureDependencyGraph,
+    caller: &SignatureCallableKey,
+    call_index: usize,
+    arg_index: usize,
+    boundary: CallArgumentBoundary,
+    source: SignatureDependencyNode,
+    callee_param: Option<SignatureDependencyNode>,
+    kind: SignatureDependencyEdgeKind,
+) {
+    let call_arg = SignatureDependencyNode::CallArg {
+        caller: caller.clone(),
+        call_index,
+        arg_index,
+    };
+    add_signature_dependency_edge(graph, source, call_arg.clone(), kind);
+    if boundary == CallArgumentBoundary::Unknown {
+        add_signature_dependency_edge(
+            graph,
+            call_arg,
+            SignatureDependencyNode::UnknownBoundaryArg {
+                caller: caller.clone(),
+                call_index,
+                arg_index,
+            },
+            SignatureDependencyEdgeKind::UnknownBoundary,
+        );
+    } else if let Some(callee_param) = callee_param {
+        add_signature_dependency_edge(graph, call_arg, callee_param, kind);
+    }
+}
+
+fn method_binding_dependency_node(
+    constraints: &SignatureConstraintState,
+    method: &MethodKey,
+    binding_name: &str,
+) -> Option<SignatureDependencyNode> {
+    let method_constraints = constraints.methods.get(method)?;
+    if let Some(index) = method_constraints
+        .param_names
+        .iter()
+        .position(|name| name == binding_name)
+    {
+        return Some(SignatureDependencyNode::MethodParam {
+            method: method.clone(),
+            name: binding_name.to_string(),
+            index,
+        });
+    }
+    if method_constraints
+        .locals
+        .iter()
+        .any(|local| local.name == binding_name)
+    {
+        return Some(SignatureDependencyNode::MethodLocal {
+            method: method.clone(),
+            name: binding_name.to_string(),
+        });
+    }
+    None
+}
+
+fn constructor_binding_dependency_node(
+    constraints: &SignatureConstraintState,
+    constructor: &ConstructorKey,
+    binding_name: &str,
+) -> Option<SignatureDependencyNode> {
+    let constructor_constraints = constraints.constructors.get(constructor)?;
+    if let Some(index) = constructor_constraints
+        .param_names
+        .iter()
+        .position(|name| name == binding_name)
+    {
+        return Some(SignatureDependencyNode::ConstructorParam {
+            constructor: constructor.clone(),
+            name: binding_name.to_string(),
+            index,
+        });
+    }
+    if constructor_constraints
+        .locals
+        .iter()
+        .any(|local| local.name == binding_name)
+    {
+        return Some(SignatureDependencyNode::ConstructorLocal {
+            constructor: constructor.clone(),
+            name: binding_name.to_string(),
+        });
+    }
+    None
+}
+
+fn method_call_param_target(
+    constraints: &SignatureConstraintState,
+    usage: &MethodUsageFacts,
+    call_index: usize,
+    arg_index: usize,
+) -> Option<SignatureDependencyNode> {
+    let resolved = usage.call_sites.get(call_index)?.resolved.as_ref()?;
+    let method = MethodKey {
+        type_name: resolved.declaring_type.clone(),
+        rust_name: resolved.rust_name.clone(),
+    };
+    let name = constraints
+        .methods
+        .get(&method)?
+        .param_names
+        .get(arg_index)?
+        .clone();
+    Some(SignatureDependencyNode::MethodParam {
+        method,
+        name,
+        index: arg_index,
+    })
+}
+
+fn constructor_param_name_for_resolved(
+    constraints: &SignatureConstraintState,
+    resolved: &crate::java_ir::ResolvedConstructor,
+    arg_index: usize,
+) -> String {
+    constraints
+        .constructors
+        .get(&ConstructorKey {
+            type_name: resolved.declaring_type.clone(),
+            rust_name: resolved.rust_name.clone(),
+        })
+        .and_then(|constructor| constructor.param_names.get(arg_index))
+        .cloned()
+        .unwrap_or_else(|| format!("arg{arg_index}"))
+}
+
+fn matching_method_call_indexes(
+    usage: &MethodUsageFacts,
+    name: &str,
+    boundary: CallArgumentBoundary,
+) -> Vec<usize> {
+    usage
+        .call_sites
+        .iter()
+        .enumerate()
+        .filter(|(_, call_site)| call_site.name == name && call_site.boundary == boundary)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn matching_constructor_call_indexes(
+    usage: &MethodUsageFacts,
+    name: &str,
+    boundary: CallArgumentBoundary,
+) -> Vec<usize> {
+    usage
+        .constructor_call_sites
+        .iter()
+        .enumerate()
+        .filter(|(_, call_site)| call_site.name == name && call_site.boundary == boundary)
+        .map(|(index, _)| constructor_call_dependency_index(usage, index))
+        .collect()
+}
+
+fn constructor_call_dependency_index(usage: &MethodUsageFacts, index: usize) -> usize {
+    usage.call_sites.len() + index
+}
+
+fn add_signature_dependency_node(
+    graph: &mut SignatureDependencyGraph,
+    node: SignatureDependencyNode,
+) {
+    graph.nodes.insert(node);
+}
+
+fn add_signature_dependency_edge(
+    graph: &mut SignatureDependencyGraph,
+    from: SignatureDependencyNode,
+    to: SignatureDependencyNode,
+    kind: SignatureDependencyEdgeKind,
+) {
+    add_signature_dependency_node(graph, from.clone());
+    add_signature_dependency_node(graph, to.clone());
+    let edge = SignatureDependencyEdge { from, to, kind };
+    if !graph.edges.contains(&edge) {
+        graph.edges.push(edge);
+    }
+}
+
+fn add_bidirectional_signature_dependency_edge(
+    graph: &mut SignatureDependencyGraph,
+    left: SignatureDependencyNode,
+    right: SignatureDependencyNode,
+    kind: SignatureDependencyEdgeKind,
+) {
+    add_signature_dependency_edge(graph, left.clone(), right.clone(), kind);
+    add_signature_dependency_edge(graph, right, left, kind);
+}
+
 pub fn solve_signature_constraints_to_fixpoint(
     constraints: SignatureConstraintState,
     usage: &UsageFacts,
@@ -418,33 +1688,15 @@ pub fn solve_signature_constraints_to_fixpoint_result(
     constraints: SignatureConstraintState,
     usage: &UsageFacts,
 ) -> SignatureFixpointResult {
+    let dependency_graph = build_signature_dependency_graph(&constraints, usage);
+    let dependency_sccs = analyze_signature_dependency_sccs(&dependency_graph);
+    let pass_plan = plan_signature_solver_passes(&dependency_sccs);
     let saturation_policy = signature_fixpoint_saturation_policy(&constraints);
     let result = saturation_policy.saturate(
         constraints,
         |constraints| {
-            let changed = propagate_call_site_constraints(constraints, usage)
-                | propagate_constructor_call_site_constraints(constraints, usage)
-                | propagate_constructor_delegation_constraints(constraints, usage)
-                | propagate_call_argument_constraints_to_callees(constraints, usage)
-                | propagate_constructor_call_argument_constraints_to_callees(constraints, usage)
-                | propagate_constructor_delegation_argument_constraints_to_callees(
-                    constraints,
-                    usage,
-                )
-                | propagate_call_result_constraints_to_bindings(constraints, usage)
-                | propagate_constructor_call_result_constraints_to_bindings(constraints, usage)
-                | propagate_call_result_constraints_to_fields(constraints, usage)
-                | propagate_constructor_call_result_constraints_to_fields(constraints, usage)
-                | propagate_method_local_alias_constraints(constraints, usage)
-                | propagate_method_local_alias_source_constraints(constraints, usage)
-                | propagate_constructor_local_alias_constraints(constraints, usage)
-                | propagate_constructor_local_alias_source_constraints(constraints, usage)
-                | propagate_method_field_storage_constraints(constraints, usage)
-                | propagate_constructor_field_storage_constraints(constraints, usage)
-                | propagate_method_return_binding_constraints(constraints, usage)
-                | propagate_method_binding_return_constraints(constraints, usage)
-                | propagate_method_return_field_constraints(constraints, usage)
-                | propagate_method_field_return_constraints(constraints, usage);
+            let changed =
+                execute_signature_solver_pass_plan(constraints, usage, &dependency_sccs, &pass_plan);
             SaturationStep::from(changed)
         },
         |max_iterations| SignatureDiagnostic {
@@ -458,7 +1710,252 @@ pub fn solve_signature_constraints_to_fixpoint_result(
         constraints: result.state,
         iterations: result.iterations,
         diagnostics: result.diagnostics,
+        dependency_sccs,
+        pass_plan,
     }
+}
+
+pub fn signature_saturation_report(
+    program: &Program,
+    usage: &UsageFacts,
+    facts: &FactSet,
+) -> SignatureSaturationReport {
+    let constraints = collect_signature_constraints(program, usage, facts);
+    signature_saturation_report_for_constraints(constraints, usage)
+}
+
+pub fn signature_saturation_report_for_constraints(
+    constraints: SignatureConstraintState,
+    usage: &UsageFacts,
+) -> SignatureSaturationReport {
+    let domain_stats = signature_fixpoint_domain_stats(&constraints);
+    let result = solve_signature_constraints_to_fixpoint_result(constraints, usage);
+    let conflict_diagnostics = signature_constraint_state_conflict_diagnostics(&result.constraints);
+    SignatureSaturationReport {
+        domain_stats,
+        iterations: result.iterations,
+        diagnostics: result.diagnostics.len(),
+        dependency_stats: result.dependency_sccs.stats,
+        pass_stats: result.pass_plan.stats,
+        join_conflicts: conflict_diagnostics.len(),
+        top_fallback_reasons: top_signature_constraint_provenance_counts(&result.constraints, 10),
+        top_conflict_axes: top_signature_conflict_axis_counts(&conflict_diagnostics, 10),
+    }
+}
+
+pub fn signature_constraint_state_conflict_diagnostics(
+    constraints: &SignatureConstraintState,
+) -> Vec<SignatureConstraintConflictDiagnostic> {
+    let mut diagnostics = Vec::new();
+    for slot_constraints in signature_constraint_slots(constraints) {
+        diagnostics.extend(
+            MergedSignatureConstraints::from_constraints(slot_constraints).conflict_diagnostics(),
+        );
+    }
+    diagnostics
+}
+
+fn top_signature_constraint_provenance_counts(
+    constraints: &SignatureConstraintState,
+    limit: usize,
+) -> Vec<SignatureReportCount> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for slot_constraints in signature_constraint_slots(constraints) {
+        for constraint in slot_constraints {
+            let label =
+                signature_constraint_provenance_label(signature_constraint_provenance(constraint));
+            *counts.entry(label.to_string()).or_default() += 1;
+        }
+    }
+    top_signature_report_counts(counts, limit)
+}
+
+fn top_signature_conflict_axis_counts(
+    diagnostics: &[SignatureConstraintConflictDiagnostic],
+    limit: usize,
+) -> Vec<SignatureReportCount> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for diagnostic in diagnostics {
+        *counts.entry(format!("{:?}", diagnostic.axis)).or_default() += 1;
+    }
+    top_signature_report_counts(counts, limit)
+}
+
+fn top_signature_report_counts(
+    counts: BTreeMap<String, usize>,
+    limit: usize,
+) -> Vec<SignatureReportCount> {
+    let mut counts = counts
+        .into_iter()
+        .map(|(label, count)| SignatureReportCount { label, count })
+        .collect::<Vec<_>>();
+    counts.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    counts.truncate(limit);
+    counts
+}
+
+fn execute_signature_solver_pass_plan(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+    analysis: &SignatureDependencySccAnalysis,
+    pass_plan: &SignatureSolverPassPlan,
+) -> bool {
+    let mut changed = false;
+    for component_index in &pass_plan.component_order {
+        let mut component_changed = true;
+        while component_changed {
+            let before = constraints.clone();
+            apply_signature_propagation_sweep(constraints, usage);
+            keep_signature_component_changes_only(constraints, &before, analysis, *component_index);
+            component_changed = constraints != &before;
+            changed |= component_changed;
+            if !pass_plan.cyclic_components.contains(component_index) {
+                break;
+            }
+        }
+    }
+    changed
+}
+
+fn keep_signature_component_changes_only(
+    constraints: &mut SignatureConstraintState,
+    before: &SignatureConstraintState,
+    analysis: &SignatureDependencySccAnalysis,
+    component_index: usize,
+) {
+    for (method_key, method_constraints) in &mut constraints.methods {
+        let Some(before_method) = before.methods.get(method_key) else {
+            continue;
+        };
+        for (param_index, param_constraints) in method_constraints.params.iter_mut().enumerate() {
+            let Some(param_name) = method_constraints.param_names.get(param_index) else {
+                continue;
+            };
+            let node = SignatureDependencyNode::MethodParam {
+                method: method_key.clone(),
+                name: param_name.clone(),
+                index: param_index,
+            };
+            if !signature_node_in_component(analysis, &node, component_index)
+                && let Some(before_constraints) = before_method.params.get(param_index)
+            {
+                *param_constraints = before_constraints.clone();
+            }
+        }
+
+        let return_node = SignatureDependencyNode::MethodReturn {
+            method: method_key.clone(),
+        };
+        if !signature_node_in_component(analysis, &return_node, component_index) {
+            method_constraints.return_constraints = before_method.return_constraints.clone();
+        }
+
+        for local_constraints in &mut method_constraints.locals {
+            let node = SignatureDependencyNode::MethodLocal {
+                method: method_key.clone(),
+                name: local_constraints.name.clone(),
+            };
+            if !signature_node_in_component(analysis, &node, component_index)
+                && let Some(before_local) = before_method
+                    .locals
+                    .iter()
+                    .find(|local| local.name == local_constraints.name)
+            {
+                local_constraints.constraints = before_local.constraints.clone();
+            }
+        }
+    }
+
+    for (constructor_key, constructor_constraints) in &mut constraints.constructors {
+        let Some(before_constructor) = before.constructors.get(constructor_key) else {
+            continue;
+        };
+        for (param_index, param_constraints) in
+            constructor_constraints.params.iter_mut().enumerate()
+        {
+            let Some(param_name) = constructor_constraints.param_names.get(param_index) else {
+                continue;
+            };
+            let node = SignatureDependencyNode::ConstructorParam {
+                constructor: constructor_key.clone(),
+                name: param_name.clone(),
+                index: param_index,
+            };
+            if !signature_node_in_component(analysis, &node, component_index)
+                && let Some(before_constraints) = before_constructor.params.get(param_index)
+            {
+                *param_constraints = before_constraints.clone();
+            }
+        }
+
+        for local_constraints in &mut constructor_constraints.locals {
+            let node = SignatureDependencyNode::ConstructorLocal {
+                constructor: constructor_key.clone(),
+                name: local_constraints.name.clone(),
+            };
+            if !signature_node_in_component(analysis, &node, component_index)
+                && let Some(before_local) = before_constructor
+                    .locals
+                    .iter()
+                    .find(|local| local.name == local_constraints.name)
+            {
+                local_constraints.constraints = before_local.constraints.clone();
+            }
+        }
+    }
+
+    for (field_key, field_constraints) in &mut constraints.fields {
+        let node = SignatureDependencyNode::Field {
+            field: field_key.clone(),
+        };
+        if !signature_node_in_component(analysis, &node, component_index)
+            && let Some(before_constraints) = before.fields.get(field_key)
+        {
+            *field_constraints = before_constraints.clone();
+        }
+    }
+}
+
+fn signature_node_in_component(
+    analysis: &SignatureDependencySccAnalysis,
+    node: &SignatureDependencyNode,
+    component_index: usize,
+) -> bool {
+    analysis
+        .component_by_node
+        .get(node)
+        .is_some_and(|actual| *actual == component_index)
+}
+
+fn apply_signature_propagation_sweep(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+) -> bool {
+    propagate_call_site_constraints(constraints, usage)
+        | propagate_constructor_call_site_constraints(constraints, usage)
+        | propagate_constructor_delegation_constraints(constraints, usage)
+        | propagate_call_argument_constraints_to_callees(constraints, usage)
+        | propagate_constructor_call_argument_constraints_to_callees(constraints, usage)
+        | propagate_constructor_delegation_argument_constraints_to_callees(constraints, usage)
+        | propagate_call_result_constraints_to_bindings(constraints, usage)
+        | propagate_constructor_call_result_constraints_to_bindings(constraints, usage)
+        | propagate_call_result_constraints_to_fields(constraints, usage)
+        | propagate_constructor_call_result_constraints_to_fields(constraints, usage)
+        | propagate_method_local_alias_constraints(constraints, usage)
+        | propagate_method_local_alias_source_constraints(constraints, usage)
+        | propagate_constructor_local_alias_constraints(constraints, usage)
+        | propagate_constructor_local_alias_source_constraints(constraints, usage)
+        | propagate_method_field_storage_constraints(constraints, usage)
+        | propagate_constructor_field_storage_constraints(constraints, usage)
+        | propagate_method_return_binding_constraints(constraints, usage)
+        | propagate_method_binding_return_constraints(constraints, usage)
+        | propagate_method_return_field_constraints(constraints, usage)
+        | propagate_method_field_return_constraints(constraints, usage)
 }
 
 pub fn signature_fixpoint_saturation_policy(
@@ -473,45 +1970,49 @@ pub fn signature_fixpoint_iteration_budget(constraints: &SignatureConstraintStat
     signature_fixpoint_saturation_policy(constraints).iteration_budget()
 }
 
+pub fn signature_fixpoint_domain_stats(
+    constraints: &SignatureConstraintState,
+) -> SignatureFixpointDomainStats {
+    let slot_count = signature_constraint_slot_count(constraints);
+    let unique_constraint_count = unique_signature_constraints(constraints).len();
+    let iteration_budget =
+        FiniteSaturationPolicy::new(slot_count, unique_constraint_count).iteration_budget();
+    SignatureFixpointDomainStats {
+        slot_count,
+        unique_constraint_count,
+        iteration_budget,
+    }
+}
+
 fn signature_constraint_slot_count(constraints: &SignatureConstraintState) -> usize {
-    let method_slots = constraints
-        .methods
-        .values()
-        .map(|method| method.params.len() + method.locals.len() + 1)
-        .sum::<usize>();
-    let constructor_slots = constraints
-        .constructors
-        .values()
-        .map(|constructor| constructor.params.len() + constructor.locals.len())
-        .sum::<usize>();
-    method_slots + constructor_slots + constraints.fields.len()
+    signature_constraint_slots(constraints).len()
 }
 
 fn unique_signature_constraints(
     constraints: &SignatureConstraintState,
 ) -> Vec<SignatureConstraint> {
     let mut unique = Vec::new();
-    for method in constraints.methods.values() {
-        for param in &method.params {
-            push_unique_signature_constraints(&mut unique, param);
-        }
-        push_unique_signature_constraints(&mut unique, &method.return_constraints);
-        for local in &method.locals {
-            push_unique_signature_constraints(&mut unique, &local.constraints);
-        }
-    }
-    for constructor in constraints.constructors.values() {
-        for param in &constructor.params {
-            push_unique_signature_constraints(&mut unique, param);
-        }
-        for local in &constructor.locals {
-            push_unique_signature_constraints(&mut unique, &local.constraints);
-        }
-    }
-    for field in constraints.fields.values() {
-        push_unique_signature_constraints(&mut unique, field);
+    for slot_constraints in signature_constraint_slots(constraints) {
+        push_unique_signature_constraints(&mut unique, slot_constraints);
     }
     unique
+}
+
+fn signature_constraint_slots(
+    constraints: &SignatureConstraintState,
+) -> Vec<&Vec<SignatureConstraint>> {
+    let mut slots = Vec::new();
+    for method in constraints.methods.values() {
+        slots.extend(method.params.iter());
+        slots.push(&method.return_constraints);
+        slots.extend(method.locals.iter().map(|local| &local.constraints));
+    }
+    for constructor in constraints.constructors.values() {
+        slots.extend(constructor.params.iter());
+        slots.extend(constructor.locals.iter().map(|local| &local.constraints));
+    }
+    slots.extend(constraints.fields.values());
+    slots
 }
 
 fn push_unique_signature_constraints(
@@ -534,10 +2035,7 @@ fn propagate_call_site_constraints(
         let Some(caller_key) = method_key_for_usage(constraints, usage_key) else {
             continue;
         };
-        let Some(caller_constraints) = constraints.methods.get(&caller_key) else {
-            continue;
-        };
-        if caller_constraints.public_api {
+        if !constraints.methods.contains_key(&caller_key) {
             continue;
         }
         for call_site in &method_usage.call_sites {
@@ -1963,12 +3461,12 @@ fn push_constraint_conflict_diagnostics(
     constraints: &[SignatureConstraint],
 ) {
     let merged = MergedSignatureConstraints::from_constraints(constraints);
-    for conflict in merged.conflicts() {
+    for conflict in merged.conflict_diagnostics() {
         diagnostics.push(SignatureDiagnostic {
             code: "signature_constraint_conflict",
             message: format!(
-                "{slot} has conflicting {:?} constraints; kept {:?}, rejected {:?}",
-                conflict.axis, conflict.kept, conflict.rejected
+                "{slot} has conflicting {:?} constraints; kept {:?}, rejected {:?}; {}",
+                conflict.axis, conflict.kept, conflict.rejected, conflict.message
             ),
         });
     }
@@ -2001,7 +3499,10 @@ fn push_capability_diagnostics_for_signature_constraints(
     match signature_owned_recovery_policy(java_ty, constraints, facts) {
         SignatureOwnedRecoveryPolicy::NotRequired
         | SignatureOwnedRecoveryPolicy::ProvenByCopy
-        | SignatureOwnedRecoveryPolicy::ProvenByExplicitClone => {}
+        | SignatureOwnedRecoveryPolicy::ProvenByExplicitClone
+        | SignatureOwnedRecoveryPolicy::ProvenByCloneBoxAdapter
+        | SignatureOwnedRecoveryPolicy::ProvenByFactoryCopy
+        | SignatureOwnedRecoveryPolicy::ProvenByImmutableSharedHandle => {}
         SignatureOwnedRecoveryPolicy::AuditConservativeClone => {
             diagnostics.push(SignatureDiagnostic {
                 code: "signature_clone_recovery_requires_audit",
@@ -2015,6 +3516,22 @@ fn push_capability_diagnostics_for_signature_constraints(
                 code: "signature_owned_recovery_requires_clone",
                 message: format!(
                     "{slot} needs owned recovery from a borrowed view, but {java_ty:?} is neither Copy nor Clone by type capability facts"
+                ),
+            });
+        }
+        SignatureOwnedRecoveryPolicy::UnsupportedFacadeOwnedExternalHandle => {
+            diagnostics.push(SignatureDiagnostic {
+                code: "signature_owned_recovery_requires_facade_transfer",
+                message: format!(
+                    "{slot} needs owned recovery from a borrowed facade-owned external handle; {java_ty:?} requires an explicit facade ownership transfer"
+                ),
+            });
+        }
+        SignatureOwnedRecoveryPolicy::UnsupportedFfiOwnedHandle => {
+            diagnostics.push(SignatureDiagnostic {
+                code: "signature_owned_recovery_requires_ffi_transfer",
+                message: format!(
+                    "{slot} needs owned recovery from a borrowed FFI-owned handle; {java_ty:?} requires an explicit FFI ownership transfer"
                 ),
             });
         }
@@ -2077,8 +3594,23 @@ pub fn signature_owned_recovery_policy_from_capability(
         OwnedRecoveryCapability::ExplicitClone { .. } => {
             SignatureOwnedRecoveryPolicy::ProvenByExplicitClone
         }
+        OwnedRecoveryCapability::CloneBoxAdapter { .. } => {
+            SignatureOwnedRecoveryPolicy::ProvenByCloneBoxAdapter
+        }
+        OwnedRecoveryCapability::FactoryCopy { .. } => {
+            SignatureOwnedRecoveryPolicy::ProvenByFactoryCopy
+        }
+        OwnedRecoveryCapability::ImmutableSharedHandle { .. } => {
+            SignatureOwnedRecoveryPolicy::ProvenByImmutableSharedHandle
+        }
         OwnedRecoveryCapability::ConservativeClone => {
             SignatureOwnedRecoveryPolicy::AuditConservativeClone
+        }
+        OwnedRecoveryCapability::FacadeOwnedExternalHandle { .. } => {
+            SignatureOwnedRecoveryPolicy::UnsupportedFacadeOwnedExternalHandle
+        }
+        OwnedRecoveryCapability::FfiOwnedHandle { .. } => {
+            SignatureOwnedRecoveryPolicy::UnsupportedFfiOwnedHandle
         }
         OwnedRecoveryCapability::NonCloneable => {
             SignatureOwnedRecoveryPolicy::UnsupportedNonCloneable
@@ -2099,6 +3631,7 @@ fn signature_constraint_pair_contains_ownership(
 
 fn build_signature_plan_from_constraints(
     program: &Program,
+    support_program: &Program,
     representations: &RepresentationPlan,
     constraints: &SignatureConstraintState,
     solve_iterations: usize,
@@ -2119,7 +3652,14 @@ fn build_signature_plan_from_constraints(
         ..SignaturePlan::default()
     };
     for ty in &program.types {
-        collect_type_signatures(ty, representations, constraints, facts, &mut plan);
+        collect_type_signatures(
+            ty,
+            support_program,
+            representations,
+            constraints,
+            facts,
+            &mut plan,
+        );
     }
     plan
 }
@@ -2162,6 +3702,33 @@ impl SignaturePlan {
             type_name: type_name.to_string(),
             rust_name: rust_name.to_string(),
         })
+    }
+
+    pub fn method_signature_by_base_name_and_arity(
+        &self,
+        type_name: &str,
+        base_name: &str,
+        arity: usize,
+    ) -> Option<(String, &MethodSignaturePlan)> {
+        let base_name = crate::parser::to_snake_case(base_name);
+        let mut matches = self
+            .methods
+            .iter()
+            .filter(|(key, signature)| {
+                key.type_name == type_name
+                    && signature.params.len() == arity
+                    && (key.rust_name == base_name
+                        || key
+                            .rust_name
+                            .strip_prefix(&base_name)
+                            .is_some_and(|suffix| suffix.starts_with('_')))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|(left, _), (right, _)| left.rust_name.cmp(&right.rust_name));
+        match matches.as_slice() {
+            [(key, signature)] => Some((key.rust_name.clone(), *signature)),
+            _ => None,
+        }
     }
 
     pub fn constructor_signature(
@@ -2337,6 +3904,7 @@ impl SignaturePlan {
 
 fn collect_type_signatures(
     ty: &TypeDecl,
+    support_program: &Program,
     representations: &RepresentationPlan,
     constraints: &SignatureConstraintState,
     facts: &FactSet,
@@ -2447,10 +4015,39 @@ fn collect_type_signatures(
                 );
             }
             crate::java_ir::Member::Type(nested) => {
-                collect_type_signatures(nested, representations, constraints, facts, plan);
+                collect_type_signatures(
+                    nested,
+                    support_program,
+                    representations,
+                    constraints,
+                    facts,
+                    plan,
+                );
             }
             crate::java_ir::Member::Unsupported { .. } => {}
         }
+    }
+    for inherited in
+        crate::inherited_members::inherited_instance_fields_for_type(ty, support_program)
+    {
+        let field_key = FieldKey {
+            type_name: ty.name.clone(),
+            field_name: inherited.field.name.clone(),
+        };
+        let field_constraints = constraints
+            .fields
+            .get(&field_key)
+            .cloned()
+            .unwrap_or_else(|| field_shape_constraints_with_facts(ty, &inherited.field, facts));
+        plan.fields.insert(
+            field_key,
+            constrained_field_shape(
+                &inherited.field.ty,
+                representations,
+                &field_constraints,
+                facts,
+            ),
+        );
     }
 }
 
@@ -2461,17 +4058,51 @@ pub fn method_param_shape_constraints(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
-    let boundary_kind = method_param_boundary_policy(ty, method, param, usage).kind;
-    let mut constraints =
-        signature_slot_baseline_policy(&param.ty, boundary_kind, facts).constraints;
-    if let Some(method_usage) = usage.methods.get(&UsageMethodKey {
+    let method_usage = usage.methods.get(&UsageMethodKey {
         type_name: ty.name.clone(),
         method_name: method.name.clone(),
-    }) && let Some(binding) = method_usage.bindings.get(&param.name)
+    });
+    let binding = method_usage.and_then(|method_usage| method_usage.bindings.get(&param.name));
+    let mut boundary_kind = method_param_boundary_policy(ty, method, param, usage).kind;
+    let public_readonly_receiver_read_product = boundary_kind
+        == Some(SignatureBoundaryKind::PublicApi)
+        && !java_types_have_same_signature_boundary_identity(&method.return_type, &param.ty)
+        && java_type_is_obvious_read_product(&method.return_type)
+        && binding.is_some_and(|binding| {
+            binding_is_fully_modeled_by_readonly_external_receivers(binding, facts)
+        });
+    if public_readonly_receiver_read_product {
+        boundary_kind = None;
+    }
+    if boundary_kind == Some(SignatureBoundaryKind::UnknownApi)
+        && binding.is_some_and(|binding| {
+            unknown_boundary_is_fully_modeled_by_external_argument_effects(binding, facts)
+        })
     {
+        boundary_kind = None;
+    }
+    let mut constraints =
+        signature_slot_baseline_policy(&param.ty, boundary_kind, facts).constraints;
+    if let Some(binding) = binding {
         push_unique_signature_constraints(
             &mut constraints,
-            &external_receiver_binding_constraints(binding, facts),
+            &external_receiver_binding_constraints(
+                binding,
+                facts,
+                true,
+                boundary_kind != Some(SignatureBoundaryKind::PublicApi)
+                    || public_readonly_receiver_read_product,
+            ),
+        );
+        push_unique_signature_constraints(
+            &mut constraints,
+            &external_argument_binding_constraints(binding, facts),
+        );
+    }
+    if let Some(body) = &method.body {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &source_binding_nullability_constraints(body, &param.name),
         );
     }
     if boundary_kind.is_none() {
@@ -2693,6 +4324,10 @@ pub fn signature_slot_baseline_policy_with_effective_facts(
         .unwrap_or_default();
     let mut constraints = capability_constraints.clone();
     push_unique_signature_constraints(&mut constraints, &boundary_constraints);
+    push_unique_signature_constraints(
+        &mut constraints,
+        &signature_erased_object_boundary_constraints_with_effective_facts(java_ty, facts),
+    );
     SignatureSlotBaselinePolicy {
         java_ty: java_ty.clone(),
         boundary_kind,
@@ -2700,6 +4335,26 @@ pub fn signature_slot_baseline_policy_with_effective_facts(
         boundary_constraints,
         constraints,
     }
+}
+
+fn signature_erased_object_boundary_constraints_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> Vec<SignatureConstraint> {
+    if !is_declared_java_object_type(java_ty) || facts.has_object_representation_facts(java_ty) {
+        return Vec::new();
+    }
+    vec![
+        SignatureConstraint::RequiredDispatch(DispatchShape::ErasedObject),
+        SignatureConstraint::RequiredView(ViewShape::ErasedObjectView),
+    ]
+}
+
+fn is_declared_java_object_type(java_ty: &JavaType) -> bool {
+    matches!(
+        java_ty,
+        JavaType::Named { name, .. } if name == "Object" || name == "java.lang.Object"
+    ) || matches!(java_ty, JavaType::Unknown(name) if name == "Object" || name == "java.lang.Object")
 }
 
 pub fn signature_slot_dispatch_requirement_policy(
@@ -2941,33 +4596,48 @@ pub fn merge_signature_boundary_kind_policy(
     current: Option<SignatureBoundaryKind>,
     next: Option<SignatureBoundaryKind>,
 ) -> SignatureBoundaryKindMerge {
-    match (current, next) {
-        (Some(SignatureBoundaryKind::EscapingStorage), rejected) => SignatureBoundaryKindMerge {
-            kept: Some(SignatureBoundaryKind::EscapingStorage),
-            rejected,
-        },
-        (rejected, Some(SignatureBoundaryKind::EscapingStorage)) => SignatureBoundaryKindMerge {
-            kept: Some(SignatureBoundaryKind::EscapingStorage),
-            rejected,
-        },
-        (Some(current), None) => SignatureBoundaryKindMerge {
+    let Some(next) = next else {
+        return SignatureBoundaryKindMerge {
+            kept: current,
+            rejected: None,
+        };
+    };
+    let Some(current) = current else {
+        return SignatureBoundaryKindMerge {
+            kept: Some(next),
+            rejected: None,
+        };
+    };
+    if current == next {
+        return SignatureBoundaryKindMerge {
             kept: Some(current),
             rejected: None,
-        },
-        (None, next) => SignatureBoundaryKindMerge {
-            kept: next,
-            rejected: None,
-        },
-        (Some(SignatureBoundaryKind::PublicApi), Some(SignatureBoundaryKind::UnknownApi))
-        | (Some(SignatureBoundaryKind::UnknownApi), Some(SignatureBoundaryKind::PublicApi))
-        | (Some(SignatureBoundaryKind::PublicApi), Some(SignatureBoundaryKind::PublicApi))
-        | (Some(SignatureBoundaryKind::UnknownApi), Some(SignatureBoundaryKind::UnknownApi)) => {
-            SignatureBoundaryKindMerge {
-                kept: current,
-                rejected: next.filter(|next| Some(*next) != current),
-            }
+        };
+    }
+    if signature_boundary_kind_priority_policy(current).rank
+        >= signature_boundary_kind_priority_policy(next).rank
+    {
+        SignatureBoundaryKindMerge {
+            kept: Some(current),
+            rejected: Some(next),
+        }
+    } else {
+        SignatureBoundaryKindMerge {
+            kept: Some(next),
+            rejected: Some(current),
         }
     }
+}
+
+pub fn signature_boundary_kind_priority_policy(
+    requirement: SignatureBoundaryKind,
+) -> SignatureBoundaryKindPriorityPolicy {
+    let rank = match requirement {
+        SignatureBoundaryKind::EscapingStorage => 30,
+        SignatureBoundaryKind::PublicApi => 20,
+        SignatureBoundaryKind::UnknownApi => 10,
+    };
+    SignatureBoundaryKindPriorityPolicy { requirement, rank }
 }
 
 pub fn constructor_param_shape_constraints(
@@ -2977,17 +4647,42 @@ pub fn constructor_param_shape_constraints(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
-    let boundary_kind = constructor_param_boundary_policy(ty, ctor, param, usage).kind;
-    let mut constraints =
-        signature_slot_baseline_policy(&param.ty, boundary_kind, facts).constraints;
-    if let Some(ctor_usage) = usage.constructors.get(&UsageConstructorKey {
+    let ctor_usage = usage.constructors.get(&UsageConstructorKey {
         type_name: ty.name.clone(),
         rust_name: constructor_rust_name(ctor),
-    }) && let Some(binding) = ctor_usage.bindings.get(&param.name)
+    });
+    let binding = ctor_usage.and_then(|ctor_usage| ctor_usage.bindings.get(&param.name));
+    let mut boundary_kind = constructor_param_boundary_policy(ty, ctor, param, usage).kind;
+    if boundary_kind == Some(SignatureBoundaryKind::PublicApi)
+        && binding.is_some_and(|binding| {
+            binding_is_fully_modeled_by_readonly_external_receivers(binding, facts)
+        })
     {
+        boundary_kind = None;
+    }
+    if boundary_kind == Some(SignatureBoundaryKind::UnknownApi)
+        && binding.is_some_and(|binding| {
+            unknown_boundary_is_fully_modeled_by_external_argument_effects(binding, facts)
+        })
+    {
+        boundary_kind = None;
+    }
+    let mut constraints =
+        signature_slot_baseline_policy(&param.ty, boundary_kind, facts).constraints;
+    if let Some(binding) = binding {
         push_unique_signature_constraints(
             &mut constraints,
-            &external_receiver_binding_constraints(binding, facts),
+            &external_receiver_binding_constraints(binding, facts, true, true),
+        );
+        push_unique_signature_constraints(
+            &mut constraints,
+            &external_argument_binding_constraints(binding, facts),
+        );
+    }
+    if let Some(body) = &ctor.body {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &source_binding_nullability_constraints(body, &param.name),
         );
     }
     if boundary_kind.is_none() {
@@ -3124,6 +4819,13 @@ impl MergedSignatureConstraints {
         &self.conflicts
     }
 
+    pub fn conflict_diagnostics(&self) -> Vec<SignatureConstraintConflictDiagnostic> {
+        self.conflicts
+            .iter()
+            .map(signature_constraint_conflict_diagnostic)
+            .collect()
+    }
+
     fn add_constraint(&mut self, constraint: &SignatureConstraint) {
         match constraint {
             SignatureConstraint::RequiredOwnership(requirement) => {
@@ -3178,12 +4880,136 @@ impl MergedSignatureConstraints {
                 }
             }
             SignatureConstraint::MutableBinding => {
-                self.mutable_binding = true;
+                self.mutable_binding =
+                    merge_signature_flag_requirement_policy(self.mutable_binding, true).kept;
             }
             SignatureConstraint::StorageSlot => {
-                self.storage_slot = true;
+                self.storage_slot =
+                    merge_signature_flag_requirement_policy(self.storage_slot, true).kept;
             }
         }
+    }
+}
+
+pub fn merge_signature_flag_requirement_policy(current: bool, next: bool) -> SignatureFlagMerge {
+    let kept = current || next;
+    SignatureFlagMerge {
+        kept,
+        changed: kept != current,
+    }
+}
+
+pub fn signature_constraint_provenance(
+    constraint: &SignatureConstraint,
+) -> SignatureConstraintProvenance {
+    match constraint {
+        SignatureConstraint::RequiredOwnership(OwnershipShape::Owned) => {
+            SignatureConstraintProvenance::OwnedRequirement
+        }
+        SignatureConstraint::RequiredOwnership(OwnershipShape::SharedBorrow) => {
+            SignatureConstraintProvenance::BorrowedRequirement
+        }
+        SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow) => {
+            SignatureConstraintProvenance::MutableBorrowRequirement
+        }
+        SignatureConstraint::RequiredOwnership(OwnershipShape::CopyValue) => {
+            SignatureConstraintProvenance::CopyRequirement
+        }
+        SignatureConstraint::RequiredView(ViewShape::Native) => {
+            SignatureConstraintProvenance::NativeViewRequirement
+        }
+        SignatureConstraint::RequiredView(ViewShape::Str) => {
+            SignatureConstraintProvenance::StringViewRequirement
+        }
+        SignatureConstraint::RequiredView(ViewShape::Slice) => {
+            SignatureConstraintProvenance::SliceViewRequirement
+        }
+        SignatureConstraint::RequiredView(ViewShape::DynTraitView) => {
+            SignatureConstraintProvenance::DynTraitViewRequirement
+        }
+        SignatureConstraint::RequiredView(ViewShape::EnumView) => {
+            SignatureConstraintProvenance::EnumViewRequirement
+        }
+        SignatureConstraint::RequiredView(ViewShape::ErasedObjectView) => {
+            SignatureConstraintProvenance::ErasedObjectRequirement
+        }
+        SignatureConstraint::RequiredDispatch(DispatchShape::Concrete) => {
+            SignatureConstraintProvenance::ConcreteDispatchRequirement
+        }
+        SignatureConstraint::RequiredDispatch(DispatchShape::DynTrait { .. }) => {
+            SignatureConstraintProvenance::DynTraitRequirement
+        }
+        SignatureConstraint::RequiredDispatch(DispatchShape::BoxedDynTrait { .. }) => {
+            SignatureConstraintProvenance::BoxedDynTraitRequirement
+        }
+        SignatureConstraint::RequiredDispatch(DispatchShape::ClosedEnum { .. }) => {
+            SignatureConstraintProvenance::ClosedEnumRequirement
+        }
+        SignatureConstraint::RequiredDispatch(DispatchShape::ErasedObject) => {
+            SignatureConstraintProvenance::ErasedObjectRequirement
+        }
+        SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull) => {
+            SignatureConstraintProvenance::NonNullStorageRequirement
+        }
+        SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNull)
+        | SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull) => {
+            SignatureConstraintProvenance::OptionalStorageRequirement
+        }
+        SignatureConstraint::RequiredStorageNullability(NullabilityState::Unknown) => {
+            SignatureConstraintProvenance::UnknownStorageRequirement
+        }
+        SignatureConstraint::MutableBinding => {
+            SignatureConstraintProvenance::MutableBindingRequirement
+        }
+        SignatureConstraint::StorageSlot => SignatureConstraintProvenance::StorageSlotRequirement,
+    }
+}
+
+pub fn signature_constraint_provenance_label(
+    provenance: SignatureConstraintProvenance,
+) -> &'static str {
+    match provenance {
+        SignatureConstraintProvenance::OwnedRequirement => "owned",
+        SignatureConstraintProvenance::BorrowedRequirement => "borrowed view",
+        SignatureConstraintProvenance::MutableBorrowRequirement => "mutable borrow",
+        SignatureConstraintProvenance::CopyRequirement => "copy value",
+        SignatureConstraintProvenance::NativeViewRequirement => "native Rust view",
+        SignatureConstraintProvenance::StringViewRequirement => "string slice view",
+        SignatureConstraintProvenance::SliceViewRequirement => "slice view",
+        SignatureConstraintProvenance::DynTraitViewRequirement => "dyn trait view",
+        SignatureConstraintProvenance::EnumViewRequirement => "enum view",
+        SignatureConstraintProvenance::ErasedObjectRequirement => "erased object",
+        SignatureConstraintProvenance::ConcreteDispatchRequirement => "concrete dispatch",
+        SignatureConstraintProvenance::DynTraitRequirement => "Box<dyn Trait>",
+        SignatureConstraintProvenance::BoxedDynTraitRequirement => "Box<dyn Trait>",
+        SignatureConstraintProvenance::ClosedEnumRequirement => "closed enum",
+        SignatureConstraintProvenance::OptionalStorageRequirement => "Option",
+        SignatureConstraintProvenance::NonNullStorageRequirement => "non-null storage",
+        SignatureConstraintProvenance::UnknownStorageRequirement => "unknown nullability",
+        SignatureConstraintProvenance::MutableBindingRequirement => "mutable binding",
+        SignatureConstraintProvenance::StorageSlotRequirement => "storage slot",
+    }
+}
+
+pub fn signature_constraint_conflict_diagnostic(
+    conflict: &SignatureConstraintConflict,
+) -> SignatureConstraintConflictDiagnostic {
+    let kept_provenance = signature_constraint_provenance(&conflict.kept);
+    let rejected_provenance = signature_constraint_provenance(&conflict.rejected);
+    SignatureConstraintConflictDiagnostic {
+        axis: conflict.axis,
+        kept: conflict.kept.clone(),
+        rejected: conflict.rejected.clone(),
+        kept_provenance,
+        rejected_provenance,
+        message: format!(
+            "{:?} join kept {:?} because it requires {}; rejected {:?} from {}",
+            conflict.axis,
+            conflict.kept,
+            signature_constraint_provenance_label(kept_provenance),
+            conflict.rejected,
+            signature_constraint_provenance_label(rejected_provenance)
+        ),
     }
 }
 
@@ -3191,42 +5017,17 @@ pub fn merge_ownership_requirement_policy(
     current: Option<OwnershipShape>,
     next: OwnershipShape,
 ) -> SignatureRequirementMerge<OwnershipShape> {
-    let Some(current) = current else {
-        return SignatureRequirementMerge {
-            kept: next,
-            rejected: None,
-        };
-    };
-    if current == next {
-        return SignatureRequirementMerge {
-            kept: current,
-            rejected: None,
-        };
-    }
-    if signature_ownership_requirement_priority_policy(current).rank
-        >= signature_ownership_requirement_priority_policy(next).rank
-    {
-        SignatureRequirementMerge {
-            kept: current,
-            rejected: Some(next),
-        }
-    } else {
-        SignatureRequirementMerge {
-            kept: next,
-            rejected: Some(current),
-        }
+    let merge = join_ranked_lattice(current, next, ownership_lattice_rank);
+    SignatureRequirementMerge {
+        kept: merge.kept,
+        rejected: merge.rejected,
     }
 }
 
 pub fn signature_ownership_requirement_priority_policy(
     requirement: OwnershipShape,
 ) -> SignatureOwnershipRequirementPriorityPolicy {
-    let rank = match requirement {
-        OwnershipShape::Owned => 40,
-        OwnershipShape::CopyValue => 30,
-        OwnershipShape::MutableBorrow => 20,
-        OwnershipShape::SharedBorrow => 10,
-    };
+    let rank = ownership_lattice_rank(&requirement);
     SignatureOwnershipRequirementPriorityPolicy { requirement, rank }
 }
 
@@ -3234,42 +5035,17 @@ pub fn merge_view_requirement_policy(
     current: Option<ViewShape>,
     next: ViewShape,
 ) -> SignatureRequirementMerge<ViewShape> {
-    let Some(current) = current else {
-        return SignatureRequirementMerge {
-            kept: next,
-            rejected: None,
-        };
-    };
-    if current == next {
-        return SignatureRequirementMerge {
-            kept: current,
-            rejected: None,
-        };
-    }
-    if signature_view_requirement_priority_policy(current.clone()).rank
-        >= signature_view_requirement_priority_policy(next.clone()).rank
-    {
-        SignatureRequirementMerge {
-            kept: current,
-            rejected: Some(next),
-        }
-    } else {
-        SignatureRequirementMerge {
-            kept: next,
-            rejected: Some(current),
-        }
+    let merge = join_ranked_lattice(current, next, view_lattice_rank);
+    SignatureRequirementMerge {
+        kept: merge.kept,
+        rejected: merge.rejected,
     }
 }
 
 pub fn signature_view_requirement_priority_policy(
     requirement: ViewShape,
 ) -> SignatureViewRequirementPriorityPolicy {
-    let rank = match &requirement {
-        ViewShape::Native => 50,
-        ViewShape::ErasedObjectView => 40,
-        ViewShape::EnumView | ViewShape::DynTraitView => 30,
-        ViewShape::Slice | ViewShape::Str => 10,
-    };
+    let rank = view_lattice_rank(&requirement);
     SignatureViewRequirementPriorityPolicy { requirement, rank }
 }
 
@@ -3277,42 +5053,17 @@ pub fn merge_dispatch_requirement_policy(
     current: Option<DispatchShape>,
     next: DispatchShape,
 ) -> SignatureRequirementMerge<DispatchShape> {
-    let Some(current) = current else {
-        return SignatureRequirementMerge {
-            kept: next,
-            rejected: None,
-        };
-    };
-    if current == next {
-        return SignatureRequirementMerge {
-            kept: current,
-            rejected: None,
-        };
-    }
-    if signature_dispatch_requirement_priority_policy(current.clone()).rank
-        >= signature_dispatch_requirement_priority_policy(next.clone()).rank
-    {
-        SignatureRequirementMerge {
-            kept: current,
-            rejected: Some(next),
-        }
-    } else {
-        SignatureRequirementMerge {
-            kept: next,
-            rejected: Some(current),
-        }
+    let merge = join_ranked_lattice(current, next, dispatch_shape_lattice_rank);
+    SignatureRequirementMerge {
+        kept: merge.kept,
+        rejected: merge.rejected,
     }
 }
 
 pub fn signature_dispatch_requirement_priority_policy(
     requirement: DispatchShape,
 ) -> SignatureDispatchRequirementPriorityPolicy {
-    let rank = match &requirement {
-        DispatchShape::Concrete => 50,
-        DispatchShape::ErasedObject => 40,
-        DispatchShape::BoxedDynTrait { .. } => 30,
-        DispatchShape::ClosedEnum { .. } | DispatchShape::DynTrait { .. } => 20,
-    };
+    let rank = dispatch_shape_lattice_rank(&requirement);
     SignatureDispatchRequirementPriorityPolicy { requirement, rank }
 }
 
@@ -3320,37 +5071,10 @@ pub fn merge_storage_nullability_requirement_policy(
     current: Option<NullabilityState>,
     next: NullabilityState,
 ) -> SignatureRequirementMerge<NullabilityState> {
-    let Some(current) = current else {
-        return SignatureRequirementMerge {
-            kept: next,
-            rejected: None,
-        };
-    };
-    if current == next {
-        return SignatureRequirementMerge {
-            kept: current,
-            rejected: None,
-        };
-    }
-    if storage_nullability_requirement_rank(current) >= storage_nullability_requirement_rank(next) {
-        SignatureRequirementMerge {
-            kept: current,
-            rejected: Some(next),
-        }
-    } else {
-        SignatureRequirementMerge {
-            kept: next,
-            rejected: Some(current),
-        }
-    }
-}
-
-fn storage_nullability_requirement_rank(requirement: NullabilityState) -> usize {
-    match requirement {
-        NullabilityState::MaybeNull => 40,
-        NullabilityState::DefinitelyNull => 30,
-        NullabilityState::Unknown => 20,
-        NullabilityState::DefinitelyNonNull => 10,
+    let merge = join_ranked_lattice(current, next, storage_nullability_lattice_rank);
+    SignatureRequirementMerge {
+        kept: merge.kept,
+        rejected: merge.rejected,
     }
 }
 
@@ -3757,6 +5481,542 @@ fn extend_signature_constraints_unique(
     }
 }
 
+pub fn source_binding_nullability_constraints(
+    block: &Block,
+    name: &str,
+) -> Vec<SignatureConstraint> {
+    collect_binding_nullability_constraint_map(block)
+        .remove(name)
+        .unwrap_or_default()
+}
+
+pub fn source_method_return_nullability_constraints(
+    method: &MethodDecl,
+) -> Vec<SignatureConstraint> {
+    if matches!(method.return_type, JavaType::Void | JavaType::Primitive(_)) {
+        return Vec::new();
+    }
+    let Some(body) = &method.body else {
+        return Vec::new();
+    };
+    let binding_states = collect_binding_nullability_state_map(body);
+    let mut states = Vec::new();
+    collect_source_return_nullability_states_from_stmts(
+        &body.statements,
+        &binding_states,
+        &mut states,
+    );
+    let state = merge_source_nullability_states(&states);
+    if matches!(state, NullabilityState::Unknown) {
+        Vec::new()
+    } else {
+        vec![SignatureConstraint::RequiredStorageNullability(state)]
+    }
+}
+
+fn collect_binding_nullability_constraint_map(
+    block: &Block,
+) -> HashMap<String, Vec<SignatureConstraint>> {
+    collect_binding_nullability_state_map(block)
+        .into_iter()
+        .map(|(name, state)| {
+            (
+                name,
+                vec![SignatureConstraint::RequiredStorageNullability(state)],
+            )
+        })
+        .collect()
+}
+
+fn collect_binding_nullability_state_map(block: &Block) -> HashMap<String, NullabilityState> {
+    let mut states = HashMap::<String, NullabilityState>::new();
+    collect_binding_nullability_states_from_stmts(&block.statements, &mut states);
+    states
+}
+
+fn collect_source_return_nullability_states_from_stmts(
+    statements: &[Stmt],
+    binding_states: &HashMap<String, NullabilityState>,
+    states: &mut Vec<NullabilityState>,
+) {
+    let mut refinements = HashSet::new();
+    collect_source_return_nullability_states_from_stmts_with_refinements(
+        statements,
+        binding_states,
+        &mut refinements,
+        states,
+    );
+}
+
+fn collect_source_return_nullability_states_from_stmts_with_refinements(
+    statements: &[Stmt],
+    binding_states: &HashMap<String, NullabilityState>,
+    refinements: &mut HashSet<String>,
+    states: &mut Vec<NullabilityState>,
+) {
+    for stmt in statements {
+        collect_source_return_nullability_states_from_stmt(
+            stmt,
+            binding_states,
+            refinements,
+            states,
+        );
+        update_post_stmt_nullability_refinements(stmt, refinements);
+    }
+}
+
+fn collect_source_return_nullability_states_from_stmt(
+    stmt: &Stmt,
+    binding_states: &HashMap<String, NullabilityState>,
+    refinements: &HashSet<String>,
+    states: &mut Vec<NullabilityState>,
+) {
+    match stmt {
+        Stmt::Return(Some(expr)) => {
+            states.push(source_return_expr_nullability_state(
+                expr,
+                binding_states,
+                refinements,
+            ));
+        }
+        Stmt::Return(None) => states.push(NullabilityState::DefinitelyNull),
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_source_return_nullability_states_from_stmts_with_refinements(
+                &then_block.statements,
+                binding_states,
+                &mut refinements.clone(),
+                states,
+            );
+            if let Some(else_block) = else_block {
+                collect_source_return_nullability_states_from_stmts_with_refinements(
+                    &else_block.statements,
+                    binding_states,
+                    &mut refinements.clone(),
+                    states,
+                );
+            }
+        }
+        Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::EnhancedFor { body, .. } => {
+            collect_source_return_nullability_states_from_stmts_with_refinements(
+                &body.statements,
+                binding_states,
+                &mut refinements.clone(),
+                states,
+            );
+        }
+        Stmt::Block(body) => collect_source_return_nullability_states_from_stmts_with_refinements(
+            &body.statements,
+            binding_states,
+            &mut refinements.clone(),
+            states,
+        ),
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                collect_source_return_nullability_states_from_stmts_with_refinements(
+                    &case.statements,
+                    binding_states,
+                    &mut refinements.clone(),
+                    states,
+                );
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            collect_source_return_nullability_states_from_stmts_with_refinements(
+                resources,
+                binding_states,
+                &mut refinements.clone(),
+                states,
+            );
+            collect_source_return_nullability_states_from_stmts_with_refinements(
+                &body.statements,
+                binding_states,
+                &mut refinements.clone(),
+                states,
+            );
+            for catch in catches {
+                collect_source_return_nullability_states_from_stmts_with_refinements(
+                    &catch.body.statements,
+                    binding_states,
+                    &mut refinements.clone(),
+                    states,
+                );
+            }
+            if let Some(finally_block) = finally_block {
+                collect_source_return_nullability_states_from_stmts_with_refinements(
+                    &finally_block.statements,
+                    binding_states,
+                    &mut refinements.clone(),
+                    states,
+                );
+            }
+        }
+        Stmt::VarDecl { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Throw(_)
+        | Stmt::LocalType(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn source_return_expr_nullability_state(
+    expr: &Expr,
+    binding_states: &HashMap<String, NullabilityState>,
+    refinements: &HashSet<String>,
+) -> NullabilityState {
+    match expr {
+        Expr::Var(name) if refinements.contains(name) => NullabilityState::DefinitelyNonNull,
+        Expr::Var(name) => binding_states
+            .get(name)
+            .copied()
+            .unwrap_or(NullabilityState::Unknown),
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => merge_source_nullability_states(&[
+            source_return_expr_nullability_state(then_expr, binding_states, refinements),
+            source_return_expr_nullability_state(else_expr, binding_states, refinements),
+        ]),
+        _ => source_expr_nullability_state(expr).unwrap_or(NullabilityState::Unknown),
+    }
+}
+
+fn update_post_stmt_nullability_refinements(stmt: &Stmt, refinements: &mut HashSet<String>) {
+    let mut mutated = HashSet::new();
+    collect_mutated_local_names_from_stmt(stmt, &mut mutated);
+    for name in mutated {
+        refinements.remove(&name);
+    }
+    if let Stmt::While { condition, body } = stmt {
+        let plan = plan_while_stmt(condition, body);
+        if let PostLoopRefinementPlan::LocalNonNull { local_name } =
+            post_loop_refinement_for_while(&plan)
+        {
+            refinements.insert(local_name.to_string());
+        }
+    }
+}
+
+fn merge_source_nullability_states(states: &[NullabilityState]) -> NullabilityState {
+    states
+        .iter()
+        .copied()
+        .reduce(crate::lattice::field_nullability_join)
+        .unwrap_or(NullabilityState::Unknown)
+}
+
+fn collect_binding_nullability_states_from_stmts(
+    statements: &[Stmt],
+    states: &mut HashMap<String, NullabilityState>,
+) {
+    for stmt in statements {
+        collect_binding_nullability_states_from_stmt(stmt, states);
+    }
+}
+
+fn collect_binding_nullability_states_from_stmt(
+    stmt: &Stmt,
+    states: &mut HashMap<String, NullabilityState>,
+) {
+    match stmt {
+        Stmt::VarDecl {
+            name,
+            initializer: Some(initializer),
+            ..
+        } => {
+            collect_binding_nullability_assignment(name, initializer, states);
+            collect_binding_nullability_states_from_expr(initializer, states);
+        }
+        Stmt::Assign { target, value } => {
+            if let Expr::Var(name) = target {
+                collect_binding_nullability_assignment(name, value, states);
+            }
+            collect_binding_nullability_states_from_expr(value, states);
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            collect_binding_nullability_states_from_expr(expr, states);
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_binding_nullability_states_from_expr(condition, states);
+            collect_binding_nullability_states_from_stmts(&then_block.statements, states);
+            if let Some(else_block) = else_block {
+                collect_binding_nullability_states_from_stmts(&else_block.statements, states);
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_binding_nullability_states_from_expr(condition, states);
+            collect_binding_nullability_states_from_stmts(&body.statements, states);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            collect_binding_nullability_states_from_stmts(init, states);
+            if let Some(condition) = condition {
+                collect_binding_nullability_states_from_expr(condition, states);
+            }
+            for expr in update {
+                collect_binding_nullability_states_from_expr(expr, states);
+            }
+            collect_binding_nullability_states_from_stmts(&body.statements, states);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_binding_nullability_states_from_expr(iterable, states);
+            collect_binding_nullability_states_from_stmts(&body.statements, states);
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_binding_nullability_states_from_expr(selector, states);
+            for case in cases {
+                for label in &case.labels {
+                    if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                        collect_binding_nullability_states_from_expr(expr, states);
+                    }
+                }
+                collect_binding_nullability_states_from_stmts(&case.statements, states);
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            collect_binding_nullability_states_from_stmts(resources, states);
+            collect_binding_nullability_states_from_stmts(&body.statements, states);
+            for catch in catches {
+                collect_binding_nullability_states_from_stmts(&catch.body.statements, states);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_binding_nullability_states_from_stmts(&finally_block.statements, states);
+            }
+        }
+        Stmt::Block(block) => {
+            collect_binding_nullability_states_from_stmts(&block.statements, states);
+        }
+        Stmt::LocalType(ty) => {
+            for member in &ty.members {
+                match member {
+                    crate::java_ir::Member::Method(method) => {
+                        if let Some(body) = &method.body {
+                            collect_binding_nullability_states_from_stmts(&body.statements, states);
+                        }
+                    }
+                    crate::java_ir::Member::Constructor(constructor) => {
+                        if let Some(body) = &constructor.body {
+                            collect_binding_nullability_states_from_stmts(&body.statements, states);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Stmt::VarDecl {
+            initializer: None, ..
+        }
+        | Stmt::Return(None)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_binding_nullability_states_from_expr(
+    expr: &Expr,
+    states: &mut HashMap<String, NullabilityState>,
+) {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::Eq | BinaryOp::Ne,
+            left,
+            right,
+        } => {
+            collect_null_comparison_binding(left, right, states);
+            collect_null_comparison_binding(right, left, states);
+            collect_null_comparison_assignment(left, right, states);
+            collect_null_comparison_assignment(right, left, states);
+            collect_binding_nullability_states_from_expr(left, states);
+            collect_binding_nullability_states_from_expr(right, states);
+        }
+        Expr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        } => {
+            if let Expr::Var(name) = left.as_ref() {
+                collect_binding_nullability_assignment(name, right, states);
+            }
+            collect_binding_nullability_states_from_expr(right, states);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_binding_nullability_states_from_expr(left, states);
+            collect_binding_nullability_states_from_expr(right, states);
+        }
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::InstanceOf { expr, .. }
+        | Expr::FieldAccess(expr, _) => collect_binding_nullability_states_from_expr(expr, states),
+        Expr::ArrayAccess(array, index) => {
+            collect_binding_nullability_states_from_expr(array, states);
+            collect_binding_nullability_states_from_expr(index, states);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_binding_nullability_states_from_expr(condition, states);
+            collect_binding_nullability_states_from_expr(then_expr, states);
+            collect_binding_nullability_states_from_expr(else_expr, states);
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_binding_nullability_states_from_expr(receiver, states);
+            }
+            for arg in args {
+                collect_binding_nullability_states_from_expr(arg, states);
+            }
+        }
+        Expr::New { args, body, .. } => {
+            for arg in args {
+                collect_binding_nullability_states_from_expr(arg, states);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    if let crate::java_ir::Member::Method(method) = member
+                        && let Some(body) = &method.body
+                    {
+                        collect_binding_nullability_states_from_stmts(&body.statements, states);
+                    }
+                }
+            }
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_binding_nullability_states_from_expr(dimension, states);
+            }
+            if let Some(initializer) = initializer {
+                for element in initializer {
+                    collect_binding_nullability_states_from_expr(element, states);
+                }
+            }
+        }
+        Expr::ArrayInitializer(elements) => {
+            for element in elements {
+                collect_binding_nullability_states_from_expr(element, states);
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => {
+                collect_binding_nullability_states_from_expr(expr, states);
+            }
+            crate::java_ir::LambdaBody::Block(block) => {
+                collect_binding_nullability_states_from_stmts(&block.statements, states);
+            }
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn collect_binding_nullability_assignment(
+    name: &str,
+    value: &Expr,
+    states: &mut HashMap<String, NullabilityState>,
+) {
+    if let Some(state) = source_expr_nullability_state(value) {
+        merge_binding_nullability_state(states, name, state);
+    }
+}
+
+fn collect_null_comparison_binding(
+    maybe_binding: &Expr,
+    maybe_null: &Expr,
+    states: &mut HashMap<String, NullabilityState>,
+) {
+    if matches!(maybe_null, Expr::Literal(Literal::Null))
+        && let Expr::Var(name) = maybe_binding
+    {
+        merge_binding_nullability_state(states, name, NullabilityState::MaybeNull);
+    }
+}
+
+fn collect_null_comparison_assignment(
+    maybe_assignment: &Expr,
+    maybe_null: &Expr,
+    states: &mut HashMap<String, NullabilityState>,
+) {
+    if !matches!(maybe_null, Expr::Literal(Literal::Null)) {
+        return;
+    }
+    let Expr::Binary {
+        op: BinaryOp::Assign,
+        left,
+        ..
+    } = maybe_assignment
+    else {
+        return;
+    };
+    if let Expr::Var(name) = left.as_ref() {
+        merge_binding_nullability_state(states, name, NullabilityState::MaybeNull);
+    }
+}
+
+fn source_expr_nullability_state(expr: &Expr) -> Option<NullabilityState> {
+    match expr {
+        Expr::Literal(Literal::Null) => Some(NullabilityState::DefinitelyNull),
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => Some(crate::lattice::field_nullability_join(
+            source_expr_nullability_state(then_expr).unwrap_or(NullabilityState::Unknown),
+            source_expr_nullability_state(else_expr).unwrap_or(NullabilityState::Unknown),
+        )),
+        _ => None,
+    }
+}
+
+fn merge_binding_nullability_state(
+    states: &mut HashMap<String, NullabilityState>,
+    name: &str,
+    state: NullabilityState,
+) {
+    states
+        .entry(name.to_string())
+        .and_modify(|current| *current = crate::lattice::field_nullability_join(*current, state))
+        .or_insert(state);
+}
+
 fn collect_local_constraint_sets(
     block: &crate::java_ir::Block,
     usage: Option<&MethodUsageFacts>,
@@ -3765,12 +6025,14 @@ fn collect_local_constraint_sets(
 ) -> Vec<LocalConstraintSet> {
     let mut locals = Vec::new();
     let mutated = collect_mutated_local_names(block);
+    let source_nullability = collect_binding_nullability_constraint_map(block);
     collect_local_constraint_sets_from_stmts(
         &block.statements,
         &mutated,
         usage,
         facts,
         captured,
+        &source_nullability,
         &mut locals,
     );
     locals
@@ -3782,6 +6044,7 @@ fn collect_local_constraint_sets_from_stmts(
     usage: Option<&MethodUsageFacts>,
     facts: &FactSet,
     captured: &HashSet<String>,
+    source_nullability: &HashMap<String, Vec<SignatureConstraint>>,
     locals: &mut Vec<LocalConstraintSet>,
 ) {
     use crate::java_ir::Stmt;
@@ -3790,6 +6053,9 @@ fn collect_local_constraint_sets_from_stmts(
             Stmt::VarDecl { ty, name, .. } => {
                 let mut constraints =
                     local_shape_constraints_with_usage(name, ty, mutated, usage, facts);
+                if let Some(source_constraints) = source_nullability.get(name) {
+                    push_unique_signature_constraints(&mut constraints, source_constraints);
+                }
                 apply_capture_constraints(&mut constraints, captured, name, ty, facts);
                 locals.push(LocalConstraintSet {
                     name: name.clone(),
@@ -3799,7 +6065,13 @@ fn collect_local_constraint_sets_from_stmts(
             }
             Stmt::For { init, body, .. } => {
                 collect_local_constraint_sets_from_stmts(
-                    init, mutated, usage, facts, captured, locals,
+                    init,
+                    mutated,
+                    usage,
+                    facts,
+                    captured,
+                    source_nullability,
+                    locals,
                 );
                 collect_local_constraint_sets_from_stmts(
                     &body.statements,
@@ -3807,6 +6079,7 @@ fn collect_local_constraint_sets_from_stmts(
                     usage,
                     facts,
                     captured,
+                    source_nullability,
                     locals,
                 );
             }
@@ -3818,6 +6091,9 @@ fn collect_local_constraint_sets_from_stmts(
             } => {
                 let mut constraints =
                     local_shape_constraints_with_usage(var_name, var_type, mutated, usage, facts);
+                if let Some(source_constraints) = source_nullability.get(var_name) {
+                    push_unique_signature_constraints(&mut constraints, source_constraints);
+                }
                 apply_capture_constraints(&mut constraints, captured, var_name, var_type, facts);
                 locals.push(LocalConstraintSet {
                     name: var_name.clone(),
@@ -3830,6 +6106,7 @@ fn collect_local_constraint_sets_from_stmts(
                     usage,
                     facts,
                     captured,
+                    source_nullability,
                     locals,
                 );
             }
@@ -3844,6 +6121,7 @@ fn collect_local_constraint_sets_from_stmts(
                     usage,
                     facts,
                     captured,
+                    source_nullability,
                     locals,
                 );
                 if let Some(else_block) = else_block {
@@ -3853,6 +6131,7 @@ fn collect_local_constraint_sets_from_stmts(
                         usage,
                         facts,
                         captured,
+                        source_nullability,
                         locals,
                     );
                 }
@@ -3864,6 +6143,7 @@ fn collect_local_constraint_sets_from_stmts(
                     usage,
                     facts,
                     captured,
+                    source_nullability,
                     locals,
                 );
             }
@@ -3875,6 +6155,7 @@ fn collect_local_constraint_sets_from_stmts(
                         usage,
                         facts,
                         captured,
+                        source_nullability,
                         locals,
                     );
                 }
@@ -3883,7 +6164,13 @@ fn collect_local_constraint_sets_from_stmts(
                 resources, body, ..
             } => {
                 collect_local_constraint_sets_from_stmts(
-                    resources, mutated, usage, facts, captured, locals,
+                    resources,
+                    mutated,
+                    usage,
+                    facts,
+                    captured,
+                    source_nullability,
+                    locals,
                 );
                 collect_local_constraint_sets_from_stmts(
                     &body.statements,
@@ -3891,6 +6178,7 @@ fn collect_local_constraint_sets_from_stmts(
                     usage,
                     facts,
                     captured,
+                    source_nullability,
                     locals,
                 );
             }
@@ -4099,7 +6387,11 @@ fn local_shape_constraints_with_usage_and_effective_facts(
     if let Some(binding) = usage.and_then(|usage| usage.bindings.get(name)) {
         push_unique_signature_constraints(
             &mut constraints,
-            &external_receiver_binding_constraints(binding, facts),
+            &constructor_assigned_local_storage_constraints(binding),
+        );
+        push_unique_signature_constraints(
+            &mut constraints,
+            &external_receiver_binding_constraints(binding, facts, false, false),
         );
         push_unique_signature_constraints(
             &mut constraints,
@@ -4118,9 +6410,34 @@ fn local_shape_constraints_with_usage_and_effective_facts(
     constraints
 }
 
+fn constructor_assigned_local_storage_constraints(
+    binding: &BindingUseFacts,
+) -> Vec<SignatureConstraint> {
+    if matches!(binding.java_ty, JavaType::Primitive(_) | JavaType::Void) {
+        return Vec::new();
+    }
+    if binding.uses.iter().any(|usage| {
+        matches!(
+            usage,
+            BindingUse::AssignedFromCall {
+                name,
+                ..
+            } if name == "new"
+        )
+    }) {
+        vec![SignatureConstraint::RequiredOwnership(
+            OwnershipShape::Owned,
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn external_receiver_binding_constraints(
     binding: &BindingUseFacts,
     facts: &FactSet,
+    allow_mutable_receiver_borrow_shape: bool,
+    allow_readonly_receiver_borrow_shape: bool,
 ) -> Vec<SignatureConstraint> {
     let mut constraints = Vec::new();
     for usage in &binding.uses {
@@ -4138,14 +6455,184 @@ pub fn external_receiver_binding_constraints(
                 effect.receiver_mutability == ReceiverMutabilityFact::MutatesReceiver
             })
         {
+            if allow_mutable_receiver_borrow_shape {
+                push_unique_signature_constraints(
+                    &mut constraints,
+                    &[SignatureConstraint::RequiredOwnership(
+                        OwnershipShape::MutableBorrow,
+                    )],
+                );
+            }
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[SignatureConstraint::MutableBinding],
+            );
+        } else if allow_readonly_receiver_borrow_shape
+            && facts
+                .external_api_effect_for_receiver(receiver_type.as_deref(), name)
+                .is_some_and(|effect| {
+                    effect.receiver_mutability == ReceiverMutabilityFact::ReadOnly
+                        && !matches!(binding.java_ty, JavaType::Primitive(_) | JavaType::Void)
+                })
+        {
             push_unique_signature_constraints(
                 &mut constraints,
                 &[SignatureConstraint::RequiredOwnership(
-                    OwnershipShape::MutableBorrow,
+                    OwnershipShape::SharedBorrow,
                 )],
             );
         }
     }
+    constraints
+}
+
+fn binding_is_fully_modeled_by_readonly_external_receivers(
+    binding: &BindingUseFacts,
+    facts: &FactSet,
+) -> bool {
+    let mut saw_receiver = false;
+    let receiver_type = external_api_receiver_type_key(&binding.java_ty);
+    for usage in &binding.uses {
+        match usage {
+            BindingUse::ReceiverForCall {
+                name,
+                boundary: CallArgumentBoundary::Unknown,
+            } => {
+                saw_receiver = true;
+                if !facts
+                    .external_api_effect_for_receiver(receiver_type.as_deref(), name)
+                    .is_some_and(|effect| {
+                        effect.receiver_mutability == ReceiverMutabilityFact::ReadOnly
+                    })
+                {
+                    return false;
+                }
+            }
+            BindingUse::ReceiverForCall { .. } => {}
+            BindingUse::ContentRead => {}
+            _ => return false,
+        }
+    }
+    saw_receiver
+}
+
+pub fn external_argument_binding_constraints(
+    binding: &BindingUseFacts,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let mut constraints = Vec::new();
+    for usage in &binding.uses {
+        let BindingUse::PassedToCall {
+            name,
+            arg_index,
+            boundary: CallArgumentBoundary::Unknown,
+        } = usage
+        else {
+            continue;
+        };
+        if let Some(effect) =
+            facts.external_api_argument_effect_for_receiver(None, name, *arg_index)
+        {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &external_argument_effect_constraints(effect),
+            );
+        }
+    }
+    constraints
+}
+
+fn unknown_boundary_is_fully_modeled_by_external_argument_effects(
+    binding: &BindingUseFacts,
+    facts: &FactSet,
+) -> bool {
+    let mut saw_unknown = false;
+    for usage in &binding.uses {
+        match usage {
+            BindingUse::PassedToCall {
+                name,
+                arg_index,
+                boundary: CallArgumentBoundary::Unknown,
+            } => {
+                saw_unknown = true;
+                if facts
+                    .external_api_argument_effect_for_receiver(None, name, *arg_index)
+                    .is_none()
+                {
+                    return false;
+                }
+            }
+            BindingUse::ReceiverForCall {
+                boundary: CallArgumentBoundary::Unknown,
+                ..
+            }
+            | BindingUse::AssignedFromCall {
+                boundary: CallArgumentBoundary::Unknown,
+                ..
+            } => return false,
+            _ => {}
+        }
+    }
+    saw_unknown
+}
+
+pub fn external_argument_effect_constraints(
+    effect: &ExternalApiArgumentEffectFact,
+) -> Vec<SignatureConstraint> {
+    let java_ty = effect
+        .parameter_type
+        .clone()
+        .unwrap_or_else(|| JavaType::Unknown("Object".to_string()));
+    let mut constraints = Vec::new();
+
+    if effect.parameter_nullability != NullabilityState::Unknown {
+        constraints.push(SignatureConstraint::RequiredStorageNullability(
+            effect.parameter_nullability,
+        ));
+    }
+
+    match effect.alias_policy {
+        ExternalArgumentAliasPolicy::Borrowed if java_ty == JavaType::String => {
+            constraints.push(SignatureConstraint::RequiredOwnership(
+                OwnershipShape::SharedBorrow,
+            ));
+            constraints.push(SignatureConstraint::RequiredView(ViewShape::Str));
+        }
+        ExternalArgumentAliasPolicy::Borrowed if matches!(java_ty, JavaType::Array(_)) => {
+            constraints.push(SignatureConstraint::RequiredOwnership(
+                OwnershipShape::SharedBorrow,
+            ));
+            constraints.push(SignatureConstraint::RequiredView(ViewShape::Slice));
+        }
+        ExternalArgumentAliasPolicy::Borrowed
+            if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) =>
+        {
+            constraints.push(SignatureConstraint::RequiredOwnership(
+                OwnershipShape::SharedBorrow,
+            ));
+        }
+        ExternalArgumentAliasPolicy::NoAlias | ExternalArgumentAliasPolicy::Escapes
+            if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) =>
+        {
+            constraints.push(SignatureConstraint::RequiredOwnership(
+                OwnershipShape::Owned,
+            ));
+        }
+        ExternalArgumentAliasPolicy::Unknown
+        | ExternalArgumentAliasPolicy::Borrowed
+        | ExternalArgumentAliasPolicy::NoAlias
+        | ExternalArgumentAliasPolicy::Escapes => {}
+    }
+
+    if effect.argument_mutability == ReceiverMutabilityFact::MutatesReceiver
+        && !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void)
+    {
+        constraints.push(SignatureConstraint::RequiredOwnership(
+            OwnershipShape::MutableBorrow,
+        ));
+        constraints.push(SignatureConstraint::MutableBinding);
+    }
+
     constraints
 }
 
@@ -4204,6 +6691,59 @@ fn external_api_receiver_type_key(java_ty: &JavaType) -> Option<String> {
     }
 }
 
+fn java_types_have_same_signature_boundary_identity(left: &JavaType, right: &JavaType) -> bool {
+    if left == right {
+        return true;
+    }
+    if matches!(left, JavaType::Primitive(_) | JavaType::Void)
+        || matches!(right, JavaType::Primitive(_) | JavaType::Void)
+    {
+        return left == right;
+    }
+    let Some(left_key) = external_api_receiver_type_key(left) else {
+        return false;
+    };
+    let Some(right_key) = external_api_receiver_type_key(right) else {
+        return false;
+    };
+    left_key == right_key
+        || simple_java_type_identity(&left_key) == simple_java_type_identity(&right_key)
+}
+
+fn simple_java_type_identity(name: &str) -> &str {
+    name.rsplit(['.', '$']).next().unwrap_or(name)
+}
+
+fn java_type_is_obvious_read_product(java_ty: &JavaType) -> bool {
+    match java_ty {
+        JavaType::Primitive(_) | JavaType::String => true,
+        JavaType::Array(_) => true,
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            let key = crate::stdlib::canonical_external_receiver_type_key(name);
+            matches!(
+                simple_java_type_identity(&key),
+                "Map"
+                    | "HashMap"
+                    | "LinkedHashMap"
+                    | "TreeMap"
+                    | "List"
+                    | "ArrayList"
+                    | "LinkedList"
+                    | "Set"
+                    | "HashSet"
+                    | "LinkedHashSet"
+                    | "TreeSet"
+                    | "Collection"
+                    | "Iterator"
+                    | "Iterable"
+                    | "Optional"
+                    | "Result"
+            )
+        }
+        JavaType::Void | JavaType::Wildcard(_) => false,
+    }
+}
+
 fn local_plan(
     name: &str,
     java_ty: &JavaType,
@@ -4236,85 +6776,89 @@ fn collect_mutated_local_names(block: &Block) -> HashSet<String> {
 
 fn collect_mutated_local_names_from_stmts(statements: &[Stmt], mutated: &mut HashSet<String>) {
     for stmt in statements {
-        match stmt {
-            Stmt::VarDecl { initializer, .. } => {
-                if let Some(expr) = initializer {
-                    collect_mutated_local_names_from_expr(expr, mutated);
-                }
-            }
-            Stmt::Assign { target, value } => {
-                collect_assignment_target_name(target, mutated);
-                collect_mutated_local_names_from_expr(value, mutated);
-            }
-            Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+        collect_mutated_local_names_from_stmt(stmt, mutated);
+    }
+}
+
+fn collect_mutated_local_names_from_stmt(stmt: &Stmt, mutated: &mut HashSet<String>) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => {
+            if let Some(expr) = initializer {
                 collect_mutated_local_names_from_expr(expr, mutated);
             }
-            Stmt::If {
-                condition,
-                then_block,
-                else_block,
-            } => {
-                collect_mutated_local_names_from_expr(condition, mutated);
-                collect_mutated_local_names_from_stmts(&then_block.statements, mutated);
-                if let Some(else_block) = else_block {
-                    collect_mutated_local_names_from_stmts(&else_block.statements, mutated);
-                }
-            }
-            Stmt::While { condition, body } => {
-                collect_mutated_local_names_from_expr(condition, mutated);
-                collect_mutated_local_names_from_stmts(&body.statements, mutated);
-            }
-            Stmt::For {
-                init,
-                condition,
-                update,
-                body,
-                ..
-            } => {
-                collect_mutated_local_names_from_stmts(init, mutated);
-                if let Some(condition) = condition {
-                    collect_mutated_local_names_from_expr(condition, mutated);
-                }
-                for expr in update {
-                    collect_mutated_local_names_from_expr(expr, mutated);
-                }
-                collect_mutated_local_names_from_stmts(&body.statements, mutated);
-            }
-            Stmt::EnhancedFor { iterable, body, .. } => {
-                collect_mutated_local_names_from_expr(iterable, mutated);
-                collect_mutated_local_names_from_stmts(&body.statements, mutated);
-            }
-            Stmt::Switch { selector, cases } => {
-                collect_mutated_local_names_from_expr(selector, mutated);
-                for case in cases {
-                    collect_mutated_local_names_from_stmts(&case.statements, mutated);
-                }
-            }
-            Stmt::Try {
-                resources,
-                body,
-                catches,
-                finally_block,
-            } => {
-                collect_mutated_local_names_from_stmts(resources, mutated);
-                collect_mutated_local_names_from_stmts(&body.statements, mutated);
-                for catch in catches {
-                    collect_mutated_local_names_from_stmts(&catch.body.statements, mutated);
-                }
-                if let Some(finally_block) = finally_block {
-                    collect_mutated_local_names_from_stmts(&finally_block.statements, mutated);
-                }
-            }
-            Stmt::Block(block) => {
-                collect_mutated_local_names_from_stmts(&block.statements, mutated);
-            }
-            Stmt::Return(None)
-            | Stmt::LocalType(_)
-            | Stmt::ConstructorInvocation { .. }
-            | Stmt::Break(_)
-            | Stmt::Continue(_)
-            | Stmt::Unsupported(_) => {}
         }
+        Stmt::Assign { target, value } => {
+            collect_assignment_target_name(target, mutated);
+            collect_mutated_local_names_from_expr(value, mutated);
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            collect_mutated_local_names_from_expr(expr, mutated);
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_mutated_local_names_from_expr(condition, mutated);
+            collect_mutated_local_names_from_stmts(&then_block.statements, mutated);
+            if let Some(else_block) = else_block {
+                collect_mutated_local_names_from_stmts(&else_block.statements, mutated);
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_mutated_local_names_from_expr(condition, mutated);
+            collect_mutated_local_names_from_stmts(&body.statements, mutated);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            collect_mutated_local_names_from_stmts(init, mutated);
+            if let Some(condition) = condition {
+                collect_mutated_local_names_from_expr(condition, mutated);
+            }
+            for expr in update {
+                collect_mutated_local_names_from_expr(expr, mutated);
+            }
+            collect_mutated_local_names_from_stmts(&body.statements, mutated);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_mutated_local_names_from_expr(iterable, mutated);
+            collect_mutated_local_names_from_stmts(&body.statements, mutated);
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_mutated_local_names_from_expr(selector, mutated);
+            for case in cases {
+                collect_mutated_local_names_from_stmts(&case.statements, mutated);
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            collect_mutated_local_names_from_stmts(resources, mutated);
+            collect_mutated_local_names_from_stmts(&body.statements, mutated);
+            for catch in catches {
+                collect_mutated_local_names_from_stmts(&catch.body.statements, mutated);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_mutated_local_names_from_stmts(&finally_block.statements, mutated);
+            }
+        }
+        Stmt::Block(block) => {
+            collect_mutated_local_names_from_stmts(&block.statements, mutated);
+        }
+        Stmt::Return(None)
+        | Stmt::LocalType(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
     }
 }
 
@@ -4326,6 +6870,14 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
         } => collect_assignment_target_name(expr, mutated),
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
             collect_mutated_local_names_from_expr(expr, mutated);
+        }
+        Expr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        } => {
+            collect_assignment_target_name(left, mutated);
+            collect_mutated_local_names_from_expr(right, mutated);
         }
         Expr::Binary { left, right, .. } => {
             collect_mutated_local_names_from_expr(left, mutated);
@@ -4345,7 +6897,21 @@ fn collect_mutated_local_names_from_expr(expr: &Expr, mutated: &mut HashSet<Stri
             collect_mutated_local_names_from_expr(array, mutated);
             collect_mutated_local_names_from_expr(index, mutated);
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_mutated_local_names_from_expr(expr, mutated);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_mutated_local_names_from_expr(expr, mutated);
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 collect_mutated_local_names_from_expr(expr, mutated);
             }
@@ -4468,6 +7034,10 @@ pub fn method_return_shape_constraints(
             )],
         );
     }
+    push_unique_signature_constraints(
+        &mut constraints,
+        &source_method_return_nullability_constraints(method),
+    );
     push_unique_signature_constraints(
         &mut constraints,
         &external_call_return_method_return_constraints(ty, method, usage, facts),

@@ -1,5 +1,10 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::facts::FactSet;
 use crate::facts::{ExternalApiRole, FactProvenance, NullabilityState, ReceiverMutabilityFact};
-use crate::java_ir::{JavaType, PrimitiveType};
+use crate::java_ir::{Block, Expr, JavaType, Member, PrimitiveType, Program, Stmt, WildcardBound};
+use crate::slot_render::{rust_name_for_java_named_type, rust_type_for_slot_with_facts};
+use crate::slot_shape::RustSlotShape;
 
 pub fn is_known_jdk_shadow_sensitive_owner(name: &str) -> bool {
     matches!(name, "Objects" | "Collections" | "Integer" | "Paths")
@@ -11,6 +16,10 @@ pub fn is_content_read_method(name: &str) -> bool {
 
 pub fn is_borrowed_string_view_method(name: &str, arg_count: usize) -> bool {
     name == "trim" && arg_count == 0
+}
+
+pub fn is_owned_string_result_method(name: &str, arg_count: usize) -> bool {
+    matches!(name, "toLowerCase" | "toUpperCase" | "toString") && arg_count == 0
 }
 
 pub fn is_known_receiverless_static_utility_method(name: &str, arg_count: usize) -> bool {
@@ -282,6 +291,51 @@ fn is_known_map_type(name: &str) -> bool {
             | "ImmutableMap"
             | "ImmutableSortedMap"
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaCollectionKind {
+    List,
+    Set,
+    Map,
+}
+
+pub fn java_collection_kind_for_name(name: &str) -> Option<JavaCollectionKind> {
+    let name = canonical_external_receiver_type_key(name);
+    let name = name.rsplit('.').next().unwrap_or(&name);
+    if is_known_map_type(name) {
+        Some(JavaCollectionKind::Map)
+    } else if is_known_set_type(name) {
+        Some(JavaCollectionKind::Set)
+    } else if is_known_list_type(name) || is_known_collection_type(name) {
+        Some(JavaCollectionKind::List)
+    } else {
+        None
+    }
+}
+
+pub fn java_collection_kind_for_type(ty: &JavaType) -> Option<JavaCollectionKind> {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            java_collection_kind_for_name(name)
+        }
+        _ => None,
+    }
+}
+
+pub fn java_map_type_args(ty: &JavaType) -> Option<(&JavaType, &JavaType)> {
+    let JavaType::Named { name, args } = ty else {
+        return None;
+    };
+    let name = canonical_external_receiver_type_key(name);
+    let name = name.rsplit('.').next().unwrap_or(&name);
+    if !is_known_map_type(name) {
+        return None;
+    }
+    match args.as_slice() {
+        [key, value] => Some((key, value)),
+        _ => None,
+    }
 }
 
 fn is_known_input_stream_type(name: &str) -> bool {
@@ -616,6 +670,15 @@ pub fn known_external_method_return_type(
             name: "List".to_string(),
             args: vec![JavaType::String],
         }),
+        (Some("IOUtils"), "getPath", 1) => Some(JavaType::Named {
+            name: "Path".to_string(),
+            args: Vec::new(),
+        }),
+        (Some("IOUtils"), "appendPathToDir", 2) => Some(JavaType::String),
+        (Some("IOUtils"), "createTempFile", 2) => Some(JavaType::Named {
+            name: "File".to_string(),
+            args: Vec::new(),
+        }),
         (Some("IOUtils"), "replaceExtension", 2) => Some(JavaType::String),
         (Some("Integer"), "parseInt", 1 | 2) => Some(JavaType::Primitive(PrimitiveType::Int)),
         (Some("QualityUtils"), "qualToProb" | "qualToProbLog10", 1) => {
@@ -685,11 +748,42 @@ pub fn known_external_method_return_type_for_call(
     arg_types: &[JavaType],
 ) -> Option<JavaType> {
     if let Some(java_ty) =
+        known_java_string_receiver_method_return_type(receiver_type, name, arg_types.len())
+    {
+        return Some(java_ty);
+    }
+    if let Some(java_ty) =
         known_argument_sensitive_external_method_return_type(receiver_type, name, arg_types)
     {
         return Some(java_ty);
     }
     known_external_method_return_type_for_receiver(receiver_type, name, arg_types.len())
+}
+
+fn known_java_string_receiver_method_return_type(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_count: usize,
+) -> Option<JavaType> {
+    let receiver_type = receiver_type?;
+    let effective_receiver_type =
+        crate::types::optional_element_type(receiver_type).unwrap_or_else(|| receiver_type.clone());
+    if !matches!(effective_receiver_type, JavaType::String) {
+        return None;
+    }
+    match (name, arg_count) {
+        ("toString" | "toLowerCase" | "toUpperCase" | "trim", 0) => Some(JavaType::String),
+        ("substring", 1 | 2) => Some(JavaType::String),
+        ("split", 1 | 2) => Some(JavaType::Array(Box::new(JavaType::String))),
+        ("isEmpty", 0) => Some(JavaType::Primitive(PrimitiveType::Boolean)),
+        ("contains" | "startsWith" | "endsWith" | "equals" | "matches", 1) => {
+            Some(JavaType::Primitive(PrimitiveType::Boolean))
+        }
+        ("length" | "indexOf" | "lastIndexOf", 0 | 1 | 2) => {
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        }
+        _ => None,
+    }
 }
 
 pub fn known_external_field_type_for_receiver(
@@ -769,7 +863,7 @@ fn known_boolean_constant_field_type(receiver: &str, field_name: &str) -> Option
     }
 }
 
-fn canonical_external_field_name(field_name: &str) -> String {
+pub fn canonical_external_field_name(field_name: &str) -> String {
     if field_name.contains('_') || field_name.chars().all(|ch| ch.is_ascii_lowercase()) {
         field_name.to_ascii_uppercase()
     } else {
@@ -982,6 +1076,10 @@ fn is_known_string_constant_field(receiver: &str, field_name: &str) -> bool {
             field_name.ends_with("_KEY")
                 || field_name.ends_with("_FIELD")
                 || field_name.ends_with("_SEPARATOR")
+                || matches!(
+                    field_name.as_str(),
+                    "MAPPING_QUALITY_DEPTH_DEPRECATED" | "TREE_SCORE"
+                )
         }
         "FileExtensions" => true,
         _ => false,
@@ -2122,6 +2220,3716 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
     .to_string()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassLiteralTokenPlan {
+    pub java_name: String,
+    pub rust_type: String,
+}
+
+pub fn class_literal_token_plan(ty: &JavaType, facts: &FactSet) -> ClassLiteralTokenPlan {
+    let shape = RustSlotShape::conservative(ty.clone());
+    ClassLiteralTokenPlan {
+        java_name: class_literal_java_name(ty),
+        rust_type: crate::emit::emit_type(&rust_type_for_slot_with_facts(&shape, facts)),
+    }
+}
+
+pub fn class_literal_java_name(ty: &JavaType) -> String {
+    match ty {
+        JavaType::Void => "void".to_string(),
+        JavaType::String => "String".to_string(),
+        JavaType::Primitive(primitive) => match primitive {
+            PrimitiveType::Boolean => "boolean",
+            PrimitiveType::Byte => "byte",
+            PrimitiveType::Short => "short",
+            PrimitiveType::Char => "char",
+            PrimitiveType::Int => "int",
+            PrimitiveType::Long => "long",
+            PrimitiveType::Float => "float",
+            PrimitiveType::Double => "double",
+        }
+        .to_string(),
+        JavaType::Array(element) => format!("{}[]", class_literal_java_name(element)),
+        JavaType::Named { name, args } if args.is_empty() => name.clone(),
+        JavaType::Named { name, args } => {
+            let args = args
+                .iter()
+                .map(class_literal_java_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{name}<{args}>")
+        }
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => class_literal_java_name(bound),
+        JavaType::Wildcard(None) => "?".to_string(),
+        JavaType::Unknown(name) => name.clone(),
+    }
+}
+
+pub fn java_class_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaClass<T> {
+    name: String,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> JavaClass<T> {
+    pub fn literal(name: &'static str) -> JavaClass<T> {
+        JavaClass { name: name.to_string(), _marker: std::marker::PhantomData }
+    }
+
+    pub fn for_name<S: Into<String>>(name: S) -> JavaClass<T> {
+        JavaClass { name: name.into(), _marker: std::marker::PhantomData }
+    }
+
+    pub fn get_name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn get_simple_name(&self) -> String {
+        self.name.rsplit('.').next().unwrap_or(&self.name).to_string()
+    }
+
+    pub fn equals<U>(&self, other: JavaClass<U>) -> bool {
+        self.name == other.name
+    }
+}"#
+        .to_string(),
+    )
+}
+
+pub fn java_platform_facade_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Path {
+    value: String,
+}
+
+impl Path {
+    pub fn new<P: JavaPathArg>(value: P) -> Path {
+        Path { value: value.into_path_value() }
+    }
+
+    pub fn to_uri(&self) -> URI {
+        URI::new(self.value.clone())
+    }
+
+    pub fn to_absolute_path(&self) -> Path {
+        self.clone()
+    }
+
+    pub fn to_file(&self) -> File {
+        File::new(self.value.clone())
+    }
+
+    pub fn resolve_sibling<P: JavaPathArg>(&self, sibling: P) -> Path {
+        Path::new(sibling)
+    }
+
+    pub fn get_file_name(&self) -> String {
+        self.value.rsplit('/').next().unwrap_or(&self.value).to_string()
+    }
+}
+
+impl std::fmt::Display for Path {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct URI {
+    value: String,
+}
+
+impl URI {
+    pub fn new<P: JavaPathArg>(value: P) -> URI {
+        URI { value: value.into_path_value() }
+    }
+
+    pub fn to_string(&self) -> String {
+        self.value.clone()
+    }
+}
+
+impl std::fmt::Display for URI {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct File {
+    value: String,
+}
+
+impl File {
+    pub fn new<P: JavaPathArg>(value: P) -> File {
+        File { value: value.into_path_value() }
+    }
+
+    pub fn to_path(&self) -> Path {
+        Path::new(self.value.clone())
+    }
+
+    pub fn get_path(&self) -> String {
+        self.value.clone()
+    }
+
+    pub fn get_absolute_path(&self) -> String {
+        self.value.clone()
+    }
+}
+
+impl std::fmt::Display for File {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value)
+    }
+}
+
+pub trait JavaPathArg {
+    fn into_path_value(self) -> String;
+}
+
+impl JavaPathArg for String {
+    fn into_path_value(self) -> String {
+        self
+    }
+}
+
+impl JavaPathArg for &String {
+    fn into_path_value(self) -> String {
+        self.clone()
+    }
+}
+
+impl JavaPathArg for &str {
+    fn into_path_value(self) -> String {
+        self.to_string()
+    }
+}
+
+impl JavaPathArg for Option<String> {
+    fn into_path_value(self) -> String {
+        self.unwrap_or_default()
+    }
+}
+
+impl JavaPathArg for &Option<String> {
+    fn into_path_value(self) -> String {
+        self.clone().unwrap_or_default()
+    }
+}
+
+impl JavaPathArg for Path {
+    fn into_path_value(self) -> String {
+        self.value
+    }
+}
+
+impl JavaPathArg for &Path {
+    fn into_path_value(self) -> String {
+        self.value.clone()
+    }
+}
+
+impl JavaPathArg for Option<Path> {
+    fn into_path_value(self) -> String {
+        self.map(|path| path.value).unwrap_or_default()
+    }
+}
+
+impl JavaPathArg for &Option<Path> {
+    fn into_path_value(self) -> String {
+        self.as_ref().map(|path| path.value.clone()).unwrap_or_default()
+    }
+}
+
+impl JavaPathArg for URI {
+    fn into_path_value(self) -> String {
+        self.value
+    }
+}
+
+impl JavaPathArg for &URI {
+    fn into_path_value(self) -> String {
+        self.value.clone()
+    }
+}
+
+impl JavaPathArg for File {
+    fn into_path_value(self) -> String {
+        self.value
+    }
+}
+
+impl JavaPathArg for &File {
+    fn into_path_value(self) -> String {
+        self.value.clone()
+    }
+}
+
+pub struct IOUtils;
+
+impl IOUtils {
+    pub fn get_path<P: JavaPathArg>(path: P) -> Path {
+        Path::new(path.into_path_value())
+    }
+
+    pub fn append_path_to_dir<D: JavaPathArg, P: JavaPathArg>(dir: D, path: P) -> String {
+        let dir = dir.into_path_value();
+        let path = path.into_path_value();
+        if dir.is_empty() {
+            path
+        } else if dir.ends_with('/') {
+            format!("{dir}{path}")
+        } else {
+            format!("{dir}/{path}")
+        }
+    }
+
+    pub fn assert_file_is_readable<P: JavaPathArg>(_path: P) {}
+
+    pub fn assert_paths_are_readable<P: JavaPathArg>(_path: P) {}
+
+    pub fn create_temp_file<P: JavaPathArg, S: JavaPathArg>(prefix: P, suffix: S) -> File {
+        File::new(format!("{}{}", prefix.into_path_value(), suffix.into_path_value()))
+    }
+}
+
+pub mod logger {
+    pub fn info<M: std::fmt::Display>(_message: M) {}
+    pub fn warn<M: std::fmt::Display>(_message: M) {}
+    pub fn debug<M: std::fmt::Display>(_message: M) {}
+    pub fn error<M: std::fmt::Display>(_message: M) {}
+    pub fn trace<M: std::fmt::Display>(_message: M) {}
+}"#
+        .to_string(),
+    )
+}
+
+pub fn java_string_split_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Vec<String> {
+    let regex = regex.as_ref();
+    let delimiter = match regex {
+        "\\t" | "\\\\t" => "\t",
+        "\\n" | "\\\\n" => "\n",
+        "\\r" | "\\\\r" => "\r",
+        "\\s+" => " ",
+        other => other,
+    };
+    let mut parts = if delimiter == "\\s+" {
+        value.split_whitespace().map(|part| part.to_string()).collect::<Vec<_>>()
+    } else {
+        value.split(delimiter).map(|part| part.to_string()).collect::<Vec<_>>()
+    };
+    if limit == 0 {
+        while parts.last().is_some_and(|part| part.is_empty()) {
+            parts.pop();
+        }
+    } else if limit > 0 && parts.len() > limit as usize {
+        let keep = limit as usize - 1;
+        let tail = parts.split_off(keep).join(delimiter);
+        parts.push(tail);
+    }
+    parts
+}"#
+        .to_string(),
+    )
+}
+
+pub fn java_string_format_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"pub fn java_string_format<S: AsRef<str>>(template: S, args: Vec<String>) -> String {
+    let mut out = String::new();
+    let mut chars = template.as_ref().chars().peekable();
+    let mut arg_index = 0usize;
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        if matches!(chars.peek(), Some('%')) {
+            chars.next();
+            out.push('%');
+            continue;
+        }
+        while let Some(next) = chars.next() {
+            if next.is_ascii_alphabetic() {
+                if matches!(next, 's' | 'd' | 'b' | 'c' | 'f') {
+                    if let Some(value) = args.get(arg_index) {
+                        out.push_str(value);
+                    }
+                    arg_index += 1;
+                } else {
+                    out.push('%');
+                    out.push(next);
+                }
+                break;
+            }
+        }
+    }
+    out
+}"#
+        .to_string(),
+    )
+}
+
+pub fn external_api_facade_support_items(
+    program: &Program,
+    facts: &FactSet,
+) -> Vec<crate::rust_ir::RustItem> {
+    external_api_facade_support_items_with_local_type_program(program, facts, program)
+}
+
+pub fn external_api_facade_support_items_with_local_type_program(
+    program: &Program,
+    facts: &FactSet,
+    local_type_program: &Program,
+) -> Vec<crate::rust_ir::RustItem> {
+    let local_types = local_type_keys_for_program(local_type_program);
+    let used_calls = collect_program_call_arities(program);
+    let used_constructors = collect_program_constructor_arities(program);
+    let imported_static_owner_calls = collect_imported_static_owner_calls(program);
+
+    let mut support = ExternalApiFacadeSupport::default();
+    support.add_nested_type_aliases_from_fields(facts, &local_types);
+    support.add_declared_external_types(program, &local_types);
+    support.add_used_external_constructors(facts, &used_constructors, &local_types);
+    support.add_used_external_api_facts(
+        facts,
+        &used_calls,
+        &local_types,
+        &imported_static_owner_calls,
+    );
+    support.add_imported_static_owner_calls(facts, &imported_static_owner_calls, &local_types);
+    support.add_builder_surface_from_used_calls(&used_calls);
+    support.add_external_field_surfaces(facts, &local_types);
+    support.into_items()
+}
+
+fn local_type_keys_for_program(program: &Program) -> BTreeSet<String> {
+    let mut types = BTreeSet::new();
+    for ty in &program.types {
+        collect_local_type_keys(ty, &mut types);
+    }
+    types
+}
+
+fn collect_local_type_keys(ty: &crate::java_ir::TypeDecl, types: &mut BTreeSet<String>) {
+    types.insert(canonical_external_receiver_type_key(&ty.name));
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_local_type_keys(nested, types);
+        }
+    }
+}
+
+#[derive(Default)]
+struct ExternalApiFacadeSupport {
+    opaque_types: BTreeSet<String>,
+    aliases: BTreeMap<String, String>,
+    fields: BTreeMap<String, BTreeMap<String, String>>,
+    impls: BTreeMap<String, BTreeSet<String>>,
+    erased_object_methods: BTreeMap<String, ExternalErasedObjectMethod>,
+    erased_object_method_conflicts: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+struct ExternalErasedObjectMethod {
+    name: String,
+    arg_count: usize,
+    return_type: String,
+}
+
+impl ExternalApiFacadeSupport {
+    fn add_declared_external_types(&mut self, program: &Program, local_types: &BTreeSet<String>) {
+        for ty in &program.types {
+            self.add_declared_external_types_from_type(ty, local_types);
+        }
+    }
+
+    fn add_declared_external_types_from_type(
+        &mut self,
+        ty: &crate::java_ir::TypeDecl,
+        local_types: &BTreeSet<String>,
+    ) {
+        for bound in &ty.type_param_bounds {
+            if let Some(bound) = bound {
+                self.add_declared_java_type(bound, local_types);
+            }
+        }
+        for member in &ty.members {
+            match member {
+                Member::Field(field) => self.add_declared_java_type(&field.ty, local_types),
+                Member::Method(method) => {
+                    self.add_declared_java_type(&method.return_type, local_types);
+                    for bound in &method.type_param_bounds {
+                        if let Some(bound) = bound {
+                            self.add_declared_java_type(bound, local_types);
+                        }
+                    }
+                    for thrown in &method.throws {
+                        self.add_declared_java_type(thrown, local_types);
+                    }
+                    for param in &method.params {
+                        self.add_declared_java_type(&param.ty, local_types);
+                    }
+                    if let Some(body) = &method.body {
+                        self.add_declared_external_types_from_block(body, local_types);
+                    }
+                }
+                Member::Constructor(constructor) => {
+                    for bound in &constructor.type_param_bounds {
+                        if let Some(bound) = bound {
+                            self.add_declared_java_type(bound, local_types);
+                        }
+                    }
+                    for thrown in &constructor.throws {
+                        self.add_declared_java_type(thrown, local_types);
+                    }
+                    for param in &constructor.params {
+                        self.add_declared_java_type(&param.ty, local_types);
+                    }
+                    if let Some(body) = &constructor.body {
+                        self.add_declared_external_types_from_block(body, local_types);
+                    }
+                }
+                Member::Type(nested) => {
+                    self.add_declared_external_types_from_type(nested, local_types)
+                }
+                Member::Unsupported { .. } => {}
+            }
+        }
+    }
+
+    fn add_declared_external_types_from_block(
+        &mut self,
+        block: &Block,
+        local_types: &BTreeSet<String>,
+    ) {
+        for stmt in &block.statements {
+            self.add_declared_external_types_from_stmt(stmt, local_types);
+        }
+    }
+
+    fn add_declared_external_types_from_stmt(
+        &mut self,
+        stmt: &Stmt,
+        local_types: &BTreeSet<String>,
+    ) {
+        match stmt {
+            Stmt::VarDecl { ty, .. } => self.add_declared_java_type(ty, local_types),
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                self.add_declared_external_types_from_block(then_block, local_types);
+                if let Some(else_block) = else_block {
+                    self.add_declared_external_types_from_block(else_block, local_types);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::EnhancedFor { body, .. } => {
+                self.add_declared_external_types_from_block(body, local_types);
+            }
+            Stmt::For { init, body, .. } => {
+                for stmt in init {
+                    self.add_declared_external_types_from_stmt(stmt, local_types);
+                }
+                self.add_declared_external_types_from_block(body, local_types);
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    for stmt in &case.statements {
+                        self.add_declared_external_types_from_stmt(stmt, local_types);
+                    }
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                for resource in resources {
+                    self.add_declared_external_types_from_stmt(resource, local_types);
+                }
+                self.add_declared_external_types_from_block(body, local_types);
+                for catch in catches {
+                    for ty in &catch.types {
+                        self.add_declared_java_type(ty, local_types);
+                    }
+                    self.add_declared_external_types_from_block(&catch.body, local_types);
+                }
+                if let Some(finally_block) = finally_block {
+                    self.add_declared_external_types_from_block(finally_block, local_types);
+                }
+            }
+            Stmt::LocalType(ty) => self.add_declared_external_types_from_type(ty, local_types),
+            Stmt::Block(block) => self.add_declared_external_types_from_block(block, local_types),
+            Stmt::Assign { .. }
+            | Stmt::Expr(_)
+            | Stmt::Return(_)
+            | Stmt::Throw(_)
+            | Stmt::ConstructorInvocation { .. }
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => {}
+        }
+    }
+
+    fn add_declared_java_type(&mut self, java_type: &JavaType, local_types: &BTreeSet<String>) {
+        match java_type {
+            JavaType::Named { name, args } => {
+                if !local_types.contains(&canonical_external_receiver_type_key(name)) {
+                    self.add_opaque_type(rust_name_for_java_named_type(name));
+                }
+                for arg in args {
+                    self.add_declared_java_type(arg, local_types);
+                }
+            }
+            JavaType::Array(inner) => self.add_declared_java_type(inner, local_types),
+            JavaType::Wildcard(Some(bound)) => match bound {
+                WildcardBound::Extends(inner) | WildcardBound::Super(inner) => {
+                    self.add_declared_java_type(inner, local_types)
+                }
+            },
+            JavaType::Primitive(_)
+            | JavaType::Void
+            | JavaType::String
+            | JavaType::Wildcard(None)
+            | JavaType::Unknown(_) => {}
+        }
+    }
+
+    fn add_nested_type_aliases_from_fields(
+        &mut self,
+        facts: &FactSet,
+        local_types: &BTreeSet<String>,
+    ) {
+        for field in &facts.external_field_facts {
+            if local_types.contains(&canonical_external_receiver_type_key(
+                &field.field.type_name,
+            )) {
+                continue;
+            }
+            let Some(JavaType::Named {
+                name: field_type_name,
+                ..
+            }) = &field.field_type
+            else {
+                continue;
+            };
+            let owner = rust_name_for_java_named_type(&canonical_external_receiver_type_key(
+                &field.field.type_name,
+            ));
+            let alias = format!(
+                "{owner}{}",
+                rust_name_for_java_named_type(&field.field.field_name)
+            );
+            let target = rust_name_for_java_named_type(field_type_name);
+            self.add_type_alias(alias, target);
+        }
+    }
+
+    fn add_used_external_constructors(
+        &mut self,
+        facts: &FactSet,
+        used_constructors: &BTreeMap<String, BTreeSet<usize>>,
+        local_types: &BTreeSet<String>,
+    ) {
+        for (type_name, arities) in used_constructors {
+            let java_type = JavaType::Named {
+                name: type_name.clone(),
+                args: Vec::new(),
+            };
+            if java_collection_kind_for_type(&java_type).is_some() {
+                continue;
+            }
+            let type_key = canonical_external_receiver_type_key(type_name);
+            if local_types.contains(&type_key) {
+                continue;
+            }
+            let owner = rust_name_for_java_named_type(&type_key);
+            if !valid_external_facade_type_ident(&owner) || is_builtin_external_facade_type(&owner)
+            {
+                continue;
+            }
+            self.add_opaque_type(owner.clone());
+            let overload_by_arity =
+                arities.len() > 1 || external_constructor_fact_arity_count(facts, type_name) > 1;
+            for arg_count in arities {
+                let rust_name = external_facade_constructor_name(*arg_count, overload_by_arity);
+                if self.has_method_named(&owner, &rust_name) {
+                    continue;
+                }
+                self.add_method(
+                    owner.clone(),
+                    external_facade_constructor_method(&rust_name, *arg_count),
+                );
+            }
+        }
+    }
+
+    fn add_used_external_api_facts(
+        &mut self,
+        facts: &FactSet,
+        used_calls: &BTreeMap<String, BTreeSet<usize>>,
+        local_types: &BTreeSet<String>,
+        imported_static_owner_calls: &BTreeMap<(String, String), BTreeSet<usize>>,
+    ) {
+        for fact in &facts.external_api_effect_facts {
+            let rust_method = crate::parser::to_snake_case(&fact.method_name);
+            let Some(arities) = used_calls.get(&rust_method) else {
+                continue;
+            };
+            if let Some(arg_count) = fact.arg_count
+                && !arities.contains(&arg_count)
+            {
+                continue;
+            }
+            let Some(receiver_type) = fact.receiver_type.as_deref() else {
+                continue;
+            };
+            let receiver_key = canonical_external_receiver_type_key(receiver_type);
+            if local_types.contains(&receiver_key) {
+                continue;
+            }
+            if imported_static_owner_call_contains(
+                imported_static_owner_calls,
+                &receiver_key,
+                &rust_method,
+                fact.arg_count,
+                arities,
+            ) {
+                continue;
+            }
+            let receiver_rust = rust_name_for_java_named_type(&receiver_key);
+            if !valid_rust_type_ident(&receiver_rust) {
+                continue;
+            }
+            self.add_opaque_type(receiver_rust.clone());
+            if let Some(return_type) = &fact.return_type {
+                self.add_java_type(return_type);
+            }
+
+            if rust_method == "new_builder" {
+                let return_rust = fact
+                    .return_type
+                    .as_ref()
+                    .map(external_facade_return_type)
+                    .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
+                self.add_method(
+                    receiver_rust,
+                    external_facade_static_method(&rust_method, 0, &return_rust),
+                );
+            } else if receiver_rust.ends_with("Builder") {
+                continue;
+            } else {
+                let arg_count = fact
+                    .arg_count
+                    .unwrap_or_else(|| arities.iter().next().copied().unwrap_or_default());
+                let return_rust = fact
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| {
+                        external_facade_return_type_with_nullability(
+                            return_type,
+                            fact.return_nullability,
+                        )
+                    })
+                    .unwrap_or_else(|| "()".to_string());
+                if fact.provenance != FactProvenance::ConservativeFallback {
+                    self.add_erased_object_method(
+                        rust_method.clone(),
+                        arg_count,
+                        return_rust.clone(),
+                    );
+                }
+                self.add_method(
+                    receiver_rust,
+                    external_facade_instance_method(&rust_method, arg_count, &return_rust),
+                );
+            }
+        }
+    }
+
+    fn add_imported_static_owner_calls(
+        &mut self,
+        facts: &FactSet,
+        imported_static_owner_calls: &BTreeMap<(String, String), BTreeSet<usize>>,
+        local_types: &BTreeSet<String>,
+    ) {
+        for ((owner, method), arities) in imported_static_owner_calls {
+            let owner_key = canonical_external_receiver_type_key(&owner);
+            if local_types.contains(&owner_key) {
+                continue;
+            }
+            let owner_rust = rust_name_for_java_named_type(&owner_key);
+            if !valid_external_facade_type_ident(&owner_rust) {
+                continue;
+            }
+            self.add_opaque_type(owner_rust.clone());
+            let simple_owner = owner_key
+                .split('.')
+                .filter(|segment| !segment.is_empty())
+                .next_back()
+                .unwrap_or(owner_key.as_str());
+            let simple_owner_rust = rust_name_for_java_named_type(simple_owner);
+            if !self.opaque_types.contains(&simple_owner_rust) {
+                self.add_type_alias(simple_owner_rust.clone(), owner_rust.clone());
+            }
+            let mut method_owners = vec![owner_rust.clone()];
+            if simple_owner_rust != owner_rust && self.opaque_types.contains(&simple_owner_rust) {
+                method_owners.push(simple_owner_rust);
+            }
+            for arg_count in arities {
+                let method_body = external_facade_imported_static_method_with_facts(
+                    facts, &owner_key, method, *arg_count,
+                );
+                for method_owner in &method_owners {
+                    if self.has_method_named(method_owner, method) {
+                        continue;
+                    }
+                    self.add_method(method_owner.clone(), method_body.clone());
+                }
+            }
+        }
+    }
+
+    fn add_external_field_surfaces(&mut self, facts: &FactSet, local_types: &BTreeSet<String>) {
+        for fact in &facts.external_field_facts {
+            let receiver_key = canonical_external_receiver_type_key(&fact.field.type_name);
+            if local_types.contains(&receiver_key) {
+                continue;
+            }
+            let owner = rust_name_for_java_named_type(&receiver_key);
+            if !valid_external_facade_type_ident(&owner)
+                || !self.opaque_types.contains(&owner)
+                || is_builtin_external_facade_type(&owner)
+            {
+                continue;
+            }
+            let Some(field_type) = &fact.field_type else {
+                continue;
+            };
+            let rust_name = crate::parser::to_snake_case(&fact.field.field_name);
+            if !valid_rust_field_ident(&rust_name) {
+                continue;
+            }
+            let rust_type = external_facade_return_type(field_type);
+            self.add_java_type(field_type);
+            self.fields
+                .entry(owner)
+                .or_default()
+                .insert(rust_name, rust_type);
+        }
+    }
+
+    fn add_builder_surface_from_used_calls(
+        &mut self,
+        used_calls: &BTreeMap<String, BTreeSet<usize>>,
+    ) {
+        let builder_types = self
+            .opaque_types
+            .iter()
+            .filter(|name| name.ends_with("Builder"))
+            .cloned()
+            .collect::<Vec<_>>();
+        for builder in builder_types {
+            self.add_opaque_type(builder.clone());
+            for (method, arities) in used_calls {
+                for arg_count in arities {
+                    if method == "build" {
+                        self.add_method(
+                            builder.clone(),
+                            external_facade_instance_method(
+                                method,
+                                *arg_count,
+                                "Box<dyn std::any::Any>",
+                            ),
+                        );
+                    } else if is_external_facade_builder_fluent_method(method) {
+                        self.add_method(
+                            builder.clone(),
+                            external_facade_builder_fluent_method(method, *arg_count),
+                        );
+                    } else if method.starts_with("get_") && method.ends_with("_builder") {
+                        self.add_method(
+                            builder.clone(),
+                            external_facade_builder_generic_getter(method, *arg_count),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn add_java_type(&mut self, java_type: &JavaType) {
+        match java_type {
+            JavaType::Named { name, args } => {
+                let rendered = rust_name_for_java_named_type(name);
+                if valid_rust_type_ident(&rendered) {
+                    self.add_opaque_type(rendered);
+                }
+                self.add_aliases_for_nested_return(name);
+                for arg in args {
+                    self.add_java_type(arg);
+                }
+            }
+            JavaType::Array(inner) => self.add_java_type(inner),
+            JavaType::Wildcard(Some(bound)) => match bound {
+                WildcardBound::Extends(inner) | WildcardBound::Super(inner) => {
+                    self.add_java_type(inner)
+                }
+            },
+            JavaType::Primitive(_)
+            | JavaType::Void
+            | JavaType::String
+            | JavaType::Wildcard(None)
+            | JavaType::Unknown(_) => {}
+        }
+    }
+
+    fn add_aliases_for_nested_return(&mut self, name: &str) {
+        let Some((base, rest)) = name.split_once('.') else {
+            return;
+        };
+        let base_rust = rust_name_for_java_named_type(base);
+        let rest_rust = rust_name_for_java_named_type(rest);
+        let target = format!("{base_rust}{rest_rust}");
+        let aliases = self
+            .aliases
+            .iter()
+            .filter_map(|(alias, alias_target)| {
+                (alias_target == &base_rust).then(|| format!("{alias}{rest_rust}"))
+            })
+            .collect::<Vec<_>>();
+        for alias in aliases {
+            self.add_type_alias(alias, target.clone());
+        }
+    }
+
+    fn add_opaque_type(&mut self, name: String) {
+        if valid_external_facade_type_ident(&name) {
+            self.opaque_types.insert(name);
+        }
+    }
+
+    fn add_type_alias(&mut self, alias: String, target: String) {
+        if alias != target
+            && valid_external_facade_type_ident(&alias)
+            && valid_external_facade_type_ident(&target)
+        {
+            self.add_opaque_type(target.clone());
+            self.aliases.insert(alias, target);
+        }
+    }
+
+    fn add_method(&mut self, owner: String, method: String) {
+        if valid_external_facade_type_ident(&owner) {
+            self.impls.entry(owner).or_default().insert(method);
+        }
+    }
+
+    fn has_method_named(&self, owner: &str, method: &str) -> bool {
+        self.impls.get(owner).is_some_and(|methods| {
+            methods
+                .iter()
+                .any(|body| facade_method_has_name(body, method))
+        })
+    }
+
+    fn add_erased_object_method(&mut self, name: String, arg_count: usize, return_type: String) {
+        if self.erased_object_method_conflicts.contains(&name) {
+            return;
+        }
+        match self.erased_object_methods.get(&name) {
+            Some(existing)
+                if existing.arg_count == arg_count && existing.return_type == return_type => {}
+            Some(_) => {
+                self.erased_object_methods.remove(&name);
+                self.erased_object_method_conflicts.insert(name);
+            }
+            None => {
+                self.erased_object_methods.insert(
+                    name.clone(),
+                    ExternalErasedObjectMethod {
+                        name,
+                        arg_count,
+                        return_type,
+                    },
+                );
+            }
+        }
+    }
+
+    fn into_items(mut self) -> Vec<crate::rust_ir::RustItem> {
+        let alias_names = self.aliases.keys().cloned().collect::<BTreeSet<_>>();
+        self.opaque_types
+            .retain(|name| !alias_names.contains(name) && !is_builtin_external_facade_type(name));
+
+        let display_and_eq_types = self.opaque_types.iter().cloned().collect::<Vec<_>>();
+        let mut lines = Vec::new();
+        for ty in self.opaque_types {
+            if let Some(fields) = self.fields.remove(&ty)
+                && !fields.is_empty()
+            {
+                let field_lines = fields
+                    .into_iter()
+                    .map(|(name, ty)| format!("    pub {name}: {ty},"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                lines.push(format!(
+                    "#[derive(Clone, Debug, Default)]\npub struct {ty} {{\n{field_lines}\n}}"
+                ));
+            } else {
+                lines.push(format!(
+                    "#[derive(Clone, Debug, Default)]\npub struct {ty};"
+                ));
+            }
+        }
+        for ty in &display_and_eq_types {
+            lines.push(external_facade_eq_impl(ty));
+            lines.push(external_facade_hash_impl(ty));
+            lines.push(external_facade_display_impl(ty));
+        }
+        for (alias, target) in self.aliases {
+            if !is_builtin_external_facade_type(&alias) && !is_builtin_external_facade_type(&target)
+            {
+                lines.push(format!("pub type {alias} = {target};"));
+            }
+        }
+        for (owner, methods) in self.impls {
+            if is_builtin_external_facade_type(&owner)
+                || alias_names.contains(&owner)
+                || methods.is_empty()
+            {
+                continue;
+            }
+            lines.push(format!(
+                "impl {owner} {{\n{}\n}}",
+                methods.into_iter().collect::<Vec<_>>().join("\n")
+            ));
+        }
+        if !self.erased_object_methods.is_empty() {
+            let methods = self
+                .erased_object_methods
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            let trait_methods = methods
+                .iter()
+                .map(external_erased_object_trait_method)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let impl_methods = methods
+                .iter()
+                .map(external_erased_object_impl_method)
+                .collect::<Vec<_>>()
+                .join("\n");
+            lines.push(format!(
+                "pub trait JavaErasedObjectFacade {{\n{trait_methods}\n}}\n\nimpl JavaErasedObjectFacade for Box<dyn std::any::Any> {{\n{impl_methods}\n}}"
+            ));
+        }
+
+        if lines.is_empty() {
+            Vec::new()
+        } else {
+            vec![crate::rust_ir::RustItem::Raw(lines.join("\n\n"))]
+        }
+    }
+}
+
+fn collect_program_call_arities(program: &Program) -> BTreeMap<String, BTreeSet<usize>> {
+    let mut calls = BTreeMap::new();
+    for ty in &program.types {
+        collect_type_call_arities(ty, &mut calls);
+    }
+    calls
+}
+
+fn collect_program_constructor_arities(program: &Program) -> BTreeMap<String, BTreeSet<usize>> {
+    let mut constructors = BTreeMap::new();
+    for ty in &program.types {
+        collect_type_constructor_arities(ty, &mut constructors);
+    }
+    constructors
+}
+
+fn collect_imported_static_owner_calls(
+    program: &Program,
+) -> BTreeMap<(String, String), BTreeSet<usize>> {
+    let aliases = imported_static_owner_aliases(program);
+    let static_members = imported_static_member_owners(program);
+    let mut calls = BTreeMap::new();
+    for ty in &program.types {
+        collect_type_imported_static_owner_calls(ty, &aliases, &static_members, &mut calls);
+    }
+    calls
+}
+
+fn imported_static_owner_call_contains(
+    imported_static_owner_calls: &BTreeMap<(String, String), BTreeSet<usize>>,
+    receiver_key: &str,
+    rust_method: &str,
+    fact_arg_count: Option<usize>,
+    used_arities: &BTreeSet<usize>,
+) -> bool {
+    let candidate = imported_static_owner_calls
+        .iter()
+        .find(|((owner, method), _)| {
+            imported_static_owner_matches_receiver_key(owner, receiver_key) && method == rust_method
+        })
+        .map(|(_, arities)| arities);
+    let Some(static_arities) = candidate else {
+        return false;
+    };
+    if let Some(arg_count) = fact_arg_count {
+        return static_arities.contains(&arg_count);
+    }
+    used_arities
+        .iter()
+        .any(|arg_count| static_arities.contains(arg_count))
+}
+
+fn imported_static_owner_matches_receiver_key(owner: &str, receiver_key: &str) -> bool {
+    if canonical_external_receiver_type_key(owner) == receiver_key {
+        return true;
+    }
+    owner
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .next_back()
+        .is_some_and(|simple| canonical_external_receiver_type_key(simple) == receiver_key)
+}
+
+fn imported_static_owner_aliases(program: &Program) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    for import in &program.imports {
+        if import.is_wildcard && !import.is_static {
+            continue;
+        }
+        let Some(type_name) = imported_static_owner_type_name(import) else {
+            continue;
+        };
+        let simple = type_name
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .next_back()
+            .unwrap_or(type_name.as_str());
+        aliases.insert(simple.to_string(), type_name.clone());
+        aliases.insert(crate::parser::to_snake_case(simple), type_name);
+    }
+    aliases
+}
+
+fn imported_static_member_owners(program: &Program) -> BTreeMap<String, String> {
+    let mut members = BTreeMap::new();
+    for import in &program.imports {
+        if !import.is_static || import.is_wildcard {
+            continue;
+        }
+        let Some((owner, member)) = import.path.rsplit_once('.') else {
+            continue;
+        };
+        members.insert(member.to_string(), owner.to_string());
+        members.insert(crate::parser::to_snake_case(member), owner.to_string());
+    }
+    members
+}
+
+fn imported_static_owner_type_name(import: &crate::java_ir::ImportDecl) -> Option<String> {
+    if import.path.is_empty() {
+        return None;
+    }
+    if !import.is_static {
+        return Some(import.path.clone());
+    }
+    if import.is_wildcard {
+        return Some(import.path.clone());
+    }
+    let owner = import.path.rsplit_once('.')?.0;
+    (!owner.is_empty()).then(|| owner.to_string())
+}
+
+fn collect_type_imported_static_owner_calls(
+    ty: &crate::java_ir::TypeDecl,
+    aliases: &BTreeMap<String, String>,
+    static_members: &BTreeMap<String, String>,
+    calls: &mut BTreeMap<(String, String), BTreeSet<usize>>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => {
+                if let Some(initializer) = &field.initializer {
+                    collect_expr_imported_static_owner_calls(
+                        initializer,
+                        aliases,
+                        static_members,
+                        calls,
+                    );
+                }
+            }
+            Member::Method(method) => {
+                if let Some(body) = &method.body {
+                    collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+                }
+            }
+            Member::Constructor(constructor) => {
+                if let Some(body) = &constructor.body {
+                    collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+                }
+            }
+            Member::Type(nested) => {
+                collect_type_imported_static_owner_calls(nested, aliases, static_members, calls)
+            }
+            Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn collect_block_imported_static_owner_calls(
+    block: &Block,
+    aliases: &BTreeMap<String, String>,
+    static_members: &BTreeMap<String, String>,
+    calls: &mut BTreeMap<(String, String), BTreeSet<usize>>,
+) {
+    for stmt in &block.statements {
+        collect_stmt_imported_static_owner_calls(stmt, aliases, static_members, calls);
+    }
+}
+
+fn collect_stmt_imported_static_owner_calls(
+    stmt: &Stmt,
+    aliases: &BTreeMap<String, String>,
+    static_members: &BTreeMap<String, String>,
+    calls: &mut BTreeMap<(String, String), BTreeSet<usize>>,
+) {
+    match stmt {
+        Stmt::VarDecl {
+            initializer: Some(expr),
+            ..
+        }
+        | Stmt::Expr(expr)
+        | Stmt::Throw(expr)
+        | Stmt::Return(Some(expr)) => {
+            collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls)
+        }
+        Stmt::Assign { target, value } => {
+            collect_expr_imported_static_owner_calls(target, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(value, aliases, static_members, calls);
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_expr_imported_static_owner_calls(condition, aliases, static_members, calls);
+            collect_block_imported_static_owner_calls(then_block, aliases, static_members, calls);
+            if let Some(else_block) = else_block {
+                collect_block_imported_static_owner_calls(
+                    else_block,
+                    aliases,
+                    static_members,
+                    calls,
+                );
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_expr_imported_static_owner_calls(condition, aliases, static_members, calls);
+            collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                collect_stmt_imported_static_owner_calls(stmt, aliases, static_members, calls);
+            }
+            if let Some(condition) = condition {
+                collect_expr_imported_static_owner_calls(condition, aliases, static_members, calls);
+            }
+            for expr in update {
+                collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls);
+            }
+            collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_expr_imported_static_owner_calls(iterable, aliases, static_members, calls);
+            collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_expr_imported_static_owner_calls(selector, aliases, static_members, calls);
+            for case in cases {
+                for stmt in &case.statements {
+                    collect_stmt_imported_static_owner_calls(stmt, aliases, static_members, calls);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_stmt_imported_static_owner_calls(resource, aliases, static_members, calls);
+            }
+            collect_block_imported_static_owner_calls(body, aliases, static_members, calls);
+            for catch in catches {
+                collect_block_imported_static_owner_calls(
+                    &catch.body,
+                    aliases,
+                    static_members,
+                    calls,
+                );
+            }
+            if let Some(finally_block) = finally_block {
+                collect_block_imported_static_owner_calls(
+                    finally_block,
+                    aliases,
+                    static_members,
+                    calls,
+                );
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_expr_imported_static_owner_calls(arg, aliases, static_members, calls);
+            }
+        }
+        Stmt::LocalType(ty) => {
+            collect_type_imported_static_owner_calls(ty, aliases, static_members, calls)
+        }
+        Stmt::Block(block) => {
+            collect_block_imported_static_owner_calls(block, aliases, static_members, calls)
+        }
+        Stmt::VarDecl {
+            initializer: None, ..
+        }
+        | Stmt::Return(None)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_expr_imported_static_owner_calls(
+    expr: &Expr,
+    aliases: &BTreeMap<String, String>,
+    static_members: &BTreeMap<String, String>,
+    calls: &mut BTreeMap<(String, String), BTreeSet<usize>>,
+) {
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            if let Some(Expr::Var(receiver_name)) = receiver.as_deref()
+                && let Some(owner) = aliases.get(receiver_name)
+            {
+                calls
+                    .entry((owner.clone(), crate::parser::to_snake_case(name)))
+                    .or_default()
+                    .insert(args.len());
+            }
+            if receiver.is_none() {
+                let rust_name = crate::parser::to_snake_case(name);
+                if let Some(owner) = static_members
+                    .get(name)
+                    .or_else(|| static_members.get(&rust_name))
+                {
+                    calls
+                        .entry((owner.clone(), rust_name))
+                        .or_default()
+                        .insert(args.len());
+                }
+            }
+            if let Some(receiver) = receiver.as_deref()
+                && let Some(owner) = qualified_static_owner_java_name(receiver)
+            {
+                calls
+                    .entry((owner, crate::parser::to_snake_case(name)))
+                    .or_default()
+                    .insert(args.len());
+            }
+            if let Some(receiver) = receiver {
+                collect_expr_imported_static_owner_calls(receiver, aliases, static_members, calls);
+            }
+            for arg in args {
+                collect_expr_imported_static_owner_calls(arg, aliases, static_members, calls);
+            }
+        }
+        Expr::FieldAccess(receiver, _) => {
+            collect_expr_imported_static_owner_calls(receiver, aliases, static_members, calls)
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_expr_imported_static_owner_calls(array, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(index, aliases, static_members, calls);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_expr_imported_static_owner_calls(dimension, aliases, static_members, calls);
+            }
+            if let Some(initializer) = initializer {
+                for value in initializer {
+                    collect_expr_imported_static_owner_calls(value, aliases, static_members, calls);
+                }
+            }
+        }
+        Expr::ArrayInitializer(values) => {
+            for value in values {
+                collect_expr_imported_static_owner_calls(value, aliases, static_members, calls);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_imported_static_owner_calls(left, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(right, aliases, static_members, calls);
+        }
+        Expr::Unary { expr, .. } => {
+            collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_imported_static_owner_calls(condition, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(then_expr, aliases, static_members, calls);
+            collect_expr_imported_static_owner_calls(else_expr, aliases, static_members, calls);
+        }
+        Expr::New { args, body, .. } => {
+            for arg in args {
+                collect_expr_imported_static_owner_calls(arg, aliases, static_members, calls);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    match member {
+                        Member::Field(field) => {
+                            if let Some(initializer) = &field.initializer {
+                                collect_expr_imported_static_owner_calls(
+                                    initializer,
+                                    aliases,
+                                    static_members,
+                                    calls,
+                                );
+                            }
+                        }
+                        Member::Method(method) => {
+                            if let Some(body) = &method.body {
+                                collect_block_imported_static_owner_calls(
+                                    body,
+                                    aliases,
+                                    static_members,
+                                    calls,
+                                );
+                            }
+                        }
+                        Member::Constructor(constructor) => {
+                            if let Some(body) = &constructor.body {
+                                collect_block_imported_static_owner_calls(
+                                    body,
+                                    aliases,
+                                    static_members,
+                                    calls,
+                                );
+                            }
+                        }
+                        Member::Type(nested) => collect_type_imported_static_owner_calls(
+                            nested,
+                            aliases,
+                            static_members,
+                            calls,
+                        ),
+                        Member::Unsupported { .. } => {}
+                    }
+                }
+            }
+        }
+        Expr::Cast { expr, .. } => {
+            collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls)
+        }
+        Expr::InstanceOf { expr, .. } => {
+            collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls)
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => {
+                collect_expr_imported_static_owner_calls(expr, aliases, static_members, calls)
+            }
+            crate::java_ir::LambdaBody::Block(block) => {
+                collect_block_imported_static_owner_calls(block, aliases, static_members, calls)
+            }
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn qualified_static_owner_java_name(expr: &Expr) -> Option<String> {
+    let Expr::FieldAccess(_, _) = expr else {
+        return None;
+    };
+    let root = static_owner_root_segment(expr)?;
+    if !root
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_lowercase())
+    {
+        return None;
+    }
+    let owner = static_owner_java_name(expr)?;
+    let class_like_segments = owner
+        .split('.')
+        .filter(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        })
+        .count();
+    (class_like_segments == 1).then_some(owner)
+}
+
+fn static_owner_root_segment(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Var(name) => Some(name.as_str()),
+        Expr::FieldAccess(receiver, _) => static_owner_root_segment(receiver),
+        _ => None,
+    }
+}
+
+fn static_owner_java_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Var(name) => Some(name.clone()),
+        Expr::FieldAccess(receiver, field) => {
+            Some(format!("{}.{}", static_owner_java_name(receiver)?, field))
+        }
+        _ => None,
+    }
+}
+
+fn collect_type_call_arities(
+    ty: &crate::java_ir::TypeDecl,
+    calls: &mut BTreeMap<String, BTreeSet<usize>>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => {
+                if let Some(initializer) = &field.initializer {
+                    collect_expr_call_arities(initializer, calls);
+                }
+            }
+            Member::Method(method) => {
+                if let Some(body) = &method.body {
+                    collect_block_call_arities(body, calls);
+                }
+            }
+            Member::Constructor(constructor) => {
+                if let Some(body) = &constructor.body {
+                    collect_block_call_arities(body, calls);
+                }
+            }
+            Member::Type(nested) => collect_type_call_arities(nested, calls),
+            Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn collect_type_constructor_arities(
+    ty: &crate::java_ir::TypeDecl,
+    constructors: &mut BTreeMap<String, BTreeSet<usize>>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => {
+                if let Some(initializer) = &field.initializer {
+                    collect_expr_constructor_arities(initializer, constructors);
+                }
+            }
+            Member::Method(method) => {
+                if let Some(body) = &method.body {
+                    collect_block_constructor_arities(body, constructors);
+                }
+            }
+            Member::Constructor(constructor) => {
+                if let Some(body) = &constructor.body {
+                    collect_block_constructor_arities(body, constructors);
+                }
+            }
+            Member::Type(nested) => collect_type_constructor_arities(nested, constructors),
+            Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn collect_block_constructor_arities(
+    block: &Block,
+    constructors: &mut BTreeMap<String, BTreeSet<usize>>,
+) {
+    for stmt in &block.statements {
+        collect_stmt_constructor_arities(stmt, constructors);
+    }
+}
+
+fn collect_stmt_constructor_arities(
+    stmt: &Stmt,
+    constructors: &mut BTreeMap<String, BTreeSet<usize>>,
+) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            if let Some(expr) = initializer {
+                collect_expr_constructor_arities(expr, constructors);
+            }
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => {
+            collect_expr_constructor_arities(expr, constructors)
+        }
+        Stmt::Assign { target, value } => {
+            collect_expr_constructor_arities(target, constructors);
+            collect_expr_constructor_arities(value, constructors);
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_expr_constructor_arities(condition, constructors);
+            collect_block_constructor_arities(then_block, constructors);
+            if let Some(else_block) = else_block {
+                collect_block_constructor_arities(else_block, constructors);
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_expr_constructor_arities(condition, constructors);
+            collect_block_constructor_arities(body, constructors);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                collect_stmt_constructor_arities(stmt, constructors);
+            }
+            if let Some(condition) = condition {
+                collect_expr_constructor_arities(condition, constructors);
+            }
+            for expr in update {
+                collect_expr_constructor_arities(expr, constructors);
+            }
+            collect_block_constructor_arities(body, constructors);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_expr_constructor_arities(iterable, constructors);
+            collect_block_constructor_arities(body, constructors);
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_expr_constructor_arities(selector, constructors);
+            for case in cases {
+                for stmt in &case.statements {
+                    collect_stmt_constructor_arities(stmt, constructors);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_stmt_constructor_arities(resource, constructors);
+            }
+            collect_block_constructor_arities(body, constructors);
+            for catch in catches {
+                collect_block_constructor_arities(&catch.body, constructors);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_block_constructor_arities(finally_block, constructors);
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_expr_constructor_arities(arg, constructors);
+            }
+        }
+        Stmt::LocalType(ty) => collect_type_constructor_arities(ty, constructors),
+        Stmt::Block(block) => collect_block_constructor_arities(block, constructors),
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_expr_constructor_arities(
+    expr: &Expr,
+    constructors: &mut BTreeMap<String, BTreeSet<usize>>,
+) {
+    match expr {
+        Expr::New { ty, args, body, .. } => {
+            if let Some(type_name) = constructed_type_name(ty) {
+                constructors
+                    .entry(type_name.to_string())
+                    .or_default()
+                    .insert(args.len());
+            }
+            for arg in args {
+                collect_expr_constructor_arities(arg, constructors);
+            }
+            for member in body.iter().flatten() {
+                match member {
+                    Member::Field(field) => {
+                        if let Some(initializer) = &field.initializer {
+                            collect_expr_constructor_arities(initializer, constructors);
+                        }
+                    }
+                    Member::Method(method) => {
+                        if let Some(body) = &method.body {
+                            collect_block_constructor_arities(body, constructors);
+                        }
+                    }
+                    Member::Constructor(constructor) => {
+                        if let Some(body) = &constructor.body {
+                            collect_block_constructor_arities(body, constructors);
+                        }
+                    }
+                    Member::Type(nested) => collect_type_constructor_arities(nested, constructors),
+                    Member::Unsupported { .. } => {}
+                }
+            }
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_expr_constructor_arities(receiver, constructors);
+            }
+            for arg in args {
+                collect_expr_constructor_arities(arg, constructors);
+            }
+        }
+        Expr::FieldAccess(receiver, _) => collect_expr_constructor_arities(receiver, constructors),
+        Expr::ArrayAccess(array, index) => {
+            collect_expr_constructor_arities(array, constructors);
+            collect_expr_constructor_arities(index, constructors);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_expr_constructor_arities(dimension, constructors);
+            }
+            for value in initializer.iter().flatten() {
+                collect_expr_constructor_arities(value, constructors);
+            }
+        }
+        Expr::ArrayInitializer(values) => {
+            for value in values {
+                collect_expr_constructor_arities(value, constructors);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_constructor_arities(left, constructors);
+            collect_expr_constructor_arities(right, constructors);
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_expr_constructor_arities(expr, constructors);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_constructor_arities(condition, constructors);
+            collect_expr_constructor_arities(then_expr, constructors);
+            collect_expr_constructor_arities(else_expr, constructors);
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => {
+                collect_expr_constructor_arities(expr, constructors)
+            }
+            crate::java_ir::LambdaBody::Block(block) => {
+                collect_block_constructor_arities(block, constructors)
+            }
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn constructed_type_name(ty: &JavaType) -> Option<&str> {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        _ => None,
+    }
+}
+
+fn external_constructor_fact_arity_count(facts: &FactSet, type_name: &str) -> usize {
+    facts
+        .external_constructor_facts
+        .iter()
+        .filter(|fact| external_constructor_type_matches(&fact.type_name, type_name))
+        .map(|fact| fact.arg_types.len())
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn external_constructor_type_matches(fact_type_name: &str, query_type_name: &str) -> bool {
+    if fact_type_name == query_type_name {
+        return true;
+    }
+    let fact_key = canonical_external_receiver_type_key(fact_type_name);
+    let query_key = canonical_external_receiver_type_key(query_type_name);
+    if fact_key == query_key {
+        return true;
+    }
+    fact_key
+        .rsplit('.')
+        .next()
+        .is_some_and(|simple| simple == query_key)
+        || query_key
+            .rsplit('.')
+            .next()
+            .is_some_and(|simple| simple == fact_key)
+}
+
+fn collect_block_call_arities(block: &Block, calls: &mut BTreeMap<String, BTreeSet<usize>>) {
+    for stmt in &block.statements {
+        collect_stmt_call_arities(stmt, calls);
+    }
+}
+
+fn collect_stmt_call_arities(stmt: &Stmt, calls: &mut BTreeMap<String, BTreeSet<usize>>) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            if let Some(expr) = initializer {
+                collect_expr_call_arities(expr, calls);
+            }
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => collect_expr_call_arities(expr, calls),
+        Stmt::Assign { target, value } => {
+            collect_expr_call_arities(target, calls);
+            collect_expr_call_arities(value, calls);
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_expr_call_arities(condition, calls);
+            collect_block_call_arities(then_block, calls);
+            if let Some(else_block) = else_block {
+                collect_block_call_arities(else_block, calls);
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_expr_call_arities(condition, calls);
+            collect_block_call_arities(body, calls);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                collect_stmt_call_arities(stmt, calls);
+            }
+            if let Some(condition) = condition {
+                collect_expr_call_arities(condition, calls);
+            }
+            for expr in update {
+                collect_expr_call_arities(expr, calls);
+            }
+            collect_block_call_arities(body, calls);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_expr_call_arities(iterable, calls);
+            collect_block_call_arities(body, calls);
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_expr_call_arities(selector, calls);
+            for case in cases {
+                for stmt in &case.statements {
+                    collect_stmt_call_arities(stmt, calls);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_stmt_call_arities(resource, calls);
+            }
+            collect_block_call_arities(body, calls);
+            for catch in catches {
+                collect_block_call_arities(&catch.body, calls);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_block_call_arities(finally_block, calls);
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_expr_call_arities(arg, calls);
+            }
+        }
+        Stmt::LocalType(ty) => collect_type_call_arities(ty, calls),
+        Stmt::Block(block) => collect_block_call_arities(block, calls),
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_expr_call_arities(expr: &Expr, calls: &mut BTreeMap<String, BTreeSet<usize>>) {
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            calls
+                .entry(crate::parser::to_snake_case(name))
+                .or_default()
+                .insert(args.len());
+            if let Some(receiver) = receiver {
+                collect_expr_call_arities(receiver, calls);
+            }
+            for arg in args {
+                collect_expr_call_arities(arg, calls);
+            }
+        }
+        Expr::FieldAccess(receiver, _) => collect_expr_call_arities(receiver, calls),
+        Expr::ArrayAccess(array, index) => {
+            collect_expr_call_arities(array, calls);
+            collect_expr_call_arities(index, calls);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_expr_call_arities(dimension, calls);
+            }
+            for value in initializer.iter().flatten() {
+                collect_expr_call_arities(value, calls);
+            }
+        }
+        Expr::ArrayInitializer(values) => {
+            for value in values {
+                collect_expr_call_arities(value, calls);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_expr_call_arities(left, calls);
+            collect_expr_call_arities(right, calls);
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_expr_call_arities(expr, calls);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_expr_call_arities(condition, calls);
+            collect_expr_call_arities(then_expr, calls);
+            collect_expr_call_arities(else_expr, calls);
+        }
+        Expr::New { args, body, .. } => {
+            for arg in args {
+                collect_expr_call_arities(arg, calls);
+            }
+            for member in body.iter().flatten() {
+                match member {
+                    Member::Field(field) => {
+                        if let Some(initializer) = &field.initializer {
+                            collect_expr_call_arities(initializer, calls);
+                        }
+                    }
+                    Member::Method(method) => {
+                        if let Some(body) = &method.body {
+                            collect_block_call_arities(body, calls);
+                        }
+                    }
+                    Member::Constructor(constructor) => {
+                        if let Some(body) = &constructor.body {
+                            collect_block_call_arities(body, calls);
+                        }
+                    }
+                    Member::Type(nested) => collect_type_call_arities(nested, calls),
+                    Member::Unsupported { .. } => {}
+                }
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => collect_expr_call_arities(expr, calls),
+            crate::java_ir::LambdaBody::Block(block) => collect_block_call_arities(block, calls),
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn external_facade_return_type(java_type: &JavaType) -> String {
+    match java_type {
+        JavaType::Primitive(PrimitiveType::Boolean) => "bool".to_string(),
+        JavaType::Primitive(PrimitiveType::Byte) => "i8".to_string(),
+        JavaType::Primitive(PrimitiveType::Short) => "i16".to_string(),
+        JavaType::Primitive(PrimitiveType::Int) => "i32".to_string(),
+        JavaType::Primitive(PrimitiveType::Long) => "i64".to_string(),
+        JavaType::Primitive(PrimitiveType::Float) => "f32".to_string(),
+        JavaType::Primitive(PrimitiveType::Double) => "f64".to_string(),
+        JavaType::Primitive(PrimitiveType::Char) => "char".to_string(),
+        JavaType::Void => "()".to_string(),
+        JavaType::String => "String".to_string(),
+        JavaType::Named { name, .. } if name == "Object" => "Box<dyn std::any::Any>".to_string(),
+        JavaType::Named { name, args }
+            if matches!(name.as_str(), "List" | "Collection" | "Iterable") =>
+        {
+            let element = args
+                .first()
+                .map(external_facade_return_type)
+                .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
+            format!("Vec<{element}>")
+        }
+        JavaType::Named { name, .. } => rust_name_for_java_named_type(name),
+        JavaType::Array(inner) => format!("Vec<{}>", external_facade_return_type(inner)),
+        JavaType::Wildcard(_) | JavaType::Unknown(_) => "Box<dyn std::any::Any>".to_string(),
+    }
+}
+
+fn external_facade_return_type_with_nullability(
+    java_type: &JavaType,
+    nullability: NullabilityState,
+) -> String {
+    let rendered = external_facade_return_type(java_type);
+    if rendered != "()"
+        && matches!(
+            nullability,
+            NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+        )
+    {
+        format!("Option<{rendered}>")
+    } else {
+        rendered
+    }
+}
+
+fn external_facade_static_method(name: &str, arg_count: usize, return_type: &str) -> String {
+    format!(
+        "    pub fn {name}{} -> {return_type} {{ {} }}",
+        external_facade_args(arg_count),
+        external_facade_default_expr(return_type)
+    )
+}
+
+fn external_facade_constructor_name(arg_count: usize, overload_by_arity: bool) -> String {
+    if overload_by_arity {
+        format!("new_{arg_count}")
+    } else {
+        "new".to_string()
+    }
+}
+
+fn external_facade_constructor_method(name: &str, arg_count: usize) -> String {
+    format!(
+        "    pub fn {name}{} -> Self {{ Default::default() }}",
+        external_facade_args(arg_count)
+    )
+}
+
+fn external_facade_eq_impl(ty: &str) -> String {
+    format!(
+        "impl PartialEq for {ty} {{\n    fn eq(&self, _other: &Self) -> bool {{ true }}\n}}\n\nimpl Eq for {ty} {{}}"
+    )
+}
+
+fn external_facade_hash_impl(ty: &str) -> String {
+    format!(
+        "impl std::hash::Hash for {ty} {{\n    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {{}}\n}}"
+    )
+}
+
+fn external_facade_display_impl(ty: &str) -> String {
+    format!(
+        "impl std::fmt::Display for {ty} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"\") }}\n}}"
+    )
+}
+
+fn external_facade_imported_static_method(name: &str, arg_count: usize) -> String {
+    if imported_static_method_is_side_effect(name) {
+        external_facade_static_method(name, arg_count, "()")
+    } else {
+        format!(
+            "    pub fn {name}{} -> R {{ Default::default() }}",
+            external_facade_generic_args("R: Default", arg_count)
+        )
+    }
+}
+
+fn external_facade_imported_static_method_with_facts(
+    facts: &FactSet,
+    owner_key: &str,
+    name: &str,
+    arg_count: usize,
+) -> String {
+    if let Some(effect) =
+        facts.external_api_effect_for_receiver_with_arity(Some(owner_key), name, Some(arg_count))
+    {
+        if let Some(return_type) = &effect.return_type {
+            let return_type = external_facade_return_type_with_nullability(
+                return_type,
+                effect.return_nullability,
+            );
+            return external_facade_static_method(name, arg_count, &return_type);
+        }
+        if effect.provenance != FactProvenance::ConservativeFallback
+            && matches!(
+                effect.role,
+                ExternalApiRole::SideEffect
+                    | ExternalApiRole::Mutator
+                    | ExternalApiRole::Setter
+                    | ExternalApiRole::FluentMutator
+                    | ExternalApiRole::IndexedSetter
+            )
+        {
+            return external_facade_static_method(name, arg_count, "()");
+        }
+    }
+    external_facade_imported_static_method(name, arg_count)
+}
+
+fn imported_static_method_is_side_effect(name: &str) -> bool {
+    name.starts_with("set_")
+        || name.starts_with("use_")
+        || name.starts_with("assert_")
+        || name.starts_with("validate_")
+        || name.starts_with("update_")
+}
+
+fn external_facade_instance_method(name: &str, arg_count: usize, return_type: &str) -> String {
+    format!(
+        "    pub fn {name}{} -> {return_type} {{ {} }}",
+        external_facade_self_args(arg_count),
+        external_facade_default_expr(return_type)
+    )
+}
+
+fn external_facade_builder_fluent_method(name: &str, arg_count: usize) -> String {
+    format!(
+        "    pub fn {name}{} -> Self {{ self.clone() }}",
+        external_facade_self_args(arg_count)
+    )
+}
+
+fn external_facade_builder_generic_getter(name: &str, arg_count: usize) -> String {
+    format!(
+        "    pub fn {name}{} -> T {{ Default::default() }}",
+        external_facade_generic_self_args("T: Default", arg_count)
+    )
+}
+
+fn facade_method_has_name(method_body: &str, method: &str) -> bool {
+    method_body.contains(&format!(" pub fn {method}<"))
+        || method_body.contains(&format!(" pub fn {method}("))
+}
+
+fn external_erased_object_trait_method(method: &ExternalErasedObjectMethod) -> String {
+    format!(
+        "    fn {}{} -> {};",
+        method.name,
+        external_facade_self_args(method.arg_count),
+        method.return_type
+    )
+}
+
+fn external_erased_object_impl_method(method: &ExternalErasedObjectMethod) -> String {
+    format!(
+        "    fn {}{} -> {} {{ {} }}",
+        method.name,
+        external_facade_self_args(method.arg_count),
+        method.return_type,
+        external_facade_default_expr(&method.return_type)
+    )
+}
+
+fn external_facade_default_expr(return_type: &str) -> &'static str {
+    if return_type.starts_with("Option<") {
+        "None"
+    } else if return_type == "Box<dyn std::any::Any>" {
+        "Box::new(())"
+    } else {
+        "Default::default()"
+    }
+}
+
+fn external_facade_args(arg_count: usize) -> String {
+    if arg_count == 0 {
+        "()".to_string()
+    } else {
+        let generics = (0..arg_count)
+            .map(|idx| format!("T{idx}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let args = (0..arg_count)
+            .map(|idx| format!("_arg{idx}: T{idx}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("<{generics}>({args})")
+    }
+}
+
+fn external_facade_generic_args(first_generic: &str, arg_count: usize) -> String {
+    let mut generics = vec![first_generic.to_string()];
+    generics.extend((0..arg_count).map(|idx| format!("T{idx}")));
+    if arg_count == 0 {
+        format!("<{}>()", generics.join(", "))
+    } else {
+        let args = (0..arg_count)
+            .map(|idx| format!("_arg{idx}: T{idx}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("<{}>({args})", generics.join(", "))
+    }
+}
+
+fn external_facade_self_args(arg_count: usize) -> String {
+    if arg_count == 0 {
+        "(&self)".to_string()
+    } else {
+        let generics = (0..arg_count)
+            .map(|idx| format!("T{idx}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let args = (0..arg_count)
+            .map(|idx| format!("_arg{idx}: T{idx}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("<{generics}>(&self, {args})")
+    }
+}
+
+fn external_facade_generic_self_args(first_generic: &str, arg_count: usize) -> String {
+    let mut generics = vec![first_generic.to_string()];
+    generics.extend((0..arg_count).map(|idx| format!("T{idx}")));
+    if arg_count == 0 {
+        format!("<{}>(&self)", generics.join(", "))
+    } else {
+        let args = (0..arg_count)
+            .map(|idx| format!("_arg{idx}: T{idx}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("<{}>(&self, {args})", generics.join(", "))
+    }
+}
+
+fn is_external_facade_builder_fluent_method(method: &str) -> bool {
+    method.starts_with("set_")
+        || method.starts_with("add_")
+        || method.starts_with("clear_")
+        || method.starts_with("merge_")
+        || method.starts_with("put_")
+}
+
+fn is_builtin_external_facade_type(name: &str) -> bool {
+    matches!(
+        name,
+        "String"
+            | "Vec"
+            | "Option"
+            | "Result"
+            | "Box"
+            | "Arrays"
+            | "Collections"
+            | "Collectors"
+            | "HashMap"
+            | "HashSet"
+            | "Iterator"
+            | "List"
+            | "Map"
+            | "Object"
+            | "Set"
+            | "Stream"
+            | "File"
+            | "IOUtils"
+            | "Path"
+            | "URI"
+            | "URL"
+            | "logger"
+            | "bool"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "f32"
+            | "f64"
+            | "char"
+            | "()"
+    )
+}
+
+fn valid_external_facade_type_ident(name: &str) -> bool {
+    valid_rust_type_ident(name)
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        && !is_builtin_external_facade_type(name)
+}
+
+pub fn external_static_string_constant_support_items(
+    program: &Program,
+    facts: &FactSet,
+) -> Vec<crate::rust_ir::RustItem> {
+    external_static_string_constant_support_items_with_local_type_program(program, facts, program)
+}
+
+pub fn external_static_string_constant_support_items_with_local_type_program(
+    program: &Program,
+    facts: &FactSet,
+    local_type_program: &Program,
+) -> Vec<crate::rust_ir::RustItem> {
+    let local_types = local_type_keys_for_program(program);
+    let local_static_string_values = static_string_constant_values_for_program(local_type_program);
+    let mut constants_by_owner: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    collect_external_static_string_constants_program(
+        program,
+        facts,
+        &local_types,
+        &mut constants_by_owner,
+    );
+    constants_by_owner
+        .into_iter()
+        .filter_map(|(owner, fields)| {
+            external_static_string_constant_support_item(
+                &owner,
+                fields,
+                &local_static_string_values,
+            )
+        })
+        .collect()
+}
+
+fn static_string_constant_values_for_program(
+    program: &Program,
+) -> BTreeMap<(String, String), String> {
+    let mut values = BTreeMap::new();
+    for ty in &program.types {
+        collect_static_string_constant_values_for_type(ty, &mut values);
+    }
+    values
+}
+
+fn collect_static_string_constant_values_for_type(
+    ty: &crate::java_ir::TypeDecl,
+    values: &mut BTreeMap<(String, String), String>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field)
+                if field.modifiers.contains(&crate::java_ir::Modifier::Static)
+                    && field.modifiers.contains(&crate::java_ir::Modifier::Final)
+                    && field.ty == JavaType::String =>
+            {
+                if let Some(Expr::Literal(crate::java_ir::Literal::String(value))) =
+                    &field.initializer
+                {
+                    values.insert((ty.name.clone(), field.name.clone()), value.clone());
+                }
+            }
+            Member::Type(nested) => collect_static_string_constant_values_for_type(nested, values),
+            _ => {}
+        }
+    }
+}
+
+fn collect_external_static_string_constants_program(
+    program: &Program,
+    facts: &FactSet,
+    local_types: &BTreeSet<String>,
+    constants_by_owner: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    for ty in &program.types {
+        collect_external_static_string_constants_type(ty, facts, local_types, constants_by_owner);
+    }
+}
+
+fn collect_external_static_string_constants_type(
+    ty: &crate::java_ir::TypeDecl,
+    facts: &FactSet,
+    local_types: &BTreeSet<String>,
+    constants_by_owner: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => {
+                if let Some(initializer) = &field.initializer {
+                    collect_external_static_string_constants_expr(
+                        initializer,
+                        facts,
+                        local_types,
+                        constants_by_owner,
+                    );
+                }
+            }
+            Member::Method(method) => {
+                if let Some(body) = &method.body {
+                    collect_external_static_string_constants_block(
+                        body,
+                        facts,
+                        local_types,
+                        constants_by_owner,
+                    );
+                }
+            }
+            Member::Constructor(constructor) => {
+                if let Some(body) = &constructor.body {
+                    collect_external_static_string_constants_block(
+                        body,
+                        facts,
+                        local_types,
+                        constants_by_owner,
+                    );
+                }
+            }
+            Member::Type(nested) => collect_external_static_string_constants_type(
+                nested,
+                facts,
+                local_types,
+                constants_by_owner,
+            ),
+            Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn collect_external_static_string_constants_block(
+    block: &Block,
+    facts: &FactSet,
+    local_types: &BTreeSet<String>,
+    constants_by_owner: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    for stmt in &block.statements {
+        collect_external_static_string_constants_stmt(stmt, facts, local_types, constants_by_owner);
+    }
+}
+
+fn collect_external_static_string_constants_stmt(
+    stmt: &Stmt,
+    facts: &FactSet,
+    local_types: &BTreeSet<String>,
+    constants_by_owner: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            if let Some(expr) = initializer {
+                collect_external_static_string_constants_expr(
+                    expr,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => collect_external_static_string_constants_expr(
+            expr,
+            facts,
+            local_types,
+            constants_by_owner,
+        ),
+        Stmt::Assign { target, value } => {
+            collect_external_static_string_constants_expr(
+                target,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            collect_external_static_string_constants_expr(
+                value,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_external_static_string_constants_expr(
+                condition,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            collect_external_static_string_constants_block(
+                then_block,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            if let Some(else_block) = else_block {
+                collect_external_static_string_constants_block(
+                    else_block,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+        }
+        Stmt::While { condition, body } => {
+            collect_external_static_string_constants_expr(
+                condition,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            collect_external_static_string_constants_block(
+                body,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for init in init {
+                collect_external_static_string_constants_stmt(
+                    init,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+            if let Some(condition) = condition {
+                collect_external_static_string_constants_expr(
+                    condition,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+            for update in update {
+                collect_external_static_string_constants_expr(
+                    update,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+            collect_external_static_string_constants_block(
+                body,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_external_static_string_constants_expr(
+                iterable,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            collect_external_static_string_constants_block(
+                body,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_external_static_string_constants_expr(
+                selector,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            for case in cases {
+                for stmt in &case.statements {
+                    collect_external_static_string_constants_stmt(
+                        stmt,
+                        facts,
+                        local_types,
+                        constants_by_owner,
+                    );
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_external_static_string_constants_stmt(
+                    resource,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+            collect_external_static_string_constants_block(
+                body,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            for catch in catches {
+                collect_external_static_string_constants_block(
+                    &catch.body,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+            if let Some(finally_block) = finally_block {
+                collect_external_static_string_constants_block(
+                    finally_block,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_external_static_string_constants_expr(
+                    arg,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+        }
+        Stmt::LocalType(ty) => {
+            collect_external_static_string_constants_type(
+                ty,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Stmt::Block(block) => {
+            collect_external_static_string_constants_block(
+                block,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_external_static_string_constants_expr(
+    expr: &Expr,
+    facts: &FactSet,
+    local_types: &BTreeSet<String>,
+    constants_by_owner: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    match expr {
+        Expr::FieldAccess(receiver, field) => {
+            if let Some(owner) = external_static_string_constant_owner(receiver, field, facts)
+                && !local_types.contains(&owner)
+            {
+                constants_by_owner
+                    .entry(owner)
+                    .or_default()
+                    .insert(canonical_external_field_name(field));
+            }
+            collect_external_static_string_constants_expr(
+                receiver,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_external_static_string_constants_expr(
+                array,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            collect_external_static_string_constants_expr(
+                index,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_external_static_string_constants_expr(
+                    dimension,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+            for value in initializer.iter().flatten() {
+                collect_external_static_string_constants_expr(
+                    value,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+        }
+        Expr::ArrayInitializer(values) => {
+            for value in values {
+                collect_external_static_string_constants_expr(
+                    value,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_external_static_string_constants_expr(
+                left,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            collect_external_static_string_constants_expr(
+                right,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_external_static_string_constants_expr(
+                expr,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_external_static_string_constants_expr(
+                condition,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            collect_external_static_string_constants_expr(
+                then_expr,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+            collect_external_static_string_constants_expr(
+                else_expr,
+                facts,
+                local_types,
+                constants_by_owner,
+            );
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_external_static_string_constants_expr(
+                    receiver,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+            for arg in args {
+                collect_external_static_string_constants_expr(
+                    arg,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+        }
+        Expr::New { args, body, .. } => {
+            for arg in args {
+                collect_external_static_string_constants_expr(
+                    arg,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                );
+            }
+            for member in body.iter().flatten() {
+                match member {
+                    Member::Field(field) => {
+                        if let Some(initializer) = &field.initializer {
+                            collect_external_static_string_constants_expr(
+                                initializer,
+                                facts,
+                                local_types,
+                                constants_by_owner,
+                            );
+                        }
+                    }
+                    Member::Method(method) => {
+                        if let Some(body) = &method.body {
+                            collect_external_static_string_constants_block(
+                                body,
+                                facts,
+                                local_types,
+                                constants_by_owner,
+                            );
+                        }
+                    }
+                    Member::Constructor(constructor) => {
+                        if let Some(body) = &constructor.body {
+                            collect_external_static_string_constants_block(
+                                body,
+                                facts,
+                                local_types,
+                                constants_by_owner,
+                            );
+                        }
+                    }
+                    Member::Type(nested) => collect_external_static_string_constants_type(
+                        nested,
+                        facts,
+                        local_types,
+                        constants_by_owner,
+                    ),
+                    Member::Unsupported { .. } => {}
+                }
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => {
+                collect_external_static_string_constants_expr(
+                    expr,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                )
+            }
+            crate::java_ir::LambdaBody::Block(block) => {
+                collect_external_static_string_constants_block(
+                    block,
+                    facts,
+                    local_types,
+                    constants_by_owner,
+                )
+            }
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn external_static_string_constant_owner(
+    receiver: &Expr,
+    field: &str,
+    facts: &FactSet,
+) -> Option<String> {
+    let Expr::Var(receiver_name) = receiver else {
+        return None;
+    };
+    let lookup_owner = canonical_external_receiver_type_key(receiver_name);
+    let rust_owner = static_constant_rust_owner(receiver_name)?;
+    if !valid_rust_type_ident(&rust_owner) {
+        return None;
+    }
+    let field_type = facts
+        .external_field_for(&lookup_owner, field)
+        .and_then(|fact| fact.field_type.clone())
+        .or_else(|| {
+            let receiver_type = JavaType::Named {
+                name: lookup_owner.clone(),
+                args: Vec::new(),
+            };
+            known_external_field_type_for_receiver(&receiver_type, field)
+        })?;
+    (field_type == JavaType::String).then_some(rust_owner)
+}
+
+fn static_constant_rust_owner(receiver_name: &str) -> Option<String> {
+    if receiver_name
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+    {
+        Some(receiver_name.to_string())
+    } else if receiver_name.contains('_') || receiver_name.chars().all(|ch| ch.is_ascii_lowercase())
+    {
+        Some(upper_camel_from_snake(receiver_name))
+    } else {
+        None
+    }
+}
+
+fn external_static_string_constant_support_item(
+    owner: &str,
+    fields: BTreeSet<String>,
+    local_static_string_values: &BTreeMap<(String, String), String>,
+) -> Option<crate::rust_ir::RustItem> {
+    let consts = fields
+        .into_iter()
+        .filter(|field| valid_rust_const_ident(field))
+        .map(|field| {
+            let value = local_static_string_values
+                .get(&(owner.to_string(), field.clone()))
+                .cloned()
+                .unwrap_or_else(|| field.clone());
+            format!("    pub const {field}: &'static str = {value:?};")
+        })
+        .collect::<Vec<_>>();
+    if consts.is_empty() {
+        return None;
+    }
+    Some(crate::rust_ir::RustItem::Raw(format!(
+        "pub struct {owner};\n\nimpl {owner} {{\n{}\n}}",
+        consts.join("\n")
+    )))
+}
+
+fn valid_rust_type_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn valid_rust_const_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn valid_rust_field_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+pub fn program_uses_java_platform_facades(program: &Program) -> bool {
+    if program.types.iter().any(|ty| {
+        matches!(
+            crate::stdlib::canonical_external_receiver_type_key(&ty.name).as_str(),
+            "Path" | "URI" | "File" | "URL"
+        )
+    }) {
+        return false;
+    }
+    program.imports.iter().any(|import| {
+        matches!(
+            import.path.as_str(),
+            "java.nio.file.Path"
+                | "java.net.URI"
+                | "java.io.File"
+                | "java.net.URL"
+                | "org.broadinstitute.hellbender.utils.io.IOUtils"
+        )
+    }) || program.types.iter().any(type_uses_java_platform_facades)
+}
+
+fn type_uses_java_platform_facades(ty: &crate::java_ir::TypeDecl) -> bool {
+    ty.extends
+        .as_deref()
+        .is_some_and(is_java_platform_facade_type_name)
+        || ty
+            .implements
+            .iter()
+            .any(|name| is_java_platform_facade_type_name(name))
+        || ty
+            .type_param_bounds
+            .iter()
+            .flatten()
+            .any(java_type_uses_java_platform_facade)
+        || ty.members.iter().any(member_uses_java_platform_facades)
+}
+
+fn member_uses_java_platform_facades(member: &crate::java_ir::Member) -> bool {
+    match member {
+        crate::java_ir::Member::Field(field) => {
+            java_type_uses_java_platform_facade(&field.ty)
+                || field
+                    .initializer
+                    .as_ref()
+                    .is_some_and(expr_uses_java_platform_facades)
+        }
+        crate::java_ir::Member::Method(method) => {
+            java_type_uses_java_platform_facade(&method.return_type)
+                || method
+                    .throws
+                    .iter()
+                    .any(java_type_uses_java_platform_facade)
+                || method
+                    .params
+                    .iter()
+                    .any(|param| java_type_uses_java_platform_facade(&param.ty))
+                || method
+                    .type_param_bounds
+                    .iter()
+                    .flatten()
+                    .any(java_type_uses_java_platform_facade)
+                || method
+                    .body
+                    .as_ref()
+                    .is_some_and(block_uses_java_platform_facades)
+        }
+        crate::java_ir::Member::Constructor(constructor) => {
+            constructor
+                .throws
+                .iter()
+                .any(java_type_uses_java_platform_facade)
+                || constructor
+                    .params
+                    .iter()
+                    .any(|param| java_type_uses_java_platform_facade(&param.ty))
+                || constructor
+                    .type_param_bounds
+                    .iter()
+                    .flatten()
+                    .any(java_type_uses_java_platform_facade)
+                || constructor
+                    .body
+                    .as_ref()
+                    .is_some_and(block_uses_java_platform_facades)
+        }
+        crate::java_ir::Member::Type(nested) => type_uses_java_platform_facades(nested),
+        crate::java_ir::Member::Unsupported { .. } => false,
+    }
+}
+
+fn block_uses_java_platform_facades(block: &crate::java_ir::Block) -> bool {
+    block.statements.iter().any(stmt_uses_java_platform_facades)
+}
+
+fn stmt_uses_java_platform_facades(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => initializer
+            .as_ref()
+            .is_some_and(expr_uses_java_platform_facades),
+        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_uses_java_platform_facades(expr),
+        Stmt::Assign { target, value } => {
+            expr_uses_java_platform_facades(target) || expr_uses_java_platform_facades(value)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_uses_java_platform_facades(condition)
+                || block_uses_java_platform_facades(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_uses_java_platform_facades)
+        }
+        Stmt::While { condition, body } => {
+            expr_uses_java_platform_facades(condition) || block_uses_java_platform_facades(body)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_uses_java_platform_facades)
+                || condition
+                    .as_ref()
+                    .is_some_and(expr_uses_java_platform_facades)
+                || update.iter().any(expr_uses_java_platform_facades)
+                || block_uses_java_platform_facades(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_uses_java_platform_facades(iterable) || block_uses_java_platform_facades(body)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_uses_java_platform_facades(selector)
+                || cases
+                    .iter()
+                    .any(|case| case.statements.iter().any(stmt_uses_java_platform_facades))
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(stmt_uses_java_platform_facades)
+                || block_uses_java_platform_facades(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_uses_java_platform_facades(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_uses_java_platform_facades)
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            args.iter().any(expr_uses_java_platform_facades)
+        }
+        Stmt::LocalType(ty) => type_uses_java_platform_facades(ty),
+        Stmt::Block(block) => block_uses_java_platform_facades(block),
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_uses_java_platform_facades(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            receiver
+                .as_deref()
+                .is_some_and(|receiver| expr_is_java_logging_receiver_call(receiver, name, args))
+                || receiver
+                    .as_deref()
+                    .is_some_and(expr_uses_java_platform_facades)
+                || args.iter().any(expr_uses_java_platform_facades)
+        }
+        Expr::FieldAccess(receiver, _) => expr_uses_java_platform_facades(receiver),
+        Expr::ArrayAccess(array, index) => {
+            expr_uses_java_platform_facades(array) || expr_uses_java_platform_facades(index)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(expr_uses_java_platform_facades)
+                || initializer
+                    .iter()
+                    .flatten()
+                    .any(expr_uses_java_platform_facades)
+        }
+        Expr::ArrayInitializer(values) => values.iter().any(expr_uses_java_platform_facades),
+        Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => expr_uses_java_platform_facades(expr),
+        Expr::Binary { left, right, .. } => {
+            expr_uses_java_platform_facades(left) || expr_uses_java_platform_facades(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_java_platform_facades(condition)
+                || expr_uses_java_platform_facades(then_expr)
+                || expr_uses_java_platform_facades(else_expr)
+        }
+        Expr::InstanceOf { expr, .. } => expr_uses_java_platform_facades(expr),
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => expr_uses_java_platform_facades(expr),
+            crate::java_ir::LambdaBody::Block(block) => block_uses_java_platform_facades(block),
+        },
+        Expr::New { args, body, .. } => {
+            args.iter().any(expr_uses_java_platform_facades)
+                || body.iter().flatten().any(member_uses_java_platform_facades)
+        }
+        Expr::ClassLiteral(_)
+        | Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::Raw(_) => false,
+    }
+}
+
+fn expr_is_java_logging_receiver_call(receiver: &Expr, name: &str, args: &[Expr]) -> bool {
+    let Expr::Var(receiver_name) = receiver else {
+        return false;
+    };
+    is_java_logging_receiver_name(receiver_name) && is_java_logging_method(name, args.len())
+}
+
+fn is_java_logging_receiver_name(name: &str) -> bool {
+    matches!(
+        crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+        "logger" | "Logger"
+    )
+}
+
+fn is_java_logging_method(name: &str, arg_count: usize) -> bool {
+    arg_count >= 1 && matches!(name, "info" | "warn" | "debug" | "error" | "trace")
+}
+
+fn java_type_uses_java_platform_facade(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Named { name, args } => {
+            is_java_platform_facade_type_name(name)
+                || args.iter().any(java_type_uses_java_platform_facade)
+        }
+        JavaType::Array(inner) => java_type_uses_java_platform_facade(inner),
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            java_type_uses_java_platform_facade(bound)
+        }
+        JavaType::Unknown(name) => is_java_platform_facade_type_name(name),
+        JavaType::Void | JavaType::Primitive(_) | JavaType::String | JavaType::Wildcard(None) => {
+            false
+        }
+    }
+}
+
+pub fn is_java_platform_facade_type_name(name: &str) -> bool {
+    matches!(
+        crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+        "Path" | "URI" | "File" | "URL"
+    )
+}
+
+pub fn program_uses_java_class_tokens(program: &Program) -> bool {
+    program
+        .types
+        .iter()
+        .any(|ty| ty.members.iter().any(member_uses_java_class_tokens))
+}
+
+pub fn program_uses_java_string_split(program: &Program) -> bool {
+    program
+        .types
+        .iter()
+        .any(|ty| ty.members.iter().any(member_uses_java_string_split))
+}
+
+pub fn program_uses_java_string_format(program: &Program) -> bool {
+    program
+        .types
+        .iter()
+        .any(|ty| ty.members.iter().any(member_uses_java_string_format))
+}
+
+fn member_uses_java_string_format(member: &crate::java_ir::Member) -> bool {
+    match member {
+        crate::java_ir::Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(expr_uses_java_string_format),
+        crate::java_ir::Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(block_uses_java_string_format),
+        crate::java_ir::Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(block_uses_java_string_format),
+        crate::java_ir::Member::Type(ty) => ty.members.iter().any(member_uses_java_string_format),
+        crate::java_ir::Member::Unsupported { .. } => false,
+    }
+}
+
+fn block_uses_java_string_format(block: &crate::java_ir::Block) -> bool {
+    block.statements.iter().any(stmt_uses_java_string_format)
+}
+
+fn stmt_uses_java_string_format(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(expr)
+        | Stmt::Return(Some(expr))
+        | Stmt::Throw(expr)
+        | Stmt::VarDecl {
+            initializer: Some(expr),
+            ..
+        } => expr_uses_java_string_format(expr),
+        Stmt::Assign { target, value } => {
+            expr_uses_java_string_format(target) || expr_uses_java_string_format(value)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_uses_java_string_format(condition)
+                || block_uses_java_string_format(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_uses_java_string_format)
+        }
+        Stmt::While { condition, body } => {
+            expr_uses_java_string_format(condition) || block_uses_java_string_format(body)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_uses_java_string_format)
+                || condition.as_ref().is_some_and(expr_uses_java_string_format)
+                || update.iter().any(expr_uses_java_string_format)
+                || block_uses_java_string_format(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_uses_java_string_format(iterable) || block_uses_java_string_format(body)
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(stmt_uses_java_string_format)
+                || block_uses_java_string_format(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_uses_java_string_format(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_uses_java_string_format)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_uses_java_string_format(selector)
+                || cases
+                    .iter()
+                    .any(|case| case.statements.iter().any(stmt_uses_java_string_format))
+        }
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(expr_uses_java_string_format),
+        Stmt::Block(block) => block_uses_java_string_format(block),
+        Stmt::LocalType(ty) => ty.members.iter().any(member_uses_java_string_format),
+        Stmt::VarDecl {
+            initializer: None, ..
+        } => false,
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_uses_java_string_format(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            receiver
+                .as_deref()
+                .and_then(|receiver| match receiver {
+                    Expr::Var(name) => Some(canonical_external_receiver_type_key(name)),
+                    _ => None,
+                })
+                .is_some_and(|receiver| receiver == "String" && name == "format")
+                || receiver
+                    .as_deref()
+                    .is_some_and(expr_uses_java_string_format)
+                || args.iter().any(expr_uses_java_string_format)
+        }
+        Expr::FieldAccess(receiver, _) => expr_uses_java_string_format(receiver),
+        Expr::ArrayAccess(array, index) => {
+            expr_uses_java_string_format(array) || expr_uses_java_string_format(index)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(expr_uses_java_string_format)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|values| values.iter().any(expr_uses_java_string_format))
+        }
+        Expr::ArrayInitializer(values) => values.iter().any(expr_uses_java_string_format),
+        Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => expr_uses_java_string_format(expr),
+        Expr::Binary { left, right, .. } => {
+            expr_uses_java_string_format(left) || expr_uses_java_string_format(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_java_string_format(condition)
+                || expr_uses_java_string_format(then_expr)
+                || expr_uses_java_string_format(else_expr)
+        }
+        Expr::InstanceOf { expr, .. } => expr_uses_java_string_format(expr),
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => expr_uses_java_string_format(expr),
+            crate::java_ir::LambdaBody::Block(block) => block_uses_java_string_format(block),
+        },
+        Expr::New { args, body, .. } => {
+            args.iter().any(expr_uses_java_string_format)
+                || body.iter().flatten().any(member_uses_java_string_format)
+        }
+        Expr::ClassLiteral(_)
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::Raw(_)
+        | Expr::MethodReference { .. } => false,
+    }
+}
+
+fn member_uses_java_string_split(member: &crate::java_ir::Member) -> bool {
+    match member {
+        crate::java_ir::Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(expr_uses_java_string_split),
+        crate::java_ir::Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(block_uses_java_string_split),
+        crate::java_ir::Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(block_uses_java_string_split),
+        crate::java_ir::Member::Type(ty) => ty.members.iter().any(member_uses_java_string_split),
+        crate::java_ir::Member::Unsupported { .. } => false,
+    }
+}
+
+fn block_uses_java_string_split(block: &crate::java_ir::Block) -> bool {
+    block.statements.iter().any(stmt_uses_java_string_split)
+}
+
+fn stmt_uses_java_string_split(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(expr)
+        | Stmt::Return(Some(expr))
+        | Stmt::Throw(expr)
+        | Stmt::VarDecl {
+            initializer: Some(expr),
+            ..
+        } => expr_uses_java_string_split(expr),
+        Stmt::Assign { target, value } => {
+            expr_uses_java_string_split(target) || expr_uses_java_string_split(value)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_uses_java_string_split(condition)
+                || block_uses_java_string_split(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_uses_java_string_split)
+        }
+        Stmt::While { condition, body } => {
+            expr_uses_java_string_split(condition) || block_uses_java_string_split(body)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_uses_java_string_split)
+                || condition.as_ref().is_some_and(expr_uses_java_string_split)
+                || update.iter().any(expr_uses_java_string_split)
+                || block_uses_java_string_split(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_uses_java_string_split(iterable) || block_uses_java_string_split(body)
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(stmt_uses_java_string_split)
+                || block_uses_java_string_split(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_uses_java_string_split(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_uses_java_string_split)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_uses_java_string_split(selector)
+                || cases
+                    .iter()
+                    .any(|case| case.statements.iter().any(stmt_uses_java_string_split))
+        }
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(expr_uses_java_string_split),
+        Stmt::Block(block) => block_uses_java_string_split(block),
+        Stmt::LocalType(ty) => ty.members.iter().any(member_uses_java_string_split),
+        Stmt::VarDecl {
+            initializer: None, ..
+        } => false,
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_uses_java_string_split(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            (receiver.is_some() && name == "split" && matches!(args.len(), 1 | 2))
+                || receiver.as_deref().is_some_and(expr_uses_java_string_split)
+                || args.iter().any(expr_uses_java_string_split)
+        }
+        Expr::FieldAccess(receiver, _) => expr_uses_java_string_split(receiver),
+        Expr::ArrayAccess(array, index) => {
+            expr_uses_java_string_split(array) || expr_uses_java_string_split(index)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(expr_uses_java_string_split)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|values| values.iter().any(expr_uses_java_string_split))
+        }
+        Expr::ArrayInitializer(values) => values.iter().any(expr_uses_java_string_split),
+        Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => expr_uses_java_string_split(expr),
+        Expr::Binary { left, right, .. } => {
+            expr_uses_java_string_split(left) || expr_uses_java_string_split(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_java_string_split(condition)
+                || expr_uses_java_string_split(then_expr)
+                || expr_uses_java_string_split(else_expr)
+        }
+        Expr::InstanceOf { expr, .. } => expr_uses_java_string_split(expr),
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => expr_uses_java_string_split(expr),
+            crate::java_ir::LambdaBody::Block(block) => block_uses_java_string_split(block),
+        },
+        Expr::New { args, body, .. } => {
+            args.iter().any(expr_uses_java_string_split)
+                || body.iter().flatten().any(member_uses_java_string_split)
+        }
+        Expr::ClassLiteral(_)
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::Raw(_)
+        | Expr::MethodReference { .. } => false,
+    }
+}
+
+fn member_uses_java_class_tokens(member: &crate::java_ir::Member) -> bool {
+    match member {
+        crate::java_ir::Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(expr_uses_java_class_tokens),
+        crate::java_ir::Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(block_uses_java_class_tokens),
+        crate::java_ir::Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(block_uses_java_class_tokens),
+        crate::java_ir::Member::Type(ty) => ty.members.iter().any(member_uses_java_class_tokens),
+        crate::java_ir::Member::Unsupported { .. } => false,
+    }
+}
+
+fn block_uses_java_class_tokens(block: &crate::java_ir::Block) -> bool {
+    block.statements.iter().any(stmt_uses_java_class_tokens)
+}
+
+fn stmt_uses_java_class_tokens(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(expr)
+        | Stmt::Return(Some(expr))
+        | Stmt::Throw(expr)
+        | Stmt::VarDecl {
+            initializer: Some(expr),
+            ..
+        } => expr_uses_java_class_tokens(expr),
+        Stmt::Assign { target, value } => {
+            expr_uses_java_class_tokens(target) || expr_uses_java_class_tokens(value)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_uses_java_class_tokens(condition)
+                || block_uses_java_class_tokens(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_uses_java_class_tokens)
+        }
+        Stmt::While { condition, body } => {
+            expr_uses_java_class_tokens(condition) || block_uses_java_class_tokens(body)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_uses_java_class_tokens)
+                || condition.as_ref().is_some_and(expr_uses_java_class_tokens)
+                || update.iter().any(expr_uses_java_class_tokens)
+                || block_uses_java_class_tokens(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_uses_java_class_tokens(iterable) || block_uses_java_class_tokens(body)
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(stmt_uses_java_class_tokens)
+                || block_uses_java_class_tokens(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_uses_java_class_tokens(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_uses_java_class_tokens)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_uses_java_class_tokens(selector)
+                || cases
+                    .iter()
+                    .any(|case| case.statements.iter().any(stmt_uses_java_class_tokens))
+        }
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(expr_uses_java_class_tokens),
+        Stmt::Block(block) => block_uses_java_class_tokens(block),
+        Stmt::LocalType(ty) => ty.members.iter().any(member_uses_java_class_tokens),
+        Stmt::VarDecl {
+            initializer: None, ..
+        } => false,
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_uses_java_class_tokens(expr: &Expr) -> bool {
+    match expr {
+        Expr::ClassLiteral(_) => true,
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            let calls_class_for_name = receiver.as_deref().is_some_and(|receiver| {
+                matches!(receiver, Expr::Var(receiver_name) if canonical_external_receiver_type_key(receiver_name) == "Class")
+            }) && name == "forName";
+            calls_class_for_name
+                || receiver.as_deref().is_some_and(expr_uses_java_class_tokens)
+                || args.iter().any(expr_uses_java_class_tokens)
+        }
+        Expr::FieldAccess(receiver, _)
+        | Expr::ArrayAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => expr_uses_java_class_tokens(receiver),
+        Expr::Binary { left, right, .. } => {
+            expr_uses_java_class_tokens(left) || expr_uses_java_class_tokens(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_java_class_tokens(condition)
+                || expr_uses_java_class_tokens(then_expr)
+                || expr_uses_java_class_tokens(else_expr)
+        }
+        Expr::New { args, body, .. } => {
+            args.iter().any(expr_uses_java_class_tokens)
+                || body
+                    .as_ref()
+                    .is_some_and(|members| members.iter().any(member_uses_java_class_tokens))
+        }
+        Expr::ArrayInitializer(args) => args.iter().any(expr_uses_java_class_tokens),
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(expr_uses_java_class_tokens)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|elements| elements.iter().any(expr_uses_java_class_tokens))
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => expr_uses_java_class_tokens(expr),
+            crate::java_ir::LambdaBody::Block(block) => block_uses_java_class_tokens(block),
+        },
+        Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::Raw(_) => false,
+    }
+}
+
 fn strip_java_type_modifiers(mut name: &str) -> &str {
     loop {
         let trimmed = name.trim_start();
@@ -2442,7 +6250,7 @@ pub fn external_api_method_role(
         ExternalApiRole::SideEffect
     } else if name == "set" && arg_count > 1 {
         ExternalApiRole::IndexedSetter
-    } else if name.starts_with("set") {
+    } else if is_java_setter_name(name) {
         ExternalApiRole::Setter
     } else if matches!(
         name,
@@ -2452,6 +6260,16 @@ pub fn external_api_method_role(
     } else {
         ExternalApiRole::Unknown
     }
+}
+
+fn is_java_setter_name(name: &str) -> bool {
+    name.starts_with("set_")
+        || name.strip_prefix("set").is_some_and(|suffix| {
+            suffix
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        })
 }
 
 fn is_side_effect_output_method(name: &str) -> bool {
@@ -2573,7 +6391,11 @@ pub fn external_api_return_nullability(
         (Some("StringUtils"), "split", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Utils"), "split", 2 | 3) => NullabilityState::DefinitelyNonNull,
         (Some("Utils"), "stream", 1) => NullabilityState::DefinitelyNonNull,
-        (Some("IOUtils"), "replaceExtension", 2) => NullabilityState::DefinitelyNonNull,
+        (
+            Some("IOUtils"),
+            "getPath" | "appendPathToDir" | "createTempFile" | "replaceExtension",
+            _,
+        ) => NullabilityState::DefinitelyNonNull,
         (Some("Integer"), "parseInt", 1 | 2) => NullabilityState::DefinitelyNonNull,
         (Some("QualityUtils"), "qualToProb" | "qualToProbLog10", 1) => {
             NullabilityState::DefinitelyNonNull
@@ -2630,9 +6452,15 @@ fn collection_api_method_role(name: &str, _arg_count: usize) -> ExternalApiRole 
         "get" => ExternalApiRole::IndexedGetter,
         "size" | "isEmpty" | "contains" | "containsAll" | "iterator" | "stream" | "filter"
         | "distinct" | "sorted" | "collect" | "toArray" => ExternalApiRole::Getter,
-        "add" | "addAll" | "remove" | "removeAll" | "clear" => ExternalApiRole::Mutator,
+        "add" | "addAll" | "remove" | "removeAll" | "removeIf" | "clear" => {
+            ExternalApiRole::Mutator
+        }
         _ => external_api_method_role(None, name, _arg_count),
     }
+}
+
+pub fn is_content_read_argument_method(name: &str, arg_index: usize) -> bool {
+    matches!((name, arg_index), ("addAll", 0) | ("containsAll", 0))
 }
 
 fn map_api_method_role(name: &str, _arg_count: usize) -> ExternalApiRole {
@@ -2660,7 +6488,14 @@ fn static_utility_method_role(
         (Some("StringUtils"), "isEmpty", 1) => ExternalApiRole::BooleanGetter,
         (Some("StringUtils"), "split", 2) => ExternalApiRole::Getter,
         (Some("Utils"), "split", 2 | 3) | (Some("Utils"), "stream", 1) => ExternalApiRole::Getter,
-        (Some("IOUtils"), "replaceExtension", 2) => ExternalApiRole::Getter,
+        (
+            Some("IOUtils"),
+            "getPath" | "appendPathToDir" | "createTempFile" | "replaceExtension",
+            _,
+        ) => ExternalApiRole::Getter,
+        (Some("IOUtils"), "assertFileIsReadable" | "assertPathsAreReadable", _) => {
+            ExternalApiRole::SideEffect
+        }
         (Some("Integer"), "parseInt", 1 | 2) => ExternalApiRole::Getter,
         (Some("QualityUtils"), "qualToProb" | "qualToProbLog10", 1) => ExternalApiRole::Getter,
         (Some("Beta"), "logBeta", 2) => ExternalApiRole::Getter,

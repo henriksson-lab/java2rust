@@ -108,6 +108,10 @@ impl RustSlotShape {
         self.sequence_element_type()
             .is_some_and(|element_ty| element_ty == element_shape.java_ty)
     }
+
+    pub fn is_shared_borrowed_value(&self) -> bool {
+        self.ownership == OwnershipShape::SharedBorrow
+    }
 }
 
 impl TypeIdentity {

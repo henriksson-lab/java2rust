@@ -42,6 +42,19 @@ The benchmark is allowed to show no count movement. If the generalized rule is
 correct, tested, and owned by the right layer, keep the test and record the
 no-movement result.
 
+## Transformation Rule Authoring
+
+Every transformation rule produced by this loop must follow
+`docs/transformation-rule-contract.md`. Before writing the implementation rule,
+write an **Ideal Rust Target** section that shows the Rust API, expression,
+type, ownership, borrowing, optionality, mutability, dispatch, error, and
+external-boundary shape we would want by hand when the needed facts are known.
+
+Only after the ideal target is explicit should the rule describe how resolver
+facts, semantic facts, object strategy, slot-shape plans, conversion plans, or
+lowering nodes select that Rust target. A rule that starts with "lower this
+Java pattern as that Rust snippet" is not ready for implementation.
+
 ## Layer Ownership
 
 ### Parser

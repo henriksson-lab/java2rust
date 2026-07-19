@@ -1,10 +1,12 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
 use new_java2rust::facts::{
-    ControlFlowFactKind, DispatchRequirementKind, ExceptionKind, ExternalApiEffectFact,
-    ExternalApiRole, FactProvenance, NullabilityState, ReceiverMutabilityFact, RecursionKind,
-    TrivialAccessorKind, UnresolvedTargetFact, UnresolvedTargetKind,
+    ControlFlowFactKind, DispatchRequirementKind, ExceptionKind, ExternalApiArgumentEffectFact,
+    ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy, FactProvenance, FactSet,
+    NullabilityState, ReceiverMutabilityFact, RecursionKind, TrivialAccessorKind,
+    UnresolvedTargetFact, UnresolvedTargetKind,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::object_model::plan_object_model;
@@ -12,12 +14,12 @@ use new_java2rust::rewrite::{
     AssignmentConditionNormalizedShape, ControlFlowRewritePlan, NullTestKind,
     TailRecursiveNormalizedShape,
 };
-use new_java2rust::slot_shape::OwnershipShape;
+use new_java2rust::slot_shape::{OwnershipShape, ViewShape};
 use new_java2rust::stdlib::{
     canonical_external_receiver_type_key, external_api_method_policy, external_field_provenance,
 };
 use new_java2rust::types::optional_java_type;
-use new_java2rust::usage::{FieldUse, UsageMethodKey};
+use new_java2rust::usage::{BindingUse, CallArgumentBoundary, FieldUse, UsageMethodKey};
 use new_java2rust::{
     emit, exception_plan, external_facts, lower, parser, representation, resolve,
     semantic_analysis, signature, translate_source, translate_source_with_facts,
@@ -159,6 +161,24 @@ fn records_non_null_field_from_all_constructors() {
 }
 
 #[test]
+fn final_initialized_reference_field_is_non_null_despite_constructor() {
+    let semantic = analyze(
+        r#"
+final class Constants {
+    public static final String NAME = "alpha";
+
+    private Constants() {}
+}
+"#,
+    );
+
+    assert_eq!(
+        semantic.facts.field_nullability_for("Constants", "NAME"),
+        Some(NullabilityState::DefinitelyNonNull)
+    );
+}
+
+#[test]
 fn field_nullability_external_override_beats_constructor_proof() {
     let source = idiom_gap("NonNullFieldFromConstructors.java");
     let parsed_external = external_facts::parse_external_facts(
@@ -231,6 +251,110 @@ fn records_non_null_field_assignment_through_constructor_delegation() {
 }
 
 #[test]
+fn field_nullability_lattice_does_not_prove_unknown_assignments_non_null() {
+    let semantic = analyze(
+        r#"
+class UnknownAssignedFields {
+    String fromCall;
+    String fromParam;
+    String fromHelper;
+
+    UnknownAssignedFields(String seed, Helper helper) {
+        fromCall = helper.fetch();
+        fromParam = seed;
+        assignHelper(seed);
+    }
+
+    private void assignHelper(String seed) {
+        fromHelper = seed;
+    }
+}
+
+class Helper {
+    String fetch() { return null; }
+}
+"#,
+    );
+
+    for field in ["fromCall", "fromParam", "fromHelper"] {
+        assert_ne!(
+            semantic
+                .facts
+                .field_nullability_for("UnknownAssignedFields", field),
+            Some(NullabilityState::DefinitelyNonNull),
+            "{field} must not be proven non-null from unknown assignment evidence"
+        );
+    }
+}
+
+#[test]
+fn field_nullability_lattice_preserves_nullable_constructor_conflicts() {
+    let semantic = analyze(
+        r#"
+class ConflictingAssignments {
+    String name;
+
+    ConflictingAssignments() {
+        this("safe");
+    }
+
+    ConflictingAssignments(String seed) {
+        name = "safe";
+        name = null;
+    }
+}
+"#,
+    );
+
+    assert_eq!(
+        semantic
+            .facts
+            .field_nullability_for("ConflictingAssignments", "name"),
+        Some(NullabilityState::MaybeNull)
+    );
+}
+
+#[test]
+fn field_nullability_lattice_keeps_constructor_delegation_cycles_finite() {
+    let semantic = analyze(
+        r#"
+class CyclicFieldDelegation {
+    String name;
+
+    CyclicFieldDelegation() {
+        this(1);
+    }
+
+    CyclicFieldDelegation(int value) {
+        this();
+        name = "safe";
+    }
+}
+"#,
+    );
+
+    assert!(
+        semantic.iterations.field_nullability > 0,
+        "{:?}",
+        semantic.iterations
+    );
+    assert!(
+        semantic
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "semantic_field_nullability_budget_exhausted"),
+        "{:?}",
+        semantic.diagnostics
+    );
+    assert_ne!(
+        semantic
+            .facts
+            .field_nullability_for("CyclicFieldDelegation", "name"),
+        Some(NullabilityState::DefinitelyNonNull)
+    );
+}
+
+#[test]
 fn nullable_field_storage_uses_option_shape_and_assignment_wrapping() {
     let translation = translate_source(&java_fixture("05-types/Nullability.java"));
 
@@ -241,6 +365,184 @@ fn nullable_field_storage_uses_option_shape_and_assignment_wrapping() {
     );
     assert!(
         translation.rust.contains("self.cached = Some(value);"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn field_nullability_and_signature_optionality_are_co_solved_for_constructor_coverage() {
+    let source = r#"
+class FieldOptionalityCases {
+    String proven;
+    String nullable;
+    String externalUnknown;
+    String missingCoverage;
+
+    FieldOptionalityCases() {
+        this.proven = "safe";
+        this.nullable = null;
+        this.externalUnknown = ExternalHelper.fetch();
+    }
+
+    FieldOptionalityCases(int skipped) {
+        this.proven = "also safe";
+        this.nullable = null;
+        this.externalUnknown = ExternalHelper.fetch();
+        this.missingCoverage = "present here only";
+    }
+}
+"#;
+    let semantic = analyze(source);
+    let translation = translate_source(source);
+
+    assert_eq!(
+        semantic
+            .facts
+            .field_nullability_for("FieldOptionalityCases", "proven"),
+        Some(NullabilityState::DefinitelyNonNull)
+    );
+    assert_eq!(
+        semantic
+            .facts
+            .field_nullability_for("FieldOptionalityCases", "nullable"),
+        Some(NullabilityState::MaybeNull)
+    );
+    assert_eq!(
+        semantic
+            .facts
+            .field_nullability_for("FieldOptionalityCases", "externalUnknown"),
+        Some(NullabilityState::MaybeNull)
+    );
+    assert_eq!(
+        semantic
+            .facts
+            .field_nullability_for("FieldOptionalityCases", "missingCoverage"),
+        Some(NullabilityState::MaybeNull)
+    );
+
+    assert!(
+        translation.rust.contains("proven: String"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("proven: Option<String>"),
+        "{}",
+        translation.rust
+    );
+    for field in ["nullable", "external_unknown", "missing_coverage"] {
+        assert!(
+            translation
+                .rust
+                .contains(&format!("{field}: Option<String>")),
+            "{}",
+            translation.rust
+        );
+    }
+}
+
+#[test]
+fn bare_constructor_field_assignments_prove_non_null_when_unshadowed() {
+    let source = r#"
+class BareFieldAssignmentsAreFields {
+    String name;
+
+    BareFieldAssignmentsAreFields() {
+        name = "safe";
+    }
+
+    BareFieldAssignmentsAreFields(int ignored) {
+        name = new String("also safe");
+    }
+
+    int length() {
+        return name.length();
+    }
+}
+"#;
+    let semantic = analyze(source);
+    let translation = translate_source(source);
+
+    assert_eq!(
+        semantic
+            .facts
+            .field_nullability_for("BareFieldAssignmentsAreFields", "name"),
+        Some(NullabilityState::DefinitelyNonNull)
+    );
+    assert!(
+        translation.rust.contains("name: String")
+            && !translation.rust.contains("name: Option<String>")
+            && translation.rust.contains("return self.name.len() as i32;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn bare_constructor_assignment_respects_parameter_shadowing() {
+    let source = r#"
+class BareFieldAssignmentShadowedByParam {
+    String name;
+
+    BareFieldAssignmentShadowedByParam(String name) {
+        name = "local only";
+    }
+}
+"#;
+    let semantic = analyze(source);
+    let translation = translate_source(source);
+
+    assert_eq!(
+        semantic
+            .facts
+            .field_nullability_for("BareFieldAssignmentShadowedByParam", "name"),
+        Some(NullabilityState::MaybeNull)
+    );
+    assert!(
+        translation.rust.contains("name: Option<String>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn constructor_initialized_sorted_map_field_is_not_optional_carrier() {
+    let source = r#"
+import java.net.URI;
+import java.util.SortedMap;
+import java.util.TreeMap;
+
+class ConstructorInitializedSortedMapField {
+    SortedMap<String, URI> sampleNameToPath;
+
+    ConstructorInitializedSortedMapField() {
+        sampleNameToPath = new TreeMap<>();
+    }
+
+    int size() {
+        return sampleNameToPath.size();
+    }
+}
+"#;
+    let semantic = analyze(source);
+    let translation = translate_source(source);
+
+    assert_eq!(
+        semantic
+            .facts
+            .field_nullability_for("ConstructorInitializedSortedMapField", "sampleNameToPath",),
+        Some(NullabilityState::DefinitelyNonNull)
+    );
+    assert!(
+        translation
+            .rust
+            .contains("sample_name_to_path: std::collections::HashMap<String, URI>")
+            && !translation.rust.contains("sample_name_to_path: Option<")
+            && translation
+                .rust
+                .contains("return self.sample_name_to_path.len() as i32;")
+            && !translation.rust.contains("sample_name_to_path.size()"),
         "{}",
         translation.rust
     );
@@ -277,7 +579,7 @@ fn records_trivial_getter_and_setter_facts() {
 }
 
 #[test]
-fn lowers_trivial_accessor_calls_as_field_access_without_deleting_api_wrappers() {
+fn preserves_public_trivial_accessor_calls_when_api_wrappers_must_survive() {
     let translation = translate_source(&idiom_gap("JavaBeanGetterSetterNames.java"));
 
     assert!(
@@ -292,6 +594,39 @@ fn lowers_trivial_accessor_calls_as_field_access_without_deleting_api_wrappers()
     );
     assert!(
         translation.rust.contains("pub fn copy_from(&mut self"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("self.set_value(other.get_value())"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("return self.get_value();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn lowers_package_private_trivial_accessor_calls_as_field_access() {
+    let translation = translate_source(&idiom_gap("PackagePrivateGetterSetterInlining.java"));
+
+    assert!(
+        translation.rust.contains("fn get_value(&self) -> i32"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("fn set_value(&mut self"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("fn copy_from(&mut self"),
         "{}",
         translation.rust
     );
@@ -333,6 +668,88 @@ fn usage_treats_trivial_accessor_calls_as_backing_field_uses() {
         )),
         "{:?}",
         copy_from.field_uses
+    );
+}
+
+#[test]
+fn usage_treats_native_collection_field_mutators_as_self_mutation() {
+    let semantic = analyze(&idiom_gap("CollectionFieldMutator.java"));
+    let put_value = semantic
+        .usage
+        .methods
+        .get(&UsageMethodKey {
+            type_name: "CollectionFieldMutator".to_string(),
+            method_name: "putValue".to_string(),
+        })
+        .unwrap();
+
+    assert!(put_value.mutates_self, "{put_value:?}");
+}
+
+#[test]
+fn method_throw_effects_propagate_through_source_call_graph() {
+    let semantic = analyze(&idiom_gap("ThrowingCallChainResultShell.java"));
+
+    assert!(
+        semantic
+            .facts
+            .method_has_thrown_exceptions("ThrowingCallChainResultShell", "leaf")
+    );
+    assert!(
+        semantic
+            .facts
+            .method_has_thrown_exceptions("ThrowingCallChainResultShell", "middle")
+    );
+    assert!(
+        semantic
+            .facts
+            .method_has_thrown_exceptions("ThrowingCallChainResultShell", "top")
+    );
+}
+
+#[test]
+fn method_throw_effects_saturate_recursive_source_call_graph() {
+    let semantic = analyze(
+        r#"
+class RecursiveThrowPropagation {
+    String a(boolean ok) {
+        if (ok) {
+            return b(ok);
+        }
+        return leaf();
+    }
+
+    String b(boolean ok) {
+        return a(ok);
+    }
+
+    String leaf() throws IOException {
+        throw new IOException("bad");
+    }
+}
+
+class IOException extends Exception {
+    IOException(String message) {
+        super(message);
+    }
+}
+"#,
+    );
+
+    assert!(
+        semantic
+            .facts
+            .method_has_thrown_exceptions("RecursiveThrowPropagation", "a")
+    );
+    assert!(
+        semantic
+            .facts
+            .method_has_thrown_exceptions("RecursiveThrowPropagation", "b")
+    );
+    assert!(
+        semantic
+            .facts
+            .method_has_thrown_exceptions("RecursiveThrowPropagation", "leaf")
     );
 }
 
@@ -567,6 +984,35 @@ class UnknownExternalApiProvenanceUse {
         .external_api_effect_for_receiver(Some("ExternalThing"), "transform")
         .unwrap();
     assert_eq!(effect.provenance, FactProvenance::ConservativeFallback);
+}
+
+#[test]
+fn external_api_effect_receiver_lookup_matches_simple_owner_for_fqn_facts() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "isGenomicsDBArray".to_string(),
+        receiver_type: Some("org.genomicsdb.GenomicsDBUtils".to_string()),
+        arg_count: Some(2),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: new_java2rust::facts::ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Primitive(PrimitiveType::Boolean)),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let effect = facts
+        .external_api_effect_for_receiver_with_arity(
+            Some("GenomicsDBUtils"),
+            "is_genomics_d_b_array",
+            Some(2),
+        )
+        .expect("FQN external API facts should be reusable through simple imported owners");
+
+    assert_eq!(
+        effect.return_type,
+        Some(JavaType::Primitive(PrimitiveType::Boolean))
+    );
 }
 
 #[test]
@@ -6369,6 +6815,267 @@ fn external_setter_effect_requires_mutable_receiver_binding_in_signature() {
 }
 
 #[test]
+fn external_setter_effect_keeps_local_storage_owned_and_mutable() {
+    let source = r#"
+class ExternalLocalReceiverMutability {
+    void run() {
+        ExternalCounter counter = new ExternalCounter();
+        counter.setValue(1);
+    }
+}
+"#;
+    let parsed = parser::parse_java_source(source);
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = semantic_analysis::analyze_program(
+        &resolved.program,
+        &resolved.facts,
+        &new_java2rust::facts::FactSet::default(),
+    );
+    let representations = representation::plan_representations(&resolved.program, &semantic.facts);
+    let signatures = signature::solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            new_java2rust::java_ir::Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let method_signature = signatures.method_signature(ty, method).unwrap();
+    let local = signatures
+        .local_shape(&method_signature.locals, "counter")
+        .expect("counter local should have a solved shape");
+
+    assert_eq!(local.ownership, OwnershipShape::Owned);
+    assert_eq!(
+        signatures.local_binding_mutability(&method_signature.locals, "counter"),
+        Some(true)
+    );
+}
+
+#[test]
+fn readonly_external_receiver_usage_can_borrow_public_helper_param() {
+    let source = r#"
+class ReadOnlyExternalReceiverParam {
+    public static String read(ExternalHandle handle) {
+        return handle.getName();
+    }
+}
+"#;
+    let parsed = parser::parse_java_source(source);
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let mut external_facts = new_java2rust::facts::FactSet::default();
+    external_facts
+        .external_api_effect_facts
+        .push(ExternalApiEffectFact {
+            method_name: "getName".to_string(),
+            receiver_type: Some("ExternalHandle".to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::String),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::UserOverride,
+        });
+    let semantic =
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &external_facts);
+    let method_usage = semantic
+        .usage
+        .methods
+        .get(&UsageMethodKey {
+            type_name: "ReadOnlyExternalReceiverParam".to_string(),
+            method_name: "read".to_string(),
+        })
+        .expect("read usage should be recorded");
+    let handle_uses = &method_usage
+        .bindings
+        .get("handle")
+        .expect("handle binding should be recorded")
+        .uses;
+    assert_eq!(
+        handle_uses,
+        &vec![
+            BindingUse::ReceiverForCall {
+                name: "getName".to_string(),
+                boundary: CallArgumentBoundary::Unknown,
+            },
+            BindingUse::ContentRead,
+        ]
+    );
+    assert!(
+        semantic
+            .facts
+            .external_api_effect_for_receiver(Some("ExternalHandle"), "getName")
+            .is_some_and(|effect| {
+                effect.receiver_mutability == ReceiverMutabilityFact::ReadOnly
+            })
+    );
+    let representations = representation::plan_representations(&resolved.program, &semantic.facts);
+    let raw_param_constraints = signature::method_param_shape_constraints(
+        &resolved.program.types[0],
+        resolved.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                new_java2rust::java_ir::Member::Method(method) if method.name == "read" => {
+                    Some(method)
+                }
+                _ => None,
+            })
+            .unwrap(),
+        &resolved.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                new_java2rust::java_ir::Member::Method(method) if method.name == "read" => {
+                    method.params.first()
+                }
+                _ => None,
+            })
+            .unwrap(),
+        &semantic.usage,
+        &semantic.facts,
+    );
+    assert!(
+        raw_param_constraints.contains(&signature::SignatureConstraint::RequiredOwnership(
+            OwnershipShape::SharedBorrow,
+        ))
+    );
+    assert!(
+        !raw_param_constraints.contains(&signature::SignatureConstraint::RequiredOwnership(
+            OwnershipShape::Owned,
+        ))
+    );
+    let signatures = signature::solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            new_java2rust::java_ir::Member::Method(method) if method.name == "read" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let param_shape = signatures.method_param_plans(ty, method).unwrap()[0]
+        .shape
+        .clone();
+
+    assert_eq!(param_shape.ownership, OwnershipShape::SharedBorrow);
+}
+
+#[test]
+fn readonly_same_type_public_helper_param_stays_owned_for_replacement_return() {
+    let source = r#"
+class ReadOnlySameTypeReplacementParam {
+    public static com.acme.ExternalHandle copy(ExternalHandle handle) {
+        return handle.copy();
+    }
+}
+"#;
+    let parsed = parser::parse_java_source(source);
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let mut external_facts = new_java2rust::facts::FactSet::default();
+    external_facts
+        .external_api_effect_facts
+        .push(ExternalApiEffectFact {
+            method_name: "copy".to_string(),
+            receiver_type: Some("ExternalHandle".to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Unknown("ExternalHandle".to_string())),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::UserOverride,
+        });
+    let semantic =
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &external_facts);
+    let representations = representation::plan_representations(&resolved.program, &semantic.facts);
+    let signatures = signature::solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            new_java2rust::java_ir::Member::Method(method) if method.name == "copy" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let param_shape = signatures.method_param_plans(ty, method).unwrap()[0]
+        .shape
+        .clone();
+
+    assert_eq!(param_shape.ownership, OwnershipShape::Owned);
+}
+
+#[test]
+fn readonly_public_helper_returning_opaque_external_product_keeps_param_owned() {
+    let source = r#"
+class ReadOnlyOpaqueProductParam {
+    public static ExternalWidget make(ExternalHandle handle) {
+        return handle.makeWidget();
+    }
+}
+"#;
+    let parsed = parser::parse_java_source(source);
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let mut external_facts = new_java2rust::facts::FactSet::default();
+    external_facts
+        .external_api_effect_facts
+        .push(ExternalApiEffectFact {
+            method_name: "makeWidget".to_string(),
+            receiver_type: Some("ExternalHandle".to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Unknown("ExternalWidget".to_string())),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::UserOverride,
+        });
+    let semantic =
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &external_facts);
+    let representations = representation::plan_representations(&resolved.program, &semantic.facts);
+    let signatures = signature::solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            new_java2rust::java_ir::Member::Method(method) if method.name == "make" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let param_shape = signatures.method_param_plans(ty, method).unwrap()[0]
+        .shape
+        .clone();
+
+    assert_eq!(param_shape.ownership, OwnershipShape::Owned);
+}
+
+#[test]
 fn external_api_user_override_beats_later_name_guess() {
     let source = idiom_gap("ExternalGetterSetterMutability.java");
     let parsed = parser::parse_java_source(&source);
@@ -6490,6 +7197,88 @@ fn external_api_receiver_specific_override_beats_global_override_in_signature() 
 }
 
 #[test]
+fn external_argument_effects_shape_method_params_in_signature_solver() {
+    let source = r#"
+class ExternalArgumentShapeUse {
+    void use(String text, ExternalBuffer buffer, ExternalPayload payload) {
+        ExternalApi.borrowString(text);
+        ExternalApi.fill(buffer);
+        ExternalApi.store(payload);
+    }
+}
+"#;
+    let parsed = parser::parse_java_source(source);
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let mut external_facts = new_java2rust::facts::FactSet::default();
+    external_facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "borrowString".to_string(),
+            receiver_type: None,
+            parameter_index: 0,
+            parameter_type: Some(JavaType::String),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::UserOverride,
+        });
+    external_facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "store".to_string(),
+            receiver_type: None,
+            parameter_index: 0,
+            parameter_type: Some(JavaType::Named {
+                name: "ExternalPayload".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::Unknown,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::UserOverride,
+        });
+    external_facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "fill".to_string(),
+            receiver_type: None,
+            parameter_index: 0,
+            parameter_type: Some(JavaType::Named {
+                name: "ExternalBuffer".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::Unknown,
+            argument_mutability: ReceiverMutabilityFact::MutatesReceiver,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::UserOverride,
+        });
+    let semantic =
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &external_facts);
+    let representations = representation::plan_representations(&resolved.program, &semantic.facts);
+    let signatures = signature::solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            new_java2rust::java_ir::Member::Method(method) if method.name == "use" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let params = signatures.method_param_plans(ty, method).unwrap();
+
+    assert_eq!(params[0].shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(params[0].shape.view, ViewShape::Str);
+    assert_eq!(params[1].shape.ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(params[2].shape.ownership, OwnershipShape::Owned);
+}
+
+#[test]
 fn external_getter_effect_preserves_shared_receiver_binding_in_signature() {
     let source = idiom_gap("ExternalGetterReadOnly.java");
     let parsed = parser::parse_java_source(&source);
@@ -6539,6 +7328,85 @@ fn records_mutual_recursion_edges_without_unbounded_growth() {
         odd.iter()
             .any(|fact| { fact.calls.method_name == "even" && fact.kind == RecursionKind::Mutual })
     );
+}
+
+#[test]
+fn records_three_method_recursion_cycle_as_finite_mutual_edges() {
+    let semantic = analyze(
+        r#"
+class ThreeCycle {
+    int c(int x) { return a(x); }
+    int a(int x) { return b(x); }
+    int b(int x) { return c(x); }
+}
+"#,
+    );
+
+    let a = semantic.facts.recursion_facts_for("ThreeCycle", "a");
+    assert!(
+        a.iter()
+            .any(|fact| { fact.calls.method_name == "b" && fact.kind == RecursionKind::Mutual })
+    );
+
+    let b = semantic.facts.recursion_facts_for("ThreeCycle", "b");
+    assert!(
+        b.iter()
+            .any(|fact| { fact.calls.method_name == "c" && fact.kind == RecursionKind::Mutual })
+    );
+
+    let c = semantic.facts.recursion_facts_for("ThreeCycle", "c");
+    assert!(
+        c.iter()
+            .any(|fact| { fact.calls.method_name == "a" && fact.kind == RecursionKind::Mutual })
+    );
+
+    assert_eq!(semantic.facts.recursion_facts.len(), 3);
+}
+
+#[test]
+fn does_not_record_recursion_facts_for_acyclic_call_chains() {
+    let semantic = analyze(
+        r#"
+class AcyclicCalls {
+    int a(int x) { return b(x); }
+    int b(int x) { return c(x); }
+    int c(int x) { return x; }
+}
+"#,
+    );
+
+    assert!(semantic.facts.recursion_facts.is_empty());
+}
+
+#[test]
+fn records_constructor_delegation_recursion_as_finite_edges() {
+    let semantic = analyze(
+        r#"
+class ConstructorCycle {
+    ConstructorCycle() { this(1); }
+    ConstructorCycle(int x) { this(); }
+}
+"#,
+    );
+
+    let facts = &semantic.facts.constructor_recursion_facts;
+    assert_eq!(facts.len(), 2, "{facts:?}");
+    assert!(facts.iter().all(|fact| {
+        fact.kind == RecursionKind::Mutual
+            && fact.constructor.type_name == "ConstructorCycle"
+            && fact.calls.type_name == "ConstructorCycle"
+    }));
+
+    let constructors = facts
+        .iter()
+        .map(|fact| fact.constructor.rust_name.as_str())
+        .collect::<HashSet<_>>();
+    let calls = facts
+        .iter()
+        .map(|fact| fact.calls.rust_name.as_str())
+        .collect::<HashSet<_>>();
+    assert_eq!(constructors, calls);
+    assert_eq!(constructors.len(), 2);
 }
 
 #[test]
@@ -6608,34 +7476,134 @@ fn plans_tail_recursive_loop_normalization_shape() {
 }
 
 #[test]
-fn translation_reports_pending_control_flow_rewrite_diagnostics() {
+fn translation_no_longer_reports_pending_assignment_in_condition_diagnostics() {
     let translation = translate_source(&idiom_gap("WhileAssignmentNotNull.java"));
 
     assert!(
-        translation
+        !translation
             .diagnostics
-            .has_code("control_flow_rewrite_pending")
+            .has_code("control_flow_rewrite_pending"),
+        "{:?}",
+        translation.diagnostics
     );
-    assert!(translation.diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
+    assert!(
+        !translation
+            .rust
             .contains("assignment-in-condition normalization")
+    );
+}
+
+#[test]
+fn translation_no_longer_reports_pending_tail_recursive_rewrite_diagnostics() {
+    let translation = translate_source(&idiom_gap("TailRecursiveAccumulator.java"));
+
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("control_flow_rewrite_pending"),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("tail-recursive loop normalization")
+    );
+    assert!(translation.rust.contains("loop {"), "{}", translation.rust);
+}
+
+#[test]
+fn recursion_policy_warns_when_direct_recursion_is_not_safe_tail_loop_shape() {
+    let source = r#"
+class NonTailRecursive {
+    int factorial(int n) {
+        if (n <= 1) {
+            return 1;
+        }
+        return n * factorial(n - 1);
+    }
+}
+"#;
+    let semantic = analyze(source);
+
+    assert!(semantic.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "recursion_tco_fallback"
+            && diagnostic.message.contains("NonTailRecursive::factorial")
+            && diagnostic
+                .message
+                .contains("does not match the safe accumulator loop shape")
+    }));
+    assert!(semantic.control_flow_plans.is_empty());
+}
+
+#[test]
+fn recursion_policy_warns_for_mutual_tail_style_recursion_fallback() {
+    let semantic = analyze(&idiom_gap("MutualRecursion.java"));
+
+    assert!(semantic.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "recursion_tco_fallback"
+            && diagnostic.message.contains("MutualRecursion::even")
+            && diagnostic.message.contains("mutual recursion")
+    }));
+    assert!(semantic.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "recursion_tco_fallback"
+            && diagnostic.message.contains("MutualRecursion::odd")
+            && diagnostic.message.contains("mutual recursion")
     }));
 }
 
 #[test]
-fn translation_reports_pending_tail_recursive_rewrite_diagnostics() {
-    let translation = translate_source(&idiom_gap("TailRecursiveAccumulator.java"));
+fn recursion_policy_warns_for_receiver_recursive_calls_not_proven_this() {
+    let source = r#"
+class ReceiverRecursive {
+    int count(ReceiverRecursive next, int n) {
+        if (n <= 0) {
+            return 0;
+        }
+        return next.count(this, n - 1);
+    }
+}
+"#;
+    let semantic = analyze(source);
 
-    assert!(
-        translation
-            .diagnostics
-            .has_code("control_flow_rewrite_pending")
-    );
-    assert!(translation.diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("tail-recursive loop normalization")
+    assert!(semantic.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "recursion_tco_fallback"
+            && diagnostic.message.contains("ReceiverRecursive::count")
+            && diagnostic.message.contains("not proven to be this")
+    }));
+}
+
+#[test]
+fn recursion_policy_warns_when_exception_wrapped_tail_loop_is_not_lowered() {
+    let source = r#"
+class Problem extends Exception {}
+class ThrowingTailRecursive {
+    long factorialLoop(int n, long acc) throws Problem {
+        if (n <= 1) {
+            return acc;
+        }
+        return factorialLoop(n - 1, acc * n);
+    }
+}
+"#;
+    let semantic = analyze(source);
+
+    assert!(semantic.control_flow_plans.iter().any(|plan| {
+        plan.method.type_name == "ThrowingTailRecursive"
+            && plan.method.method_name == "factorialLoop"
+            && plan
+                .rewrites
+                .iter()
+                .any(|rewrite| matches!(rewrite, ControlFlowRewritePlan::TailRecursiveLoop(_)))
+    }));
+    assert!(semantic.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "recursion_tco_fallback"
+            && diagnostic
+                .message
+                .contains("ThrowingTailRecursive::factorialLoop")
+            && diagnostic
+                .message
+                .contains("exception lowering wraps the method in Result")
     }));
 }
 

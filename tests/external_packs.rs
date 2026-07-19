@@ -10663,7 +10663,7 @@ fn htsjdk_tribble_feature_pack_models_coordinate_getters() {
     assert_eq!(
         header.return_type,
         Some(JavaType::Named {
-            name: "Object".to_string(),
+            name: "VCFHeader".to_string(),
             args: Vec::new(),
         })
     );
@@ -12411,18 +12411,25 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
     }
 
     for (receiver, method_name, expected_type) in [
-        ("GenomicsDBColumn", "newBuilder", "Builder"),
-        ("ContigPosition", "newBuilder", "Builder"),
-        ("ExportConfiguration", "newBuilder", "Builder"),
-        ("ImportConfiguration", "newBuilder", "Builder"),
-        ("Partition", "newBuilder", "Builder"),
-        ("VidMappingPB", "newBuilder", "Builder"),
-        ("VidMappingPB", "toBuilder", "Builder"),
-        ("FieldLengthDescriptorComponentPB", "newBuilder", "Builder"),
+        ("GenomicsDBColumn", "newBuilder", "GenomicsDBColumn.Builder"),
+        ("ContigPosition", "newBuilder", "ContigPosition.Builder"),
         (
-            "GenomicsDBImporter",
-            "getProtobufVidMapping",
-            "VidMappingPB",
+            "ExportConfiguration",
+            "newBuilder",
+            "ExportConfiguration.Builder",
+        ),
+        (
+            "ImportConfiguration",
+            "newBuilder",
+            "ImportConfiguration.Builder",
+        ),
+        ("Partition", "newBuilder", "Partition.Builder"),
+        ("VidMappingPB", "newBuilder", "VidMappingPB.Builder"),
+        ("VidMappingPB", "toBuilder", "VidMappingPB.Builder"),
+        (
+            "FieldLengthDescriptorComponentPB",
+            "newBuilder",
+            "FieldLengthDescriptorComponentPB.Builder",
         ),
     ] {
         let effect = facts
@@ -12443,6 +12450,26 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
         );
     }
 
+    let protobuf_mapping = facts
+        .external_api_effect_for_receiver(Some("GenomicsDBImporter"), "getProtobufVidMapping")
+        .expect("GenomicsDBImporter.getProtobufVidMapping should be pack-owned");
+    assert_eq!(
+        protobuf_mapping.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(protobuf_mapping.role, ExternalApiRole::Getter);
+    assert_eq!(
+        protobuf_mapping.return_type,
+        Some(JavaType::Named {
+            name: "VidMappingPB".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        protobuf_mapping.return_nullability,
+        NullabilityState::MaybeNull
+    );
+
     let contigs = facts
         .external_api_effect_for_receiver(Some("VidMappingPB"), "getContigsList")
         .expect("VidMappingPB.getContigsList should be pack-owned");
@@ -12451,10 +12478,49 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
         Some(JavaType::Named {
             name: "List".to_string(),
             args: vec![JavaType::Named {
-                name: "Contig".to_string(),
+                name: "GenomicsDBVidMapProto.Chromosome".to_string(),
                 args: Vec::new(),
             }],
         })
+    );
+
+    assert!(
+        facts
+            .external_library_pack_for_type("GenomicsDBVidMapProto.Chromosome")
+            .is_some(),
+        "GenomicsDBVidMapProto.Chromosome should be owned by the GenomicsDB pack"
+    );
+
+    let chromosome_name = facts
+        .external_api_effect_for_receiver(Some("GenomicsDBVidMapProto.Chromosome"), "getName")
+        .expect("GenomicsDBVidMapProto.Chromosome.getName should be pack-owned");
+    assert_eq!(chromosome_name.return_type, Some(JavaType::String));
+    assert_eq!(
+        chromosome_name.return_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+
+    let chromosome_offset = facts
+        .external_api_effect_for_receiver(
+            Some("GenomicsDBVidMapProto.Chromosome"),
+            "getTiledbColumnOffset",
+        )
+        .expect("GenomicsDBVidMapProto.Chromosome.getTiledbColumnOffset should be pack-owned");
+    assert_eq!(
+        chromosome_offset.return_type,
+        Some(JavaType::Primitive(
+            new_java2rust::java_ir::PrimitiveType::Long
+        ))
+    );
+
+    let chromosome_length = facts
+        .external_api_effect_for_receiver(Some("GenomicsDBVidMapProto.Chromosome"), "getLength")
+        .expect("GenomicsDBVidMapProto.Chromosome.getLength should be pack-owned");
+    assert_eq!(
+        chromosome_length.return_type,
+        Some(JavaType::Primitive(
+            new_java2rust::java_ir::PrimitiveType::Int
+        ))
     );
 
     let field = facts
@@ -12483,6 +12549,70 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
         .external_api_effect_for_receiver(Some("FieldInfo"), "getName")
         .expect("FieldInfo.getName should be pack-owned");
     assert_eq!(field_name.return_type, Some(JavaType::String));
+
+    let is_array = facts
+        .external_api_effect_for_receiver_with_arity(
+            Some("GenomicsDBUtils"),
+            "isGenomicsDBArray",
+            Some(2),
+        )
+        .expect("GenomicsDBUtils.isGenomicsDBArray should be pack-owned");
+    assert_eq!(
+        is_array.return_type,
+        Some(JavaType::Primitive(
+            new_java2rust::java_ir::PrimitiveType::Boolean
+        ))
+    );
+
+    let read_file = facts
+        .external_api_effect_for_receiver_with_arity(
+            Some("org.genomicsdb.GenomicsDBUtils"),
+            "readEntireFile",
+            Some(1),
+        )
+        .expect("GenomicsDBUtils.readEntireFile should be pack-owned");
+    assert_eq!(read_file.return_type, Some(JavaType::String));
+
+    let gcs_connector = facts
+        .external_api_effect_for_receiver_with_arity(
+            Some("GenomicsDBUtils"),
+            "useGcsHdfsConnector",
+            Some(1),
+        )
+        .expect("GenomicsDBUtils.useGcsHdfsConnector should be pack-owned");
+    assert_eq!(gcs_connector.return_type, None);
+    assert_eq!(gcs_connector.role, ExternalApiRole::SideEffect);
+
+    for (receiver, method_name, parameter_index, parameter_type) in [
+        (
+            "org.genomicsdb.GenomicsDBUtils",
+            "isGenomicsDBArray",
+            0,
+            "String",
+        ),
+        ("GenomicsDBUtils", "isGenomicsDBArray", 1, "String"),
+        ("GenomicsDBUtils", "readEntireFile", 0, "String"),
+        ("GenomicsDBUtils", "useGcsHdfsConnector", 0, "boolean"),
+    ] {
+        let argument = facts
+            .external_api_argument_effect_for_receiver(Some(receiver), method_name, parameter_index)
+            .unwrap_or_else(|| {
+                panic!("{receiver}.{method_name} parameter {parameter_index} should be pack-owned")
+            });
+        assert_eq!(
+            argument.parameter_type,
+            Some(new_java2rust::parser::parse_type(parameter_type))
+        );
+        assert_eq!(
+            argument.argument_mutability,
+            ReceiverMutabilityFact::ReadOnly
+        );
+        assert_eq!(
+            argument.alias_policy,
+            new_java2rust::facts::ExternalArgumentAliasPolicy::Borrowed
+        );
+    }
+
     for receiver in [
         "FieldInfo",
         "field_info",
@@ -12602,6 +12732,24 @@ class GenomicsDbPackUse {
 "#,
     );
 
+    let collected_genomicsdb_methods = semantic
+        .facts
+        .external_api_effect_facts
+        .iter()
+        .filter(|effect| {
+            effect.receiver_type.as_deref().is_some_and(|receiver| {
+                receiver.contains("VidMapping") || receiver.contains("GenomicsDB")
+            })
+        })
+        .map(|effect| {
+            format!(
+                "{}.{}",
+                effect.receiver_type.as_deref().unwrap_or("*"),
+                effect.method_name
+            )
+        })
+        .collect::<Vec<_>>();
+
     for (receiver, method_name) in [
         ("GenomicsDBColumn", "newBuilder"),
         ("ContigPosition", "newBuilder"),
@@ -12628,7 +12776,12 @@ class GenomicsDbPackUse {
         let effect = semantic
             .facts
             .external_api_effect_for_receiver(Some(receiver), method_name)
-            .unwrap_or_else(|| panic!("{receiver}.{method_name} should be modeled"));
+            .unwrap_or_else(|| {
+                panic!(
+                    "{receiver}.{method_name} should be modeled; collected: {collected_genomicsdb_methods:?}; diagnostics: {:?}",
+                    semantic.diagnostics
+                )
+            });
         assert_eq!(effect.provenance, FactProvenance::ExternalLibraryPack);
     }
 

@@ -220,7 +220,6 @@ A separate policy pass chooses how Java class/interface hierarchies are represen
 enum ObjectRepresentation {
     ConcreteStruct,
     DynTrait,
-    BoxedDynTrait,
     ClosedEnum,
     ErasedObject,
 }
@@ -233,8 +232,28 @@ Preferred order for hierarchy-like values:
 1. `ConcreteStruct` when no polymorphism is needed.
 2. `ClosedEnum` when a closed set of subclasses/implementations is known.
 3. `DynTrait` when interface/subtype dispatch is needed and object safety works.
-4. `BoxedDynTrait` when owned polymorphic values escape or must be stored heterogeneously.
-5. `ErasedObject` or an unsupported diagnostic when the type is too dynamic or unsafe to represent faithfully.
+4. `ErasedObject` or an unsupported diagnostic when the type is too dynamic or unsafe to represent faithfully.
+
+`BoxedDynTrait` is intentionally not an `ObjectRepresentation`. It is a slot
+projection of a `DynTrait` representation when an owned polymorphic value must
+escape, be returned, be captured, or be stored. The hierarchy strategy remains
+`DynTrait`; only the slot dispatch becomes `DispatchShape::BoxedDynTrait`.
+
+### Object Representation Fallback Matrix
+
+| Role | Concrete Struct | Closed Enum | Dyn Trait | Boxed Dyn Trait | Erased Object | Unsupported Hierarchy |
+| --- | --- | --- | --- | --- | --- | --- |
+| Public API param | Concrete param when the declared type has no polymorphic representation requirement. | Accepted only if public extensibility is not required by facts. | Borrowed trait view for object-safe public interfaces. | Not a representation; public params remain borrowed dyn unless an owned storage requirement is explicit. | Used for raw/wildcard/object-preserving public boundaries or rejected trait objects. | Diagnostic when an extends/implements edge cannot be represented and no erased fallback is selected. |
+| Public API return | Concrete owned return for concrete declared types. | Accepted for closed hierarchy returns. | Projected to owned boxed dyn slot when returning an interface value. | Slot projection for owned escaping dyn-trait return. | Used for unknown/raw/wildcard object-preserving returns. | Diagnostic before lowering if required conversion back from erased/dyn cannot be proven. |
+| Unknown API param | Concrete param for resolved helper calls. | Accepted when the unknown call target has a closed enum type. | Borrowed trait view for object-safe interface arguments. | Not a representation; only used if the slot itself requires owned polymorphic storage. | Used for unknown runtime object requirements. | Diagnostic when dispatch coercion lacks a runtime target. |
+| Unknown API return | Concrete local/return shape for resolved concrete helpers. | Accepted when source-summary facts prove closed variants. | Borrowed dyn as a value shape, then projected by the consuming slot. | Slot projection for storing or returning the result. | Used for unknown call results when runtime type is not modeled. | Diagnostic when cast/instanceof asks for unsupported recovery. |
+| Storage/field | Concrete struct field for non-polymorphic types. | Enum field for closed hierarchy storage. | Source representation remains dyn trait. | Owned field/storage projection for dyn trait. | Stored as erased object for raw/wildcard/rejected trait-object types. | Diagnostic if field hierarchy edges cannot be represented. |
+| Local | Concrete local unless usage forces polymorphic behavior. | Closed enum local when case-split proof exists. | Borrowed dyn local when only borrowed trait view is needed. | Local slot may project to boxed dyn if it escapes or is stored. | Erased object local for unknown runtime object facts. | Diagnostic if local conversion would require unsupported ownership/dispatch recovery. |
+| Captured value | Concrete captured value when capture does not cross a polymorphic boundary. | Closed enum capture for closed hierarchy values. | Captured borrowed dyn only for non-escaping closure use. | Escaping capture projects dyn trait to boxed dyn. | Capture falls back to erased object when runtime identity is unknown. | Diagnostic if capture requires unsupported clone-box or downcast recovery. |
+| External pack fact | Concrete when pack says final/concrete with no subtype dispatch. | Closed enum when pack provides a closed hierarchy override. | Dyn trait when pack proves object safety. | Provided by slot projection from dyn trait plus owned storage requirement. | Erased object when pack rejects trait objects or names raw object behavior. | Pack diagnostics should name missing subtype, object-safety, or runtime-target proof. |
+| Non-object-safe interface | Not applicable for the interface root. | Possible only with explicit closed enum override and valid variants. | Rejected. | Rejected as a representation; slot projection cannot rescue non-object-safe dyn. | Fallback representation. | Diagnostic records the object-safety violation reason. |
+| Closed hierarchy | Concrete for leaves. | Preferred for root when closed-world proof and named variants exist. | Rejected if closed enum is selected. | Only a slot projection if closed enum is not selected and dyn trait wins. | Used when override or requirements reject static case split. | Diagnostic if proof is incomplete or variants cannot be named. |
+| Raw object / wildcard object | Not used without concrete runtime identity. | Not used without named variants. | Not used without object-safe trait identity. | Not used as representation. | Default conservative representation. | Diagnostic if later casts require a missing runtime target. |
 
 ## Closed Enum Hierarchies
 
@@ -283,6 +302,32 @@ Closed enum representation is valid when one of these is true:
 - The corpus proves all implementations and no external implementation is possible.
 - The user injects facts declaring the hierarchy closed.
 - A package/project policy treats a set as closed for this translation unit.
+
+Closed enum selection is driven by an explicit proof policy, not by emission
+special cases. Parsed sealed declarations produce two separate facts: a closed
+hierarchy fact and a sealed-permits fact naming the Java alternatives. External
+packs and user facts may provide closed-hierarchy evidence without a Java
+permits list, but then the known subtype/finality facts must still prove named
+terminal variants.
+
+The proof states are:
+
+- `Proven`: a closed hierarchy fact is effective, all required permitted
+  subtypes are present when a permits list exists, at least one direct subtype
+  is known, and every direct variant is final.
+- `OpenWorld`: no effective closed hierarchy fact is available, so dyn trait or
+  erased-object fallback remains responsible.
+- `NoKnownDirectSubtypes`: the hierarchy is closed but has no named direct
+  variants for a Rust enum.
+- `MissingPermittedSubtypes`: source sealed permits name alternatives that are
+  not present in the known direct subtype set.
+- `NonFinalVariants`: direct variants are not final, so matching the direct
+  subtype set would miss later subclasses.
+
+User `closed-enum` overrides are validated separately against source hierarchy
+facts. They can intentionally select a named enum, but diagnostics must report
+unknown variants, variants that are not recorded as subtypes, and omitted
+terminal source subtypes.
 
 ## Dynamic Trait Fallback
 
@@ -497,6 +542,21 @@ Concrete Dog -> ClosedEnum AnimalValue
 Concrete Dog -> DynTrait Animal
 => &expr as &dyn Animal
 
+Concrete Dog -> ErasedObject
+=> Box::new(expr) as Box<dyn std::any::Any>
+
+ErasedObject -> Concrete Dog
+=> *expr.downcast::<Dog>().expect("invalid Java cast")
+
+ErasedObject instanceof Dog
+=> expr.is::<Dog>()
+
+ErasedObject -> DynTrait Animal
+=> unsupported diagnostic; a concrete runtime downcast target is required
+
+ErasedObject -> BoxedDynTrait Animal
+=> unsupported diagnostic; a concrete runtime downcast target and ownership proof are required
+
 ClosedEnum AnimalValue -> Concrete Dog
 => match/downcast adapter
 ```
@@ -504,6 +564,197 @@ ClosedEnum AnimalValue -> Concrete Dog
 Coercion owns adapters such as `.clone()`, `.cloned()`, `.to_string()`, enum wrapping, trait-object upcasting, and downcasting support.
 
 Stream lowering, method-call lowering, and ordinary expression lowering must not embed those ownership/dispatch decisions directly.
+
+## Erased Object Runtime Contract
+
+`ErasedObject` lowers to `Box<dyn std::any::Any>`. It is an owned runtime value
+used when source facts cannot preserve a more precise concrete, enum, or
+object-safe trait representation. The contract is:
+
+- storing, returning, and passing erased values preserves the
+  `Box<dyn std::any::Any>` carrier;
+- concrete values enter the carrier with `Box::new(value) as Box<dyn std::any::Any>`;
+- concrete casts use `downcast::<Target>()` and panic on invalid Java casts;
+- concrete `instanceof` checks use `is::<Target>()`;
+- erased-to-borrowed-dyn and erased-to-boxed-dyn recovery are unsupported until
+  a concrete runtime target and ownership proof are available;
+- anonymous erased boundaries and external-pack erased handles use this same
+  carrier instead of generating anonymous concrete implementations.
+
+Source-summary superclass boundaries use the same representation contract.
+When an emitted primary/co-translated type extends a class that is present only
+as a source-summary declaration, `representation` emits a corpus-analysis
+`HierarchyOverride` for the summary superclass with `ErasedObject`. That keeps
+non-emitted framework bases out of inheritance-lowering diagnostics while
+preserving ordinary diagnostics for co-translated superclass bodies, which
+still require real hierarchy lowering.
+
+## Boxed Dyn Clone-Box Requirements
+
+Borrowed dyn to owned boxed dyn recovery is not an ordinary `.clone()` on the
+trait object. The conversion planner must classify it before rendering:
+
+- `ProvenAdapter` when a clone-box adapter is known to be available for the
+  trait;
+- `RequiresGeneratedAdapter` when the concrete Java type is clone-capable but
+  the dyn adapter still has to be generated;
+- `UnsupportedNonCloneable` when no ownership proof exists.
+
+Until adapter generation is implemented, `RequiresGeneratedAdapter` remains an
+unsupported conversion diagnostic that preserves whether the clone proof was
+explicit or conservative.
+
+## Owned Recovery Capability Facts
+
+Owned recovery is a fact-layer decision, not a lowering special case. A Java
+type that crosses a borrowed-to-owned Rust boundary is classified by
+`OwnedRecoveryCapabilityFact` before coercion, signature solving, or external
+library lowering chooses an adapter.
+
+The capability vocabulary is deliberately broader than Rust `Copy`/`Clone`:
+
+- `Copy` covers primitive and proven copyable value types.
+- `ExplicitClone` covers ordinary Java values with a trustworthy Rust clone.
+- `CloneBoxAdapter` covers trait-object values that can be recovered through a
+  known clone-box adapter.
+- `FactoryCopy` covers APIs whose owned recovery is represented by a copy
+  factory rather than direct clone semantics.
+- `ImmutableSharedHandle` covers shared external handles whose owned Rust value
+  can be copied because the handle is immutable and identity-stable.
+- `FacadeOwnedExternalHandle` covers facade values that need an explicit
+  ownership-transfer adapter before Rust can own them.
+- `FfiOwnedHandle` covers FFI/resource handles that need an explicit FFI
+  transfer, retain, or dup operation before Rust can own them.
+- `ConservativeClone` is the fallback audit state when no explicit fact exists
+  but the Java type is not known to be non-cloneable.
+- `NonCloneable` is the explicit unsupported state.
+
+`EffectiveFacts::owned_recovery_capability_for` is the single query point.
+Coercion maps clone-box and factory-copy capabilities through the same
+`CloneRecoveryPolicy::ProvenCloneCapability` path for now, while preserving the
+more specific capability in fact and signature policy APIs. Immutable shared
+handles map to copy recovery. Facade-owned and FFI-owned handles remain
+unsupported conversion/signature diagnostics until explicit transfer adapters
+exist.
+
+External packs must add capability facts instead of matching Java package names
+inside lowering. This keeps GATK/HTSJDK, HDF5, SQLite, or future dependency
+rules declarative and lets ownership recovery compose with signature inference,
+borrowed element adapters, and dyn-trait fallback planning.
+
+Serialized external pack manifests use:
+
+```text
+external-pack-owned-recovery <pack> <type> <kind> [java-type=<type>]
+```
+
+where `<kind>` is one of `copy`, `explicit-clone`, `clone-box-adapter`,
+`factory-copy`, `immutable-shared-handle`,
+`facade-owned-external-handle`, `ffi-owned-handle`,
+`conservative-clone`, or `non-cloneable`.
+
+## Boxed Dyn Clone-Box Generation Policy
+
+The adapter decision is separate from the requirement classification. The
+planner maps each `DynCloneBoxAdapterRequirement` to a
+`DynCloneBoxAdapterGenerationPolicy` before diagnostics or compile-error
+rendering:
+
+- `AlreadyAvailable` means the target trait already has a known clone-box
+  adapter and the conversion can be emitted by the adapter-aware path;
+- `GenerateAdapter` is reserved for a future support item emitted by
+  representation lowering or item assembly;
+- `DeferredUnsupported` is the current behavior for missing generation support
+  and for missing ownership proof.
+
+`DeferredUnsupported` must produce a structured diagnostic and a consuming
+`compile_error!` placeholder. Generated crates that encounter borrowed dyn to
+owned boxed dyn recovery are therefore intentionally blocked until the adapter
+emitter exists, instead of producing Rust that appears complete but cannot
+represent Java ownership safely.
+
+## Java Cast Semantics
+
+Java casts are classified before Rust rendering by
+`JavaCastSemanticsPolicy`. The classifier consumes Java type predicates from
+`types`, representation-shaped slots, and the existing `ShapeCoercionPlan`.
+
+Named outcomes:
+
+- `PrimitiveNumericCast` for Java numeric primitive casts, including narrowing
+  and widening;
+- `ReferenceUpcast` for concrete-to-enum, concrete-to-dyn, boxed dyn, and
+  erased-object upcasts;
+- `CheckedReferenceDowncast` for runtime-checked casts out of closed enum, dyn
+  trait, boxed dyn trait, or erased-object representations, using
+  `InvalidCastPolicy`;
+- `UncheckedGenericCast` for same-raw-type generic casts with different type
+  arguments;
+- `RawOrWildcardCast` for raw generic counterparts and wildcard-containing
+  types;
+- `OptionalResultCast` for casts crossing `Optional` or planned `Result`
+  carriers;
+- `ImpossibleCast` for primitive/reference and invalid primitive casts;
+- `DiagnosticOnlyFallback` when the representation-shaped coercion already
+  produced unsupported diagnostics.
+
+Lowering may render through `ShapeCoercionPlan`, but it must not rediscover
+these Java cast categories from syntax.
+
+## Java Instanceof Semantics
+
+`instanceof` is classified before rendering by `InstanceOfTargetPolicy` and
+`plan_instanceof_check_with_facts`.
+
+Target classification names:
+
+- `ConcreteRuntimeTarget` when the target has a concrete nominal runtime type;
+- `ClosedEnumTarget` when the target is a closed hierarchy representation;
+- `DynTraitTarget` and `BoxedDynTraitTarget` when the target is an object-safe
+  interface representation or owned slot projection;
+- `ErasedObjectTarget` when the target is represented as `Box<dyn Any>`;
+- `PrimitiveTarget` for invalid Java primitive targets;
+- `RawOrWildcardTarget` for raw generic targets and wildcard-containing
+  targets;
+- `MissingRuntimeTarget` when no Rust runtime target can be named.
+
+Hierarchy facts are consumed through `HierarchySubtypePolicy`, which uses the
+finite reachability worklist in `facts`. A known concrete subtype checked
+against an interface or closed hierarchy target may become `AlwaysTrue`; dynamic
+checks over closed enum, borrowed dyn, boxed dyn, and erased-object actuals still
+lower through the representation-shaped `InstanceOfCheck` variants.
+
+## Cast and Instanceof Planning Boundary
+
+`lower.rs` may pass signature, representation, and fact context into
+`plan_cast_conversion` and `plan_instanceof`, but it must not inspect hierarchy
+facts, object representations, dispatch strategies, package names, or Java type
+capabilities for casts or `instanceof`.
+
+The boundary is named by `CastAndInstanceOfPlanningBoundary`:
+
+- casts consume representation-shaped source and target slots through
+  `CastConversionPlan`;
+- `instanceof` consumes representation-shaped slots and semantic facts through
+  `InstanceOfPlan`;
+- hierarchy reasoning happens in `facts` and `conversion_plan` before lowering;
+- rendering uses `conversion_lowering` and `coercion` plan consumers only.
+
+## Capability-Owned Type Classification
+
+Nonprimitive Java type categories used by cast and `instanceof` planning are
+owned by effective fact policies:
+
+- `CastTypeCapabilityPolicy` identifies optional/result carriers,
+  raw-or-wildcard casts, and unchecked same-raw-type generic casts;
+- `InstanceOfTargetCapabilityPolicy` identifies primitive and
+  raw-or-wildcard `instanceof` targets;
+- `FactSet` exposes facade methods for both policies so conversion planning
+  does not import raw structural helpers or branch on package/type spellings.
+
+Conversion planning may still branch directly on Java primitive kinds where the
+primitive value is required for Rust numeric casts or primitive-target
+diagnostics.
 
 ## Fallback Strategy
 

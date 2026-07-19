@@ -1,10 +1,13 @@
 use crate::exception_lowering::exception_result_type;
 use crate::exception_plan::MethodExceptionPlan;
 use crate::facts::FactSet;
-use crate::java_ir::{ConstructorDecl, Member, MethodDecl, Modifier, TypeDecl};
+use crate::java_ir::{
+    ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
+    PrimitiveType, Program, TypeDecl,
+};
 use crate::rust_ir::{
-    RustExpr, RustField, RustFunction, RustImpl, RustItem, RustParam, RustReceiver, RustStmt,
-    RustStruct, RustType,
+    RustAssociatedConst, RustExpr, RustField, RustFunction, RustImpl, RustItem, RustParam,
+    RustReceiver, RustStmt, RustStruct, RustType,
 };
 use crate::signature::{ReceiverPlan, SignaturePlan};
 use crate::slot_render::{
@@ -21,15 +24,25 @@ pub fn struct_item_for_type_with_facts(
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> RustItem {
+    struct_item_for_type_with_facts_and_support_context(ty, signatures, facts, &Program::default())
+}
+
+pub fn struct_item_for_type_with_facts_and_support_context(
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+) -> RustItem {
     RustItem::Struct(RustStruct {
         name: ty.name.clone(),
-        fields: struct_fields_for_type(ty, signatures, facts),
+        fields: struct_fields_for_type(ty, signatures, facts, support_program),
     })
 }
 
 pub fn impl_item_for_type(ty: &TypeDecl, functions: Vec<RustFunction>) -> RustItem {
     RustItem::Impl(RustImpl {
         target: ty.name.clone(),
+        associated_consts: associated_consts_for_type(ty),
         functions,
     })
 }
@@ -175,11 +188,13 @@ fn struct_fields_for_type(
     ty: &TypeDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    support_program: &Program,
 ) -> Vec<RustField> {
-    ty.members
+    let mut fields: Vec<_> = ty
+        .members
         .iter()
         .filter_map(|member| match member {
-            Member::Field(field) => Some(RustField {
+            Member::Field(field) if !is_static_field(field) => Some(RustField {
                 name: field.name.clone(),
                 ty: rust_type_for_slot_with_facts(
                     &signatures.required_field_shape(&ty.name, &field.name),
@@ -189,7 +204,84 @@ fn struct_fields_for_type(
             }),
             _ => None,
         })
+        .collect();
+    fields.extend(
+        crate::inherited_members::inherited_instance_fields_for_type(ty, support_program)
+            .into_iter()
+            .map(|inherited| RustField {
+                name: inherited.field.name.clone(),
+                ty: rust_type_for_slot_with_facts(
+                    &signatures.required_field_shape(&ty.name, &inherited.field.name),
+                    facts,
+                ),
+                is_pub: false,
+            }),
+    );
+    fields
+}
+
+pub fn is_static_field(field: &FieldDecl) -> bool {
+    field.modifiers.contains(&Modifier::Static)
+}
+
+pub fn is_static_final_field(field: &FieldDecl) -> bool {
+    field.modifiers.contains(&Modifier::Static) && field.modifiers.contains(&Modifier::Final)
+}
+
+fn associated_consts_for_type(ty: &TypeDecl) -> Vec<RustAssociatedConst> {
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if is_static_final_field(field) => {
+                associated_const_for_field(field)
+            }
+            _ => None,
+        })
         .collect()
+}
+
+fn associated_const_for_field(field: &FieldDecl) -> Option<RustAssociatedConst> {
+    let initializer = field.initializer.as_ref()?;
+    let (ty, value) = const_type_and_value(&field.ty, initializer)?;
+    Some(RustAssociatedConst {
+        name: field.name.clone(),
+        ty,
+        value,
+        is_pub: !field.modifiers.contains(&Modifier::Private),
+    })
+}
+
+fn const_type_and_value(ty: &JavaType, initializer: &Expr) -> Option<(RustType, RustExpr)> {
+    let Expr::Literal(literal) = initializer else {
+        return None;
+    };
+    match (ty, literal) {
+        (JavaType::String, Literal::String(value)) => Some((
+            RustType::Raw("&'static str".to_string()),
+            RustExpr::Literal(format!("{value:?}")),
+        )),
+        (JavaType::Primitive(PrimitiveType::Boolean), Literal::Bool(value)) => {
+            Some((RustType::Bool, RustExpr::Literal(value.to_string())))
+        }
+        (JavaType::Primitive(PrimitiveType::Byte), Literal::Int(value))
+        | (JavaType::Primitive(PrimitiveType::Short), Literal::Int(value))
+        | (JavaType::Primitive(PrimitiveType::Int), Literal::Int(value)) => {
+            Some((RustType::I32, RustExpr::Literal(value.to_string())))
+        }
+        (JavaType::Primitive(PrimitiveType::Long), Literal::Long(value)) => {
+            Some((RustType::I64, RustExpr::Literal(format!("{value}i64"))))
+        }
+        (JavaType::Primitive(PrimitiveType::Float), Literal::Float(value)) => {
+            Some((RustType::F32, RustExpr::Literal(format!("{value}f32"))))
+        }
+        (JavaType::Primitive(PrimitiveType::Double), Literal::Double(value)) => {
+            Some((RustType::F64, RustExpr::Literal(format!("{value}f64"))))
+        }
+        (JavaType::Primitive(PrimitiveType::Char), Literal::Char(value)) => {
+            Some((RustType::Char, RustExpr::Literal(format!("{value:?}"))))
+        }
+        _ => None,
+    }
 }
 
 fn constructor_params(

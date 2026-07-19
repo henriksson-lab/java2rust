@@ -62,6 +62,17 @@ For each implementation slice:
 Frequency is only a tie-breaker. Prefer work that prevents later stages from
 rediscovering Java meaning.
 
+## Transformation Rule Authoring
+
+Each generalized transformation rule must start from the Rust result we want,
+not from the Java syntax symptom. Follow
+`docs/transformation-rule-contract.md`: add an **Ideal Rust Target** section
+before the **Implementation Rule** section. The ideal target names the Rust
+type/API/control-flow shape and the relevant ownership, borrowing,
+nullability, mutability, dispatch, conversion, error, collection, lifetime, and
+external-boundary choices. The implementation rule then explains which facts
+and plans select that target and which fallback is used when proof is missing.
+
 ## Milestones
 
 Track the next phase through these milestones. Each milestone may take several

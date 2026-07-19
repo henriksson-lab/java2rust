@@ -2,23 +2,25 @@ use std::collections::{HashMap, HashSet};
 
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
-    AccessorInlinePolicy, CatchFact, ControlFlowFact, ControlFlowFactKind, DispatchRequirementFact,
-    DispatchRequirementKind, ExceptionFact, ExceptionKind, ExternalApiEffectFact,
-    ExternalConstructorFact, ExternalFieldFact, FactProvenance, FactSet, FieldKey,
-    FieldNullabilityFact, FieldNullabilityProvenance, MethodEffectFact, MethodKey,
-    NullabilityState, ReceiverMutabilityFact, RecursionFact, RecursionKind, TrivialAccessorFact,
-    TrivialAccessorKind, UnresolvedTargetKind,
+    AccessorInlinePolicy, CatchFact, ConstructorKey, ConstructorRecursionFact, ControlFlowFact,
+    ControlFlowFactKind, DispatchRequirementFact, DispatchRequirementKind, ExceptionFact,
+    ExceptionKind, ExternalApiEffectFact, ExternalConstructorFact, ExternalFieldFact,
+    FactProvenance, FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
+    MethodEffectFact, MethodKey, NullabilityState, ReceiverMutabilityFact, RecursionFact,
+    RecursionKind, TrivialAccessorFact, TrivialAccessorKind, UnresolvedTargetKind,
 };
+use crate::graph::strongly_connected_components;
 use crate::java_ir::{
     BinaryOp, Block, ConstructorDecl, ConstructorInvocationKind, Expr, FieldDecl, JavaType,
-    LambdaBody, Literal, Member, MethodDecl, Modifier, Program, Stmt, TypeDecl,
+    LambdaBody, Literal, Member, MethodDecl, Modifier, Param, Program, Stmt, TypeDecl,
 };
+use crate::lattice::field_nullability_join;
 use crate::rewrite::{
     AssignmentConditionNormalizedShape, AssignmentInConditionPlan, ControlFlowRewritePlan,
     MethodControlFlowPlan, NullTestKind, TailRecursiveLoopPlan, TailRecursiveNormalizedShape,
 };
 use crate::types::{TypeEnv, infer_expr_type};
-use crate::usage::{self, UsageFacts, UsageMethodKey};
+use crate::usage::{self, CallGraphEdgeKind, CallableKey, UsageFacts, UsageMethodKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticFacts {
@@ -110,6 +112,7 @@ pub fn analyze_program_with_config(
         );
     }
     collect_method_effect_facts(program, &usage, &mut facts);
+    propagate_source_call_thrown_effects(program, &mut facts);
     collect_recursion_facts(program, &mut facts);
     collect_dispatch_requirement_facts(program, &mut facts);
     let control_flow_plans = if config.enable_control_flow_facts {
@@ -118,8 +121,9 @@ pub fn analyze_program_with_config(
     } else {
         Vec::new()
     };
-    collect_exception_facts(program, &mut facts);
+    collect_exception_facts(program, &mut facts, &mut diagnostics);
     collect_catch_facts(program, &mut facts);
+    collect_recursion_fallback_diagnostics(program, &facts, &control_flow_plans, &mut diagnostics);
 
     SemanticFacts {
         facts,
@@ -735,7 +739,21 @@ fn collect_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
             collect_expr_type_names(array, names);
             collect_expr_type_names(index, names);
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_expr_type_names(expr, names);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_expr_type_names(expr, names);
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 collect_expr_type_names(expr, names);
             }
@@ -1452,24 +1470,32 @@ fn collect_external_api_effects_from_expr_with_env(
             resolved,
         } = expr
         {
-            let Some(receiver_type_key) = external_api_call_receiver_type_key(
+            let Some(receiver_type_key) = crate::call_plan::external_call_receiver_type_key(
                 receiver.as_deref(),
                 name,
                 args.len(),
+                facts,
                 env,
-                current_type,
+                Some(current_type),
             ) else {
                 return;
             };
-            let is_java_platform_api = receiver_type_key.as_deref().is_some_and(|receiver_type| {
-                crate::external_packs::java_platform_api_effect_for_receiver_with_arity(
-                    receiver_type,
-                    name,
-                    Some(args.len()),
-                )
-                .is_some()
-            });
-            if resolved.is_some() && !is_java_platform_api {
+            let is_modeled_external_api =
+                receiver_type_key.as_deref().is_some_and(|receiver_type| {
+                    crate::external_packs::java_platform_api_effect_for_receiver_with_arity(
+                        receiver_type,
+                        name,
+                        Some(args.len()),
+                    )
+                    .is_some()
+                        || crate::external_packs::external_api_effect_for_receiver_with_arity(
+                            Some(receiver_type),
+                            name,
+                            Some(args.len()),
+                        )
+                        .is_some()
+                });
+            if resolved.is_some() && !is_modeled_external_api {
                 return;
             }
             if receiver_type_key.is_none()
@@ -1513,7 +1539,21 @@ fn walk_expr_outside_lambdas(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
             walk_expr_outside_lambdas(array, visit);
             walk_expr_outside_lambdas(index, visit);
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                walk_expr_outside_lambdas(expr, visit);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    walk_expr_outside_lambdas(expr, visit);
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 walk_expr_outside_lambdas(expr, visit);
             }
@@ -1918,23 +1958,6 @@ fn builtin_external_library_pack_for_type(
         .flatten()
 }
 
-fn external_api_call_receiver_type_key(
-    receiver: Option<&Expr>,
-    name: &str,
-    arg_count: usize,
-    env: &TypeEnv,
-    current_type: &str,
-) -> Option<Option<String>> {
-    match receiver {
-        None if crate::stdlib::is_known_receiverless_static_utility_method(name, arg_count) => {
-            Some(None)
-        }
-        None => Some(Some(current_type.to_string())),
-        Some(Expr::This | Expr::Super) => Some(Some(current_type.to_string())),
-        Some(receiver) => external_api_receiver_expr_type_key(receiver, env).map(Some),
-    }
-}
-
 fn external_api_receiver_expr_type_key(receiver: &Expr, env: &TypeEnv) -> Option<String> {
     let inferred = infer_expr_type(receiver, env);
     if weak_unknown_field_access_receiver(receiver, &inferred) {
@@ -2015,6 +2038,9 @@ fn insert_external_api_type_param_bounds(
 }
 
 fn external_api_receiver_type_key_with_env(java_ty: &JavaType, env: &TypeEnv) -> Option<String> {
+    if let Some(element_ty) = crate::types::optional_element_type(java_ty) {
+        return external_api_receiver_type_key_with_env(&element_ty, env);
+    }
     if let JavaType::Named { name, args } = java_ty
         && args.is_empty()
         && let Some(bound) = env.type_param_bound(name)
@@ -2037,8 +2063,9 @@ fn external_api_receiver_type_key(java_ty: &JavaType) -> Option<String> {
 }
 
 fn collect_recursion_facts(program: &Program, facts: &mut FactSet) {
+    let call_graph = usage::build_call_graph(program);
     for ty in &program.types {
-        collect_type_recursion_facts(ty, facts);
+        collect_type_recursion_facts(ty, &call_graph, facts);
     }
 }
 
@@ -2046,6 +2073,69 @@ fn collect_method_effect_facts(program: &Program, usage: &UsageFacts, facts: &mu
     for ty in &program.types {
         collect_type_method_effect_facts(ty, usage, facts);
     }
+}
+
+fn propagate_source_call_thrown_effects(program: &Program, facts: &mut FactSet) {
+    let graph = usage::build_call_graph(program);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for edge in &graph.edges {
+            if edge.kind != CallGraphEdgeKind::DirectMethodCall {
+                continue;
+            }
+            let (
+                CallableKey::Method {
+                    type_name: caller_type,
+                    method_name: caller_method,
+                },
+                CallableKey::Method {
+                    type_name: callee_type,
+                    method_name: callee_method,
+                },
+            ) = (&edge.caller, &edge.callee)
+            else {
+                continue;
+            };
+            let callee_thrown = facts
+                .method_effect_for(callee_type, callee_method)
+                .map(|effect| effect.thrown.clone())
+                .unwrap_or_default();
+            if callee_thrown.is_empty() {
+                continue;
+            }
+            if push_method_thrown_effects(facts, caller_type, caller_method, &callee_thrown) {
+                changed = true;
+            }
+        }
+    }
+}
+
+fn push_method_thrown_effects(
+    facts: &mut FactSet,
+    type_name: &str,
+    method_name: &str,
+    thrown: &[JavaType],
+) -> bool {
+    let Some(index) = facts
+        .method_effect_facts
+        .iter()
+        .position(|fact| source_method_effect_key_matches(&fact.method, type_name, method_name))
+    else {
+        return false;
+    };
+    let effect = &mut facts.method_effect_facts[index];
+    let before = effect.thrown.len();
+    for ty in thrown {
+        push_unique_java_type(&mut effect.thrown, ty.clone());
+    }
+    effect.thrown.len() != before
+}
+
+fn source_method_effect_key_matches(key: &MethodKey, type_name: &str, method_name: &str) -> bool {
+    key.type_name == type_name
+        && (key.method_name == method_name
+            || crate::parser::to_snake_case(&key.method_name) == method_name)
 }
 
 fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &mut FactSet) {
@@ -2104,12 +2194,13 @@ fn external_api_thrown_exception_types(
             if resolved.is_some() {
                 return;
             }
-            let Some(receiver_type_key) = external_api_call_receiver_type_key(
+            let Some(receiver_type_key) = crate::call_plan::external_call_receiver_type_key(
                 receiver.as_deref(),
                 name,
                 args.len(),
+                facts,
                 &env,
-                &ty.name,
+                Some(&ty.name),
             ) else {
                 return;
             };
@@ -2394,7 +2485,7 @@ fn push_unique_java_type(types: &mut Vec<JavaType>, ty: JavaType) {
     }
 }
 
-fn collect_type_recursion_facts(ty: &TypeDecl, facts: &mut FactSet) {
+fn collect_type_recursion_facts(ty: &TypeDecl, call_graph: &usage::CallGraph, facts: &mut FactSet) {
     let method_names = ty
         .members
         .iter()
@@ -2403,28 +2494,42 @@ fn collect_type_recursion_facts(ty: &TypeDecl, facts: &mut FactSet) {
             _ => None,
         })
         .collect::<HashSet<_>>();
-    let mut edges = Vec::new();
     for member in &ty.members {
-        match member {
-            Member::Method(method) => {
-                if let Some(body) = &method.body {
-                    let calls = called_same_type_methods(body, &method_names);
-                    for called in calls {
-                        edges.push((method.name.clone(), called));
-                    }
-                }
-            }
-            Member::Type(nested) => collect_type_recursion_facts(nested, facts),
-            _ => {}
+        if let Member::Type(nested) = member {
+            collect_type_recursion_facts(nested, call_graph, facts);
         }
     }
+    collect_method_recursion_facts_for_type(ty, call_graph, facts, method_names);
+    collect_constructor_recursion_facts_for_type(ty, call_graph, facts);
+}
+
+fn collect_method_recursion_facts_for_type(
+    ty: &TypeDecl,
+    call_graph: &usage::CallGraph,
+    facts: &mut FactSet,
+    method_names: HashSet<String>,
+) {
+    let edges = same_type_method_call_graph_edges(&ty.name, call_graph);
+    let mut successors_by_method = HashMap::<String, Vec<String>>::new();
     for (caller, callee) in &edges {
+        successors_by_method
+            .entry(caller.clone())
+            .or_default()
+            .push(callee.clone());
+    }
+    let scc = strongly_connected_components(method_names.iter().cloned(), |method| {
+        successors_by_method
+            .get(method)
+            .cloned()
+            .unwrap_or_default()
+    });
+
+    let mut edges = edges.into_iter().collect::<Vec<_>>();
+    edges.sort();
+    for (caller, callee) in edges {
         let kind = if caller == callee {
             Some(RecursionKind::Direct)
-        } else if edges
-            .iter()
-            .any(|(other_caller, other_callee)| other_caller == callee && other_callee == caller)
-        {
+        } else if scc.component_by_node.get(&caller) == scc.component_by_node.get(&callee) {
             Some(RecursionKind::Mutual)
         } else {
             None
@@ -2433,17 +2538,152 @@ fn collect_type_recursion_facts(ty: &TypeDecl, facts: &mut FactSet) {
             facts.recursion_facts.push(RecursionFact {
                 method: MethodKey {
                     type_name: ty.name.clone(),
-                    method_name: caller.clone(),
+                    method_name: caller,
                 },
                 calls: MethodKey {
                     type_name: ty.name.clone(),
-                    method_name: callee.clone(),
+                    method_name: callee,
                 },
                 kind,
                 provenance: FactProvenance::ParsedSource,
             });
         }
     }
+}
+
+fn collect_constructor_recursion_facts_for_type(
+    ty: &TypeDecl,
+    call_graph: &usage::CallGraph,
+    facts: &mut FactSet,
+) {
+    let constructor_names = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Constructor(constructor) => Some(
+                constructor
+                    .rust_name
+                    .clone()
+                    .unwrap_or_else(|| "new".to_string()),
+            ),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    if constructor_names.is_empty() {
+        return;
+    }
+
+    let edges = same_type_constructor_call_graph_edges(&ty.name, call_graph);
+    let mut successors_by_constructor = HashMap::<String, Vec<String>>::new();
+    for (caller, callee) in &edges {
+        successors_by_constructor
+            .entry(caller.clone())
+            .or_default()
+            .push(callee.clone());
+    }
+    let scc = strongly_connected_components(constructor_names.iter().cloned(), |constructor| {
+        successors_by_constructor
+            .get(constructor)
+            .cloned()
+            .unwrap_or_default()
+    });
+
+    let mut edges = edges.into_iter().collect::<Vec<_>>();
+    edges.sort();
+    for (caller, callee) in edges {
+        let kind = if caller == callee {
+            Some(RecursionKind::Direct)
+        } else if scc.component_by_node.get(&caller) == scc.component_by_node.get(&callee) {
+            Some(RecursionKind::Mutual)
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            facts
+                .constructor_recursion_facts
+                .push(ConstructorRecursionFact {
+                    constructor: ConstructorKey {
+                        type_name: ty.name.clone(),
+                        rust_name: caller,
+                    },
+                    calls: ConstructorKey {
+                        type_name: ty.name.clone(),
+                        rust_name: callee,
+                    },
+                    kind,
+                    provenance: FactProvenance::ParsedSource,
+                });
+        }
+    }
+}
+
+fn same_type_method_call_graph_edges(
+    type_name: &str,
+    call_graph: &usage::CallGraph,
+) -> HashSet<(String, String)> {
+    call_graph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == CallGraphEdgeKind::DirectMethodCall)
+        .filter_map(|edge| {
+            let CallableKey::Method {
+                type_name: caller_type,
+                method_name: caller_method,
+            } = &edge.caller
+            else {
+                return None;
+            };
+            let CallableKey::Method {
+                type_name: callee_type,
+                method_name: callee_method,
+            } = &edge.callee
+            else {
+                return None;
+            };
+            if caller_type == type_name && callee_type == type_name {
+                Some((caller_method.clone(), callee_method.clone()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn same_type_constructor_call_graph_edges(
+    type_name: &str,
+    call_graph: &usage::CallGraph,
+) -> HashSet<(String, String)> {
+    call_graph
+        .edges
+        .iter()
+        .filter(|edge| {
+            matches!(
+                edge.kind,
+                CallGraphEdgeKind::ConstructorCall | CallGraphEdgeKind::ConstructorDelegationThis
+            )
+        })
+        .filter_map(|edge| {
+            let CallableKey::Constructor {
+                type_name: caller_type,
+                rust_name: caller_constructor,
+            } = &edge.caller
+            else {
+                return None;
+            };
+            let CallableKey::Constructor {
+                type_name: callee_type,
+                rust_name: callee_constructor,
+            } = &edge.callee
+            else {
+                return None;
+            };
+            if caller_type == type_name && callee_type == type_name {
+                Some((caller_constructor.clone(), callee_constructor.clone()))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn collect_dispatch_requirement_facts(program: &Program, facts: &mut FactSet) {
@@ -2592,7 +2832,21 @@ fn collect_dispatch_requirement_facts_from_expr(expr: &Expr, facts: &mut FactSet
             collect_dispatch_requirement_facts_from_expr(array, facts);
             collect_dispatch_requirement_facts_from_expr(index, facts);
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_dispatch_requirement_facts_from_expr(expr, facts);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_dispatch_requirement_facts_from_expr(expr, facts);
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 collect_dispatch_requirement_facts_from_expr(expr, facts);
             }
@@ -2757,6 +3011,191 @@ fn collect_type_control_flow_plans(ty: &TypeDecl, plans: &mut Vec<MethodControlF
     }
 }
 
+fn collect_recursion_fallback_diagnostics(
+    program: &Program,
+    facts: &FactSet,
+    control_flow_plans: &[MethodControlFlowPlan],
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    for ty in &program.types {
+        collect_type_recursion_fallback_diagnostics(ty, facts, control_flow_plans, diagnostics);
+    }
+}
+
+fn collect_type_recursion_fallback_diagnostics(
+    ty: &TypeDecl,
+    facts: &FactSet,
+    control_flow_plans: &[MethodControlFlowPlan],
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Method(method) => {
+                if let Some(body) = &method.body {
+                    collect_method_recursion_fallback_diagnostics(
+                        ty,
+                        method,
+                        body,
+                        facts,
+                        control_flow_plans,
+                        diagnostics,
+                    );
+                }
+            }
+            Member::Type(nested) => collect_type_recursion_fallback_diagnostics(
+                nested,
+                facts,
+                control_flow_plans,
+                diagnostics,
+            ),
+            _ => {}
+        }
+    }
+}
+
+fn collect_method_recursion_fallback_diagnostics(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    body: &Block,
+    facts: &FactSet,
+    control_flow_plans: &[MethodControlFlowPlan],
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
+    let has_safe_tail_plan =
+        method_has_safe_tail_loop_plan(control_flow_plans, &ty.name, &method.name);
+    if has_safe_tail_plan && !method.throws.is_empty() {
+        push_semantic_diagnostic_once(
+            diagnostics,
+            "recursion_tco_fallback",
+            format!(
+                "{}::{} has a safe tail-recursive shape, but it is kept as ordinary recursion because exception lowering wraps the method in Result",
+                ty.name, method.name
+            ),
+        );
+    }
+
+    let recursion = facts.recursion_facts_for(&ty.name, &method.name);
+    if recursion
+        .iter()
+        .any(|fact| fact.kind == RecursionKind::Direct)
+        && !has_safe_tail_plan
+    {
+        push_semantic_diagnostic_once(
+            diagnostics,
+            "recursion_tco_fallback",
+            format!(
+                "{}::{} is directly recursive but does not match the safe accumulator loop shape; it remains ordinary Rust recursion",
+                ty.name, method.name
+            ),
+        );
+    }
+
+    if recursion
+        .iter()
+        .any(|fact| fact.kind == RecursionKind::Mutual)
+        && block_tail_returns_any_method(
+            body,
+            &recursion
+                .iter()
+                .filter(|fact| fact.kind == RecursionKind::Mutual)
+                .map(|fact| fact.calls.method_name.as_str())
+                .collect::<HashSet<_>>(),
+        )
+    {
+        push_semantic_diagnostic_once(
+            diagnostics,
+            "recursion_tco_fallback",
+            format!(
+                "{}::{} participates in mutual recursion; tail-style calls remain ordinary Rust calls because no single-method loop rewrite is sound",
+                ty.name, method.name
+            ),
+        );
+    }
+
+    if block_has_receiver_recursive_call(body, &method.name) {
+        push_semantic_diagnostic_once(
+            diagnostics,
+            "recursion_tco_fallback",
+            format!(
+                "{}::{} calls {} through a receiver that is not proven to be this; no self-tail loop rewrite is applied",
+                ty.name, method.name, method.name
+            ),
+        );
+    }
+}
+
+fn method_has_safe_tail_loop_plan(
+    control_flow_plans: &[MethodControlFlowPlan],
+    type_name: &str,
+    method_name: &str,
+) -> bool {
+    control_flow_plans.iter().any(|plan| {
+        plan.method.type_name == type_name
+            && plan.method.method_name == method_name
+            && plan.rewrites.iter().any(|rewrite| {
+                matches!(
+                    rewrite,
+                    ControlFlowRewritePlan::TailRecursiveLoop(TailRecursiveLoopPlan {
+                        normalized_shape:
+                            TailRecursiveNormalizedShape::LoopWithParameterReassignment,
+                        ..
+                    })
+                )
+            })
+    })
+}
+
+fn block_tail_returns_any_method(body: &Block, method_names: &HashSet<&str>) -> bool {
+    body.statements
+        .iter()
+        .any(|stmt| stmt_tail_returns_any_method(stmt, method_names))
+}
+
+fn stmt_tail_returns_any_method(stmt: &Stmt, method_names: &HashSet<&str>) -> bool {
+    match stmt {
+        Stmt::Return(Some(Expr::Call { name, .. })) => method_names.contains(name.as_str()),
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            block_tail_returns_any_method(then_block, method_names)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_tail_returns_any_method(block, method_names))
+        }
+        Stmt::Block(body) => block_tail_returns_any_method(body, method_names),
+        _ => false,
+    }
+}
+
+fn block_has_receiver_recursive_call(body: &Block, method_name: &str) -> bool {
+    body.statements
+        .iter()
+        .any(|stmt| stmt_has_receiver_recursive_call(stmt, method_name))
+}
+
+fn stmt_has_receiver_recursive_call(stmt: &Stmt, method_name: &str) -> bool {
+    let mut found = false;
+    walk_stmt_exprs(stmt, &mut |expr| {
+        if expr_has_receiver_recursive_call(expr, method_name) {
+            found = true;
+        }
+    });
+    found
+}
+
+fn expr_has_receiver_recursive_call(expr: &Expr, method_name: &str) -> bool {
+    matches!(
+        expr,
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            ..
+        } if name == method_name && !matches!(receiver.as_ref(), Expr::This)
+    )
+}
+
 fn collect_assignment_in_condition_plans(body: &Block, rewrites: &mut Vec<ControlFlowRewritePlan>) {
     for stmt in &body.statements {
         match stmt {
@@ -2858,45 +3297,43 @@ fn assignment_fragment_plan(
 }
 
 fn tail_recursive_loop_plan(body: &Block, method_name: &str) -> Option<TailRecursiveLoopPlan> {
-    body.statements
-        .iter()
-        .find_map(|stmt| tail_recursive_loop_plan_from_stmt(stmt, method_name))
-}
-
-fn tail_recursive_loop_plan_from_stmt(
-    stmt: &Stmt,
-    method_name: &str,
-) -> Option<TailRecursiveLoopPlan> {
-    match stmt {
-        Stmt::Return(Some(Expr::Call { name, args, .. })) if name == method_name => {
-            Some(TailRecursiveLoopPlan {
-                method_name: name.clone(),
-                arg_count: args.len(),
-                normalized_shape: TailRecursiveNormalizedShape::LoopWithParameterReassignment,
-            })
-        }
+    let [
         Stmt::If {
             then_block,
-            else_block,
+            else_block: None,
             ..
-        } => tail_recursive_loop_plan(then_block, method_name).or_else(|| {
-            else_block
-                .as_ref()
-                .and_then(|else_block| tail_recursive_loop_plan(else_block, method_name))
-        }),
-        Stmt::Block(body) => tail_recursive_loop_plan(body, method_name),
-        _ => None,
+        },
+        Stmt::Return(Some(Expr::Call { name, args, .. })),
+    ] = body.statements.as_slice()
+    else {
+        return None;
+    };
+    if name != method_name || !block_is_single_value_return(then_block) {
+        return None;
     }
+    Some(TailRecursiveLoopPlan {
+        method_name: name.clone(),
+        arg_count: args.len(),
+        normalized_shape: TailRecursiveNormalizedShape::LoopWithParameterReassignment,
+    })
 }
 
-fn collect_exception_facts(program: &Program, facts: &mut FactSet) {
+fn block_is_single_value_return(block: &Block) -> bool {
+    matches!(block.statements.as_slice(), [Stmt::Return(Some(_))])
+}
+
+fn collect_exception_facts(
+    program: &Program,
+    facts: &mut FactSet,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) {
     let mut exception_names = HashSet::new();
     for ty in &program.types {
-        collect_exception_candidate_names(ty, facts, &mut exception_names);
+        collect_exception_candidate_names(ty, facts, &mut exception_names, diagnostics);
     }
     for type_name in exception_names {
         facts.exception_facts.push(ExceptionFact {
-            kind: classify_exception_type(&type_name, facts),
+            kind: classify_exception_type(&type_name, facts, diagnostics),
             type_name,
             provenance: FactProvenance::ParsedSource,
         });
@@ -2907,9 +3344,10 @@ fn collect_exception_candidate_names(
     ty: &TypeDecl,
     facts: &FactSet,
     exception_names: &mut HashSet<String>,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
 ) {
     if ty.extends.as_deref().is_some_and(is_exception_root_name)
-        || type_reaches_exception(&ty.name, facts)
+        || type_reaches_exception(&ty.name, facts, diagnostics)
     {
         exception_names.insert(ty.name.clone());
     }
@@ -2936,7 +3374,7 @@ fn collect_exception_candidate_names(
                 }
             }
             Member::Type(nested) => {
-                collect_exception_candidate_names(nested, facts, exception_names)
+                collect_exception_candidate_names(nested, facts, exception_names, diagnostics)
             }
             _ => {}
         }
@@ -3135,7 +3573,8 @@ fn exception_assignable_to_catch(
     let Some(catch_name) = java_type_name(catch_ty) else {
         return false;
     };
-    exception_name == catch_name || type_reaches(exception_name, catch_name, facts)
+    exception_name == catch_name
+        || type_reaches_without_diagnostics(exception_name, catch_name, facts)
 }
 
 fn java_type_sort_key(java_ty: &JavaType) -> String {
@@ -3176,7 +3615,10 @@ fn collect_type_field_nullability_facts(
         .members
         .iter()
         .filter_map(|member| match member {
-            Member::Method(method) => method.body.as_ref(),
+            Member::Method(method) => method
+                .body
+                .as_ref()
+                .map(|body| (body, local_shadows_from_params(&method.params))),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -3210,7 +3652,7 @@ fn field_nullability_fact(
     field: &FieldDecl,
     constructors: &[&ConstructorDecl],
     constructor_assignments: &HashMap<String, HashMap<String, AssignmentNullability>>,
-    method_bodies: &[&Block],
+    method_bodies: &[(&Block, HashSet<String>)],
     helper_assignments: &HashMap<String, HashMap<String, AssignmentNullability>>,
     facts: &FactSet,
 ) -> FieldNullabilityFact {
@@ -3222,21 +3664,42 @@ fn field_nullability_fact(
         .initializer
         .as_ref()
         .is_some_and(expr_observed_non_null);
+    let final_initialized_non_null =
+        field.modifiers.contains(&Modifier::Final) && initializer_non_null;
     let initializer_null = matches!(field.initializer, Some(Expr::Literal(Literal::Null)));
-    let any_method_null_assignment = method_bodies
-        .iter()
-        .any(|body| block_assigns_field_null(body, ty, &field.name, helper_assignments, facts));
     let all_constructors_assign_non_null = !constructors.is_empty()
         && constructors.iter().all(|constructor| {
             constructor_assignments
                 .get(&constructor_rust_name(constructor))
                 .and_then(|assignments| assignments.get(&field.name))
-                .is_some_and(|assignment| *assignment == AssignmentNullability::ObservedNonNull)
+                .is_some_and(|assignment| *assignment == NullabilityState::DefinitelyNonNull)
         });
+    let method_assignment_nullability = strongest_assignment(
+        method_bodies
+            .iter()
+            .flat_map(|(body, local_shadows)| {
+                block_field_assignments(
+                    body,
+                    ty,
+                    &field.name,
+                    local_shadows,
+                    helper_assignments,
+                    facts,
+                )
+            })
+            .collect(),
+    );
 
-    let (state, provenance) = if initializer_null || any_method_null_assignment {
+    let (state, provenance) = if initializer_null {
         (
             NullabilityState::MaybeNull,
+            FieldNullabilityProvenance::FieldInitializer,
+        )
+    } else if let Some(method_assignment) = method_assignment_nullability
+        && method_assignment != NullabilityState::DefinitelyNonNull
+    {
+        (
+            field_state_from_assignment_nullability(method_assignment),
             FieldNullabilityProvenance::MethodAssignment,
         )
     } else if all_constructors_assign_non_null {
@@ -3244,7 +3707,7 @@ fn field_nullability_fact(
             NullabilityState::DefinitelyNonNull,
             FieldNullabilityProvenance::ConstructorAssignments,
         )
-    } else if constructors.is_empty() && initializer_non_null {
+    } else if final_initialized_non_null || (constructors.is_empty() && initializer_non_null) {
         (
             NullabilityState::DefinitelyNonNull,
             FieldNullabilityProvenance::FieldInitializer,
@@ -3263,30 +3726,33 @@ fn field_nullability_fact(
     }
 }
 
-fn block_assigns_field_null(
-    body: &Block,
-    ty: &TypeDecl,
-    field_name: &str,
-    helper_assignments: &HashMap<String, HashMap<String, AssignmentNullability>>,
-    facts: &FactSet,
-) -> bool {
-    block_field_assignments(body, ty, field_name, helper_assignments, facts)
-        .into_iter()
-        .any(|assignment| assignment == AssignmentNullability::Null)
+fn field_state_from_assignment_nullability(assignment: AssignmentNullability) -> NullabilityState {
+    match assignment {
+        NullabilityState::DefinitelyNonNull => NullabilityState::DefinitelyNonNull,
+        NullabilityState::DefinitelyNull | NullabilityState::MaybeNull => {
+            NullabilityState::MaybeNull
+        }
+        NullabilityState::Unknown => NullabilityState::Unknown,
+    }
 }
+
+type AssignmentNullability = NullabilityState;
 
 fn block_field_assignments(
     body: &Block,
     ty: &TypeDecl,
     field_name: &str,
+    local_shadows: &HashSet<String>,
     helper_assignments: &HashMap<String, HashMap<String, AssignmentNullability>>,
     facts: &FactSet,
 ) -> Vec<AssignmentNullability> {
     let mut assignments = Vec::new();
+    let mut local_shadows = local_shadows.clone();
     collect_field_assignments_from_stmts(
         &body.statements,
         ty,
         field_name,
+        &mut local_shadows,
         helper_assignments,
         facts,
         &mut assignments,
@@ -3298,20 +3764,63 @@ fn collect_field_assignments_from_stmts(
     statements: &[Stmt],
     ty: &TypeDecl,
     field_name: &str,
+    local_shadows: &mut HashSet<String>,
     helper_assignments: &HashMap<String, HashMap<String, AssignmentNullability>>,
     facts: &FactSet,
     assignments: &mut Vec<AssignmentNullability>,
 ) {
     for stmt in statements {
         match stmt {
+            Stmt::VarDecl {
+                name, initializer, ..
+            } => {
+                if let Some(initializer) = initializer {
+                    collect_field_assignments_from_expr(
+                        initializer,
+                        ty,
+                        field_name,
+                        local_shadows,
+                        helper_assignments,
+                        facts,
+                        assignments,
+                    );
+                }
+                local_shadows.insert(name.clone());
+            }
             Stmt::Assign { target, value } if assignment_targets_field(target, field_name) => {
                 assignments.push(expr_assignment_nullability(value));
+            }
+            Stmt::Assign { target, value }
+                if bare_assignment_targets_unshadowed_field(target, field_name, local_shadows) =>
+            {
+                assignments.push(bare_field_assignment_nullability(value, local_shadows));
+            }
+            Stmt::Assign { target, value } => {
+                collect_field_assignments_from_expr(
+                    target,
+                    ty,
+                    field_name,
+                    local_shadows,
+                    helper_assignments,
+                    facts,
+                    assignments,
+                );
+                collect_field_assignments_from_expr(
+                    value,
+                    ty,
+                    field_name,
+                    local_shadows,
+                    helper_assignments,
+                    facts,
+                    assignments,
+                );
             }
             Stmt::Expr(expr) => {
                 collect_field_assignments_from_expr(
                     expr,
                     ty,
                     field_name,
+                    local_shadows,
                     helper_assignments,
                     facts,
                     assignments,
@@ -3322,30 +3831,49 @@ fn collect_field_assignments_from_stmts(
                 else_block,
                 ..
             } => {
+                let mut then_shadows = local_shadows.clone();
                 collect_field_assignments_from_stmts(
                     &then_block.statements,
                     ty,
                     field_name,
+                    &mut then_shadows,
                     helper_assignments,
                     facts,
                     assignments,
                 );
                 if let Some(else_block) = else_block {
+                    let mut else_shadows = local_shadows.clone();
                     collect_field_assignments_from_stmts(
                         &else_block.statements,
                         ty,
                         field_name,
+                        &mut else_shadows,
                         helper_assignments,
                         facts,
                         assignments,
                     );
                 }
             }
-            Stmt::While { body, .. } | Stmt::EnhancedFor { body, .. } | Stmt::Block(body) => {
+            Stmt::While { body, .. } | Stmt::Block(body) => {
+                let mut body_shadows = local_shadows.clone();
                 collect_field_assignments_from_stmts(
                     &body.statements,
                     ty,
                     field_name,
+                    &mut body_shadows,
+                    helper_assignments,
+                    facts,
+                    assignments,
+                );
+            }
+            Stmt::EnhancedFor { var_name, body, .. } => {
+                let mut body_shadows = local_shadows.clone();
+                body_shadows.insert(var_name.clone());
+                collect_field_assignments_from_stmts(
+                    &body.statements,
+                    ty,
+                    field_name,
+                    &mut body_shadows,
                     helper_assignments,
                     facts,
                     assignments,
@@ -3354,10 +3882,12 @@ fn collect_field_assignments_from_stmts(
             Stmt::For {
                 init, update, body, ..
             } => {
+                let mut loop_shadows = local_shadows.clone();
                 collect_field_assignments_from_stmts(
                     init,
                     ty,
                     field_name,
+                    &mut loop_shadows,
                     helper_assignments,
                     facts,
                     assignments,
@@ -3367,6 +3897,7 @@ fn collect_field_assignments_from_stmts(
                         expr,
                         ty,
                         field_name,
+                        &mut loop_shadows,
                         helper_assignments,
                         facts,
                         assignments,
@@ -3376,6 +3907,7 @@ fn collect_field_assignments_from_stmts(
                     &body.statements,
                     ty,
                     field_name,
+                    &mut loop_shadows,
                     helper_assignments,
                     facts,
                     assignments,
@@ -3383,10 +3915,12 @@ fn collect_field_assignments_from_stmts(
             }
             Stmt::Switch { cases, .. } => {
                 for case in cases {
+                    let mut case_shadows = local_shadows.clone();
                     collect_field_assignments_from_stmts(
                         &case.statements,
                         ty,
                         field_name,
+                        &mut case_shadows,
                         helper_assignments,
                         facts,
                         assignments,
@@ -3399,10 +3933,12 @@ fn collect_field_assignments_from_stmts(
                 catches,
                 finally_block,
             } => {
+                let mut try_shadows = local_shadows.clone();
                 collect_field_assignments_from_stmts(
                     resources,
                     ty,
                     field_name,
+                    &mut try_shadows,
                     helper_assignments,
                     facts,
                     assignments,
@@ -3411,25 +3947,31 @@ fn collect_field_assignments_from_stmts(
                     &body.statements,
                     ty,
                     field_name,
+                    &mut try_shadows,
                     helper_assignments,
                     facts,
                     assignments,
                 );
                 for catch in catches {
+                    let mut catch_shadows = local_shadows.clone();
+                    catch_shadows.insert(catch.name.clone());
                     collect_field_assignments_from_stmts(
                         &catch.body.statements,
                         ty,
                         field_name,
+                        &mut catch_shadows,
                         helper_assignments,
                         facts,
                         assignments,
                     );
                 }
                 if let Some(finally_block) = finally_block {
+                    let mut finally_shadows = local_shadows.clone();
                     collect_field_assignments_from_stmts(
                         &finally_block.statements,
                         ty,
                         field_name,
+                        &mut finally_shadows,
                         helper_assignments,
                         facts,
                         assignments,
@@ -3445,6 +3987,7 @@ fn collect_field_assignments_from_expr(
     expr: &Expr,
     ty: &TypeDecl,
     field_name: &str,
+    local_shadows: &mut HashSet<String>,
     helper_assignments: &HashMap<String, HashMap<String, AssignmentNullability>>,
     facts: &FactSet,
     assignments: &mut Vec<AssignmentNullability>,
@@ -3473,6 +4016,7 @@ fn collect_field_assignments_from_expr(
                     arg,
                     ty,
                     field_name,
+                    local_shadows,
                     helper_assignments,
                     facts,
                     assignments,
@@ -3485,6 +4029,7 @@ fn collect_field_assignments_from_expr(
                     receiver,
                     ty,
                     field_name,
+                    local_shadows,
                     helper_assignments,
                     facts,
                     assignments,
@@ -3495,6 +4040,7 @@ fn collect_field_assignments_from_expr(
                     arg,
                     ty,
                     field_name,
+                    local_shadows,
                     helper_assignments,
                     facts,
                     assignments,
@@ -3506,6 +4052,7 @@ fn collect_field_assignments_from_expr(
                 left,
                 ty,
                 field_name,
+                local_shadows,
                 helper_assignments,
                 facts,
                 assignments,
@@ -3514,6 +4061,7 @@ fn collect_field_assignments_from_expr(
                 right,
                 ty,
                 field_name,
+                local_shadows,
                 helper_assignments,
                 facts,
                 assignments,
@@ -3524,6 +4072,7 @@ fn collect_field_assignments_from_expr(
                 expr,
                 ty,
                 field_name,
+                local_shadows,
                 helper_assignments,
                 facts,
                 assignments,
@@ -3538,6 +4087,7 @@ fn collect_field_assignments_from_expr(
                 condition,
                 ty,
                 field_name,
+                local_shadows,
                 helper_assignments,
                 facts,
                 assignments,
@@ -3546,6 +4096,7 @@ fn collect_field_assignments_from_expr(
                 then_expr,
                 ty,
                 field_name,
+                local_shadows,
                 helper_assignments,
                 facts,
                 assignments,
@@ -3554,6 +4105,7 @@ fn collect_field_assignments_from_expr(
                 else_expr,
                 ty,
                 field_name,
+                local_shadows,
                 helper_assignments,
                 facts,
                 assignments,
@@ -3564,6 +4116,7 @@ fn collect_field_assignments_from_expr(
                 receiver,
                 ty,
                 field_name,
+                local_shadows,
                 helper_assignments,
                 facts,
                 assignments,
@@ -3574,6 +4127,7 @@ fn collect_field_assignments_from_expr(
                 array,
                 ty,
                 field_name,
+                local_shadows,
                 helper_assignments,
                 facts,
                 assignments,
@@ -3582,17 +4136,49 @@ fn collect_field_assignments_from_expr(
                 index,
                 ty,
                 field_name,
+                local_shadows,
                 helper_assignments,
                 facts,
                 assignments,
             );
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
             for expr in dimensions {
                 collect_field_assignments_from_expr(
                     expr,
                     ty,
                     field_name,
+                    local_shadows,
+                    helper_assignments,
+                    facts,
+                    assignments,
+                );
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_field_assignments_from_expr(
+                        expr,
+                        ty,
+                        field_name,
+                        local_shadows,
+                        helper_assignments,
+                        facts,
+                        assignments,
+                    );
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
+            for expr in dimensions {
+                collect_field_assignments_from_expr(
+                    expr,
+                    ty,
+                    field_name,
+                    local_shadows,
                     helper_assignments,
                     facts,
                     assignments,
@@ -3605,6 +4191,7 @@ fn collect_field_assignments_from_expr(
                     arg,
                     ty,
                     field_name,
+                    local_shadows,
                     helper_assignments,
                     facts,
                     assignments,
@@ -3635,8 +4222,10 @@ fn collect_helper_field_assignments(
             continue;
         };
         let mut field_assignments = HashMap::new();
+        let local_shadows = local_shadows_from_params(&method.params);
         for field in field_types(ty).keys() {
-            let assignments = block_field_assignments(body, ty, field, &HashMap::new(), facts);
+            let assignments =
+                block_field_assignments(body, ty, field, &local_shadows, &HashMap::new(), facts);
             if let Some(assignment) = strongest_assignment(assignments) {
                 field_assignments.insert(field.clone(), assignment);
             }
@@ -3656,13 +4245,23 @@ fn collect_constructor_field_assignments(
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) -> ConstructorAssignmentSaturation {
     let fields = field_types(ty);
+    let cyclic_constructors = cyclic_delegating_constructor_names(constructors);
     let mut by_constructor = HashMap::new();
     for constructor in constructors {
         let mut field_assignments = HashMap::new();
-        if let Some(body) = &constructor.body {
+        if let Some(body) = &constructor.body
+            && !cyclic_constructors.contains(&constructor_rust_name(constructor))
+        {
+            let local_shadows = local_shadows_from_params(&constructor.params);
             for field in fields.keys() {
-                let assignments =
-                    block_field_assignments(body, ty, field, helper_assignments, facts);
+                let assignments = block_field_assignments(
+                    body,
+                    ty,
+                    field,
+                    &local_shadows,
+                    helper_assignments,
+                    facts,
+                );
                 if let Some(assignment) = strongest_assignment(assignments) {
                     field_assignments.insert(field.clone(), assignment);
                 }
@@ -3673,7 +4272,7 @@ fn collect_constructor_field_assignments(
 
     let policy = FiniteSaturationPolicy::new(
         constructors.len().saturating_mul(fields.len()),
-        AssignmentNullability::FACT_KIND_COUNT,
+        ASSIGNMENT_NULLABILITY_FACT_KIND_COUNT,
     );
     let result = policy.saturate(
         by_constructor,
@@ -3720,6 +4319,40 @@ fn collect_constructor_field_assignments(
     }
 }
 
+fn cyclic_delegating_constructor_names(constructors: &[&ConstructorDecl]) -> HashSet<String> {
+    let delegation = constructors
+        .iter()
+        .filter_map(|constructor| {
+            delegated_this_constructor_name(constructor)
+                .map(|target| (constructor_rust_name(constructor), target))
+        })
+        .collect::<HashMap<_, _>>();
+    delegation
+        .keys()
+        .filter(|name| constructor_delegation_reaches(&delegation, name, name))
+        .cloned()
+        .collect()
+}
+
+fn constructor_delegation_reaches(
+    delegation: &HashMap<String, String>,
+    start: &str,
+    target: &str,
+) -> bool {
+    let mut seen = HashSet::new();
+    let mut current = start;
+    while let Some(next) = delegation.get(current) {
+        if next == target {
+            return true;
+        }
+        if !seen.insert(current.to_string()) {
+            return false;
+        }
+        current = next;
+    }
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConstructorAssignmentSaturation {
     assignments: HashMap<String, HashMap<String, AssignmentNullability>>,
@@ -3746,8 +4379,9 @@ fn merge_assignment_nullability(
     current: Option<AssignmentNullability>,
     next: AssignmentNullability,
 ) -> AssignmentNullability {
-    strongest_assignment(current.into_iter().chain([next]).collect())
-        .expect("merged assignment list is non-empty")
+    current
+        .map(|current| field_nullability_join(current, next))
+        .unwrap_or(next)
 }
 
 fn constructor_rust_name(constructor: &ConstructorDecl) -> String {
@@ -3758,36 +4392,30 @@ fn constructor_rust_name(constructor: &ConstructorDecl) -> String {
 }
 
 fn strongest_assignment(assignments: Vec<AssignmentNullability>) -> Option<AssignmentNullability> {
-    if assignments
-        .iter()
-        .any(|assignment| *assignment == AssignmentNullability::Null)
-    {
-        Some(AssignmentNullability::Null)
-    } else if assignments
-        .iter()
-        .any(|assignment| *assignment == AssignmentNullability::ObservedNonNull)
-    {
-        Some(AssignmentNullability::ObservedNonNull)
-    } else {
-        None
-    }
+    assignments.into_iter().reduce(field_nullability_join)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AssignmentNullability {
-    Null,
-    ObservedNonNull,
-}
-
-impl AssignmentNullability {
-    const FACT_KIND_COUNT: usize = 2;
-}
+const ASSIGNMENT_NULLABILITY_FACT_KIND_COUNT: usize = 4;
 
 fn expr_assignment_nullability(expr: &Expr) -> AssignmentNullability {
     if matches!(expr, Expr::Literal(Literal::Null)) {
-        AssignmentNullability::Null
+        NullabilityState::DefinitelyNull
+    } else if expr_observed_non_null(expr) {
+        NullabilityState::DefinitelyNonNull
     } else {
-        AssignmentNullability::ObservedNonNull
+        NullabilityState::Unknown
+    }
+}
+
+fn bare_field_assignment_nullability(
+    expr: &Expr,
+    local_shadows: &HashSet<String>,
+) -> AssignmentNullability {
+    match expr {
+        Expr::Literal(Literal::Null) => NullabilityState::DefinitelyNull,
+        Expr::Var(name) if local_shadows.contains(name) => NullabilityState::MaybeNull,
+        Expr::Call { .. } => NullabilityState::MaybeNull,
+        _ => expr_assignment_nullability(expr),
     }
 }
 
@@ -3799,6 +4427,14 @@ fn assignment_targets_field(target: &Expr, field_name: &str) -> bool {
     assigned_this_field_name(target) == Some(field_name)
 }
 
+fn bare_assignment_targets_unshadowed_field(
+    target: &Expr,
+    field_name: &str,
+    local_shadows: &HashSet<String>,
+) -> bool {
+    matches!(target, Expr::Var(name) if name == field_name && !local_shadows.contains(name))
+}
+
 fn assigned_this_field_name(target: &Expr) -> Option<&str> {
     match target {
         Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
@@ -3806,6 +4442,10 @@ fn assigned_this_field_name(target: &Expr) -> Option<&str> {
         }
         _ => None,
     }
+}
+
+fn local_shadows_from_params(params: &[Param]) -> HashSet<String> {
+    params.iter().map(|param| param.name.clone()).collect()
 }
 
 fn returned_field_name(expr: &Expr) -> Option<&str> {
@@ -3853,13 +4493,18 @@ fn types_compatible(left: &JavaType, right: &JavaType) -> bool {
     left == right
 }
 
-fn classify_exception_type(type_name: &str, facts: &FactSet) -> ExceptionKind {
-    if is_unchecked_exception_name(type_name) || type_reaches(type_name, "RuntimeException", facts)
+fn classify_exception_type(
+    type_name: &str,
+    facts: &FactSet,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) -> ExceptionKind {
+    if is_unchecked_exception_name(type_name)
+        || type_reaches(type_name, "RuntimeException", facts, diagnostics)
     {
         ExceptionKind::Unchecked
     } else if is_checked_exception_root_name(type_name)
-        || type_reaches(type_name, "Exception", facts)
-        || type_reaches(type_name, "Throwable", facts)
+        || type_reaches(type_name, "Exception", facts, diagnostics)
+        || type_reaches(type_name, "Throwable", facts, diagnostics)
     {
         ExceptionKind::Checked
     } else {
@@ -3867,20 +4512,44 @@ fn classify_exception_type(type_name: &str, facts: &FactSet) -> ExceptionKind {
     }
 }
 
-fn type_reaches_exception(type_name: &str, facts: &FactSet) -> bool {
+fn type_reaches_exception(
+    type_name: &str,
+    facts: &FactSet,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) -> bool {
     is_exception_root_name(type_name)
-        || type_reaches(type_name, "Exception", facts)
-        || type_reaches(type_name, "RuntimeException", facts)
-        || type_reaches(type_name, "Throwable", facts)
+        || type_reaches(type_name, "Exception", facts, diagnostics)
+        || type_reaches(type_name, "RuntimeException", facts, diagnostics)
+        || type_reaches(type_name, "Throwable", facts, diagnostics)
 }
 
-fn type_reaches(type_name: &str, super_name: &str, facts: &FactSet) -> bool {
+fn type_reaches_without_diagnostics(type_name: &str, super_name: &str, facts: &FactSet) -> bool {
+    let mut diagnostics = Vec::new();
+    type_reaches(type_name, super_name, facts, &mut diagnostics)
+}
+
+fn type_reaches(
+    type_name: &str,
+    super_name: &str,
+    facts: &FactSet,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+) -> bool {
     let java_ty = JavaType::Named {
         name: type_name.to_string(),
         args: Vec::new(),
     };
-    facts
-        .reachable_hierarchy_edges_for_type(&java_ty)
+    let reachability = facts.reachable_hierarchy_edges_for_type_with_stats(&java_ty);
+    diagnostics.extend(
+        reachability
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| SemanticDiagnostic {
+                code: diagnostic.code,
+                message: diagnostic.message,
+            }),
+    );
+    reachability
+        .edges
         .iter()
         .any(|edge| edge.sub_name == type_name && edge.super_name == super_name)
 }
@@ -3913,21 +4582,6 @@ fn java_type_name(java_ty: &JavaType) -> Option<&str> {
         JavaType::String => Some("String"),
         _ => None,
     }
-}
-
-fn called_same_type_methods(body: &Block, method_names: &HashSet<String>) -> HashSet<String> {
-    let mut calls = HashSet::new();
-    for stmt in &body.statements {
-        walk_stmt_exprs(stmt, &mut |expr| {
-            if let Expr::Call { receiver, name, .. } = expr
-                && call_receiver_is_this(receiver)
-                && method_names.contains(name)
-            {
-                calls.insert(name.clone());
-            }
-        });
-    }
-    calls
 }
 
 fn block_has_assignment_in_condition(body: &Block) -> bool {
@@ -4153,7 +4807,21 @@ fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
             walk_expr(array, visit);
             walk_expr(index, visit);
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                walk_expr(expr, visit);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    walk_expr(expr, visit);
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 walk_expr(expr, visit);
             }

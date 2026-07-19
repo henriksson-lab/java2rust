@@ -1,21 +1,30 @@
+use crate::conversion_plan::LoweredType;
+use crate::effective_facts::EffectiveFacts;
 use crate::facts::{
-    ExternalApiArgumentEffectFact, ExternalArgumentAliasPolicy, ExternalLibraryMode,
-    FactProvenance, FactSet, ReceiverMutabilityFact, TrivialAccessorKind,
+    AccessorInlinePolicy, ExternalApiArgumentEffectFact, ExternalApiRole,
+    ExternalArgumentAliasPolicy, ExternalLibraryMode, FactProvenance, FactSet, HierarchyStrategy,
+    NullabilityState, ReceiverMutabilityFact, TrivialAccessorKind,
 };
-use crate::java_ir::{CallKind, Expr, JavaType, ResolvedCall, ResolvedConstructor};
+use crate::java_ir::{
+    CallKind, Expr, JavaType, LambdaBody, PrimitiveType, ResolvedCall, ResolvedConstructor,
+};
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
     apply_borrowed_sequence_content_projection, apply_borrowed_string_content_projection,
-    value_shape_for_java_type,
+    apply_required_dispatch, borrowed_sequence_element_shape, value_shape_for_java_type,
 };
 use crate::signature::SignaturePlan;
-use crate::slot_shape::{MutabilityShape, OwnershipShape, RustSlotShape};
+use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape};
 use crate::types::{TypeEnv, infer_expr_type};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallTargetPlan<'a> {
     StaticSelf {
         rust_name: &'a str,
+    },
+    StaticOwner {
+        owner: String,
+        rust_name: String,
     },
     InstanceReceiver {
         receiver: &'a Expr,
@@ -31,6 +40,23 @@ pub enum CallTargetPlan<'a> {
     FallbackFree {
         rust_name: String,
     },
+    JavaClassStatic {
+        rust_name: String,
+    },
+    NativeCollectionMethod {
+        receiver: &'a Expr,
+        method: NativeCollectionMethod,
+    },
+    NativeCollectionStatic {
+        method: NativeCollectionStaticMethod,
+    },
+    NativeJavaInstance {
+        receiver: &'a Expr,
+        method: NativeJavaInstanceMethod,
+    },
+    NativeJavaStatic {
+        method: NativeJavaStaticMethod,
+    },
     ExternalCrateReceiver {
         receiver: &'a Expr,
         crate_name: String,
@@ -43,19 +69,150 @@ impl<'a> CallTargetPlan<'a> {
         match self {
             CallTargetPlan::InstanceReceiver { receiver, .. }
             | CallTargetPlan::FallbackReceiver { receiver, .. }
-            | CallTargetPlan::ExternalCrateReceiver { receiver, .. } => Some(receiver),
+            | CallTargetPlan::ExternalCrateReceiver { receiver, .. }
+            | CallTargetPlan::NativeCollectionMethod { receiver, .. }
+            | CallTargetPlan::NativeJavaInstance { receiver, .. } => Some(receiver),
             CallTargetPlan::StaticSelf { .. }
+            | CallTargetPlan::StaticOwner { .. }
             | CallTargetPlan::InstanceSelf { .. }
-            | CallTargetPlan::FallbackFree { .. } => None,
+            | CallTargetPlan::FallbackFree { .. }
+            | CallTargetPlan::JavaClassStatic { .. }
+            | CallTargetPlan::NativeCollectionStatic { .. }
+            | CallTargetPlan::NativeJavaStatic { .. } => None,
+        }
+    }
+
+    pub fn adapts_optional_instance_receiver(&self) -> bool {
+        matches!(
+            self,
+            CallTargetPlan::InstanceReceiver { .. }
+                | CallTargetPlan::FallbackReceiver { .. }
+                | CallTargetPlan::ExternalCrateReceiver { .. }
+                | CallTargetPlan::NativeJavaInstance { .. }
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCollectionMethod {
+    Len,
+    IsEmpty,
+    ListPush,
+    ListGet,
+    SetInsert,
+    Extend,
+    MapInsert,
+    MapGet,
+    MapContainsKey,
+    MapKeys,
+    MapIter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeCollectionExtendArgPlan {
+    OwnedSource { slot_shape: RustSlotShape },
+    BorrowedSequenceSource { element_shape: RustSlotShape },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCollectionStaticMethod {
+    ArraysAsList,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeJavaInstanceMethod {
+    StringLen,
+    StringToLowercase,
+    StringContains,
+    StringStartsWith,
+    StringEndsWith,
+    StringSplit,
+    Equals,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeJavaStaticMethod {
+    MathMax,
+    StringFormat,
+    StringJoin,
+    ObjectsEquals,
+}
+
+pub fn native_collection_lowered_type(
+    receiver: &Expr,
+    method: NativeCollectionMethod,
+    types: &TypeEnv,
+) -> Option<LoweredType> {
+    let receiver_ty = infer_expr_type(receiver, types);
+    let receiver_ty = effective_native_collection_receiver_type(&receiver_ty);
+    match method {
+        NativeCollectionMethod::ListGet => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            Some(LoweredType::optional_element_borrow_shape(
+                borrowed_sequence_element_shape(element_ty.clone()),
+            ))
+        }
+        NativeCollectionMethod::MapGet => {
+            let (_, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
+            Some(LoweredType::optional_element_borrow_shape(
+                borrowed_sequence_element_shape(value_ty.clone()),
+            ))
+        }
+        NativeCollectionMethod::MapInsert => {
+            let (_, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
+            Some(LoweredType::from_java(crate::types::optional_java_type(
+                value_ty.clone(),
+            )))
+        }
+        _ => None,
+    }
+}
+
+pub fn external_call_lowered_type(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> Option<LoweredType> {
+    let receiver_key =
+        external_call_receiver_type_key(receiver, name, arg_count, facts, types, current_type)?;
+    let effect = facts.external_api_effect_for_receiver_with_arity(
+        receiver_key.as_deref(),
+        name,
+        Some(arg_count),
+    )?;
+    let return_ty = effect.return_type.clone()?;
+
+    match effect.return_nullability {
+        NullabilityState::MaybeNull
+            if external_return_borrows_receiver(effect.role, &return_ty) =>
+        {
+            Some(LoweredType::optional_element_borrow_shape(
+                borrowed_sequence_element_shape(return_ty),
+            ))
+        }
+        NullabilityState::MaybeNull | NullabilityState::DefinitelyNull => Some(
+            LoweredType::from_java(crate::types::optional_java_type(return_ty)),
+        ),
+        NullabilityState::DefinitelyNonNull | NullabilityState::Unknown => {
+            Some(LoweredType::from_java(return_ty))
         }
     }
 }
 
+fn external_return_borrows_receiver(role: ExternalApiRole, return_ty: &JavaType) -> bool {
+    matches!(role, ExternalApiRole::IndexedGetter)
+        && !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void)
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub struct NewTargetPlan<'a> {
+pub struct NewTargetPlan {
     pub owner_shape: RustSlotShape,
-    pub rust_name: &'a str,
+    pub rust_name: String,
     pub external_crate: Option<ExternalCrateNewTarget>,
+    pub native_collection: Option<NativeCollectionNewTarget>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +220,22 @@ pub struct ExternalCrateNewTarget {
     pub crate_name: String,
     pub type_name: String,
     pub rust_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCollectionNewTarget {
+    Empty {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
+    WithCapacity {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
+    FromSource {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
+    FromSingleArg {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +273,17 @@ pub enum CallStatementPlan<'a> {
         field_name: String,
         value: &'a Expr,
     },
+    IterableForEach {
+        receiver: &'a Expr,
+        param_names: Vec<String>,
+        body: &'a LambdaBody,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallExceptionPropagationPlan {
+    PropagateResult,
+    NoPropagation,
 }
 
 pub fn plan_trivial_accessor_call<'a>(
@@ -114,6 +298,9 @@ pub fn plan_trivial_accessor_call<'a>(
         return None;
     }
     let accessor = facts.trivial_accessor_for(&resolved.declaring_type, name)?;
+    if accessor.inline_policy != AccessorInlinePolicy::InlineCandidate {
+        return None;
+    }
     match &accessor.kind {
         TrivialAccessorKind::Getter { field } if args.is_empty() => {
             Some(TrivialAccessorCallPlan::Getter {
@@ -130,6 +317,30 @@ pub fn plan_trivial_accessor_call<'a>(
         }
         _ => None,
     }
+}
+
+pub fn plan_call_exception_propagation(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&ResolvedCall>,
+    facts: &FactSet,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> CallExceptionPropagationPlan {
+    if let Some(resolved) = resolved
+        && facts.method_has_thrown_exceptions(&resolved.declaring_type, &resolved.rust_name)
+    {
+        return CallExceptionPropagationPlan::PropagateResult;
+    }
+
+    if let Some(effect) = external_call_effect(receiver, name, args, facts, types, current_type)
+        && !effect.thrown.is_empty()
+    {
+        return CallExceptionPropagationPlan::PropagateResult;
+    }
+
+    CallExceptionPropagationPlan::NoPropagation
 }
 
 pub fn plan_call_expr<'a>(
@@ -156,6 +367,141 @@ pub fn plan_call_expr<'a>(
     ))
 }
 
+pub fn apply_fallback_receiver_rust_name<'a>(
+    plan: CallExprPlan<'a>,
+    fallback_rust_name: Option<String>,
+) -> CallExprPlan<'a> {
+    match (plan, fallback_rust_name) {
+        (
+            CallExprPlan::Target(CallTargetPlan::FallbackReceiver { receiver, .. }),
+            Some(rust_name),
+        ) => CallExprPlan::Target(CallTargetPlan::FallbackReceiver {
+            receiver,
+            rust_name,
+        }),
+        (plan, _) => plan,
+    }
+}
+
+fn external_call_effect<'a>(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    facts: &'a FactSet,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> Option<&'a crate::facts::ExternalApiEffectFact> {
+    let receiver_key =
+        external_call_receiver_type_key(receiver, name, args.len(), facts, types, current_type)?;
+    facts.external_api_effect_for_receiver_with_arity(
+        receiver_key.as_deref(),
+        name,
+        Some(args.len()),
+    )
+}
+
+pub fn external_call_receiver_type_key(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> Option<Option<String>> {
+    match receiver {
+        None if crate::stdlib::is_known_receiverless_static_utility_method(name, arg_count) => {
+            Some(None)
+        }
+        None => current_type.map(|type_name| Some(type_name.to_string())),
+        Some(Expr::This | Expr::Super) => current_type.map(|type_name| Some(type_name.to_string())),
+        Some(receiver) => external_receiver_expr_type_key(receiver, facts, types).map(Some),
+    }
+}
+
+fn external_receiver_expr_type_key(
+    receiver: &Expr,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<String> {
+    let inferred = infer_expr_type(receiver, types);
+    if weak_unknown_field_access_receiver(receiver, &inferred) {
+        return infer_external_field_access_type(receiver, facts, types)
+            .and_then(|external_field_ty| external_receiver_type_key(&external_field_ty, types));
+    }
+    external_receiver_type_key(&inferred, types)
+}
+
+fn infer_external_field_access_type(
+    expr: &Expr,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<JavaType> {
+    let Expr::FieldAccess(receiver, field) = expr else {
+        return None;
+    };
+    let receiver_ty = infer_external_field_access_type(receiver, facts, types)
+        .unwrap_or_else(|| infer_expr_type(receiver, types));
+    external_pack_or_fact_field_type(&receiver_ty, field, facts)
+}
+
+fn external_pack_or_fact_field_type(
+    receiver_ty: &JavaType,
+    field: &str,
+    facts: &FactSet,
+) -> Option<JavaType> {
+    let receiver_name = external_field_receiver_name(receiver_ty)?;
+    if let Some(field_fact) = facts.external_field_for(&receiver_name, field)
+        && let Some(field_type) = &field_fact.field_type
+    {
+        return Some(field_type.clone());
+    }
+    if let Some(field_fact) = crate::external_packs::external_field_for(&receiver_name, field)
+        && let Some(field_type) = field_fact.field_type
+    {
+        return Some(field_type);
+    }
+    crate::stdlib::known_external_field_type_for_receiver(receiver_ty, field)
+}
+
+fn external_field_receiver_name(receiver_ty: &JavaType) -> Option<String> {
+    match receiver_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+        }
+        _ => None,
+    }
+}
+
+fn weak_unknown_field_access_receiver(receiver: &Expr, inferred: &JavaType) -> bool {
+    match (receiver, inferred) {
+        (Expr::FieldAccess(_, field), JavaType::Unknown(name)) => {
+            name == field
+                || crate::parser::to_snake_case(name) == crate::parser::to_snake_case(field)
+        }
+        _ => false,
+    }
+}
+
+fn external_receiver_type_key(java_ty: &JavaType, types: &TypeEnv) -> Option<String> {
+    if let Some(element_ty) = crate::types::optional_element_type(java_ty) {
+        return external_receiver_type_key(&element_ty, types);
+    }
+    if let JavaType::Named { name, args } = java_ty
+        && args.is_empty()
+        && let Some(bound) = types.type_param_bound(name)
+    {
+        return external_receiver_type_key(bound, types);
+    }
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+        }
+        JavaType::String => Some("String".to_string()),
+        JavaType::Array(_) => Some("Array".to_string()),
+        JavaType::Void | JavaType::Primitive(_) | JavaType::Wildcard(_) => None,
+    }
+}
+
 pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallStatementPlan<'a>> {
     let Expr::Call {
         receiver,
@@ -166,18 +512,47 @@ pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallSt
     else {
         return None;
     };
-    match plan_trivial_accessor_call(receiver.as_deref(), name, args, resolved.as_ref(), facts)? {
-        TrivialAccessorCallPlan::Setter {
+    if let Some(plan) = plan_iterable_for_each_statement(receiver.as_deref(), name, args) {
+        return Some(plan);
+    }
+    match plan_trivial_accessor_call(receiver.as_deref(), name, args, resolved.as_ref(), facts) {
+        Some(TrivialAccessorCallPlan::Setter {
             receiver,
             field_name,
             value,
-        } => Some(CallStatementPlan::TrivialAccessorSetter {
+        }) => Some(CallStatementPlan::TrivialAccessorSetter {
             receiver,
             field_name,
             value,
         }),
-        TrivialAccessorCallPlan::Getter { .. } => None,
+        Some(TrivialAccessorCallPlan::Getter { .. }) | None => None,
     }
+}
+
+fn plan_iterable_for_each_statement<'a>(
+    receiver: Option<&'a Expr>,
+    name: &str,
+    args: &'a [Expr],
+) -> Option<CallStatementPlan<'a>> {
+    if name != "forEach" || args.len() != 1 {
+        return None;
+    }
+    let receiver = receiver?;
+    let Expr::Lambda { params, body } = &args[0] else {
+        return None;
+    };
+    let param_names = params
+        .iter()
+        .map(|param| param.name.clone())
+        .collect::<Vec<_>>();
+    if param_names.is_empty() {
+        return None;
+    }
+    Some(CallStatementPlan::IterableForEach {
+        receiver,
+        param_names,
+        body,
+    })
 }
 
 pub fn plan_call_target<'a>(
@@ -202,14 +577,57 @@ pub fn plan_call_target_with_facts<'a>(
     types: &TypeEnv,
 ) -> CallTargetPlan<'a> {
     if let Some(receiver) = receiver
+        && let Some(target) = plan_java_logging_facade_call(receiver, name)
+    {
+        return target;
+    }
+
+    if let Some(receiver) = receiver
         && let Some(target) = plan_external_crate_receiver_call(receiver, name, facts, types)
     {
         return target;
     }
 
+    if let Some(receiver) = receiver
+        && let Some(target) = plan_native_collection_receiver_call(receiver, name, types)
+    {
+        return target;
+    }
+
+    if let Some(target) = plan_native_java_static_call(receiver, name) {
+        return target;
+    }
+
+    if let Some(call) = resolved
+        && let (CallKind::Instance, Some(receiver)) = (&call.kind, receiver)
+    {
+        return CallTargetPlan::InstanceReceiver {
+            receiver,
+            rust_name: &call.rust_name,
+        };
+    }
+
+    if let Some(receiver) = receiver
+        && let Some(target) = plan_native_java_receiver_call(receiver, name, types)
+    {
+        return target;
+    }
+
+    if let Some(target) = plan_native_collection_static_call(receiver, name) {
+        return target;
+    }
+
+    if let Some(target) = plan_java_class_static_call(receiver, name) {
+        return target;
+    }
+
     if let Some(call) = resolved {
         return match (&call.kind, receiver) {
-            (CallKind::Static, _) => CallTargetPlan::StaticSelf {
+            (CallKind::Static, Some(_)) => CallTargetPlan::StaticOwner {
+                owner: rust_static_owner_type_name(&call.declaring_type),
+                rust_name: call.rust_name.clone(),
+            },
+            (CallKind::Static, None) => CallTargetPlan::StaticSelf {
                 rust_name: &call.rust_name,
             },
             (CallKind::Instance, Some(receiver)) => CallTargetPlan::InstanceReceiver {
@@ -223,15 +641,262 @@ pub fn plan_call_target_with_facts<'a>(
     }
 
     if let Some(receiver) = receiver {
+        if let Some(owner) = static_utility_owner_expr_type_name(receiver, name, facts, types) {
+            return CallTargetPlan::StaticOwner {
+                owner,
+                rust_name: crate::parser::to_snake_case(name),
+            };
+        }
+        if let Some(owner) = qualified_static_owner_expr_type_name(receiver, types) {
+            return CallTargetPlan::StaticOwner {
+                owner,
+                rust_name: crate::parser::to_snake_case(name),
+            };
+        }
         CallTargetPlan::FallbackReceiver {
             receiver,
             rust_name: crate::parser::to_snake_case(name),
         }
     } else {
+        if let Some(owner) = types.static_member_import_owner(name) {
+            return CallTargetPlan::StaticOwner {
+                owner: rust_static_owner_type_name(owner),
+                rust_name: crate::parser::to_snake_case(name),
+            };
+        }
+        let rust_name = crate::parser::to_snake_case(name);
+        if let Some(owner) = types.static_member_import_owner(&rust_name) {
+            return CallTargetPlan::StaticOwner {
+                owner: rust_static_owner_type_name(owner),
+                rust_name,
+            };
+        }
         CallTargetPlan::FallbackFree {
             rust_name: crate::parser::to_snake_case(name),
         }
     }
+}
+
+fn plan_java_logging_facade_call<'a>(receiver: &'a Expr, name: &str) -> Option<CallTargetPlan<'a>> {
+    let Expr::Var(receiver_name) = receiver else {
+        return None;
+    };
+    if !matches!(
+        crate::stdlib::canonical_external_receiver_type_key(receiver_name).as_str(),
+        "logger" | "Logger"
+    ) {
+        return None;
+    }
+    if !matches!(name, "info" | "warn" | "debug" | "error" | "trace") {
+        return None;
+    }
+    Some(CallTargetPlan::StaticOwner {
+        owner: "logger".to_string(),
+        rust_name: crate::parser::to_snake_case(name),
+    })
+}
+
+fn static_utility_owner_expr_type_name(
+    receiver: &Expr,
+    name: &str,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<String> {
+    let Expr::Var(receiver_name) = receiver else {
+        return None;
+    };
+    if types.local_type(receiver_name).is_some() || types.field_type(receiver_name).is_some() {
+        return None;
+    }
+    if let Some(owner) = types.static_type_alias(receiver_name) {
+        return Some(rust_static_owner_type_name(owner));
+    }
+    let owner = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    if facts
+        .external_api_effect_for_receiver(Some(&owner), name)
+        .is_some()
+        || crate::external_packs::external_api_effect_for_receiver(Some(&owner), name).is_some()
+        || crate::stdlib::external_api_method_role(Some(&owner), name, 0)
+            != ExternalApiRole::Unknown
+    {
+        Some(owner)
+    } else {
+        None
+    }
+}
+
+pub fn rust_static_owner_type_name(owner: &str) -> String {
+    let simple = owner
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .next_back()
+        .unwrap_or(owner);
+    upper_camel_from_snake_or_preserved(simple)
+}
+
+fn qualified_static_owner_expr_type_name(receiver: &Expr, types: &TypeEnv) -> Option<String> {
+    let Expr::FieldAccess(_, _) = receiver else {
+        return None;
+    };
+    static_owner_expr_type_name(receiver, types)
+}
+
+fn static_owner_expr_type_name(receiver: &Expr, types: &TypeEnv) -> Option<String> {
+    match receiver {
+        Expr::Var(name) => {
+            if types.local_type(name).is_some() || types.field_type(name).is_some() {
+                return None;
+            }
+            Some(upper_camel_from_snake_or_preserved(name))
+        }
+        Expr::FieldAccess(inner, field) => {
+            if is_static_constant_member(field) {
+                return None;
+            }
+            let _ = static_owner_expr_type_name(inner, types)?;
+            Some(upper_camel_from_snake_or_preserved(field))
+        }
+        _ => None,
+    }
+}
+
+fn upper_camel_from_snake_or_preserved(name: &str) -> String {
+    if name
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+    {
+        return name.to_string();
+    }
+    let mut out = String::new();
+    let mut uppercase_next = true;
+    for ch in name.chars() {
+        if ch == '_' {
+            uppercase_next = true;
+        } else if uppercase_next {
+            out.push(ch.to_ascii_uppercase());
+            uppercase_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn is_static_constant_member(member: &str) -> bool {
+    member
+        .chars()
+        .any(|ch| ch == '_' || ch.is_ascii_uppercase())
+        && member
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
+}
+
+fn plan_native_collection_static_call<'a>(
+    receiver: Option<&'a Expr>,
+    name: &str,
+) -> Option<CallTargetPlan<'a>> {
+    let Some(Expr::Var(receiver_name)) = receiver else {
+        return None;
+    };
+    if crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Arrays"
+        && name == "asList"
+    {
+        return Some(CallTargetPlan::NativeCollectionStatic {
+            method: NativeCollectionStaticMethod::ArraysAsList,
+        });
+    }
+    None
+}
+
+fn plan_native_collection_receiver_call<'a>(
+    receiver: &'a Expr,
+    name: &str,
+    types: &TypeEnv,
+) -> Option<CallTargetPlan<'a>> {
+    let receiver_ty = infer_expr_type(receiver, types);
+    let receiver_ty = effective_native_collection_receiver_type(&receiver_ty);
+    let kind = crate::stdlib::java_collection_kind_for_type(&receiver_ty)?;
+    let method = match (kind, name) {
+        (_, "size") => NativeCollectionMethod::Len,
+        (_, "isEmpty") => NativeCollectionMethod::IsEmpty,
+        (crate::stdlib::JavaCollectionKind::List, "add") => NativeCollectionMethod::ListPush,
+        (crate::stdlib::JavaCollectionKind::List, "get") => NativeCollectionMethod::ListGet,
+        (crate::stdlib::JavaCollectionKind::Set, "add") => NativeCollectionMethod::SetInsert,
+        (
+            crate::stdlib::JavaCollectionKind::List | crate::stdlib::JavaCollectionKind::Set,
+            "addAll",
+        ) => NativeCollectionMethod::Extend,
+        (crate::stdlib::JavaCollectionKind::Map, "put") => NativeCollectionMethod::MapInsert,
+        (crate::stdlib::JavaCollectionKind::Map, "get") => NativeCollectionMethod::MapGet,
+        (crate::stdlib::JavaCollectionKind::Map, "containsKey" | "contains_key") => {
+            NativeCollectionMethod::MapContainsKey
+        }
+        (crate::stdlib::JavaCollectionKind::Map, "keySet" | "key_set") => {
+            NativeCollectionMethod::MapKeys
+        }
+        (crate::stdlib::JavaCollectionKind::Map, "entrySet" | "entry_set") => {
+            NativeCollectionMethod::MapIter
+        }
+        _ => return None,
+    };
+    Some(CallTargetPlan::NativeCollectionMethod { receiver, method })
+}
+
+fn plan_native_java_receiver_call<'a>(
+    receiver: &'a Expr,
+    name: &str,
+    types: &TypeEnv,
+) -> Option<CallTargetPlan<'a>> {
+    let receiver_ty = infer_expr_type(receiver, types);
+    let effective_receiver_ty =
+        crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+    let method = match (&effective_receiver_ty, name) {
+        (JavaType::String, "length") => NativeJavaInstanceMethod::StringLen,
+        (JavaType::String, "toLowerCase") => NativeJavaInstanceMethod::StringToLowercase,
+        (JavaType::String, "contains") => NativeJavaInstanceMethod::StringContains,
+        (JavaType::String, "startsWith") => NativeJavaInstanceMethod::StringStartsWith,
+        (JavaType::String, "endsWith") => NativeJavaInstanceMethod::StringEndsWith,
+        (JavaType::String, "split") => NativeJavaInstanceMethod::StringSplit,
+        (_, "equals") => NativeJavaInstanceMethod::Equals,
+        _ => return None,
+    };
+    Some(CallTargetPlan::NativeJavaInstance { receiver, method })
+}
+
+fn plan_native_java_static_call<'a>(
+    receiver: Option<&'a Expr>,
+    name: &str,
+) -> Option<CallTargetPlan<'a>> {
+    let Some(Expr::Var(receiver_name)) = receiver else {
+        return None;
+    };
+    let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    let method = match (receiver_key.as_str(), name) {
+        ("Math", "max") => NativeJavaStaticMethod::MathMax,
+        ("String", "format") => NativeJavaStaticMethod::StringFormat,
+        ("String", "join") => NativeJavaStaticMethod::StringJoin,
+        ("Objects", "equals") => NativeJavaStaticMethod::ObjectsEquals,
+        _ => return None,
+    };
+    Some(CallTargetPlan::NativeJavaStatic { method })
+}
+
+fn plan_java_class_static_call<'a>(
+    receiver: Option<&'a Expr>,
+    name: &str,
+) -> Option<CallTargetPlan<'a>> {
+    let Some(Expr::Var(receiver_name)) = receiver else {
+        return None;
+    };
+    if crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Class"
+        && name == "forName"
+    {
+        return Some(CallTargetPlan::JavaClassStatic {
+            rust_name: "for_name".to_string(),
+        });
+    }
+    None
 }
 
 fn plan_external_crate_receiver_call<'a>(
@@ -280,36 +945,181 @@ fn plan_external_crate_receiver_call<'a>(
     })
 }
 
-pub fn plan_new_target<'a>(
+pub fn plan_new_target(
     ty: &JavaType,
-    resolved: Option<&'a ResolvedConstructor>,
+    resolved: Option<&ResolvedConstructor>,
     representations: &RepresentationPlan,
-) -> NewTargetPlan<'a> {
+) -> NewTargetPlan {
     plan_new_target_with_facts(ty, resolved, representations, &FactSet::default(), 0)
 }
 
-pub fn plan_new_target_with_facts<'a>(
+pub fn plan_new_target_with_facts(
     ty: &JavaType,
-    resolved: Option<&'a ResolvedConstructor>,
+    resolved: Option<&ResolvedConstructor>,
     representations: &RepresentationPlan,
     facts: &FactSet,
     arg_count: usize,
-) -> NewTargetPlan<'a> {
+) -> NewTargetPlan {
     let owner_ty = resolved
-        .map(|resolved| JavaType::Named {
-            name: resolved.declaring_type.clone(),
-            args: Vec::new(),
-        })
+        .map(|resolved| resolved.constructed_type.clone())
         .unwrap_or_else(|| ty.clone());
-    let rust_name = resolved
-        .map(|resolved| resolved.rust_name.as_str())
-        .unwrap_or("new");
-    let external_crate = plan_external_crate_constructor(&owner_ty, rust_name, facts, arg_count);
+    let rust_name = constructor_rust_name(&owner_ty, resolved, facts, arg_count);
+    let external_crate = plan_external_crate_constructor(&owner_ty, &rust_name, facts, arg_count);
+    let native_collection = plan_native_collection_constructor(&owner_ty, arg_count);
     NewTargetPlan {
         owner_shape: value_shape_for_java_type(representations, owner_ty),
         rust_name,
         external_crate,
+        native_collection,
     }
+}
+
+pub fn plan_new_target_for_args_with_facts(
+    ty: &JavaType,
+    resolved: Option<&ResolvedConstructor>,
+    representations: &RepresentationPlan,
+    facts: &FactSet,
+    args: &[Expr],
+    types: &TypeEnv,
+) -> NewTargetPlan {
+    let owner_ty = resolved
+        .map(|resolved| resolved.constructed_type.clone())
+        .unwrap_or_else(|| ty.clone());
+    let rust_name = constructor_rust_name(&owner_ty, resolved, facts, args.len());
+    let external_crate = plan_external_crate_constructor(&owner_ty, &rust_name, facts, args.len());
+    let native_collection = plan_native_collection_constructor_for_args(&owner_ty, args, types)
+        .or_else(|| plan_native_collection_constructor(&owner_ty, args.len()));
+    NewTargetPlan {
+        owner_shape: value_shape_for_java_type(representations, owner_ty),
+        rust_name,
+        external_crate,
+        native_collection,
+    }
+}
+
+fn constructor_rust_name(
+    owner_ty: &JavaType,
+    resolved: Option<&ResolvedConstructor>,
+    facts: &FactSet,
+    arg_count: usize,
+) -> String {
+    if let Some(resolved) = resolved {
+        return resolved.rust_name.clone();
+    }
+    let Some(type_name) = java_type_name(owner_ty) else {
+        return "new".to_string();
+    };
+    if external_constructor_needs_arity_name(type_name, facts) {
+        format!("new_{arg_count}")
+    } else {
+        "new".to_string()
+    }
+}
+
+pub fn unresolved_constructor_rust_name_for_facts(
+    owner_ty: &JavaType,
+    facts: &FactSet,
+    arg_count: usize,
+) -> String {
+    constructor_rust_name(owner_ty, None, facts, arg_count)
+}
+
+fn external_constructor_needs_arity_name(type_name: &str, facts: &FactSet) -> bool {
+    let arities = facts
+        .external_constructor_facts
+        .iter()
+        .filter(|fact| external_constructor_type_matches(&fact.type_name, type_name))
+        .map(|fact| fact.arg_types.len())
+        .collect::<std::collections::BTreeSet<_>>();
+    arities.len() > 1
+}
+
+fn external_constructor_type_matches(fact_type_name: &str, query_type_name: &str) -> bool {
+    if fact_type_name == query_type_name {
+        return true;
+    }
+    let fact_key = crate::stdlib::canonical_external_receiver_type_key(fact_type_name);
+    let query_key = crate::stdlib::canonical_external_receiver_type_key(query_type_name);
+    if fact_key == query_key {
+        return true;
+    }
+    fact_key
+        .rsplit('.')
+        .next()
+        .is_some_and(|simple| simple == query_key)
+        || query_key
+            .rsplit('.')
+            .next()
+            .is_some_and(|simple| simple == fact_key)
+}
+
+fn plan_native_collection_constructor(
+    ty: &JavaType,
+    arg_count: usize,
+) -> Option<NativeCollectionNewTarget> {
+    let kind = crate::stdlib::java_collection_kind_for_type(ty)?;
+    match arg_count {
+        0 => Some(NativeCollectionNewTarget::Empty { kind }),
+        1 => Some(NativeCollectionNewTarget::FromSingleArg { kind }),
+        _ => None,
+    }
+}
+
+fn plan_native_collection_constructor_for_args(
+    ty: &JavaType,
+    args: &[Expr],
+    types: &TypeEnv,
+) -> Option<NativeCollectionNewTarget> {
+    let kind = crate::stdlib::java_collection_kind_for_type(ty)?;
+    match args {
+        [] => Some(NativeCollectionNewTarget::Empty { kind }),
+        [arg] if is_integral_capacity_arg(arg, types) => {
+            Some(NativeCollectionNewTarget::WithCapacity { kind })
+        }
+        [arg] if is_collection_source_arg(arg, types) => {
+            Some(NativeCollectionNewTarget::FromSource { kind })
+        }
+        [_] => Some(NativeCollectionNewTarget::FromSingleArg { kind }),
+        _ => None,
+    }
+}
+
+fn is_integral_capacity_arg(arg: &Expr, types: &TypeEnv) -> bool {
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = arg
+        && args.is_empty()
+        && matches!(
+            plan_native_collection_receiver_call(receiver, name, types),
+            Some(CallTargetPlan::NativeCollectionMethod {
+                method: NativeCollectionMethod::Len,
+                ..
+            })
+        )
+    {
+        return true;
+    }
+    match infer_expr_type(arg, types) {
+        JavaType::Primitive(
+            crate::java_ir::PrimitiveType::Byte
+            | crate::java_ir::PrimitiveType::Short
+            | crate::java_ir::PrimitiveType::Int
+            | crate::java_ir::PrimitiveType::Long,
+        ) => true,
+        JavaType::Named { name, .. } => {
+            matches!(name.as_str(), "Byte" | "Short" | "Integer" | "Long")
+        }
+        _ => false,
+    }
+}
+
+fn is_collection_source_arg(arg: &Expr, types: &TypeEnv) -> bool {
+    let arg_ty = infer_expr_type(arg, types);
+    crate::stdlib::java_collection_kind_for_type(&arg_ty).is_some()
+        || crate::types::sequence_element_type(&arg_ty).is_some()
 }
 
 fn plan_external_crate_constructor(
@@ -372,13 +1182,21 @@ pub fn resolved_call_arg_shapes(
 ) -> Vec<RustSlotShape> {
     (0..arg_count)
         .map(|index| {
-            signatures.required_method_arg_shape_by_rust_name(
-                &call.declaring_type,
-                &call.rust_name,
-                index,
-            )
+            signatures
+                .method_arg_shape_by_rust_name(&call.declaring_type, &call.rust_name, index)
+                .unwrap_or_else(|| resolved_call_boundary_arg_shape(call, index))
         })
         .collect()
+}
+
+fn resolved_call_boundary_arg_shape(call: &ResolvedCall, index: usize) -> RustSlotShape {
+    let java_ty = call
+        .arg_coercions
+        .iter()
+        .find(|coercion| coercion.arg_index == index)
+        .map(|coercion| coercion.target.clone())
+        .unwrap_or_else(|| JavaType::Unknown(format!("{}:arg{index}", call.rust_name)));
+    RustSlotShape::for_storage(java_ty)
 }
 
 pub fn plan_call_arguments(
@@ -406,20 +1224,155 @@ pub fn plan_call_arguments_with_facts(
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
     }
 
-    external_call_arg_shapes(receiver, name, arg_count, facts, types)
+    native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
         .map(ArgumentLoweringPlan::Shaped)
+        .or_else(|| {
+            external_call_arg_shapes(receiver, name, arg_count, facts, types)
+                .map(ArgumentLoweringPlan::Shaped)
+        })
         .unwrap_or(ArgumentLoweringPlan::Unshaped { arg_count })
 }
 
-fn external_call_arg_shapes(
+pub fn plan_call_arguments_with_facts_and_args(
+    receiver: Option<&Expr>,
+    name: &str,
+    resolved: Option<&ResolvedCall>,
+    args: &[Expr],
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> ArgumentLoweringPlan {
+    let arg_count = args.len();
+    if let Some(call) = resolved {
+        return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
+    }
+
+    native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
+        .map(ArgumentLoweringPlan::Shaped)
+        .or_else(|| {
+            external_call_arg_shapes(receiver, name, arg_count, facts, types)
+                .map(ArgumentLoweringPlan::Shaped)
+        })
+        .or_else(|| {
+            conservative_external_mutator_arg_shapes(receiver, name, args, signatures, facts, types)
+                .map(ArgumentLoweringPlan::Shaped)
+        })
+        .unwrap_or(ArgumentLoweringPlan::Unshaped { arg_count })
+}
+
+pub fn native_collection_arg_shapes(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    types: &TypeEnv,
+) -> Option<Vec<RustSlotShape>> {
+    native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, &FactSet::default())
+}
+
+pub fn native_collection_arg_shapes_with_facts(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<Vec<RustSlotShape>> {
+    let effective_facts = EffectiveFacts::new(facts);
+    let receiver = receiver?;
+    let receiver_ty = infer_expr_type(receiver, types);
+    let receiver_ty = effective_native_collection_receiver_type(&receiver_ty);
+    let method = match plan_native_collection_receiver_call(receiver, name, types)? {
+        CallTargetPlan::NativeCollectionMethod { method, .. } => method,
+        _ => return None,
+    };
+    let shapes = match method {
+        NativeCollectionMethod::ListPush | NativeCollectionMethod::SetInsert if arg_count == 1 => {
+            vec![collection_element_arg_shape_with_effective_facts(
+                &receiver_ty,
+                &effective_facts,
+            )?]
+        }
+        NativeCollectionMethod::Extend if arg_count == 1 => {
+            vec![storage_arg_shape_with_effective_facts(
+                receiver_ty.clone(),
+                &effective_facts,
+            )]
+        }
+        NativeCollectionMethod::MapInsert if arg_count == 2 => {
+            let (key_ty, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
+            vec![
+                storage_arg_shape_with_effective_facts(key_ty.clone(), &effective_facts),
+                storage_arg_shape_with_effective_facts(value_ty.clone(), &effective_facts),
+            ]
+        }
+        NativeCollectionMethod::ListGet if arg_count == 1 => {
+            vec![RustSlotShape::for_storage(JavaType::Primitive(
+                PrimitiveType::Int,
+            ))]
+        }
+        NativeCollectionMethod::MapGet | NativeCollectionMethod::MapContainsKey
+            if arg_count == 1 =>
+        {
+            let (key_ty, _) = crate::stdlib::java_map_type_args(&receiver_ty)?;
+            vec![borrowed_sequence_element_shape(key_ty.clone())]
+        }
+        _ => return None,
+    };
+    Some(shapes)
+}
+
+fn collection_element_arg_shape_with_effective_facts(
+    receiver_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> Option<RustSlotShape> {
+    let element_ty = crate::types::sequence_element_type(receiver_ty)?;
+    Some(storage_arg_shape_with_effective_facts(element_ty, facts))
+}
+
+fn storage_arg_shape_with_effective_facts(
+    java_ty: JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> RustSlotShape {
+    let mut shape = RustSlotShape::for_storage(java_ty.clone());
+    if matches!(
+        facts.object_representation_override_strategy_for(&java_ty),
+        Some(HierarchyStrategy::ErasedObject)
+    ) {
+        apply_required_dispatch(&mut shape, DispatchShape::ErasedObject);
+    }
+    shape
+}
+
+pub fn plan_native_collection_extend_arg(
+    receiver_ty: &JavaType,
+    arg_shape: &RustSlotShape,
+) -> Option<NativeCollectionExtendArgPlan> {
+    let receiver_ty = effective_native_collection_receiver_type(receiver_ty);
+    if arg_shape.ownership == OwnershipShape::SharedBorrow && arg_shape.view == ViewShape::Slice {
+        let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+        return Some(NativeCollectionExtendArgPlan::BorrowedSequenceSource {
+            element_shape: RustSlotShape::for_storage(element_ty),
+        });
+    }
+
+    Some(NativeCollectionExtendArgPlan::OwnedSource {
+        slot_shape: RustSlotShape::for_storage(receiver_ty),
+    })
+}
+
+fn effective_native_collection_receiver_type(receiver_ty: &JavaType) -> JavaType {
+    crate::types::optional_element_type(receiver_ty)
+        .filter(|element_ty| crate::stdlib::java_collection_kind_for_type(element_ty).is_some())
+        .unwrap_or_else(|| receiver_ty.clone())
+}
+
+pub fn external_call_arg_shapes(
     receiver: Option<&Expr>,
     name: &str,
     arg_count: usize,
     facts: &FactSet,
     types: &TypeEnv,
 ) -> Option<Vec<RustSlotShape>> {
-    let receiver_name = receiver
-        .and_then(|receiver| java_type_name(&infer_expr_type(receiver, types)).map(str::to_string));
+    let receiver_name = external_call_argument_receiver_key(receiver, name, types);
     (0..arg_count)
         .map(|index| {
             facts
@@ -427,6 +1380,168 @@ fn external_call_arg_shapes(
                 .map(argument_shape_from_external_effect)
         })
         .collect()
+}
+
+fn external_call_argument_receiver_key(
+    receiver: Option<&Expr>,
+    name: &str,
+    types: &TypeEnv,
+) -> Option<String> {
+    receiver
+        .and_then(|receiver| static_call_argument_owner_key(receiver, types))
+        .or_else(|| {
+            receiver.and_then(|receiver| {
+                java_type_name(&infer_expr_type(receiver, types)).map(str::to_string)
+            })
+        })
+        .or_else(|| {
+            static_member_import_owner_for_call(name, types)
+                .map(crate::stdlib::canonical_external_receiver_type_key)
+        })
+}
+
+fn static_call_argument_owner_key(receiver: &Expr, types: &TypeEnv) -> Option<String> {
+    if let Some(owner) = imported_static_owner_for_call(receiver, types) {
+        return Some(crate::stdlib::canonical_external_receiver_type_key(owner));
+    }
+    qualified_static_owner_java_key(receiver)
+}
+
+fn imported_static_owner_for_call<'a>(receiver: &Expr, types: &'a TypeEnv) -> Option<&'a str> {
+    let Expr::Var(receiver_name) = receiver else {
+        return None;
+    };
+    if types.local_type(receiver_name).is_some() || types.field_type(receiver_name).is_some() {
+        return None;
+    }
+    types.static_type_alias(receiver_name)
+}
+
+fn static_member_import_owner_for_call<'a>(name: &str, types: &'a TypeEnv) -> Option<&'a str> {
+    types
+        .static_member_import_owner(name)
+        .or_else(|| types.static_member_import_owner(&crate::parser::to_snake_case(name)))
+}
+
+fn qualified_static_owner_java_key(receiver: &Expr) -> Option<String> {
+    let Expr::FieldAccess(_, _) = receiver else {
+        return None;
+    };
+    let root = static_owner_root_segment(receiver)?;
+    if !root
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_lowercase())
+    {
+        return None;
+    }
+    let owner = static_owner_java_name(receiver)?;
+    let class_like_segments = owner
+        .split('.')
+        .filter(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        })
+        .count();
+    (class_like_segments == 1).then_some(owner)
+}
+
+fn static_owner_root_segment(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Var(name) => Some(name.as_str()),
+        Expr::FieldAccess(receiver, _) => static_owner_root_segment(receiver),
+        _ => None,
+    }
+}
+
+fn static_owner_java_name(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Var(name) => Some(name.clone()),
+        Expr::FieldAccess(receiver, field) => {
+            Some(format!("{}.{}", static_owner_java_name(receiver)?, field))
+        }
+        _ => None,
+    }
+}
+
+fn conservative_external_mutator_arg_shapes(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<Vec<RustSlotShape>> {
+    if args.is_empty() {
+        return None;
+    }
+
+    let receiver_name = receiver
+        .and_then(|receiver| java_type_name(&infer_expr_type(receiver, types)).map(str::to_string));
+    let role = facts
+        .external_api_effect_for_receiver_with_arity(
+            receiver_name.as_deref(),
+            name,
+            Some(args.len()),
+        )
+        .map(|effect| effect.role)
+        .unwrap_or_else(|| {
+            crate::stdlib::external_api_method_role(receiver_name.as_deref(), name, args.len())
+        });
+
+    if !matches!(
+        role,
+        ExternalApiRole::Setter | ExternalApiRole::FluentMutator | ExternalApiRole::IndexedSetter
+    ) {
+        return None;
+    }
+
+    let effective_facts = EffectiveFacts::new(facts);
+    Some(
+        args.iter()
+            .map(|arg| {
+                storage_arg_shape_with_effective_facts(
+                    infer_arg_storage_java_type(arg, signatures, types),
+                    &effective_facts,
+                )
+            })
+            .collect(),
+    )
+}
+
+fn infer_arg_storage_java_type(
+    arg: &Expr,
+    signatures: &SignaturePlan,
+    types: &TypeEnv,
+) -> JavaType {
+    let inferred = infer_expr_type(arg, types);
+    if !matches!(inferred, JavaType::Unknown(_)) {
+        return inferred;
+    }
+    static_field_shape_for_expr(arg, signatures)
+        .map(|shape| shape.java_ty.clone())
+        .unwrap_or(inferred)
+}
+
+fn static_field_shape_for_expr<'a>(
+    arg: &Expr,
+    signatures: &'a SignaturePlan,
+) -> Option<&'a RustSlotShape> {
+    let Expr::FieldAccess(receiver, field) = arg else {
+        return None;
+    };
+    let Expr::Var(owner) = receiver.as_ref() else {
+        return None;
+    };
+    let owner_upper = upper_camel_from_snake_or_preserved(owner);
+    let field_snake = crate::parser::to_snake_case(field);
+    signatures
+        .field_shape(owner, field)
+        .or_else(|| signatures.field_shape(&owner_upper, field))
+        .or_else(|| signatures.field_shape(owner, &field_snake))
+        .or_else(|| signatures.field_shape(&owner_upper, &field_snake))
 }
 
 fn argument_shape_from_external_effect(effect: &ExternalApiArgumentEffectFact) -> RustSlotShape {
@@ -473,13 +1588,31 @@ pub fn resolved_constructor_arg_shapes(
 ) -> Vec<RustSlotShape> {
     (0..arg_count)
         .map(|index| {
-            signatures.required_constructor_arg_shape_by_rust_name(
-                &constructor.declaring_type,
-                &constructor.rust_name,
-                index,
-            )
+            signatures
+                .constructor_arg_shape_by_rust_name(
+                    &constructor.declaring_type,
+                    &constructor.rust_name,
+                    index,
+                )
+                .unwrap_or_else(|| resolved_constructor_boundary_arg_shape(constructor, index))
         })
         .collect()
+}
+
+fn resolved_constructor_boundary_arg_shape(
+    constructor: &ResolvedConstructor,
+    index: usize,
+) -> RustSlotShape {
+    constructor
+        .params
+        .get(index)
+        .map(|param| RustSlotShape::for_storage(param.ty.clone()))
+        .unwrap_or_else(|| {
+            RustSlotShape::for_storage(JavaType::Unknown(format!(
+                "{}:arg{index}",
+                constructor.rust_name
+            )))
+        })
 }
 
 pub fn plan_constructor_arguments(

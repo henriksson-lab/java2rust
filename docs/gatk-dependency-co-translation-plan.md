@@ -12,6 +12,24 @@ This document fixes the policy for deciding which mode to use. The goal is to
 improve Rust output and analysis quality without turning GATK or HTSJDK into
 hard-coded lowering rules.
 
+## Transformation Rule Documentation Contract
+
+Dependency-boundary rules are transformation rules when they decide emitted Rust
+shape, even if the implementation lives in an external pack, source-summary
+mode, crate mapping, or facade. Each new or materially revised dependency rule
+must therefore start with an **Ideal Rust Target** section before its
+**Implementation Rule**.
+
+The ideal target must show the Rust API shape the boundary is trying to expose:
+owned value, borrow, `Option<T>`, collection type, enum, trait object, facade
+handle, error carrier, iterator, or opaque fallback. Only after that target is
+clear should the plan describe required facts, mode selection, pack ownership,
+conversion behavior, and fallback diagnostics. This keeps dependency handling
+aligned with the broader transformation-rule contract in
+`docs/transformation-rule-contract.md` and the active GATK plan in
+`docs/gatk-running-algorithm-strengthening-plan.md`, and avoids adding
+package-name-specific lowering branches as substitutes for design.
+
 ## Evidence
 
 The current old-corpus GATK import scan is dominated by:
@@ -59,6 +77,74 @@ Precedence is:
 
 Lowering must consume the resolved facts and plans. It should not inspect Java
 package names to rediscover dependency policy.
+
+## Mode Selection Criteria
+
+The default choice for a dependency boundary is the narrowest mode that exposes
+the facts needed by downstream stages without emitting Java-shaped Rust bodies.
+Do not promote a package from external facts to source summary, or from source
+summary to co-translation, merely because one unresolved call is visible in a
+benchmark. First identify which downstream responsibility needs information
+that the current mode cannot provide.
+
+Decision table:
+
+| Evidence from resolver benchmark or fixtures | Choose | Why |
+| --- | --- | --- |
+| The type is primary project source selected for output. | `co_translate_source` | Bodies, fields, constructors, hierarchy, effects, and control flow are part of the Rust artifact. |
+| The dependency body contains algorithmic logic that must appear in the emitted Rust, such as scoring, graph rewriting, traversal, parsing, or data transformation that cannot be replaced by a Rust crate/facade. | `co_translate_source` | Declaration facts are insufficient because calls must lower to translated Rust bodies. |
+| The dependency type is a GATK-owned helper/data/config class whose fields, constructors, constants, nested classes, exceptions, or interface declarations are needed to resolve primary source, but its methods do not need to be emitted for the selected benchmark slice. | `source_summary` | Declarations and semantic facts should participate in resolution, slot shape, and object strategy without making helper bodies part of the output surface. |
+| The primary source extends or implements a dependency declaration whose body will not be emitted, but the declaration is needed for object strategy or erased-boundary decisions. | `source_summary` | Hierarchy facts are needed; emitted inheritance through a non-emitted body is not. |
+| Adding a sibling source root changes constructor, method, or field pressure into `source_dependency_resolved_*` rows, and the dependency is project-owned rather than a third-party library. | `source_summary` first, then `co_translate_source` only if body emission is required | This is omitted project/source pressure, not an external-library gap. Summaries are the cheaper proof boundary. |
+| The dependency is a third-party Java library with a coherent public API surface, such as HTSJDK, Guava, Apache Commons, JSON, CSV, Kryo, Spark, Hadoop, or Picard/Barclay infrastructure. | `external_fact_model` or `rust_crate_mapping` | Preserve an all-or-nothing external boundary; do not partially translate random Java internals into native structs. |
+| The dependency maps naturally to a Rust crate or local facade, such as HDF5, SQLite, graph utilities, JSON, CSV, or native runtime handles. | `rust_crate_mapping` or `ffi_boundary` | Facts should describe ownership, mutability, errors, resource lifetime, and facade conversions; Java implementation bodies are the wrong source of Rust design. |
+| The dependency is a runtime framework, distributed execution layer, reflection/annotation system, native binding, serializer runtime, logger, or IO backend. | `external_fact_model`, `ffi_boundary`, or `conservative_boundary` | Runtime behavior should be represented as typed effects and unsupported/coverage diagnostics, not translated control flow. |
+| The pack owns a type but a member is unsupported or not yet modeled. | pack-owned `unsupported` or missing-coverage diagnostic | Keep the gap attached to the selected boundary instead of falling through to generic guessing or lowering special cases. |
+| The benchmark pressure disappears only after adding a package-name-specific lowering rule. | reject the rule and reclassify | Lowering should apply facts and conversion plans; package policy belongs in source-root config or external packs. |
+
+Promotion rules:
+
+- Promote `source_summary` to `co_translate_source` only when a selected output
+  needs the dependency method body, body-derived control-flow/effect facts
+  cannot be summarized soundly, or the dependency is an algorithmic part of the
+  Rust artifact rather than a declaration provider.
+- Promote `external_fact_model` to `rust_crate_mapping` only after semantic
+  facts exist for the boundary and the Rust facade/crate mapping can be tested
+  through slot-shape and conversion plans.
+- Promote a conservative boundary into a modeled pack when the package/type is
+  selected as an owned all-or-nothing surface. The pack may still mark members
+  `conservative` or `unsupported`, but the ownership must be explicit.
+- Do not promote third-party libraries into partial co-translation during a
+  GATK run. HTSJDK may become a separate full translation target, but that is a
+  different run mode from selectively co-translating the few HTSJDK classes
+  GATK happens to touch.
+
+Demotion rules:
+
+- Demote a candidate co-translated dependency to `source_summary` when emitted
+  Rust only needs constructors, fields, constants, nested types, exception
+  class declarations, interface declarations, object-strategy facts, or
+  overload/type facts.
+- Demote a candidate source summary to an external pack when the dependency is
+  third-party, runtime-backed, reflection-heavy, or better represented by a
+  Rust facade than by Java declarations.
+- Demote an external pack candidate to `conservative_boundary` when no coherent
+  API surface is selected yet. The benchmark should continue to report that
+  pressure as conservative rather than hiding it behind incomplete facts.
+
+Required evidence before changing a dependency mode:
+
+- a neutral fixture that exercises the API shape that motivated the change
+- benchmark provenance showing whether pressure is source dependency,
+  external pack, crate/facade, unsupported, missing-pack, or conservative
+- for `source_summary`, source-root or package-prefix selection that proves the
+  dependency can be summarized without double-counting emitted primary files
+- for `co_translate_source`, at least one emitted-body reason and an object/
+  slot-shape check that the dependency bodies do not introduce unplanned Java
+  inheritance or ownership pressure
+- for `external_fact_model`, `rust_crate_mapping`, or `ffi_boundary`, an
+  explicit pack boundary with coverage states for modeled and unsupported
+  members
 
 ## External Library Workflow
 
@@ -909,7 +995,8 @@ Current coverage status:
 - User-authored external pack manifests now have a line-oriented parser for
   package ownership, mode, default coverage, Rust target hooks, modeled API
   effects, modeled constructors, modeled fields, object representation
-  strategies, type capabilities, field nullability, and unsupported entries.
+  strategies, type capabilities, owned-recovery capabilities, field
+  nullability, and unsupported entries.
   The parser emits the same `FactSet` shapes as built-in packs, so the
   resolver and semantic layers consume external-library-pack provenance
   without lowering package-name checks. The CLI accepts these manifests through
@@ -943,19 +1030,22 @@ Current coverage status:
   gaps are measurable without being mixed into generic unexplained targets.
   Parsed manifests are also audited for boundary coherence: API effects,
   argument effects, constructors, fields, field nullability, object strategy,
-  type capability, exception, unsupported rows, and crate/facade mapping facts
-  whose receiver/type is not owned by the declared pack boundary now produce
-  structured manifest diagnostics. This keeps user-authored manifests from
-  becoming one-method escape hatches that bypass the all-or-nothing pack
-  boundary rule. Parsed manifests can now also emit detailed object-safety
-  violation facts with external-pack provenance; a direct representation
-  regression proves those facts reject a dyn-trait facade request and fall back
-  to erased object representation without inspecting package names. A neutral
-  runtime-adapter regression also proves a parsed manifest can supply
-  erased-object superclass policy and type capabilities as dependency-provider
-  facts: a source serializer extending `dep.runtime.Serializer<T>` stays on
-  the explicit external-pack object boundary with no lowering package-name
-  checks.
+  type capability, owned-recovery capability, exception, unsupported rows, and
+  crate/facade mapping facts whose receiver/type is not owned by the declared
+  pack boundary now produce structured manifest diagnostics. This keeps
+  user-authored manifests from becoming one-method escape hatches that bypass
+  the all-or-nothing pack boundary rule. Parsed manifests can now also emit
+  detailed object-safety violation facts with external-pack provenance; a
+  direct representation regression proves those facts reject a dyn-trait
+  facade request and fall back to erased object representation without
+  inspecting package names. A neutral runtime-adapter regression also proves a
+  parsed manifest can supply erased-object superclass policy and type
+  capabilities as dependency-provider facts: a source serializer extending
+  `dep.runtime.Serializer<T>` stays on the explicit external-pack object
+  boundary with no lowering package-name checks. Neutral GATK-shaped
+  owned-recovery regressions prove parsed manifests can classify
+  factory-copy, immutable shared-handle, and FFI-owned handle recovery through
+  fact-layer coercion instead of package-specific lowering branches.
 
 ## First External Pack Pilot: HTSJDK VariantContext
 

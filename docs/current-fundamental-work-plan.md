@@ -109,6 +109,29 @@ If the selected outcome cannot be generalized yet, the slice should improve
 diagnostics or add an explicit conservative fallback test instead of adding a
 speculative production rule.
 
+## Transformation Rule Authoring
+
+Every tracked transformation rule must use the repository contract in
+`docs/transformation-rule-contract.md`. The first rule section must be
+**Ideal Rust Target**, before **Implementation Rule**, status notes, module
+assignments, or lowering details. New rules must be written in that order from
+the start; older rule entries must be normalized before they are used for an
+implementation slice.
+
+The ideal target section states the Rust we would write by hand when the facts
+are available: API shape, expression shape, type, ownership, borrowing,
+nullability, mutability, dispatch, error handling, collection behavior, and
+external-boundary behavior as applicable. The implementation rule then states
+which facts and plan nodes prove that target is legal and which structured
+fallback applies when the facts are missing.
+
+This is the default authoring rule for the broader plan. The corpus can select
+which problem to study, but it must not select the Rust shape indirectly through
+the first implementation that happens to compile. Each selected mapping needs a
+target-first rule entry before code changes, including narrow stdlib mappings,
+coercion fixes, exception propagation, dependency facades, object
+representation choices, and fallback behavior.
+
 ## Priority Order
 
 ### 1. Resolver Completeness

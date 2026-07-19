@@ -261,7 +261,9 @@ fn effective_facts_own_owned_recovery_capability_resolution() {
     );
     assert_eq!(
         effective.owned_recovery_capability_for(&JavaType::String),
-        OwnedRecoveryCapability::ConservativeClone
+        OwnedRecoveryCapability::ExplicitClone {
+            java_ty: JavaType::String,
+        }
     );
     assert_eq!(
         effective.owned_recovery_capability_for(&handle),

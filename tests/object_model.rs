@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use new_java2rust::effective_facts::EffectiveFacts;
 use new_java2rust::facts::{
@@ -9,14 +9,21 @@ use new_java2rust::java_ir::JavaType;
 use new_java2rust::object_model::{
     HierarchyEdgeDiagnosticOutcome, ObjectHierarchyEdge, ObjectHierarchyEdgeDiagnosticInput,
     ObjectHierarchyEdgeKind, ObjectModelInput, ObjectRepresentation, ObjectRepresentationRequest,
-    ObjectSafetyPolicy, RepresentationLookupFallback, object_hierarchy_edge_diagnostic_policy,
-    object_hierarchy_edge_representation_policy, object_representation_lookup_policy,
-    object_representation_policy, plan_object_model, plan_object_model_from_input,
+    ObjectSafetyPolicy, RepresentationLookupFallback, dispatch_requirements_from_usage,
+    object_hierarchy_edge_diagnostic_policy, object_hierarchy_edge_representation_policy,
+    object_representation_lookup_policy, object_representation_policy, plan_object_model,
+    plan_object_model_from_input,
 };
 use new_java2rust::parser::parse_java_source;
-use new_java2rust::representation::plan_representations;
+use new_java2rust::representation::{plan_representations, representation_dispatch_policy};
 use new_java2rust::resolve::resolve_program;
+use new_java2rust::shape_projection::{
+    DispatchRequirementProjectionRole, dispatch_requirement_projection_policy,
+};
 use new_java2rust::usage::analyze_usage;
+use new_java2rust::usage::{
+    BindingUse, BindingUseFacts, CallArgumentBoundary, MethodUsageFacts, UsageFacts, UsageMethodKey,
+};
 use new_java2rust::{
     facts::{FactSet, TypeCapabilityOverride},
     slot_shape::DispatchShape,
@@ -223,7 +230,7 @@ final class Dog implements Animal {}
 }
 
 #[test]
-fn object_model_input_accepts_usage_without_recomputing_strategy_shape() {
+fn object_model_input_usage_adds_requirements_without_rechoosing_stable_dyn_shape() {
     let parsed = parse_java_source(
         r#"
 interface Animal {}
@@ -249,7 +256,21 @@ class Use {
         usage: None,
     });
 
-    assert_eq!(with_usage, without_usage);
+    assert_eq!(
+        with_usage.strategy_for("Animal").unwrap().strategy,
+        without_usage.strategy_for("Animal").unwrap().strategy
+    );
+    assert_eq!(
+        with_usage.strategy_for("Animal").unwrap().requirements,
+        vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
+    );
+    assert!(
+        without_usage
+            .strategy_for("Animal")
+            .unwrap()
+            .requirements
+            .is_empty()
+    );
 }
 
 #[test]
@@ -478,6 +499,172 @@ class Dog implements Animal {}
         ]
     );
     assert_eq!(facts.dispatch_requirement_facts_for("Animal").len(), 3);
+}
+
+#[test]
+fn object_model_input_usage_contributes_dispatch_requirements() {
+    let parsed = parse_java_source(
+        r#"
+interface Stored {}
+interface Borrowed {}
+interface UnknownArg {}
+interface RejectedReceiver {}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let facts = FactSet::default();
+    let effective_facts = EffectiveFacts::new(&facts);
+    let usage = UsageFacts {
+        methods_by_rust_name: HashMap::new(),
+        methods: HashMap::from([(
+            UsageMethodKey {
+                type_name: "Use".to_string(),
+                method_name: "run".to_string(),
+            },
+            MethodUsageFacts {
+                bindings: HashMap::from([
+                    (
+                        "stored".to_string(),
+                        BindingUseFacts {
+                            name: "stored".to_string(),
+                            java_ty: JavaType::Named {
+                                name: "Stored".to_string(),
+                                args: Vec::new(),
+                            },
+                            uses: vec![BindingUse::StoredInField {
+                                field_name: "value".to_string(),
+                            }],
+                        },
+                    ),
+                    (
+                        "borrowed".to_string(),
+                        BindingUseFacts {
+                            name: "borrowed".to_string(),
+                            java_ty: JavaType::Named {
+                                name: "Borrowed".to_string(),
+                                args: Vec::new(),
+                            },
+                            uses: vec![BindingUse::PassedToCall {
+                                name: "read".to_string(),
+                                arg_index: 0,
+                                boundary: CallArgumentBoundary::InternalSameType,
+                            }],
+                        },
+                    ),
+                    (
+                        "unknown".to_string(),
+                        BindingUseFacts {
+                            name: "unknown".to_string(),
+                            java_ty: JavaType::Named {
+                                name: "UnknownArg".to_string(),
+                                args: Vec::new(),
+                            },
+                            uses: vec![BindingUse::PassedToCall {
+                                name: "external".to_string(),
+                                arg_index: 0,
+                                boundary: CallArgumentBoundary::Unknown,
+                            }],
+                        },
+                    ),
+                    (
+                        "receiver".to_string(),
+                        BindingUseFacts {
+                            name: "receiver".to_string(),
+                            java_ty: JavaType::Named {
+                                name: "RejectedReceiver".to_string(),
+                                args: Vec::new(),
+                            },
+                            uses: vec![BindingUse::ReceiverForCall {
+                                name: "external".to_string(),
+                                boundary: CallArgumentBoundary::Unknown,
+                            }],
+                        },
+                    ),
+                ]),
+                ..MethodUsageFacts::default()
+            },
+        )]),
+        constructors: HashMap::new(),
+    };
+
+    let usage_requirements = dispatch_requirements_from_usage(&usage);
+    assert_eq!(
+        usage_requirements.get("Stored").unwrap(),
+        &vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
+    );
+    assert_eq!(
+        usage_requirements.get("Borrowed").unwrap(),
+        &vec![DispatchRequirementKind::NeedsBorrowedTraitView]
+    );
+    assert_eq!(
+        usage_requirements.get("UnknownArg").unwrap(),
+        &vec![DispatchRequirementKind::NeedsUnknownRuntimeObject]
+    );
+    assert_eq!(
+        usage_requirements.get("RejectedReceiver").unwrap(),
+        &vec![DispatchRequirementKind::RejectTraitObject]
+    );
+
+    let object_plan = plan_object_model_from_input(ObjectModelInput {
+        program: &resolved.program,
+        facts: &facts,
+        effective_facts: &effective_facts,
+        usage: Some(&usage),
+    });
+
+    assert_eq!(
+        object_plan.strategy_for("Stored").unwrap().requirements,
+        vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
+    );
+    let stored_dispatch = representation_dispatch_policy(
+        object_plan.strategy_for("Stored").unwrap().strategy.clone(),
+    )
+    .dispatch;
+    assert_eq!(
+        dispatch_requirement_projection_policy(
+            DispatchRequirementProjectionRole::Storage,
+            stored_dispatch,
+            DispatchRequirementKind::NeedsOwnedPolymorphicStorage,
+        )
+        .projected_dispatch,
+        Some(DispatchShape::BoxedDynTrait {
+            trait_name: "Stored".to_string(),
+        })
+    );
+    assert_eq!(
+        object_plan.strategy_for("Borrowed").unwrap().requirements,
+        vec![DispatchRequirementKind::NeedsBorrowedTraitView]
+    );
+    let borrowed_dispatch = representation_dispatch_policy(
+        object_plan
+            .strategy_for("Borrowed")
+            .unwrap()
+            .strategy
+            .clone(),
+    )
+    .dispatch;
+    assert_eq!(
+        dispatch_requirement_projection_policy(
+            DispatchRequirementProjectionRole::Param,
+            borrowed_dispatch,
+            DispatchRequirementKind::NeedsBorrowedTraitView,
+        )
+        .projected_dispatch,
+        Some(DispatchShape::DynTrait {
+            trait_name: "Borrowed".to_string(),
+        })
+    );
+    assert_eq!(
+        object_plan.strategy_for("UnknownArg").unwrap().strategy,
+        ObjectRepresentation::ErasedObject
+    );
+    assert_eq!(
+        object_plan
+            .strategy_for("RejectedReceiver")
+            .unwrap()
+            .strategy,
+        ObjectRepresentation::ErasedObject
+    );
 }
 
 #[test]

@@ -36,6 +36,23 @@ parser -> resolve
        -> emit
 ```
 
+## Transformation Rule Documentation Contract
+
+Every transformation rule introduced or revised under this plan must document
+the desired Rust before it documents the implementation mechanism. Use the
+canonical rule template from `docs/transformation-rule-contract.md`: **Ideal
+Rust Target**, **Implementation Rule**, **Required Facts**, **Owning Layer**,
+**Fallback Shape**, and **Evidence**. The active GATK plan mirrors this
+contract in `docs/gatk-running-algorithm-strengthening-plan.md`.
+
+The **Ideal Rust Target** section is mandatory and must appear before any
+implementation rule, status note, module assignment, or lowering detail. It
+should show the Rust shape we want to emit when enough facts are known,
+including ownership, borrowing, nullability, dispatch, collection, error, and
+external-boundary shape when those dimensions matter. The implementation rule
+then explains how semantic facts and plan nodes reach that target without
+introducing fixture-specific or corpus-specific branches.
+
 ## Non-Goals
 
 - Do not make every idiom-gap fixture translate idiomatically in this goal.

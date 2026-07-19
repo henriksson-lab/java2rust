@@ -1,9 +1,14 @@
 use crate::facts::{
     DispatchRequirementKind, FactProvenance, FactSet, HierarchyEdgeFact, HierarchyOverride,
-    ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability, TypeCapabilityOverride,
+    HierarchyStrategy, ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability,
+    OwnedRecoveryCapabilityFact, TypeCapabilityOverride,
 };
 use crate::java_ir::JavaType;
 use crate::slot_shape::TypeCapabilities;
+use crate::types::{
+    contains_wildcard_type, is_known_raw_generic_type, is_optional_or_result_type,
+    is_raw_generic_counterpart, is_unchecked_generic_counterpart,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct EffectiveFacts<'a> {
@@ -14,6 +19,22 @@ pub struct EffectiveFacts<'a> {
 pub struct EffectiveFact<T> {
     pub value: T,
     pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CastTypeCapabilityPolicy {
+    pub actual: JavaType,
+    pub target: JavaType,
+    pub optional_or_result: bool,
+    pub raw_or_wildcard: bool,
+    pub unchecked_generic: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceOfTargetCapabilityPolicy {
+    pub target: JavaType,
+    pub primitive_target: bool,
+    pub raw_or_wildcard_target: bool,
 }
 
 impl<'a> EffectiveFacts<'a> {
@@ -62,6 +83,36 @@ impl<'a> EffectiveFacts<'a> {
 
     pub fn implemented_types_for(&self, java_ty: &JavaType) -> Vec<JavaType> {
         self.type_capabilities_for(java_ty).implements
+    }
+
+    pub fn cast_type_capability_policy(
+        &self,
+        actual: &JavaType,
+        target: &JavaType,
+    ) -> CastTypeCapabilityPolicy {
+        CastTypeCapabilityPolicy {
+            actual: actual.clone(),
+            target: target.clone(),
+            optional_or_result: is_optional_or_result_type(actual)
+                || is_optional_or_result_type(target),
+            raw_or_wildcard: contains_wildcard_type(actual)
+                || contains_wildcard_type(target)
+                || is_raw_generic_counterpart(actual, target),
+            unchecked_generic: is_unchecked_generic_counterpart(actual, target),
+        }
+    }
+
+    pub fn instanceof_target_capability_policy(
+        &self,
+        target: &JavaType,
+    ) -> InstanceOfTargetCapabilityPolicy {
+        InstanceOfTargetCapabilityPolicy {
+            target: target.clone(),
+            primitive_target: matches!(target, JavaType::Primitive(_)),
+            raw_or_wildcard_target: contains_wildcard_type(target)
+                || matches!(target, JavaType::Wildcard(_))
+                || is_known_raw_generic_type(target),
+        }
     }
 
     pub fn object_safe_trait_fact_for_name(&self, type_name: &str) -> Option<bool> {
@@ -154,6 +205,21 @@ impl<'a> EffectiveFacts<'a> {
             .max_by_key(effective_fact_precedence_key)
     }
 
+    pub fn sealed_permitted_subtypes_for(
+        &self,
+        type_name: &str,
+    ) -> Option<EffectiveFact<Vec<String>>> {
+        self.facts
+            .sealed_permits_facts
+            .iter()
+            .filter(|fact| type_name_matches(&fact.type_name, type_name))
+            .map(|fact| EffectiveFact {
+                value: fact.permitted_subtypes.clone(),
+                provenance: fact.provenance,
+            })
+            .max_by_key(effective_fact_precedence_key)
+    }
+
     pub fn closed_hierarchy_variants_for(
         &self,
         type_name: &str,
@@ -189,9 +255,30 @@ impl<'a> EffectiveFacts<'a> {
             })
     }
 
+    pub fn object_representation_override_strategy_for(
+        &self,
+        java_ty: &JavaType,
+    ) -> Option<&'a HierarchyStrategy> {
+        let type_name = capability_type_name(java_ty)?;
+        self.facts
+            .hierarchy_overrides
+            .iter()
+            .filter(|override_fact| type_name_matches(&override_fact.type_name, type_name))
+            .max_by_key(|override_fact| fact_precedence_key(override_fact.provenance))
+            .map(|override_fact| &override_fact.strategy)
+    }
+
     pub fn owned_recovery_capability_for(&self, java_ty: &JavaType) -> OwnedRecoveryCapability {
+        if let Some(fact) = self.owned_recovery_capability_fact_for(java_ty) {
+            return fact.capability.clone();
+        }
         if self.is_copy_type(java_ty) {
             return OwnedRecoveryCapability::Copy;
+        }
+        if matches!(java_ty, JavaType::String) {
+            return OwnedRecoveryCapability::ExplicitClone {
+                java_ty: java_ty.clone(),
+            };
         }
         if self.explicit_clone_capability_for(java_ty) == Some(true) {
             return OwnedRecoveryCapability::ExplicitClone {
@@ -202,6 +289,18 @@ impl<'a> EffectiveFacts<'a> {
             return OwnedRecoveryCapability::ConservativeClone;
         }
         OwnedRecoveryCapability::NonCloneable
+    }
+
+    pub fn owned_recovery_capability_fact_for(
+        &self,
+        java_ty: &JavaType,
+    ) -> Option<&'a OwnedRecoveryCapabilityFact> {
+        let type_name = capability_type_name(java_ty)?;
+        self.facts
+            .owned_recovery_capability_facts
+            .iter()
+            .filter(|fact| type_name_matches(&fact.type_name, type_name))
+            .max_by_key(|fact| fact_precedence_key(fact.provenance))
     }
 
     pub fn is_string_like_type(&self, java_ty: &JavaType) -> bool {

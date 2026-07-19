@@ -62,6 +62,7 @@ fn parses_array_creation_and_unary_plus_without_raw_fallbacks() {
             Some(Expr::ArrayCreation {
                 element_type,
                 dimensions,
+                initializer,
             }),
         ..
     } = &one_dimensional.statements[0]
@@ -70,6 +71,7 @@ fn parses_array_creation_and_unary_plus_without_raw_fallbacks() {
     };
     assert_eq!(element_type, &JavaType::Primitive(PrimitiveType::Double));
     assert_eq!(dimensions.len(), 1);
+    assert_eq!(initializer, &None);
 
     let two_dimensional = method_body(&parsed.program.types[0], "twoDimensional");
     let Stmt::VarDecl {
@@ -77,6 +79,7 @@ fn parses_array_creation_and_unary_plus_without_raw_fallbacks() {
             Some(Expr::ArrayCreation {
                 element_type,
                 dimensions,
+                initializer,
             }),
         ..
     } = &two_dimensional.statements[0]
@@ -85,6 +88,24 @@ fn parses_array_creation_and_unary_plus_without_raw_fallbacks() {
     };
     assert_eq!(element_type, &JavaType::Primitive(PrimitiveType::Double));
     assert_eq!(dimensions.len(), 2);
+    assert_eq!(initializer, &None);
+}
+
+#[test]
+fn parses_typed_array_initializer_without_raw_fallbacks() {
+    let expr = new_java2rust::parser::parse_expr("new String[]{prefix + comment}");
+    let Expr::ArrayCreation {
+        element_type,
+        dimensions,
+        initializer: Some(elements),
+    } = expr
+    else {
+        panic!("expected typed array initializer");
+    };
+
+    assert_eq!(element_type, JavaType::String);
+    assert!(dimensions.is_empty());
+    assert_eq!(elements.len(), 1);
 }
 
 #[test]
@@ -297,7 +318,21 @@ fn collect_expr_fallbacks(expr: &Expr, out: &mut Vec<String>) {
             collect_expr_fallbacks(array, out);
             collect_expr_fallbacks(index, out);
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_expr_fallbacks(expr, out);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_expr_fallbacks(expr, out);
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 collect_expr_fallbacks(expr, out);
             }

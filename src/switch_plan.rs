@@ -18,6 +18,18 @@ pub struct SwitchCasePlan {
     pub labels: Vec<SwitchCaseLabelPlan>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SimpleReturnSwitchPlan<'a> {
+    pub selector: &'a Expr,
+    pub cases: &'a [SwitchCase],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SimpleReturnSwitchCasePlan<'a> {
+    pub labels: Vec<SwitchCaseLabelPlan>,
+    pub return_expr: &'a Expr,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SwitchCaseLabelPlan {
     Expr(Expr),
@@ -45,6 +57,46 @@ pub fn plan_switch_case(case: &SwitchCase) -> SwitchCasePlan {
             })
             .collect(),
     }
+}
+
+pub fn plan_simple_return_switch<'a>(
+    selector: &'a Expr,
+    cases: &'a [SwitchCase],
+) -> Option<SimpleReturnSwitchPlan<'a>> {
+    if cases.is_empty() {
+        return None;
+    }
+    let mut pending_label_group = false;
+    for case in cases {
+        if plan_simple_return_switch_case(case).is_some() {
+            pending_label_group = false;
+            continue;
+        }
+        if case.statements.is_empty()
+            && !case
+                .labels
+                .iter()
+                .any(|label| matches!(label, SwitchLabel::Default))
+        {
+            pending_label_group = true;
+            continue;
+        }
+        return None;
+    }
+    if pending_label_group {
+        return None;
+    }
+    Some(SimpleReturnSwitchPlan { selector, cases })
+}
+
+pub fn plan_simple_return_switch_case(case: &SwitchCase) -> Option<SimpleReturnSwitchCasePlan<'_>> {
+    let [Stmt::Return(Some(return_expr))] = case.statements.as_slice() else {
+        return None;
+    };
+    Some(SimpleReturnSwitchCasePlan {
+        labels: plan_switch_case(case).labels,
+        return_expr,
+    })
 }
 
 pub fn rewrite_switch_breaks(stmt: &Stmt, switch_label: &str) -> Stmt {

@@ -31,6 +31,20 @@ Do not add a production rule whose only explanation is one GATK class, method,
 or package path. If the exact external API name is itself the semantic fact,
 model it as an external API fact with provenance rather than as lowering logic.
 
+Every transformation rule must also state the desired Rust before the
+implementation mechanics. Use `docs/transformation-rule-contract.md` for the
+required order: **Ideal Rust Target** first, **Implementation Rule** second.
+The target section should make the intended Rust API, expression, type,
+ownership, borrowing, optionality, mutability, dispatch, conversion, error, and
+external-boundary shape explicit before any module-specific lowering rule is
+accepted.
+
+Apply this at the level of each transformation rule, not only at the level of a
+plan item. When one design slice covers several mappings, each mapping needs
+its own **Ideal Rust Target** before its **Implementation Rule**, unless the
+slice explicitly documents that the mappings share one target Rust shape, one
+set of required facts, one owning layer, and one fallback shape.
+
 ## Corpus-Derived Test Gate
 
 Every selected corpus outcome must produce tests before or alongside the

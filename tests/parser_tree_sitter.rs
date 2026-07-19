@@ -111,7 +111,7 @@ class Outer {
     assert!(inner.members.iter().any(|member| matches!(
         member,
         Member::Field(field)
-            if field.name == "s_e_n_t_i_n_e_l" && field.modifiers.contains(&Modifier::Static)
+            if field.name == "SENTINEL" && field.modifiers.contains(&Modifier::Static)
     )));
 }
 

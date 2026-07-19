@@ -13,12 +13,183 @@ fn fixture(path: &str) -> String {
 #[test]
 fn all_java_fixtures_are_loadable() {
     let fixtures = load_java_fixtures("examples/java").unwrap();
-    assert_eq!(fixtures.len(), 50);
+    assert_eq!(fixtures.len(), 65);
     assert!(
         fixtures
             .iter()
             .any(|f| f.relative_path.ends_with("04-objects/SimpleClass.java"))
     );
+}
+
+#[test]
+fn translates_static_import_and_qualified_static_utility_owner() {
+    let translation = translate_source(&fixture("06-stdlib/StaticImportUtilityOwner.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("StaticUtility::read_value(path)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub struct StaticUtility;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("self.local_value(path)"),
+        "{}",
+        translation.rust
+    );
+    assert!(!translation.rust.contains("return read_value(path)"));
+    assert!(!translation.rust.contains("external.lib"));
+}
+
+#[test]
+fn translates_imported_static_utility_owner_without_module_receiver() {
+    let translation = translate_source(&fixture("06-stdlib/ImportedStaticUtilityOwner.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("ExternalUtility::read_value(path)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub type ExternalUtility = ExternalLibExternalUtility;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("local.read_value(path)"),
+        "{}",
+        translation.rust
+    );
+    assert!(!translation.rust.contains("external_utility::read_value"));
+}
+
+#[test]
+fn translates_external_string_constant_argument_without_downcast() {
+    let translation = translate_source(&fixture("06-stdlib/ExternalStringConstantArgument.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("GATKVCFConstants::RAW_MAPPING_QUALITY_WITH_DEPTH_KEY"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub struct GATKVCFConstants"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub const RAW_MAPPING_QUALITY_WITH_DEPTH_KEY: &'static str = \"RAW_MAPPING_QUALITY_WITH_DEPTH_KEY\";"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(!translation.rust.contains("downcast::<String>()"));
+}
+
+#[test]
+fn translates_stream_non_null_filter_method_reference() {
+    let translation = translate_source(&fixture("06-stdlib/StreamFilterNonNull.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("values.iter().collect::<Vec<_>>()"),
+        "{}",
+        translation.rust
+    );
+    assert!(!translation.rust.contains("Objects::non_null"));
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java expression: method reference")
+    );
+}
+
+#[test]
+fn translates_stream_nullable_map_then_non_null_filter() {
+    let translation = translate_source(&fixture("06-stdlib/StreamMapNullFilter.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains(".map(|value| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"),
+        "{}",
+        translation.rust
+    );
+    assert!(!translation.rust.contains("Objects::non_null"));
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java expression: lambda")
+    );
+}
+
+#[test]
+fn translates_stream_flat_map_block_pipeline() {
+    let translation = translate_source(&fixture("06-stdlib/StreamFlatMapBlockPipeline.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains(
+            "groups.iter().flat_map(|group| { let mut names = group.names(); names.iter().filter(|name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java expression: lambda")
+    );
+}
+
+#[test]
+fn translates_nullable_clear_assignment_as_option_take() {
+    let translation = translate_source(&fixture("05-types/NullableClearAssignment.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("self.cached.take();"),
+        "{}",
+        translation.rust
+    );
+    assert!(!translation.rust.contains("self.cached = None;"));
 }
 
 #[test]
@@ -238,6 +409,63 @@ fn translates_simple_stream_sum_to_iterator_chain() {
 }
 
 #[test]
+fn translates_map_get_null_ternary_with_borrowed_optional_carrier() {
+    let translation = translate_source(&fixture("06-stdlib/CollectionsUse.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let old: Option<i32> = counts.get(name).copied();")
+            && translation
+                .rust
+                .contains("if old.is_none() { 1 } else { (old.unwrap() + 1) }")
+            && translation
+                .rust
+                .contains("counts.insert(name.clone(), if old.is_none()")
+            && !translation.rust.contains("Some(counts.get")
+            && !translation.rust.contains("(old + 1)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn translates_map_put_previous_value_as_optional_without_double_wrapping() {
+    let translation = translate_source(
+        r#"
+import java.util.Map;
+
+class MapPutPreviousValue {
+    String replace(Map<String, String> values, String key, String value) {
+        String old = values.put(key, value);
+        return old == null ? "missing" : old;
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let old: Option<String> = values.insert(key, value);")
+            && translation.rust.contains("if old.is_none()")
+            && translation.rust.contains("old.unwrap()")
+            && !translation.rust.contains("Some(values.insert")
+            && !translation.rust.contains("Some(Some("),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn simple_stream_sum_generated_rust_preserves_behavior() {
     let translation = translate_source(&fixture("06-stdlib/StreamsUse.java"));
     assert!(
@@ -283,6 +511,202 @@ mod generated_tests {
         "streams behavior test failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn stream_capture_generated_rust_preserves_behavior() {
+    let translation = translate_source(&fixture("06-stdlib/StreamCapturesLocal.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("values.iter().map(|v| (*v + base)).sum::<i32>()"),
+        "{}",
+        translation.rust
+    );
+    let test_source = format!(
+        "{}\n{}",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn stream_sum_uses_captured_base() {
+        let streams = StreamCapturesLocal {};
+        assert_eq!(streams.add_base(vec![1, 2, 3], 10), 36);
+    }
+}
+"#
+    );
+    let rust_path = Path::new("/tmp").join("new_java2rust_stream_captures_local_test.rs");
+    let bin_path = Path::new("/tmp").join("new_java2rust_stream_captures_local_test");
+    fs::write(&rust_path, test_source).unwrap();
+    let output = Command::new("rustc")
+        .arg("--test")
+        .arg(&rust_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stream capture test did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "stream capture behavior test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn stream_flat_map_lambda_generated_rust_preserves_behavior() {
+    let translation = translate_source(&fixture("06-stdlib/StreamFlatMapLambda.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("groups.iter().flat_map(|group| group.iter()).collect::<Vec<_>>()"),
+        "{}",
+        translation.rust
+    );
+    let test_source = format!(
+        "{}\n{}",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn stream_flat_map_lambda_flattens_groups() {
+        let streams = StreamFlatMapLambda {};
+        let groups = vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["c".to_string()],
+        ];
+        assert_eq!(
+            streams.flatten(groups),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+}
+"#
+    );
+    let rust_path = Path::new("/tmp").join("new_java2rust_stream_flat_map_lambda_test.rs");
+    let bin_path = Path::new("/tmp").join("new_java2rust_stream_flat_map_lambda_test");
+    fs::write(&rust_path, test_source).unwrap();
+    let output = Command::new("rustc")
+        .arg("--test")
+        .arg(&rust_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stream flatMap lambda test did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "stream flatMap lambda behavior test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn stream_block_lambda_generated_rust_preserves_behavior() {
+    let translation = translate_source(&fixture("06-stdlib/StreamBlockLambda.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains(
+            "values.iter().map(|value| { let mut trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
+        ) && !translation.rust.contains("unsupported Java expression: lambda")
+            && !translation.rust.contains(".cloned().collect::<Vec<_>>()"),
+        "{}",
+        translation.rust
+    );
+    let test_source = format!(
+        "{}\n{}",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn stream_block_lambda_normalizes_values() {
+        let streams = StreamBlockLambda {};
+        assert_eq!(
+            streams.normalize(vec![" A ".to_string(), "Bc".to_string()]),
+            vec!["a".to_string(), "bc".to_string()]
+        );
+    }
+}
+"#
+    );
+    let rust_path = Path::new("/tmp").join("new_java2rust_stream_block_lambda_test.rs");
+    let bin_path = Path::new("/tmp").join("new_java2rust_stream_block_lambda_test");
+    fs::write(&rust_path, test_source).unwrap();
+    let output = Command::new("rustc")
+        .arg("--test")
+        .arg(&rust_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stream block lambda test did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "stream block lambda behavior test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn stream_flat_map_projection_generated_rust_preserves_behavior() {
+    let translation = translate_source(&fixture("06-stdlib/StreamFlatMapProjection.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains(
+            "groups.iter().flat_map(|group| group.names().into_iter()).collect::<Vec<_>>()"
+        ),
+        "{}",
+        translation.rust
     );
 }
 
@@ -515,6 +939,74 @@ fn translates_same_arity_overload_call_sites() {
 }
 
 #[test]
+fn nested_static_builder_call_uses_resolved_type_owner() {
+    let translation = translate_source(&fixture("06-stdlib/NestedStaticBuilderCall.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let builder: Builder = GenomicsDBColumn::new_builder();")
+    );
+    assert!(!translation.rust.contains("coordinates.genomics_d_b_column"));
+    assert!(!translation.rust.contains("Coordinates::GenomicsDBColumn"));
+}
+
+#[test]
+fn stream_block_lambda_static_owner_uses_type_owner() {
+    let translation = translate_source(&fixture("06-stdlib/StreamBlockStaticOwner.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let mut builder = GenomicsDBColumn::new_builder();")
+    );
+    assert!(!translation.rust.contains("coordinates.genomics_d_b_column"));
+}
+
+#[test]
+fn collection_capacity_constructor_uses_with_capacity() {
+    let translation = translate_source(&fixture("06-stdlib/CollectionCapacityConstructor.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Vec::with_capacity(self.names.as_ref().unwrap().len() as usize)")
+    );
+    assert!(!translation.rust.contains("self.names.size()"));
+}
+
+#[test]
+fn collectors_to_map_lowers_to_hash_map_collect() {
+    let translation = translate_source(&fixture("06-stdlib/CollectorsToMap.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(translation.rust.contains(
+        "values.iter().map(|v| ((*v).clone(), v.len() as i32)).collect::<std::collections::HashMap<_, _>>()"
+    ));
+    assert!(!translation.rust.contains("collectors.to_map"));
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java expression: lambda")
+    );
+}
+
+#[test]
 fn guardrail_fixtures_emit_structured_unsupported_diagnostics() {
     let cases = [
         (
@@ -552,7 +1044,9 @@ fn first_slice_generated_rust_compiles() {
         "03-methods/MethodsAndOverloads.java",
         "03-methods/ConstructorOverloads.java",
         "03-methods/OverloadSameArity.java",
+        "04-objects/DynTraitMethodCompatibility.java",
         "04-objects/SimpleClass.java",
+        "05-types/NullableLocalReturn.java",
         "06-stdlib/ThrowOnly.java",
         "06-stdlib/StreamsUse.java",
         "06-stdlib/StreamsCollect.java",

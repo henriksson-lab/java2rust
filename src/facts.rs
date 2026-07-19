@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
+use crate::fact_saturation::{
+    FiniteFactDomain, WorklistSaturationPolicy, WorklistStats, saturate_worklist,
+};
 use crate::java_ir::JavaType;
 use crate::slot_shape::TypeCapabilities;
 
@@ -10,8 +12,10 @@ pub struct FactSet {
     pub captures: CaptureFacts,
     pub hierarchy_overrides: Vec<HierarchyOverride>,
     pub closed_hierarchy_facts: Vec<ClosedHierarchyFact>,
+    pub sealed_permits_facts: Vec<SealedPermitsFact>,
     pub object_safety_facts: Vec<ObjectSafetyFact>,
     pub type_capability_overrides: Vec<TypeCapabilityOverride>,
+    pub owned_recovery_capability_facts: Vec<OwnedRecoveryCapabilityFact>,
     pub field_nullability_facts: Vec<FieldNullabilityFact>,
     pub trivial_accessor_facts: Vec<TrivialAccessorFact>,
     pub external_api_effect_facts: Vec<ExternalApiEffectFact>,
@@ -22,6 +26,7 @@ pub struct FactSet {
     pub external_field_facts: Vec<ExternalFieldFact>,
     pub method_effect_facts: Vec<MethodEffectFact>,
     pub recursion_facts: Vec<RecursionFact>,
+    pub constructor_recursion_facts: Vec<ConstructorRecursionFact>,
     pub control_flow_facts: Vec<ControlFlowFact>,
     pub unresolved_target_facts: Vec<UnresolvedTargetFact>,
     pub dispatch_requirement_facts: Vec<DispatchRequirementFact>,
@@ -33,16 +38,39 @@ pub struct FactSet {
     pub unsupported_external_field_facts: Vec<UnsupportedExternalFieldFact>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchyReachabilityResult {
+    pub edges: Vec<HierarchyEdgeFact>,
+    pub stats: WorklistStats,
+    pub diagnostics: Vec<HierarchyReachabilityDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchySubtypePolicy {
+    pub subtype: JavaType,
+    pub supertype: JavaType,
+    pub reaches: bool,
+    pub diagnostics: Vec<HierarchyReachabilityDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HierarchyReachabilityDiagnostic {
+    pub code: &'static str,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FactKind {
     Capture,
     HierarchyOverride,
     ClosedHierarchy,
+    SealedPermits,
     ObjectSafety,
     TypeCapability,
     FieldNullability,
     TrivialAccessor,
     MethodEffect,
+    ConstructorRecursion,
     ExternalApiEffect,
     ExternalApiArgumentEffect,
     ExternalCrateApiMapping,
@@ -295,6 +323,14 @@ pub struct RecursionFact {
     pub provenance: FactProvenance,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstructorRecursionFact {
+    pub constructor: ConstructorKey,
+    pub calls: ConstructorKey,
+    pub kind: RecursionKind,
+    pub provenance: FactProvenance,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlFlowFactKind {
     AssignmentInCondition,
@@ -411,7 +447,7 @@ pub struct FactDiagnostic {
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HierarchyEdgeFact {
     pub super_name: String,
     pub sub_name: String,
@@ -421,6 +457,13 @@ pub struct HierarchyEdgeFact {
 pub struct ClosedHierarchyFact {
     pub type_name: String,
     pub closed: bool,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedPermitsFact {
+    pub type_name: String,
+    pub permitted_subtypes: Vec<String>,
     pub provenance: FactProvenance,
 }
 
@@ -475,8 +518,20 @@ pub enum FactProvenance {
 pub enum OwnedRecoveryCapability {
     Copy,
     ExplicitClone { java_ty: JavaType },
+    CloneBoxAdapter { java_ty: JavaType },
+    FactoryCopy { java_ty: JavaType },
+    ImmutableSharedHandle { java_ty: JavaType },
+    FacadeOwnedExternalHandle { java_ty: JavaType },
+    FfiOwnedHandle { java_ty: JavaType },
     ConservativeClone,
     NonCloneable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedRecoveryCapabilityFact {
+    pub type_name: String,
+    pub capability: OwnedRecoveryCapability,
+    pub provenance: FactProvenance,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -543,9 +598,12 @@ impl FactSet {
         self.hierarchy_overrides.extend(other.hierarchy_overrides);
         self.closed_hierarchy_facts
             .extend(other.closed_hierarchy_facts);
+        self.sealed_permits_facts.extend(other.sealed_permits_facts);
         self.object_safety_facts.extend(other.object_safety_facts);
         self.type_capability_overrides
             .extend(other.type_capability_overrides);
+        self.owned_recovery_capability_facts
+            .extend(other.owned_recovery_capability_facts);
         self.field_nullability_facts
             .extend(other.field_nullability_facts);
         self.trivial_accessor_facts
@@ -563,6 +621,8 @@ impl FactSet {
         self.external_field_facts.extend(other.external_field_facts);
         self.method_effect_facts.extend(other.method_effect_facts);
         self.recursion_facts.extend(other.recursion_facts);
+        self.constructor_recursion_facts
+            .extend(other.constructor_recursion_facts);
         self.control_flow_facts.extend(other.control_flow_facts);
         self.unresolved_target_facts
             .extend(other.unresolved_target_facts);
@@ -691,10 +751,36 @@ impl FactSet {
         arg_count: Option<usize>,
         provenance: Option<FactProvenance>,
     ) -> Option<&ExternalApiEffectFact> {
+        if provenance.is_none() {
+            if let Some(effect) = arg_count.and_then(|arg_count| {
+                self.external_api_effect_facts.iter().rev().find(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && external_optional_type_name_matches(
+                            fact.receiver_type.as_deref(),
+                            receiver_type,
+                        )
+                        && fact.arg_count == Some(arg_count)
+                        && fact.return_type.is_some()
+                })
+            }) {
+                return Some(effect);
+            }
+            if let Some(effect) = self.external_api_effect_facts.iter().rev().find(|fact| {
+                external_method_name_matches(&fact.method_name, method_name)
+                    && external_optional_type_name_matches(
+                        fact.receiver_type.as_deref(),
+                        receiver_type,
+                    )
+                    && (arg_count.is_none() || fact.arg_count.is_none())
+                    && fact.return_type.is_some()
+            }) {
+                return Some(effect);
+            }
+        }
         arg_count
             .and_then(|arg_count| {
                 self.external_api_effect_facts.iter().rev().find(|fact| {
-                    fact.method_name == method_name
+                    external_method_name_matches(&fact.method_name, method_name)
                         && external_optional_type_name_matches(
                             fact.receiver_type.as_deref(),
                             receiver_type,
@@ -705,7 +791,7 @@ impl FactSet {
             })
             .or_else(|| {
                 self.external_api_effect_facts.iter().rev().find(|fact| {
-                    fact.method_name == method_name
+                    external_method_name_matches(&fact.method_name, method_name)
                         && external_optional_type_name_matches(
                             fact.receiver_type.as_deref(),
                             receiver_type,
@@ -1043,6 +1129,17 @@ impl FactSet {
             .collect()
     }
 
+    pub fn constructor_recursion_facts_for(
+        &self,
+        type_name: &str,
+        rust_name: &str,
+    ) -> Vec<&ConstructorRecursionFact> {
+        self.constructor_recursion_facts
+            .iter()
+            .filter(|fact| constructor_key_matches(&fact.constructor, type_name, rust_name))
+            .collect()
+    }
+
     pub fn method_effect_for(
         &self,
         type_name: &str,
@@ -1159,6 +1256,14 @@ impl FactSet {
         crate::effective_facts::EffectiveFacts::new(self).owned_recovery_capability_for(java_ty)
     }
 
+    pub fn owned_recovery_capability_fact_for(
+        &self,
+        java_ty: &JavaType,
+    ) -> Option<&OwnedRecoveryCapabilityFact> {
+        crate::effective_facts::EffectiveFacts::new(self)
+            .owned_recovery_capability_fact_for(java_ty)
+    }
+
     pub fn object_safe_trait_fact_for_name(&self, type_name: &str) -> Option<bool> {
         crate::effective_facts::EffectiveFacts::new(self).object_safe_trait_fact_for_name(type_name)
     }
@@ -1191,6 +1296,23 @@ impl FactSet {
         crate::effective_facts::EffectiveFacts::new(self).implemented_types_for(java_ty)
     }
 
+    pub fn cast_type_capability_policy(
+        &self,
+        actual: &JavaType,
+        target: &JavaType,
+    ) -> crate::effective_facts::CastTypeCapabilityPolicy {
+        crate::effective_facts::EffectiveFacts::new(self)
+            .cast_type_capability_policy(actual, target)
+    }
+
+    pub fn instanceof_target_capability_policy(
+        &self,
+        target: &JavaType,
+    ) -> crate::effective_facts::InstanceOfTargetCapabilityPolicy {
+        crate::effective_facts::EffectiveFacts::new(self)
+            .instanceof_target_capability_policy(target)
+    }
+
     pub fn is_final_type(&self, java_ty: &JavaType) -> bool {
         crate::effective_facts::EffectiveFacts::new(self).is_final_type(java_ty)
     }
@@ -1200,47 +1322,92 @@ impl FactSet {
     }
 
     pub fn reachable_hierarchy_edges_for_type(&self, java_ty: &JavaType) -> Vec<HierarchyEdgeFact> {
-        let Some(sub_name) = java_type_name(java_ty).map(str::to_string) else {
-            return Vec::new();
+        self.reachable_hierarchy_edges_for_type_with_stats(java_ty)
+            .edges
+    }
+
+    pub fn hierarchy_subtype_policy(
+        &self,
+        subtype: &JavaType,
+        supertype: &JavaType,
+    ) -> HierarchySubtypePolicy {
+        let result = self.reachable_hierarchy_edges_for_type_with_stats(subtype);
+        let reaches = match (java_type_name(subtype), java_type_name(supertype)) {
+            (Some(sub_name), Some(super_name)) if sub_name == super_name => true,
+            (Some(_), Some(super_name)) => result
+                .edges
+                .iter()
+                .any(|edge| edge.super_name == super_name),
+            _ => false,
         };
-        let mut state = self.direct_hierarchy_edges_for_type(java_ty);
-        let domain_size = self.hierarchy_type_names(&sub_name).len();
-        let saturation_policy = FiniteSaturationPolicy::new(domain_size, domain_size);
-        let result = saturation_policy.saturate(
-            state,
-            |edges| {
-                let mut changed = false;
-                let snapshot = edges.clone();
-                for edge in snapshot {
-                    let super_ty = JavaType::Named {
-                        name: edge.super_name.clone(),
-                        args: Vec::new(),
+        HierarchySubtypePolicy {
+            subtype: subtype.clone(),
+            supertype: supertype.clone(),
+            reaches,
+            diagnostics: result.diagnostics,
+        }
+    }
+
+    pub fn reachable_hierarchy_edges_for_type_with_stats(
+        &self,
+        java_ty: &JavaType,
+    ) -> HierarchyReachabilityResult {
+        let Some(sub_name) = java_type_name(java_ty).map(str::to_string) else {
+            return HierarchyReachabilityResult {
+                edges: Vec::new(),
+                stats: WorklistStats::default(),
+                diagnostics: Vec::new(),
+            };
+        };
+        let initial_edges = self.direct_hierarchy_edges_for_type(java_ty);
+        let domain = self.hierarchy_reachability_domain(&sub_name);
+        let policy = WorklistSaturationPolicy::new(domain.iteration_budget());
+        let mut result = saturate_worklist(
+            initial_edges.clone(),
+            initial_edges,
+            policy,
+            |edges, edge, inserter| {
+                let super_ty = JavaType::Named {
+                    name: edge.super_name.clone(),
+                    args: Vec::new(),
+                };
+                for next_edge in self.direct_hierarchy_edges_for_type(&super_ty) {
+                    if next_edge.super_name == sub_name {
+                        continue;
+                    }
+                    let reachable_edge = HierarchyEdgeFact {
+                        super_name: next_edge.super_name,
+                        sub_name: sub_name.clone(),
                     };
-                    for next_edge in self.direct_hierarchy_edges_for_type(&super_ty) {
-                        if next_edge.super_name == sub_name {
-                            continue;
-                        }
-                        let reachable_edge = HierarchyEdgeFact {
-                            super_name: next_edge.super_name,
-                            sub_name: sub_name.clone(),
-                        };
-                        if !edges.contains(&reachable_edge) {
-                            edges.push(reachable_edge);
-                            changed = true;
-                        }
+                    if !edges.contains(&reachable_edge) {
+                        edges.push(reachable_edge.clone());
+                        inserter.insert(reachable_edge);
                     }
                 }
-                SaturationStep::from(changed)
             },
-            |_| (),
+            |stats| HierarchyReachabilityDiagnostic {
+                code: "hierarchy_reachability_budget_exhausted",
+                message: format!(
+                    "hierarchy reachability exceeded finite worklist budget after {} processed items",
+                    stats.processed_items
+                ),
+            },
         );
-        state = result.state;
-        state.sort_by(|left, right| {
+        result.state.sort_by(|left, right| {
             left.super_name
                 .cmp(&right.super_name)
                 .then_with(|| left.sub_name.cmp(&right.sub_name))
         });
-        state
+        HierarchyReachabilityResult {
+            edges: result.state,
+            stats: result.stats,
+            diagnostics: result.diagnostics,
+        }
+    }
+
+    pub fn hierarchy_reachability_domain(&self, root_type_name: &str) -> FiniteFactDomain {
+        let type_count = self.hierarchy_type_names(root_type_name).len();
+        FiniteFactDomain::new(type_count, type_count)
     }
 
     fn direct_hierarchy_edges_for_type(&self, java_ty: &JavaType) -> Vec<HierarchyEdgeFact> {
@@ -1301,6 +1468,12 @@ impl FactSet {
             .closed_hierarchy_variants_for(type_name, direct_subtypes)
     }
 
+    pub fn sealed_permitted_subtypes_for(&self, type_name: &str) -> Option<Vec<String>> {
+        crate::effective_facts::EffectiveFacts::new(self)
+            .sealed_permitted_subtypes_for(type_name)
+            .map(|fact| fact.value)
+    }
+
     pub fn type_capability_overrides_for(
         &self,
         java_ty: &JavaType,
@@ -1346,12 +1519,30 @@ fn external_optional_type_name_matches(
     }
 }
 
+fn external_method_name_matches(fact_method_name: &str, query_method_name: &str) -> bool {
+    fact_method_name == query_method_name
+        || crate::parser::to_snake_case(fact_method_name)
+            == crate::parser::to_snake_case(query_method_name)
+}
+
 fn external_type_name_aliases(type_name: &str) -> Vec<String> {
     let mut aliases = external_direct_type_name_aliases(type_name);
     let simple = type_name.rsplit('.').next().unwrap_or(type_name);
     let simple_canonical = crate::stdlib::canonical_external_receiver_type_key(simple);
     let simple_snake = crate::parser::to_snake_case(simple);
-    aliases.extend([simple.to_string(), simple_canonical, simple_snake]);
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(type_name);
+    let canonical_simple = canonical.rsplit('.').next().unwrap_or(&canonical);
+    let canonical_simple_canonical =
+        crate::stdlib::canonical_external_receiver_type_key(canonical_simple);
+    let canonical_simple_snake = crate::parser::to_snake_case(canonical_simple);
+    aliases.extend([
+        simple.to_string(),
+        simple_canonical,
+        simple_snake,
+        canonical_simple.to_string(),
+        canonical_simple_canonical,
+        canonical_simple_snake,
+    ]);
     aliases.sort();
     aliases.dedup();
     aliases
@@ -1395,7 +1586,14 @@ fn external_field_name_aliases(field_name: &str) -> Vec<String> {
 }
 
 fn method_key_matches(method: &MethodKey, type_name: &str, method_name: &str) -> bool {
-    external_type_name_matches(&method.type_name, type_name) && method.method_name == method_name
+    external_type_name_matches(&method.type_name, type_name)
+        && (method.method_name == method_name
+            || crate::parser::to_snake_case(&method.method_name) == method_name)
+}
+
+fn constructor_key_matches(constructor: &ConstructorKey, type_name: &str, rust_name: &str) -> bool {
+    external_type_name_matches(&constructor.type_name, type_name)
+        && constructor.rust_name == rust_name
 }
 
 fn capability_type_name(java_ty: &JavaType) -> Option<&str> {

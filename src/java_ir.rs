@@ -81,7 +81,7 @@ pub struct ConstructorDecl {
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     pub name: String,
     pub ty: JavaType,
@@ -220,6 +220,9 @@ pub enum ConstructorInvocationKind {
 pub struct ResolvedConstructor {
     pub declaring_type: String,
     pub rust_name: String,
+    pub constructed_type: JavaType,
+    pub params: Vec<Param>,
+    pub arg_coercions: Vec<JavaCoercionEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,6 +236,7 @@ pub enum Expr {
     ArrayCreation {
         element_type: JavaType,
         dimensions: Vec<Expr>,
+        initializer: Option<Vec<Expr>>,
     },
     ArrayInitializer(Vec<Expr>),
     Binary {
@@ -299,12 +303,36 @@ pub struct ResolvedCall {
     pub rust_name: String,
     pub kind: CallKind,
     pub return_type: JavaType,
+    pub arg_coercions: Vec<JavaCoercionEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallKind {
     Instance,
     Static,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaCoercionEvidence {
+    pub arg_index: usize,
+    pub actual: JavaType,
+    pub target: JavaType,
+    pub kind: JavaCoercionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaCoercionKind {
+    Identity,
+    PrimitiveWidening,
+    Boxing,
+    Unboxing,
+    BoxingWidening,
+    ReferenceWidening,
+    GenericInference,
+    NullToReference,
+    LambdaAdaptation,
+    MethodReferenceAdaptation,
+    UnknownFallback,
 }
 
 #[derive(Debug, Clone, PartialEq)]

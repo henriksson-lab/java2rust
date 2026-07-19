@@ -1,6 +1,6 @@
 use crate::effective_facts::EffectiveFacts;
-use crate::facts::FactSet;
-use crate::java_ir::{JavaType, PrimitiveType};
+use crate::facts::{FactSet, HierarchyStrategy};
+use crate::java_ir::{JavaType, PrimitiveType, WildcardBound};
 use crate::rust_ir::{RustExpr, RustType};
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
 use crate::types::optional_element_type;
@@ -58,13 +58,30 @@ pub enum SlotValueRustTypePolicy {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeJavaRustTypePolicy {
-    Sequence { element_ty: JavaType },
-    Optional { element_ty: JavaType },
-    Direct { ty: RustType },
-    Named { name: String },
+    Sequence {
+        container: NativeSequenceContainer,
+        element_ty: JavaType,
+    },
+    Optional {
+        element_ty: JavaType,
+    },
+    Direct {
+        ty: RustType,
+    },
+    Named {
+        name: String,
+    },
     WildcardObject,
-    UnknownRaw { raw: String },
+    UnknownRaw {
+        raw: String,
+    },
     ArrayRequiresSequenceElement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSequenceContainer {
+    Vec,
+    HashSet,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +110,16 @@ pub fn rust_type_for_slot_with_effective_facts(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
+    if let Some(element_ty) = shape.optional_element_type() {
+        let mut element_shape = shape.clone();
+        element_shape.java_ty = element_ty;
+        element_shape.type_identity =
+            crate::slot_shape::TypeIdentity::from_java_type(element_shape.java_ty.clone());
+        return RustType::Option(Box::new(rust_type_for_slot_with_effective_facts(
+            &element_shape,
+            facts,
+        )));
+    }
     render_slot_rust_type_policy(&slot_rust_type_policy_with_effective_facts(shape, facts))
 }
 
@@ -375,10 +402,42 @@ pub fn native_java_rust_type_policy_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> NativeJavaRustTypePolicy {
+    if matches!(
+        facts.object_representation_override_strategy_for(ty),
+        Some(HierarchyStrategy::ErasedObject)
+    ) {
+        return NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Raw("Box<dyn std::any::Any>".to_string()),
+        };
+    }
+    if let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty) {
+        if let JavaType::Named { args, .. } = ty
+            && let Some(element_ty) = args.first()
+        {
+            match kind {
+                crate::stdlib::JavaCollectionKind::List => {
+                    return NativeJavaRustTypePolicy::Sequence {
+                        container: NativeSequenceContainer::Vec,
+                        element_ty: element_ty.clone(),
+                    };
+                }
+                crate::stdlib::JavaCollectionKind::Set => {
+                    return NativeJavaRustTypePolicy::Sequence {
+                        container: NativeSequenceContainer::HashSet,
+                        element_ty: element_ty.clone(),
+                    };
+                }
+                crate::stdlib::JavaCollectionKind::Map => {}
+            }
+        }
+    }
     if let Some(element_ty) =
         slot_content_capability_policy_with_effective_facts(ty, facts).sequence_element
     {
-        return NativeJavaRustTypePolicy::Sequence { element_ty };
+        return NativeJavaRustTypePolicy::Sequence {
+            container: NativeSequenceContainer::Vec,
+            element_ty,
+        };
     }
     if let Some(element_ty) = optional_element_type(ty) {
         return NativeJavaRustTypePolicy::Optional { element_ty };
@@ -413,9 +472,45 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             ty: RustType::String,
         },
         JavaType::Array(_) => NativeJavaRustTypePolicy::ArrayRequiresSequenceElement,
+        JavaType::Named { name, args }
+            if crate::stdlib::canonical_external_receiver_type_key(name) == "Class" =>
+        {
+            let token_ty = args.first().map_or_else(
+                || "()".to_string(),
+                |arg| class_token_arg_rust_type(arg, facts),
+            );
+            NativeJavaRustTypePolicy::Direct {
+                ty: RustType::Raw(format!("JavaClass<{token_ty}>")),
+            }
+        }
+        JavaType::Named { .. } if crate::stdlib::java_map_type_args(ty).is_some() => {
+            let (key, value) = crate::stdlib::java_map_type_args(ty).unwrap();
+            NativeJavaRustTypePolicy::Direct {
+                ty: RustType::Raw(format!(
+                    "std::collections::HashMap<{}, {}>",
+                    crate::emit::emit_type(&rust_type_for_java_type_with_effective_facts(
+                        key, facts
+                    )),
+                    crate::emit::emit_type(&rust_type_for_java_type_with_effective_facts(
+                        value, facts
+                    ))
+                )),
+            }
+        }
         JavaType::Named { name, .. } => native_named_java_rust_type_policy(name).policy,
         JavaType::Wildcard(_) => NativeJavaRustTypePolicy::WildcardObject,
         JavaType::Unknown(raw) => NativeJavaRustTypePolicy::UnknownRaw { raw: raw.clone() },
+    }
+}
+
+fn class_token_arg_rust_type(arg: &JavaType, facts: &EffectiveFacts<'_>) -> String {
+    match arg {
+        JavaType::Wildcard(None) => "()".to_string(),
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            class_token_arg_rust_type(bound, facts)
+        }
+        _ => crate::emit::emit_type(&rust_type_for_java_type_with_effective_facts(arg, facts)),
     }
 }
 
@@ -439,6 +534,7 @@ pub fn slot_content_capability_policy_with_effective_facts(
 }
 
 pub fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustTypePolicy {
+    let rust_name = rust_name_for_java_named_type(name);
     let policy = match name {
         "Integer" => NativeJavaRustTypePolicy::Direct { ty: RustType::I32 },
         "Long" => NativeJavaRustTypePolicy::Direct { ty: RustType::I64 },
@@ -446,14 +542,43 @@ pub fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustType
         "Float" => NativeJavaRustTypePolicy::Direct { ty: RustType::F32 },
         "Boolean" => NativeJavaRustTypePolicy::Direct { ty: RustType::Bool },
         "Character" => NativeJavaRustTypePolicy::Direct { ty: RustType::Char },
+        "Object" => NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Raw("Box<dyn std::any::Any>".to_string()),
+        },
         _ => NativeJavaRustTypePolicy::Named {
-            name: name.to_string(),
+            name: rust_name.clone(),
         },
     };
     NativeNamedJavaRustTypePolicy {
         name: name.to_string(),
         policy,
     }
+}
+
+pub fn rust_name_for_java_named_type(name: &str) -> String {
+    if !name.contains('.') {
+        return name.to_string();
+    }
+    name.split('.')
+        .filter(|part| !part.trim().is_empty())
+        .map(upper_camel_identifier_part)
+        .collect::<String>()
+}
+
+fn upper_camel_identifier_part(part: &str) -> String {
+    let mut out = String::new();
+    let mut uppercase_next = true;
+    for ch in part.chars() {
+        if ch == '_' || ch == '-' || ch == '$' {
+            uppercase_next = true;
+        } else if uppercase_next {
+            out.push(ch.to_ascii_uppercase());
+            uppercase_next = false;
+        } else if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 pub fn render_native_java_rust_type_policy(
@@ -469,9 +594,19 @@ pub fn render_native_java_rust_type_policy_with_effective_facts(
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
     match policy {
-        NativeJavaRustTypePolicy::Sequence { element_ty } => RustType::Vec(Box::new(
-            rust_type_for_java_type_with_effective_facts(element_ty, facts),
-        )),
+        NativeJavaRustTypePolicy::Sequence {
+            container,
+            element_ty,
+        } => {
+            let element_ty = rust_type_for_java_type_with_effective_facts(element_ty, facts);
+            match container {
+                NativeSequenceContainer::Vec => RustType::Vec(Box::new(element_ty)),
+                NativeSequenceContainer::HashSet => RustType::Raw(format!(
+                    "std::collections::HashSet<{}>",
+                    crate::emit::emit_type(&element_ty)
+                )),
+            }
+        }
         NativeJavaRustTypePolicy::Optional { element_ty } => RustType::Option(Box::new(
             rust_type_for_java_type_with_effective_facts(element_ty, facts),
         )),

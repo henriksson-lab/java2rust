@@ -65,9 +65,44 @@ pub fn control_flow_rewrite_diagnostics(
         .flat_map(|plan| {
             plan.rewrites
                 .iter()
+                .filter(|rewrite| !control_flow_rewrite_is_lowered(rewrite))
                 .map(|rewrite| control_flow_rewrite_diagnostic(plan, rewrite))
         })
         .collect()
+}
+
+fn control_flow_rewrite_is_lowered(rewrite: &ControlFlowRewritePlan) -> bool {
+    matches!(
+        rewrite,
+        ControlFlowRewritePlan::AssignmentInCondition(AssignmentInConditionPlan {
+            normalized_shape: AssignmentConditionNormalizedShape::LoopAssignThenBreak,
+            ..
+        }) | ControlFlowRewritePlan::TailRecursiveLoop(TailRecursiveLoopPlan {
+            normalized_shape: TailRecursiveNormalizedShape::LoopWithParameterReassignment,
+            ..
+        })
+    )
+}
+
+pub fn method_has_tail_recursive_loop_rewrite(
+    control_flow_plans: &[MethodControlFlowPlan],
+    type_name: &str,
+    method_name: &str,
+) -> bool {
+    control_flow_plans.iter().any(|plan| {
+        plan.method.type_name == type_name
+            && plan.method.method_name == method_name
+            && plan.rewrites.iter().any(|rewrite| {
+                matches!(
+                    rewrite,
+                    ControlFlowRewritePlan::TailRecursiveLoop(TailRecursiveLoopPlan {
+                        normalized_shape:
+                            TailRecursiveNormalizedShape::LoopWithParameterReassignment,
+                        ..
+                    })
+                )
+            })
+    })
 }
 
 fn control_flow_rewrite_diagnostic(

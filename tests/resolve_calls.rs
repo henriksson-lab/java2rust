@@ -1,14 +1,311 @@
 use new_java2rust::external_facts::parse_external_facts;
 use new_java2rust::facts::{FactProvenance, UnresolvedTargetKind};
-use new_java2rust::java_ir::{CallKind, ConstructorInvocationKind, Expr, JavaType, Member, Stmt};
+use new_java2rust::java_ir::{
+    CallKind, ConstructorInvocationKind, Expr, JavaCoercionKind, JavaType, Member, Param,
+    PrimitiveType, Stmt,
+};
 use new_java2rust::parser::parse_java_source;
 use new_java2rust::resolve::{
-    resolve_program, resolve_program_with_source_program,
+    OverloadApplicabilityMode, OverloadArgumentConversion, OverloadRejectionReason,
+    overload_applicability_report, resolve_program, resolve_program_with_source_program,
     resolve_program_with_source_program_and_facts,
 };
 use new_java2rust::resolver_benchmark::{
     benchmark_java_resolver_dir, render_resolver_benchmark_report,
 };
+
+fn param(name: &str, ty: JavaType) -> Param {
+    Param {
+        name: name.to_string(),
+        ty,
+        is_varargs: false,
+    }
+}
+
+fn varargs_param(name: &str, element_ty: JavaType) -> Param {
+    Param {
+        name: name.to_string(),
+        ty: JavaType::Array(Box::new(element_ty)),
+        is_varargs: true,
+    }
+}
+
+#[test]
+fn overload_applicability_reports_primitive_boxing_unboxing_and_rejections() {
+    let symbols = new_java2rust::resolve::source_symbols_from_program(
+        &parse_java_source("class Empty {}").program,
+    );
+
+    let widening = overload_applicability_report(
+        &[param("x", JavaType::Primitive(PrimitiveType::Long))],
+        &[JavaType::Primitive(PrimitiveType::Int)],
+        &symbols,
+    );
+    assert_eq!(widening.mode, Some(OverloadApplicabilityMode::FixedArity));
+    assert_eq!(
+        widening.arguments[0].conversion,
+        OverloadArgumentConversion::PrimitiveWidening
+    );
+
+    let boxing = overload_applicability_report(
+        &[param(
+            "x",
+            JavaType::Named {
+                name: "Integer".to_string(),
+                args: Vec::new(),
+            },
+        )],
+        &[JavaType::Primitive(PrimitiveType::Int)],
+        &symbols,
+    );
+    assert_eq!(
+        boxing.arguments[0].conversion,
+        OverloadArgumentConversion::Boxing
+    );
+
+    let unboxing = overload_applicability_report(
+        &[param("x", JavaType::Primitive(PrimitiveType::Long))],
+        &[JavaType::Named {
+            name: "Integer".to_string(),
+            args: Vec::new(),
+        }],
+        &symbols,
+    );
+    assert_eq!(
+        unboxing.arguments[0].conversion,
+        OverloadArgumentConversion::Unboxing
+    );
+
+    let null_to_primitive = overload_applicability_report(
+        &[param("x", JavaType::Primitive(PrimitiveType::Int))],
+        &[JavaType::Unknown("null".to_string())],
+        &symbols,
+    );
+    assert!(matches!(
+        null_to_primitive.rejections.as_slice(),
+        [OverloadRejectionReason::NullToPrimitive { arg_index: 0, .. }]
+    ));
+}
+
+#[test]
+fn overload_applicability_reports_varargs_generics_and_ambiguous_scores() {
+    let symbols = new_java2rust::resolve::source_symbols_from_program(
+        &parse_java_source("class Empty {}").program,
+    );
+
+    let varargs = overload_applicability_report(
+        &[
+            param("prefix", JavaType::String),
+            varargs_param("rest", JavaType::String),
+        ],
+        &[JavaType::String, JavaType::String, JavaType::String],
+        &symbols,
+    );
+    assert_eq!(varargs.mode, Some(OverloadApplicabilityMode::VariableArity));
+    assert!(varargs.is_applicable(), "{varargs:?}");
+
+    let generic = overload_applicability_report(
+        &[param(
+            "value",
+            JavaType::Named {
+                name: "T".to_string(),
+                args: Vec::new(),
+            },
+        )],
+        &[JavaType::String],
+        &symbols,
+    );
+    assert_eq!(
+        generic.arguments[0].conversion,
+        OverloadArgumentConversion::GenericInference
+    );
+
+    let integer_candidate = overload_applicability_report(
+        &[param(
+            "value",
+            JavaType::Named {
+                name: "Integer".to_string(),
+                args: Vec::new(),
+            },
+        )],
+        &[JavaType::Primitive(PrimitiveType::Int)],
+        &symbols,
+    );
+    let another_integer_candidate = overload_applicability_report(
+        &[param(
+            "other",
+            JavaType::Named {
+                name: "Integer".to_string(),
+                args: Vec::new(),
+            },
+        )],
+        &[JavaType::Primitive(PrimitiveType::Int)],
+        &symbols,
+    );
+    assert_eq!(integer_candidate.score, another_integer_candidate.score);
+    assert!(integer_candidate.is_applicable());
+    assert!(another_integer_candidate.is_applicable());
+}
+
+#[test]
+fn overload_applicability_reports_lambda_and_method_reference_targets() {
+    let parsed = parse_java_source(
+        r#"
+interface Sink {
+    void accept(String value);
+}
+class Plain {}
+"#,
+    );
+    let symbols = new_java2rust::resolve::source_symbols_from_program(&parsed.program);
+
+    let lambda = overload_applicability_report(
+        &[param(
+            "sink",
+            JavaType::Named {
+                name: "Sink".to_string(),
+                args: Vec::new(),
+            },
+        )],
+        &[JavaType::Unknown("lambda".to_string())],
+        &symbols,
+    );
+    assert_eq!(
+        lambda.arguments[0].conversion,
+        OverloadArgumentConversion::LambdaToFunctionalInterface
+    );
+
+    let method_reference = overload_applicability_report(
+        &[param(
+            "sink",
+            JavaType::Named {
+                name: "Sink".to_string(),
+                args: Vec::new(),
+            },
+        )],
+        &[JavaType::Unknown("method_reference".to_string())],
+        &symbols,
+    );
+    assert_eq!(
+        method_reference.arguments[0].conversion,
+        OverloadArgumentConversion::MethodReferenceToFunctionalInterface
+    );
+
+    let rejected_lambda = overload_applicability_report(
+        &[param(
+            "plain",
+            JavaType::Named {
+                name: "Plain".to_string(),
+                args: Vec::new(),
+            },
+        )],
+        &[JavaType::Unknown("lambda".to_string())],
+        &symbols,
+    );
+    assert!(matches!(
+        rejected_lambda.rejections.as_slice(),
+        [OverloadRejectionReason::LambdaTargetNotFunctionalInterface { arg_index: 0, .. }]
+    ));
+}
+
+#[test]
+fn resolver_records_java_coercion_evidence_for_selected_call_arguments() {
+    let parsed = parse_java_source(
+        r#"
+interface Sink {
+    void accept(String value);
+}
+
+class JavaCoercionEvidenceCallResolution {
+    void accept(long widened, Integer boxed, long unboxed, Sink sink) {}
+
+    void run(Integer boxed) {
+        accept(1, 2, boxed, value -> {});
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let Stmt::Expr(Expr::Call {
+        resolved: Some(call),
+        ..
+    }) = first_stmt(&resolved.program.types[1]).unwrap()
+    else {
+        panic!("expected resolved coercion-bearing call");
+    };
+    let kinds = call
+        .arg_coercions
+        .iter()
+        .map(|evidence| evidence.kind)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        kinds,
+        vec![
+            JavaCoercionKind::PrimitiveWidening,
+            JavaCoercionKind::Boxing,
+            JavaCoercionKind::Unboxing,
+            JavaCoercionKind::LambdaAdaptation,
+        ]
+    );
+    assert_eq!(call.arg_coercions[0].arg_index, 0);
+    assert_eq!(
+        call.arg_coercions[0].actual,
+        JavaType::Primitive(PrimitiveType::Int)
+    );
+    assert_eq!(
+        call.arg_coercions[0].target,
+        JavaType::Primitive(PrimitiveType::Long)
+    );
+}
+
+#[test]
+fn resolver_records_java_coercion_evidence_for_selected_constructor_arguments() {
+    let parsed = parse_java_source(
+        r#"
+class Boxed {
+    Boxed(long widened, Integer boxed) {}
+}
+
+class JavaCoercionEvidenceConstructorResolution {
+    Boxed run() {
+        return new Boxed(1, 2);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let Expr::New {
+        resolved: Some(constructor),
+        ..
+    } = first_return_expr(&resolved.program.types[1]).unwrap()
+    else {
+        panic!("expected resolved coercion-bearing constructor");
+    };
+    let kinds = constructor
+        .arg_coercions
+        .iter()
+        .map(|evidence| evidence.kind)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        kinds,
+        vec![
+            JavaCoercionKind::PrimitiveWidening,
+            JavaCoercionKind::Boxing,
+        ]
+    );
+}
 
 #[test]
 fn resolve_annotates_same_class_overload_call_targets() {
@@ -2565,6 +2862,303 @@ class InheritedGenericReturnResolution {
 
     assert_eq!(call.declaring_type, "InheritedGenericReturnResolution");
     assert_eq!(call.rust_name, "with_flanks_list_int_dictionary");
+}
+
+#[test]
+fn resolver_substitutes_inherited_generic_return_type_through_interface_chain() {
+    let parsed = parse_java_source(
+        r#"
+interface Provider<T> {
+    T get();
+}
+
+interface NamedProvider<U> extends Provider<U> {
+}
+
+class StringProvider implements NamedProvider<String> {
+}
+
+class InterfaceGenericReturnResolution {
+    void accept(String value) {}
+    void accept(int value) {}
+
+    void run(StringProvider provider) {
+        accept(provider.get());
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+
+    let Stmt::Expr(Expr::Call {
+        resolved: Some(call),
+        ..
+    }) = first_stmt(&resolved.program.types[3]).unwrap()
+    else {
+        panic!("expected resolved overload from inherited interface generic return");
+    };
+
+    assert_eq!(call.declaring_type, "InterfaceGenericReturnResolution");
+    assert_eq!(call.rust_name, "accept_string");
+}
+
+#[test]
+fn resolver_uses_extends_wildcard_bound_for_inherited_interface_return() {
+    let parsed = parse_java_source(
+        r#"
+class Payload {
+    int value;
+}
+
+interface Provider<T> {
+    T get();
+}
+
+interface PayloadProvider<T extends Payload> extends Provider<T> {
+}
+
+class WildProvider implements PayloadProvider<? extends Payload> {
+}
+
+class InterfaceWildcardReturnResolution {
+    void accept(int value) {}
+    void accept(String value) {}
+
+    void run(WildProvider provider) {
+        accept(provider.get().value);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let unresolved_fields = resolved
+        .facts
+        .unresolved_target_facts
+        .iter()
+        .filter(|fact| fact.kind == UnresolvedTargetKind::FieldAccess)
+        .collect::<Vec<_>>();
+    assert!(
+        unresolved_fields.is_empty(),
+        "interface wildcard substitutions should expose the readable bound: {unresolved_fields:?}"
+    );
+
+    let Stmt::Expr(Expr::Call {
+        resolved: Some(call),
+        ..
+    }) = first_stmt(&resolved.program.types[4]).unwrap()
+    else {
+        panic!("expected resolved overload from inherited wildcard interface return");
+    };
+
+    assert_eq!(call.rust_name, "accept_int");
+}
+
+#[test]
+fn resolver_records_target_typed_diamond_constructed_types() {
+    let parsed = parse_java_source(
+        r#"
+class Box<T> {
+    Box() {}
+    Box(T value) {}
+}
+
+class Pair<K, V> {
+    Pair() {}
+}
+
+class Holder<T> {
+    Holder(T value) {}
+}
+
+interface MyList<T> {
+}
+
+class MyArrayList<T> implements MyList<T> {
+    MyArrayList() {}
+}
+
+interface MyMap<K, V> {
+}
+
+class MyHashMap<K, V> implements MyMap<K, V> {
+    MyHashMap() {}
+}
+
+class DiamondConstructedTypeResolution {
+    void run() {
+        Box<String> one = new Box<>();
+        Pair<String, Integer> two = new Pair<>();
+        Holder<Box<String>> nested = new Holder<>(new Box<>());
+        Box raw = new Box<>();
+        MyList<String> list = new MyArrayList<>();
+        MyMap<String, Integer> map = new MyHashMap<>();
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let body = resolved.program.types[7]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+
+    let Stmt::VarDecl {
+        initializer: Some(Expr::New {
+            resolved: Some(one),
+            ..
+        }),
+        ..
+    } = &body.statements[0]
+    else {
+        panic!("expected first diamond constructor");
+    };
+    assert_eq!(
+        one.constructed_type,
+        JavaType::Named {
+            name: "Box".to_string(),
+            args: vec![JavaType::String],
+        }
+    );
+
+    let Stmt::VarDecl {
+        initializer: Some(Expr::New {
+            resolved: Some(two),
+            ..
+        }),
+        ..
+    } = &body.statements[1]
+    else {
+        panic!("expected second diamond constructor");
+    };
+    assert_eq!(
+        two.constructed_type,
+        JavaType::Named {
+            name: "Pair".to_string(),
+            args: vec![
+                JavaType::String,
+                JavaType::Named {
+                    name: "Integer".to_string(),
+                    args: Vec::new(),
+                },
+            ],
+        }
+    );
+
+    let Stmt::VarDecl {
+        initializer:
+            Some(Expr::New {
+                args,
+                resolved: Some(nested),
+                ..
+            }),
+        ..
+    } = &body.statements[2]
+    else {
+        panic!("expected nested diamond constructor");
+    };
+    assert_eq!(
+        nested.constructed_type,
+        JavaType::Named {
+            name: "Holder".to_string(),
+            args: vec![JavaType::Named {
+                name: "Box".to_string(),
+                args: vec![JavaType::String],
+            }],
+        }
+    );
+    let Expr::New {
+        resolved: Some(inner),
+        ..
+    } = &args[0]
+    else {
+        panic!("expected nested constructor argument");
+    };
+    assert_eq!(
+        inner.constructed_type,
+        JavaType::Named {
+            name: "Box".to_string(),
+            args: vec![JavaType::String],
+        }
+    );
+
+    let Stmt::VarDecl {
+        initializer: Some(Expr::New {
+            resolved: Some(raw),
+            ..
+        }),
+        ..
+    } = &body.statements[3]
+    else {
+        panic!("expected raw fallback constructor");
+    };
+    assert_eq!(
+        raw.constructed_type,
+        JavaType::Named {
+            name: "Box".to_string(),
+            args: Vec::new(),
+        }
+    );
+
+    let Stmt::VarDecl {
+        initializer: Some(Expr::New {
+            resolved: Some(list),
+            ..
+        }),
+        ..
+    } = &body.statements[4]
+    else {
+        panic!("expected subtype target diamond constructor");
+    };
+    assert_eq!(
+        list.constructed_type,
+        JavaType::Named {
+            name: "MyArrayList".to_string(),
+            args: vec![JavaType::String],
+        }
+    );
+
+    let Stmt::VarDecl {
+        initializer: Some(Expr::New {
+            resolved: Some(map),
+            ..
+        }),
+        ..
+    } = &body.statements[5]
+    else {
+        panic!("expected multi-arg subtype target diamond constructor");
+    };
+    assert_eq!(
+        map.constructed_type,
+        JavaType::Named {
+            name: "MyHashMap".to_string(),
+            args: vec![
+                JavaType::String,
+                JavaType::Named {
+                    name: "Integer".to_string(),
+                    args: Vec::new(),
+                },
+            ],
+        }
+    );
 }
 
 #[test]
@@ -14168,6 +14762,179 @@ class UnsupportedExternal {
     assert!(rendered.contains("external_pack_unsupported_api"));
     assert!(rendered.contains("top_semantic_diagnostic_files"));
     assert!(rendered.contains("UnsupportedExternal.java"));
+}
+
+#[test]
+fn resolver_benchmark_reports_signature_solver_phase_counters() {
+    let root = std::env::temp_dir().join(format!(
+        "new_java2rust_signature_benchmark_counters_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("RecursiveSignatures.java"),
+        r#"
+public class RecursiveSignatures {
+    public String first(String value) {
+        return second(value);
+    }
+
+    public String second(String value) {
+        return first(value);
+    }
+
+    public String publicEntry(String value) {
+        return first(value);
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let report = benchmark_java_resolver_dir(&root).unwrap();
+    let rendered = render_resolver_benchmark_report(&report);
+    std::fs::remove_dir_all(&root).unwrap();
+
+    assert!(report.signature_constraint_slots > 0, "{rendered}");
+    assert!(report.signature_unique_constraints > 0, "{rendered}");
+    assert!(report.signature_fixpoint_iteration_budget > 0, "{rendered}");
+    assert!(report.signature_fixpoint_iterations > 0, "{rendered}");
+    assert_eq!(report.signature_fixpoint_diagnostics, 0, "{rendered}");
+    assert!(
+        report
+            .top_signature_fallback_reasons
+            .iter()
+            .any(|entry| entry.label == "owned" && entry.count > 0),
+        "{rendered}"
+    );
+    assert!(report.signature_dependency_graph_nodes > 0, "{rendered}");
+    assert!(report.signature_dependency_graph_edges > 0, "{rendered}");
+    assert!(report.signature_dependency_sccs > 0, "{rendered}");
+    assert!(report.signature_dependency_cyclic_sccs > 0, "{rendered}");
+    assert!(report.signature_dependency_max_scc_size > 1, "{rendered}");
+    assert!(report.signature_solver_planned_components > 0, "{rendered}");
+    assert!(report.signature_solver_cyclic_components > 0, "{rendered}");
+    assert!(report.signature_solver_max_component_size > 1, "{rendered}");
+
+    for key in [
+        "signature_constraint_slots",
+        "signature_unique_constraints",
+        "signature_fixpoint_iteration_budget",
+        "signature_fixpoint_iterations",
+        "signature_fixpoint_diagnostics",
+        "signature_join_conflicts",
+        "top_signature_fallback_reasons",
+        "signature_dependency_graph_nodes",
+        "signature_dependency_graph_edges",
+        "signature_dependency_sccs",
+        "signature_dependency_cyclic_sccs",
+        "signature_dependency_max_scc_size",
+        "signature_solver_planned_components",
+        "signature_solver_cyclic_components",
+        "signature_solver_max_component_size",
+    ] {
+        assert!(rendered.contains(key), "missing {key} in:\n{rendered}");
+    }
+}
+
+#[test]
+fn resolver_benchmark_reports_runtime_phase_counters() {
+    let root = std::env::temp_dir().join(format!(
+        "new_java2rust_runtime_benchmark_counters_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("RuntimeCounters.java"),
+        r#"
+class RuntimeCounters {
+    int value;
+
+    public int get() {
+        return this.value;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let report = benchmark_java_resolver_dir(&root).unwrap();
+    let rendered = render_resolver_benchmark_report(&report);
+    std::fs::remove_dir_all(&root).unwrap();
+
+    assert_eq!(report.files_seen, 1, "{rendered}");
+    assert!(
+        report.files_per_second_x1000 > 0 || report.elapsed_ms == 0,
+        "{rendered}"
+    );
+    assert!(
+        report.parse_phase_ms
+            + report.source_summary_phase_ms
+            + report.representation_phase_ms
+            + report.resolution_phase_ms
+            <= report.elapsed_ms + 4,
+        "{rendered}"
+    );
+
+    for key in [
+        "elapsed_ms",
+        "files_per_second_x1000",
+        "parse_phase_ms",
+        "source_summary_phase_ms",
+        "representation_phase_ms",
+        "resolution_phase_ms",
+    ] {
+        assert!(rendered.contains(key), "missing {key} in:\n{rendered}");
+    }
+}
+
+#[test]
+fn resolver_benchmark_reports_hierarchy_worklist_phase_counters() {
+    let root = std::env::temp_dir().join(format!(
+        "new_java2rust_hierarchy_benchmark_counters_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("HierarchyCounters.java"),
+        r#"
+class Base {}
+class Middle extends Base {}
+class Leaf extends Middle {}
+"#,
+    )
+    .unwrap();
+
+    let report = benchmark_java_resolver_dir(&root).unwrap();
+    let rendered = render_resolver_benchmark_report(&report);
+    std::fs::remove_dir_all(&root).unwrap();
+
+    assert!(report.hierarchy_worklist_processed_items > 0, "{rendered}");
+    assert!(report.hierarchy_worklist_inserted_facts > 0, "{rendered}");
+    assert!(report.hierarchy_worklist_max_queue_size > 0, "{rendered}");
+    assert!(report.hierarchy_worklist_domain_slots > 0, "{rendered}");
+    assert!(
+        report.hierarchy_worklist_value_lattice_height > 0,
+        "{rendered}"
+    );
+    assert_eq!(
+        report.hierarchy_worklist_budget_diagnostics, 0,
+        "{rendered}"
+    );
+
+    for key in [
+        "hierarchy_worklist_processed_items",
+        "hierarchy_worklist_inserted_facts",
+        "hierarchy_worklist_max_queue_size",
+        "hierarchy_worklist_domain_slots",
+        "hierarchy_worklist_value_lattice_height",
+        "hierarchy_worklist_budget_diagnostics",
+    ] {
+        assert!(rendered.contains(key), "missing {key} in:\n{rendered}");
+    }
 }
 
 fn first_return_expr(ty: &new_java2rust::java_ir::TypeDecl) -> Option<&Expr> {

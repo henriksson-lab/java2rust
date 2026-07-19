@@ -6,7 +6,10 @@ use crate::java_ir::{BinaryOp, Expr, JavaType, Literal, PrimitiveType, Stmt};
 pub struct TypeEnv {
     locals: HashMap<String, JavaType>,
     fields: HashMap<String, JavaType>,
+    type_fields: HashMap<(String, String), JavaType>,
     type_param_bounds: HashMap<String, JavaType>,
+    static_type_aliases: HashMap<String, String>,
+    static_member_imports: HashMap<String, String>,
 }
 
 impl TypeEnv {
@@ -22,8 +25,36 @@ impl TypeEnv {
         self.fields.insert(name.into(), ty);
     }
 
+    pub fn insert_type_field(
+        &mut self,
+        type_name: impl Into<String>,
+        field_name: impl Into<String>,
+        ty: JavaType,
+    ) {
+        self.type_fields
+            .insert((type_name.into(), field_name.into()), ty);
+    }
+
     pub fn insert_type_param_bound(&mut self, name: impl Into<String>, bound: JavaType) {
         self.type_param_bounds.insert(name.into(), bound);
+    }
+
+    pub fn insert_static_type_alias(
+        &mut self,
+        alias: impl Into<String>,
+        type_name: impl Into<String>,
+    ) {
+        self.static_type_aliases
+            .insert(alias.into(), type_name.into());
+    }
+
+    pub fn insert_static_member_import(
+        &mut self,
+        member: impl Into<String>,
+        owner_type: impl Into<String>,
+    ) {
+        self.static_member_imports
+            .insert(member.into(), owner_type.into());
     }
 
     pub fn local_type(&self, name: &str) -> Option<&JavaType> {
@@ -34,8 +65,21 @@ impl TypeEnv {
         self.fields.get(name)
     }
 
+    pub fn type_field_type(&self, type_name: &str, field_name: &str) -> Option<&JavaType> {
+        self.type_fields
+            .get(&(type_name.to_string(), field_name.to_string()))
+    }
+
     pub fn type_param_bound(&self, name: &str) -> Option<&JavaType> {
         self.type_param_bounds.get(name)
+    }
+
+    pub fn static_type_alias(&self, name: &str) -> Option<&str> {
+        self.static_type_aliases.get(name).map(String::as_str)
+    }
+
+    pub fn static_member_import_owner(&self, member: &str) -> Option<&str> {
+        self.static_member_imports.get(member).map(String::as_str)
     }
 
     pub fn learn_stmt(&mut self, stmt: &Stmt) {
@@ -90,8 +134,8 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
         Expr::ArrayCreation {
             element_type,
             dimensions,
-        } => dimensions
-            .iter()
+            initializer,
+        } => (0..initializer.as_ref().map_or(dimensions.len(), |_| 1).max(1))
             .fold(element_type.clone(), |ty, _| JavaType::Array(Box::new(ty))),
         Expr::ArrayInitializer(elements) => elements
             .first()
@@ -153,6 +197,11 @@ fn external_pack_method_return_type(
     name: &str,
     arg_count: usize,
 ) -> Option<JavaType> {
+    if let Some(receiver_type) = receiver_type
+        && let Some(element_ty) = optional_element_type(receiver_type)
+    {
+        return external_pack_method_return_type(Some(&element_ty), name, arg_count);
+    }
     let receiver_name = match receiver_type {
         Some(JavaType::Named { name, .. }) | Some(JavaType::Unknown(name)) => Some(name.as_str()),
         _ => None,
@@ -188,7 +237,11 @@ pub fn literal_type(lit: &Literal) -> JavaType {
 pub fn sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
     match java_ty {
         JavaType::Array(inner) => Some((**inner).clone()),
-        JavaType::Named { name, args } if name == "List" && args.len() == 1 => {
+        JavaType::Named { name, args }
+            if crate::stdlib::java_collection_kind_for_name(name)
+                .is_some_and(|kind| kind != crate::stdlib::JavaCollectionKind::Map)
+                && args.len() == 1 =>
+        {
             Some(args[0].clone())
         }
         _ => None,
@@ -204,9 +257,98 @@ pub fn optional_element_type(java_ty: &JavaType) -> Option<JavaType> {
     }
 }
 
+pub fn is_numeric_primitive_type(primitive: PrimitiveType) -> bool {
+    !matches!(primitive, PrimitiveType::Boolean)
+}
+
+pub fn is_named_java_type(java_ty: &JavaType, expected: &str) -> bool {
+    matches!(java_ty, JavaType::Named { name, .. } if name == expected)
+}
+
+pub fn is_optional_or_result_type(java_ty: &JavaType) -> bool {
+    is_named_java_type(java_ty, "Optional") || is_named_java_type(java_ty, "Result")
+}
+
+pub fn contains_wildcard_type(java_ty: &JavaType) -> bool {
+    match java_ty {
+        JavaType::Wildcard(_) => true,
+        JavaType::Array(inner) => contains_wildcard_type(inner),
+        JavaType::Named { args, .. } => args.iter().any(contains_wildcard_type),
+        _ => false,
+    }
+}
+
+pub fn is_raw_generic_counterpart(actual: &JavaType, target: &JavaType) -> bool {
+    match (actual, target) {
+        (
+            JavaType::Named {
+                name: actual_name,
+                args: actual_args,
+            },
+            JavaType::Named {
+                name: target_name,
+                args: target_args,
+            },
+        ) => {
+            actual_name == target_name
+                && ((actual_args.is_empty() && !target_args.is_empty())
+                    || (!actual_args.is_empty() && target_args.is_empty()))
+        }
+        _ => false,
+    }
+}
+
+pub fn is_known_raw_generic_type(java_ty: &JavaType) -> bool {
+    matches!(
+        java_ty,
+        JavaType::Named { name, args }
+            if args.is_empty()
+                && matches!(
+                    name.as_str(),
+                    "List"
+                        | "Set"
+                        | "Map"
+                        | "Optional"
+                        | "Iterator"
+                        | "Iterable"
+                        | "Comparator"
+                        | "Comparable"
+                        | "Class"
+                )
+    )
+}
+
+pub fn is_unchecked_generic_counterpart(actual: &JavaType, target: &JavaType) -> bool {
+    match (actual, target) {
+        (
+            JavaType::Named {
+                name: actual_name,
+                args: actual_args,
+            },
+            JavaType::Named {
+                name: target_name,
+                args: target_args,
+            },
+        ) => {
+            actual_name == target_name
+                && !actual_args.is_empty()
+                && !target_args.is_empty()
+                && actual_args != target_args
+        }
+        _ => false,
+    }
+}
+
 pub fn list_java_type(element_ty: JavaType) -> JavaType {
     JavaType::Named {
         name: "List".to_string(),
+        args: vec![element_ty],
+    }
+}
+
+pub fn set_java_type(element_ty: JavaType) -> JavaType {
+    JavaType::Named {
+        name: "Set".to_string(),
         args: vec![element_ty],
     }
 }
@@ -241,9 +383,30 @@ pub fn infer_member_access_type(receiver: &Expr, member: &str, env: &TypeEnv) ->
         Some(JavaType::Primitive(PrimitiveType::Int))
     } else if let Some(java_ty) = external_pack_field_type(&receiver_ty, member) {
         Some(java_ty)
+    } else if let Some(java_ty) = source_type_field_type(&receiver_ty, member, env) {
+        Some(java_ty)
+    } else if is_static_type_qualifier(receiver, env)
+        && let Some(java_ty) =
+            crate::stdlib::known_external_field_type_for_receiver(&receiver_ty, member)
+    {
+        Some(java_ty)
     } else {
         None
     }
+}
+
+fn is_static_type_qualifier(receiver: &Expr, env: &TypeEnv) -> bool {
+    let Expr::Var(name) = receiver else {
+        return false;
+    };
+    if env.local_type(name).is_some() || env.field_type(name).is_some() {
+        return false;
+    }
+    name.chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+        || name.contains('_')
+        || name.chars().all(|ch| ch.is_ascii_lowercase())
 }
 
 fn external_pack_field_type(receiver_ty: &JavaType, member: &str) -> Option<JavaType> {
@@ -254,6 +417,16 @@ fn external_pack_field_type(receiver_ty: &JavaType, member: &str) -> Option<Java
     crate::external_packs::external_field_for(receiver_name, member)?
         .field_type
         .clone()
+}
+
+fn source_type_field_type(receiver_ty: &JavaType, member: &str, env: &TypeEnv) -> Option<JavaType> {
+    let receiver_name = match receiver_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        _ => return None,
+    };
+    env.type_field_type(receiver_name, member)
+        .or_else(|| env.type_field_type(receiver_name, &crate::parser::to_snake_case(member)))
+        .cloned()
 }
 
 fn is_java_length_receiver(ty: &JavaType) -> bool {

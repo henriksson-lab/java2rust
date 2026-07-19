@@ -9,8 +9,9 @@ use crate::facts::{
     ExternalFieldFact, ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet,
     FieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride,
     HierarchyStrategy, NullabilityState, ObjectSafetyFact, ObjectSafetyViolation,
-    ReceiverMutabilityFact, TypeCapabilityOverride, UnsupportedExternalApiFact,
-    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
+    OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, ReceiverMutabilityFact,
+    TypeCapabilityOverride, UnsupportedExternalApiFact, UnsupportedExternalConstructorFact,
+    UnsupportedExternalFieldFact,
 };
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::parser::parse_type;
@@ -929,6 +930,22 @@ pub fn audit_external_pack_manifest_coverage(
         }
     }
 
+    for capability in facts
+        .owned_recovery_capability_facts
+        .iter()
+        .filter(|capability| capability.provenance == FactProvenance::ExternalLibraryPack)
+    {
+        if !fact_set_owns_type(facts, &capability.type_name) {
+            diagnostics.warning(
+                "external_pack_manifest_unowned_owned_recovery_capability_fact",
+                format!(
+                    "{} has an external-pack owned-recovery capability fact but no declared pack owns type {}",
+                    capability.type_name, capability.type_name
+                ),
+            );
+        }
+    }
+
     for field in facts
         .field_nullability_facts
         .iter()
@@ -1213,6 +1230,22 @@ pub fn audit_external_pack_fact_boundaries(facts: &FactSet) -> DiagnosticBag {
                 "external_pack_manifest_unowned_type_capability_fact",
                 format!(
                     "{} has an external-pack type capability fact but no declared pack owns type {}",
+                    capability.type_name, capability.type_name
+                ),
+            );
+        }
+    }
+
+    for capability in facts
+        .owned_recovery_capability_facts
+        .iter()
+        .filter(|capability| capability.provenance == FactProvenance::ExternalLibraryPack)
+    {
+        if !fact_set_owns_type(facts, &capability.type_name) {
+            diagnostics.warning(
+                "external_pack_manifest_unowned_owned_recovery_capability_fact",
+                format!(
+                    "{} has an external-pack owned-recovery capability fact but no declared pack owns type {}",
                     capability.type_name, capability.type_name
                 ),
             );
@@ -1660,6 +1693,22 @@ pub fn parse_external_pack_manifest(source: &str) -> ExternalPackManifestParse {
                     &mut diagnostics,
                     line_index,
                     type_name,
+                    metadata,
+                );
+            }
+            [
+                "external-pack-owned-recovery",
+                _pack_name,
+                type_name,
+                kind,
+                metadata @ ..,
+            ] => {
+                push_external_pack_owned_recovery_fact(
+                    &mut facts,
+                    &mut diagnostics,
+                    line_index,
+                    type_name,
+                    kind,
                     metadata,
                 );
             }
@@ -2871,6 +2920,32 @@ fn push_external_pack_type_capability_fact(
     facts.type_capability_overrides.push(capability);
 }
 
+fn push_external_pack_owned_recovery_fact(
+    facts: &mut FactSet,
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    type_name: &str,
+    kind: &str,
+    metadata: &[&str],
+) {
+    let Some(capability) = parse_external_pack_owned_recovery_capability(
+        diagnostics,
+        line_index,
+        type_name,
+        kind,
+        metadata,
+    ) else {
+        return;
+    };
+    facts
+        .owned_recovery_capability_facts
+        .push(OwnedRecoveryCapabilityFact {
+            type_name: type_name.to_string(),
+            capability,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+}
+
 fn push_external_pack_object_safety_fact(
     facts: &mut FactSet,
     diagnostics: &mut DiagnosticBag,
@@ -3077,6 +3152,77 @@ fn parse_external_pack_type_capability(
         return None;
     }
     Some(capability)
+}
+
+fn parse_external_pack_owned_recovery_capability(
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    type_name: &str,
+    kind: &str,
+    metadata: &[&str],
+) -> Option<OwnedRecoveryCapability> {
+    let java_ty = parse_owned_recovery_java_type(diagnostics, line_index, type_name, metadata)?;
+    match kind {
+        "copy" => Some(OwnedRecoveryCapability::Copy),
+        "explicit-clone" | "explicit_clone" => {
+            Some(OwnedRecoveryCapability::ExplicitClone { java_ty })
+        }
+        "clone-box-adapter" | "clone_box_adapter" => {
+            Some(OwnedRecoveryCapability::CloneBoxAdapter { java_ty })
+        }
+        "factory-copy" | "factory_copy" => Some(OwnedRecoveryCapability::FactoryCopy { java_ty }),
+        "immutable-shared-handle" | "immutable_shared_handle" => {
+            Some(OwnedRecoveryCapability::ImmutableSharedHandle { java_ty })
+        }
+        "facade-owned-external-handle" | "facade_owned_external_handle" => {
+            Some(OwnedRecoveryCapability::FacadeOwnedExternalHandle { java_ty })
+        }
+        "ffi-owned-handle" | "ffi_owned_handle" => {
+            Some(OwnedRecoveryCapability::FfiOwnedHandle { java_ty })
+        }
+        "conservative-clone" | "conservative_clone" => {
+            Some(OwnedRecoveryCapability::ConservativeClone)
+        }
+        "non-cloneable" | "non_cloneable" => Some(OwnedRecoveryCapability::NonCloneable),
+        _ => {
+            push_external_pack_parse_error(
+                diagnostics,
+                line_index,
+                "invalid external-pack-owned-recovery capability kind",
+            );
+            None
+        }
+    }
+}
+
+fn parse_owned_recovery_java_type(
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    type_name: &str,
+    metadata: &[&str],
+) -> Option<JavaType> {
+    let mut java_ty = parse_type(type_name);
+    for token in metadata {
+        if let Some(value) = token.strip_prefix("java-type=") {
+            if value.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-owned-recovery java-type metadata must name a type",
+                );
+                return None;
+            }
+            java_ty = parse_type(value);
+        } else {
+            push_external_pack_parse_error(
+                diagnostics,
+                line_index,
+                "unrecognized external-pack-owned-recovery metadata",
+            );
+            return None;
+        }
+    }
+    Some(java_ty)
 }
 
 fn parse_external_pack_object_safety_violation(
@@ -3922,6 +4068,8 @@ const GOOGLE_CLOUD_NIO_OWNED_TYPES: &[&str] = &[
     "CloudStorageConfiguration",
 ];
 const GENOMICSDB_OWNED_TYPES: &[&str] = &[
+    "org.genomicsdb.GenomicsDBUtils",
+    "GenomicsDBUtils",
     "com.intel.genomicsdb.GenomicsDBFeatureReader",
     "GenomicsDBFeatureReader",
     "com.intel.genomicsdb.GenomicsDBImporter",
@@ -3954,6 +4102,10 @@ const GENOMICSDB_OWNED_TYPES: &[&str] = &[
     "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
     "GenomicsDBVidMapProto.VidMappingPB",
     "VidMappingPB",
+    "com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+    "org.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+    "GenomicsDBVidMapProto.Chromosome",
+    "Chromosome",
     "com.intel.genomicsdb.model.GenomicsDBVidMapProto.FieldInfo",
     "GenomicsDBVidMapProto.FieldInfo",
     "FieldInfo",
@@ -4725,6 +4877,10 @@ const GENOMICSDB_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB"),
     cloneable_final_capability("GenomicsDBVidMapProto.VidMappingPB"),
     cloneable_final_capability("VidMappingPB"),
+    cloneable_final_capability("com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome"),
+    cloneable_final_capability("org.genomicsdb.model.GenomicsDBVidMapProto.Chromosome"),
+    cloneable_final_capability("GenomicsDBVidMapProto.Chromosome"),
+    cloneable_final_capability("Chromosome"),
     cloneable_final_capability("com.intel.genomicsdb.model.GenomicsDBVidMapProto.FieldInfo"),
     cloneable_final_capability("GenomicsDBVidMapProto.FieldInfo"),
     cloneable_final_capability("FieldInfo"),
@@ -5322,6 +5478,24 @@ const fn semantic_side_effect(
     api_effect(
         receiver_type,
         method_name,
+        ExternalApiRole::SideEffect,
+        ReceiverMutabilityFact::ReadOnly,
+        None,
+        return_nullability,
+        &[],
+    )
+}
+
+const fn semantic_side_effect_with_arity(
+    receiver_type: &'static str,
+    method_name: &'static str,
+    arg_count: usize,
+    return_nullability: NullabilityState,
+) -> ExternalPackApiEffect {
+    api_effect_with_arity(
+        receiver_type,
+        method_name,
+        arg_count,
         ExternalApiRole::SideEffect,
         ReceiverMutabilityFact::ReadOnly,
         None,
@@ -9769,7 +9943,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getHeader",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "Object",
+        "VCFHeader",
         NullabilityState::MaybeNull,
     ),
     semantic_typed_effect(
@@ -9777,7 +9951,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getHeader",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "Object",
+        "VCFHeader",
         NullabilityState::MaybeNull,
     ),
     semantic_typed_effect(
@@ -17845,6 +18019,10 @@ const GENOMICSDB_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
     erased_object_strategy("com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB"),
     erased_object_strategy("GenomicsDBVidMapProto.VidMappingPB"),
     erased_object_strategy("VidMappingPB"),
+    erased_object_strategy("com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome"),
+    erased_object_strategy("org.genomicsdb.model.GenomicsDBVidMapProto.Chromosome"),
+    erased_object_strategy("GenomicsDBVidMapProto.Chromosome"),
+    erased_object_strategy("Chromosome"),
     erased_object_strategy("com.intel.genomicsdb.model.GenomicsDBVidMapProto.FieldInfo"),
     erased_object_strategy("GenomicsDBVidMapProto.FieldInfo"),
     erased_object_strategy("FieldInfo"),
@@ -19520,7 +19698,86 @@ const GENOMICSDB_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("ReadSession", "TableReadOptions"),
 ];
 
+const GENOMICSDB_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
+    readonly_borrowed_argument(
+        "org.genomicsdb.GenomicsDBUtils",
+        "isGenomicsDBArray",
+        0,
+        "String",
+    ),
+    readonly_borrowed_argument("GenomicsDBUtils", "isGenomicsDBArray", 0, "String"),
+    readonly_borrowed_argument(
+        "org.genomicsdb.GenomicsDBUtils",
+        "isGenomicsDBArray",
+        1,
+        "String",
+    ),
+    readonly_borrowed_argument("GenomicsDBUtils", "isGenomicsDBArray", 1, "String"),
+    readonly_borrowed_argument(
+        "org.genomicsdb.GenomicsDBUtils",
+        "readEntireFile",
+        0,
+        "String",
+    ),
+    readonly_borrowed_argument("GenomicsDBUtils", "readEntireFile", 0, "String"),
+    readonly_borrowed_argument(
+        "org.genomicsdb.GenomicsDBUtils",
+        "useGcsHdfsConnector",
+        0,
+        "boolean",
+    ),
+    readonly_borrowed_argument("GenomicsDBUtils", "useGcsHdfsConnector", 0, "boolean"),
+];
+
 const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect_with_arity(
+        "org.genomicsdb.GenomicsDBUtils",
+        "isGenomicsDBArray",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "GenomicsDBUtils",
+        "isGenomicsDBArray",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.genomicsdb.GenomicsDBUtils",
+        "readEntireFile",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "GenomicsDBUtils",
+        "readEntireFile",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_side_effect_with_arity(
+        "org.genomicsdb.GenomicsDBUtils",
+        "useGcsHdfsConnector",
+        1,
+        NullabilityState::Unknown,
+    ),
+    semantic_side_effect_with_arity(
+        "GenomicsDBUtils",
+        "useGcsHdfsConnector",
+        1,
+        NullabilityState::Unknown,
+    ),
     semantic_typed_effect(
         "com.intel.genomicsdb.model.Coordinates.GenomicsDBColumn",
         "newBuilder",
@@ -19638,7 +19895,7 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getContigsList",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "List<Contig>",
+        "List<GenomicsDBVidMapProto.Chromosome>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -19646,7 +19903,103 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getContigsList",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "List<Contig>",
+        "List<GenomicsDBVidMapProto.Chromosome>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getName",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getName",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBVidMapProto.Chromosome",
+        "getName",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Chromosome",
+        "getName",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getTiledbColumnOffset",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "long",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getTiledbColumnOffset",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "long",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBVidMapProto.Chromosome",
+        "getTiledbColumnOffset",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "long",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Chromosome",
+        "getTiledbColumnOffset",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "long",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getLength",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getLength",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBVidMapProto.Chromosome",
+        "getLength",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Chromosome",
+        "getLength",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -19721,7 +20074,7 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "VidMappingPB",
-        NullabilityState::DefinitelyNonNull,
+        NullabilityState::MaybeNull,
     ),
     semantic_typed_effect(
         "GenomicsDBImporter",
@@ -19729,7 +20082,7 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "VidMappingPB",
-        NullabilityState::DefinitelyNonNull,
+        NullabilityState::MaybeNull,
     ),
     semantic_mutator_effect(
         "com.intel.genomicsdb.GenomicsDBImporter",
@@ -19820,6 +20173,12 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const GENOMICSDB_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("org.genomicsdb.GenomicsDBUtils", "isGenomicsDBArray"),
+    modeled_semantic("GenomicsDBUtils", "isGenomicsDBArray"),
+    modeled_semantic("org.genomicsdb.GenomicsDBUtils", "readEntireFile"),
+    modeled_semantic("GenomicsDBUtils", "readEntireFile"),
+    modeled_semantic("org.genomicsdb.GenomicsDBUtils", "useGcsHdfsConnector"),
+    modeled_semantic("GenomicsDBUtils", "useGcsHdfsConnector"),
     modeled_semantic(
         "com.intel.genomicsdb.model.Coordinates.GenomicsDBColumn",
         "newBuilder",
@@ -19860,6 +20219,36 @@ const GENOMICSDB_MODELED_APIS: &[ExternalPackModeledApi] = &[
         "getContigsList",
     ),
     modeled_semantic("VidMappingPB", "getContigsList"),
+    modeled_semantic(
+        "com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getName",
+    ),
+    modeled_semantic(
+        "org.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getName",
+    ),
+    modeled_semantic("GenomicsDBVidMapProto.Chromosome", "getName"),
+    modeled_semantic("Chromosome", "getName"),
+    modeled_semantic(
+        "com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getTiledbColumnOffset",
+    ),
+    modeled_semantic(
+        "org.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getTiledbColumnOffset",
+    ),
+    modeled_semantic("GenomicsDBVidMapProto.Chromosome", "getTiledbColumnOffset"),
+    modeled_semantic("Chromosome", "getTiledbColumnOffset"),
+    modeled_semantic(
+        "com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getLength",
+    ),
+    modeled_semantic(
+        "org.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
+        "getLength",
+    ),
+    modeled_semantic("GenomicsDBVidMapProto.Chromosome", "getLength"),
+    modeled_semantic("Chromosome", "getLength"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "getFields",
@@ -23500,7 +23889,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             object_safety: NO_OBJECT_SAFETY,
             type_capabilities: GENOMICSDB_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
-            argument_effects: NO_ARGUMENT_EFFECTS,
+            argument_effects: GENOMICSDB_ARGUMENT_EFFECTS,
             exceptions: NO_EXCEPTIONS,
             api_effects: GENOMICSDB_API_EFFECTS,
             modeled_apis: GENOMICSDB_MODELED_APIS,
@@ -24350,10 +24739,12 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
             for fact in facts.external_api_effect_facts.iter().rev() {
                 if let Some(receiver_type) = &fact.receiver_type {
                     for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
-                        index
-                            .api_effects
-                            .entry((receiver_alias, fact.method_name.clone(), fact.arg_count))
-                            .or_insert_with(|| fact.clone());
+                        for method_alias in external_method_name_lookup_aliases(&fact.method_name) {
+                            index
+                                .api_effects
+                                .entry((receiver_alias.clone(), method_alias, fact.arg_count))
+                                .or_insert_with(|| fact.clone());
+                        }
                     }
                 }
             }
@@ -24457,6 +24848,16 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                         .push(fact.clone());
                 }
             }
+            for fact in facts.owned_recovery_capability_facts.iter().rev() {
+                for type_alias in external_receiver_lookup_aliases(&fact.type_name) {
+                    index
+                        .representation_facts
+                        .entry(type_alias)
+                        .or_default()
+                        .owned_recovery_capability_facts
+                        .push(fact.clone());
+                }
+            }
             for fact in facts.exception_facts.iter().rev() {
                 for type_alias in external_receiver_lookup_aliases(&fact.type_name) {
                     index
@@ -24475,7 +24876,17 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
 fn external_receiver_lookup_aliases(receiver_type: &str) -> Vec<String> {
     let canonical = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
     let snake = crate::parser::to_snake_case(receiver_type);
-    let mut aliases = vec![receiver_type.to_string(), canonical, snake];
+    let simple = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
+    let simple_canonical = crate::stdlib::canonical_external_receiver_type_key(simple);
+    let simple_snake = crate::parser::to_snake_case(simple);
+    let mut aliases = vec![
+        receiver_type.to_string(),
+        canonical,
+        snake,
+        simple.to_string(),
+        simple_canonical,
+        simple_snake,
+    ];
     aliases.sort();
     aliases.dedup();
     aliases
@@ -24493,6 +24904,14 @@ fn external_field_type_lookup_aliases(type_name: &str) -> Vec<String> {
 fn external_field_name_lookup_aliases(field_name: &str) -> Vec<String> {
     let canonical = crate::parser::to_snake_case(field_name);
     let mut aliases = vec![field_name.to_string(), canonical];
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn external_method_name_lookup_aliases(method_name: &str) -> Vec<String> {
+    let canonical = crate::parser::to_snake_case(method_name);
+    let mut aliases = vec![method_name.to_string(), canonical];
     aliases.sort();
     aliases.dedup();
     aliases
@@ -24517,20 +24936,27 @@ pub fn external_api_effect_for_receiver_with_arity(
         return Some(effect);
     }
     let index = builtin_external_pack_lookup_index();
-    arg_count
-        .and_then(|arg_count| {
-            index.api_effects.get(&(
-                receiver_type.to_string(),
-                method_name.to_string(),
-                Some(arg_count),
-            ))
-        })
-        .or_else(|| {
-            index
-                .api_effects
-                .get(&(receiver_type.to_string(), method_name.to_string(), None))
-        })
-        .cloned()
+    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+        for method_alias in external_method_name_lookup_aliases(method_name) {
+            if let Some(effect) = arg_count.and_then(|arg_count| {
+                index.api_effects.get(&(
+                    receiver_alias.clone(),
+                    method_alias.clone(),
+                    Some(arg_count),
+                ))
+            }) {
+                return Some(effect.clone());
+            }
+            if let Some(effect) =
+                index
+                    .api_effects
+                    .get(&(receiver_alias.clone(), method_alias.clone(), None))
+            {
+                return Some(effect.clone());
+            }
+        }
+    }
+    None
 }
 
 pub fn java_platform_api_effect_for_receiver_with_arity(

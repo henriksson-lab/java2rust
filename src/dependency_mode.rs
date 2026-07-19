@@ -55,6 +55,7 @@ impl DependencyMode {
 pub struct DependencySourceRoot {
     pub path: PathBuf,
     pub mode: DependencyMode,
+    pub package_prefixes: Vec<String>,
 }
 
 impl DependencySourceRoot {
@@ -62,7 +63,29 @@ impl DependencySourceRoot {
         Self {
             path: path.into(),
             mode,
+            package_prefixes: Vec::new(),
         }
+    }
+
+    pub fn with_package_prefixes(
+        path: impl Into<PathBuf>,
+        mode: DependencyMode,
+        package_prefixes: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            mode,
+            package_prefixes: package_prefixes.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn package_matches(&self, package: Option<&str>) -> bool {
+        self.package_prefixes.is_empty()
+            || package.is_some_and(|package| {
+                self.package_prefixes
+                    .iter()
+                    .any(|prefix| package_prefix_matches(prefix, package))
+            })
     }
 }
 
@@ -183,6 +206,20 @@ impl DependencyModeConfig {
             .push(DependencySourceRoot::new(path, mode));
     }
 
+    pub fn add_source_root_with_package_prefixes(
+        &mut self,
+        path: impl Into<PathBuf>,
+        mode: DependencyMode,
+        package_prefixes: impl IntoIterator<Item = impl Into<String>>,
+    ) {
+        self.source_roots
+            .push(DependencySourceRoot::with_package_prefixes(
+                path,
+                mode,
+                package_prefixes,
+            ));
+    }
+
     pub fn add_fact_provider(
         &mut self,
         name: impl Into<String>,
@@ -233,6 +270,13 @@ impl DependencyModeConfig {
             .max_by_key(|root| root.path.components().count())
             .map(|root| root.mode)
     }
+}
+
+fn package_prefix_matches(prefix: &str, package: &str) -> bool {
+    package == prefix
+        || package
+            .strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
 fn infer_external_pack_provider_mode(

@@ -6,14 +6,15 @@ use std::time::Instant;
 use crate::dependency_mode::{DependencyFactProvider, DependencyMode, DependencyModeConfig};
 use crate::diagnostics::Severity;
 use crate::facts::{
-    ExternalApiRole, ExternalLibraryMode, FactProvenance, FactSet, HierarchyOverride,
-    HierarchyStrategy, UnresolvedTargetKind, external_type_name_matches,
+    ExternalApiRole, ExternalLibraryMode, FactProvenance, FactSet, UnresolvedTargetKind,
+    external_type_name_matches,
 };
 use crate::java_ir::{
     Block, Expr, ImportDecl, JavaType, LambdaBody, Member, Param, Program, Stmt, SwitchLabel,
     TypeDecl,
 };
 use crate::parser::ParsedProgram;
+use crate::representation::extend_representation_facts_for_source_summary_superclass_boundaries;
 use crate::types::TypeEnv;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28,6 +29,7 @@ pub struct ResolverBenchmarkReport {
     pub configured_provider_trivial_accessor_facts: usize,
     pub configured_provider_method_effect_facts: usize,
     pub configured_provider_recursion_facts: usize,
+    pub configured_provider_constructor_recursion_facts: usize,
     pub configured_provider_control_flow_facts: usize,
     pub configured_provider_dispatch_requirement_facts: usize,
     pub configured_provider_catch_facts: usize,
@@ -56,6 +58,7 @@ pub struct ResolverBenchmarkReport {
     pub source_summary_provider_trivial_accessor_facts: usize,
     pub source_summary_provider_method_effect_facts: usize,
     pub source_summary_provider_recursion_facts: usize,
+    pub source_summary_provider_constructor_recursion_facts: usize,
     pub source_summary_provider_control_flow_facts: usize,
     pub source_summary_provider_dispatch_requirement_facts: usize,
     pub source_summary_provider_catch_facts: usize,
@@ -143,8 +146,35 @@ pub struct ResolverBenchmarkReport {
     pub external_api_return_nullability_facts: usize,
     pub external_api_fluent_builder_facts: usize,
     pub external_api_argument_effect_facts: usize,
+    pub signature_constraint_slots: usize,
+    pub signature_unique_constraints: usize,
+    pub signature_fixpoint_iteration_budget: usize,
+    pub signature_fixpoint_iterations: usize,
+    pub signature_fixpoint_diagnostics: usize,
+    pub signature_join_conflicts: usize,
+    pub top_signature_fallback_reasons: Vec<SignatureBenchmarkCount>,
+    pub top_signature_conflict_axes: Vec<SignatureBenchmarkCount>,
+    pub signature_dependency_graph_nodes: usize,
+    pub signature_dependency_graph_edges: usize,
+    pub signature_dependency_sccs: usize,
+    pub signature_dependency_cyclic_sccs: usize,
+    pub signature_dependency_max_scc_size: usize,
+    pub signature_solver_planned_components: usize,
+    pub signature_solver_cyclic_components: usize,
+    pub signature_solver_max_component_size: usize,
+    pub hierarchy_worklist_processed_items: usize,
+    pub hierarchy_worklist_inserted_facts: usize,
+    pub hierarchy_worklist_max_queue_size: usize,
+    pub hierarchy_worklist_domain_slots: usize,
+    pub hierarchy_worklist_value_lattice_height: usize,
+    pub hierarchy_worklist_budget_diagnostics: usize,
     pub total_facts: usize,
     pub elapsed_ms: u128,
+    pub files_per_second_x1000: usize,
+    pub parse_phase_ms: u128,
+    pub source_summary_phase_ms: u128,
+    pub representation_phase_ms: u128,
+    pub resolution_phase_ms: u128,
     pub object_concrete_struct_representations: usize,
     pub object_dyn_trait_representations: usize,
     pub object_closed_enum_representations: usize,
@@ -183,6 +213,7 @@ pub struct ResolverBenchmarkReport {
     pub top_external_field_guess_contexts: Vec<UnresolvedFieldContextSummary>,
     pub top_project_field_guess_contexts: Vec<UnresolvedFieldContextSummary>,
     pub top_source_field_guess_contexts: Vec<UnresolvedFieldContextSummary>,
+    pub top_source_summary_recommendations: Vec<SourceSummaryRecommendation>,
     pub top_unresolved_targets: Vec<UnresolvedTargetSummary>,
     pub top_unexplained_method_targets: Vec<UnresolvedTargetSummary>,
     pub top_unexplained_method_receivers: Vec<UnresolvedMethodReceiverSummary>,
@@ -202,6 +233,7 @@ pub struct ResolverBenchmarkReport {
 pub struct ResolverBenchmarkSourceRoot {
     pub path: PathBuf,
     pub mode: DependencyMode,
+    pub package_prefixes: Vec<String>,
     pub files_seen: usize,
 }
 
@@ -222,6 +254,7 @@ pub struct ResolverBenchmarkFactProvider {
     pub type_capability_facts: usize,
     pub field_nullability_facts: usize,
     pub exception_facts: usize,
+    pub constructor_recursion_facts: usize,
     pub external_library_pack_facts: usize,
     pub unsupported_external_api_facts: usize,
     pub unsupported_external_constructor_facts: usize,
@@ -338,6 +371,17 @@ pub struct SourceDependencyFieldSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSummaryRecommendation {
+    pub package_prefix: String,
+    pub target_type: String,
+    pub constructor_guesses: usize,
+    pub field_guesses: usize,
+    pub method_guesses: usize,
+    pub count: usize,
+    pub sample_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalApiGuessSummary {
     pub receiver_type: String,
     pub method_name: String,
@@ -434,6 +478,12 @@ pub struct DiagnosticSummary {
     pub sample_files: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureBenchmarkCount {
+    pub label: String,
+    pub count: usize,
+}
+
 pub fn benchmark_java_resolver_dir(root: &Path) -> std::io::Result<ResolverBenchmarkReport> {
     benchmark_java_resolver_config(&DependencyModeConfig::for_primary_source_root(root))
 }
@@ -456,6 +506,7 @@ pub fn benchmark_java_resolver_config(
             .map(|root| ResolverBenchmarkSourceRoot {
                 path: root.path.clone(),
                 mode: root.mode,
+                package_prefixes: root.package_prefixes.clone(),
                 files_seen: 0,
             })
             .collect(),
@@ -487,6 +538,7 @@ pub fn benchmark_java_resolver_config(
                 type_capability_facts: provider.facts.type_capability_overrides.len(),
                 field_nullability_facts: provider.facts.field_nullability_facts.len(),
                 exception_facts: provider.facts.exception_facts.len(),
+                constructor_recursion_facts: provider.facts.constructor_recursion_facts.len(),
                 external_library_pack_facts: provider.facts.external_library_packs.len(),
                 unsupported_external_api_facts: provider.facts.unsupported_external_api_facts.len(),
                 unsupported_external_constructor_facts: provider
@@ -513,26 +565,30 @@ pub fn benchmark_java_resolver_config(
     }
     let mut parsed_files = Vec::new();
     let mut seen_source_paths = HashSet::new();
+    let parse_started_at = Instant::now();
     for source_root in config.source_roots_for_source_index() {
         let source_root_index = config
             .source_roots
             .iter()
-            .position(|root| root.path == source_root.path && root.mode == source_root.mode);
+            .position(|root| root == source_root);
         for path in java_files_under(&source_root.path)? {
             if config.mode_for_source_path(&path) != Some(source_root.mode) {
+                continue;
+            }
+            let source = fs::read_to_string(&path)?;
+            let parsed = crate::parser::parse_java_source(&source);
+            if !source_root.package_matches(parsed.program.package.as_deref()) {
                 continue;
             }
             if !seen_source_paths.insert(path.clone()) {
                 continue;
             }
-            let source = fs::read_to_string(&path)?;
             report.files_seen += 1;
             if let Some(index) = source_root_index {
                 if let Some(root) = report.source_roots.get_mut(index) {
                     root.files_seen += 1;
                 }
             }
-            let parsed = crate::parser::parse_java_source(&source);
             report.parser_diagnostics += parsed.diagnostics.len();
             if !parsed.diagnostics.has_errors() {
                 report.files_parsed_without_errors += 1;
@@ -548,6 +604,8 @@ pub fn benchmark_java_resolver_config(
             });
         }
     }
+    report.parse_phase_ms = parse_started_at.elapsed().as_millis();
+    let source_summary_started_at = Instant::now();
     for parsed_file in parsed_files
         .iter()
         .filter(|file| file.mode == DependencyMode::SourceSummary)
@@ -562,13 +620,18 @@ pub fn benchmark_java_resolver_config(
             summary_facts.closed_hierarchy_facts.len();
         external_facts.extend_from(summary_facts);
     }
+    report.source_summary_phase_ms = source_summary_started_at.elapsed().as_millis();
+    let representation_started_at = Instant::now();
     let source_programs = combined_source_programs_by_package(&parsed_files);
     let source_index = SourceTypeIndex::from_programs(&source_programs);
     let source_type_modes = source_type_modes_by_name(&parsed_files);
     let source_type_fields = source_type_fields_by_name(&parsed_files);
     let mut representation_facts = external_facts.clone();
     extend_representation_facts_for_source_summary_superclass_boundaries(
-        &parsed_files,
+        parsed_files
+            .iter()
+            .filter(|file| file.mode.emits_rust())
+            .map(|file| &file.parsed.program),
         &source_type_modes,
         &mut representation_facts,
     );
@@ -618,6 +681,8 @@ pub fn benchmark_java_resolver_config(
             collect_diagnostics: true,
         },
     );
+    report.representation_phase_ms = representation_started_at.elapsed().as_millis();
+    let resolution_started_at = Instant::now();
     for parsed_file in parsed_files {
         if !parsed_file.mode.participates_in_resolution() {
             continue;
@@ -640,7 +705,13 @@ pub fn benchmark_java_resolver_config(
             &source_type_fields,
         );
     }
+    report.resolution_phase_ms = resolution_started_at.elapsed().as_millis();
     report.elapsed_ms = started_at.elapsed().as_millis();
+    report.files_per_second_x1000 = if report.elapsed_ms == 0 {
+        0
+    } else {
+        ((report.files_seen as u128) * 1000 * 1000 / report.elapsed_ms) as usize
+    };
     Ok(report)
 }
 
@@ -885,7 +956,21 @@ fn collect_anonymous_constructor_target_names_for_expr(
             collect_anonymous_constructor_target_names_for_expr(array, target_names);
             collect_anonymous_constructor_target_names_for_expr(index, target_names);
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_anonymous_constructor_target_names_for_expr(expr, target_names);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_anonymous_constructor_target_names_for_expr(expr, target_names);
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 collect_anonymous_constructor_target_names_for_expr(expr, target_names);
             }
@@ -1043,57 +1128,6 @@ fn source_type_fields_by_name(
     }
     inherit_source_type_fields(&mut fields, &extends_by_type);
     fields
-}
-
-fn extend_representation_facts_for_source_summary_superclass_boundaries(
-    parsed_files: &[ParsedJavaFile],
-    source_type_modes: &HashMap<String, DependencyMode>,
-    facts: &mut FactSet,
-) {
-    let mut boundary_types = HashSet::new();
-    for parsed_file in parsed_files {
-        if !parsed_file.mode.emits_rust() {
-            continue;
-        }
-        for ty in &parsed_file.parsed.program.types {
-            collect_source_summary_superclasses_for_type(
-                ty,
-                source_type_modes,
-                &mut boundary_types,
-            );
-        }
-    }
-    for type_name in boundary_types {
-        if facts
-            .hierarchy_overrides
-            .iter()
-            .any(|existing| existing.type_name == type_name)
-        {
-            continue;
-        }
-        facts.hierarchy_overrides.push(HierarchyOverride {
-            type_name,
-            strategy: HierarchyStrategy::ErasedObject,
-            provenance: FactProvenance::CorpusAnalysis,
-        });
-    }
-}
-
-fn collect_source_summary_superclasses_for_type(
-    ty: &TypeDecl,
-    source_type_modes: &HashMap<String, DependencyMode>,
-    boundary_types: &mut HashSet<String>,
-) {
-    if let Some(super_name) = ty.extends.as_deref() {
-        if source_type_modes.get(super_name) == Some(&DependencyMode::SourceSummary) {
-            boundary_types.insert(super_name.to_string());
-        }
-    }
-    for member in &ty.members {
-        if let Member::Type(nested) = member {
-            collect_source_summary_superclasses_for_type(nested, source_type_modes, boundary_types);
-        }
-    }
 }
 
 fn collect_source_type_fields(
@@ -1507,6 +1541,39 @@ impl SourceTypeIndex {
                 && self.project_package_roots.iter().any(|root| {
                     import.path == *root || import.path.starts_with(&format!("{root}."))
                 })
+        })
+    }
+
+    fn source_summary_recommendation_package(
+        &self,
+        program: &Program,
+        type_name: &str,
+    ) -> Option<String> {
+        let simple_name = type_name.rsplit('.').next().unwrap_or(type_name);
+        let canonical_simple_name = crate::parser::to_snake_case(simple_name);
+        for import in &program.imports {
+            if import.is_static || import.is_wildcard {
+                continue;
+            }
+            let imported_simple_name = import.path.rsplit('.').next().unwrap_or(&import.path);
+            if imported_simple_name != simple_name
+                && crate::parser::to_snake_case(imported_simple_name) != canonical_simple_name
+            {
+                continue;
+            }
+            if self.by_qualified_name.contains_key(&import.path)
+                || self.project_package_roots.iter().any(|root| {
+                    import.path == *root || import.path.starts_with(&format!("{root}."))
+                })
+            {
+                return package_name_for_qualified_type(&import.path).map(str::to_string);
+            }
+        }
+        program.package.as_ref().and_then(|package| {
+            self.project_package_roots
+                .iter()
+                .any(|root| package == root || package.starts_with(&format!("{root}.")))
+                .then(|| package.clone())
         })
     }
 }
@@ -1994,6 +2061,14 @@ fn benchmark_parsed_java_file(
         match constructor_guess_ownership.ownership_for(&fact.type_name) {
             DependencyGuessOwner::Source => {
                 report.source_constructor_guesses += 1;
+                push_source_summary_recommendation(
+                    &mut report.top_source_summary_recommendations,
+                    source_index,
+                    &resolved.program,
+                    &fact.type_name,
+                    SourceSummaryRecommendationReason::Constructor,
+                    file_label,
+                );
                 push_external_constructor_guess_summary(
                     &mut report.top_source_constructor_guess_types,
                     &fact.type_name,
@@ -2002,6 +2077,14 @@ fn benchmark_parsed_java_file(
             }
             DependencyGuessOwner::Project => {
                 report.project_constructor_guesses += 1;
+                push_source_summary_recommendation(
+                    &mut report.top_source_summary_recommendations,
+                    source_index,
+                    &resolved.program,
+                    &fact.type_name,
+                    SourceSummaryRecommendationReason::Constructor,
+                    file_label,
+                );
                 push_external_constructor_guess_summary(
                     &mut report.top_project_constructor_guess_types,
                     &fact.type_name,
@@ -2033,6 +2116,14 @@ fn benchmark_parsed_java_file(
         match field_guess_ownership.ownership_for(&fact.field.type_name) {
             FieldGuessOwner::Source => {
                 report.source_field_guesses += 1;
+                push_source_summary_recommendation(
+                    &mut report.top_source_summary_recommendations,
+                    source_index,
+                    &resolved.program,
+                    &fact.field.type_name,
+                    SourceSummaryRecommendationReason::Field,
+                    file_label,
+                );
                 push_external_field_guess_summary(
                     &mut report.top_source_field_guess_targets,
                     &fact.field.type_name,
@@ -2042,6 +2133,14 @@ fn benchmark_parsed_java_file(
             }
             FieldGuessOwner::Project => {
                 report.project_field_guesses += 1;
+                push_source_summary_recommendation(
+                    &mut report.top_source_summary_recommendations,
+                    source_index,
+                    &resolved.program,
+                    &fact.field.type_name,
+                    SourceSummaryRecommendationReason::Field,
+                    file_label,
+                );
                 push_external_field_guess_summary(
                     &mut report.top_project_field_guess_targets,
                     &fact.field.type_name,
@@ -2089,6 +2188,8 @@ fn benchmark_parsed_java_file(
         );
     }
     report.total_facts += fact_count_excluding_provider_facts(&semantic.facts, external_facts);
+    collect_signature_solver_counts(&resolved.program, &semantic.usage, &semantic.facts, report);
+    collect_hierarchy_worklist_counts(&resolved.program, &semantic.facts, report);
 
     for fact in &resolved.facts.unresolved_target_facts {
         match fact.kind {
@@ -2194,6 +2295,27 @@ fn benchmark_parsed_java_file(
                     );
                 } else {
                     report.unexplained_method_calls += 1;
+                    if let Some(receiver_type) = receiver_type.as_deref()
+                        && (is_source_type_reference(
+                            source_type_names,
+                            source_index,
+                            &resolved.program,
+                            receiver_type,
+                        ) || is_project_type_reference(
+                            source_index,
+                            &resolved.program,
+                            receiver_type,
+                        ))
+                    {
+                        push_source_summary_recommendation(
+                            &mut report.top_source_summary_recommendations,
+                            source_index,
+                            &resolved.program,
+                            receiver_type,
+                            SourceSummaryRecommendationReason::Method,
+                            file_label,
+                        );
+                    }
                     push_unresolved_summary(
                         &mut report.top_unexplained_method_targets,
                         fact.kind,
@@ -2888,6 +3010,9 @@ fn benchmark_parsed_java_file(
     report.top_project_field_guess_contexts.truncate(20);
     sort_field_contexts(&mut report.top_source_field_guess_contexts);
     report.top_source_field_guess_contexts.truncate(20);
+    sort_and_truncate_source_summary_recommendations(
+        &mut report.top_source_summary_recommendations,
+    );
     report.top_resolver_diagnostics.sort_by(|left, right| {
         right
             .count
@@ -2904,6 +3029,8 @@ fn benchmark_parsed_java_file(
             .then_with(|| left.message.cmp(&right.message))
     });
     report.top_semantic_diagnostics.truncate(20);
+    sort_and_truncate_signature_benchmark_counts(&mut report.top_signature_fallback_reasons);
+    sort_and_truncate_signature_benchmark_counts(&mut report.top_signature_conflict_axes);
     report
         .top_object_representation_diagnostics
         .sort_by(|left, right| {
@@ -2965,6 +3092,83 @@ fn benchmark_parsed_java_file(
                 .then_with(|| left.enclosing_member.cmp(&right.enclosing_member))
         });
     report.top_unexplained_field_contexts.truncate(20);
+}
+
+fn collect_signature_solver_counts(
+    program: &Program,
+    usage: &crate::usage::UsageFacts,
+    facts: &FactSet,
+    report: &mut ResolverBenchmarkReport,
+) {
+    let signature_report = crate::signature::signature_saturation_report(program, usage, facts);
+    let domain_stats = signature_report.domain_stats;
+    let dependency_stats = signature_report.dependency_stats;
+    let pass_stats = signature_report.pass_stats;
+
+    report.signature_constraint_slots += domain_stats.slot_count;
+    report.signature_unique_constraints += domain_stats.unique_constraint_count;
+    report.signature_fixpoint_iteration_budget += domain_stats.iteration_budget;
+    report.signature_fixpoint_iterations += signature_report.iterations;
+    report.signature_fixpoint_diagnostics += signature_report.diagnostics;
+    report.signature_join_conflicts += signature_report.join_conflicts;
+    merge_signature_benchmark_counts(
+        &mut report.top_signature_fallback_reasons,
+        signature_report.top_fallback_reasons,
+    );
+    merge_signature_benchmark_counts(
+        &mut report.top_signature_conflict_axes,
+        signature_report.top_conflict_axes,
+    );
+    report.signature_dependency_graph_nodes += dependency_stats.node_count;
+    report.signature_dependency_graph_edges += dependency_stats.edge_count;
+    report.signature_dependency_sccs += dependency_stats.component_count;
+    report.signature_dependency_cyclic_sccs += dependency_stats.cyclic_component_count;
+    report.signature_dependency_max_scc_size = report
+        .signature_dependency_max_scc_size
+        .max(dependency_stats.max_component_size);
+    report.signature_solver_planned_components += pass_stats.planned_components;
+    report.signature_solver_cyclic_components += pass_stats.cyclic_components;
+    report.signature_solver_max_component_size = report
+        .signature_solver_max_component_size
+        .max(pass_stats.max_component_size);
+}
+
+fn collect_hierarchy_worklist_counts(
+    program: &Program,
+    facts: &FactSet,
+    report: &mut ResolverBenchmarkReport,
+) {
+    for ty in &program.types {
+        collect_type_hierarchy_worklist_counts(ty, facts, report);
+    }
+}
+
+fn collect_type_hierarchy_worklist_counts(
+    ty: &TypeDecl,
+    facts: &FactSet,
+    report: &mut ResolverBenchmarkReport,
+) {
+    let domain = facts.hierarchy_reachability_domain(&ty.name);
+    let java_ty = JavaType::Named {
+        name: ty.name.clone(),
+        args: Vec::new(),
+    };
+    let reachability = facts.reachable_hierarchy_edges_for_type_with_stats(&java_ty);
+
+    report.hierarchy_worklist_domain_slots += domain.declared_slots;
+    report.hierarchy_worklist_value_lattice_height += domain.value_lattice_height;
+    report.hierarchy_worklist_processed_items += reachability.stats.processed_items;
+    report.hierarchy_worklist_inserted_facts += reachability.stats.inserted_facts;
+    report.hierarchy_worklist_max_queue_size = report
+        .hierarchy_worklist_max_queue_size
+        .max(reachability.stats.max_queue_len);
+    report.hierarchy_worklist_budget_diagnostics += reachability.diagnostics.len();
+
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_type_hierarchy_worklist_counts(nested, facts, report);
+        }
+    }
 }
 
 fn collect_object_representation_counts_for_programs<'a>(
@@ -3048,7 +3252,8 @@ fn collect_object_representation_counts_for_program(
             crate::representation::ObjectRepresentation::DynTrait { .. } => {
                 report.object_dyn_trait_representations += 1;
             }
-            crate::representation::ObjectRepresentation::ClosedEnum { .. } => {
+            crate::representation::ObjectRepresentation::JavaEnum { .. }
+            | crate::representation::ObjectRepresentation::ClosedEnum { .. } => {
                 report.object_closed_enum_representations += 1;
             }
             crate::representation::ObjectRepresentation::ErasedObject => {
@@ -3641,7 +3846,37 @@ fn collect_expr_source_dependency_resolution_counts(
                 report,
             );
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_expr_source_dependency_resolution_counts(
+                    expr,
+                    current_mode,
+                    source_type_modes,
+                    source_type_fields,
+                    env,
+                    context,
+                    report,
+                );
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_expr_source_dependency_resolution_counts(
+                        expr,
+                        current_mode,
+                        source_type_modes,
+                        source_type_fields,
+                        env,
+                        context,
+                        report,
+                    );
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 collect_expr_source_dependency_resolution_counts(
                     expr,
@@ -4438,7 +4673,11 @@ fn collect_expr_resolved_external_pack_field_access_counts(
                 report,
             );
         }
-        Expr::ArrayCreation { dimensions, .. } => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
             for dimension in dimensions {
                 collect_expr_resolved_external_pack_field_access_counts(
                     dimension,
@@ -4448,6 +4687,18 @@ fn collect_expr_resolved_external_pack_field_access_counts(
                     context,
                     report,
                 );
+            }
+            if let Some(initializer) = initializer {
+                for element in initializer {
+                    collect_expr_resolved_external_pack_field_access_counts(
+                        element,
+                        semantic_facts,
+                        unresolved_fields,
+                        env,
+                        context,
+                        report,
+                    );
+                }
             }
         }
         Expr::ArrayInitializer(elements) => {
@@ -4811,6 +5062,8 @@ fn collect_configured_provider_fact_counts(
             provider.facts.trivial_accessor_facts.len();
         report.configured_provider_method_effect_facts += provider.facts.method_effect_facts.len();
         report.configured_provider_recursion_facts += provider.facts.recursion_facts.len();
+        report.configured_provider_constructor_recursion_facts +=
+            provider.facts.constructor_recursion_facts.len();
         report.configured_provider_control_flow_facts += provider.facts.control_flow_facts.len();
         report.configured_provider_dispatch_requirement_facts +=
             provider.facts.dispatch_requirement_facts.len();
@@ -4865,6 +5118,8 @@ fn collect_source_summary_provider_fact_counts(
         report.source_summary_provider_method_effect_facts +=
             provider.facts.method_effect_facts.len();
         report.source_summary_provider_recursion_facts += provider.facts.recursion_facts.len();
+        report.source_summary_provider_constructor_recursion_facts +=
+            provider.facts.constructor_recursion_facts.len();
         report.source_summary_provider_control_flow_facts +=
             provider.facts.control_flow_facts.len();
         report.source_summary_provider_dispatch_requirement_facts +=
@@ -4984,6 +5239,10 @@ pub fn render_resolver_benchmark_report(report: &ResolverBenchmarkReport) -> Str
             report.configured_provider_recursion_facts
         ),
         format!(
+            "configured_provider_constructor_recursion_facts\t{}",
+            report.configured_provider_constructor_recursion_facts
+        ),
+        format!(
             "configured_provider_control_flow_facts\t{}",
             report.configured_provider_control_flow_facts
         ),
@@ -5091,6 +5350,10 @@ pub fn render_resolver_benchmark_report(report: &ResolverBenchmarkReport) -> Str
         format!(
             "source_summary_provider_recursion_facts\t{}",
             report.source_summary_provider_recursion_facts
+        ),
+        format!(
+            "source_summary_provider_constructor_recursion_facts\t{}",
+            report.source_summary_provider_constructor_recursion_facts
         ),
         format!(
             "source_summary_provider_control_flow_facts\t{}",
@@ -5364,8 +5627,99 @@ pub fn render_resolver_benchmark_report(report: &ResolverBenchmarkReport) -> Str
             "external_api_argument_effect_facts\t{}",
             report.external_api_argument_effect_facts
         ),
+        format!(
+            "signature_constraint_slots\t{}",
+            report.signature_constraint_slots
+        ),
+        format!(
+            "signature_unique_constraints\t{}",
+            report.signature_unique_constraints
+        ),
+        format!(
+            "signature_fixpoint_iteration_budget\t{}",
+            report.signature_fixpoint_iteration_budget
+        ),
+        format!(
+            "signature_fixpoint_iterations\t{}",
+            report.signature_fixpoint_iterations
+        ),
+        format!(
+            "signature_fixpoint_diagnostics\t{}",
+            report.signature_fixpoint_diagnostics
+        ),
+        format!(
+            "signature_join_conflicts\t{}",
+            report.signature_join_conflicts
+        ),
+        format!(
+            "signature_dependency_graph_nodes\t{}",
+            report.signature_dependency_graph_nodes
+        ),
+        format!(
+            "signature_dependency_graph_edges\t{}",
+            report.signature_dependency_graph_edges
+        ),
+        format!(
+            "signature_dependency_sccs\t{}",
+            report.signature_dependency_sccs
+        ),
+        format!(
+            "signature_dependency_cyclic_sccs\t{}",
+            report.signature_dependency_cyclic_sccs
+        ),
+        format!(
+            "signature_dependency_max_scc_size\t{}",
+            report.signature_dependency_max_scc_size
+        ),
+        format!(
+            "signature_solver_planned_components\t{}",
+            report.signature_solver_planned_components
+        ),
+        format!(
+            "signature_solver_cyclic_components\t{}",
+            report.signature_solver_cyclic_components
+        ),
+        format!(
+            "signature_solver_max_component_size\t{}",
+            report.signature_solver_max_component_size
+        ),
+        format!(
+            "hierarchy_worklist_processed_items\t{}",
+            report.hierarchy_worklist_processed_items
+        ),
+        format!(
+            "hierarchy_worklist_inserted_facts\t{}",
+            report.hierarchy_worklist_inserted_facts
+        ),
+        format!(
+            "hierarchy_worklist_max_queue_size\t{}",
+            report.hierarchy_worklist_max_queue_size
+        ),
+        format!(
+            "hierarchy_worklist_domain_slots\t{}",
+            report.hierarchy_worklist_domain_slots
+        ),
+        format!(
+            "hierarchy_worklist_value_lattice_height\t{}",
+            report.hierarchy_worklist_value_lattice_height
+        ),
+        format!(
+            "hierarchy_worklist_budget_diagnostics\t{}",
+            report.hierarchy_worklist_budget_diagnostics
+        ),
         format!("total_facts\t{}", report.total_facts),
         format!("elapsed_ms\t{}", report.elapsed_ms),
+        format!("files_per_second_x1000\t{}", report.files_per_second_x1000),
+        format!("parse_phase_ms\t{}", report.parse_phase_ms),
+        format!(
+            "source_summary_phase_ms\t{}",
+            report.source_summary_phase_ms
+        ),
+        format!(
+            "representation_phase_ms\t{}",
+            report.representation_phase_ms
+        ),
+        format!("resolution_phase_ms\t{}", report.resolution_phase_ms),
         format!(
             "object_concrete_struct_representations\t{}",
             report.object_concrete_struct_representations
@@ -5387,13 +5741,33 @@ pub fn render_resolver_benchmark_report(report: &ResolverBenchmarkReport) -> Str
             report.object_representation_diagnostics
         ),
     ];
+    if !report.top_signature_fallback_reasons.is_empty() {
+        lines.push("top_signature_fallback_reasons".to_string());
+        lines.push("reason\tcount".to_string());
+        for reason in &report.top_signature_fallback_reasons {
+            lines.push(format!("{}\t{}", reason.label, reason.count));
+        }
+    }
+    if !report.top_signature_conflict_axes.is_empty() {
+        lines.push("top_signature_conflict_axes".to_string());
+        lines.push("axis\tcount".to_string());
+        for axis in &report.top_signature_conflict_axes {
+            lines.push(format!("{}\t{}", axis.label, axis.count));
+        }
+    }
     if !report.source_roots.is_empty() {
         lines.push("source_roots".to_string());
         for source_root in &report.source_roots {
+            let package_prefixes = if source_root.package_prefixes.is_empty() {
+                "*".to_string()
+            } else {
+                source_root.package_prefixes.join(",")
+            };
             lines.push(format!(
-                "{:?}\t{}\t{}",
+                "{:?}\t{}\t{}\t{}",
                 source_root.mode,
                 source_root.files_seen,
+                package_prefixes,
                 source_root.path.display()
             ));
         }
@@ -5401,11 +5775,11 @@ pub fn render_resolver_benchmark_report(report: &ResolverBenchmarkReport) -> Str
     if !report.fact_providers.is_empty() {
         lines.push("fact_providers".to_string());
         lines.push(
-            "name\tmode\tfacts\texternal_api_effect_facts\texternal_api_argument_effect_facts\texternal_crate_api_mapping_facts\texternal_crate_constructor_mapping_facts\texternal_constructor_facts\texternal_field_facts\thierarchy_override_facts\tclosed_hierarchy_facts\tobject_safety_facts\ttype_capability_facts\tfield_nullability_facts\texception_facts\texternal_library_pack_facts\tunsupported_external_api_facts\tunsupported_external_constructor_facts\tunsupported_external_field_facts".to_string(),
+            "name\tmode\tfacts\texternal_api_effect_facts\texternal_api_argument_effect_facts\texternal_crate_api_mapping_facts\texternal_crate_constructor_mapping_facts\texternal_constructor_facts\texternal_field_facts\thierarchy_override_facts\tclosed_hierarchy_facts\tobject_safety_facts\ttype_capability_facts\tfield_nullability_facts\texception_facts\tconstructor_recursion_facts\texternal_library_pack_facts\tunsupported_external_api_facts\tunsupported_external_constructor_facts\tunsupported_external_field_facts".to_string(),
         );
         for provider in &report.fact_providers {
             lines.push(format!(
-                "{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{:?}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 provider.name,
                 provider.mode,
                 provider.facts,
@@ -5421,6 +5795,7 @@ pub fn render_resolver_benchmark_report(report: &ResolverBenchmarkReport) -> Str
                 provider.type_capability_facts,
                 provider.field_nullability_facts,
                 provider.exception_facts,
+                provider.constructor_recursion_facts,
                 provider.external_library_pack_facts,
                 provider.unsupported_external_api_facts,
                 provider.unsupported_external_constructor_facts,
@@ -5882,6 +6257,25 @@ pub fn render_resolver_benchmark_report(report: &ResolverBenchmarkReport) -> Str
             lines.push(format_field_context_summary(target));
         }
     }
+    if !report.top_source_summary_recommendations.is_empty() {
+        lines.push("top_source_summary_recommendations".to_string());
+        lines.push(
+            "package_prefix\ttarget_type\tconstructors\tfields\tmethods\tcount\tsample_files"
+                .to_string(),
+        );
+        for recommendation in &report.top_source_summary_recommendations {
+            lines.push(format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                recommendation.package_prefix,
+                recommendation.target_type,
+                recommendation.constructor_guesses,
+                recommendation.field_guesses,
+                recommendation.method_guesses,
+                recommendation.count,
+                recommendation.sample_files.join(",")
+            ));
+        }
+    }
     if !report.top_resolver_diagnostics.is_empty() {
         lines.push("top_resolver_diagnostics".to_string());
         for diagnostic in &report.top_resolver_diagnostics {
@@ -6190,7 +6584,21 @@ fn collect_source_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
             collect_source_expr_type_names(array, names);
             collect_source_expr_type_names(index, names);
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_source_expr_type_names(expr, names);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_source_expr_type_names(expr, names);
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 collect_source_expr_type_names(expr, names);
             }
@@ -6612,6 +7020,111 @@ fn sort_and_truncate_target_summaries(summaries: &mut Vec<UnresolvedTargetSummar
             .then_with(|| left.target_name.cmp(&right.target_name))
     });
     summaries.truncate(20);
+}
+
+fn merge_signature_benchmark_counts(
+    summaries: &mut Vec<SignatureBenchmarkCount>,
+    counts: Vec<crate::signature::SignatureReportCount>,
+) {
+    for count in counts {
+        if let Some(summary) = summaries
+            .iter_mut()
+            .find(|summary| summary.label == count.label)
+        {
+            summary.count += count.count;
+        } else {
+            summaries.push(SignatureBenchmarkCount {
+                label: count.label,
+                count: count.count,
+            });
+        }
+    }
+}
+
+fn sort_and_truncate_signature_benchmark_counts(summaries: &mut Vec<SignatureBenchmarkCount>) {
+    summaries.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    summaries.truncate(20);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceSummaryRecommendationReason {
+    Constructor,
+    Field,
+    Method,
+}
+
+fn push_source_summary_recommendation(
+    recommendations: &mut Vec<SourceSummaryRecommendation>,
+    source_index: Option<&SourceTypeIndex>,
+    program: &Program,
+    target_type: &str,
+    reason: SourceSummaryRecommendationReason,
+    file_label: &str,
+) {
+    let Some(source_index) = source_index else {
+        return;
+    };
+    let Some(package_prefix) =
+        source_index.source_summary_recommendation_package(program, target_type)
+    else {
+        return;
+    };
+    let target_type = target_type.rsplit('.').next().unwrap_or(target_type);
+    if let Some(recommendation) = recommendations.iter_mut().find(|recommendation| {
+        recommendation.package_prefix == package_prefix && recommendation.target_type == target_type
+    }) {
+        increment_source_summary_recommendation(recommendation, reason, file_label);
+    } else {
+        let mut recommendation = SourceSummaryRecommendation {
+            package_prefix,
+            target_type: target_type.to_string(),
+            constructor_guesses: 0,
+            field_guesses: 0,
+            method_guesses: 0,
+            count: 0,
+            sample_files: Vec::new(),
+        };
+        increment_source_summary_recommendation(&mut recommendation, reason, file_label);
+        recommendations.push(recommendation);
+    }
+}
+
+fn increment_source_summary_recommendation(
+    recommendation: &mut SourceSummaryRecommendation,
+    reason: SourceSummaryRecommendationReason,
+    file_label: &str,
+) {
+    match reason {
+        SourceSummaryRecommendationReason::Constructor => recommendation.constructor_guesses += 1,
+        SourceSummaryRecommendationReason::Field => recommendation.field_guesses += 1,
+        SourceSummaryRecommendationReason::Method => recommendation.method_guesses += 1,
+    }
+    recommendation.count += 1;
+    push_bounded_sample_file(&mut recommendation.sample_files, file_label);
+}
+
+fn push_bounded_sample_file(sample_files: &mut Vec<String>, file_label: &str) {
+    if sample_files.len() < 5 && !sample_files.iter().any(|file| file == file_label) {
+        sample_files.push(file_label.to_string());
+    }
+}
+
+fn sort_and_truncate_source_summary_recommendations(
+    recommendations: &mut Vec<SourceSummaryRecommendation>,
+) {
+    recommendations.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.package_prefix.cmp(&right.package_prefix))
+            .then_with(|| left.target_type.cmp(&right.target_type))
+    });
+    recommendations.truncate(20);
 }
 
 fn push_unexplained_method_receiver_summary(
@@ -7500,6 +8013,7 @@ fn fact_count(facts: &FactSet) -> usize {
         + facts.closed_hierarchy_facts.len()
         + facts.object_safety_facts.len()
         + facts.type_capability_overrides.len()
+        + facts.owned_recovery_capability_facts.len()
         + facts.field_nullability_facts.len()
         + facts.trivial_accessor_facts.len()
         + facts.external_api_effect_facts.len()
@@ -7510,6 +8024,7 @@ fn fact_count(facts: &FactSet) -> usize {
         + facts.external_field_facts.len()
         + facts.method_effect_facts.len()
         + facts.recursion_facts.len()
+        + facts.constructor_recursion_facts.len()
         + facts.control_flow_facts.len()
         + facts.unresolved_target_facts.len()
         + facts.dispatch_requirement_facts.len()

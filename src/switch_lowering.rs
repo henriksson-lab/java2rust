@@ -7,6 +7,12 @@ pub struct SwitchRenderCase {
     pub statements: Vec<RustStmt>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchMatchRenderCase {
+    pub patterns: Vec<String>,
+    pub statements: Vec<RustStmt>,
+}
+
 pub fn switch_case_condition(
     plan: &SwitchPlan<'_>,
     case_plan: &SwitchCasePlan,
@@ -60,4 +66,36 @@ pub fn render_switch(
     out.push_str("    }\n");
     out.push('}');
     out
+}
+
+pub fn render_simple_return_match_switch(
+    selector: RustExpr,
+    cases: Vec<SwitchMatchRenderCase>,
+    default_statements: Option<Vec<RustStmt>>,
+) -> String {
+    let mut out = String::new();
+    out.push_str("match ");
+    out.push_str(&crate::emit::emit_expr(&selector));
+    out.push_str(" {\n");
+    for case in cases {
+        if case.patterns.is_empty() {
+            continue;
+        }
+        out.push_str("    ");
+        out.push_str(&case.patterns.join(" | "));
+        out.push_str(" => {\n");
+        out.push_str(&crate::emit::emit_statements(&case.statements, 2));
+        out.push_str("    }\n");
+    }
+    out.push_str("    _ => {\n");
+    if let Some(statements) = default_statements {
+        out.push_str(&crate::emit::emit_statements(&statements, 2));
+    }
+    out.push_str("    }\n");
+    out.push('}');
+    out
+}
+
+pub fn switch_match_pattern_expr(expr: RustExpr) -> String {
+    crate::emit::emit_expr(&expr)
 }

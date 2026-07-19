@@ -1548,6 +1548,60 @@ class UsesArgs {
 }
 
 #[test]
+fn resolver_benchmark_recommends_source_summary_prefix_for_project_guesses() {
+    let root = unique_temp_root("dependency-mode-source-summary-recommendations");
+    let app_root = root.join("app");
+    fs::create_dir_all(app_root.join("app/usecase")).unwrap();
+    fs::write(
+        app_root.join("app/usecase/UsesArgs.java"),
+        r#"
+package app.usecase;
+
+import app.helper.FindArgs;
+
+class UsesArgs {
+    int score(FindArgs args) {
+        FindArgs created = new FindArgs();
+        return args.kSize + created.minEvidenceMapQ + args.score();
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let config = DependencyModeConfig::for_primary_source_root(&app_root);
+    let report = benchmark_java_resolver_config(&config).unwrap();
+    let rendered = render_resolver_benchmark_report(&report);
+
+    assert!(
+        report.project_constructor_guesses >= 1,
+        "constructor pressure should be classified before recommendation: {rendered}"
+    );
+    assert!(
+        report.project_field_guesses >= 2,
+        "field pressure should be classified before recommendation: {rendered}"
+    );
+    assert!(
+        report
+            .top_source_summary_recommendations
+            .iter()
+            .any(|recommendation| {
+                recommendation.package_prefix == "app.helper"
+                    && recommendation.target_type == "FindArgs"
+                    && recommendation.constructor_guesses >= 1
+                    && recommendation.field_guesses >= 2
+                    && recommendation.count >= 3
+                    && recommendation
+                        .sample_files
+                        .contains(&"app/usecase/UsesArgs.java".to_string())
+            }),
+        "project constructor/field guesses should recommend a source-summary root: {rendered}"
+    );
+    assert!(rendered.contains("top_source_summary_recommendations"));
+    assert!(rendered.contains("app.helper\tFindArgs"));
+}
+
+#[test]
 fn resolver_benchmark_classifies_snake_case_project_field_receiver_as_project() {
     let root = unique_temp_root("dependency-mode-snake-project-field-receiver");
     let app_root = root.join("app");
@@ -3574,7 +3628,7 @@ class UsesRuntime {
         "{rendered}"
     );
     assert!(rendered.contains(
-        "dep.runtime.manifest\tRustCrateMapping\t15\t1\t0\t1\t1\t1\t1\t1\t0\t0\t1\t1\t1\t3\t1\t1\t1"
+        "dep.runtime.manifest\tRustCrateMapping\t15\t1\t0\t1\t1\t1\t1\t1\t0\t0\t1\t1\t1\t0\t3\t1\t1\t1"
     ));
     assert!(rendered.contains("configured_provider_external_crate_api_mapping_facts\t1"));
     assert!(rendered.contains("configured_provider_external_crate_constructor_mapping_facts\t1"));
@@ -5268,6 +5322,209 @@ class ApacheHttpUse {
     assert!(
         !rendered.contains("external_pack_missing_api"),
         "Apache HTTP modeled header mutation should not produce missing-pack diagnostics: {rendered}"
+    );
+}
+
+#[test]
+fn source_summary_root_package_prefix_filters_summary_files() {
+    let root = unique_temp_root("dependency-mode-source-summary-package-prefix");
+    let app_root = root.join("app");
+    let deps_root = root.join("deps");
+    fs::create_dir_all(app_root.join("app/usecase")).unwrap();
+    fs::create_dir_all(deps_root.join("dep/keep")).unwrap();
+    fs::create_dir_all(deps_root.join("dep/skip")).unwrap();
+
+    fs::write(
+        app_root.join("app/usecase/UsesHelper.java"),
+        r#"
+package app.usecase;
+
+import dep.keep.Helper;
+
+class UsesHelper {
+    int read() {
+        return new Helper().value();
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        deps_root.join("dep/keep/Helper.java"),
+        r#"
+package dep.keep;
+
+public class Helper {
+    public int value() {
+        return 7;
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        deps_root.join("dep/skip/Noise.java"),
+        r#"
+package dep.skip;
+
+public class Noise {
+    public int noise() {
+        return 1;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let mut config = DependencyModeConfig::for_primary_source_root(&app_root);
+    config.add_source_root_with_package_prefixes(
+        &deps_root,
+        DependencyMode::SourceSummary,
+        ["dep.keep"],
+    );
+
+    let report = benchmark_java_resolver_config(&config).unwrap();
+    let rendered = render_resolver_benchmark_report(&report);
+    let summary_root = report
+        .source_roots
+        .iter()
+        .find(|root| root.mode == DependencyMode::SourceSummary)
+        .unwrap();
+
+    assert_eq!(report.files_seen, 2, "{rendered}");
+    assert_eq!(summary_root.files_seen, 1, "{rendered}");
+    assert_eq!(summary_root.package_prefixes, vec!["dep.keep".to_string()]);
+    assert!(
+        rendered.contains("SourceSummary\t1\tdep.keep"),
+        "{rendered}"
+    );
+    assert_eq!(report.unresolved_method_calls, 0, "{rendered}");
+}
+
+#[test]
+fn source_summary_neutral_envelope_resolves_core_declaration_shapes() {
+    let root = unique_temp_root("dependency-mode-source-summary-neutral-envelope");
+    let app_root = root.join("app");
+    let summary_root = root.join("summary");
+    fs::create_dir_all(app_root.join("app/envelope")).unwrap();
+    fs::create_dir_all(summary_root.join("dep/envelope")).unwrap();
+
+    fs::write(
+        app_root.join("app/envelope/UsesEnvelope.java"),
+        r#"
+package app.envelope;
+
+import dep.envelope.Args;
+import dep.envelope.Box.Inner;
+import dep.envelope.EnvelopeException.BadInput;
+import dep.envelope.Flags;
+
+class UsesEnvelope {
+    int score(Args args) {
+        Args copy = new Args(args.size, args.offset);
+        Inner inner = new Inner(copy.size);
+        if (copy.offset < 0) {
+            BadInput error = new BadInput("negative offset");
+            return -1;
+        }
+        return inner.value() + copy.offset + Flags.DEFAULT_OFFSET;
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        summary_root.join("dep/envelope/Args.java"),
+        r#"
+package dep.envelope;
+
+public final class Args {
+    public int size;
+    public int offset;
+
+    public Args(int size, int offset) {}
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        summary_root.join("dep/envelope/Box.java"),
+        r#"
+package dep.envelope;
+
+public final class Box {
+    public static final class Inner {
+        public Inner(int value) {}
+
+        public int value() {
+            return 1;
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        summary_root.join("dep/envelope/EnvelopeException.java"),
+        r#"
+package dep.envelope;
+
+public class EnvelopeException extends RuntimeException {
+    public EnvelopeException(String message) {}
+
+    public static final class BadInput extends EnvelopeException {
+        public BadInput(String message) {
+            super(message);
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        summary_root.join("dep/envelope/Flags.java"),
+        r#"
+package dep.envelope;
+
+public interface Flags {
+    int DEFAULT_OFFSET = 3;
+}
+"#,
+    )
+    .unwrap();
+
+    let mut config = DependencyModeConfig::for_primary_source_root(&app_root);
+    config.add_source_root(&summary_root, DependencyMode::SourceSummary);
+    let report = benchmark_java_resolver_config(&config).unwrap();
+    let rendered = render_resolver_benchmark_report(&report);
+
+    assert_eq!(report.parser_diagnostics, 0, "{rendered}");
+    assert_eq!(report.resolver_diagnostics, 0, "{rendered}");
+    assert_eq!(report.unresolved_constructors, 0, "{rendered}");
+    assert_eq!(report.unresolved_field_accesses, 0, "{rendered}");
+    assert!(
+        report.source_dependency_resolved_constructors >= 3,
+        "constructors for Args, nested Inner, and nested BadInput should resolve through summaries: {rendered}"
+    );
+    assert!(
+        report.source_dependency_resolved_field_accesses >= 4,
+        "public fields and interface constants should resolve through summaries: {rendered}"
+    );
+    assert!(
+        report.source_dependency_resolved_method_calls >= 1,
+        "nested class methods should resolve through summaries: {rendered}"
+    );
+    assert!(
+        rendered.contains("Args\t2\tSourceSummary")
+            && rendered.contains("Inner\t1\tSourceSummary")
+            && rendered.contains("BadInput\t1\tSourceSummary"),
+        "source dependency constructor table should show all envelope constructors: {rendered}"
+    );
+    assert!(
+        rendered.contains("Args\tsize\tSourceSummary")
+            && rendered.contains("Args\toffset\tSourceSummary")
+            && rendered.contains("Flags\t"),
+        "source dependency field table should show envelope fields and constants: {rendered}"
     );
 }
 

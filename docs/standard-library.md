@@ -4,6 +4,18 @@
 
 Stdlib mappings must be exact-owner or positive-carrier gated. Do not rewrite a method just because a simple name matches a JDK class.
 
+Each stdlib mapping is a transformation rule and must follow
+`docs/transformation-rule-contract.md`: document the **Ideal Rust Target**
+before the **Implementation Rule**. For example, a stream, collection, string,
+or path mapping should first show the idiomatic Rust expression and carrier
+shape, then describe the owner/type/capability facts needed to select it.
+
+The short mapping bullets below are an inventory, not implementation-ready
+rules by themselves. Before implementing or materially revising any listed
+mapping, expand it into a rule entry with **Ideal Rust Target** immediately
+before **Implementation Rule**, followed by required facts, owning layer,
+fallback shape, and evidence.
+
 ## Direct Idiomatic Mappings
 
 - `String.length()` -> `.chars().count()` when Java UTF-16 length is not required; otherwise a runtime UTF-16 helper.
@@ -67,6 +79,27 @@ values.stream()
     .sum()
 ```
 
+### Ideal Rust Target
+
+For a Java stream over a proven `List<Integer>`/`Vec<i32>` where the pipeline is
+pure local filtering, primitive mapping, and summation, the target Rust should
+be an ordinary iterator chain over borrowed elements:
+
+```rust
+values
+    .iter()
+    .filter(|v| **v > 0)
+    .map(|v| *v)
+    .sum::<i32>()
+```
+
+The target is borrowed iteration, not a Java stream wrapper, because the stream
+does not need Java cursor identity, parallel stream behavior, checked exception
+propagation, mutation during iteration, or collector-specific duplicate-key
+semantics. The primitive terminal result is an owned `i32`.
+
+### Implementation Rule
+
 Requirements:
 
 - The source carrier lowers to `Vec<i32>` from `List<Integer>`.
@@ -74,14 +107,5 @@ Requirements:
 - Supported intermediate operations are `filter(lambda)` and `mapToInt(lambda)`.
 - The terminal operation must be `sum()`.
 - Lambda bodies are lowered only for simple expression lambdas over the stream item.
-
-Lowering target:
-
-```rust
-values.iter()
-    .filter(|v| **v > 0)
-    .map(|v| *v)
-    .sum::<i32>()
-```
 
 This recognizer lives in `lower` as a stdlib-specific expression lowering rule. It must not change `parser` output, and broader stream facts should move into `stdlib`/`resolve` once more stream shapes are supported.

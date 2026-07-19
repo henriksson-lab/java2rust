@@ -50,6 +50,14 @@ at the responsible layer. The tests should be derived from the observed
 outcome, but should try not to overfit to GATK or any other current pressure
 corpus.
 
+Transformation rules produced by these slices must follow
+`docs/transformation-rule-contract.md`: each rule starts with **Ideal Rust
+Target**, then **Implementation Rule**, then the required facts, owning layer,
+fallback, and evidence. The ideal target must describe the Rust we want before
+we describe how Java facts select it, so ownership, borrowing, optionality,
+mutability, dispatch, conversions, and external-boundary choices stay visible
+instead of becoming late lowering special cases.
+
 Outcome-driven test rules:
 
 - Add at least one minimized regression test for every selected corpus outcome.

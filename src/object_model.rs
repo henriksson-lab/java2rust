@@ -6,7 +6,7 @@ use crate::facts::{
     ObjectSafetyViolation,
 };
 use crate::java_ir::{JavaType, Member, Program, TypeDecl, TypeKind};
-use crate::usage::UsageFacts;
+use crate::usage::{BindingUse, CallArgumentBoundary, UsageFacts};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ObjectModelInput<'a> {
@@ -35,6 +35,7 @@ pub struct ObjectStrategyPlan {
 }
 
 pub type DispatchRequirement = DispatchRequirementKind;
+pub type UsageDispatchRequirements = BTreeMap<String, Vec<DispatchRequirement>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedObjectStrategy {
@@ -125,10 +126,36 @@ pub struct ClosedEnumFactPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosedEnumProofPolicy {
+    pub type_name: String,
+    pub proof: ClosedEnumProof,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClosedEnumProof {
+    Proven {
+        variants: Vec<String>,
+        provenance: FactProvenance,
+    },
+    OpenWorld,
+    NoKnownDirectSubtypes,
+    MissingPermittedSubtypes {
+        missing: Vec<String>,
+    },
+    NonFinalVariants {
+        variants: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectRepresentation {
     ConcreteStruct,
     DynTrait {
         trait_name: String,
+    },
+    JavaEnum {
+        enum_name: String,
+        variants: Vec<String>,
     },
     ClosedEnum {
         enum_name: String,
@@ -149,6 +176,28 @@ pub enum ObjectRepresentationRequest {
     ErasedObjectOverride {
         type_name: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxedDynObjectRepresentationInvariant {
+    SlotProjectionOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoxedDynObjectRepresentationPolicy {
+    pub invariant: BoxedDynObjectRepresentationInvariant,
+    pub object_representation_has_boxed_dyn_variant: bool,
+    pub representation_dispatch_maps_boxed_dyn: bool,
+    pub slot_projection_creates_owned_boxed_dyn_storage: bool,
+}
+
+pub fn boxed_dyn_object_representation_policy() -> BoxedDynObjectRepresentationPolicy {
+    BoxedDynObjectRepresentationPolicy {
+        invariant: BoxedDynObjectRepresentationInvariant::SlotProjectionOnly,
+        object_representation_has_boxed_dyn_variant: false,
+        representation_dispatch_maps_boxed_dyn: false,
+        slot_projection_creates_owned_boxed_dyn_storage: true,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,22 +262,121 @@ pub fn plan_object_model_with_effective_facts(
 
 pub fn plan_object_model_from_input(input: ObjectModelInput<'_>) -> ObjectModelPlan {
     let _facts = input.facts;
-    let _usage = input.usage;
-    plan_object_model_from_effective_facts(input.program, input.effective_facts)
+    let usage_requirements = input
+        .usage
+        .map(dispatch_requirements_from_usage)
+        .unwrap_or_default();
+    plan_object_model_from_effective_facts_and_usage(
+        input.program,
+        input.effective_facts,
+        &usage_requirements,
+    )
 }
 
 fn plan_object_model_from_effective_facts(
     program: &Program,
     facts: &EffectiveFacts<'_>,
 ) -> ObjectModelPlan {
+    plan_object_model_from_effective_facts_and_usage(
+        program,
+        facts,
+        &UsageDispatchRequirements::new(),
+    )
+}
+
+fn plan_object_model_from_effective_facts_and_usage(
+    program: &Program,
+    facts: &EffectiveFacts<'_>,
+    usage_requirements: &UsageDispatchRequirements,
+) -> ObjectModelPlan {
     let mut plan = ObjectModelPlan::default();
     for ty in &program.types {
-        collect_type_strategy(ty, facts, &mut plan);
+        collect_type_strategy(ty, facts, usage_requirements, &mut plan);
     }
-    collect_hierarchy_edges_for_strategy_plan(facts, &mut plan);
+    collect_hierarchy_edges_for_strategy_plan(facts, usage_requirements, &mut plan);
     apply_hierarchy_overrides_to_strategy_plan(facts, &mut plan);
     apply_closed_enum_strategy_selection(facts, &mut plan);
     plan
+}
+
+pub fn dispatch_requirements_from_usage(usage: &UsageFacts) -> UsageDispatchRequirements {
+    let mut requirements = UsageDispatchRequirements::new();
+    for method in usage.methods.values().chain(usage.constructors.values()) {
+        for binding in method.bindings.values() {
+            let Some(type_name) = dispatch_requirement_type_name(&binding.java_ty) else {
+                continue;
+            };
+            for use_fact in &binding.uses {
+                for requirement in dispatch_requirements_for_binding_use(use_fact) {
+                    push_usage_dispatch_requirement(&mut requirements, type_name, requirement);
+                }
+            }
+        }
+    }
+    requirements
+}
+
+fn dispatch_requirements_for_binding_use(use_fact: &BindingUse) -> Vec<DispatchRequirement> {
+    match use_fact {
+        BindingUse::StoredInField { .. } | BindingUse::Returned => {
+            vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
+        }
+        BindingUse::PassedToCall { boundary, .. }
+        | BindingUse::AssignedFromCall { boundary, .. } => match boundary {
+            CallArgumentBoundary::InternalSameType | CallArgumentBoundary::KnownContentRead => {
+                vec![DispatchRequirementKind::NeedsBorrowedTraitView]
+            }
+            CallArgumentBoundary::Unknown => {
+                vec![DispatchRequirementKind::NeedsUnknownRuntimeObject]
+            }
+        },
+        BindingUse::ReceiverForCall { boundary, .. } => match boundary {
+            CallArgumentBoundary::InternalSameType | CallArgumentBoundary::KnownContentRead => {
+                vec![DispatchRequirementKind::NeedsBorrowedTraitView]
+            }
+            CallArgumentBoundary::Unknown => vec![DispatchRequirementKind::RejectTraitObject],
+        },
+        BindingUse::ContentRead | BindingUse::AssignedToLocal { .. } | BindingUse::Mutated => {
+            Vec::new()
+        }
+    }
+}
+
+fn dispatch_requirement_type_name(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::String => Some("String"),
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => {
+            None
+        }
+    }
+}
+
+fn push_usage_dispatch_requirement(
+    requirements: &mut UsageDispatchRequirements,
+    type_name: &str,
+    requirement: DispatchRequirement,
+) {
+    let entry = requirements.entry(type_name.to_string()).or_default();
+    if !entry.contains(&requirement) {
+        entry.push(requirement);
+    }
+}
+
+fn merged_dispatch_requirements(
+    type_name: &str,
+    facts: &EffectiveFacts<'_>,
+    usage_requirements: &UsageDispatchRequirements,
+) -> Vec<DispatchRequirement> {
+    let mut requirements = facts.dispatch_requirements_for(type_name);
+    if let Some(usage) = usage_requirements.get(type_name) {
+        for requirement in usage {
+            if !requirements.contains(requirement) {
+                requirements.push(*requirement);
+            }
+        }
+    }
+    requirements
 }
 
 impl ObjectModelPlan {
@@ -277,7 +425,18 @@ pub fn object_strategy_for_type_with_effective_facts(
     ty: &TypeDecl,
     facts: &EffectiveFacts<'_>,
 ) -> ObjectStrategyPlan {
-    let requirements = facts.dispatch_requirements_for(&ty.name);
+    object_strategy_for_type_with_effective_facts_and_requirements(
+        ty,
+        facts,
+        facts.dispatch_requirements_for(&ty.name),
+    )
+}
+
+fn object_strategy_for_type_with_effective_facts_and_requirements(
+    ty: &TypeDecl,
+    facts: &EffectiveFacts<'_>,
+    requirements: Vec<DispatchRequirement>,
+) -> ObjectStrategyPlan {
     let explicit_hierarchy_override = facts
         .hierarchy_overrides()
         .iter()
@@ -307,9 +466,9 @@ pub fn object_strategy_for_type_with_effective_facts(
             (policy.representation, policy.diagnostics)
         }
         TypeKind::Enum => (
-            ObjectRepresentation::ClosedEnum {
+            ObjectRepresentation::JavaEnum {
                 enum_name: ty.name.clone(),
-                variants: Vec::new(),
+                variants: java_enum_variant_names(ty),
             },
             Vec::new(),
         ),
@@ -325,13 +484,60 @@ pub fn object_strategy_for_type_with_effective_facts(
     }
 }
 
-fn collect_type_strategy(ty: &TypeDecl, facts: &EffectiveFacts<'_>, plan: &mut ObjectModelPlan) {
-    let strategy = object_strategy_for_type_with_effective_facts(ty, facts);
+pub fn java_enum_variant_names(ty: &TypeDecl) -> Vec<String> {
+    if ty.kind != TypeKind::Enum {
+        return Vec::new();
+    }
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if field.ty == named_type(&ty.name) => {
+                Some(rust_enum_variant_name_from_parsed_constant(&field.name))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub fn rust_enum_variant_name_from_parsed_constant(name: &str) -> String {
+    let mut out = String::new();
+    for part in name.split('_').filter(|part| !part.is_empty()) {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    if out.is_empty() {
+        "Unknown".to_string()
+    } else {
+        out
+    }
+}
+
+fn named_type(name: &str) -> JavaType {
+    JavaType::Named {
+        name: name.to_string(),
+        args: Vec::new(),
+    }
+}
+
+fn collect_type_strategy(
+    ty: &TypeDecl,
+    facts: &EffectiveFacts<'_>,
+    usage_requirements: &UsageDispatchRequirements,
+    plan: &mut ObjectModelPlan,
+) {
+    let strategy = object_strategy_for_type_with_effective_facts_and_requirements(
+        ty,
+        facts,
+        merged_dispatch_requirements(&ty.name, facts, usage_requirements),
+    );
     plan.diagnostics.extend(strategy.diagnostics.clone());
     plan.insert_strategy(strategy);
     for member in &ty.members {
         if let Member::Type(nested) = member {
-            collect_type_strategy(nested, facts, plan);
+            collect_type_strategy(nested, facts, usage_requirements, plan);
         }
     }
 }
@@ -353,6 +559,7 @@ fn has_explicit_hierarchy_override_in_effective_facts(
 
 fn collect_hierarchy_edges_for_strategy_plan(
     facts: &EffectiveFacts<'_>,
+    usage_requirements: &UsageDispatchRequirements,
     plan: &mut ObjectModelPlan,
 ) {
     let roots = plan.strategies.keys().cloned().collect::<Vec<_>>();
@@ -363,7 +570,13 @@ fn collect_hierarchy_edges_for_strategy_plan(
         };
         record_object_hierarchy_edges_for_type(facts, plan, &java_ty);
         for edge in facts.hierarchy_edges_for_type(&java_ty) {
-            add_direct_subtype_to_strategy(plan, &edge.super_name, &edge.sub_name, facts);
+            add_direct_subtype_to_strategy(
+                plan,
+                &edge.super_name,
+                &edge.sub_name,
+                facts,
+                usage_requirements,
+            );
         }
     }
 }
@@ -523,6 +736,11 @@ pub fn object_representation_lookup_policy(
         };
     }
     match java_ty {
+        JavaType::Named { name, .. } if name == "Object" => RepresentationLookupPolicy {
+            java_ty: java_ty.clone(),
+            fallback: RepresentationLookupFallback::ConservativeErasedObject,
+            representation: ObjectRepresentation::ErasedObject,
+        },
         JavaType::Unknown(_) | JavaType::Wildcard(_) => RepresentationLookupPolicy {
             java_ty: java_ty.clone(),
             fallback: RepresentationLookupFallback::ConservativeErasedObject,
@@ -541,6 +759,7 @@ fn add_direct_subtype_to_strategy(
     super_name: &str,
     subtype_name: &str,
     facts: &EffectiveFacts<'_>,
+    usage_requirements: &UsageDispatchRequirements,
 ) {
     let strategy = if let Some(strategy) = plan.strategy_for_mut(super_name) {
         strategy
@@ -548,7 +767,7 @@ fn add_direct_subtype_to_strategy(
         plan.insert_strategy(ObjectStrategyPlan {
             root: super_name.to_string(),
             strategy: ObjectRepresentation::ErasedObject,
-            requirements: facts.dispatch_requirements_for(super_name),
+            requirements: merged_dispatch_requirements(super_name, facts, usage_requirements),
             direct_subtypes: Vec::new(),
             rejected: Vec::new(),
             provenance: vec![FactProvenance::ConservativeFallback],
@@ -641,31 +860,25 @@ fn closed_enum_rejection_reason(
     direct_subtypes: &[String],
     facts: &EffectiveFacts<'_>,
 ) -> String {
-    if facts.closed_hierarchy_fact_for_name(type_name) != Some(true) {
-        return format!(
+    match closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, facts).proof {
+        ClosedEnumProof::Proven { .. } => {
+            format!("closed enum for {type_name} was not applicable to the current representation")
+        }
+        ClosedEnumProof::OpenWorld => format!(
             "closed enum for {type_name} requires a closed hierarchy fact before runtime case-split requirements can use named variants"
-        );
-    }
-    if direct_subtypes.is_empty() {
-        return format!("closed enum for {type_name} requires at least one known direct subtype");
-    }
-    let non_final_variants = direct_subtypes
-        .iter()
-        .filter(|subtype| {
-            !facts.is_final_type(&JavaType::Named {
-                name: (*subtype).clone(),
-                args: Vec::new(),
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if !non_final_variants.is_empty() {
-        return format!(
+        ),
+        ClosedEnumProof::NoKnownDirectSubtypes => {
+            format!("closed enum for {type_name} requires at least one known direct subtype")
+        }
+        ClosedEnumProof::MissingPermittedSubtypes { missing } => format!(
+            "closed enum for {type_name} is missing permitted subtype evidence for: {}",
+            missing.join(", ")
+        ),
+        ClosedEnumProof::NonFinalVariants { variants } => format!(
             "closed enum for {type_name} requires final direct variants; non-final variants: {}",
-            non_final_variants.join(", ")
-        );
+            variants.join(", ")
+        ),
     }
-    format!("closed enum for {type_name} was not applicable to the current representation")
 }
 
 fn apply_erased_object_requirement_fallback(strategy: &mut ObjectStrategyPlan) {
@@ -1013,19 +1226,23 @@ pub fn closed_enum_inference_policy_with_effective_facts(
     direct_subtypes: &[String],
     facts: &EffectiveFacts<'_>,
 ) -> ClosedEnumInferencePolicy {
-    let fact_policy =
-        closed_enum_fact_policy_with_effective_facts(type_name, direct_subtypes, facts);
-    let representation = fact_policy
-        .variants
-        .and_then(|variants| match current_representation {
-            ObjectRepresentation::DynTrait { .. } | ObjectRepresentation::ErasedObject => {
-                Some(ObjectRepresentation::ClosedEnum {
-                    enum_name: format!("{type_name}Value"),
-                    variants,
-                })
-            }
-            ObjectRepresentation::ConcreteStruct | ObjectRepresentation::ClosedEnum { .. } => None,
-        });
+    let proof_policy =
+        closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, facts);
+    let variants = match &proof_policy.proof {
+        ClosedEnumProof::Proven { variants, .. } => Some(variants.clone()),
+        _ => None,
+    };
+    let representation = variants.and_then(|variants| match current_representation {
+        ObjectRepresentation::DynTrait { .. } | ObjectRepresentation::ErasedObject => {
+            Some(ObjectRepresentation::ClosedEnum {
+                enum_name: format!("{type_name}Value"),
+                variants,
+            })
+        }
+        ObjectRepresentation::ConcreteStruct
+        | ObjectRepresentation::JavaEnum { .. }
+        | ObjectRepresentation::ClosedEnum { .. } => None,
+    });
     let provenance = representation
         .is_some()
         .then_some(FactProvenance::CorpusAnalysis);
@@ -1050,10 +1267,109 @@ pub fn closed_enum_fact_policy_with_effective_facts(
     direct_subtypes: &[String],
     facts: &EffectiveFacts<'_>,
 ) -> ClosedEnumFactPolicy {
+    let proof_policy =
+        closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, facts);
+    let variants = match proof_policy.proof {
+        ClosedEnumProof::Proven { variants, .. } => Some(variants),
+        _ => None,
+    };
     ClosedEnumFactPolicy {
         type_name: type_name.to_string(),
-        variants: facts.closed_hierarchy_variants_for(type_name, direct_subtypes),
+        variants,
     }
+}
+
+pub fn closed_enum_proof_policy(
+    type_name: &str,
+    direct_subtypes: &[String],
+    facts: &FactSet,
+) -> ClosedEnumProofPolicy {
+    let effective_facts = EffectiveFacts::new(facts);
+    closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, &effective_facts)
+}
+
+pub fn closed_enum_proof_policy_with_effective_facts(
+    type_name: &str,
+    direct_subtypes: &[String],
+    facts: &EffectiveFacts<'_>,
+) -> ClosedEnumProofPolicy {
+    let proof = match facts.closed_hierarchy_fact_for_name_with_provenance(type_name) {
+        Some(closed_fact) if closed_fact.value => {
+            if let Some(permits_fact) = facts.sealed_permitted_subtypes_for(type_name) {
+                let missing = missing_permitted_subtypes(&permits_fact.value, direct_subtypes);
+                if !missing.is_empty() {
+                    ClosedEnumProof::MissingPermittedSubtypes { missing }
+                } else {
+                    closed_enum_terminal_variant_proof(
+                        direct_subtypes,
+                        facts,
+                        closed_fact.provenance,
+                    )
+                }
+            } else {
+                closed_enum_terminal_variant_proof(direct_subtypes, facts, closed_fact.provenance)
+            }
+        }
+        _ => ClosedEnumProof::OpenWorld,
+    };
+    ClosedEnumProofPolicy {
+        type_name: type_name.to_string(),
+        proof,
+    }
+}
+
+fn closed_enum_terminal_variant_proof(
+    direct_subtypes: &[String],
+    facts: &EffectiveFacts<'_>,
+    provenance: FactProvenance,
+) -> ClosedEnumProof {
+    if direct_subtypes.is_empty() {
+        return ClosedEnumProof::NoKnownDirectSubtypes;
+    }
+    let non_final_variants = direct_subtypes
+        .iter()
+        .filter(|subtype| {
+            !facts.is_final_type(&JavaType::Named {
+                name: (*subtype).clone(),
+                args: Vec::new(),
+            })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if non_final_variants.is_empty() {
+        ClosedEnumProof::Proven {
+            variants: direct_subtypes.to_vec(),
+            provenance,
+        }
+    } else {
+        ClosedEnumProof::NonFinalVariants {
+            variants: non_final_variants,
+        }
+    }
+}
+
+fn missing_permitted_subtypes(permits: &[String], direct_subtypes: &[String]) -> Vec<String> {
+    permits
+        .iter()
+        .filter(|permitted| {
+            !direct_subtypes
+                .iter()
+                .any(|direct| hierarchy_name_matches(permitted, direct))
+        })
+        .cloned()
+        .collect()
+}
+
+fn hierarchy_name_matches(left: &str, right: &str) -> bool {
+    left == right || simple_hierarchy_name(left) == simple_hierarchy_name(right)
+}
+
+fn simple_hierarchy_name(name: &str) -> &str {
+    let without_generics = name.split_once('<').map_or(name, |(prefix, _)| prefix);
+    without_generics
+        .rsplit(['.', '$'])
+        .next()
+        .unwrap_or(without_generics)
 }
 
 fn hierarchy_override_representation_from_object_policy(

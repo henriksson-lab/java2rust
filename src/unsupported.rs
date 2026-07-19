@@ -20,7 +20,6 @@ pub enum UnsupportedStatementLowering {
 pub enum UnsupportedExpressionLowering {
     Lambda,
     MethodReference,
-    ClassLiteral,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +56,10 @@ pub fn unsupported_statement_stmt(kind: UnsupportedStatementLowering) -> RustStm
     unsupported_statement_message_policy(kind).compile_error_stmt()
 }
 
+pub fn unsupported_try_catch_finally_stmt() -> RustStmt {
+    unsupported_statement_stmt(UnsupportedStatementLowering::TryCatchFinally)
+}
+
 pub fn unsupported_expression_expr(kind: UnsupportedExpressionLowering) -> RustExpr {
     unsupported_expression_message_policy(kind).compile_error_expr()
 }
@@ -65,14 +68,34 @@ pub fn plan_unsupported_expression(expr: &Expr) -> Option<UnsupportedExpressionL
     match expr {
         Expr::Lambda { .. } => Some(UnsupportedExpressionLowering::Lambda),
         Expr::MethodReference { .. } => Some(UnsupportedExpressionLowering::MethodReference),
-        Expr::ClassLiteral(_) => Some(UnsupportedExpressionLowering::ClassLiteral),
         _ => None,
     }
 }
 
 pub fn plan_unsupported_statement(stmt: &Stmt) -> Option<UnsupportedStatementLowering> {
     match stmt {
-        Stmt::Try { .. } => Some(UnsupportedStatementLowering::TryCatchFinally),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            if matches!(
+                crate::exception_plan::plan_try_stmt(
+                    resources,
+                    body,
+                    catches,
+                    finally_block.as_ref()
+                ),
+                crate::exception_plan::TryStmtPlan::CatchOnly { .. }
+                    | crate::exception_plan::TryStmtPlan::WithResources { .. }
+                    | crate::exception_plan::TryStmtPlan::FinallyOnly { .. }
+            ) {
+                None
+            } else {
+                Some(UnsupportedStatementLowering::TryCatchFinally)
+            }
+        }
         Stmt::LocalType(_) => Some(UnsupportedStatementLowering::LocalTypeDeclaration),
         Stmt::ConstructorInvocation { .. } => {
             Some(UnsupportedStatementLowering::ConstructorDelegation)
@@ -168,9 +191,6 @@ fn expression_message(kind: UnsupportedExpressionLowering) -> String {
         UnsupportedExpressionLowering::Lambda => "unsupported Java expression: lambda".to_string(),
         UnsupportedExpressionLowering::MethodReference => {
             "unsupported Java expression: method reference".to_string()
-        }
-        UnsupportedExpressionLowering::ClassLiteral => {
-            "unsupported Java expression: class literal".to_string()
         }
     }
 }

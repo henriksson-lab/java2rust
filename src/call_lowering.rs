@@ -1,7 +1,15 @@
-use crate::call_plan::{CallTargetPlan, NewTargetPlan};
+use crate::call_plan::{
+    CallTargetPlan, NativeCollectionMethod, NativeCollectionNewTarget,
+    NativeCollectionStaticMethod, NativeJavaInstanceMethod, NativeJavaStaticMethod, NewTargetPlan,
+};
+use crate::conversion_plan::{BorrowedElementRecoveryPolicy, borrowed_element_recovery_policy};
+use crate::emit;
 use crate::facts::FactSet;
+use crate::java_ir::{Expr, JavaType, LambdaBody};
 use crate::rust_ir::RustExpr;
 use crate::slot_render::rust_type_for_slot_with_facts;
+use crate::slot_shape::RustSlotShape;
+use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body};
 
 pub fn apply_call_target(
     target: &CallTargetPlan<'_>,
@@ -11,6 +19,10 @@ pub fn apply_call_target(
     match target {
         CallTargetPlan::StaticSelf { rust_name } => RustExpr::Call {
             function: Box::new(RustExpr::Raw(format!("Self::{rust_name}"))),
+            args,
+        },
+        CallTargetPlan::StaticOwner { owner, rust_name } => RustExpr::Call {
+            function: Box::new(RustExpr::Raw(format!("{owner}::{rust_name}"))),
             args,
         },
         CallTargetPlan::InstanceReceiver { rust_name, .. } => RustExpr::MethodCall {
@@ -36,6 +48,26 @@ pub fn apply_call_target(
             function: Box::new(RustExpr::Var(rust_name.clone())),
             args,
         },
+        CallTargetPlan::JavaClassStatic { rust_name } => RustExpr::Call {
+            function: Box::new(RustExpr::Raw(format!("JavaClass::<()>::{rust_name}"))),
+            args,
+        },
+        CallTargetPlan::NativeCollectionMethod { method, .. } => apply_native_collection_method(
+            lowered_receiver.expect("native collection target must provide receiver"),
+            *method,
+            args,
+        ),
+        CallTargetPlan::NativeCollectionStatic { method } => {
+            apply_native_collection_static_method(*method, args)
+        }
+        CallTargetPlan::NativeJavaInstance { method, .. } => apply_native_java_instance_method(
+            lowered_receiver.expect("native Java instance target must provide receiver"),
+            *method,
+            args,
+        ),
+        CallTargetPlan::NativeJavaStatic { method } => {
+            apply_native_java_static_method(*method, args)
+        }
         CallTargetPlan::ExternalCrateReceiver {
             crate_name,
             rust_name,
@@ -54,15 +86,373 @@ pub fn apply_call_target(
     }
 }
 
-pub fn apply_new_target(target: &NewTargetPlan<'_>, args: Vec<RustExpr>) -> RustExpr {
+pub fn propagate_result_expr(expr: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!("{}?", crate::emit::emit_expr(&expr)))
+}
+
+fn apply_native_java_instance_method(
+    receiver: RustExpr,
+    method: NativeJavaInstanceMethod,
+    args: Vec<RustExpr>,
+) -> RustExpr {
+    match method {
+        NativeJavaInstanceMethod::StringLen => RustExpr::Raw(format!(
+            "{}.len() as i32",
+            crate::emit::emit_expr(&receiver)
+        )),
+        NativeJavaInstanceMethod::StringToLowercase => RustExpr::MethodCall {
+            receiver: Box::new(receiver),
+            method: "to_lowercase".to_string(),
+            args,
+        },
+        NativeJavaInstanceMethod::StringContains => RustExpr::MethodCall {
+            receiver: Box::new(receiver),
+            method: "contains".to_string(),
+            args,
+        },
+        NativeJavaInstanceMethod::StringStartsWith => RustExpr::MethodCall {
+            receiver: Box::new(receiver),
+            method: "starts_with".to_string(),
+            args,
+        },
+        NativeJavaInstanceMethod::StringEndsWith => RustExpr::MethodCall {
+            receiver: Box::new(receiver),
+            method: "ends_with".to_string(),
+            args,
+        },
+        NativeJavaInstanceMethod::StringSplit => apply_string_split(receiver, args),
+        NativeJavaInstanceMethod::Equals => {
+            let Some(other) = args.into_iter().next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"Java equals requires one argument\")".to_string(),
+                );
+            };
+            RustExpr::Binary {
+                op: "==".to_string(),
+                left: Box::new(receiver),
+                right: Box::new(other),
+            }
+        }
+    }
+}
+
+fn apply_string_split(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
+    if args.is_empty() || args.len() > 2 {
+        return RustExpr::Raw(
+            "compile_error!(\"Java String.split requires one or two arguments\")".to_string(),
+        );
+    }
+    let regex = args.remove(0);
+    let limit = args
+        .pop()
+        .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw("java_string_split".to_string())),
+        args: vec![
+            RustExpr::Raw(format!("{}.as_str()", crate::emit::emit_expr(&receiver))),
+            regex,
+            limit,
+        ],
+    }
+}
+
+fn apply_native_java_static_method(
+    method: NativeJavaStaticMethod,
+    args: Vec<RustExpr>,
+) -> RustExpr {
+    match method {
+        NativeJavaStaticMethod::MathMax => {
+            let mut args = args.into_iter();
+            let Some(left) = args.next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"Math.max requires two arguments\")".to_string(),
+                );
+            };
+            let Some(right) = args.next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"Math.max requires two arguments\")".to_string(),
+                );
+            };
+            RustExpr::Call {
+                function: Box::new(RustExpr::Raw("std::cmp::max".to_string())),
+                args: vec![left, right],
+            }
+        }
+        NativeJavaStaticMethod::StringFormat => apply_string_format(args),
+        NativeJavaStaticMethod::StringJoin => apply_string_join(args),
+        NativeJavaStaticMethod::ObjectsEquals => {
+            let mut args = args.into_iter();
+            let Some(left) = args.next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"Objects.equals requires two arguments\")".to_string(),
+                );
+            };
+            let Some(right) = args.next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"Objects.equals requires two arguments\")".to_string(),
+                );
+            };
+            RustExpr::Binary {
+                op: "==".to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+        }
+    }
+}
+
+fn apply_string_join(args: Vec<RustExpr>) -> RustExpr {
+    let mut args = args.into_iter();
+    let Some(delimiter) = args.next() else {
+        return RustExpr::Raw("compile_error!(\"String.join requires arguments\")".to_string());
+    };
+    let Some(values) = args.next() else {
+        return RustExpr::Raw("compile_error!(\"String.join requires values\")".to_string());
+    };
+    if args.next().is_some() {
+        return RustExpr::Raw(
+            "compile_error!(\"String.join varargs are not supported yet\")".to_string(),
+        );
+    }
+    RustExpr::MethodCall {
+        receiver: Box::new(values),
+        method: "join".to_string(),
+        args: vec![string_join_delimiter_arg(delimiter)],
+    }
+}
+
+fn string_join_delimiter_arg(delimiter: RustExpr) -> RustExpr {
+    if let Some(literal) = string_literal_source(&delimiter) {
+        RustExpr::Literal(format!("{literal:?}"))
+    } else {
+        RustExpr::Raw(format!("{}.as_str()", crate::emit::emit_expr(&delimiter)))
+    }
+}
+
+fn apply_string_format(mut args: Vec<RustExpr>) -> RustExpr {
+    if args.is_empty() {
+        return RustExpr::Raw("String::new()".to_string());
+    }
+    let format_arg = args.remove(0);
+    let Some(java_format) = string_literal_source(&format_arg) else {
+        return RustExpr::Call {
+            function: Box::new(RustExpr::Raw("java_string_format".to_string())),
+            args: vec![
+                format_arg,
+                RustExpr::Raw(format!(
+                    "vec![{}]",
+                    args.into_iter()
+                        .map(|arg| format!("{}.to_string()", crate::emit::emit_expr(&arg)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            ],
+        };
+    };
+    let rust_format = java_format_to_rust_format(&java_format);
+    let mut rendered_args = vec![RustExpr::Literal(format!("{rust_format:?}"))];
+    rendered_args.extend(args);
+    RustExpr::Raw(format!(
+        "format!({})",
+        rendered_args
+            .iter()
+            .map(crate::emit::emit_expr)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+fn string_literal_source(expr: &RustExpr) -> Option<String> {
+    let raw = crate::emit::emit_expr(expr);
+    let raw = raw.strip_suffix(".to_string()").unwrap_or(&raw);
+    if !(raw.starts_with('"') && raw.ends_with('"')) {
+        return None;
+    }
+    Some(raw[1..raw.len() - 1].to_string())
+}
+
+fn java_format_to_rust_format(format: &str) -> String {
+    let mut out = String::new();
+    let mut chars = format.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            out.push(ch);
+            continue;
+        }
+        if matches!(chars.peek(), Some('%')) {
+            chars.next();
+            out.push('%');
+            continue;
+        }
+
+        let mut spec = String::new();
+        while let Some(next) = chars.peek().copied() {
+            if next.is_ascii_alphabetic() {
+                chars.next();
+                match next {
+                    's' | 'd' | 'b' | 'c' => out.push_str("{}"),
+                    'f' => out.push_str(&rust_float_format(&spec)),
+                    _ => out.push_str("{}"),
+                }
+                break;
+            }
+            spec.push(next);
+            chars.next();
+        }
+    }
+    out
+}
+
+fn rust_float_format(spec: &str) -> String {
+    if let Some(dot) = spec.find('.') {
+        let width = spec[..dot]
+            .chars()
+            .filter(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        let precision = spec[dot + 1..]
+            .chars()
+            .filter(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        return match (width.is_empty(), precision.is_empty()) {
+            (true, true) => "{}".to_string(),
+            (true, false) => format!("{{:.{precision}}}"),
+            (false, true) => format!("{{:{width}}}"),
+            (false, false) => format!("{{:{width}.{precision}}}"),
+        };
+    }
+    let width = spec
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if width.is_empty() {
+        "{}".to_string()
+    } else {
+        format!("{{:{width}}}")
+    }
+}
+
+fn apply_native_collection_static_method(
+    method: NativeCollectionStaticMethod,
+    args: Vec<RustExpr>,
+) -> RustExpr {
+    match method {
+        NativeCollectionStaticMethod::ArraysAsList => RustExpr::Raw(format!(
+            "vec![{}]",
+            args.iter()
+                .map(crate::emit::emit_expr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+pub fn apply_collection_remove_if(receiver: RustExpr, predicate: &Expr) -> Option<RustExpr> {
+    let Expr::Lambda { params, body } = predicate else {
+        return None;
+    };
+    let param = &params.first()?.name;
+    let LambdaBody::Expr(body) = body else {
+        return None;
+    };
+    let predicate = emit_stream_lambda_body(body, param, StreamLambdaValue::BorrowedItem)?;
+    Some(RustExpr::Raw(format!(
+        "{}.retain(|{}| !({}))",
+        crate::emit::emit_expr(&receiver),
+        param,
+        predicate
+    )))
+}
+
+fn apply_native_collection_method(
+    receiver: RustExpr,
+    method: NativeCollectionMethod,
+    args: Vec<RustExpr>,
+) -> RustExpr {
+    if matches!(method, NativeCollectionMethod::Len) {
+        return RustExpr::Raw(format!(
+            "{}.len() as i32",
+            crate::emit::emit_expr(&receiver)
+        ));
+    }
+    if matches!(method, NativeCollectionMethod::MapKeys) {
+        return RustExpr::Raw(format!(
+            "{}.keys().cloned().collect::<Vec<_>>()",
+            crate::emit::emit_expr(&receiver)
+        ));
+    }
+    let rust_name = match method {
+        NativeCollectionMethod::Len => "len",
+        NativeCollectionMethod::IsEmpty => "is_empty",
+        NativeCollectionMethod::ListPush => "push",
+        NativeCollectionMethod::ListGet => "get",
+        NativeCollectionMethod::SetInsert => "insert",
+        NativeCollectionMethod::Extend => "extend",
+        NativeCollectionMethod::MapInsert => "insert",
+        NativeCollectionMethod::MapGet => "get",
+        NativeCollectionMethod::MapContainsKey => "contains_key",
+        NativeCollectionMethod::MapKeys => unreachable!("MapKeys is rendered as an owned key view"),
+        NativeCollectionMethod::MapIter => "iter",
+    };
+    RustExpr::MethodCall {
+        receiver: Box::new(receiver),
+        method: rust_name.to_string(),
+        args,
+    }
+}
+
+pub fn apply_native_collection_extend(receiver: RustExpr, arg: RustExpr) -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(receiver),
+        method: "extend".to_string(),
+        args: vec![arg],
+    }
+}
+
+pub fn borrowed_sequence_extend_arg(
+    arg: RustExpr,
+    element_shape: &RustSlotShape,
+    facts: &FactSet,
+) -> RustExpr {
+    let arg = emit::emit_expr(&arg);
+    match borrowed_element_recovery_policy(element_shape, facts) {
+        BorrowedElementRecoveryPolicy::StringViewToOwned => {
+            RustExpr::Raw(format!("{arg}.iter().map(|v| v.to_string())"))
+        }
+        BorrowedElementRecoveryPolicy::CopyElements => {
+            RustExpr::Raw(format!("{arg}.iter().copied()"))
+        }
+        BorrowedElementRecoveryPolicy::CloneElements { .. } => {
+            RustExpr::Raw(format!("{arg}.iter().cloned()"))
+        }
+        BorrowedElementRecoveryPolicy::Unsupported { .. } => RustExpr::Raw(format!(
+            "{arg}.iter().cloned() /* java2rust: unsupported borrowed element recovery for extend */"
+        )),
+    }
+}
+
+pub fn apply_class_literal_token(ty: &JavaType, facts: &FactSet) -> RustExpr {
+    let plan = crate::stdlib::class_literal_token_plan(ty, facts);
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw(format!(
+            "JavaClass::<{}>::literal",
+            plan.rust_type
+        ))),
+        args: vec![RustExpr::Literal(format!("{:?}", plan.java_name))],
+    }
+}
+
+pub fn apply_new_target(target: &NewTargetPlan, args: Vec<RustExpr>) -> RustExpr {
     apply_new_target_with_facts(target, args, &FactSet::default())
 }
 
 pub fn apply_new_target_with_facts(
-    target: &NewTargetPlan<'_>,
+    target: &NewTargetPlan,
     args: Vec<RustExpr>,
     facts: &FactSet,
 ) -> RustExpr {
+    if let Some(native_collection) = target.native_collection {
+        return apply_native_collection_new_target(target, native_collection, args, facts);
+    }
     if let Some(external_crate) = &target.external_crate {
         return RustExpr::Call {
             function: Box::new(RustExpr::Raw(format!(
@@ -72,12 +462,72 @@ pub fn apply_new_target_with_facts(
             args,
         };
     }
+    let owner_type =
+        crate::emit::emit_type(&rust_type_for_slot_with_facts(&target.owner_shape, facts));
+    if owner_type == "Box<dyn std::any::Any>" {
+        return erased_object_new_expr(args);
+    }
     RustExpr::Call {
         function: Box::new(RustExpr::Raw(format!(
             "{}::{}",
-            crate::emit::emit_type(&rust_type_for_slot_with_facts(&target.owner_shape, facts)),
-            target.rust_name
+            owner_type, target.rust_name
         ))),
         args,
+    }
+}
+
+fn erased_object_new_expr(args: Vec<RustExpr>) -> RustExpr {
+    let value = match args.as_slice() {
+        [] => "()".to_string(),
+        [single] => crate::emit::emit_expr(single),
+        _ => format!(
+            "({})",
+            args.iter()
+                .map(crate::emit::emit_expr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    RustExpr::Raw(format!("Box::new({value}) as Box<dyn std::any::Any>"))
+}
+
+fn apply_native_collection_new_target(
+    _target: &NewTargetPlan,
+    native_collection: NativeCollectionNewTarget,
+    mut args: Vec<RustExpr>,
+    _facts: &FactSet,
+) -> RustExpr {
+    match native_collection {
+        NativeCollectionNewTarget::Empty { kind } => RustExpr::Call {
+            function: Box::new(RustExpr::Raw(format!(
+                "{}::new",
+                native_collection_type_name(kind)
+            ))),
+            args: Vec::new(),
+        },
+        NativeCollectionNewTarget::WithCapacity { kind } => {
+            let capacity = args
+                .pop()
+                .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
+            RustExpr::Raw(format!(
+                "{}::with_capacity({} as usize)",
+                native_collection_type_name(kind),
+                emit::emit_expr(&capacity)
+            ))
+        }
+        NativeCollectionNewTarget::FromSource { kind } => args.pop().unwrap_or_else(|| {
+            RustExpr::Raw(format!("{}::new()", native_collection_type_name(kind)))
+        }),
+        NativeCollectionNewTarget::FromSingleArg { kind } => args.pop().unwrap_or_else(|| {
+            RustExpr::Raw(format!("{}::new()", native_collection_type_name(kind)))
+        }),
+    }
+}
+
+fn native_collection_type_name(kind: crate::stdlib::JavaCollectionKind) -> &'static str {
+    match kind {
+        crate::stdlib::JavaCollectionKind::List => "Vec",
+        crate::stdlib::JavaCollectionKind::Set => "std::collections::HashSet",
+        crate::stdlib::JavaCollectionKind::Map => "std::collections::HashMap",
     }
 }

@@ -1,17 +1,23 @@
 use std::collections::{BTreeSet, HashMap};
 
+use crate::dependency_mode::DependencyMode;
 use crate::effective_facts::EffectiveFacts;
-use crate::facts::{FactProvenance, FactSet, HierarchyEdgeFact};
+use crate::facts::{
+    FactProvenance, FactSet, HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy,
+};
 use crate::java_ir::{Block, Expr, JavaType, LambdaBody, Member, Program, Stmt, TypeDecl};
 pub use crate::object_model::{
-    ClosedEnumFactPolicy, ClosedEnumInferencePolicy, HierarchyEdgeDiagnosticOutcome,
-    HierarchyEdgeDiagnosticPolicy, HierarchyOverrideApplicationPolicy,
-    HierarchyOverrideRepresentationPolicy, HierarchyOverrideValidationPolicy,
-    ObjectHierarchyContext, ObjectHierarchyEdge, ObjectHierarchyEdgeDiagnosticInput,
-    ObjectHierarchyEdgeKind, ObjectModelInput, ObjectRepresentation, ObjectRepresentationPolicy,
-    ObjectRepresentationRequest, ObjectSafetyFactPolicy, ObjectSafetyPolicy,
-    RepresentationDiagnostic, RepresentationLookupFallback, RepresentationLookupPolicy,
-    closed_enum_fact_policy, closed_enum_inference_policy, hierarchy_override_application_policy,
+    BoxedDynObjectRepresentationInvariant, BoxedDynObjectRepresentationPolicy,
+    ClosedEnumFactPolicy, ClosedEnumInferencePolicy, ClosedEnumProof, ClosedEnumProofPolicy,
+    HierarchyEdgeDiagnosticOutcome, HierarchyEdgeDiagnosticPolicy,
+    HierarchyOverrideApplicationPolicy, HierarchyOverrideRepresentationPolicy,
+    HierarchyOverrideValidationPolicy, ObjectHierarchyContext, ObjectHierarchyEdge,
+    ObjectHierarchyEdgeDiagnosticInput, ObjectHierarchyEdgeKind, ObjectModelInput,
+    ObjectRepresentation, ObjectRepresentationPolicy, ObjectRepresentationRequest,
+    ObjectSafetyFactPolicy, ObjectSafetyPolicy, RepresentationDiagnostic,
+    RepresentationLookupFallback, RepresentationLookupPolicy,
+    boxed_dyn_object_representation_policy, closed_enum_fact_policy, closed_enum_inference_policy,
+    closed_enum_proof_policy, hierarchy_override_application_policy,
     hierarchy_override_representation_policy, hierarchy_override_validation_policy,
     object_hierarchy_edge_diagnostic_policy, object_hierarchy_edge_representation_policy,
     object_representation_is_user_closed_enum, object_representation_lookup_policy,
@@ -60,6 +66,12 @@ pub struct RepresentationHierarchyFactPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnonymousClassDiagnosticPolicy {
     pub diagnostics: Vec<RepresentationDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSummarySuperclassBoundaryPolicy {
+    pub boundary_types: Vec<String>,
+    pub facts: Vec<HierarchyOverride>,
 }
 
 pub fn plan_representations(program: &Program, facts: &FactSet) -> RepresentationPlan {
@@ -124,6 +136,22 @@ impl RepresentationPlan {
 
     pub fn dispatch_for(&self, java_ty: &JavaType) -> DispatchShape {
         representation_dispatch_policy(self.representation_for(java_ty)).dispatch
+    }
+
+    pub fn java_enum_variant_for_label(&self, type_name: &str, label_name: &str) -> Option<String> {
+        let representation = self.type_representation(type_name)?;
+        let ObjectRepresentation::JavaEnum {
+            enum_name,
+            variants,
+        } = &representation.representation
+        else {
+            return None;
+        };
+        let variant = crate::object_model::rust_enum_variant_name_from_parsed_constant(label_name);
+        variants
+            .iter()
+            .any(|known| known == &variant)
+            .then(|| format!("{enum_name}::{variant}"))
     }
 
     pub fn diagnostics_for_program(&self, program: &Program) -> Vec<RepresentationDiagnostic> {
@@ -214,7 +242,8 @@ pub fn representation_dispatch_policy(
         ObjectRepresentation::DynTrait { trait_name } => DispatchShape::DynTrait {
             trait_name: trait_name.clone(),
         },
-        ObjectRepresentation::ClosedEnum { enum_name, .. } => DispatchShape::ClosedEnum {
+        ObjectRepresentation::JavaEnum { enum_name, .. }
+        | ObjectRepresentation::ClosedEnum { enum_name, .. } => DispatchShape::ClosedEnum {
             enum_name: enum_name.clone(),
         },
         ObjectRepresentation::ErasedObject => DispatchShape::ErasedObject,
@@ -234,6 +263,114 @@ pub fn hierarchy_edge_diagnostic_policy(
 
 pub fn anonymous_class_diagnostic_policy(program: &Program) -> AnonymousClassDiagnosticPolicy {
     anonymous_class_diagnostic_policy_with_plan(program, None)
+}
+
+pub fn extend_representation_facts_for_source_summary_superclass_boundaries<'a>(
+    emitted_programs: impl IntoIterator<Item = &'a Program>,
+    source_type_modes: &HashMap<String, DependencyMode>,
+    facts: &mut FactSet,
+) -> SourceSummarySuperclassBoundaryPolicy {
+    let policy =
+        source_summary_superclass_boundary_policy(emitted_programs, source_type_modes, facts);
+    facts
+        .hierarchy_overrides
+        .extend(policy.facts.iter().cloned());
+    policy
+}
+
+pub fn source_summary_superclass_boundary_policy<'a>(
+    emitted_programs: impl IntoIterator<Item = &'a Program>,
+    source_type_modes: &HashMap<String, DependencyMode>,
+    facts: &FactSet,
+) -> SourceSummarySuperclassBoundaryPolicy {
+    let mut boundary_types = BTreeSet::new();
+    for program in emitted_programs {
+        for ty in &program.types {
+            collect_source_summary_superclasses_for_type(
+                ty,
+                source_type_modes,
+                &mut boundary_types,
+            );
+        }
+    }
+    let facts = boundary_types
+        .iter()
+        .filter(|type_name| {
+            !facts
+                .hierarchy_overrides
+                .iter()
+                .any(|existing| existing.type_name == **type_name)
+        })
+        .map(|type_name| HierarchyOverride {
+            type_name: type_name.clone(),
+            strategy: HierarchyStrategy::ErasedObject,
+            provenance: FactProvenance::CorpusAnalysis,
+        })
+        .collect::<Vec<_>>();
+    SourceSummarySuperclassBoundaryPolicy {
+        boundary_types: boundary_types.into_iter().collect(),
+        facts,
+    }
+}
+
+fn collect_source_summary_superclasses_for_type(
+    ty: &TypeDecl,
+    source_type_modes: &HashMap<String, DependencyMode>,
+    boundary_types: &mut BTreeSet<String>,
+) {
+    if let Some(super_name) = ty.extends.as_deref() {
+        if let Some(boundary_name) =
+            source_type_name_with_mode(super_name, source_type_modes, DependencyMode::SourceSummary)
+        {
+            boundary_types.insert(boundary_name);
+        }
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_source_summary_superclasses_for_type(nested, source_type_modes, boundary_types);
+        }
+    }
+}
+
+fn source_type_name_with_mode(
+    type_name: &str,
+    source_type_modes: &HashMap<String, DependencyMode>,
+    mode: DependencyMode,
+) -> Option<String> {
+    hierarchy_type_name_lookup_aliases(type_name)
+        .into_iter()
+        .find(|alias| source_type_modes.get(alias) == Some(&mode))
+}
+
+fn hierarchy_type_name_lookup_aliases(type_name: &str) -> Vec<String> {
+    let raw_name = type_name
+        .split_once('<')
+        .map(|(raw, _)| raw)
+        .unwrap_or(type_name)
+        .trim();
+    let parsed = crate::parser::parse_hierarchy_type(type_name);
+    let mut aliases = Vec::new();
+    push_unique_alias(&mut aliases, type_name.trim());
+    push_unique_alias(&mut aliases, raw_name);
+    if let JavaType::Named { name, .. } = parsed {
+        push_unique_alias(&mut aliases, &name);
+        push_unique_alias(&mut aliases, &crate::parser::to_snake_case(&name));
+    }
+    push_unique_alias(
+        &mut aliases,
+        &crate::parser::to_snake_case(type_name.trim()),
+    );
+    push_unique_alias(&mut aliases, &crate::parser::to_snake_case(raw_name));
+    aliases
+}
+
+fn push_unique_alias(aliases: &mut Vec<String>, alias: &str) {
+    if alias.is_empty() {
+        return;
+    }
+    if !aliases.iter().any(|existing| existing == alias) {
+        aliases.push(alias.to_string());
+    }
 }
 
 fn anonymous_class_diagnostic_policy_with_plan(
@@ -403,7 +540,21 @@ fn collect_anonymous_class_diagnostics_for_expr(
             collect_anonymous_class_diagnostics_for_expr(array, plan, diagnostics);
             collect_anonymous_class_diagnostics_for_expr(index, plan, diagnostics);
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
             }
@@ -693,7 +844,21 @@ fn collect_anonymous_erased_boundary_type_names_for_expr(
             collect_anonymous_erased_boundary_type_names_for_expr(array, facts, type_names);
             collect_anonymous_erased_boundary_type_names_for_expr(index, facts, type_names);
         }
-        Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_anonymous_erased_boundary_type_names_for_expr(expr, facts, type_names);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_anonymous_erased_boundary_type_names_for_expr(expr, facts, type_names);
+                }
+            }
+        }
+        Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
                 collect_anonymous_erased_boundary_type_names_for_expr(expr, facts, type_names);
             }

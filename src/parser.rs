@@ -344,10 +344,16 @@ fn qualify_java_sql_expr(expr: &mut Expr, imported: &JavaSqlImports) {
         Expr::ArrayCreation {
             element_type,
             dimensions,
+            initializer,
         } => {
             qualify_java_sql_type(element_type, imported);
             for dimension in dimensions {
                 qualify_java_sql_expr(dimension, imported);
+            }
+            if let Some(initializer) = initializer {
+                for element in initializer {
+                    qualify_java_sql_expr(element, imported);
+                }
             }
         }
         Expr::ArrayInitializer(elements) => {
@@ -939,7 +945,7 @@ fn parse_field_decl(node: tree_sitter::Node, source: &str) -> Vec<Member> {
                 .child_by_field_name("value")
                 .map(|value| parse_expr_node(value, source));
             Some(Member::Field(FieldDecl {
-                name: to_snake_case(&name),
+                name: field_decl_name(&name, &modifiers),
                 ty: ty.clone(),
                 modifiers: modifiers.clone(),
                 initializer,
@@ -947,6 +953,23 @@ fn parse_field_decl(node: tree_sitter::Node, source: &str) -> Vec<Member> {
             }))
         })
         .collect()
+}
+
+fn field_decl_name(name: &str, modifiers: &[Modifier]) -> String {
+    if modifiers.contains(&Modifier::Static)
+        && modifiers.contains(&Modifier::Final)
+        && is_java_constant_name(name)
+    {
+        name.to_string()
+    } else {
+        to_snake_case(name)
+    }
+}
+
+fn is_java_constant_name(name: &str) -> bool {
+    name.chars()
+        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+        && name.chars().any(|ch| ch.is_ascii_uppercase())
 }
 
 fn parse_constructor_decl(
@@ -1780,6 +1803,10 @@ fn parse_array_creation_expr(node: tree_sitter::Node, source: &str) -> Expr {
         .child_by_field_name("type")
         .map(|node| parse_type_node(node, source))
         .unwrap_or_else(|| JavaType::Unknown("array".to_string()));
+    let initializer = named_children(node)
+        .into_iter()
+        .find(|child| child.kind() == "array_initializer")
+        .map(|initializer| parse_array_initializer_elements(initializer, source));
     let dimensions = named_children(node)
         .into_iter()
         .filter(|child| child.kind() == "dimensions_expr")
@@ -1790,6 +1817,7 @@ fn parse_array_creation_expr(node: tree_sitter::Node, source: &str) -> Expr {
     Expr::ArrayCreation {
         element_type,
         dimensions,
+        initializer,
     }
 }
 
@@ -2028,12 +2056,7 @@ fn parse_type_text(src: &str) -> JavaType {
                 {
                     return parse_type_text(inner_suffix.trim());
                 }
-                let name = src[..open]
-                    .trim()
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
+                let name = java_type_name_suffix(src[..open].trim());
                 let inner = src[open + 1..src.rfind('>').unwrap_or(src.len())].trim();
                 return JavaType::Named {
                     name,
@@ -2044,10 +2067,31 @@ fn parse_type_text(src: &str) -> JavaType {
                 };
             }
             JavaType::Named {
-                name: src.rsplit('.').next().unwrap_or(src).to_string(),
+                name: java_type_name_suffix(src),
                 args: Vec::new(),
             }
         }
+    }
+}
+
+fn java_type_name_suffix(src: &str) -> String {
+    let mut suffix = Vec::new();
+    for part in src.split('.') {
+        let part = part.trim();
+        if part
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            suffix.push(part);
+        } else if !suffix.is_empty() {
+            suffix.push(part);
+        }
+    }
+    if suffix.is_empty() {
+        src.rsplit('.').next().unwrap_or(src).trim().to_string()
+    } else {
+        suffix.join(".")
     }
 }
 

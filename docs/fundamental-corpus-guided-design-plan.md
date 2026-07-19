@@ -28,6 +28,19 @@ Every benchmark-derived improvement must land in the owning layer:
 Lowering should not learn Java semantics from method names, class names, or the
 current benchmark corpus.
 
+## Transformation Rule Contract
+
+When corpus pressure turns into a transformation rule, document the rule using
+`docs/transformation-rule-contract.md`. The rule must begin with **Ideal Rust
+Target** before **Implementation Rule**.
+
+The ideal target describes the Rust code we would choose by hand once semantic
+facts are known: type shape, API shape, control-flow shape, ownership,
+borrowing, nullability, mutability, dispatch, conversion, error handling,
+collection behavior, and external-boundary behavior where relevant. The
+implementation rule is only the second step: it states which facts, plans, and
+fallbacks select or reject that target.
+
 ## Why GATK For Now
 
 GATK is the current pressure corpus because it contains realistic stressors:

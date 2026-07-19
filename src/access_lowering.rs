@@ -5,13 +5,18 @@ use crate::rust_ir::RustExpr;
 use crate::types::TypeEnv;
 
 pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
-    if env.local_type(name).is_none() && env.field_type(name).is_some() {
-        RustExpr::Field(
-            Box::new(RustExpr::Var("self".to_string())),
-            name.to_string(),
-        )
+    RustExpr::Raw(render_bare_name(name, env))
+}
+
+pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
+    if env.local_type(name).is_none()
+        && let Some(static_name) = env.static_field_access_name(name)
+    {
+        format!("Self::{static_name}")
+    } else if env.local_type(name).is_none() && env.field_type(name).is_some() {
+        format!("self.{}", crate::parser::to_snake_case(name))
     } else {
-        RustExpr::Var(name.to_string())
+        crate::parser::to_snake_case(name)
     }
 }
 
@@ -29,10 +34,16 @@ pub fn lower_field_access(
 }
 
 fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> RustExpr {
-    match plan.op {
+    match &plan.op {
         MemberAccessOp::LenAsI32 => RustExpr::Raw(format!(
             "{}.len() as i32",
             crate::emit::emit_expr(&receiver)
         )),
+        MemberAccessOp::StaticConstant { owner } => {
+            RustExpr::Raw(format!("{owner}::{}", plan.member))
+        }
+        MemberAccessOp::RustField { rust_name } => {
+            RustExpr::Field(Box::new(receiver), rust_name.clone())
+        }
     }
 }

@@ -88,7 +88,11 @@ pub fn project_java_value_shape(
         return value_shape_for_java_type(representations, java_ty);
     }
     let mut shape = RustSlotShape::conservative(java_ty);
-    if matches!(shape.java_ty, JavaType::Unknown(_) | JavaType::Wildcard(_)) {
+    if matches!(
+        &shape.java_ty,
+        JavaType::Named { name, .. } if name == "Object"
+    ) || matches!(shape.java_ty, JavaType::Unknown(_) | JavaType::Wildcard(_))
+    {
         apply_dispatch_projection(&mut shape, DispatchShape::ErasedObject);
     }
     shape
@@ -98,6 +102,10 @@ pub fn borrowed_string_content_shape() -> RustSlotShape {
     let mut shape = RustSlotShape::conservative(JavaType::String);
     apply_borrowed_string_content_projection(&mut shape);
     shape
+}
+
+pub fn owned_string_value_shape() -> RustSlotShape {
+    RustSlotShape::conservative(JavaType::String)
 }
 
 pub fn apply_borrowed_string_content_projection(shape: &mut RustSlotShape) {

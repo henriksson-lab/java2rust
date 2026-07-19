@@ -3,13 +3,14 @@ use std::collections::{HashMap, HashSet};
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
     Capture, CaptureFacts, CaptureOrigin, CaptureOwner, CaptureOwnerKind, CaptureSource,
-    ClosedHierarchyFact, FactProvenance, FactSet, NodeId, ObjectSafetyFact, ObjectSafetyViolation,
-    TypeCapabilityOverride, UnresolvedTargetFact, UnresolvedTargetKind,
+    ClosedHierarchyFact, ExternalFieldFact, FactProvenance, FactSet, FieldKey, NodeId,
+    ObjectSafetyFact, ObjectSafetyViolation, SealedPermitsFact, TypeCapabilityOverride,
+    UnresolvedTargetFact, UnresolvedTargetKind,
 };
 use crate::java_ir::{
-    Block, CallKind, ConstructorDecl, ConstructorInvocationKind, Expr, JavaType, LambdaBody,
-    Member, MethodDecl, Modifier, Param, Program, ResolvedCall, ResolvedConstructor, Stmt,
-    TypeDecl, TypeKind, WildcardBound,
+    Block, CallKind, ConstructorDecl, ConstructorInvocationKind, Expr, JavaCoercionEvidence,
+    JavaCoercionKind, JavaType, LambdaBody, Member, MethodDecl, Modifier, Param, Program,
+    ResolvedCall, ResolvedConstructor, Stmt, TypeDecl, TypeKind, WildcardBound,
 };
 use crate::types::{TypeEnv, infer_expr_type};
 
@@ -23,6 +24,77 @@ pub struct ResolvedProgram {
 #[derive(Debug, Clone)]
 pub struct SourceSymbols {
     symbols: ProgramSymbols,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverloadApplicabilityMode {
+    FixedArity,
+    VariableArity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverloadArgumentConversion {
+    Exact,
+    PrimitiveWidening,
+    Boxing,
+    Unboxing,
+    BoxingWidening,
+    ReferenceWidening,
+    GenericInference,
+    NullToReference,
+    LambdaToFunctionalInterface,
+    MethodReferenceToFunctionalInterface,
+    UnknownFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverloadRejectionReason {
+    ArityMismatch {
+        expected: usize,
+        actual: usize,
+        varargs: bool,
+    },
+    MissingVarargsArrayParam,
+    ArgumentTypeMismatch {
+        arg_index: usize,
+        actual: JavaType,
+        target: JavaType,
+    },
+    NullToPrimitive {
+        arg_index: usize,
+        target: JavaType,
+    },
+    LambdaTargetNotFunctionalInterface {
+        arg_index: usize,
+        target: JavaType,
+    },
+    MethodReferenceTargetNotFunctionalInterface {
+        arg_index: usize,
+        target: JavaType,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverloadArgumentApplicability {
+    pub arg_index: usize,
+    pub actual: JavaType,
+    pub target: JavaType,
+    pub conversion: OverloadArgumentConversion,
+    pub score: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverloadApplicabilityReport {
+    pub mode: Option<OverloadApplicabilityMode>,
+    pub score: Option<u32>,
+    pub arguments: Vec<OverloadArgumentApplicability>,
+    pub rejections: Vec<OverloadRejectionReason>,
+}
+
+impl OverloadApplicabilityReport {
+    pub fn is_applicable(&self) -> bool {
+        self.score.is_some() && self.rejections.is_empty()
+    }
 }
 
 pub fn resolve_program(program: &Program, diagnostics: DiagnosticBag) -> ResolvedProgram {
@@ -111,6 +183,7 @@ pub fn resolve_program_with_source_symbols_and_facts(
 pub fn declaration_facts_from_program(program: &Program) -> FactSet {
     let mut facts = FactSet::default();
     collect_type_capability_facts(program, &mut facts);
+    collect_field_declaration_facts(program, &mut facts);
     facts
 }
 
@@ -591,7 +664,21 @@ impl ProgramSymbols {
                 self.collect_local_types_from_expr(array, enclosing_type);
                 self.collect_local_types_from_expr(index, enclosing_type);
             }
-            Expr::ArrayCreation { dimensions, .. } | Expr::ArrayInitializer(dimensions) => {
+            Expr::ArrayCreation {
+                dimensions,
+                initializer,
+                ..
+            } => {
+                for expr in dimensions {
+                    self.collect_local_types_from_expr(expr, enclosing_type);
+                }
+                if let Some(initializer) = initializer {
+                    for expr in initializer {
+                        self.collect_local_types_from_expr(expr, enclosing_type);
+                    }
+                }
+            }
+            Expr::ArrayInitializer(dimensions) => {
                 for expr in dimensions {
                     self.collect_local_types_from_expr(expr, enclosing_type);
                 }
@@ -662,29 +749,76 @@ impl ProgramSymbols {
     fn methods_for_hierarchy(&self, type_name: &str) -> Vec<MethodSymbol> {
         let mut out = Vec::new();
         let mut seen_signatures = HashSet::new();
-        let mut current = Some(self.source_type_name(type_name).to_string());
-        let mut substitutions = HashMap::new();
         let mut visited = HashSet::new();
-        while let Some(type_name) = current.as_deref() {
-            if !visited.insert(type_name.to_string()) {
-                break;
-            }
-            if let Some(methods) = self.methods_by_type.get(type_name) {
-                for method in methods {
-                    let substituted = substitute_method_symbol(method, &substitutions);
-                    if seen_signatures.insert(method_signature_key(&substituted)) {
-                        out.push(substituted);
-                    }
+        self.collect_methods_for_hierarchy(
+            self.source_type_name(type_name),
+            &HashMap::new(),
+            &mut visited,
+            &mut seen_signatures,
+            &mut out,
+        );
+        out
+    }
+
+    fn collect_methods_for_hierarchy(
+        &self,
+        type_name: &str,
+        substitutions: &HashMap<String, JavaType>,
+        visited: &mut HashSet<String>,
+        seen_signatures: &mut HashSet<String>,
+        out: &mut Vec<MethodSymbol>,
+    ) {
+        let type_name = self.source_type_name(type_name).to_string();
+        let visit_key = format!("{type_name}::{substitutions:?}");
+        if !visited.insert(visit_key) {
+            return;
+        }
+        if let Some(methods) = self.methods_by_type.get(&type_name) {
+            for method in methods {
+                let substituted = substitute_method_symbol(method, substitutions);
+                if seen_signatures.insert(method_signature_key(&substituted)) {
+                    out.push(substituted);
                 }
             }
-            current = self
-                .extends_type_by_type
-                .get(type_name)
-                .and_then(|super_type| {
-                    extend_supertype_substitutions(self, type_name, super_type, &mut substitutions)
-                });
         }
-        out
+
+        if let Some(super_type) = self.extends_type_by_type.get(&type_name) {
+            let mut super_substitutions = substitutions.clone();
+            if let Some(super_name) = extend_supertype_substitutions(
+                self,
+                &type_name,
+                super_type,
+                &mut super_substitutions,
+            ) {
+                self.collect_methods_for_hierarchy(
+                    &super_name,
+                    &super_substitutions,
+                    visited,
+                    seen_signatures,
+                    out,
+                );
+            }
+        }
+
+        if let Some(interfaces) = self.implements_type_by_type.get(&type_name) {
+            for interface_type in interfaces {
+                let mut interface_substitutions = substitutions.clone();
+                if let Some(interface_name) = extend_supertype_substitutions(
+                    self,
+                    &type_name,
+                    interface_type,
+                    &mut interface_substitutions,
+                ) {
+                    self.collect_methods_for_hierarchy(
+                        &interface_name,
+                        &interface_substitutions,
+                        visited,
+                        seen_signatures,
+                        out,
+                    );
+                }
+            }
+        }
     }
 
     fn methods_for_unqualified_call(&self, type_name: &str) -> Vec<MethodSymbol> {
@@ -1129,9 +1263,13 @@ fn extend_supertype_substitutions(
         .get(&super_name)
         .and_then(|_| symbols.type_params_for(&super_name))
     {
-        for (param, arg) in super_params.iter().zip(args) {
+        let super_bounds = symbols.type_param_bounds_for(&super_name).unwrap_or(&[]);
+        for (index, (param, arg)) in super_params.iter().zip(args).enumerate() {
             let substituted_arg = substitute_method_type_variables(arg, substitutions);
-            substitutions.insert(param.clone(), substituted_arg);
+            substitutions.insert(
+                param.clone(),
+                wildcard_actual_or_declared_bound(&substituted_arg, super_bounds.get(index)),
+            );
         }
     }
     Some(super_name)
@@ -1269,6 +1407,7 @@ fn resolve_stmt_calls(
     match stmt {
         Stmt::VarDecl {
             initializer: Some(expr),
+            ty,
             ..
         } => {
             resolve_expr_calls(
@@ -1282,6 +1421,7 @@ fn resolve_stmt_calls(
                 external_facts,
                 enclosing_member,
             );
+            apply_target_type_to_constructor_expr(expr, ty, symbols);
         }
         Stmt::VarDecl { .. } => {}
         Stmt::Assign { target, value } => {
@@ -1683,6 +1823,109 @@ fn resolve_stmt_calls(
     }
 }
 
+fn apply_target_type_to_constructor_expr(
+    expr: &mut Expr,
+    target_ty: &JavaType,
+    symbols: &ProgramSymbols,
+) {
+    let Expr::New {
+        ty,
+        args,
+        resolved: Some(resolved),
+        ..
+    } = expr
+    else {
+        return;
+    };
+    resolved.constructed_type =
+        inferred_constructed_type(ty, Some(target_ty), &resolved.declaring_type, symbols);
+    resolved.params = constructor_params_for_constructed_type(resolved, symbols);
+    apply_constructor_param_targets(args, resolved, symbols);
+}
+
+fn apply_constructor_param_targets(
+    args: &mut [Expr],
+    constructor: &ResolvedConstructor,
+    symbols: &ProgramSymbols,
+) {
+    for (arg, param) in args.iter_mut().zip(&constructor.params) {
+        apply_target_type_to_constructor_expr(arg, &param.ty, symbols);
+    }
+}
+
+fn constructor_params_for_constructed_type(
+    constructor: &ResolvedConstructor,
+    symbols: &ProgramSymbols,
+) -> Vec<Param> {
+    let JavaType::Named { name, args } = &constructor.constructed_type else {
+        return constructor.params.clone();
+    };
+    let Some(type_params) = symbols.type_params_for(name) else {
+        return constructor.params.clone();
+    };
+    let substitutions = type_params
+        .iter()
+        .zip(args)
+        .map(|(param, arg)| (param.clone(), arg.clone()))
+        .collect::<HashMap<_, _>>();
+    constructor
+        .params
+        .iter()
+        .map(|param| Param {
+            name: param.name.clone(),
+            ty: substitute_method_type_variables(&param.ty, &substitutions),
+            is_varargs: param.is_varargs,
+        })
+        .collect()
+}
+
+fn inferred_constructed_type(
+    parsed_ty: &JavaType,
+    target_ty: Option<&JavaType>,
+    declaring_type: &str,
+    symbols: &ProgramSymbols,
+) -> JavaType {
+    let JavaType::Named { name, args } = parsed_ty else {
+        return parsed_ty.clone();
+    };
+    if !args.is_empty() {
+        return parsed_ty.clone();
+    }
+    let Some(JavaType::Named {
+        name: target_name,
+        args: target_args,
+    }) = target_ty
+    else {
+        return JavaType::Named {
+            name: declaring_type.to_string(),
+            args: Vec::new(),
+        };
+    };
+    if target_args.is_empty() {
+        return JavaType::Named {
+            name: declaring_type.to_string(),
+            args: Vec::new(),
+        };
+    }
+    let source_name = symbols.source_type_name(name);
+    let source_target = symbols.source_type_name(target_name);
+    if source_name == source_target
+        || crate::stdlib::is_known_java_subtype(source_name, source_target)
+        || symbols
+            .source_subtype_distance(source_name, source_target)
+            .is_some()
+    {
+        return JavaType::Named {
+            name: declaring_type.to_string(),
+            args: target_args.clone(),
+        };
+    }
+    JavaType::Named {
+        name: declaring_type.to_string(),
+        args: Vec::new(),
+    }
+}
+
 fn resolve_expr_calls(
     expr: &mut Expr,
     current_type: &str,
@@ -2042,7 +2285,16 @@ fn resolve_expr_calls(
                     resolve_same_class_constructor(&arg_types, &constructor_candidates, symbols)
                 };
                 match selection {
-                    Ok(Some(constructor)) => *resolved = Some(constructor),
+                    Ok(Some(mut constructor)) => {
+                        constructor.constructed_type = inferred_constructed_type(
+                            ty,
+                            None,
+                            &constructor.declaring_type,
+                            symbols,
+                        );
+                        apply_constructor_param_targets(args, &constructor, symbols);
+                        *resolved = Some(constructor);
+                    }
                     Ok(None) => facts.unresolved_target_facts.push(UnresolvedTargetFact {
                         enclosing_type: current_type.to_string(),
                         enclosing_member: enclosing_member.map(str::to_string),
@@ -2155,7 +2407,7 @@ fn should_defer_stream_lambda_arg_resolution(
     name: &str,
     args: &[Expr],
 ) -> bool {
-    if !is_stream_lambda_mapper_name(name) || args.len() != 1 {
+    if !is_stream_lambda_arg_name(name) || args.len() != 1 {
         return false;
     }
     matches!(
@@ -2181,7 +2433,7 @@ fn resolve_stream_map_lambda_arg(
     external_facts: &FactSet,
     enclosing_member: Option<&str>,
 ) {
-    if !is_stream_lambda_mapper_name(name) || args.len() != 1 {
+    if !is_stream_lambda_arg_name(name) || args.len() != 1 {
         return;
     }
     let Some(JavaType::Named {
@@ -2213,6 +2465,10 @@ fn resolve_stream_map_lambda_arg(
 
 fn is_stream_lambda_mapper_name(name: &str) -> bool {
     matches!(name, "map" | "mapToInt" | "mapToLong" | "mapToDouble")
+}
+
+fn is_stream_lambda_arg_name(name: &str) -> bool {
+    is_stream_lambda_mapper_name(name) || name == "flatMap"
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2678,6 +2934,16 @@ fn infer_resolver_expr_type_with_facts(
             ) {
                 return java_ty;
             }
+            if let Some(java_ty) = infer_stream_lambda_flat_map_return_type(
+                receiver_type.as_ref(),
+                name,
+                args,
+                current_type,
+                symbols,
+                env,
+            ) {
+                return java_ty;
+            }
             if let Some(java_ty) = infer_stream_method_reference_flat_map_return_type(
                 receiver_type.as_ref(),
                 name,
@@ -2822,6 +3088,10 @@ fn infer_resolver_expr_type_with_facts(
             ),
             symbols,
         ),
+        Expr::New {
+            resolved: Some(resolved),
+            ..
+        } => resolved.constructed_type.clone(),
         Expr::New { ty, .. } | Expr::Cast { ty, .. } => ty.clone(),
         Expr::ClassLiteral(ty) => crate::types::class_literal_type(ty),
         other => infer_expr_type(other, env),
@@ -2853,6 +3123,7 @@ fn source_enum_synthetic_call(
         rust_name: crate::parser::to_snake_case(name),
         kind: CallKind::Static,
         return_type,
+        arg_coercions: Vec::new(),
     })
 }
 
@@ -3011,6 +3282,53 @@ fn infer_stream_method_reference_map_return_type(
     Some(JavaType::Named {
         name: "Stream".to_string(),
         args: vec![mapped],
+    })
+}
+
+fn infer_stream_lambda_flat_map_return_type(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    args: &[Expr],
+    current_type: &str,
+    symbols: &ProgramSymbols,
+    env: &TypeEnv,
+) -> Option<JavaType> {
+    if name != "flatMap" || args.len() != 1 {
+        return None;
+    }
+    let stream_element = match receiver_type {
+        Some(JavaType::Named { name, args }) if name == "Stream" => args.first()?,
+        _ => return None,
+    };
+    let Expr::Lambda { params, body } = &args[0] else {
+        return None;
+    };
+
+    let mut lambda_env = env.clone();
+    if let Some(lambda_param) = params.first() {
+        let param_ty = lambda_param
+            .ty
+            .clone()
+            .unwrap_or_else(|| stream_element.clone());
+        lambda_env.insert_local(lambda_param.name.clone(), param_ty);
+    }
+
+    let LambdaBody::Expr(expr) = body else {
+        return None;
+    };
+    let JavaType::Named {
+        name: body_name,
+        args: body_args,
+    } = infer_resolver_expr_type(expr, current_type, symbols, &lambda_env)
+    else {
+        return None;
+    };
+    if body_name != "Stream" {
+        return None;
+    }
+    Some(JavaType::Named {
+        name: "Stream".to_string(),
+        args: vec![body_args.first()?.clone()],
     })
 }
 
@@ -3453,7 +3771,7 @@ fn resolve_same_class_call(
         receiver_actual_ty,
         symbols,
     ));
-    let params = selected
+    let substituted_params: Vec<Param> = selected
         .params
         .iter()
         .map(|param| Param {
@@ -3462,6 +3780,12 @@ fn resolve_same_class_call(
             is_varargs: param.is_varargs,
         })
         .collect();
+    let param_types = substituted_params
+        .iter()
+        .map(|param| param.ty.clone())
+        .collect::<Vec<_>>();
+    let arg_coercions =
+        java_coercion_evidence_for_params(&selected.params, &param_types, arg_types, symbols);
     Ok(Some(MethodResolution {
         call: ResolvedCall {
             declaring_type: selected.declaring_type.clone(),
@@ -3472,8 +3796,9 @@ fn resolve_same_class_call(
                 CallKind::Instance
             },
             return_type: substitute_method_type_variables(&selected.return_type, &substitutions),
+            arg_coercions,
         },
-        params,
+        params: substituted_params,
     }))
 }
 
@@ -3702,9 +4027,32 @@ fn resolve_same_class_constructor(
         ));
     };
 
+    let substitutions = constructor_type_substitutions(selected, arg_types, symbols);
+    let params = selected
+        .params
+        .iter()
+        .map(|param| Param {
+            name: param.name.clone(),
+            ty: substitute_method_type_variables(&param.ty, &substitutions),
+            is_varargs: param.is_varargs,
+        })
+        .collect::<Vec<_>>();
+    let param_types = params
+        .iter()
+        .map(|param| param.ty.clone())
+        .collect::<Vec<_>>();
+    let arg_coercions =
+        java_coercion_evidence_for_params(&selected.params, &param_types, arg_types, symbols);
+
     Ok(Some(ResolvedConstructor {
         declaring_type: selected.declaring_type.clone(),
         rust_name: selected.rust_name.clone(),
+        constructed_type: JavaType::Named {
+            name: selected.declaring_type.clone(),
+            args: Vec::new(),
+        },
+        params: selected.params.clone(),
+        arg_coercions,
     }))
 }
 
@@ -3718,6 +4066,12 @@ fn resolve_anonymous_class_constructor(
         Some(TypeKind::Interface) if arg_types.is_empty() => Ok(Some(ResolvedConstructor {
             declaring_type: symbols.source_type_name(target_name).to_string(),
             rust_name: "anonymous".to_string(),
+            constructed_type: JavaType::Named {
+                name: symbols.source_type_name(target_name).to_string(),
+                args: Vec::new(),
+            },
+            params: Vec::new(),
+            arg_coercions: Vec::new(),
         })),
         Some(TypeKind::Class | TypeKind::Record) => {
             resolve_same_class_constructor(arg_types, constructors, symbols)
@@ -3880,6 +4234,118 @@ fn callable_match_score(
     Some(fixed_score + expanded_score + 5)
 }
 
+pub fn overload_applicability_report(
+    params: &[Param],
+    arg_types: &[JavaType],
+    source_symbols: &SourceSymbols,
+) -> OverloadApplicabilityReport {
+    let param_types = params
+        .iter()
+        .map(|param| param.ty.clone())
+        .collect::<Vec<_>>();
+    callable_applicability_report(params, &param_types, arg_types, &source_symbols.symbols)
+}
+
+fn callable_applicability_report(
+    params: &[Param],
+    param_types: &[JavaType],
+    arg_types: &[JavaType],
+    symbols: &ProgramSymbols,
+) -> OverloadApplicabilityReport {
+    if !params.last().is_some_and(|param| param.is_varargs) {
+        return fixed_arity_applicability_report(param_types, arg_types, symbols);
+    }
+
+    if arg_types.len() < params.len().saturating_sub(1) {
+        return OverloadApplicabilityReport {
+            mode: None,
+            score: None,
+            arguments: Vec::new(),
+            rejections: vec![OverloadRejectionReason::ArityMismatch {
+                expected: params.len().saturating_sub(1),
+                actual: arg_types.len(),
+                varargs: true,
+            }],
+        };
+    }
+
+    if params.len() == arg_types.len() {
+        let fixed = fixed_arity_applicability_report(param_types, arg_types, symbols);
+        if fixed.is_applicable() {
+            return fixed;
+        }
+    }
+
+    let fixed_count = params.len().saturating_sub(1);
+    let JavaType::Array(vararg_element) = &param_types[fixed_count] else {
+        return OverloadApplicabilityReport {
+            mode: None,
+            score: None,
+            arguments: Vec::new(),
+            rejections: vec![OverloadRejectionReason::MissingVarargsArrayParam],
+        };
+    };
+    let mut report = fixed_arity_prefix_applicability_report(
+        &param_types[..fixed_count],
+        &arg_types[..fixed_count],
+        symbols,
+        OverloadApplicabilityMode::VariableArity,
+    );
+    if !report.rejections.is_empty() {
+        return report;
+    }
+    for (offset, arg_ty) in arg_types[fixed_count..].iter().enumerate() {
+        let arg_index = fixed_count + offset;
+        push_argument_applicability(&mut report, arg_index, arg_ty, vararg_element, symbols);
+    }
+    if report.rejections.is_empty() {
+        let total = report.arguments.iter().map(|arg| arg.score).sum::<u32>() + 5;
+        report.score = Some(total);
+    }
+
+    report
+}
+
+fn java_coercion_evidence_for_params(
+    params: &[Param],
+    param_types: &[JavaType],
+    arg_types: &[JavaType],
+    symbols: &ProgramSymbols,
+) -> Vec<JavaCoercionEvidence> {
+    callable_applicability_report(params, param_types, arg_types, symbols)
+        .arguments
+        .into_iter()
+        .map(|argument| JavaCoercionEvidence {
+            arg_index: argument.arg_index,
+            actual: argument.actual,
+            target: argument.target,
+            kind: java_coercion_kind_from_overload_conversion(argument.conversion),
+        })
+        .collect()
+}
+
+fn java_coercion_kind_from_overload_conversion(
+    conversion: OverloadArgumentConversion,
+) -> JavaCoercionKind {
+    match conversion {
+        OverloadArgumentConversion::Exact => JavaCoercionKind::Identity,
+        OverloadArgumentConversion::PrimitiveWidening => JavaCoercionKind::PrimitiveWidening,
+        OverloadArgumentConversion::Boxing => JavaCoercionKind::Boxing,
+        OverloadArgumentConversion::Unboxing => JavaCoercionKind::Unboxing,
+        OverloadArgumentConversion::BoxingWidening => JavaCoercionKind::BoxingWidening,
+        OverloadArgumentConversion::ReferenceWidening => JavaCoercionKind::ReferenceWidening,
+        OverloadArgumentConversion::GenericInference => JavaCoercionKind::GenericInference,
+        OverloadArgumentConversion::NullToReference => JavaCoercionKind::NullToReference,
+        OverloadArgumentConversion::LambdaToFunctionalInterface => {
+            JavaCoercionKind::LambdaAdaptation
+        }
+        OverloadArgumentConversion::MethodReferenceToFunctionalInterface => {
+            JavaCoercionKind::MethodReferenceAdaptation
+        }
+        OverloadArgumentConversion::UnknownFallback => JavaCoercionKind::UnknownFallback,
+    }
+}
+
 fn overload_match_score(
     params: &[&JavaType],
     arg_types: &[JavaType],
@@ -3893,6 +4359,265 @@ fn overload_match_score(
         .zip(arg_types)
         .map(|(param, arg_ty)| java_type_match_score(arg_ty, param, symbols))
         .sum()
+}
+
+fn java_type_applicability(
+    actual: &JavaType,
+    target: &JavaType,
+    symbols: &ProgramSymbols,
+) -> Result<(OverloadArgumentConversion, u32), OverloadRejectionReason> {
+    let actual_java = actual.clone();
+    let target_java = target.clone();
+    if actual == target {
+        return Ok((OverloadArgumentConversion::Exact, 0));
+    }
+    match (actual, target) {
+        (
+            JavaType::Named {
+                name: actual_name,
+                args: actual_args,
+            },
+            JavaType::Named { name: target, .. },
+        ) if actual_args.is_empty() && is_method_type_variable(actual_name, None) => {
+            let score = if crate::stdlib::is_known_structural_reference_target(target) {
+                45
+            } else {
+                55
+            };
+            Ok((OverloadArgumentConversion::GenericInference, score))
+        }
+        (_, JavaType::Named { name, args })
+            if args.is_empty() && is_method_type_variable(name, None) =>
+        {
+            Ok((
+                OverloadArgumentConversion::GenericInference,
+                if matches!(actual, JavaType::Primitive(_)) {
+                    65
+                } else {
+                    40
+                },
+            ))
+        }
+        (JavaType::Primitive(actual), JavaType::Primitive(target)) => {
+            primitive_widening_distance(*actual, *target)
+                .map(|distance| {
+                    (
+                        OverloadArgumentConversion::PrimitiveWidening,
+                        1 + u32::from(distance),
+                    )
+                })
+                .ok_or_else(|| argument_type_mismatch(&actual_java, &target_java))
+        }
+        (JavaType::Primitive(actual), JavaType::Named { name: target, .. }) => {
+            if target == "Object" {
+                Ok((OverloadArgumentConversion::BoxingWidening, 70))
+            } else if target == "Number" {
+                primitive_can_box_to_number(*actual)
+                    .then_some((OverloadArgumentConversion::BoxingWidening, 65))
+                    .ok_or_else(|| argument_type_mismatch(&actual_java, &target_java))
+            } else {
+                crate::stdlib::boxed_primitive_type(target)
+                    .and_then(|target| {
+                        primitive_widening_distance(*actual, target).map(|distance| {
+                            (
+                                if distance == 0 {
+                                    OverloadArgumentConversion::Boxing
+                                } else {
+                                    OverloadArgumentConversion::BoxingWidening
+                                },
+                                2 + u32::from(distance),
+                            )
+                        })
+                    })
+                    .ok_or_else(|| argument_type_mismatch(&actual_java, &target_java))
+            }
+        }
+        (JavaType::Named { name: actual, .. }, JavaType::Primitive(target)) => {
+            crate::stdlib::boxed_primitive_type(actual)
+                .and_then(|actual| {
+                    primitive_widening_distance(actual, *target).map(|distance| {
+                        (
+                            OverloadArgumentConversion::Unboxing,
+                            2 + u32::from(distance),
+                        )
+                    })
+                })
+                .ok_or_else(|| argument_type_mismatch(&actual_java, &target_java))
+        }
+        (JavaType::Named { .. }, JavaType::Named { name, .. }) if name == "Object" => {
+            Ok((OverloadArgumentConversion::ReferenceWidening, 60))
+        }
+        (JavaType::String, JavaType::Named { name, .. }) if name == "Object" => {
+            Ok((OverloadArgumentConversion::ReferenceWidening, 60))
+        }
+        (JavaType::String, JavaType::Named { name, .. }) => {
+            crate::stdlib::is_known_java_subtype("String", name)
+                .then_some((OverloadArgumentConversion::ReferenceWidening, 10))
+                .ok_or_else(|| argument_type_mismatch(&actual_java, &target_java))
+        }
+        (
+            JavaType::Named {
+                name: actual,
+                args: actual_args,
+            },
+            JavaType::Named {
+                name: target,
+                args: target_args,
+            },
+        ) => named_reference_match_score(actual, actual_args, target, target_args, symbols)
+            .map(|score| (OverloadArgumentConversion::ReferenceWidening, score))
+            .ok_or_else(|| argument_type_mismatch(&actual_java, &target_java)),
+        (JavaType::Unknown(name), _) if name == "null" => {
+            if matches!(target, JavaType::Primitive(_)) {
+                Err(OverloadRejectionReason::NullToPrimitive {
+                    arg_index: 0,
+                    target: target_java.clone(),
+                })
+            } else {
+                Ok((OverloadArgumentConversion::NullToReference, 30))
+            }
+        }
+        (JavaType::Unknown(name), JavaType::Named { name: target, .. }) if name == "lambda" => {
+            symbols
+                .is_functional_interface_type(target)
+                .then_some((OverloadArgumentConversion::LambdaToFunctionalInterface, 20))
+                .ok_or_else(
+                    || OverloadRejectionReason::LambdaTargetNotFunctionalInterface {
+                        arg_index: 0,
+                        target: target_java.clone(),
+                    },
+                )
+        }
+        (JavaType::Unknown(name), JavaType::Named { name: target, .. })
+            if name == "method_reference" =>
+        {
+            symbols
+                .is_functional_interface_type(target)
+                .then_some((
+                    OverloadArgumentConversion::MethodReferenceToFunctionalInterface,
+                    20,
+                ))
+                .ok_or_else(|| {
+                    OverloadRejectionReason::MethodReferenceTargetNotFunctionalInterface {
+                        arg_index: 0,
+                        target: target_java.clone(),
+                    }
+                })
+        }
+        (JavaType::Unknown(name), JavaType::Named { name: target, .. })
+            if unknown_collection_factory_matches_target(name, target) =>
+        {
+            Ok((OverloadArgumentConversion::UnknownFallback, 25))
+        }
+        (JavaType::Unknown(_), JavaType::Void) => {
+            Err(argument_type_mismatch(&actual_java, &target_java))
+        }
+        (JavaType::Unknown(_), JavaType::Primitive(_)) => {
+            Ok((OverloadArgumentConversion::UnknownFallback, 95))
+        }
+        (JavaType::Unknown(_), _) => Ok((OverloadArgumentConversion::UnknownFallback, 80)),
+        _ => Err(argument_type_mismatch(&actual_java, &target_java)),
+    }
+}
+
+fn argument_type_mismatch(actual: &JavaType, target: &JavaType) -> OverloadRejectionReason {
+    OverloadRejectionReason::ArgumentTypeMismatch {
+        arg_index: 0,
+        actual: actual.clone(),
+        target: target.clone(),
+    }
+}
+
+fn fixed_arity_applicability_report(
+    param_types: &[JavaType],
+    arg_types: &[JavaType],
+    symbols: &ProgramSymbols,
+) -> OverloadApplicabilityReport {
+    fixed_arity_prefix_applicability_report(
+        param_types,
+        arg_types,
+        symbols,
+        OverloadApplicabilityMode::FixedArity,
+    )
+}
+
+fn fixed_arity_prefix_applicability_report(
+    param_types: &[JavaType],
+    arg_types: &[JavaType],
+    symbols: &ProgramSymbols,
+    mode: OverloadApplicabilityMode,
+) -> OverloadApplicabilityReport {
+    if param_types.len() != arg_types.len() {
+        return OverloadApplicabilityReport {
+            mode: None,
+            score: None,
+            arguments: Vec::new(),
+            rejections: vec![OverloadRejectionReason::ArityMismatch {
+                expected: param_types.len(),
+                actual: arg_types.len(),
+                varargs: mode == OverloadApplicabilityMode::VariableArity,
+            }],
+        };
+    }
+    let mut report = OverloadApplicabilityReport {
+        mode: Some(mode),
+        score: None,
+        arguments: Vec::new(),
+        rejections: Vec::new(),
+    };
+    for (arg_index, (target, actual)) in param_types.iter().zip(arg_types).enumerate() {
+        push_argument_applicability(&mut report, arg_index, actual, target, symbols);
+    }
+    if report.rejections.is_empty() {
+        report.score = Some(report.arguments.iter().map(|arg| arg.score).sum());
+    }
+    report
+}
+
+fn push_argument_applicability(
+    report: &mut OverloadApplicabilityReport,
+    arg_index: usize,
+    actual: &JavaType,
+    target: &JavaType,
+    symbols: &ProgramSymbols,
+) {
+    match java_type_applicability(actual, target, symbols) {
+        Ok((conversion, score)) => report.arguments.push(OverloadArgumentApplicability {
+            arg_index,
+            actual: actual.clone(),
+            target: target.clone(),
+            conversion,
+            score,
+        }),
+        Err(reason) => report.rejections.push(reason.with_arg_index(arg_index)),
+    }
+}
+
+impl OverloadRejectionReason {
+    fn with_arg_index(self, arg_index: usize) -> Self {
+        match self {
+            OverloadRejectionReason::ArgumentTypeMismatch { actual, target, .. } => {
+                OverloadRejectionReason::ArgumentTypeMismatch {
+                    arg_index,
+                    actual,
+                    target,
+                }
+            }
+            OverloadRejectionReason::NullToPrimitive { target, .. } => {
+                OverloadRejectionReason::NullToPrimitive { arg_index, target }
+            }
+            OverloadRejectionReason::LambdaTargetNotFunctionalInterface { target, .. } => {
+                OverloadRejectionReason::LambdaTargetNotFunctionalInterface { arg_index, target }
+            }
+            OverloadRejectionReason::MethodReferenceTargetNotFunctionalInterface {
+                target, ..
+            } => OverloadRejectionReason::MethodReferenceTargetNotFunctionalInterface {
+                arg_index,
+                target,
+            },
+            other => other,
+        }
+    }
 }
 
 fn java_type_match_score(
@@ -4195,6 +4920,29 @@ fn collect_type_capability_facts(program: &Program, facts: &mut FactSet) {
     }
 }
 
+fn collect_field_declaration_facts(program: &Program, facts: &mut FactSet) {
+    for ty in &program.types {
+        collect_field_declaration_facts_for_type(ty, facts);
+    }
+}
+
+fn collect_field_declaration_facts_for_type(ty: &TypeDecl, facts: &mut FactSet) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => facts.external_field_facts.push(ExternalFieldFact {
+                field: FieldKey {
+                    type_name: ty.name.clone(),
+                    field_name: field.name.clone(),
+                },
+                field_type: Some(field.ty.clone()),
+                provenance: FactProvenance::ParsedSource,
+            }),
+            Member::Type(nested) => collect_field_declaration_facts_for_type(nested, facts),
+            _ => {}
+        }
+    }
+}
+
 fn collect_type_capability_facts_for_type(
     ty: &TypeDecl,
     facts: &mut FactSet,
@@ -4240,6 +4988,13 @@ fn collect_type_capability_facts_for_type(
             } else {
                 FactProvenance::CorpusAnalysis
             },
+        });
+    }
+    if ty.modifiers.contains(&Modifier::Sealed) && !ty.permits.is_empty() {
+        facts.sealed_permits_facts.push(SealedPermitsFact {
+            type_name: ty.name.clone(),
+            permitted_subtypes: ty.permits.clone(),
+            provenance: FactProvenance::ParsedSource,
         });
     }
     for member in &ty.members {

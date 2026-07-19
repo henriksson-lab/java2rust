@@ -4,6 +4,29 @@ Use this checklist before adding support for a new Java feature or fixing a
 translation corner case. The goal is to keep mappings in one owner instead of
 spreading Java-specific special cases through lowering.
 
+## 0. Ideal Rust Target
+
+- Treat every transformation rule as target-first design, not symptom-first
+  lowering.
+- Before writing the implementation rule, add an **Ideal Rust Target** section
+  that shows the Rust API, expression, type, ownership, borrowing, optionality,
+  mutability, dispatch, conversion, error, and external-boundary shape we would
+  want by hand.
+- Then add the **Implementation Rule** section immediately after it. This
+  section explains which semantic facts and plan nodes select that target.
+- Keep these exact section names. Do not substitute "approach", "lowering",
+  "desired output", "algorithm", or a benchmark note for either contract
+  section.
+- Apply this per mapping. If one fix covers several Java patterns, each pattern
+  needs its own target and rule unless the design explicitly states that they
+  share the same Rust target shape, required facts, owning layer, and fallback.
+- Use `docs/transformation-rule-contract.md` as the required template. A rule
+  without an **Ideal Rust Target** before its implementation mechanics is still
+  in design and is not ready to implement.
+- Do not start coding from a rule whose target and implementation mechanics are
+  inseparable. Split the rule until the target Rust shape can be reviewed on
+  its own, then write the fact-driven implementation rule below it.
+
 ## 1. Java Semantics
 
 - Add parser or resolver facts for Java syntax, names, overload targets,

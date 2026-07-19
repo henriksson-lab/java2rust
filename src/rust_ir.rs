@@ -28,7 +28,16 @@ pub struct RustField {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RustImpl {
     pub target: String,
+    pub associated_consts: Vec<RustAssociatedConst>,
     pub functions: Vec<RustFunction>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RustAssociatedConst {
+    pub name: String,
+    pub ty: RustType,
+    pub value: RustExpr,
+    pub is_pub: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

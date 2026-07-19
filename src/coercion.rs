@@ -2,10 +2,12 @@ use crate::conversion_plan::{
     BorrowedDynToOwnedBoxedDynRecoveryPolicy, BorrowedElementAdapterPolicy, BorrowedElementCarrier,
     BorrowedElementRecoveryFallbackPolicy, BorrowedElementRecoveryPolicy,
     BorrowedElementSlotAdapterPolicy, CloneRecoveryPolicy, DispatchCoercionFallbackPolicy,
-    DispatchCoercionPolicy, InstanceOfCheck, InstanceOfFallbackPolicy, InvalidCastPolicy,
-    LoweredType, OptionalShapeCoercionPolicy, OwnershipCoercionFallbackPolicy,
-    OwnershipCoercionPolicy, ShapeCoercionPlan, Slot, SlotConversionPlan, SyntaxCoercionPlan,
-    SyntaxSlotCoercionPolicy, ViewCoercionPolicy,
+    DispatchCoercionPolicy, DynCloneBoxAdapterGenerationPolicy, InstanceOfCheck,
+    InstanceOfFallbackPolicy, InvalidCastPolicy, LoweredType, OptionalShapeCoercionPolicy,
+    OwnershipCoercionFallbackPolicy, OwnershipCoercionPolicy, ShapeCoercionPlan, Slot,
+    SlotConversionPlan, SyntaxCoercionPlan, SyntaxSlotCoercionPolicy, ViewCoercionPolicy,
+    dyn_clone_box_adapter_deferral_message, dyn_clone_box_adapter_generation_policy,
+    dyn_clone_box_adapter_requirement,
 };
 use crate::emit;
 use crate::facts::FactSet;
@@ -67,8 +69,12 @@ pub enum Coercion {
     },
     IndexToUsize,
     ToStringForConcat,
+    OptionalToJavaDisplayString,
+    OptionalToJavaDisplayValue,
     AsStr,
     ToOwnedString,
+    AsSlice,
+    BorrowMut,
     WrapClosedEnum {
         enum_name: String,
         variant_name: String,
@@ -107,6 +113,7 @@ pub enum Coercion {
     },
     WrapOption,
     UnwrapOption,
+    UnwrapOptionBorrowed,
     Borrow,
     CopyBorrowedValue,
     CloneRecovery {
@@ -139,6 +146,12 @@ impl SyntaxSlotCoercionPolicy {
             SyntaxSlotCoercionPolicy::Identity => vec![Coercion::Identity],
             SyntaxSlotCoercionPolicy::IndexToUsize => vec![Coercion::IndexToUsize],
             SyntaxSlotCoercionPolicy::ToStringForConcat => vec![Coercion::ToStringForConcat],
+            SyntaxSlotCoercionPolicy::OptionalToJavaDisplayString => {
+                vec![Coercion::OptionalToJavaDisplayString]
+            }
+            SyntaxSlotCoercionPolicy::OptionalToJavaDisplayValue => {
+                vec![Coercion::OptionalToJavaDisplayValue]
+            }
         }
     }
 }
@@ -158,15 +171,14 @@ pub fn plan_shape_coercion_with_facts(
 impl ShapeCoercionPlan {
     pub fn coercions(&self) -> Vec<Coercion> {
         let mut plan = Vec::new();
+        let optional_coercions = self.optional.clone().coercions();
+        if !optional_coercions.is_empty() {
+            return optional_coercions;
+        }
         plan.extend(self.dispatch.coercions());
         let view_coercions = self.view.coercions();
         if !view_coercions.is_empty() {
             plan.extend(view_coercions);
-            return plan;
-        }
-        let optional_coercions = self.optional.clone().coercions();
-        if !optional_coercions.is_empty() {
-            plan.extend(optional_coercions);
             return plan;
         }
         plan.extend(self.ownership.coercions());
@@ -199,12 +211,21 @@ impl OptionalShapeCoercionPolicy {
                 coercions
             }
             OptionalShapeCoercionPolicy::Unwrap { element_plan, .. } => {
-                let mut coercions = vec![Coercion::UnwrapOption];
+                let mut coercions = vec![optional_unwrap_coercion_for_element_plan(&element_plan)];
                 coercions.extend(non_identity_coercions(element_plan.coercions()));
                 coercions
             }
+            OptionalShapeCoercionPolicy::MapElement { .. } => Vec::new(),
             OptionalShapeCoercionPolicy::NoChange => Vec::new(),
         }
+    }
+}
+
+fn optional_unwrap_coercion_for_element_plan(element_plan: &ShapeCoercionPlan) -> Coercion {
+    if element_plan.target.ownership == OwnershipShape::SharedBorrow {
+        Coercion::UnwrapOptionBorrowed
+    } else {
+        Coercion::UnwrapOption
     }
 }
 
@@ -214,6 +235,7 @@ impl ViewCoercionPolicy {
             ViewCoercionPolicy::NoViewChange => Vec::new(),
             ViewCoercionPolicy::BorrowStringView => vec![Coercion::AsStr],
             ViewCoercionPolicy::OwnStringFromView => vec![Coercion::ToOwnedString],
+            ViewCoercionPolicy::BorrowSequenceSliceView => vec![Coercion::AsSlice],
         }
     }
 }
@@ -223,6 +245,7 @@ impl OwnershipCoercionPolicy {
         match self {
             OwnershipCoercionPolicy::NoOwnershipChange => Vec::new(),
             OwnershipCoercionPolicy::BorrowOwnedValue => vec![Coercion::Borrow],
+            OwnershipCoercionPolicy::BorrowOwnedMutably => vec![Coercion::BorrowMut],
             OwnershipCoercionPolicy::RecoverOwnedCopyValue => vec![Coercion::CopyBorrowedValue],
             OwnershipCoercionPolicy::RecoverOwnedWithClone { policy } => {
                 vec![Coercion::CloneRecovery {
@@ -299,6 +322,22 @@ pub fn ownership_coercion_fallback_message_policy(
                 code: "unsupported_borrowed_to_owned_non_cloneable",
                 message: format!(
                     "unsupported Java borrowed-to-owned recovery for non-cloneable type {java_ty:?}"
+                ),
+            }
+        }
+        OwnershipCoercionFallbackPolicy::BorrowedToFacadeOwnedExternalHandle { java_ty } => {
+            UnsupportedCoercionMessagePolicy {
+                code: "unsupported_borrowed_to_facade_owned_external_handle",
+                message: format!(
+                    "unsupported Java borrowed-to-owned recovery for facade-owned external handle {java_ty:?}; use an explicit facade ownership transfer"
+                ),
+            }
+        }
+        OwnershipCoercionFallbackPolicy::BorrowedToFfiOwnedHandle { java_ty } => {
+            UnsupportedCoercionMessagePolicy {
+                code: "unsupported_borrowed_to_ffi_owned_handle",
+                message: format!(
+                    "unsupported Java borrowed-to-owned recovery for FFI-owned handle {java_ty:?}; use an explicit FFI ownership transfer"
                 ),
             }
         }
@@ -441,25 +480,33 @@ fn borrowed_dyn_to_owned_boxed_dyn_message_policy(
     trait_name: &str,
     recovery: &BorrowedDynToOwnedBoxedDynRecoveryPolicy,
 ) -> UnsupportedCoercionMessagePolicy {
-    match recovery {
-        BorrowedDynToOwnedBoxedDynRecoveryPolicy::NoOwnershipProof => {
+    let requirement = dyn_clone_box_adapter_requirement(trait_name, recovery);
+    match dyn_clone_box_adapter_generation_policy(&requirement) {
+        DynCloneBoxAdapterGenerationPolicy::AlreadyAvailable { trait_name } => {
             UnsupportedCoercionMessagePolicy {
-                code: "unsupported_borrowed_dyn_to_owned_boxed_dyn",
+                code: "borrowed_dyn_to_owned_boxed_dyn_clone_box_adapter_proven",
                 message: format!(
-                    "unsupported Java borrowed dyn trait to owned boxed dyn recovery for {trait_name}; no ownership proof is available"
+                    "Java borrowed dyn trait to owned boxed dyn recovery for {trait_name} has a proven clone-box adapter"
                 ),
             }
         }
-        BorrowedDynToOwnedBoxedDynRecoveryPolicy::CloneBoxAdapterRequired { policy } => {
+        DynCloneBoxAdapterGenerationPolicy::GenerateAdapter { trait_name, policy } => {
             let proof = match policy {
                 CloneRecoveryPolicy::ProvenCloneCapability { .. } => "explicit clone proof exists",
                 CloneRecoveryPolicy::AuditRequired => "only conservative clone proof exists",
             };
             UnsupportedCoercionMessagePolicy {
-                code: "unsupported_borrowed_dyn_to_owned_boxed_dyn_clone_box_adapter",
+                code: "borrowed_dyn_to_owned_boxed_dyn_clone_box_adapter_required",
                 message: format!(
-                    "unsupported Java borrowed dyn trait to owned boxed dyn recovery for {trait_name}; {proof}, but dyn clone-box adapter generation is not implemented"
+                    "Java borrowed dyn trait to owned boxed dyn recovery for {trait_name}; {proof}, and dyn clone-box adapter generation is required"
                 ),
+            }
+        }
+        DynCloneBoxAdapterGenerationPolicy::DeferredUnsupported { trait_name, reason } => {
+            let diagnostic = dyn_clone_box_adapter_deferral_message(&trait_name, reason);
+            UnsupportedCoercionMessagePolicy {
+                code: diagnostic.code,
+                message: diagnostic.message,
             }
         }
     }
@@ -490,6 +537,32 @@ pub fn apply_coercions(mut expr: RustExpr, coercions: &[Coercion]) -> RustExpr {
 }
 
 pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> RustExpr {
+    match &plan.optional {
+        OptionalShapeCoercionPolicy::Wrap { element_plan, .. } => {
+            let expr = apply_shape_coercion_plan(expr, element_plan);
+            return apply_one(expr, &Coercion::WrapOption);
+        }
+        OptionalShapeCoercionPolicy::Unwrap { element_plan, .. } => {
+            let expr = apply_one(
+                expr,
+                &optional_unwrap_coercion_for_element_plan(element_plan),
+            );
+            return apply_shape_coercion_plan(expr, element_plan);
+        }
+        OptionalShapeCoercionPolicy::MapElement { element_plan, .. } => {
+            let mapped_value =
+                apply_shape_coercion_plan(RustExpr::Var("value".to_string()), element_plan);
+            if emit::emit_expr(&mapped_value) == "value" {
+                return expr;
+            }
+            return RustExpr::Raw(format!(
+                "{}.map(|value| {})",
+                emit::emit_expr(&expr),
+                emit::emit_expr(&mapped_value)
+            ));
+        }
+        OptionalShapeCoercionPolicy::NoChange => {}
+    }
     apply_coercions(expr, &plan.coercions())
 }
 
@@ -615,6 +688,20 @@ pub fn instanceof_fallback_message_policy(
                 "unsupported Java instanceof shape: actual={actual_dispatch:?}, target={target_dispatch:?}"
             ),
         },
+        InstanceOfFallbackPolicy::PrimitiveTarget { java_ty } => UnsupportedCoercionMessagePolicy {
+            code: "unsupported_instanceof_primitive_target",
+            message: format!(
+                "unsupported Java instanceof check: primitive target type {java_ty:?}"
+            ),
+        },
+        InstanceOfFallbackPolicy::RawOrWildcardTarget { java_ty } => {
+            UnsupportedCoercionMessagePolicy {
+                code: "unsupported_instanceof_raw_or_wildcard_target",
+                message: format!(
+                    "unsupported Java instanceof check: raw or wildcard target type {java_ty:?}"
+                ),
+            }
+        }
         InstanceOfFallbackPolicy::MissingRuntimeTarget { java_ty } => {
             UnsupportedCoercionMessagePolicy {
                 code: "unsupported_instanceof_missing_runtime_target",
@@ -666,7 +753,7 @@ fn apply_borrowed_element_adapter(
     expr: RustExpr,
     policy: &BorrowedElementAdapterPolicy,
 ) -> RustExpr {
-    match (&policy.carrier, &policy.recovery) {
+    let adapted = match (&policy.carrier, &policy.recovery) {
         (BorrowedElementCarrier::Option, BorrowedElementRecoveryPolicy::StringViewToOwned) => {
             RustExpr::MethodCall {
                 receiver: Box::new(expr),
@@ -691,18 +778,41 @@ fn apply_borrowed_element_adapter(
                 emit::emit_expr(&expr)
             ))
         }
+        (BorrowedElementCarrier::Set, BorrowedElementRecoveryPolicy::StringViewToOwned) => {
+            RustExpr::Raw(format!(
+                "{}.into_iter().map(|v| v.to_string()).collect::<std::collections::HashSet<_>>()",
+                emit::emit_expr(&expr)
+            ))
+        }
         (BorrowedElementCarrier::Vec, BorrowedElementRecoveryPolicy::CopyElements) => {
             RustExpr::Raw(format!(
                 "{}.into_iter().copied().collect::<Vec<_>>()",
                 emit::emit_expr(&expr)
             ))
         }
+        (BorrowedElementCarrier::Set, BorrowedElementRecoveryPolicy::CopyElements) => {
+            RustExpr::Raw(format!(
+                "{}.into_iter().copied().collect::<std::collections::HashSet<_>>()",
+                emit::emit_expr(&expr)
+            ))
+        }
         (BorrowedElementCarrier::Vec, BorrowedElementRecoveryPolicy::CloneElements { policy }) => {
             apply_borrowed_vec_clone_adapter(expr, policy)
+        }
+        (BorrowedElementCarrier::Set, BorrowedElementRecoveryPolicy::CloneElements { policy }) => {
+            apply_borrowed_set_clone_adapter(expr, policy)
         }
         (_, BorrowedElementRecoveryPolicy::Unsupported { policy: fallback }) => {
             render_borrowed_element_recovery_fallback_policy(expr, &policy.element_shape, fallback)
         }
+    };
+    if policy.unwrap_carrier {
+        RustExpr::Raw(format!(
+            "{}.expect(\"Java null receiver\")",
+            emit::emit_expr(&adapted)
+        ))
+    } else {
+        adapted
     }
 }
 
@@ -724,6 +834,14 @@ fn apply_borrowed_option_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPol
 fn apply_borrowed_vec_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
     RustExpr::Raw(format!(
         "{}.into_iter().cloned(){}.collect::<Vec<_>>()",
+        emit::emit_expr(&expr),
+        render_clone_recovery_policy(policy)
+    ))
+}
+
+fn apply_borrowed_set_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{}.into_iter().cloned(){}.collect::<std::collections::HashSet<_>>()",
         emit::emit_expr(&expr),
         render_clone_recovery_policy(policy)
     ))
@@ -801,10 +919,19 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         Coercion::Identity => expr,
         Coercion::IndexToUsize => RustExpr::Raw(format!("{} as usize", emit::emit_expr(&expr))),
         Coercion::ToStringForConcat => {
-            RustExpr::Raw(format!("{}.to_string()", emit::emit_expr(&expr)))
+            RustExpr::Raw(format!("({}).to_string()", emit::emit_expr(&expr)))
         }
+        Coercion::OptionalToJavaDisplayString => RustExpr::Raw(format!(
+            "{}.as_deref().unwrap_or(\"null\")",
+            emit::emit_expr(&expr)
+        )),
+        Coercion::OptionalToJavaDisplayValue => RustExpr::Raw(format!(
+            "{}.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())",
+            emit::emit_expr(&expr)
+        )),
         Coercion::AsStr => RustExpr::Raw(format!("{}.as_str()", emit::emit_expr(&expr))),
         Coercion::ToOwnedString => RustExpr::Raw(format!("{}.to_string()", emit::emit_expr(&expr))),
+        Coercion::AsSlice => RustExpr::Raw(format!("{}.as_slice()", emit::emit_expr(&expr))),
         Coercion::WrapClosedEnum {
             enum_name,
             variant_name,
@@ -860,7 +987,12 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         )),
         Coercion::WrapOption => RustExpr::Raw(format!("Some({})", emit::emit_expr(&expr))),
         Coercion::UnwrapOption => RustExpr::Raw(format!("{}.unwrap()", emit::emit_expr(&expr))),
+        Coercion::UnwrapOptionBorrowed => RustExpr::Raw(format!(
+            "{}.as_ref().expect(\"Java null receiver\")",
+            emit::emit_expr(&expr)
+        )),
         Coercion::Borrow => RustExpr::Raw(format!("&{}", emit::emit_expr(&expr))),
+        Coercion::BorrowMut => RustExpr::Raw(format!("&mut {}", emit::emit_expr(&expr))),
         Coercion::CopyBorrowedValue => RustExpr::Raw(format!("*{}", emit::emit_expr(&expr))),
         Coercion::CloneRecovery { policy } => apply_clone_recovery(expr, policy),
         Coercion::UnsupportedOwnership {
