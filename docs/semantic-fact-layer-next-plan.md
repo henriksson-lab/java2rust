@@ -53,6 +53,52 @@ external-boundary shape when those dimensions matter. The implementation rule
 then explains how semantic facts and plan nodes reach that target without
 introducing fixture-specific or corpus-specific branches.
 
+## Future Goal: Unify Facts And Reusable Ideas
+
+After the current semantic fact layer is stable, add an explicit unification
+goal so new work reuses existing concepts instead of creating parallel names,
+parallel heuristics, or late lowering equivalents.
+
+Ideal Rust target:
+
+- analysis produces one queryable fact graph for semantic properties such as
+  nullability, ownership recovery, mutability, object representation, hierarchy,
+  external API effects, error shape, collection element shape, and crate/facade
+  boundary shape;
+- downstream planners consume that graph through named capability queries and
+  plan nodes, not through ad hoc Java-name checks or duplicated local booleans;
+- emitted Rust decisions for equivalent source situations are selected by the
+  same fact/query path even when they originate from source analysis, external
+  packs, user overrides, source summaries, or conservative guesses.
+
+Implementation rule:
+
+- maintain a fact/idea registry in this document or a successor
+  `docs/fact-concept-registry.md`;
+- every new fact-like concept must declare whether it is a new canonical fact,
+  an alias/projection of an existing fact, or a consumer-specific plan derived
+  from existing facts;
+- every new lowering or planning rule must name the existing fact query it
+  consumes before adding a new query;
+- repeated corpus fixes must first be checked against the registry and either
+  reuse the existing concept or explicitly extend it with migration notes;
+- tests should include at least one cross-origin case when possible, for
+  example source-derived fact plus external-pack fact selecting the same slot
+  shape.
+
+Acceptance criteria:
+
+- no module-local list of special type, method, or package names may be added
+  when the same behavior can be represented as a fact, capability, external
+  pack entry, source summary, or override;
+- duplicate concepts are removed or linked through one canonical query before
+  broadening corpus coverage;
+- audit tests or review checklist items catch newly introduced duplicate
+  concepts, especially in `stdlib`, resolver shortcuts, coercion, signature,
+  slot rendering, and late emission;
+- benchmark-driven fixes update the registry entry for the generalized idea
+  rather than only recording the corpus symptom.
+
 ## Non-Goals
 
 - Do not make every idiom-gap fixture translate idiomatically in this goal.
@@ -417,8 +463,16 @@ Rules:
 - User-provided external facts override guesses and produce conflict
   diagnostics if they contradict source-proven facts.
 - External reference and callback parameters are assumed non-null unless a
-  nullable fact or observed `null` call site proves otherwise. The assumption
-  is stored as a fact with provenance, not re-created in lowering.
+  nullable fact or observed `null` call site proves otherwise. This is a
+  fact-layer boundary policy: injected or source-discovered facts enter first,
+  the external-parameter policy normalizes remaining unknown slots to required
+  values, and lowering consumes the normalized slot shape without adding a
+  second heuristic.
+- Keep this rule centralized. Adding a new external library, crate facade,
+  callback adapter, ownership adapter, or coercion rule must not introduce a
+  second nullability decision point. New evidence is represented as facts keyed
+  by callable owner, kind, arity, and parameter index; the existing slot policy
+  is the single place that decides `T`/`&T`/`F` versus `Option<T>`/`Option<F>`.
 - Observed `null` at a resolved external owner/kind/arity/parameter slot makes
   that slot nullable. Non-null arguments into that optional slot are adapted at
   the conversion boundary with `Some(...)`; null arguments become `None`.

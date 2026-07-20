@@ -22,6 +22,7 @@ pub struct StreamPlan<'a> {
 pub struct StreamSource<'a> {
     pub expr: &'a Expr,
     pub optional_sequence: bool,
+    pub iteration: StreamSourceIteration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,8 +64,13 @@ pub enum StreamTerminal<'a> {
         key: LambdaPlan<'a>,
         value: LambdaPlan<'a>,
     },
+    Join {
+        delimiter: Option<&'a Expr>,
+    },
+    ToArray,
     FindFirst,
     AnyMatch(LambdaPlan<'a>),
+    AllMatch(LambdaPlan<'a>),
 }
 
 #[derive(Clone)]
@@ -77,6 +83,7 @@ pub struct LambdaPlan<'a> {
 pub enum StreamLambdaBody<'a> {
     Expr(&'a Expr),
     Block(&'a Block),
+    MethodReference { target: &'a str, method: &'a str },
 }
 
 impl<'a> StreamLambdaBody<'a> {
@@ -87,6 +94,7 @@ impl<'a> StreamLambdaBody<'a> {
                 Stmt::Return(Some(expr)) => Some(expr),
                 _ => None,
             }),
+            StreamLambdaBody::MethodReference { .. } => None,
         }
     }
 
@@ -101,6 +109,7 @@ impl<'a> StreamLambdaBody<'a> {
                     &block.statements
                 }
             }
+            StreamLambdaBody::MethodReference { .. } => &[],
         }
     }
 }
@@ -152,18 +161,13 @@ pub fn build_stream_plan<'a>(
 
     let terminal = match name.as_str() {
         "sum" if args.is_empty() => StreamTerminal::Sum,
-        "collect" if args.len() == 1 && is_collectors_to_list(&args[0]) => {
-            StreamTerminal::Collect(JavaCollectionKind::List)
-        }
-        "collect" if args.len() == 1 && is_collectors_to_set(&args[0]) => {
-            StreamTerminal::Collect(JavaCollectionKind::Set)
-        }
-        "collect" if args.len() == 1 => {
-            let (key, value) = collectors_to_map_lambdas(&args[0])?;
-            StreamTerminal::CollectToMap { key, value }
-        }
+        "collect" if args.len() == 1 => stream_collect_terminal(&args[0])?,
+        "toArray" | "to_array" if args.is_empty() => StreamTerminal::ToArray,
         "findFirst" if args.is_empty() => StreamTerminal::FindFirst,
         "anyMatch" if args.len() == 1 => StreamTerminal::AnyMatch(lambda_plan(&args[0])?),
+        "allMatch" | "all_match" if args.len() == 1 => {
+            StreamTerminal::AllMatch(lambda_plan(&args[0])?)
+        }
         _ => return None,
     };
     let source_expr = receiver_source(receiver)?;
@@ -174,6 +178,7 @@ pub fn build_stream_plan<'a>(
         source: StreamSource {
             expr: source,
             optional_sequence: stream_source_is_optional_sequence(source, env, facts),
+            iteration: stream_source_iteration(source),
         },
         ops,
         terminal,
@@ -202,6 +207,44 @@ fn is_collectors_to_list(expr: &Expr) -> bool {
 
 fn is_collectors_to_set(expr: &Expr) -> bool {
     is_collectors_terminal(expr, "toSet")
+}
+
+fn stream_collect_terminal(expr: &Expr) -> Option<StreamTerminal<'_>> {
+    if is_collectors_to_list(expr) {
+        return Some(StreamTerminal::Collect(JavaCollectionKind::List));
+    }
+    if is_collectors_to_set(expr) {
+        return Some(StreamTerminal::Collect(JavaCollectionKind::Set));
+    }
+    if let Some(delimiter) = collectors_joining_delimiter(expr) {
+        return Some(StreamTerminal::Join { delimiter });
+    }
+    let (key, value) = collectors_to_map_lambdas(expr)?;
+    Some(StreamTerminal::CollectToMap { key, value })
+}
+
+fn collectors_joining_delimiter(expr: &Expr) -> Option<Option<&Expr>> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if name != "joining" {
+        return None;
+    }
+    if !matches!(receiver.as_ref(), Expr::Var(owner) if owner == "Collectors" || owner == "collectors")
+    {
+        return None;
+    }
+    match args.as_slice() {
+        [] => Some(None),
+        [delimiter] => Some(Some(delimiter)),
+        _ => None,
+    }
 }
 
 fn collectors_to_map_lambdas<'a>(expr: &'a Expr) -> Option<(LambdaPlan<'a>, LambdaPlan<'a>)> {
@@ -255,7 +298,24 @@ fn collect_stream_chain_source(expr: &Expr) -> Option<&Expr> {
 
     match name.as_str() {
         "stream" if args.is_empty() => receiver.as_deref(),
-        "filter" | "map" | "mapToInt" | "flatMap" if args.len() == 1 => {
+        "stream"
+            if args.len() == 1
+                && matches!(receiver.as_deref(), Some(Expr::Var(owner))
+                    if crate::stdlib::canonical_external_receiver_type_key(owner) == "Arrays") =>
+        {
+            args.first()
+        }
+        "range" | "range_closed"
+            if args.len() == 2
+                && matches!(receiver.as_deref(), Some(Expr::Var(owner))
+                    if crate::stdlib::canonical_external_receiver_type_key(owner) == "IntStream") =>
+        {
+            Some(expr)
+        }
+        "filter" | "map" | "mapToInt" | "map_to_int" | "mapToDouble" | "map_to_double"
+        | "mapToObj" | "map_to_obj" | "flatMap" | "flat_map"
+            if args.len() == 1 =>
+        {
             collect_stream_chain_source(receiver.as_deref()?)
         }
         _ => None,
@@ -282,6 +342,20 @@ fn collect_stream_chain<'a>(
         "stream" if args.is_empty() => receiver
             .as_deref()
             .map(|source| (source, Vec::new(), input_shape)),
+        "stream"
+            if args.len() == 1
+                && matches!(receiver.as_deref(), Some(Expr::Var(owner))
+                    if crate::stdlib::canonical_external_receiver_type_key(owner) == "Arrays") =>
+        {
+            args.first().map(|source| (source, Vec::new(), input_shape))
+        }
+        "range" | "range_closed"
+            if args.len() == 2
+                && matches!(receiver.as_deref(), Some(Expr::Var(owner))
+                    if crate::stdlib::canonical_external_receiver_type_key(owner) == "IntStream") =>
+        {
+            Some((expr, Vec::new(), input_shape))
+        }
         "filter" if args.len() == 1 => {
             let (source, mut ops, current_shape) =
                 collect_stream_chain(receiver.as_deref()?, input_shape, env, facts)?;
@@ -310,18 +384,38 @@ fn collect_stream_chain<'a>(
             });
             Some((source, ops, output_shape))
         }
-        "mapToInt" if args.len() == 1 => {
+        "mapToObj" | "map_to_obj" if args.len() == 1 => {
+            let lambda = lambda_plan(&args[0])?;
+            let (source, mut ops, current_shape) =
+                collect_stream_chain(receiver.as_deref()?, input_shape, env, facts)?;
+            let output_shape = infer_stream_lambda_output_shape(&lambda, &current_shape);
+            ops.push(StreamOp::Map {
+                lambda,
+                output_shape: output_shape.clone(),
+            });
+            Some((source, ops, output_shape))
+        }
+        "mapToInt" | "map_to_int" | "mapToDouble" | "map_to_double" if args.len() == 1 => {
             let lambda = lambda_plan(&args[0])?;
             let (source, mut ops, _) =
                 collect_stream_chain(receiver.as_deref()?, input_shape, env, facts)?;
-            let output_shape = infer_stream_map_to_int_shape(lambda.body.return_expr()?);
+            let output_shape = if matches!(name.as_str(), "mapToDouble" | "map_to_double") {
+                RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Double))
+            } else if matches!(lambda.body, StreamLambdaBody::MethodReference { .. }) {
+                infer_stream_lambda_output_shape(
+                    &lambda,
+                    &RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+                )
+            } else {
+                infer_stream_map_to_int_shape(lambda.body.return_expr()?)
+            };
             ops.push(StreamOp::MapToPrimitive {
                 lambda,
                 output_shape: output_shape.clone(),
             });
             Some((source, ops, output_shape))
         }
-        "flatMap" if args.len() == 1 => {
+        "flatMap" | "flat_map" if args.len() == 1 => {
             let (source, mut ops, current_shape) =
                 collect_stream_chain(receiver.as_deref()?, input_shape, env, facts)?;
             let flat_map = flat_map_plan(&args[0], &current_shape, env, facts)?;
@@ -333,20 +427,49 @@ fn collect_stream_chain<'a>(
     }
 }
 
+fn stream_source_iteration(source: &Expr) -> StreamSourceIteration {
+    match source {
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if args.len() == 2
+            && matches!(receiver.as_ref(), Expr::Var(owner)
+                if crate::stdlib::canonical_external_receiver_type_key(owner) == "IntStream")
+            && matches!(name.as_str(), "range" | "range_closed") =>
+        {
+            StreamSourceIteration::OwnedValue
+        }
+        Expr::Var(_) | Expr::FieldAccess(_, _) | Expr::ArrayAccess(_, _) => {
+            StreamSourceIteration::Borrowed
+        }
+        _ => StreamSourceIteration::OwnedValue,
+    }
+}
+
 fn lambda_plan(lambda: &Expr) -> Option<LambdaPlan<'_>> {
-    let Expr::Lambda { params, body } = lambda else {
-        return None;
-    };
-    let param = params.first()?.name.clone();
-    let body = match body {
-        LambdaBody::Expr(body) => StreamLambdaBody::Expr(body),
-        LambdaBody::Block(block) if block_returns_value(block) => StreamLambdaBody::Block(block),
-        LambdaBody::Block(_) => return None,
-    };
-    Some(LambdaPlan {
-        param_name: param,
-        body,
-    })
+    match lambda {
+        Expr::Lambda { params, body } => {
+            let param = params.first()?.name.clone();
+            let body = match body {
+                LambdaBody::Expr(body) => StreamLambdaBody::Expr(body),
+                LambdaBody::Block(block) if block_returns_value(block) => {
+                    StreamLambdaBody::Block(block)
+                }
+                LambdaBody::Block(_) => return None,
+            };
+            Some(LambdaPlan {
+                param_name: param,
+                body,
+            })
+        }
+        Expr::MethodReference { target, method } => Some(LambdaPlan {
+            param_name: "value".to_string(),
+            body: StreamLambdaBody::MethodReference { target, method },
+        }),
+        _ => None,
+    }
 }
 
 fn block_returns_value(block: &Block) -> bool {
@@ -357,6 +480,10 @@ fn infer_stream_lambda_output_shape(
     lambda: &LambdaPlan<'_>,
     input_shape: &RustSlotShape,
 ) -> RustSlotShape {
+    if let StreamLambdaBody::MethodReference { target, method } = lambda.body {
+        return infer_stream_method_reference_output_shape(target, method, input_shape)
+            .unwrap_or_else(|| input_shape.clone());
+    }
     let Some(return_expr) = lambda.body.return_expr() else {
         return input_shape.clone();
     };
@@ -367,6 +494,28 @@ fn infer_stream_lambda_output_shape(
         nullable
     } else {
         output_shape
+    }
+}
+
+fn infer_stream_method_reference_output_shape(
+    target: &str,
+    method: &str,
+    input_shape: &RustSlotShape,
+) -> Option<RustSlotShape> {
+    let target = crate::stdlib::canonical_external_receiver_type_key(target);
+    match (target.as_str(), method) {
+        ("Integer", "intValue" | "int_value") => Some(RustSlotShape::for_storage(
+            JavaType::Primitive(PrimitiveType::Int),
+        )),
+        ("String", "valueOf" | "value_of") | ("Object", "toString" | "to_string") => {
+            Some(crate::shape_projection::owned_string_value_shape())
+        }
+        (_, method) if method.starts_with("get") || method.starts_with("get_") => {
+            let mut shape = input_shape.clone();
+            shape.java_ty = JavaType::Unknown(crate::parser::to_snake_case(method));
+            Some(shape)
+        }
+        _ => None,
     }
 }
 
@@ -503,6 +652,7 @@ fn lambda_stream_chain_plan<'a>(
             source: StreamSource {
                 expr: source,
                 optional_sequence: stream_source_is_optional_sequence(source, &lambda_env, facts),
+                iteration: stream_source_iteration(source),
             },
             ops,
             source_element: StreamElement {
@@ -572,8 +722,10 @@ pub fn stream_terminal_actual(
                 args: vec![key_shape.java_ty, value_shape.java_ty],
             })
         }
+        StreamTerminal::Join { .. } => LoweredType::from_java(JavaType::String),
+        StreamTerminal::ToArray => stream_collect_actual(element_shape),
         StreamTerminal::FindFirst => LoweredType::optional_element_borrow_shape(element_shape),
-        StreamTerminal::AnyMatch(_) => {
+        StreamTerminal::AnyMatch(_) | StreamTerminal::AllMatch(_) => {
             LoweredType::from_java(JavaType::Primitive(PrimitiveType::Boolean))
         }
     }
@@ -585,6 +737,10 @@ fn infer_terminal_lambda_output_shape(
     _env: &TypeEnv,
     _facts: &FactSet,
 ) -> RustSlotShape {
+    if let StreamLambdaBody::MethodReference { target, method } = lambda.body {
+        return infer_stream_method_reference_output_shape(target, method, element_shape)
+            .unwrap_or_else(|| element_shape.clone());
+    }
     let Some(return_expr) = lambda.body.return_expr() else {
         return element_shape.clone();
     };

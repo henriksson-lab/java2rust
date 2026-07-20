@@ -116,7 +116,6 @@ pub fn translate_source_with_context_sources_and_summary_sources(
 ) -> Translation {
     let parsed = parser::parse_java_source(source);
     let mut source_program = parsed.program.clone();
-    let mut semantic_program = parsed.program.clone();
     let mut summary_program = Program::default();
     let mut summary_facts = FactSet::default();
     let mut context_diagnostics = DiagnosticBag::new();
@@ -124,7 +123,6 @@ pub fn translate_source_with_context_sources_and_summary_sources(
         let context_parsed = parser::parse_java_source(context_source);
         context_diagnostics.extend(context_parsed.diagnostics);
         merge_program_context(&mut source_program, context_parsed.program.clone());
-        merge_program_context(&mut semantic_program, context_parsed.program);
     }
     for summary_source in summary_sources {
         let summary_parsed = parser::parse_java_source(summary_source);
@@ -137,7 +135,6 @@ pub fn translate_source_with_context_sources_and_summary_sources(
     }
     let source_program_context =
         (!context_sources.is_empty() || !summary_sources.is_empty()).then_some(source_program);
-    let semantic_program_context = (!context_sources.is_empty()).then_some(semantic_program);
     let support_program_context = source_program_context.clone();
     let summary_program_context = (!summary_sources.is_empty()).then_some(summary_program);
     let mut effective_external_facts = external_facts.clone();
@@ -145,7 +142,7 @@ pub fn translate_source_with_context_sources_and_summary_sources(
     let mut translation = translate_parsed_source_with_context(
         parsed,
         source_program_context,
-        semantic_program_context,
+        None,
         support_program_context,
         summary_program_context,
         &effective_external_facts,

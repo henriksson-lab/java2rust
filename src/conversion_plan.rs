@@ -3,7 +3,9 @@ use crate::expr_shape::{
     ExprShapeContext, ShapeEnv, infer_assignment_target_shape_with_context,
     infer_expr_shape_with_context,
 };
-use crate::facts::{FactSet, OwnedRecoveryCapability};
+use crate::facts::{
+    ExternalConversionAdapterKind, FactSet, HierarchyStrategy, OwnedRecoveryCapability,
+};
 use crate::java_ir::{Expr, JavaCoercionEvidence, JavaCoercionKind, JavaType, PrimitiveType};
 use crate::shape_projection::{borrowed_sequence_element_shape, project_java_value_shape};
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
@@ -532,6 +534,10 @@ pub enum DispatchCoercionPolicy {
     BorrowConcreteFacade {
         target_type: String,
     },
+    ExternalInto {
+        from_type: JavaType,
+        to_type: JavaType,
+    },
     BoxDynTrait {
         trait_name: String,
     },
@@ -683,6 +689,18 @@ pub struct SetElementTargetMatchPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoweredType {
     Slot(Box<RustSlotShape>),
+    RustScalar {
+        java_shape: Box<RustSlotShape>,
+        rust_type_name: String,
+    },
+    RustBorrowed {
+        java_shape: Box<RustSlotShape>,
+        rust_type_name: String,
+    },
+    RustUnsignedByteArray {
+        java_shape: Box<RustSlotShape>,
+        optional: bool,
+    },
     OptionalElementBorrow {
         option_shape: Box<RustSlotShape>,
         element_shape: Box<RustSlotShape>,
@@ -700,6 +718,29 @@ pub enum LoweredType {
 impl LoweredType {
     pub fn from_java(java_ty: JavaType) -> Self {
         Self::Slot(Box::new(RustSlotShape::conservative(java_ty)))
+    }
+
+    pub fn rust_scalar_return(java_ty: JavaType, rust_type_name: String) -> Self {
+        Self::RustScalar {
+            java_shape: Box::new(RustSlotShape::conservative(java_ty)),
+            rust_type_name,
+        }
+    }
+
+    pub fn rust_borrowed_return(java_ty: JavaType, rust_type_name: String) -> Self {
+        let mut java_shape = RustSlotShape::conservative(java_ty);
+        java_shape.ownership = OwnershipShape::SharedBorrow;
+        Self::RustBorrowed {
+            java_shape: Box::new(java_shape),
+            rust_type_name,
+        }
+    }
+
+    pub fn rust_unsigned_byte_array_return(java_ty: JavaType, optional: bool) -> Self {
+        Self::RustUnsignedByteArray {
+            java_shape: Box::new(RustSlotShape::conservative(java_ty)),
+            optional,
+        }
     }
 
     pub fn optional_element_borrow(element_ty: JavaType) -> Self {
@@ -754,11 +795,36 @@ impl LoweredType {
     pub fn java_ty(&self) -> Option<&JavaType> {
         match self {
             LoweredType::Slot(shape) => Some(&shape.java_ty),
+            LoweredType::RustScalar { java_shape, .. } => Some(&java_shape.java_ty),
+            LoweredType::RustBorrowed { java_shape, .. } => Some(&java_shape.java_ty),
+            LoweredType::RustUnsignedByteArray { java_shape, .. } => Some(&java_shape.java_ty),
             LoweredType::OptionalElementBorrow { option_shape, .. } => Some(&option_shape.java_ty),
             LoweredType::VecElementBorrow { vec_shape, .. } => Some(&vec_shape.java_ty),
             LoweredType::SetElementBorrow { set_shape, .. } => Some(&set_shape.java_ty),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustScalarSlotCastPolicy {
+    pub rust_type_name: String,
+    pub java_semantic_shape: RustSlotShape,
+    pub target: RustSlotShape,
+    pub target_primitive: PrimitiveType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustBorrowedFacadeReturnPolicy {
+    pub rust_type_name: String,
+    pub java_semantic_shape: RustSlotShape,
+    pub target: RustSlotShape,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustUnsignedByteArrayReturnPolicy {
+    pub java_semantic_shape: RustSlotShape,
+    pub target: RustSlotShape,
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1100,6 +1166,14 @@ pub fn ownership_coercion_policy_with_effective_facts(
         && actual.view == target.view
         && actual.ownership == OwnershipShape::SharedBorrow
         && target.ownership == OwnershipShape::Owned
+    {
+        let capability =
+            coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
+        ownership_recovery_policy_from_capability(capability.recovery, actual, target)
+    } else if actual.ownership == OwnershipShape::SharedBorrow
+        && target.ownership == OwnershipShape::Owned
+        && matches!(target.dispatch, DispatchShape::ErasedObject)
+        && !matches!(actual.java_ty, JavaType::Primitive(_) | JavaType::Void)
     {
         let capability =
             coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
@@ -1523,7 +1597,9 @@ pub fn dispatch_coercion_policy_with_facts(
     }
     match (&actual.dispatch, &target.dispatch) {
         (DispatchShape::Concrete, DispatchShape::Concrete) => {
-            if actual.java_ty != target.java_ty
+            if let Some(adapter) = external_conversion_adapter_policy(actual, target, facts) {
+                adapter
+            } else if actual.java_ty != target.java_ty
                 && target.ownership == OwnershipShape::SharedBorrow
                 && borrowed_element_target_matches_element(target, actual, facts)
                 && let Some(target_type) =
@@ -1547,6 +1623,9 @@ pub fn dispatch_coercion_policy_with_facts(
                 .unwrap_or_else(|| unsupported_dispatch_coercion_policy(actual, target))
         }
         (DispatchShape::Concrete, DispatchShape::DynTrait { trait_name }) => {
+            if external_crate_mapped_dyn_trait_boundary(trait_name, facts) {
+                return DispatchCoercionPolicy::NoDispatchChange;
+            }
             DispatchCoercionPolicy::BorrowDynTrait {
                 trait_name: trait_name.clone(),
             }
@@ -1562,6 +1641,9 @@ pub fn dispatch_coercion_policy_with_facts(
             trait_name: target_trait.clone(),
         },
         (DispatchShape::Concrete, DispatchShape::BoxedDynTrait { trait_name }) => {
+            if external_crate_mapped_dyn_trait_boundary(trait_name, facts) {
+                return DispatchCoercionPolicy::EraseObject;
+            }
             DispatchCoercionPolicy::BoxDynTrait {
                 trait_name: trait_name.clone(),
             }
@@ -1673,6 +1755,45 @@ pub fn dispatch_coercion_policy_with_facts(
             }
         }
         _ => unsupported_dispatch_coercion_policy(actual, target),
+    }
+}
+
+fn external_crate_mapped_dyn_trait_boundary(trait_name: &str, facts: &FactSet) -> bool {
+    let effective_facts = EffectiveFacts::new(facts);
+    let java_ty = JavaType::Named {
+        name: trait_name.to_string(),
+        args: Vec::new(),
+    };
+    matches!(
+        effective_facts.object_representation_override_strategy_for(&java_ty),
+        Some(HierarchyStrategy::DynTrait { .. })
+    ) && effective_facts
+        .external_library_pack_for_type(&crate::stdlib::canonical_external_receiver_type_key(
+            trait_name,
+        ))
+        .is_some_and(|pack| pack.mode == crate::facts::ExternalLibraryMode::RustCrateMapping)
+}
+
+fn external_conversion_adapter_policy(
+    actual: &RustSlotShape,
+    target: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<DispatchCoercionPolicy> {
+    let (
+        JavaType::Named {
+            name: from_type, ..
+        },
+        JavaType::Named { name: to_type, .. },
+    ) = (&actual.java_ty, &target.java_ty)
+    else {
+        return None;
+    };
+    let adapter = facts.external_conversion_adapter_for(from_type, to_type)?;
+    match adapter.kind {
+        ExternalConversionAdapterKind::Into => Some(DispatchCoercionPolicy::ExternalInto {
+            from_type: actual.java_ty.clone(),
+            to_type: target.java_ty.clone(),
+        }),
     }
 }
 
@@ -2274,6 +2395,9 @@ pub enum SlotConversionPlan {
     Shape(ShapeCoercionPlan),
     Syntax(SyntaxCoercionPlan),
     BorrowedElement(BorrowedElementSlotAdapterPolicy),
+    RustScalarCast(RustScalarSlotCastPolicy),
+    RustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy),
+    RustUnsignedByteArrayReturn(RustUnsignedByteArrayReturnPolicy),
     Identity { actual: LoweredType, slot: Slot },
 }
 
@@ -2282,7 +2406,11 @@ impl SlotConversionPlan {
         match self {
             SlotConversionPlan::Shape(plan) => plan.unsupported_diagnostics(),
             SlotConversionPlan::BorrowedElement(policy) => policy.unsupported_diagnostics(),
-            SlotConversionPlan::Syntax(_) | SlotConversionPlan::Identity { .. } => Vec::new(),
+            SlotConversionPlan::Syntax(_)
+            | SlotConversionPlan::RustScalarCast(_)
+            | SlotConversionPlan::RustBorrowedFacadeReturn(_)
+            | SlotConversionPlan::RustUnsignedByteArrayReturn(_)
+            | SlotConversionPlan::Identity { .. } => Vec::new(),
         }
     }
 }
@@ -2347,7 +2475,10 @@ pub fn plan_cast_conversion(
     ctx: ExprShapeContext<'_>,
 ) -> CastConversionPlan {
     let actual = infer_expr_shape_with_context(expr, env, ctx);
-    let target = project_java_value_shape(ctx.representations, target_ty.clone());
+    let mut target = project_java_value_shape(ctx.representations, target_ty.clone());
+    if same_java_type_cast_should_preserve_actual_shape(&actual, &target) {
+        target = actual.clone();
+    }
     let default_facts = FactSet::default();
     let facts = ctx.facts.unwrap_or(&default_facts);
     let coercion = shape_coercion_plan_with_facts(&actual, &target, facts);
@@ -2358,6 +2489,23 @@ pub fn plan_cast_conversion(
         target,
         semantics,
         coercion,
+    }
+}
+
+fn same_java_type_cast_should_preserve_actual_shape(
+    actual: &RustSlotShape,
+    target: &RustSlotShape,
+) -> bool {
+    java_types_have_same_erased_cast_identity(&actual.java_ty, &target.java_ty)
+        && matches!(actual.dispatch, DispatchShape::Concrete)
+        && matches!(actual.view, ViewShape::Native)
+        && matches!(target.dispatch, DispatchShape::ErasedObject)
+}
+
+fn java_types_have_same_erased_cast_identity(left: &JavaType, right: &JavaType) -> bool {
+    match (left, right) {
+        (JavaType::Named { name: left, .. }, JavaType::Named { name: right, .. }) => left == right,
+        _ => left == right,
     }
 }
 
@@ -2539,15 +2687,69 @@ pub fn lowered_slot_conversion_plan_with_facts(
     match (actual, slot) {
         (LoweredType::Slot(actual), _) => slot_conversion_plan_with_facts(actual, slot, facts),
         (
+            LoweredType::RustScalar {
+                java_shape,
+                rust_type_name,
+            },
+            Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
+        ) => {
+            if let JavaType::Primitive(target_primitive) = target.java_ty {
+                SlotConversionPlan::RustScalarCast(RustScalarSlotCastPolicy {
+                    rust_type_name: rust_type_name.clone(),
+                    java_semantic_shape: (**java_shape).clone(),
+                    target: target.clone(),
+                    target_primitive,
+                })
+            } else {
+                slot_conversion_plan_with_facts(java_shape, slot, facts)
+            }
+        }
+        (
+            LoweredType::RustBorrowed {
+                java_shape,
+                rust_type_name,
+            },
+            Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
+        ) if slot_or_optional_element_targets_erased_object(target) => {
+            SlotConversionPlan::RustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy {
+                rust_type_name: rust_type_name.clone(),
+                java_semantic_shape: (**java_shape).clone(),
+                target: target.clone(),
+            })
+        }
+        (
+            LoweredType::RustBorrowed { java_shape, .. },
+            Slot::Assignment(_) | Slot::Return(_) | Slot::Argument(_),
+        ) => slot_conversion_plan_with_facts(java_shape, slot, facts),
+        (
+            LoweredType::RustUnsignedByteArray {
+                java_shape,
+                optional,
+            },
+            Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
+        ) if target_expects_java_byte_array_or_option(target) => {
+            SlotConversionPlan::RustUnsignedByteArrayReturn(RustUnsignedByteArrayReturnPolicy {
+                java_semantic_shape: (**java_shape).clone(),
+                target: target.clone(),
+                optional: *optional,
+            })
+        }
+        (
+            LoweredType::RustUnsignedByteArray { java_shape, .. },
+            Slot::Assignment(_) | Slot::Return(_) | Slot::Argument(_),
+        ) => slot_conversion_plan_with_facts(java_shape, slot, facts),
+        (
             LoweredType::OptionalElementBorrow {
                 option_shape,
                 element_shape,
             },
             Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
         ) => {
-            if matches!(target.dispatch, DispatchShape::ErasedObject) {
+            if slot_or_optional_element_targets_erased_object(target) {
+                let mut option_shape = (**option_shape).clone();
+                option_shape.ownership = element_shape.ownership;
                 SlotConversionPlan::Shape(shape_coercion_plan_with_facts(
-                    option_shape,
+                    &option_shape,
                     target,
                     facts,
                 ))
@@ -2592,4 +2794,35 @@ pub fn lowered_slot_conversion_plan_with_facts(
             slot: slot.clone(),
         },
     }
+}
+
+fn target_expects_java_byte_array_or_option(target: &RustSlotShape) -> bool {
+    java_type_is_byte_array(&target.java_ty)
+        || target
+            .optional_element_type()
+            .is_some_and(|element_ty| java_type_is_byte_array(&element_ty))
+}
+
+fn java_type_is_byte_array(java_ty: &JavaType) -> bool {
+    matches!(
+        java_ty,
+        JavaType::Array(element)
+            if matches!(element.as_ref(), JavaType::Primitive(PrimitiveType::Byte))
+    )
+}
+
+fn slot_or_optional_element_targets_erased_object(target: &RustSlotShape) -> bool {
+    if matches!(target.dispatch, DispatchShape::ErasedObject) {
+        return true;
+    }
+    target.optional_element_type().is_some_and(|element_ty| {
+        matches!(
+            optional_element_slot_shape(target, element_ty.clone()).dispatch,
+            DispatchShape::ErasedObject
+        ) || java_type_is_erased_object_like(&element_ty)
+    })
+}
+
+fn java_type_is_erased_object_like(java_ty: &JavaType) -> bool {
+    matches!(java_ty, JavaType::Unknown(name) | JavaType::Named { name, .. } if name == "Object" || name == "java.lang.Object")
 }

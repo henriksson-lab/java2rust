@@ -20,8 +20,14 @@ pub struct FactSet {
     pub trivial_accessor_facts: Vec<TrivialAccessorFact>,
     pub external_api_effect_facts: Vec<ExternalApiEffectFact>,
     pub external_api_argument_effect_facts: Vec<ExternalApiArgumentEffectFact>,
+    pub external_constructor_argument_effect_facts: Vec<ExternalConstructorArgumentEffectFact>,
+    pub external_conversion_adapter_facts: Vec<ExternalConversionAdapterFact>,
     pub external_crate_api_mapping_facts: Vec<ExternalCrateApiMappingFact>,
+    pub external_crate_type_mapping_facts: Vec<ExternalCrateTypeMappingFact>,
     pub external_crate_constructor_mapping_facts: Vec<ExternalCrateConstructorMappingFact>,
+    pub external_rust_result_facts: Vec<ExternalRustResultFact>,
+    pub external_rust_return_type_facts: Vec<ExternalRustReturnTypeFact>,
+    pub external_constructor_rust_result_facts: Vec<ExternalConstructorRustResultFact>,
     pub external_constructor_facts: Vec<ExternalConstructorFact>,
     pub external_field_facts: Vec<ExternalFieldFact>,
     pub method_effect_facts: Vec<MethodEffectFact>,
@@ -73,8 +79,11 @@ pub enum FactKind {
     ConstructorRecursion,
     ExternalApiEffect,
     ExternalApiArgumentEffect,
+    ExternalConstructorArgumentEffect,
+    ExternalConversionAdapter,
     ExternalCrateApiMapping,
     ExternalCrateConstructorMapping,
+    ExternalRustReturnType,
     ExternalConstructor,
     ExternalField,
     ControlFlow,
@@ -116,6 +125,15 @@ pub enum NullabilityState {
     MaybeNull,
     DefinitelyNull,
     Unknown,
+}
+
+pub fn external_parameter_nullability_policy(state: NullabilityState) -> NullabilityState {
+    // External parameter slots are required unless a fact provides positive
+    // nullable evidence. Future injected facts should enter before this policy.
+    match state {
+        NullabilityState::Unknown => NullabilityState::DefinitelyNonNull,
+        explicit => explicit,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +234,31 @@ pub struct ExternalApiArgumentEffectFact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalConstructorArgumentEffectFact {
+    pub type_name: String,
+    pub arg_count: usize,
+    pub parameter_index: usize,
+    pub parameter_type: Option<JavaType>,
+    pub parameter_nullability: NullabilityState,
+    pub argument_mutability: ReceiverMutabilityFact,
+    pub alias_policy: ExternalArgumentAliasPolicy,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalConversionAdapterKind {
+    Into,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalConversionAdapterFact {
+    pub from_type: String,
+    pub to_type: String,
+    pub kind: ExternalConversionAdapterKind,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalCrateApiMappingFact {
     pub receiver_type: String,
     pub method_name: String,
@@ -225,11 +268,44 @@ pub struct ExternalCrateApiMappingFact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalCrateTypeMappingFact {
+    pub type_name: String,
+    pub rust_type_name: String,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalCrateConstructorMappingFact {
     pub type_name: String,
     pub arg_count: usize,
     pub rust_type_name: Option<String>,
     pub rust_name: String,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalRustResultFact {
+    pub receiver_type: Option<String>,
+    pub method_name: String,
+    pub arg_count: Option<usize>,
+    pub returns_result: bool,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalRustReturnTypeFact {
+    pub receiver_type: Option<String>,
+    pub method_name: String,
+    pub arg_count: Option<usize>,
+    pub rust_type_name: String,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalConstructorRustResultFact {
+    pub type_name: String,
+    pub arg_count: usize,
+    pub returns_result: bool,
     pub provenance: FactProvenance,
 }
 
@@ -612,10 +688,22 @@ impl FactSet {
             .extend(other.external_api_effect_facts);
         self.external_api_argument_effect_facts
             .extend(other.external_api_argument_effect_facts);
+        self.external_constructor_argument_effect_facts
+            .extend(other.external_constructor_argument_effect_facts);
+        self.external_conversion_adapter_facts
+            .extend(other.external_conversion_adapter_facts);
         self.external_crate_api_mapping_facts
             .extend(other.external_crate_api_mapping_facts);
+        self.external_crate_type_mapping_facts
+            .extend(other.external_crate_type_mapping_facts);
         self.external_crate_constructor_mapping_facts
             .extend(other.external_crate_constructor_mapping_facts);
+        self.external_rust_result_facts
+            .extend(other.external_rust_result_facts);
+        self.external_rust_return_type_facts
+            .extend(other.external_rust_return_type_facts);
+        self.external_constructor_rust_result_facts
+            .extend(other.external_constructor_rust_result_facts);
         self.external_constructor_facts
             .extend(other.external_constructor_facts);
         self.external_field_facts.extend(other.external_field_facts);
@@ -892,6 +980,57 @@ impl FactSet {
             })
     }
 
+    pub fn external_constructor_argument_effect_for(
+        &self,
+        type_name: &str,
+        arg_count: usize,
+        parameter_index: usize,
+    ) -> Option<&ExternalConstructorArgumentEffectFact> {
+        self.external_constructor_argument_effect_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                external_type_name_matches(&fact.type_name, type_name)
+                    && fact.arg_count == arg_count
+                    && fact.parameter_index == parameter_index
+                    && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.external_constructor_argument_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.type_name, type_name)
+                            && fact.arg_count == arg_count
+                            && fact.parameter_index == parameter_index
+                    })
+            })
+    }
+
+    pub fn external_conversion_adapter_for(
+        &self,
+        from_type: &str,
+        to_type: &str,
+    ) -> Option<&ExternalConversionAdapterFact> {
+        self.external_conversion_adapter_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                external_type_name_matches(&fact.from_type, from_type)
+                    && external_type_name_matches(&fact.to_type, to_type)
+                    && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.external_conversion_adapter_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.from_type, from_type)
+                            && external_type_name_matches(&fact.to_type, to_type)
+                    })
+            })
+    }
+
     pub fn external_crate_api_mapping_for_receiver(
         &self,
         receiver_type: &str,
@@ -1025,6 +1164,152 @@ impl FactSet {
             })
     }
 
+    pub fn external_crate_rust_type_name_for(&self, type_name: &str) -> Option<&str> {
+        self.external_crate_type_mapping_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                external_type_name_directly_matches(&fact.type_name, type_name)
+                    && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.external_crate_type_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| external_type_name_matches(&fact.type_name, type_name))
+            })
+            .map(|fact| fact.rust_type_name.as_str())
+            .or_else(|| {
+                self.external_crate_constructor_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_directly_matches(&fact.type_name, type_name)
+                            && fact.rust_type_name.is_some()
+                            && fact.provenance == FactProvenance::UserOverride
+                    })
+                    .or_else(|| {
+                        self.external_crate_constructor_mapping_facts
+                            .iter()
+                            .rev()
+                            .find(|fact| {
+                                external_type_name_matches(&fact.type_name, type_name)
+                                    && fact.rust_type_name.is_some()
+                            })
+                    })
+                    .and_then(|fact| fact.rust_type_name.as_deref())
+            })
+    }
+
+    pub fn external_crate_constructor_rust_type_name_for(&self, type_name: &str) -> Option<&str> {
+        self.external_crate_constructor_mapping_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                external_type_name_directly_matches(&fact.type_name, type_name)
+                    && fact.rust_type_name.is_some()
+                    && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.external_crate_constructor_mapping_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.type_name, type_name)
+                            && fact.rust_type_name.is_some()
+                    })
+            })
+            .and_then(|fact| fact.rust_type_name.as_deref())
+    }
+
+    pub fn external_rust_result_for_receiver(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_count: Option<usize>,
+    ) -> Option<&ExternalRustResultFact> {
+        self.find_external_rust_result(receiver_type, method_name, arg_count, true)
+            .or_else(|| self.find_external_rust_result(None, method_name, arg_count, true))
+            .or_else(|| {
+                self.find_external_rust_result(receiver_type, method_name, arg_count, false)
+            })
+            .or_else(|| self.find_external_rust_result(None, method_name, arg_count, false))
+    }
+
+    fn find_external_rust_result(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_count: Option<usize>,
+        user_override_only: bool,
+    ) -> Option<&ExternalRustResultFact> {
+        self.external_rust_result_facts.iter().rev().find(|fact| {
+            fact.method_name == method_name
+                && fact.arg_count == arg_count
+                && (!user_override_only || fact.provenance == FactProvenance::UserOverride)
+                && external_optional_type_name_matches(fact.receiver_type.as_deref(), receiver_type)
+        })
+    }
+
+    pub fn external_rust_return_type_for_receiver(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_count: Option<usize>,
+    ) -> Option<&ExternalRustReturnTypeFact> {
+        self.find_external_rust_return_type(receiver_type, method_name, arg_count, true)
+            .or_else(|| self.find_external_rust_return_type(None, method_name, arg_count, true))
+            .or_else(|| {
+                self.find_external_rust_return_type(receiver_type, method_name, arg_count, false)
+            })
+            .or_else(|| self.find_external_rust_return_type(None, method_name, arg_count, false))
+    }
+
+    fn find_external_rust_return_type(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_count: Option<usize>,
+        user_override_only: bool,
+    ) -> Option<&ExternalRustReturnTypeFact> {
+        self.external_rust_return_type_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                fact.method_name == method_name
+                    && fact.arg_count == arg_count
+                    && (!user_override_only || fact.provenance == FactProvenance::UserOverride)
+                    && external_optional_type_name_matches(
+                        fact.receiver_type.as_deref(),
+                        receiver_type,
+                    )
+            })
+    }
+
+    pub fn external_constructor_rust_result_for(
+        &self,
+        type_name: &str,
+        arg_count: usize,
+    ) -> Option<&ExternalConstructorRustResultFact> {
+        self.external_constructor_rust_result_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                external_type_name_matches(&fact.type_name, type_name)
+                    && fact.arg_count == arg_count
+                    && fact.provenance == FactProvenance::UserOverride
+            })
+            .or_else(|| {
+                self.external_constructor_rust_result_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_type_name_matches(&fact.type_name, type_name)
+                            && fact.arg_count == arg_count
+                    })
+            })
+    }
+
     pub fn external_constructor_for(
         &self,
         type_name: &str,
@@ -1086,7 +1371,13 @@ impl FactSet {
         self.external_library_packs
             .iter()
             .rev()
-            .find(|pack| external_pack_owns_type(pack, type_name))
+            .find(|pack| external_pack_directly_owns_type(pack, type_name))
+            .or_else(|| {
+                self.external_library_packs
+                    .iter()
+                    .rev()
+                    .find(|pack| external_pack_owns_type(pack, type_name))
+            })
     }
 
     pub fn unsupported_external_api_for_receiver(
@@ -1525,7 +1816,12 @@ impl FactSet {
     }
 }
 
-fn external_pack_owns_type(pack: &ExternalLibraryPackFact, type_name: &str) -> bool {
+pub(crate) fn external_pack_owns_type(pack: &ExternalLibraryPackFact, type_name: &str) -> bool {
+    external_pack_directly_owns_type(pack, type_name)
+        || external_type_name_directly_matches(&pack.package_prefix, type_name)
+}
+
+fn external_pack_directly_owns_type(pack: &ExternalLibraryPackFact, type_name: &str) -> bool {
     type_name == pack.package_prefix
         || type_name
             .strip_prefix(&pack.package_prefix)

@@ -160,7 +160,8 @@ pub fn resolve_program_with_source_symbols_and_facts(
     for ty in &mut program.types {
         assign_type_rust_names(ty, &mut diagnostics);
     }
-    let symbols = &source_symbols.symbols;
+    let symbols_with_facts = source_symbols.symbols.with_external_facts(external_facts);
+    let symbols = &symbols_with_facts;
     let mut resolver_facts = FactSet::default();
     for ty in &mut program.types {
         resolve_type_calls(
@@ -454,6 +455,7 @@ struct ProgramSymbols {
     type_param_bounds_by_type: HashMap<String, Vec<Option<JavaType>>>,
     functional_interfaces: HashSet<String>,
     functional_interface_methods: HashMap<String, MethodSymbol>,
+    external_facts: FactSet,
 }
 
 impl ProgramSymbols {
@@ -462,6 +464,12 @@ impl ProgramSymbols {
         for ty in &program.types {
             symbols.collect_type(ty, None);
         }
+        symbols
+    }
+
+    fn with_external_facts(&self, external_facts: &FactSet) -> Self {
+        let mut symbols = self.clone();
+        symbols.external_facts = external_facts.clone();
         symbols
     }
 
@@ -1107,6 +1115,9 @@ impl ProgramSymbols {
             if type_name == target {
                 return Some(distance);
             }
+            if self.fact_subtype_reaches(type_name, target) {
+                return Some(distance + 2);
+            }
             if crate::stdlib::is_known_java_subtype(type_name, target) {
                 return Some(distance + 5);
             }
@@ -1122,6 +1133,20 @@ impl ProgramSymbols {
         }
 
         None
+    }
+
+    fn fact_subtype_reaches(&self, actual: &str, target: &str) -> bool {
+        let actual_ty = JavaType::Named {
+            name: self.source_type_name(actual).to_string(),
+            args: Vec::new(),
+        };
+        let target_ty = JavaType::Named {
+            name: self.source_type_name(target).to_string(),
+            args: Vec::new(),
+        };
+        self.external_facts
+            .hierarchy_subtype_policy(&actual_ty, &target_ty)
+            .reaches
     }
 
     fn is_source_enum_type(&self, type_name: &str) -> bool {
@@ -3013,6 +3038,14 @@ fn infer_resolver_expr_type_with_facts(
             ) {
                 return java_ty;
             }
+            if let Some(java_ty) = external_fact_method_return_type_for_call(
+                receiver_type.as_ref(),
+                name,
+                &arg_types,
+                external_facts,
+            ) {
+                return java_ty;
+            }
             crate::stdlib::known_external_method_return_type_for_call(
                 receiver_type.as_ref(),
                 name,
@@ -3675,6 +3708,22 @@ fn known_external_or_pack_field_type_for_receiver(
         return Some(field_type);
     }
     crate::stdlib::known_external_field_type_for_receiver(receiver_ty, member)
+}
+
+fn external_fact_method_return_type_for_call(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_types: &[JavaType],
+    external_facts: &FactSet,
+) -> Option<JavaType> {
+    let receiver_name = receiver_type.and_then(external_receiver_type_name);
+    external_facts
+        .external_api_effect_for_receiver_with_arity(
+            receiver_name.as_deref(),
+            name,
+            Some(arg_types.len()),
+        )
+        .and_then(|effect| effect.return_type.clone())
 }
 
 fn external_receiver_type_name(receiver_ty: &JavaType) -> Option<String> {

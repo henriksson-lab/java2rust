@@ -5,13 +5,16 @@ use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
     ClosedHierarchyFact, ExceptionFact, ExceptionKind, ExternalApiArgumentEffectFact,
     ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
-    ExternalConstructorFact, ExternalCrateApiMappingFact, ExternalCrateConstructorMappingFact,
-    ExternalFieldFact, ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet,
-    FieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride,
-    HierarchyStrategy, NullabilityState, ObjectSafetyFact, ObjectSafetyViolation,
-    OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, ReceiverMutabilityFact,
-    TypeCapabilityOverride, UnsupportedExternalApiFact, UnsupportedExternalConstructorFact,
-    UnsupportedExternalFieldFact,
+    ExternalConstructorArgumentEffectFact, ExternalConstructorFact,
+    ExternalConstructorRustResultFact, ExternalConversionAdapterFact,
+    ExternalConversionAdapterKind, ExternalCrateApiMappingFact,
+    ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFieldFact,
+    ExternalLibraryMode, ExternalLibraryPackFact, ExternalRustResultFact,
+    ExternalRustReturnTypeFact, FactProvenance, FactSet, FieldKey, FieldNullabilityFact,
+    FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy, NullabilityState,
+    ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
+    ReceiverMutabilityFact, TypeCapabilityOverride, UnsupportedExternalApiFact,
+    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
 };
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::parser::parse_type;
@@ -1066,6 +1069,22 @@ pub fn audit_external_pack_fact_boundaries(facts: &FactSet) -> DiagnosticBag {
         }
     }
 
+    for mapping in facts
+        .external_crate_type_mapping_facts
+        .iter()
+        .filter(|mapping| mapping.provenance == FactProvenance::ExternalLibraryPack)
+    {
+        if !fact_set_owns_type(facts, &mapping.type_name) {
+            diagnostics.warning(
+                "external_pack_manifest_unowned_crate_type_mapping_fact",
+                format!(
+                    "{} has an external-pack crate type mapping fact but no declared pack owns type {}",
+                    mapping.type_name, mapping.type_name
+                ),
+            );
+        }
+    }
+
     for constructor in facts
         .external_constructor_facts
         .iter()
@@ -1617,6 +1636,46 @@ pub fn parse_external_pack_manifest(source: &str) -> ExternalPackManifestParse {
                 );
             }
             [
+                "external-pack-constructor-argument",
+                _pack_name,
+                type_name,
+                arg_count,
+                parameter_index,
+                parameter_nullability,
+                argument_mutability,
+                alias_policy,
+                metadata @ ..,
+            ] => {
+                push_external_pack_constructor_argument_fact(
+                    &mut facts,
+                    &mut diagnostics,
+                    line_index,
+                    type_name,
+                    arg_count,
+                    parameter_index,
+                    parameter_nullability,
+                    argument_mutability,
+                    alias_policy,
+                    metadata,
+                );
+            }
+            [
+                "external-pack-conversion",
+                _pack_name,
+                from_type,
+                to_type,
+                kind,
+            ] => {
+                push_external_pack_conversion_adapter_fact(
+                    &mut facts,
+                    &mut diagnostics,
+                    line_index,
+                    from_type,
+                    to_type,
+                    kind,
+                );
+            }
+            [
                 "external-pack-field",
                 pack_name,
                 type_name,
@@ -1817,7 +1876,7 @@ fn push_external_pack_fact(
         push_external_pack_parse_error(diagnostics, line_index, "invalid external pack coverage");
         return;
     };
-    let Some(rust_target) = parse_pack_metadata(diagnostics, line_index, metadata) else {
+    let Some(parsed_metadata) = parse_pack_metadata(diagnostics, line_index, metadata) else {
         return;
     };
     facts.external_library_packs.push(ExternalLibraryPackFact {
@@ -1825,9 +1884,18 @@ fn push_external_pack_fact(
         package_prefix: package_prefix.to_string(),
         mode,
         coverage,
-        rust_target,
+        rust_target: parsed_metadata.rust_target,
         provenance: FactProvenance::ExternalLibraryPack,
     });
+    if let Some(rust_type_name) = parsed_metadata.rust_type_name {
+        facts
+            .external_crate_type_mapping_facts
+            .push(ExternalCrateTypeMappingFact {
+                type_name: package_prefix.to_string(),
+                rust_type_name,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
 }
 
 fn push_external_pack_api_fact(
@@ -1914,6 +1982,28 @@ fn push_external_pack_api_fact(
         thrown: parsed_metadata.thrown,
         provenance: FactProvenance::ExternalLibraryPack,
     });
+    if let Some(returns_result) = parsed_metadata.rust_result {
+        facts
+            .external_rust_result_facts
+            .push(ExternalRustResultFact {
+                receiver_type: Some(receiver_type.to_string()),
+                method_name: method_name.to_string(),
+                arg_count: parsed_metadata.arg_count,
+                returns_result,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
+    if let Some(rust_type_name) = parsed_metadata.rust_return_type {
+        facts
+            .external_rust_return_type_facts
+            .push(ExternalRustReturnTypeFact {
+                receiver_type: Some(receiver_type.to_string()),
+                method_name: method_name.to_string(),
+                arg_count: parsed_metadata.arg_count,
+                rust_type_name,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
     if parsed_metadata.rust_name.is_some()
         || (coverage == ExternalApiCoverage::Mapped && pack_is_rust_crate_mapping(facts, pack_name))
     {
@@ -1981,6 +2071,16 @@ fn push_external_pack_constructor_fact(
             arg_types: vec![JavaType::Unknown("_".to_string()); arg_count],
             provenance: FactProvenance::ExternalLibraryPack,
         });
+    if let Some(returns_result) = parsed_metadata.rust_result {
+        facts
+            .external_constructor_rust_result_facts
+            .push(ExternalConstructorRustResultFact {
+                type_name: type_name.to_string(),
+                arg_count,
+                returns_result,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
     if parsed_metadata.rust_name.is_some()
         || parsed_metadata.rust_type_name.is_some()
         || (coverage == ExternalApiCoverage::Mapped && pack_is_rust_crate_mapping(facts, pack_name))
@@ -2157,6 +2257,29 @@ fn external_pack_modeled_field_type(type_name: &str, field_name: &str) -> Option
     if simple_type_name == "GenotypesContext" && field_name == "NO_GENOTYPES" {
         return Some(JavaType::Named {
             name: "GenotypesContext".to_string(),
+            args: Vec::new(),
+        });
+    }
+    if simple_type_name == "GenotypeType"
+        && matches!(
+            field_name,
+            "HET" | "HOM_REF" | "HOM_VAR" | "NO_CALL" | "UNAVAILABLE"
+        )
+    {
+        return Some(JavaType::Named {
+            name: "GenotypeType".to_string(),
+            args: Vec::new(),
+        });
+    }
+    if simple_type_name == "VCFHeaderLineCount" && matches!(field_name, "A" | "R" | "G") {
+        return Some(JavaType::Named {
+            name: "VCFHeaderLineCount".to_string(),
+            args: Vec::new(),
+        });
+    }
+    if simple_type_name == "VCFHeaderLineType" && field_name == "Integer" {
+        return Some(JavaType::Named {
+            name: "VCFHeaderLineType".to_string(),
             args: Vec::new(),
         });
     }
@@ -3040,6 +3163,94 @@ fn push_external_pack_argument_effect_fact(
         });
 }
 
+fn push_external_pack_constructor_argument_fact(
+    facts: &mut FactSet,
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    type_name: &str,
+    arg_count: &str,
+    parameter_index: &str,
+    parameter_nullability: &str,
+    argument_mutability: &str,
+    alias_policy: &str,
+    metadata: &[&str],
+) {
+    let Ok(arg_count) = arg_count.parse::<usize>() else {
+        push_external_pack_parse_error(diagnostics, line_index, "invalid constructor arg count");
+        return;
+    };
+    let Ok(parameter_index) = parameter_index.parse::<usize>() else {
+        push_external_pack_parse_error(diagnostics, line_index, "invalid parameter index");
+        return;
+    };
+    let Some(parameter_nullability) = parse_nullability_state(parameter_nullability) else {
+        push_external_pack_parse_error(
+            diagnostics,
+            line_index,
+            "invalid constructor argument parameter nullability",
+        );
+        return;
+    };
+    let Some(argument_mutability) = parse_receiver_mutability(argument_mutability) else {
+        push_external_pack_parse_error(
+            diagnostics,
+            line_index,
+            "invalid constructor argument mutability",
+        );
+        return;
+    };
+    let Some(alias_policy) = parse_external_argument_alias_policy(alias_policy) else {
+        push_external_pack_parse_error(
+            diagnostics,
+            line_index,
+            "invalid constructor argument alias policy",
+        );
+        return;
+    };
+    let Some(parameter_type) = parse_external_argument_metadata(diagnostics, line_index, metadata)
+    else {
+        return;
+    };
+    facts
+        .external_constructor_argument_effect_facts
+        .push(ExternalConstructorArgumentEffectFact {
+            type_name: type_name.to_string(),
+            arg_count,
+            parameter_index,
+            parameter_type,
+            parameter_nullability,
+            argument_mutability,
+            alias_policy,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+}
+
+fn push_external_pack_conversion_adapter_fact(
+    facts: &mut FactSet,
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    from_type: &str,
+    to_type: &str,
+    kind: &str,
+) {
+    let Some(kind) = parse_external_conversion_adapter_kind(kind) else {
+        push_external_pack_parse_error(
+            diagnostics,
+            line_index,
+            "invalid external conversion adapter kind",
+        );
+        return;
+    };
+    facts
+        .external_conversion_adapter_facts
+        .push(ExternalConversionAdapterFact {
+            from_type: from_type.to_string(),
+            to_type: to_type.to_string(),
+            kind,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+}
+
 fn push_external_pack_exception_fact(
     facts: &mut FactSet,
     diagnostics: &mut DiagnosticBag,
@@ -3320,6 +3531,14 @@ fn parse_external_pack_closed_bool(value: &str) -> Option<bool> {
     }
 }
 
+fn parse_bool_metadata_value(value: &str) -> Option<bool> {
+    match value {
+        "true" | "yes" => Some(true),
+        "false" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 fn parse_type_list_metadata(
     diagnostics: &mut DiagnosticBag,
     line_index: usize,
@@ -3476,6 +3695,13 @@ fn parse_external_argument_alias_policy(value: &str) -> Option<ExternalArgumentA
     }
 }
 
+fn parse_external_conversion_adapter_kind(value: &str) -> Option<ExternalConversionAdapterKind> {
+    match value {
+        "into" => Some(ExternalConversionAdapterKind::Into),
+        _ => None,
+    }
+}
+
 fn parse_nullability_state(value: &str) -> Option<NullabilityState> {
     match value {
         "definitely-non-null" | "non-null" => Some(NullabilityState::DefinitelyNonNull),
@@ -3486,12 +3712,18 @@ fn parse_nullability_state(value: &str) -> Option<NullabilityState> {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ExternalPackMetadata {
+    rust_target: Option<String>,
+    rust_type_name: Option<String>,
+}
+
 fn parse_pack_metadata(
     diagnostics: &mut DiagnosticBag,
     line_index: usize,
     metadata: &[&str],
-) -> Option<Option<String>> {
-    let mut rust_target = None;
+) -> Option<ExternalPackMetadata> {
+    let mut parsed = ExternalPackMetadata::default();
     for token in metadata {
         if let Some(target) = token.strip_prefix("target=") {
             if target.is_empty() {
@@ -3502,17 +3734,45 @@ fn parse_pack_metadata(
                 );
                 return None;
             }
-            rust_target = Some(target.to_string());
+            parsed.rust_target = Some(target.to_string());
+        } else if let Some(rust_type_name) = token.strip_prefix("rust-type=") {
+            if rust_type_name.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack rust-type metadata must name a Rust type",
+                );
+                return None;
+            }
+            parsed.rust_type_name = Some(rust_type_name.to_string());
+        } else if let Some(package) = token.strip_prefix("package=") {
+            if package.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack package metadata must name a Cargo package",
+                );
+                return None;
+            }
+        } else if let Some(path) = token.strip_prefix("path=") {
+            if path.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack path metadata must name a Cargo dependency path",
+                );
+                return None;
+            }
         } else {
             push_external_pack_parse_error(
                 diagnostics,
                 line_index,
-                "unrecognized external-pack metadata; expected target=RustPath",
+                "unrecognized external-pack metadata; expected target=RustPath, rust-type=RustType, package=CargoPackage or path=DependencyPath",
             );
             return None;
         }
     }
-    Some(rust_target)
+    Some(parsed)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3521,6 +3781,8 @@ struct ExternalApiMetadata {
     return_type: Option<JavaType>,
     thrown: Vec<JavaType>,
     rust_name: Option<String>,
+    rust_result: Option<bool>,
+    rust_return_type: Option<String>,
 }
 
 fn parse_external_api_metadata(
@@ -3585,11 +3847,31 @@ fn parse_external_api_metadata(
                 return None;
             }
             parsed.rust_name = Some(rust_name.to_string());
+        } else if let Some(rust_result) = token.strip_prefix("rust-result=") {
+            let Some(rust_result) = parse_bool_metadata_value(rust_result) else {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-api rust-result metadata must be true or false",
+                );
+                return None;
+            };
+            parsed.rust_result = Some(rust_result);
+        } else if let Some(rust_return_type) = token.strip_prefix("rust-return=") {
+            if rust_return_type.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-api rust-return metadata must name a Rust facade return type",
+                );
+                return None;
+            }
+            parsed.rust_return_type = Some(rust_return_type.to_string());
         } else {
             push_external_pack_parse_error(
                 diagnostics,
                 line_index,
-                "unrecognized external-pack-api metadata; expected args=N, return=Type, throws=TypeA,TypeB or rust=facade_name",
+                "unrecognized external-pack-api metadata; expected args=N, return=Type, throws=TypeA,TypeB, rust=facade_name, rust-result=true|false or rust-return=RustType",
             );
             return None;
         }
@@ -3601,6 +3883,7 @@ fn parse_external_api_metadata(
 struct ExternalConstructorMetadata {
     rust_type_name: Option<String>,
     rust_name: Option<String>,
+    rust_result: Option<bool>,
 }
 
 fn parse_external_constructor_metadata(
@@ -3630,11 +3913,21 @@ fn parse_external_constructor_metadata(
                 return None;
             }
             parsed.rust_type_name = Some(rust_type_name.to_string());
+        } else if let Some(rust_result) = token.strip_prefix("rust-result=") {
+            let Some(rust_result) = parse_bool_metadata_value(rust_result) else {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-constructor rust-result metadata must be true or false",
+                );
+                return None;
+            };
+            parsed.rust_result = Some(rust_result);
         } else {
             push_external_pack_parse_error(
                 diagnostics,
                 line_index,
-                "unrecognized external-pack-constructor metadata; expected rust=constructor_name or rust-type=RustType",
+                "unrecognized external-pack-constructor metadata; expected rust=constructor_name, rust-type=RustType or rust-result=true|false",
             );
             return None;
         }
@@ -18859,6 +19152,14 @@ const VCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("VCFHeader", "HEADER_FIELDS"),
     modeled_semantic_field("htsjdk.variant.vcf.VCFHeader", "REFERENCE_KEY"),
     modeled_semantic_field("VCFHeader", "REFERENCE_KEY"),
+    modeled_semantic_field("htsjdk.variant.vcf.VCFHeaderLineCount", "A"),
+    modeled_semantic_field("VCFHeaderLineCount", "A"),
+    modeled_semantic_field("htsjdk.variant.vcf.VCFHeaderLineCount", "R"),
+    modeled_semantic_field("VCFHeaderLineCount", "R"),
+    modeled_semantic_field("htsjdk.variant.vcf.VCFHeaderLineCount", "G"),
+    modeled_semantic_field("VCFHeaderLineCount", "G"),
+    modeled_semantic_field("htsjdk.variant.vcf.VCFHeaderLineType", "Integer"),
+    modeled_semantic_field("VCFHeaderLineType", "Integer"),
     modeled_semantic_field(
         "htsjdk.variant.vcf.VCFCompoundHeaderLine",
         "SupportedHeaderLineType",
@@ -18941,6 +19242,16 @@ const VARIANTCONTEXT_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("GenotypesContext", "NO_GENOTYPES"),
     modeled_semantic_field("htsjdk.variant.variantcontext.VariantContext", "Type"),
     modeled_semantic_field("VariantContext", "Type"),
+    modeled_semantic_field("htsjdk.variant.variantcontext.GenotypeType", "HET"),
+    modeled_semantic_field("GenotypeType", "HET"),
+    modeled_semantic_field("htsjdk.variant.variantcontext.GenotypeType", "HOM_REF"),
+    modeled_semantic_field("GenotypeType", "HOM_REF"),
+    modeled_semantic_field("htsjdk.variant.variantcontext.GenotypeType", "HOM_VAR"),
+    modeled_semantic_field("GenotypeType", "HOM_VAR"),
+    modeled_semantic_field("htsjdk.variant.variantcontext.GenotypeType", "NO_CALL"),
+    modeled_semantic_field("GenotypeType", "NO_CALL"),
+    modeled_semantic_field("htsjdk.variant.variantcontext.GenotypeType", "UNAVAILABLE"),
+    modeled_semantic_field("GenotypeType", "UNAVAILABLE"),
     modeled_semantic_field(
         "htsjdk.variant.variantcontext.CommonInfo",
         "NO_LOG10_PERROR",
@@ -19895,6 +20206,20 @@ const GENOMICSDB_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     readonly_borrowed_argument("GenomicsDBUtils", "isGenomicsDBArray", 1, "String"),
     readonly_borrowed_argument(
         "org.genomicsdb.GenomicsDBUtils",
+        "getArrayColumnBounds",
+        0,
+        "String",
+    ),
+    readonly_borrowed_argument("GenomicsDBUtils", "getArrayColumnBounds", 0, "String"),
+    readonly_borrowed_argument(
+        "org.genomicsdb.GenomicsDBUtils",
+        "getArrayColumnBounds",
+        1,
+        "String",
+    ),
+    readonly_borrowed_argument("GenomicsDBUtils", "getArrayColumnBounds", 1, "String"),
+    readonly_borrowed_argument(
+        "org.genomicsdb.GenomicsDBUtils",
         "readEntireFile",
         0,
         "String",
@@ -20568,8 +20893,12 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const GENOMICSDB_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("com.intel.genomicsdb.importer.model.ImportConfig", "new"),
+    modeled_semantic("ImportConfig", "new"),
     modeled_semantic("org.genomicsdb.GenomicsDBUtils", "isGenomicsDBArray"),
     modeled_semantic("GenomicsDBUtils", "isGenomicsDBArray"),
+    modeled_semantic("org.genomicsdb.GenomicsDBUtils", "getArrayColumnBounds"),
+    modeled_semantic("GenomicsDBUtils", "getArrayColumnBounds"),
     modeled_semantic("org.genomicsdb.GenomicsDBUtils", "readEntireFile"),
     modeled_semantic("GenomicsDBUtils", "readEntireFile"),
     modeled_semantic("org.genomicsdb.GenomicsDBUtils", "useGcsHdfsConnector"),
@@ -21725,6 +22054,64 @@ const BROAD_HELLBENDER_UTILS_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &
 ];
 
 const BROAD_HELLBENDER_UTILS_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "join",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Utils",
+        "join",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "getRandomGenerator",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Random",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Utils",
+        "getRandomGenerator",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Random",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_getter_effect(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "listFromPrimitives",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_getter_effect(
+        "Utils",
+        "listFromPrimitives",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_getter_effect(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "nonNull",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_getter_effect("Utils", "nonNull", NullabilityState::DefinitelyNonNull),
+    semantic_getter_effect(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "filterCollectionByExpressions",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_getter_effect(
+        "Utils",
+        "filterCollectionByExpressions",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_side_effect_with_arity(
         "org.broadinstitute.hellbender.utils.Utils",
         "validate",
@@ -21742,6 +22129,25 @@ const BROAD_HELLBENDER_UTILS_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const BROAD_HELLBENDER_UTILS_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "join"),
+    modeled_semantic("Utils", "join"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "listFromPrimitives",
+    ),
+    modeled_semantic("Utils", "listFromPrimitives"),
+    modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "nonNull"),
+    modeled_semantic("Utils", "nonNull"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "filterCollectionByExpressions",
+    ),
+    modeled_semantic("Utils", "filterCollectionByExpressions"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.Utils",
+        "getRandomGenerator",
+    ),
+    modeled_semantic("Utils", "getRandomGenerator"),
     modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "validate"),
     modeled_semantic("Utils", "validate"),
     modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "validateArg"),

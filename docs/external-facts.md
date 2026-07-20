@@ -165,6 +165,30 @@ zero-based. `ALIAS_POLICY` is `unknown`, `no-alias`, `borrowed`, or `escapes`.
 The optional `type=TYPE` metadata records the Java parameter type used by slot
 and conversion planning.
 
+External argument nullability is positive evidence, not a missing-data default.
+If no external argument fact, source annotation, provider summary, or call-site
+evidence says a reference parameter accepts `null`, slot planning should treat
+the external boundary as definitely non-null. Use `maybe-null` or
+`definitely-null` only when the library contract or observed source behavior
+actually proves the optional shape.
+
+This also applies to callback parameters and constructor arguments. For an
+unknown external callback slot, assume the callback itself and its parameters
+are required values unless nullable evidence exists. For example, a constructor
+parameter that is only known to be a callback taking
+`(Map<String, URI>, int, int)` and returning a reader map is modeled as
+non-null by default; a future injected fact can widen that exact slot to
+nullable without changing lowering rules.
+
+This is a general boundary rule, not a library shim rule. The only place that
+may turn unknown external parameter nullability into the default non-null shape
+is the semantic fact or slot-planning policy that consumes `FactSet`. Lowering,
+call rendering, external crate mappings, and per-library manifests must consume
+the normalized parameter slot shape. They must not add their own method-name,
+type-name, crate-name, or corpus-specific nullable guesses. If a future corpus
+shows a real nullable parameter, add or inject a fact for that exact callable
+slot and let the same rule widen it.
+
 These facts feed semantic analysis and signature planning. Downstream lowering
 must consume the facts and plans rather than adding new name heuristics for
 external getters, setters, or mutators.
@@ -233,11 +257,14 @@ External pack manifests use the same line-oriented style, but they define a
 coherent library boundary instead of isolated user overrides:
 
 ```text
-external-pack dep.variant dep.variant rust-crate-mapping mapped target=crate::external::dep_variant
+external-pack dep.variant dep.variant rust-crate-mapping mapped target=crate::external::dep_variant package=dep-variant path=../vendor/dep-variant
+external-pack dep.variant dep.variant.NativeCursor rust-crate-mapping mapped target=crate::external::dep_variant rust-type=CursorHandle
 external-pack-api dep.variant dep.variant.Record getContig semantic getter read-only definitely-non-null return=String
 external-pack-api dep.variant dep.variant.Builder setContig semantic fluent-mutator mutates-receiver definitely-non-null return=dep.variant.Builder
 external-pack-api dep.variant dep.variant.Reader read mapped getter read-only maybe-null args=1 return=Record throws=DepIoError rust=read_record
 external-pack-constructor dep.variant dep.variant.Builder 0 mapped rust-type=DepVariantBuilder rust=new_builder
+external-pack-constructor-argument dep.variant dep.variant.Builder 2 1 definitely-non-null read-only borrowed type=dep.variant.Options
+external-pack-conversion dep.variant dep.variant.Leaf dep.variant.Root into
 external-pack-constructor dep.variant dep.variant.LegacyReader 1 unsupported
 external-pack-field dep.variant dep.variant.Record TYPE semantic
 external-pack-field dep.variant dep.variant.Record RAW_HANDLE unsupported
@@ -255,14 +282,27 @@ external-pack-exception dep.variant dep.variant.DecodeError checked
 external-pack-unsupported dep.variant dep.variant.Reader rawDecode requires runtime codec state
 ```
 
-`external-pack PACK TYPE_PREFIX MODE COVERAGE [target=RUST_PATH]` records
+`external-pack PACK TYPE_PREFIX MODE COVERAGE [target=RUST_PATH]
+[rust-type=RUST_TYPE] [package=CARGO_PACKAGE] [path=DEPENDENCY_PATH]` records
 library ownership and the default coverage state for types under that prefix.
 Supported modes are `external-fact-model`, `rust-crate-mapping`,
-`ffi-boundary`, and `conservative-boundary`.
+`ffi-boundary`, and `conservative-boundary`. `target=` is semantic input: it
+names the Rust module or crate path used by lowering. `rust-type=` records the
+Rust facade type name for this owned Java type or prefix and is the preferred
+place to model stable Java-type to Rust-type name differences such as acronym
+or facade handle spelling. Type-level `rust-type=` facts are consumed by all
+crate-mapped type rendering, including method returns, fields, locals,
+constructor results, and facade support. Constructor-level `rust-type=`
+metadata remains available for constructor-specific facade mappings, but it is
+not the canonical place to name a type. `package=` and `path=` are
+dependency-assembly metadata consumed by generated-crate tooling; semantic
+analysis accepts them but does not use them for type, ownership, nullability,
+or lowering decisions.
 
 `external-pack-api PACK RECEIVER METHOD COVERAGE ROLE MUTABILITY [NULLABILITY]
-[args=N] [return=TYPE] [throws=TYPE_A,TYPE_B] [rust=RUST_FN]` records a
-pack-owned modeled API entry as an external API effect fact with
+[args=N] [return=TYPE] [throws=TYPE_A,TYPE_B] [rust=RUST_FN]
+[rust-result=true|false] [rust-return=RUST_TYPE]` records a pack-owned modeled
+API entry as an external API effect fact with
 external-library-pack provenance. The coverage value must be one of
 `declared`, `conservative`, `semantic`, `mapped`, or `unsupported`.
 Unsupported entries become explicit unsupported facts instead of falling
@@ -275,14 +315,33 @@ Inline unsupported API rows do not accept `args=`, `return=`, `throws=`, or
 `rust=` metadata because no call effect or facade mapping is emitted.
 For `rust-crate-mapping` packs, mapped API rows also produce facade-symbol
 mapping facts. `rust=RUST_FN` overrides the default Java-to-snake-case facade
-function name. The manifest audit treats these mapping facts as first-class
-pack output: a crate API mapping fact must come from a `rust-crate-mapping`
-manifest row with matching receiver, method, arity, and Rust symbol.
+function name. `rust-result=true|false` records whether the Rust facade returns
+`Result` independently of the Java `throws=` model. `rust-return=RUST_TYPE`
+records the actual Rust facade return type when it differs from the Java
+semantic `return=TYPE`; slot conversion then owns any cast or adapter, such as
+Rust `usize` returned by a facade for a Java `int` method. Borrowed ABI forms
+such as `rust-return=&Schema` and `rust-return=Option<&FieldVector>` mean the
+facade returns a borrow while Java semantics still expose a value; conversion
+planning must recover owned values before erasing or storing them. The manifest
+audit treats these mapping facts as first-class pack output: a crate API
+mapping fact must come from a `rust-crate-mapping` manifest row with matching
+receiver, method, arity, and Rust symbol.
+
+External method and constructor parameter nullability is non-null by default.
+`unknown` parameter nullability, missing parameter metadata, or an unmodeled
+neighboring parameter means the Rust-facing slot is required unless positive
+nullable evidence exists. Positive evidence includes an explicit
+`external-pack-argument` or user fact, observed `null` at a resolved call site,
+nullable source-summary/provider facts, or declared library annotations. This
+default applies only to parameters; return and field nullability continue to
+come from their own facts. Future user-injected facts should override this
+default in the fact layer, then flow through slot shape and conversion planning
+without adding nullable special cases in lowering.
 
 `external-pack-constructor PACK TYPE ARG_COUNT COVERAGE [rust-type=RUST_TYPE]
 [rust=RUST_FN]` records a modeled constructor entry. Constructor argument types
-are intentionally unknown at the manifest layer; resolution and call planning
-match pack constructors by arity for external-library-pack facts. For
+default to unknown at the manifest layer; resolution and call planning match
+pack constructors by arity for external-library-pack facts. For
 `rust-crate-mapping` packs, mapped constructor rows also produce constructor
 facade mapping facts. `rust-type=RUST_TYPE` and `rust=RUST_FN` override the
 default Rust type name and constructor function name. The manifest audit checks
@@ -292,6 +351,30 @@ constructor rows produce structured unsupported-constructor facts instead of
 falling through to generic missing-constructor diagnostics. Unsupported
 constructor rows do not accept `rust-type=` or `rust=` metadata because no
 constructor facade mapping is emitted.
+
+`external-pack-constructor-argument PACK TYPE ARG_COUNT INDEX NULLABILITY
+MUTABILITY ALIAS_POLICY [type=TYPE]` records a constructor parameter boundary
+fact. It uses the same nullability, mutability, aliasing, and `type=TYPE`
+metadata meanings as `external-pack-argument`, but is keyed by constructor
+owner type and Java arity instead of method name. Use it for crate/facade
+constructors whose Rust parameter shape differs from the Java value shape, such
+as borrowed allocator handles, borrowed path strings, borrowed slices, optional
+callbacks, and owned escaping resources.
+
+External method and constructor parameters default to non-null. A missing
+argument fact, or an argument fact whose nullability is `unknown`, must not
+introduce `Option<T>` by itself. Use `maybe-null` or `definitely-null` only
+when a manifest, source summary, observed `null` call site, or future injected
+override proves that the boundary accepts null.
+
+`external-pack-conversion PACK FROM_TYPE TO_TYPE into` records a Rust facade
+adapter for a Java reference conversion where both sides are external-pack
+types. The current adapter kind, `into`, means Rust has a standard
+`From<FROM> for TO` or equivalent `Into<TO>` implementation, so coercion may
+render `expr.into()` when an expression of `FROM_TYPE` is passed to a slot of
+`TO_TYPE`. This is intended for facade subtype wrappers such as concrete vector
+handles into a facade enum. Lowering must not special-case the source or target
+library name.
 
 `external-pack-field PACK TYPE FIELD COVERAGE` records a modeled field, nested
 type, enum constant, or static constant entry. Like methods and constructors,

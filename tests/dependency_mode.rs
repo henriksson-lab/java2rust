@@ -2304,6 +2304,85 @@ public class ActiveArgs {
 }
 
 #[test]
+fn source_summary_field_facts_resolve_feature_input_generic_overload() {
+    let root = unique_temp_root("dependency-mode-source-summary-feature-input-overload");
+    let app_root = root.join("app");
+    let args_root = root.join("args");
+    fs::create_dir_all(app_root.join("app/tools")).unwrap();
+    fs::create_dir_all(args_root.join("dep/args")).unwrap();
+
+    fs::write(
+        app_root.join("app/tools/UsesDbsnpArgs.java"),
+        r#"
+package app.tools;
+
+import dep.args.DbsnpArgumentCollection;
+import java.util.Collection;
+import java.util.List;
+
+class FeatureInput<T> {}
+class VariantContext {}
+
+class UsesDbsnpArgs {
+    DbsnpArgumentCollection dbsnp = new DbsnpArgumentCollection();
+
+    <T> List<T> getValues(FeatureInput<T> input) {
+        return null;
+    }
+
+    <T> List<T> getValues(Collection<FeatureInput<T>> inputs) {
+        return null;
+    }
+
+    List<VariantContext> run() {
+        return getValues(dbsnp.dbsnp);
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        args_root.join("dep/args/DbsnpArgumentCollection.java"),
+        r#"
+package dep.args;
+
+import app.tools.FeatureInput;
+import app.tools.VariantContext;
+
+public class DbsnpArgumentCollection {
+    public FeatureInput<VariantContext> dbsnp;
+}
+"#,
+    )
+    .unwrap();
+
+    let baseline_config =
+        DependencyModeConfig::for_primary_source_root(&app_root).without_builtin_external_packs();
+    let baseline = benchmark_java_resolver_config(&baseline_config).unwrap();
+    let baseline_rendered = render_resolver_benchmark_report(&baseline);
+    assert!(
+        baseline.resolver_diagnostics > 0,
+        "without the argument-collection summary, the dbsnp field should remain ambiguous: {baseline_rendered}"
+    );
+
+    let mut config = DependencyModeConfig::for_primary_source_root(&app_root);
+    config.add_source_root(&args_root, DependencyMode::SourceSummary);
+    let report = benchmark_java_resolver_config(&config).unwrap();
+    let rendered = render_resolver_benchmark_report(&report);
+
+    assert_eq!(report.resolver_diagnostics, 0, "{rendered}");
+    assert_eq!(report.external_field_guesses, 0, "{rendered}");
+    assert!(
+        report.source_dependency_resolved_field_accesses >= 1,
+        "source-summary field facts should explain DbsnpArgumentCollection.dbsnp: {rendered}"
+    );
+    assert!(
+        rendered.contains("DbsnpArgumentCollection\tdbsnp\tSourceSummary"),
+        "field table should attribute dbsnp to the source-summary dependency: {rendered}"
+    );
+}
+
+#[test]
 fn overlapping_source_summary_root_does_not_duplicate_primary_files() {
     let root = unique_temp_root("dependency-mode-overlapping-source-roots");
     let parent_root = root.join("all");

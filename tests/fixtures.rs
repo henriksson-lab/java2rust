@@ -279,6 +279,67 @@ fn translates_simple_class_shape() {
 }
 
 #[test]
+fn translates_multiline_string_concat_with_braces_without_closing_impl() {
+    let translation = translate_source(
+        r#"
+abstract class BraceStringConcat {
+    int minGQ;
+    int maxGQ;
+
+    abstract String createLabel(String sampleName);
+
+    public abstract void add(int pos, int newEnd);
+
+    String label() {
+        return "HomRefBlock{" +
+                "minGQ=" + minGQ +
+                ", maxGQ=" + maxGQ +
+                '}';
+    }
+
+    boolean withinBounds(int gq) {
+        return gq >= minGQ && gq < maxGQ;
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("format!(\"HomRefBlock{{minGQ={}, maxGQ={}{}\""),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn within_bounds(&self, gq: i32) -> bool"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("\n    }\n    pub fn within_bounds"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("\n    }\n    pub fn create_label"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn translates_expression_precedence_shape() {
     let translation = translate_source(&fixture("01-expressions/ExpressionPrecedence.java"));
     assert!(!translation.diagnostics.has_errors());

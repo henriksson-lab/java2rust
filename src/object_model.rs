@@ -1095,8 +1095,11 @@ pub fn hierarchy_override_application_policy_with_effective_facts(
             hierarchy_override_representation_policy_with_effective_facts(override_fact, facts);
         diagnostics.extend(policy.diagnostics);
         Some(policy.representation)
-    } else if external_erased_object_override_introduces_boundary_root(override_fact) {
-        Some(ObjectRepresentation::ErasedObject)
+    } else if external_pack_override_introduces_boundary_root(override_fact) {
+        let policy =
+            hierarchy_override_representation_policy_with_effective_facts(override_fact, facts);
+        diagnostics.extend(policy.diagnostics);
+        Some(policy.representation)
     } else {
         None
     };
@@ -1126,7 +1129,7 @@ pub fn hierarchy_override_validation_policy(
 ) -> HierarchyOverrideValidationPolicy {
     let mut diagnostics = Vec::new();
     if !context.contains_type(&override_fact.type_name)
-        && !external_erased_object_override_introduces_boundary_root(override_fact)
+        && !external_pack_override_introduces_boundary_root(override_fact)
     {
         diagnostics.push(representation_override_conflict_diagnostic(format!(
             "hierarchy override references unknown Java type {}",
@@ -1147,11 +1150,14 @@ pub fn hierarchy_override_validation_policy(
     }
 }
 
-fn external_erased_object_override_introduces_boundary_root(
-    override_fact: &HierarchyOverride,
-) -> bool {
+fn external_pack_override_introduces_boundary_root(override_fact: &HierarchyOverride) -> bool {
     override_fact.provenance == FactProvenance::ExternalLibraryPack
-        && override_fact.strategy == HierarchyStrategy::ErasedObject
+        && matches!(
+            override_fact.strategy,
+            HierarchyStrategy::ConcreteStruct
+                | HierarchyStrategy::DynTrait { .. }
+                | HierarchyStrategy::ErasedObject
+        )
 }
 
 pub fn hierarchy_override_representation_policy(

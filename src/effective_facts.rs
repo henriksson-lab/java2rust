@@ -1,7 +1,7 @@
 use crate::facts::{
-    DispatchRequirementKind, FactProvenance, FactSet, HierarchyEdgeFact, HierarchyOverride,
-    HierarchyStrategy, ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability,
-    OwnedRecoveryCapabilityFact, TypeCapabilityOverride,
+    DispatchRequirementKind, ExternalLibraryPackFact, FactProvenance, FactSet, HierarchyEdgeFact,
+    HierarchyOverride, HierarchyStrategy, ObjectSafetyFact, ObjectSafetyViolation,
+    OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, TypeCapabilityOverride,
 };
 use crate::java_ir::JavaType;
 use crate::slot_shape::TypeCapabilities;
@@ -44,6 +44,17 @@ impl<'a> EffectiveFacts<'a> {
 
     pub fn hierarchy_overrides(&self) -> &'a [HierarchyOverride] {
         &self.facts.hierarchy_overrides
+    }
+
+    pub fn external_library_pack_for_type(
+        &self,
+        type_name: &str,
+    ) -> Option<&'a ExternalLibraryPackFact> {
+        self.facts.external_library_pack_for_type(type_name)
+    }
+
+    pub fn external_crate_rust_type_name_for(&self, type_name: &str) -> Option<&'a str> {
+        self.facts.external_crate_rust_type_name_for(type_name)
     }
 
     pub fn dispatch_requirements_for(&self, type_name: &str) -> Vec<DispatchRequirementKind> {

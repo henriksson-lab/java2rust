@@ -5,6 +5,7 @@ use crate::java_ir::{BinaryOp, CallKind, Expr, JavaType, Literal, Stmt, UnaryOp}
 use crate::literal_lowering::literal_to_rust;
 use crate::operator_lowering::{binary_op_to_rust, stream_unary_prefix};
 use crate::rust_ir::RustExpr;
+use crate::slot_shape::{OwnershipShape, RustSlotShape, ViewShape};
 use crate::stream::{
     FilterPlan, FlatMapPlan, LambdaPlan, StreamLambdaBody, StreamOp, StreamPlan, StreamSource,
     StreamSourceIteration, StreamSubPipeline, StreamTerminal,
@@ -15,6 +16,7 @@ use std::collections::HashSet;
 pub enum StreamLambdaValue {
     FilterBorrowed,
     BorrowedItem,
+    OwnedItem,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +105,7 @@ fn emit_stream_lambda_body_with_locals_prec(
             match value {
                 StreamLambdaValue::FilterBorrowed => format!("**{param}"),
                 StreamLambdaValue::BorrowedItem => format!("*{param}"),
+                StreamLambdaValue::OwnedItem => param.to_string(),
             },
             12,
         ),
@@ -181,10 +184,18 @@ fn emit_stream_lambda_body_with_locals_prec(
             args,
             resolved,
         } => {
-            let args = emit_stream_lambda_args_with_locals(args, param, value, locals, ctx)?;
             if let Some(resolved) = resolved
                 && matches!(resolved.kind, CallKind::Static)
             {
+                let args = emit_stream_lambda_call_args_for_receiver(
+                    Some(receiver),
+                    name,
+                    args,
+                    param,
+                    value,
+                    locals,
+                    ctx,
+                )?;
                 return parenthesize_stream_expr_if_needed(
                     format!(
                         "{}::{}({})",
@@ -199,9 +210,27 @@ fn emit_stream_lambda_body_with_locals_prec(
                 );
             }
             if let Some(owner) = stream_static_owner_expr_type_name(receiver, locals, ctx) {
+                let args = emit_stream_lambda_call_args_for_receiver(
+                    Some(receiver),
+                    name,
+                    args,
+                    param,
+                    value,
+                    locals,
+                    ctx,
+                )?;
                 if owner == "Integer" && name == "parseInt" && args.len() == 1 {
                     return parenthesize_stream_expr_if_needed(
                         format!("{}.parse::<i32>().unwrap()", args[0]),
+                        11,
+                        parent_prec,
+                        right_child,
+                        None,
+                    );
+                }
+                if owner == "Double" && name == "parseDouble" && args.len() == 1 {
+                    return parenthesize_stream_expr_if_needed(
+                        format!("{}.parse::<f64>().unwrap()", args[0]),
                         11,
                         parent_prec,
                         right_child,
@@ -230,6 +259,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                     None,
                 );
             }
+            let args = emit_stream_lambda_args_with_locals(args, param, value, locals, ctx)?;
             let receiver =
                 emit_stream_lambda_receiver_with_locals(receiver, param, value, locals, ctx)?;
             let rendered = match name.as_str() {
@@ -332,8 +362,8 @@ pub fn render_stream_plan_with_context(
 ) -> Option<LoweredExpr> {
     let source = crate::emit::emit_expr(&lowered_source);
     let mut out = render_stream_source_iter(&source, &plan.source);
-    render_stream_ops(&mut out, &plan.ops, ctx)?;
-    render_stream_terminal(&mut out, plan, ctx)?;
+    let item_is_borrowed = render_stream_ops(&mut out, plan, ctx)?;
+    render_stream_terminal(&mut out, plan, item_is_borrowed, ctx)?;
     Some(LoweredExpr {
         expr: RustExpr::Raw(out),
         actual: plan.actual.clone(),
@@ -341,25 +371,60 @@ pub fn render_stream_plan_with_context(
 }
 
 fn render_stream_source_iter(source: &str, stream_source: &StreamSource<'_>) -> String {
-    if stream_source.optional_sequence {
-        format!("{source}.as_ref().unwrap().iter()")
+    let source = parenthesize_stream_source_for_method_call(source);
+    match (stream_source.optional_sequence, stream_source.iteration) {
+        (true, StreamSourceIteration::Borrowed) => format!("{source}.as_ref().unwrap().iter()"),
+        (true, StreamSourceIteration::OwnedValue) => format!("{source}.unwrap().into_iter()"),
+        (false, StreamSourceIteration::Borrowed) => format!("{source}.iter()"),
+        (false, StreamSourceIteration::OwnedValue) => format!("{source}.into_iter()"),
+    }
+}
+
+fn parenthesize_stream_source_for_method_call(source: &str) -> String {
+    if source.contains("..") && !(source.starts_with('(') && source.ends_with(')')) {
+        format!("({source})")
     } else {
-        format!("{source}.iter()")
+        source.to_string()
     }
 }
 
 fn render_stream_ops(
     out: &mut String,
+    plan: &StreamPlan<'_>,
+    ctx: StreamRenderContext<'_>,
+) -> Option<bool> {
+    render_stream_ops_with_options(
+        out,
+        &plan.ops,
+        ctx,
+        StreamRenderOptions::default(),
+        matches!(plan.source.iteration, StreamSourceIteration::Borrowed),
+    )
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StreamRenderOptions {
+    move_filter_closures: bool,
+}
+
+fn render_stream_ops_with_options(
+    out: &mut String,
     ops: &[StreamOp<'_>],
     ctx: StreamRenderContext<'_>,
-) -> Option<()> {
-    let mut item_is_borrowed = true;
+    options: StreamRenderOptions,
+    mut item_is_borrowed: bool,
+) -> Option<bool> {
     for op in ops {
         match op {
             StreamOp::Filter(filter) => match filter {
                 FilterPlan::Predicate(lambda) => {
+                    let closure_prefix = if options.move_filter_closures {
+                        "move "
+                    } else {
+                        ""
+                    };
                     out.push_str(&format!(
-                        ".filter(|{}| {})",
+                        ".filter({closure_prefix}|{}| {})",
                         lambda.param_name,
                         emit_stream_lambda_closure_body(
                             lambda,
@@ -379,10 +444,15 @@ fn render_stream_ops(
                 }
             },
             StreamOp::Map { lambda, .. } | StreamOp::MapToPrimitive { lambda, .. } => {
+                let value = if item_is_borrowed {
+                    StreamLambdaValue::BorrowedItem
+                } else {
+                    StreamLambdaValue::OwnedItem
+                };
                 out.push_str(&format!(
                     ".map(|{}| {})",
                     lambda.param_name,
-                    emit_stream_lambda_closure_body(lambda, StreamLambdaValue::BorrowedItem, ctx)?
+                    emit_stream_lambda_closure_body(lambda, value, ctx)?
                 ));
                 item_is_borrowed = false;
             }
@@ -433,7 +503,7 @@ fn render_stream_ops(
             },
         }
     }
-    Some(())
+    Some(item_is_borrowed)
 }
 
 fn render_stream_sub_pipeline(
@@ -447,14 +517,37 @@ fn render_stream_sub_pipeline(
         StreamLambdaValue::BorrowedItem,
         ctx,
     )?;
-    let mut out = render_stream_source_iter(&source, &pipeline.source);
-    render_stream_ops(&mut out, &pipeline.ops, ctx)?;
+    let source_is_lambda_param =
+        matches!(pipeline.source.expr, Expr::Var(name) if name == &lambda.param_name);
+    let mut out = if source_is_lambda_param {
+        render_stream_source_iter(&source, &pipeline.source)
+    } else {
+        render_stream_source_owned_iter(&source, &pipeline.source)
+    };
+    render_stream_ops_with_options(
+        &mut out,
+        &pipeline.ops,
+        ctx,
+        StreamRenderOptions {
+            move_filter_closures: true,
+        },
+        matches!(pipeline.source.iteration, StreamSourceIteration::Borrowed),
+    )?;
     Some(out)
+}
+
+fn render_stream_source_owned_iter(source: &str, stream_source: &StreamSource<'_>) -> String {
+    if stream_source.optional_sequence {
+        format!("{source}.unwrap().into_iter()")
+    } else {
+        format!("{source}.into_iter()")
+    }
 }
 
 fn render_stream_terminal(
     out: &mut String,
     plan: &StreamPlan<'_>,
+    item_is_borrowed: bool,
     ctx: StreamRenderContext<'_>,
 ) -> Option<()> {
     match &plan.terminal {
@@ -484,16 +577,57 @@ fn render_stream_terminal(
                 )?
             ));
         }
+        StreamTerminal::Join { delimiter } => {
+            let delimiter = render_stream_join_delimiter(*delimiter, ctx)?;
+            out.push_str(&format!(
+                ".map(|item| item.to_string()).collect::<Vec<_>>().join({delimiter})"
+            ));
+        }
+        StreamTerminal::ToArray => out.push_str(".collect::<Vec<_>>()"),
         StreamTerminal::FindFirst => out.push_str(".next()"),
         StreamTerminal::AnyMatch(lambda) => {
+            let value = if item_is_borrowed {
+                StreamLambdaValue::BorrowedItem
+            } else {
+                StreamLambdaValue::OwnedItem
+            };
             out.push_str(&format!(
                 ".any(|{}| {})",
                 lambda.param_name,
-                emit_stream_lambda_closure_body(lambda, StreamLambdaValue::BorrowedItem, ctx)?
+                emit_stream_lambda_closure_body(lambda, value, ctx)?
+            ));
+        }
+        StreamTerminal::AllMatch(lambda) => {
+            let value = if item_is_borrowed {
+                StreamLambdaValue::BorrowedItem
+            } else {
+                StreamLambdaValue::OwnedItem
+            };
+            out.push_str(&format!(
+                ".all(|{}| {})",
+                lambda.param_name,
+                emit_stream_lambda_closure_body(lambda, value, ctx)?
             ));
         }
     };
     Some(())
+}
+
+fn render_stream_join_delimiter(
+    delimiter: Option<&Expr>,
+    ctx: StreamRenderContext<'_>,
+) -> Option<String> {
+    match delimiter {
+        None => Some("\"\"".to_string()),
+        Some(Expr::Literal(Literal::String(value))) => Some(format!("{value:?}")),
+        Some(expr) => emit_stream_lambda_body_with_context(
+            expr,
+            "__java_unused_stream_join_param",
+            StreamLambdaValue::OwnedItem,
+            ctx,
+        )
+        .map(|expr| format!("{expr}.as_str()")),
+    }
 }
 
 fn emit_stream_collect_to_map_lambda_body(
@@ -517,6 +651,9 @@ fn emit_stream_lambda_closure_body(
     value: StreamLambdaValue,
     ctx: StreamRenderContext<'_>,
 ) -> Option<String> {
+    if let StreamLambdaBody::MethodReference { target, method } = lambda.body {
+        return emit_stream_method_reference_body(target, method, &lambda.param_name, value, ctx);
+    }
     if let Some(nullable_body) = emit_nullable_stream_lambda_closure_body(lambda, value, ctx) {
         return Some(nullable_body);
     }
@@ -529,6 +666,44 @@ fn emit_stream_lambda_closure_body(
         Some(return_expr)
     } else {
         Some(format!("{{ {prefix}{return_expr} }}"))
+    }
+}
+
+fn emit_stream_method_reference_body(
+    target: &str,
+    method: &str,
+    param: &str,
+    value: StreamLambdaValue,
+    _ctx: StreamRenderContext<'_>,
+) -> Option<String> {
+    let target = crate::stdlib::canonical_external_receiver_type_key(target);
+    let value_expr = match value {
+        StreamLambdaValue::FilterBorrowed => format!("**{param}"),
+        StreamLambdaValue::BorrowedItem => format!("*{param}"),
+        StreamLambdaValue::OwnedItem => param.to_string(),
+    };
+    let receiver = match value {
+        StreamLambdaValue::FilterBorrowed => format!("(**{param})"),
+        StreamLambdaValue::BorrowedItem => format!("(*{param})"),
+        StreamLambdaValue::OwnedItem => param.to_string(),
+    };
+    match (target.as_str(), method) {
+        ("Integer", "intValue" | "int_value") => Some(value_expr),
+        ("Object", "toString" | "to_string") => Some(format!("{receiver}.to_string()")),
+        ("String", "valueOf" | "value_of") => Some(format!("{receiver}.to_string()")),
+        (_, method) if method.starts_with("get") || method.starts_with("get_") => Some(format!(
+            "{receiver}.{}()",
+            crate::parser::to_snake_case(method)
+        )),
+        _ if target == "this" || target == "self" => Some(format!(
+            "self.{}({receiver})",
+            crate::parser::to_snake_case(method)
+        )),
+        _ => Some(format!(
+            "{}::{}({receiver})",
+            target,
+            crate::parser::to_snake_case(method)
+        )),
     }
 }
 
@@ -624,6 +799,7 @@ fn emit_stream_lambda_prefix_and_locals<'a>(
     let mutated = match body {
         StreamLambdaBody::Expr(_) => HashSet::new(),
         StreamLambdaBody::Block(block) => stream_lambda_mutated_locals(block),
+        StreamLambdaBody::MethodReference { .. } => HashSet::new(),
     };
     for stmt in body.prefix_statements() {
         out.push_str(&emit_stream_lambda_stmt(
@@ -918,6 +1094,116 @@ fn emit_stream_lambda_args_with_locals(
         .collect()
 }
 
+fn emit_stream_lambda_call_args_for_receiver(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    param: &str,
+    value: StreamLambdaValue,
+    locals: &[&str],
+    ctx: StreamRenderContext<'_>,
+) -> Option<Vec<String>> {
+    let default_args = emit_stream_lambda_args_with_locals(args, param, value, locals, ctx)?;
+    let Some(facts) = ctx.facts else {
+        return Some(default_args);
+    };
+    let Some(env) = ctx.env else {
+        return Some(default_args);
+    };
+    let Some(slots) = crate::call_plan::external_call_arg_shapes(
+        receiver,
+        name,
+        args.len(),
+        facts,
+        env.type_env(),
+    ) else {
+        return Some(default_args);
+    };
+    Some(
+        args.iter()
+            .zip(default_args)
+            .zip(slots.iter())
+            .map(|((arg, rendered), slot)| {
+                adapt_stream_lambda_arg_for_slot(arg, rendered, slot, param, locals, ctx)
+            })
+            .collect(),
+    )
+}
+
+fn adapt_stream_lambda_arg_for_slot(
+    arg: &Expr,
+    rendered: String,
+    slot: &RustSlotShape,
+    param: &str,
+    locals: &[&str],
+    ctx: StreamRenderContext<'_>,
+) -> String {
+    if slot.view == ViewShape::Str && slot.ownership == OwnershipShape::SharedBorrow {
+        return render_stream_lambda_borrowed_str_arg(arg, rendered, param, locals, ctx);
+    }
+    if slot.ownership == OwnershipShape::Owned {
+        return render_stream_lambda_owned_arg(arg, rendered, param);
+    }
+    rendered
+}
+
+fn render_stream_lambda_borrowed_str_arg(
+    arg: &Expr,
+    rendered: String,
+    param: &str,
+    locals: &[&str],
+    ctx: StreamRenderContext<'_>,
+) -> String {
+    match arg {
+        Expr::Var(name) if name == param => format!("{param}.as_str()"),
+        Expr::Var(name) if locals.iter().any(|local| *local == name) => {
+            format!("{}.as_str()", crate::parser::to_snake_case(name))
+        }
+        Expr::Var(name) => ctx
+            .env
+            .filter(|env| env.local_shape(name).is_none())
+            .and_then(|env| env.field_shape(name))
+            .and_then(|shape| {
+                shape
+                    .optional_element_type()
+                    .is_some_and(|element| element == JavaType::String)
+                    .then(|| {
+                        format!(
+                            "self.{}.as_deref().expect(\"Java null receiver\")",
+                            crate::parser::to_snake_case(name)
+                        )
+                    })
+            })
+            .unwrap_or_else(|| format!("{rendered}.as_str()")),
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => ctx
+            .env
+            .and_then(|env| env.field_shape(field))
+            .and_then(|shape| {
+                shape
+                    .optional_element_type()
+                    .is_some_and(|element| element == JavaType::String)
+                    .then(|| {
+                        format!(
+                            "self.{}.as_deref().expect(\"Java null receiver\")",
+                            crate::parser::to_snake_case(field)
+                        )
+                    })
+            })
+            .unwrap_or_else(|| format!("{rendered}.as_str()")),
+        _ => format!("{rendered}.as_str()"),
+    }
+}
+
+fn render_stream_lambda_owned_arg(arg: &Expr, rendered: String, param: &str) -> String {
+    match arg {
+        Expr::Var(name) if name == param => format!("{param}.clone()"),
+        Expr::FieldAccess(receiver, _) if matches!(receiver.as_ref(), Expr::This) => {
+            format!("{rendered}.clone()")
+        }
+        _ => rendered,
+    }
+}
+
 fn parenthesize_stream_expr_if_needed(
     rendered: String,
     own_prec: u8,
@@ -1073,9 +1359,9 @@ fn emit_stream_lambda_receiver_with_locals(
 ) -> Option<String> {
     match expr {
         Expr::Var(name) if name == param => Some(match value {
-            StreamLambdaValue::FilterBorrowed | StreamLambdaValue::BorrowedItem => {
-                param.to_string()
-            }
+            StreamLambdaValue::FilterBorrowed
+            | StreamLambdaValue::BorrowedItem
+            | StreamLambdaValue::OwnedItem => param.to_string(),
         }),
         _ => emit_stream_lambda_body_with_locals(expr, param, value, locals, ctx),
     }

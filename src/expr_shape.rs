@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::facts::FactSet;
 use crate::java_ir::{Expr, JavaType, Member, MethodDecl, Modifier, Stmt, TypeDecl};
@@ -20,6 +22,7 @@ pub struct ShapeEnv {
     local_shapes: HashMap<String, RustSlotShape>,
     field_shapes: HashMap<String, RustSlotShape>,
     static_field_names: HashMap<String, String>,
+    local_plan_occurrences: Rc<RefCell<HashMap<(String, String), usize>>>,
 }
 
 impl ShapeEnv {
@@ -131,6 +134,47 @@ impl ShapeEnv {
         self.local_shapes.get(name)
     }
 
+    pub fn next_local_plan_for_declared_type<'a>(
+        &mut self,
+        locals: &'a [LocalPlan],
+        name: &str,
+        declared_ty: &JavaType,
+    ) -> Option<&'a LocalPlan> {
+        let exact_matches = locals
+            .iter()
+            .filter(|local| local.name == name && local.java_ty == *declared_ty)
+            .collect::<Vec<_>>();
+        if !exact_matches.is_empty() {
+            let index = self.consume_local_plan_occurrence(name, declared_ty);
+            return exact_matches
+                .get(index)
+                .copied()
+                .or_else(|| exact_matches.last().copied());
+        }
+
+        let name_matches = locals
+            .iter()
+            .filter(|local| local.name == name)
+            .collect::<Vec<_>>();
+        if name_matches.is_empty() {
+            return None;
+        }
+        let index = self.consume_local_plan_occurrence(name, &JavaType::Unknown("*".to_string()));
+        name_matches
+            .get(index)
+            .copied()
+            .or_else(|| name_matches.last().copied())
+    }
+
+    fn consume_local_plan_occurrence(&mut self, name: &str, declared_ty: &JavaType) -> usize {
+        let key = (name.to_string(), java_type_occurrence_key(declared_ty));
+        let mut occurrences = self.local_plan_occurrences.borrow_mut();
+        let entry = occurrences.entry(key).or_default();
+        let index = *entry;
+        *entry += 1;
+        index
+    }
+
     pub fn field_shape(&self, name: &str) -> Option<&RustSlotShape> {
         self.field_shapes.get(name)
     }
@@ -141,6 +185,31 @@ impl ShapeEnv {
 
     pub fn static_field_access_name(&self, name: &str) -> Option<&str> {
         self.static_field_names.get(name).map(String::as_str)
+    }
+}
+
+fn java_type_occurrence_key(ty: &JavaType) -> String {
+    match ty {
+        JavaType::Void => "void".to_string(),
+        JavaType::Primitive(primitive) => format!("primitive:{primitive:?}"),
+        JavaType::String => "String".to_string(),
+        JavaType::Array(inner) => format!("array:{}", java_type_occurrence_key(inner)),
+        JavaType::Named { name, args } => {
+            let args = args
+                .iter()
+                .map(java_type_occurrence_key)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("named:{name}<{args}>")
+        }
+        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound))) => {
+            format!("? extends {}", java_type_occurrence_key(bound))
+        }
+        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
+            format!("? super {}", java_type_occurrence_key(bound))
+        }
+        JavaType::Wildcard(None) => "?".to_string(),
+        JavaType::Unknown(name) => format!("unknown:{name}"),
     }
 }
 

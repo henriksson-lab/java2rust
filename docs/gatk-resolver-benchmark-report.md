@@ -37339,3 +37339,547 @@ Evidence:
   The previous `E0507` move out of `self.merged_header_lines` is gone.
   Remaining compile errors are the cross-module `VidMappingPB`/`GenomicsDBImporter`
   identity mismatches and the stream iterator element inference rows.
+
+## Focused GenomicsDB Gate: Shared Support Facade Merge
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_shared_facade_merge_v4 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	failed
+cargo_check_errors	5
+```
+
+Ideal Rust Target:
+
+Focused-package output should have one crate identity for each duplicated
+external support facade. Cross-module calls involving `VidMappingPB`,
+`VidMappingPBBuilder`, and `GenomicsDBImporter` should use root crate types,
+not module-local duplicates.
+
+Implementation Rule:
+
+Package assembly now runs a support-facade merge pass after per-file
+translation. The pass considers only duplicate declarations in the support
+prelude before the real translated source type, moves declarations, aliases,
+deduplicated trait impls, and merged inherent methods to crate root, and
+records method/trait/alias conflicts in
+`generated-shared-support-conflicts.tsv`.
+
+Evidence:
+
+- The intermediate gate at
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_shared_facade_merge_v2`
+  reached `cargo_check_errors=3`; the previous cross-module
+  `VidMappingPB`/`GenomicsDBImporter` mismatches were gone.
+- The combined gate at
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_shared_facade_merge_v4`
+  is `cargo_check_errors=5` after adding the correct
+  `GenomicsDBUtils.getArrayColumnBounds(...) -> long[]` pack fact and the
+  scoped try-capture local initialization rule.
+- Remaining compile failures are all in the nested `flatMap` stream closure:
+  moving `self.workspace`, moving `*partition`, returning an iterator over a
+  temporary `get_contigs_list()` vector, and a nested filter closure borrowing
+  local `bounds`.
+- The existing invalid pattern remains one `invalid_java_cast_downcast` in
+  `GenomicsDBImport`.
+
+## Focused GenomicsDB Gate: Nested FlatMap and Anonymous Facade Return
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_anonymous_facade_v11 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	1
+cargo_check	ok
+cargo_check_errors	0
+```
+
+Ideal Rust Target:
+
+Nested `flatMap` block lambdas that return a temporary collection stream should
+own the temporary collection iterator, move captured locals into nested
+closures when needed, and adapt external string arguments at the stream-call
+boundary. Anonymous external facade returns should use the declared concrete
+facade return slot when the method body constructs a matching anonymous
+implementation.
+
+Implementation Rule:
+
+Stream sub-pipelines now distinguish borrowed outer stream parameters from
+owned temporary collection sources, render nested filters with `move` where the
+block creates captured locals, and route static external stream-call arguments
+through external argument slot facts. Method return signatures add a concrete
+declared-return constraint when a method returns a matching anonymous
+implementation, and concrete dispatch for erased external facades renders the
+named facade type instead of `Box<dyn Any>`.
+
+Evidence:
+
+- `stream_plan_lowers_flat_map_block_temporary_collection_as_owned_subpipeline`
+  covers the GenomicsDB-style nested `flatMap` with `getArrayColumnBounds`,
+  owned temporary list iteration, and moved filter captures.
+- `anonymous_external_facade_return_keeps_declared_concrete_shape_for_internal_method`
+  proves a private method returning `new FeatureReader<>() { ... }` keeps
+  `FeatureReader` as the solved return type and does not emit
+  `downcast::<FeatureReader>()` in that fixture.
+- The focused GenomicsDB gate at
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_anonymous_facade_v11`
+  reports `cargo_check ok` and `cargo_check_errors=0`; the previous nested
+  stream closure compile failures are gone.
+- Residual: one invalid pattern remains in `GenomicsDBImport` where a serial
+  `sampleToReaderMap.put(sampleName, reader)` path still emits
+  `reader.downcast::<FeatureReader>()` even though the local declaration is
+  rendered as `FeatureReader`. Attempts to recover this through duplicate local
+  occurrence refinement caused focused-gate compile regressions, so this should
+  be addressed by proper scoped local occurrence identities rather than a
+  late map-insert rewrite.
+
+## Focused GenomicsDB Gate: Scoped Local Occurrence Identity
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_scoped_locals_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	0
+cargo_check	ok
+cargo_check_errors	0
+```
+
+Ideal Rust Target:
+
+Duplicate Java local names from separate lexical scopes should not collapse to
+one name-only shape during lowering. A later declaration initialized from a
+concrete internal facade return should remain concrete when it flows into a
+typed collection slot.
+
+Implementation Rule:
+
+`ShapeEnv` now carries a shared local-plan occurrence cursor. Lexical shape
+bindings remain cloned per branch/block, but declaration-plan consumption is
+shared across those clones so lowering consumes local plans in source traversal
+order. `Stmt::VarDecl` lowering inserts the exact emitted local shape into the
+environment, and the generic statement-learning pass skips var declarations to
+avoid overwriting occurrence-specific facts with name-only lookup. Conservative
+erased local plans can inherit a more specific planned initializer return shape
+when the Java erased identity matches and the initializer is concrete/native.
+
+Evidence:
+
+- `duplicate_local_names_use_scoped_occurrence_shape_before_map_insert_conversion`
+  proves an earlier scoped `FeatureReader<String> reader;` declaration does
+  not make the later `FeatureReader<String> reader = reader();` occurrence
+  downcast when inserted into a `Map<String, FeatureReader<String>>`.
+- In the focused GenomicsDB gate, the serial path now renders
+  `let reader: FeatureReader = self.get_reader_from_path(...)?;` followed by
+  `sample_to_reader_map.insert(..., reader.clone())`.
+- `invalid_pattern_files` drops from `1` in the previous anonymous facade gate
+  to `0`; `cargo_check` remains `ok` with `cargo_check_errors=0`.
+
+## Focused GenomicsDB Gate: Idiom Sweep Precision Refresh
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb \
+  --source-root-package source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java:org.broadinstitute.hellbender.engine \
+  --builtin-external-pack com.intel.genomicsdb \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_genomicsdb_compile_gate_idiom_precision_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files	6
+resolver_bench	ok
+translate_failed_files	0
+diagnostic_files	6
+invalid_pattern_files	0
+cargo_check	ok
+cargo_check_errors	0
+runtime_downcast	0	0
+concrete_none	0	0
+java_collection_api	0	0
+stream_placeholder	0	0
+try_placeholder	0	0
+array_placeholder	0	0
+switch_state_machine	0	0
+super_constructor	0	0
+unsupported_constructor_delegation	0	0
+class_literal_placeholder	0	0
+instanceof_placeholder	0	0
+```
+
+Ideal Rust Target:
+
+The idiom sweep should rank real translator gaps, not valid Rust carriers or
+domain-specific facade APIs. Valid optional Rust such as
+`let value: Option<T> = None;` and `return None;` from an `Option<T>` function
+should not be counted as concrete-null storage. Idiomatic `HashMap::contains_key`
+and external/domain methods such as `IntervalList::add` should not be counted
+as Java collection leaks.
+
+Implementation Rule:
+
+`scripts/sweep-generated-idioms.py` now filters `concrete_none` matches through
+a predicate that excludes explicitly typed `Option<...> = None` locals and
+`return None;` inside functions returning `Option<...>`. The strong Java
+collection signal now looks for Java-only spellings that should not survive on
+native Rust collections: `.add_all(`, `.size(`, `.put(`, and `.entry_set(`.
+It deliberately excludes `.contains_key(` because that is also the idiomatic
+Rust `HashMap` method, and excludes bare `.add(` because domain facades may
+own a real method with that name.
+
+Evidence:
+
+- `idiom_sweep_ignores_valid_option_none_carriers` covers the optional-local
+  and optional-return exclusions while retaining a true `value = None;` signal.
+- `idiom_sweep_counts_only_strong_java_collection_spellings` proves
+  `contains_key` and domain-style `.add(...)` are ignored while strong Java
+  spellings are still counted.
+- The focused GenomicsDB gate at
+  `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_idiom_precision_v1`
+  reports `invalid_pattern_files=0`, `cargo_check ok`,
+  `cargo_check_errors=0`, and zero occurrences for all tracked idiom signals.
+
+## Focused VariantUtils Parser/Semantic Gate: Utility Pack Tail
+
+Command:
+
+```text
+scripts/run-focused-stage-gates.sh \
+  --stage parser-resolver-semantic \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/variantutils \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils/variant \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/engine \
+  --builtin-external-pack htsjdk.variant.variantcontext \
+  --builtin-external-pack htsjdk.variant.vcf \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_variantutils_parser_semantic_utils_pack_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+parser_diagnostics      0
+resolver_diagnostics    1
+semantic_diagnostics    2
+```
+
+Ideal Rust Target:
+
+GATK utility helpers and HTSJDK enum-like constants should cross the external
+pack boundary as ordinary facts. Calls such as `Utils.join(",", values)` should
+have a non-null `String` result, `Utils.getRandomGenerator()` should have a
+non-null `Random` result, and enum constants such as `GenotypeType.HET` or
+`VCFHeaderLineCount.A` should be typed named values. More polymorphic helpers
+such as `Utils.listFromPrimitives`, `Utils.nonNull`, and
+`Utils.filterCollectionByExpressions` should be recognized as non-null
+pack-owned getter boundaries until argument-sensitive generic return modeling
+is added.
+
+Implementation Rule:
+
+The external pack tables now own the observed `org.broadinstitute.hellbender`
+utility methods and the HTSJDK `GenotypeType`, `VCFHeaderLineCount`, and
+`VCFHeaderLineType` constants. Semantic analysis consumes those pack facts
+before reporting missing-pack diagnostics. GenomicsDB's
+`GenomicsDBUtils.getArrayColumnBounds` and `ImportConfig.new` argument facts
+also have explicit manifest coverage so the pack audit remains clean.
+
+Evidence:
+
+- `builtin_external_member_lookup_uses_cached_pack_facts` asserts direct pack
+  lookup for the new utility effects and enum constants.
+- `semantic_analysis_uses_variantutils_observed_utils_and_enum_pack_entries`
+  proves the observed variantutils utility calls and enum constants do not
+  produce missing-pack diagnostics.
+- `genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers` and
+  `builtin_pack_manifests_explicitly_classify_modeled_member_facts` keep the
+  touched GenomicsDB pack entries manifest-clean.
+- `cargo test --test external_packs --quiet` passes.
+- `cargo check --quiet` passes.
+- The focused variantutils parser/semantic gate moves from
+  `semantic_diagnostics=39` in
+  `/tmp/new_java2rust_gatk_variantutils_stage_gate_v1` to
+  `semantic_diagnostics=2` in
+  `/tmp/new_java2rust_gatk_variantutils_parser_semantic_utils_pack_v1`.
+
+Remaining:
+
+- `resolver_diagnostics=1`: `ValidateVariants.java` still has an ambiguous
+  `getValues` overload for argument type `Unknown("dbsnp")`.
+- The two semantic diagnostics are both the intentional unsupported
+  `VariantContext.fullyDecode` external boundary.
+- `object_representation_diagnostics=10` still come from the unknown
+  `htsjdk.samtools.util.Locatable` hierarchy override, so the next fundamental
+  dependency slice should add the relevant source summary or pack coverage
+  rather than a lowering rule.
+
+## Focused VariantUtils Parser/Semantic Gate: Source Summary Envelope and Locatable Boundary
+
+Command:
+
+```text
+scripts/run-focused-stage-gates.sh \
+  --stage parser-resolver-semantic \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/variantutils \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils/variant \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/engine \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/cmdline/argumentcollections \
+  --builtin-external-pack htsjdk.variant.variantcontext \
+  --builtin-external-pack htsjdk.variant.vcf \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_variantutils_parser_semantic_argcollections_locatable_v1 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+parser_diagnostics                 0
+resolver_diagnostics               0
+semantic_diagnostics               2
+object_representation_diagnostics  0
+```
+
+Ideal Rust Target:
+
+The focused variantutils envelope should be clean for parser, resolver, and
+object representation before compile lowering work starts. `dbsnp.dbsnp`
+should resolve through the `DbsnpArgumentCollection` source-summary field as
+`FeatureInput<VariantContext>`, allowing the resolver to select the
+`getValues(FeatureInput<T>)` overload without a `getValues` special case.
+Pack-owned external facade roots such as `htsjdk.samtools.util.Locatable`
+should be valid object-representation boundary roots even when the Java source
+type is not co-translated.
+
+Implementation Rule:
+
+The selected variantutils dependency envelope now includes
+`org.broadinstitute.hellbender.cmdline.argumentcollections` as a source-summary
+root. That supplies the typed `DbsnpArgumentCollection.dbsnp` field fact and
+removes the final resolver ambiguity. The object-model validator now accepts
+external-pack object strategy overrides as boundary roots for concrete, erased,
+and dyn-trait external shapes; closed-enum overrides still require explicit
+source/variant proof.
+
+Evidence:
+
+- `source_summary_field_facts_resolve_feature_input_generic_overload` proves
+  a summary-only `DbsnpArgumentCollection.dbsnp:
+  FeatureInput<VariantContext>` field resolves the same overloaded generic
+  `getValues(...)` shape without changing resolver overload rules.
+- `external_pack_concrete_object_override_can_introduce_boundary_root` proves
+  external-pack concrete object strategies can introduce non-source boundary
+  roots while user concrete overrides for missing types still diagnose.
+- `cargo test --test dependency_mode --quiet` passes.
+- The focused variantutils parser/semantic gate at
+  `/tmp/new_java2rust_gatk_variantutils_parser_semantic_argcollections_locatable_v1`
+  reports `parser_diagnostics=0`, `resolver_diagnostics=0`, and
+  `object_representation_diagnostics=0`.
+
+Remaining:
+
+- `semantic_diagnostics=2` remains only for the intentional unsupported
+  `VariantContext.fullyDecode` external boundary in `SelectVariants.java`.
+- The next source-summary envelope pressure is constructor/field surface for
+  exceptions, haplotypecaller argument collections, GenomicsDB options,
+  annotator `chromosome_counts`, and selected genotyper/sample helpers.
+
+## Focused VariantUtils Translation Gate: Summary Context Scoping
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --skip-resolver-bench \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/variantutils \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils/variant \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/engine \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/cmdline/argumentcollections \
+  --builtin-external-pack htsjdk.variant.variantcontext \
+  --builtin-external-pack htsjdk.variant.vcf \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_variantutils_translate_summary_cli_v4 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files                  10
+translate_failed_files 0
+diagnostic_files       8
+invalid_pattern_files  10
+cargo_check            failed
+cargo_check_errors     1179
+elapsed                1:42.80
+```
+
+Ideal Rust Target:
+
+Focused package translation should use sibling and source-summary declarations
+as a bounded dependency envelope. Each emitted Java file should resolve against
+the selected package context, but semantic/signature/lowering work should stay
+scoped to the emitted file. Runtime support items such as `JavaClass<T>` should
+be emitted once in the generated crate root, not as duplicate per-module impls.
+
+Implementation Rule:
+
+`--context-source-summary-dir` forwards plain source-summary roots into
+translation. `translate_source_with_context_sources_and_summary_sources` now
+keeps dependency context in the resolver/support programs rather than merging
+the focused package into each file's semantic body program. The focused package
+script forwards `--source-root source-summary:path` to that summary-context
+channel. Generated crate assembly also centralizes `JavaClass<T>` support and
+strips module-local generic `impl<T> JavaClass<T>` blocks.
+
+Evidence:
+
+- A direct `UpdateVCFSequenceDictionary.java` probe with primary sibling
+  context moved from a 45s timeout to `elapsed=0:07.42`.
+- The focused VariantUtils translation gate completes with zero translation
+  failures. The previous completed package run,
+  `/tmp/new_java2rust_gatk_variantutils_translate_summary_cli_v3`, reported
+  `cargo_check_errors=1397`; after shared `JavaClass` support,
+  `/tmp/new_java2rust_gatk_variantutils_translate_summary_cli_v4` reports
+  `cargo_check_errors=1179`.
+- The `JavaClass::{literal,for_name,get_name,get_simple_name,equals}`
+  duplicate definition bucket is gone from the top compile errors.
+
+Remaining:
+
+- The top remaining compile buckets are real translation gaps: mismatched
+  types, missing GATK/HTSJDK constants and facades, typed Java collection
+  aliases (`Map`, `List`, `Arrays`, `Collections`), casts followed by method
+  calls, optional array indexing, and invalid-cast placeholders.
+- Invalid patterns remain in all ten generated files, led by
+  `invalid_java_cast_downcast=68` over nine files and
+  `compile_error_placeholder=23` over six files.
+
+## Focused VariantUtils Translation Gate: Shared Static Constant Support
+
+Command:
+
+```text
+scripts/translate-focused-package.sh \
+  --skip-resolver-bench \
+  --primary /home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/walkers/variantutils \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/utils/variant \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/engine \
+  --source-root source-summary:/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/cmdline/argumentcollections \
+  --builtin-external-pack htsjdk.variant.variantcontext \
+  --builtin-external-pack htsjdk.variant.vcf \
+  --builtin-external-pack htsjdk.samtools.util \
+  --out /tmp/new_java2rust_gatk_variantutils_translate_summary_consts_v2 \
+  --jobs 4
+```
+
+Summary:
+
+```text
+files                  10
+translate_failed_files 0
+diagnostic_files       8
+invalid_pattern_files  10
+cargo_check            failed
+cargo_check_errors     1022
+elapsed                1:45.00
+```
+
+Ideal Rust Target:
+
+Scalar Java static constants from external packs and source-summary
+dependencies should be emitted once as Rust associated constants on a shared
+support owner:
+
+```text
+GATKVCFConstants::RAW_MAPPING_QUALITY_WITH_DEPTH_KEY
+VCFConstants::DEPTH_KEY
+```
+
+The owner may be a generated facade when the Java source is summary-only. Full
+co-translated context still suppresses facade emission because the owner is
+expected to be emitted as source.
+
+Implementation Rule:
+
+Static-constant support generation now separates the context used to recover
+declaration facts and literal values from the set of owners actually emitted by
+the current Rust file. Source-summary owners are dependency owners, not local
+emitted owners, so their scalar constants receive facade support. Package
+assembly now preserves `pub const` items when merging duplicate support
+facades, instead of only preserving methods from inherent impl blocks.
+
+Evidence:
+
+- `source_summary_static_string_constant_emits_external_facade` proves a
+  summary-only static string owner emits a facade and associated constant.
+- `context_static_string_constant_owner_stays_sibling_source_type` proves full
+  context sources still suppress sibling facade emission.
+- `shared_support_merger_preserves_associated_constants` proves package
+  support merging keeps `pub const` items inside shared inherent impls.
+- The focused VariantUtils gate moves from `cargo_check_errors=1179` to
+  `1022`. The previous unresolved `GATKVCFConstants` bucket and missing
+  `VCFConstants::*` scalar associated-constant buckets are gone.
+
+Remaining:
+
+- Object-valued enum-like constants such as `Allele::NON_REF_ALLELE`,
+  `Allele::SPAN_DEL`, and `GenotypeType::{HET,HOM_REF,HOM_VAR}` need a
+  separate facade strategy; scalar associated constants cannot represent
+  non-const heap-backed object values.
+- The largest remaining buckets are mismatched types, missing Java collection
+  aliases/helpers (`Map`, `List`, `Arrays`, `Collections`), header-line facade
+  surfaces, invalid cast placeholders, and optional array indexing.

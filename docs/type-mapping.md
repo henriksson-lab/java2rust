@@ -60,3 +60,16 @@ Operations on erased carriers preserve Java runtime uncertainty. Reads return `J
 ## Nullability Overlay
 
 Nullability is an overlay on the resolved underlying type. `null`, assignments of `null`, nullable returns, checked `x == null`, and nullable external annotations feed this overlay. Constructor definite-non-null facts may remove `Option` only when every constructor path proves initialization before escape.
+
+For un-translated external Java API parameters, the default boundary assumption
+is non-null unless the source program, a known external pack, a source summary,
+or a future injected fact says otherwise. This keeps Rust signatures from
+spreading `Option<T>` through ordinary callbacks, handles, readers, and helper
+objects just because the callee is not translated. Evidence that widens the
+slot includes observed `null` call sites, Java null checks around the value,
+nullable annotations or library models, explicit nullable parameter facts, or
+user-provided override facts. The rule is still fact-driven: injected facts
+must take precedence over the default, and the default must be recorded as a
+boundary assumption rather than rediscovered in lowering. Return and field
+nullability remain separate external facts until we deliberately lock an
+equivalent default for those boundaries.

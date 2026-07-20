@@ -21,6 +21,24 @@ are finite, typed dataflow problems with small lattices and explicit fallback
 diagnostics. Strengthen the existing algorithms before introducing a heavier
 solver.
 
+## External Parameter Nullability Default
+
+Un-translated external Java API parameters default to non-null unless there is
+proof or a strong suggestion to the contrary. This applies to external
+arguments and constructor parameters as a boundary policy, not as an emitter
+heuristic. Nullable source evidence, known library facts, source summaries, or
+future user-injected override facts must widen the slot to `Option<T>` and take
+precedence over the default.
+
+The reason is practical and architectural: Java libraries overwhelmingly use
+non-null objects for ordinary callbacks, handles, readers, builders, and helper
+values, and treating every unknown boundary as nullable spreads `Option<T>`
+through signatures before facts have a chance to refine the API. The default
+must be represented as a semantic/signature fact with provenance so later
+layers can consume one decision instead of repeating nullability special cases.
+Return and field nullability remain separate fact families until we explicitly
+lock matching defaults for those boundaries.
+
 ## Success Definitions
 
 ### Milestone A: Resolver/Semantic Envelope Clean
@@ -638,11 +656,12 @@ even if the generated Rust count improves.
     `<path>/<package/prefix>` and then validates each candidate's declared
     package before admitting it; only if that directory does not exist does it
     fall back to scanning the provided root. This keeps normal Java roots
-    bounded while preserving correctness for nonstandard layouts. The current
-    translation context still merges admitted source files into semantic
-    analysis, so large `source-summary` envelopes remain a follow-up algorithm
-    task: build reusable source-summary facts once and feed those facts to
-    translation instead of solving every context body for every primary file.
+    bounded while preserving correctness for nonstandard layouts. Translation
+    now also accepts plain summary roots through
+    `--context-source-summary-dir`, so focused package scripts can pass the
+    same `--source-root source-summary:path` envelope used by resolver/stage
+    gates into translation without promoting dependencies to full
+    co-translation.
   - Implemented with `--source-root-package mode:path:package.prefix`
     plus `DependencySourceRoot::package_prefixes`. Source indexing parses the
     file package before admitting a source-summary file, so broad dependency
@@ -663,12 +682,12 @@ even if the generated Rust count improves.
     primary/co-translated source. Static string constants from summary context
     should still have one Rust definition when the primary file uses them:
     `Constants::NAME` with `pub const NAME: &'static str = "value";`.
-  - Implementation Rule: translation now separates full context sources from
-    summary context sources. Full context sources still enter semantic solving
-    for tests and future co-translation use. Package-filtered
-    `--context-dir-package` sources enter the resolver source program and
-    support-local-type program, but not the semantic body program. Their
-    declaration facts are added to the external fact set with
+  - Implementation Rule: translation now separates emitted-source semantic
+    solving from dependency context. Full `--context-dir` sources,
+    package-filtered `--context-dir-package` sources, and plain
+    `--context-source-summary-dir` sources enter the resolver source program
+    and support-local-type program, but not the per-file semantic body program.
+    Summary sources also add declaration facts to the external fact set with
     `resolve::declaration_facts_from_program`, including type capabilities and
     field declaration facts. `call_plan` uses resolved call coercion evidence
     and resolved constructor params as finite boundary fallback shapes when a
@@ -706,6 +725,20 @@ even if the generated Rust count improves.
     translation failures `0`, invalid-pattern files `1`, and
     `cargo_check_errors=82`. The remaining top buckets are now real inherited
     member/super/facade lowering gaps rather than a context-scaling failure.
+    The focused VariantUtils package gate reproduces the same scaling fix:
+    primary sibling context alone moved from a 45s timeout for
+    `UpdateVCFSequenceDictionary.java` to `elapsed=0:07.42`, and the full
+    package gate at
+    `/tmp/new_java2rust_gatk_variantutils_translate_summary_cli_v4`
+    completes in `elapsed=1:42.80` with translation failures `0`; after
+    centralizing `JavaClass` support in the generated crate, compile errors
+    move from `1397` to `1179`. After preserving associated constants while
+    merging shared support facades and treating source-summary static constant
+    owners as non-emitted dependency owners, the follow-up gate at
+    `/tmp/new_java2rust_gatk_variantutils_translate_summary_consts_v2`
+    completes in `elapsed=1:45.00` with translation failures `0` and
+    `cargo_check_errors=1022`; the unresolved `GATKVCFConstants` and missing
+    `VCFConstants::*` scalar-constant buckets are gone.
 
 - [x] `SRC-3`: Prevent overlapping source-summary roots from double-counting.
   - Owner: `src/resolver_benchmark.rs`, source index
@@ -2274,8 +2307,10 @@ even if the generated Rust count improves.
     `signature` turns them into constraints; external packs/user facts own
     provenance; lowering consumes solved receiver/argument slots.
   - Fallback Shape: if an external argument boundary is not covered by facts,
-    keep the generic conservative unknown-boundary policy and report the
-    missing coverage rather than guessing mutability from method names.
+    assume reference and callback parameters are non-null, keep mutability and
+    aliasing conservative, and report missing coverage for any ownership or
+    callback-signature precision. Nullable external parameters require an
+    explicit fact, an observed `null` call site, or a future injected override.
   - Evidence: external setters, fluent builders, indexed getters, borrowed
     arguments, escaping arguments, and mutating arguments affect slot shapes
     without lowering-specific API branches.
@@ -2285,8 +2320,11 @@ even if the generated Rust count improves.
     signature constraints for borrowed, escaping, and mutating arguments. When
     every unknown argument boundary for a binding is covered by such facts, the
     solver uses those fact constraints instead of the generic unknown-boundary
-    fallback; otherwise it stays conservative. Coverage includes
+    fallback; otherwise it still defaults the external argument nullability to
+    non-null while keeping ownership/mutability conservative. Coverage includes
     `external_argument_effects_shape_method_params_in_signature_solver`,
+    `external_argument_constraints_default_unknown_slots_to_non_null`,
+    `external_argument_nullable_fact_overrides_non_null_default`,
     `external_setter_effect_requires_mutable_receiver_binding_in_signature`,
     `static_external_facade_uses_nullable_argument_fact_without_call_site_type_hack`,
     `htsjdk_tribble_feature_pack_models_coordinate_getters`,
@@ -3383,6 +3421,11 @@ even if the generated Rust count improves.
     beyond local declarations/expressions/assignments plus final return,
     closure statements needing full method-lowering semantics, and full
     target-functional-interface arity/type adaptation for method references.
+    Scoped local occurrence identities now consume local plans in declaration
+    order across cloned lexical lowering environments. The serial
+    `sampleToReaderMap.put(sampleName, reader)` path now keeps the later
+    `reader` occurrence as `FeatureReader` through map value conversion instead
+    of reusing an earlier erased declaration.
     In the GenomicsDB gate, block-lambda planning now removes placeholders and
     renders type-qualified builder calls such as `ContigPosition::new_builder`
     and `GenomicsDBColumn::new_builder`; remaining failures are missing
@@ -3392,7 +3435,17 @@ even if the generated Rust count improves.
     `generateIntervalListFromWorkspace` to an iterator chain with
     `filter_map`. The follow-up flatMap refresh lowers
     `generateIntervalListFromVidMap` to a nested iterator chain and removes the
-    remaining stream lambda placeholder. A later callback refresh lowers
+    remaining stream lambda placeholder. The nested temporary-collection
+    flatMap refresh also renders `getContigsList().stream().filter(...).map(...)`
+    as an owned nested iterator chain with moved filter captures and external
+    string arguments adapted from argument slot facts. The focused GenomicsDB
+    gate at
+    `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_anonymous_facade_v11`
+    reports `cargo_check ok` and `cargo_check_errors=0`. The scoped-local gate
+    at `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_scoped_locals_v1`
+    reports `invalid_pattern_files=0`, `cargo_check ok`, and
+    `cargo_check_errors=0`; the previous invalid Java-cast downcast is gone.
+    A later callback refresh lowers
     `futures.forEach((sampleName, future) -> { ... })` as a Rust loop, reducing
     unsupported lambda placeholders from `2` to `1`; the exposed nested
     try/catch body and the remaining `submit(() -> { ... })` callback still
@@ -5643,6 +5696,33 @@ even if the generated Rust count improves.
     `tools/walkers/variantutils` with source summaries.
   - Implemented by `scripts/translate-focused-package.sh`; first recorded gate
     is `tools/genomicsdb` in `docs/gatk-resolver-benchmark-report.md`.
+    The focused `tools/walkers/variantutils` parser/semantic gate at
+    `/tmp/new_java2rust_gatk_variantutils_parser_semantic_utils_pack_v1`
+    now records `parser_diagnostics=0`, `resolver_diagnostics=1`, and
+    `semantic_diagnostics=2`, down from the previous `semantic_diagnostics=39`.
+    The remaining semantic diagnostics are the intentional unsupported
+    `VariantContext.fullyDecode` boundary; the remaining resolver diagnostic is
+    `ValidateVariants.getValues(dbsnp)` overload ambiguity.
+    Adding `cmdline/argumentcollections` as a source-summary dependency and
+    allowing external-pack concrete object strategy facts to introduce boundary
+    roots produces the focused gate at
+    `/tmp/new_java2rust_gatk_variantutils_parser_semantic_argcollections_locatable_v1`:
+    `parser_diagnostics=0`, `resolver_diagnostics=0`,
+    `semantic_diagnostics=2`, and `object_representation_diagnostics=0`.
+    The remaining semantic diagnostics are still only the intentional
+    `VariantContext.fullyDecode` unsupported boundary.
+    The focused `tools/walkers/variantutils` translation gate at
+    `/tmp/new_java2rust_gatk_variantutils_translate_summary_cli_v4` now
+    completes instead of timing out: files `10`, translation failures `0`,
+    diagnostic files `8`, invalid-pattern files `10`, and
+    `cargo_check_errors=1179`. The previous package-gate run with the same
+    envelope produced `cargo_check_errors=1397`; moving `JavaClass` support
+    from per-module impls into generated shared support removes the
+    `JavaClass::{literal,for_name,get_name,get_simple_name,equals}` duplicate
+    definition bucket. The remaining top buckets are mismatched types,
+    missing GATK/HTSJDK constants and facades, typed Java collection aliases,
+    casts followed by method calls, optional array indexing, and unresolved
+    invalid-cast placeholders.
 
 - [x] `GATE-2`: Track invalid Rust patterns as hard failures for focused gates.
   - Owner: `scripts/`, `tests/idiom_gaps.rs`
@@ -5659,7 +5739,7 @@ even if the generated Rust count improves.
     generalized fixture tests.
   - Status: Implemented as a reproducible triage tool. The tracked
     `scripts/sweep-generated-idioms.py` scans generated Rust, ranks
-    regex-defined idiom signals by occurrence/file count, maps examples back to
+    targeted idiom signals by occurrence/file count, maps examples back to
     Java source through `status.tsv`, and names the owning layer plus
     generalized fixture coverage for each signal.
     `scripts/translate-focused-package.sh` now runs the sweep after translation and writes
@@ -5667,7 +5747,11 @@ even if the generated Rust count improves.
     while keeping compile status and invalid-pattern checks as the only hard
     gate failures. `docs/gatk-current-idiom-audit.md` documents the direct
     command, focused-gate output locations, and the signal-to-fixture ownership
-    map.
+    map. The sweep now filters valid optional carriers such as
+    `let value: Option<T> = None;` and `return None;` from an `Option<T>`
+    function, and its Java collection signal excludes idiomatic Rust
+    `HashMap::contains_key` plus domain-facade methods such as
+    `IntervalList::add`.
   - Residual: the signal list is intentionally heuristic and should be updated
     whenever a new high-count corpus pattern appears; a count decrease alone is
     not accepted as correctness evidence without fixture and compile-gate
@@ -6061,8 +6145,16 @@ Acceptance:
 
 ## External Parameter Nullability Defaults
 
-- [ ] `EXT-NULL-1`: Default external reference and callback parameters to
+- [x] `EXT-NULL-1`: Default external reference and callback parameters to
   non-null unless facts prove or strongly suggest nullable.
+  - Locked Rule: external parameter nullability is evidence-driven. `Unknown`
+    is not a third runtime shape and does not mean `Option<_>`; it means the
+    nullable fact is absent, so reference and callback parameters default to
+    non-null. Nullable parameters require observed `null`, an explicit
+    external/source/user fact, or another documented nullable signal. Future
+    fact injection may add or override these facts, but ordinary lowering must
+    consume the same parameter-shape decision and must not add library-specific
+    nullable guesses.
   - Ideal Rust Target: external library calls should expose ordinary Rust
     parameter shapes by default: `T`, `&T`, `&mut T`, or `F: Fn...`, not
     `Option<T>`/`Option<F>` everywhere. If a Java call site passes `null`, or
@@ -6081,9 +6173,10 @@ Acceptance:
     also mark the slot nullable or non-null; a contradiction with an observed
     `null` call site should emit a conflict diagnostic and choose the safe
     optional shape unless a future explicit override policy says otherwise. If
-    no nullable evidence exists, the slot is `DefinitelyNonNull` with
-    provenance `AssumedNonNullExternalDefault`. This rule applies only to
-    parameters; return nullability is governed by return facts.
+    no nullable evidence exists, the slot is `DefinitelyNonNull`; this is the
+    global default for external reference/callback parameters, not a
+    library-specific workaround. This rule applies only to parameters; return
+    nullability is governed by return facts.
   - Required Facts: resolved callable owner, callable kind
     (constructor/static/instance), method name where applicable, arity,
     parameter index, Java parameter category (primitive/reference/callback),
@@ -6098,20 +6191,31 @@ Acceptance:
     Rendering must not rediscover nullable external parameters from raw
     expression strings.
   - Fallback Shape: when an external reference/callback parameter has no
-    nullable evidence, assume non-null and record the assumption. When nullable
-    evidence exists but the target callback or reference type is unknown, emit
+    nullable evidence, assume non-null. The current executable form is a
+    `RequiredStorageNullability(DefinitelyNonNull)` signature constraint. An
+    external argument fact with `Unknown` nullability is still absence of
+    nullable evidence, so type, alias, or mutability facts must not suppress
+    the non-null default. A later diagnostics slice should attach explicit
+    `AssumedNonNullExternalDefault` provenance without changing lowering.
+    When nullable evidence exists but the target callback or reference type is unknown, emit
     `Option<T>`/`Option<F>` with generic arguments plus a diagnostic rather
     than forcing a non-null slot. Future injected facts may replace the
     conservative generic shape without changing lowering.
-  - Evidence: add tests proving a neutral external constructor callback
-    parameter remains non-optional, the same parameter becomes optional when
-    any call passes `null`, non-null alternatives in a nullable ternary are
-    wrapped with `Some(...)`, and explicit fact injection can mark a parameter
-    nullable/non-null with conflict diagnostics. This item is open until the
-    focused GenomicsDB import constructor no longer emits an incompatible
-    `None` versus closure branch or a one-argument method-reference callback
-    for the reader-map constructor parameter.
-  - Status: Partial. Constructor argument shaping now consumes external
+  - Evidence: `external_argument_constraints_default_unknown_slots_to_non_null`
+    proves an unknown external callback parameter becomes non-null by default.
+    `external_argument_unknown_nullability_fact_keeps_non_null_default` proves
+    a partial external argument fact does not suppress the default.
+    `external_argument_nullable_fact_overrides_non_null_default` proves an
+    explicit nullable fact takes precedence over the default.
+    `unknown_external_constructor_callback_nullability_stays_non_optional`
+    proves the constructor argument-shape path follows the same rule.
+    `nullable_external_constructor_callback_slot_wraps_method_reference_branch`
+    proves `bypass ? null : this::readerFactory` lowers to
+    `None`/`Some(|arg0, arg1, arg2| ...)` when the constructor slot is known
+    nullable. `call_plan_owns_call_and_new_target_selection_before_argument_lowering`
+    proves one constructor argument fact shapes all constructor slots while
+    unmodeled neighbors remain non-optional.
+  - Status: Rule locked. Constructor argument shaping now consumes external
     argument facts through `external_constructor_arg_shapes`, defaulting
     unmodeled neighboring external constructor parameters to conservative
     non-optional slots. `conversion_plan` treats lambdas and method references
@@ -6119,18 +6223,13 @@ Acceptance:
     method-reference planning can render current-receiver method references
     with arity from the current type signature. The GenomicsDB pack now marks
     `ImportConfig::new` parameter 6 as a nullable escaping `Function` slot.
-    `nullable_external_constructor_callback_slot_wraps_method_reference_branch`
-    proves `bypass ? null : this::readerFactory` lowers to
-    `None`/`Some(|arg0, arg1, arg2| ...)` without a callback downcast.
-    `call_plan_owns_call_and_new_target_selection_before_argument_lowering`
-    proves one constructor argument fact shapes all constructor slots while
-    unmodeled neighbors remain non-optional. The focused GenomicsDB gate at
+    The focused GenomicsDB gate at
     `/tmp/new_java2rust_gatk_genomicsdb_compile_gate_ext_null_arity_v1` moves
     from `cargo_check_errors=8` to `7`; the previous incompatible
     `None`/closure branch, one-argument callback, and `Function` downcast on
-    the `ImportConfig::new` argument are gone. This item remains open because
-    general observed-null fact production and explicit injected-fact conflict
-    diagnostics are not implemented yet.
+    the `ImportConfig::new` argument are gone. Future work remains in
+    `EXT-NULL-2` for general observed-null fact production, injected-fact
+    provenance, and explicit conflict diagnostics.
   - Follow-up Status: Partial. The GenomicsDB pack now also models
     `ImportConfig::new` parameter 4 as a non-null escaping
     `Set<VCFHeaderLine>` slot. This gives the existing optional-self-field

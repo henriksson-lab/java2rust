@@ -1,5 +1,5 @@
 use crate::effective_facts::EffectiveFacts;
-use crate::facts::{FactSet, HierarchyStrategy};
+use crate::facts::{ExternalLibraryMode, FactSet, HierarchyStrategy};
 use crate::java_ir::{JavaType, PrimitiveType, WildcardBound};
 use crate::rust_ir::{RustExpr, RustType};
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
@@ -231,17 +231,29 @@ pub fn render_slot_value_rust_type_policy_with_effective_facts(
         SlotValueRustTypePolicy::ClosedEnum { enum_name } => RustType::Named(enum_name.clone()),
         SlotValueRustTypePolicy::BoxedDynTrait { trait_name }
         | SlotValueRustTypePolicy::BoxedDynTraitView { trait_name } => {
-            RustType::Raw(format!("Box<dyn {trait_name}>"))
+            if external_crate_mapped_dyn_trait_path(trait_name, facts).is_some() {
+                return RustType::Raw("Box<dyn std::any::Any>".to_string());
+            }
+            RustType::Raw(format!(
+                "Box<dyn {}>",
+                dyn_trait_rust_path_with_effective_facts(trait_name, facts)
+            ))
         }
         SlotValueRustTypePolicy::ErasedObject => {
             RustType::Raw("Box<dyn std::any::Any>".to_string())
         }
         SlotValueRustTypePolicy::DynTrait { trait_name }
         | SlotValueRustTypePolicy::DynTraitView { trait_name } => {
-            RustType::Raw(format!("dyn {trait_name}"))
+            if let Some(trait_path) = external_crate_mapped_dyn_trait_path(trait_name, facts) {
+                return RustType::Raw(format!("impl {trait_path}"));
+            }
+            RustType::Raw(format!(
+                "dyn {}",
+                dyn_trait_rust_path_with_effective_facts(trait_name, facts)
+            ))
         }
         SlotValueRustTypePolicy::ConcreteDispatch { java_ty } => {
-            if erased_final_facade_generic_arg_should_keep_named_type(java_ty, facts)
+            if erased_facade_concrete_dispatch_should_keep_named_type(java_ty, facts)
                 && let JavaType::Named { name, .. } = java_ty
             {
                 RustType::Named(rust_name_for_java_named_type(name))
@@ -257,6 +269,59 @@ pub fn render_slot_value_rust_type_policy_with_effective_facts(
             rust_type_for_java_type_with_effective_facts(element_ty, facts),
         )),
     }
+}
+
+fn external_crate_mapped_dyn_trait_path(
+    trait_name: &str,
+    facts: &EffectiveFacts<'_>,
+) -> Option<String> {
+    let java_ty = JavaType::Named {
+        name: trait_name.to_string(),
+        args: Vec::new(),
+    };
+    let Some(HierarchyStrategy::DynTrait {
+        trait_name: fact_trait_name,
+    }) = facts.object_representation_override_strategy_for(&java_ty)
+    else {
+        return None;
+    };
+    let type_key = crate::stdlib::canonical_external_receiver_type_key(trait_name);
+    if let Some(pack) = facts.external_library_pack_for_type(&type_key)
+        && pack.mode == ExternalLibraryMode::RustCrateMapping
+        && let Some(crate_name) = pack.rust_target.as_deref()
+    {
+        return Some(format!("{crate_name}::{fact_trait_name}"));
+    }
+    None
+}
+
+fn dyn_trait_rust_path_with_effective_facts(
+    trait_name: &str,
+    facts: &EffectiveFacts<'_>,
+) -> String {
+    let java_ty = JavaType::Named {
+        name: trait_name.to_string(),
+        args: Vec::new(),
+    };
+    if let Some(HierarchyStrategy::DynTrait {
+        trait_name: fact_trait_name,
+    }) = facts.object_representation_override_strategy_for(&java_ty)
+    {
+        let type_key = crate::stdlib::canonical_external_receiver_type_key(trait_name);
+        if let Some(pack) = facts.external_library_pack_for_type(&type_key)
+            && pack.mode == ExternalLibraryMode::RustCrateMapping
+            && let Some(crate_name) = pack.rust_target.as_deref()
+        {
+            return format!("{crate_name}::{fact_trait_name}");
+        }
+        return fact_trait_name.clone();
+    }
+    trait_name.to_string()
+}
+
+pub fn dyn_trait_rust_path(trait_name: &str, facts: &FactSet) -> String {
+    let effective_facts = EffectiveFacts::new(facts);
+    dyn_trait_rust_path_with_effective_facts(trait_name, &effective_facts)
 }
 
 pub fn default_expr_for_slot(shape: &RustSlotShape) -> RustExpr {
@@ -421,26 +486,48 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             ty: RustType::Raw("Box<dyn std::any::Any>".to_string()),
         };
     }
-    if let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty) {
-        if let JavaType::Named { args, .. } = ty
-            && let Some(element_ty) = args.first()
-        {
-            match kind {
-                crate::stdlib::JavaCollectionKind::List => {
-                    return NativeJavaRustTypePolicy::Sequence {
-                        container: NativeSequenceContainer::Vec,
-                        element_ty: element_ty.clone(),
-                    };
-                }
-                crate::stdlib::JavaCollectionKind::Set => {
-                    return NativeJavaRustTypePolicy::Sequence {
-                        container: NativeSequenceContainer::HashSet,
-                        element_ty: element_ty.clone(),
-                    };
-                }
-                crate::stdlib::JavaCollectionKind::Map => {}
+    if let JavaType::Named { name, args } = ty
+        && (!args.is_empty() || raw_java_collection_erasure_name(name))
+        && let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
+    {
+        match kind {
+            crate::stdlib::JavaCollectionKind::List => {
+                return NativeJavaRustTypePolicy::Sequence {
+                    container: NativeSequenceContainer::Vec,
+                    element_ty: args
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(erased_object_java_type),
+                };
+            }
+            crate::stdlib::JavaCollectionKind::Set => {
+                return NativeJavaRustTypePolicy::Sequence {
+                    container: NativeSequenceContainer::HashSet,
+                    element_ty: args
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(erased_object_java_type),
+                };
+            }
+            crate::stdlib::JavaCollectionKind::Map if args.len() == 2 => {}
+            crate::stdlib::JavaCollectionKind::Map => {
+                return NativeJavaRustTypePolicy::Direct {
+                    ty: RustType::Raw(
+                        "std::collections::HashMap<String, Box<dyn std::any::Any>>".to_string(),
+                    ),
+                };
             }
         }
+    }
+    if let JavaType::Named { name, args } = ty
+        && let Some(ty) = external_crate_mapped_named_rust_type(name, args, facts)
+    {
+        return NativeJavaRustTypePolicy::Direct { ty };
+    }
+    if let JavaType::Unknown(name) = ty
+        && let Some(ty) = external_crate_mapped_named_rust_type(name, &[], facts)
+    {
+        return NativeJavaRustTypePolicy::Direct { ty };
     }
     if let Some(element_ty) =
         slot_content_capability_policy_with_effective_facts(ty, facts).sequence_element
@@ -508,9 +595,55 @@ pub fn native_java_rust_type_policy_with_effective_facts(
                 )),
             }
         }
-        JavaType::Named { name, .. } => native_named_java_rust_type_policy(name).policy,
+        JavaType::Named { name, .. } => {
+            if let JavaType::Named { args, .. } = ty
+                && let Some(ty) = external_crate_mapped_named_rust_type(name, args, facts)
+            {
+                NativeJavaRustTypePolicy::Direct { ty }
+            } else {
+                native_named_java_rust_type_policy(name).policy
+            }
+        }
         JavaType::Wildcard(_) => NativeJavaRustTypePolicy::WildcardObject,
-        JavaType::Unknown(raw) => NativeJavaRustTypePolicy::UnknownRaw { raw: raw.clone() },
+        JavaType::Unknown(raw) => {
+            if let Some(ty) = external_crate_mapped_named_rust_type(raw, &[], facts) {
+                NativeJavaRustTypePolicy::Direct { ty }
+            } else {
+                NativeJavaRustTypePolicy::UnknownRaw { raw: raw.clone() }
+            }
+        }
+    }
+}
+
+fn external_crate_mapped_named_rust_type(
+    name: &str,
+    args: &[JavaType],
+    facts: &EffectiveFacts<'_>,
+) -> Option<RustType> {
+    let pack = facts.external_library_pack_for_type(name)?;
+    if pack.mode != ExternalLibraryMode::RustCrateMapping {
+        return None;
+    }
+    let crate_name = pack.rust_target.as_deref()?;
+    let type_name = facts
+        .external_crate_rust_type_name_for(name)
+        .map(str::to_string)
+        .unwrap_or_else(|| rust_name_for_java_named_type(name.rsplit('.').next().unwrap_or(name)));
+    let generic_args = args
+        .iter()
+        .map(|arg| {
+            crate::emit::emit_type(&rust_type_for_java_generic_arg_with_effective_facts(
+                arg, facts,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if generic_args.is_empty() {
+        Some(RustType::Raw(format!("{crate_name}::{type_name}")))
+    } else {
+        Some(RustType::Raw(format!(
+            "{crate_name}::{type_name}<{}>",
+            generic_args.join(", ")
+        )))
     }
 }
 
@@ -556,6 +689,9 @@ pub fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustType
         "Object" => NativeJavaRustTypePolicy::Direct {
             ty: RustType::Raw("Box<dyn std::any::Any>".to_string()),
         },
+        "Properties" => NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Raw("std::collections::HashMap<String, String>".to_string()),
+        },
         _ => NativeJavaRustTypePolicy::Named {
             name: rust_name.clone(),
         },
@@ -564,6 +700,36 @@ pub fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustType
         name: name.to_string(),
         policy,
     }
+}
+
+fn erased_object_java_type() -> JavaType {
+    JavaType::Named {
+        name: "Object".to_string(),
+        args: Vec::new(),
+    }
+}
+
+fn raw_java_collection_erasure_name(name: &str) -> bool {
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+    let simple = canonical.rsplit('.').next().unwrap_or(&canonical);
+    matches!(
+        simple,
+        "Collection"
+            | "Iterable"
+            | "List"
+            | "ArrayList"
+            | "LinkedList"
+            | "Set"
+            | "HashSet"
+            | "LinkedHashSet"
+            | "SortedSet"
+            | "TreeSet"
+            | "Map"
+            | "HashMap"
+            | "LinkedHashMap"
+            | "SortedMap"
+            | "TreeMap"
+    )
 }
 
 fn external_final_facade_should_keep_named_type(ty: &JavaType, facts: &EffectiveFacts<'_>) -> bool {
@@ -583,16 +749,38 @@ fn erased_final_facade_generic_arg_should_keep_named_type(
     ) && facts.is_final_type(ty)
 }
 
+fn erased_facade_concrete_dispatch_should_keep_named_type(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    matches!(
+        facts.object_representation_override_strategy_for(ty),
+        Some(HierarchyStrategy::ErasedObject)
+    )
+}
+
 fn rust_type_for_java_generic_arg_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
+    if let JavaType::Unknown(raw) = ty
+        && java_type_variable_name(raw)
+    {
+        return RustType::Raw("Box<dyn std::any::Any>".to_string());
+    }
     if erased_final_facade_generic_arg_should_keep_named_type(ty, facts)
         && let JavaType::Named { name, .. } = ty
     {
         return RustType::Named(rust_name_for_java_named_type(name));
     }
     rust_type_for_java_type_with_effective_facts(ty, facts)
+}
+
+fn java_type_variable_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
 }
 
 pub fn rust_name_for_java_named_type(name: &str) -> String {
@@ -652,7 +840,9 @@ pub fn render_native_java_rust_type_policy_with_effective_facts(
         )),
         NativeJavaRustTypePolicy::Direct { ty } => ty.clone(),
         NativeJavaRustTypePolicy::Named { name } => RustType::Named(name.clone()),
-        NativeJavaRustTypePolicy::WildcardObject => RustType::Named("JavaObject".to_string()),
+        NativeJavaRustTypePolicy::WildcardObject => {
+            RustType::Raw("Box<dyn std::any::Any>".to_string())
+        }
         NativeJavaRustTypePolicy::UnknownRaw { raw } => RustType::Raw(raw.clone()),
         NativeJavaRustTypePolicy::ArrayRequiresSequenceElement => {
             unreachable!("arrays are handled by sequence_element_type")

@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use new_java2rust::access_lowering::{lower_bare_name, lower_field_access};
+use new_java2rust::access_lowering::{
+    lower_bare_name, lower_field_access, lower_field_access_with_facts,
+};
 use new_java2rust::array_lowering::render_array_expr;
 use new_java2rust::array_plan::{ArrayExprPlan, plan_array_expr};
 use new_java2rust::call_lowering::{
@@ -14,9 +16,10 @@ use new_java2rust::call_plan::{
     native_collection_arg_shapes, native_collection_arg_shapes_with_facts,
     native_collection_lowered_type, plan_call_arguments, plan_call_arguments_with_facts,
     plan_call_arguments_with_facts_and_args, plan_call_exception_propagation, plan_call_expr,
-    plan_call_statement, plan_call_target, plan_call_target_with_facts, plan_constructor_arguments,
-    plan_new_target, plan_new_target_with_facts, plan_trivial_accessor_call,
-    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
+    plan_call_statement, plan_call_target, plan_call_target_with_facts,
+    plan_call_target_with_facts_and_arity, plan_constructor_arguments, plan_new_target,
+    plan_new_target_with_facts, plan_trivial_accessor_call, resolved_call_arg_shapes,
+    resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::Coercion;
 use new_java2rust::constructor_plan::{
@@ -35,9 +38,10 @@ use new_java2rust::diagnostics::Severity;
 use new_java2rust::effective_facts::EffectiveFacts;
 use new_java2rust::exception_lowering::{
     CatchRenderArm, exception_cause_or_self_if_instance_expr, exception_expr_from_new,
-    exception_expr_from_new_with_cause_hint, exception_result_type, fallback_exception_expr,
-    java_exception_support_item, new_exception_expr, new_exception_expr_with_cause, return_stmt,
-    throw_stmt, try_catch_stmt, try_finally_scope_stmt, try_with_resources_scope_stmt,
+    exception_expr_from_new_with_cause_hint, exception_result_type, external_exception_conversions,
+    fallback_exception_expr, java_exception_support_item, java_exception_support_item_with_facts,
+    new_exception_expr, new_exception_expr_with_cause, return_stmt, throw_stmt, try_catch_stmt,
+    try_finally_scope_stmt, try_with_resources_scope_stmt,
 };
 use new_java2rust::exception_plan::{
     JavaExceptionSupportPlan, MethodExceptionPlan, ThrowExprPlan, TryBlockCompletion, TryStmtPlan,
@@ -58,13 +62,14 @@ use new_java2rust::external_packs::parse_external_pack_manifest;
 use new_java2rust::facts::{
     AccessorInlinePolicy, CaptureOrigin, CaptureOwnerKind, CaptureSource, ClosedHierarchyFact,
     ControlFlowFactKind, DispatchRequirementFact, DispatchRequirementKind,
-    ExternalApiArgumentEffectFact, ExternalApiEffectFact, ExternalApiRole,
+    ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole,
     ExternalArgumentAliasPolicy, ExternalConstructorFact, ExternalCrateConstructorMappingFact,
-    ExternalFieldFact, FactProvenance, FactSet, FieldKey as FactFieldKey, FieldNullabilityFact,
-    FieldNullabilityProvenance, HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy,
-    MethodEffectFact, MethodKey as FactMethodKey, NullabilityState, ObjectSafetyViolation,
-    OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, ReceiverMutabilityFact, RecursionKind,
-    TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride,
+    ExternalFieldFact, ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet,
+    FieldKey as FactFieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyEdgeFact,
+    HierarchyOverride, HierarchyStrategy, MethodEffectFact, MethodKey as FactMethodKey,
+    NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
+    ReceiverMutabilityFact, RecursionKind, TrivialAccessorFact, TrivialAccessorKind,
+    TypeCapabilityOverride,
 };
 use new_java2rust::item_assembly::{
     constructor_default_field_value, constructor_function_shell, constructor_return_body,
@@ -158,17 +163,18 @@ use new_java2rust::signature::{
     capability_diagnostics_for_signature_constraints, collect_signature_constraints,
     conservative_boundary_constraints, conservative_boundary_constraints_with_effective_facts,
     constrained_receiver_plan, constructor_param_boundary_policy,
-    constructor_param_shape_constraints, field_boundary_policy, field_nullability_shape_policy,
-    field_shape_constraints, field_shape_constraints_with_facts,
-    field_shape_constraints_with_usage, local_shape_constraints, merge_dispatch_requirement_policy,
-    merge_ownership_requirement_policy, merge_signature_boundary_kind_policy,
-    merge_signature_flag_requirement_policy, merge_storage_nullability_requirement_policy,
-    merge_view_requirement_policy, method_param_boundary_policy, method_param_shape_constraints,
-    method_return_boundary_policy, method_return_shape_constraints, receiver_constraints,
-    receiver_constraints_with_facts, receiver_constraints_with_usage,
-    signature_boundary_constraints, signature_boundary_constraints_with_effective_facts,
-    signature_boundary_kind_priority_policy, signature_boundary_policy,
-    signature_boundary_policy_with_effective_facts, signature_boundary_representation_fact_policy,
+    constructor_param_shape_constraints, external_argument_binding_constraints,
+    field_boundary_policy, field_nullability_shape_policy, field_shape_constraints,
+    field_shape_constraints_with_facts, field_shape_constraints_with_usage,
+    local_shape_constraints, merge_dispatch_requirement_policy, merge_ownership_requirement_policy,
+    merge_signature_boundary_kind_policy, merge_signature_flag_requirement_policy,
+    merge_storage_nullability_requirement_policy, merge_view_requirement_policy,
+    method_param_boundary_policy, method_param_shape_constraints, method_return_boundary_policy,
+    method_return_shape_constraints, receiver_constraints, receiver_constraints_with_facts,
+    receiver_constraints_with_usage, signature_boundary_constraints,
+    signature_boundary_constraints_with_effective_facts, signature_boundary_kind_priority_policy,
+    signature_boundary_policy, signature_boundary_policy_with_effective_facts,
+    signature_boundary_representation_fact_policy,
     signature_boundary_representation_fact_policy_with_effective_facts,
     signature_boundary_representation_policy, signature_boundary_role_policies,
     signature_boundary_role_policy, signature_capability_policy,
@@ -235,7 +241,7 @@ use new_java2rust::stream::{
 };
 use new_java2rust::stream_lowering::{
     StreamLambdaValue, StreamRenderContext, emit_stream_lambda_body,
-    emit_stream_lambda_body_with_context, render_stream_plan,
+    emit_stream_lambda_body_with_context, render_stream_plan, render_stream_plan_with_context,
 };
 use new_java2rust::stream_shape::{
     StreamSourceCapabilityPolicy, infer_stream_lambda_body_shape, infer_stream_map_to_int_shape,
@@ -268,7 +274,8 @@ use new_java2rust::usage::{
     constructor_invocation_boundary_policy, method_api_boundary_policy,
 };
 use new_java2rust::{
-    emit, translate_source, translate_source_with_context_sources, translate_source_with_facts,
+    emit, translate_source, translate_source_with_context_sources,
+    translate_source_with_context_summary_sources, translate_source_with_facts,
 };
 
 #[test]
@@ -305,6 +312,164 @@ fn slot_shape_projects_arrays_and_primitives_without_type_specific_ownership_var
             mutable: false,
             inner: Box::new(RustType::Slice(Box::new(RustType::String)))
         }
+    );
+}
+
+#[test]
+fn rust_crate_mapped_external_slots_render_facade_type_identity() {
+    let mut facts = FactSet::default();
+    facts.external_library_packs.push(ExternalLibraryPackFact {
+        pack_name: "sqlite".to_string(),
+        package_prefix: "java.sql.Connection".to_string(),
+        mode: ExternalLibraryMode::RustCrateMapping,
+        coverage: ExternalApiCoverage::Mapped,
+        rust_target: Some("sqlite_facade".to_string()),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_library_packs.push(ExternalLibraryPackFact {
+        pack_name: "hdf5".to_string(),
+        package_prefix: "HDF5File".to_string(),
+        mode: ExternalLibraryMode::RustCrateMapping,
+        coverage: ExternalApiCoverage::Mapped,
+        rust_target: Some("hdf5_facade".to_string()),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    assert_eq!(
+        rust_type_for_slot_with_facts(
+            &RustSlotShape::conservative(JavaType::Named {
+                name: "java.sql.Connection".to_string(),
+                args: Vec::new(),
+            }),
+            &facts
+        ),
+        RustType::Raw("sqlite_facade::Connection".to_string())
+    );
+    assert_eq!(
+        rust_type_for_slot_with_facts(
+            &RustSlotShape::conservative(JavaType::Named {
+                name: "HDF5File".to_string(),
+                args: Vec::new(),
+            }),
+            &facts
+        ),
+        RustType::Raw("hdf5_facade::HDF5File".to_string())
+    );
+}
+
+#[test]
+fn rust_crate_mapped_static_external_owners_render_facade_paths() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack arrow VectorSchemaRoot rust-crate-mapping mapped target=arrow_facade
+external-pack-api arrow VectorSchemaRoot of mapped getter read-only definitely-non-null args=1 return=VectorSchemaRoot rust=of
+external-pack sql driver_manager rust-crate-mapping mapped target=sqlite_facade
+external-pack-api sql driver_manager getConnection mapped getter read-only definitely-non-null args=1 return=Connection rust=get_connection
+external-pack-api sql driver_manager getConnection mapped getter read-only definitely-non-null args=2 return=Connection rust=get_connection_with_properties
+external-pack sql java.sql.DriverManager rust-crate-mapping mapped target=sqlite_facade
+external-pack-api sql java.sql.DriverManager getConnection mapped getter read-only definitely-non-null args=2 return=Connection rust=get_connection_with_properties
+"#,
+    )
+    .facts;
+
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("VectorSchemaRoot".to_string())),
+            "of",
+            1,
+            None,
+            &facts,
+            &TypeEnv::default(),
+        ),
+        CallTargetPlan::StaticOwner {
+            ref owner,
+            ref rust_name,
+        } if owner == "arrow_facade::VectorSchemaRoot" && rust_name == "of"
+    ));
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("driver_manager".to_string())),
+            "getConnection",
+            1,
+            None,
+            &facts,
+            &TypeEnv::default(),
+        ),
+        CallTargetPlan::StaticOwner {
+            ref owner,
+            ref rust_name,
+        } if owner == "sqlite_facade::driver_manager" && rust_name == "get_connection"
+    ));
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("driver_manager".to_string())),
+            "getConnection",
+            2,
+            None,
+            &facts,
+            &TypeEnv::default(),
+        ),
+        CallTargetPlan::StaticOwner {
+            ref owner,
+            ref rust_name,
+        } if owner == "sqlite_facade::driver_manager" && rust_name == "get_connection_with_properties"
+    ));
+
+    let mut imported_types = TypeEnv::new();
+    imported_types.insert_static_type_alias("DriverManager", "java.sql.DriverManager");
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("DriverManager".to_string())),
+            "getConnection",
+            2,
+            None,
+            &facts,
+            &imported_types,
+        ),
+        CallTargetPlan::StaticOwner {
+            ref owner,
+            ref rust_name,
+        } if owner == "sqlite_facade::DriverManager" && rust_name == "get_connection_with_properties"
+    ));
+}
+
+#[test]
+fn rust_crate_mapped_external_static_fields_render_associated_constants() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack hdf5 HDF5File rust-crate-mapping mapped target=hdf5_facade
+external-pack hdf5 HDF5File.OpenMode rust-crate-mapping mapped target=hdf5_facade
+external-pack hdf5 OpenMode rust-crate-mapping mapped target=hdf5_facade
+external-pack-field hdf5 HDF5File OpenMode mapped
+external-pack-field hdf5 HDF5File.OpenMode CREATE mapped
+external-pack-field hdf5 OpenMode READ_ONLY mapped
+"#,
+    )
+    .facts;
+
+    let hdf5_open_mode = Expr::FieldAccess(
+        Box::new(Expr::Var("HDF5File".to_string())),
+        "OpenMode".to_string(),
+    );
+    assert_eq!(
+        lower_field_access_with_facts(
+            &hdf5_open_mode,
+            "CREATE",
+            &TypeEnv::default(),
+            RustExpr::Raw("ignored".to_string()),
+            &facts,
+        ),
+        RustExpr::Raw("hdf5_facade::OpenMode::CREATE".to_string())
+    );
+    assert_eq!(
+        lower_field_access_with_facts(
+            &Expr::Var("OpenMode".to_string()),
+            "READ_ONLY",
+            &TypeEnv::default(),
+            RustExpr::Raw("ignored".to_string()),
+            &facts,
+        ),
+        RustExpr::Raw("hdf5_facade::OpenMode::READ_ONLY".to_string())
     );
 }
 
@@ -987,6 +1152,28 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
         }
     );
     assert_eq!(
+        rust_type_for_java_type_with_facts(
+            &JavaType::Named {
+                name: "List".to_string(),
+                args: Vec::new(),
+            },
+            &FactSet::default(),
+        ),
+        RustType::Vec(Box::new(RustType::Raw(
+            "Box<dyn std::any::Any>".to_string()
+        )))
+    );
+    assert_eq!(
+        rust_type_for_java_type_with_facts(
+            &JavaType::Named {
+                name: "Map".to_string(),
+                args: Vec::new(),
+            },
+            &FactSet::default(),
+        ),
+        RustType::Raw("std::collections::HashMap<String, Box<dyn std::any::Any>>".to_string())
+    );
+    assert_eq!(
         native_java_rust_type_policy(
             &JavaType::Named {
                 name: "Set".to_string(),
@@ -1097,7 +1284,7 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
             &RustSlotShape::conservative(list_java_type(JavaType::String)),
             &FactSet::default()
         ),
-        SlotValueRustTypePolicy::NativeDispatch {
+        SlotValueRustTypePolicy::ConcreteDispatch {
             java_ty: list_java_type(JavaType::String),
         }
     );
@@ -1172,7 +1359,7 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
     mutable_string_shape.ownership = OwnershipShape::MutableBorrow;
     assert_eq!(
         slot_value_rust_type_policy(&mutable_string_shape, &FactSet::default()),
-        SlotValueRustTypePolicy::NativeDispatch {
+        SlotValueRustTypePolicy::ConcreteDispatch {
             java_ty: JavaType::String,
         }
     );
@@ -2864,6 +3051,53 @@ class Impl implements Sink {}
 }
 
 #[test]
+fn external_pack_concrete_object_override_can_introduce_boundary_root() {
+    let parsed = parse_java_source(
+        r#"
+class UsesExternalBoundary {
+    ExternalLocatable value;
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    let external_override = HierarchyOverride {
+        type_name: "htsjdk.samtools.util.Locatable".to_string(),
+        strategy: HierarchyStrategy::ConcreteStruct,
+        provenance: FactProvenance::ExternalLibraryPack,
+    };
+    facts.hierarchy_overrides.push(external_override.clone());
+    let plan = plan_representations(&resolved.program, &facts);
+    let context = object_hierarchy_context(&plan);
+
+    let policy = hierarchy_override_application_policy(&external_override, &context, &facts);
+
+    assert_eq!(
+        policy.representation,
+        Some(ObjectRepresentation::ConcreteStruct)
+    );
+    assert_eq!(policy.provenance, FactProvenance::ExternalLibraryPack);
+    assert!(
+        policy.diagnostics.is_empty(),
+        "external pack concrete boundary roots should not require a source type declaration: {:?}",
+        policy.diagnostics
+    );
+
+    let user_override = HierarchyOverride {
+        type_name: "MissingExternal".to_string(),
+        strategy: HierarchyStrategy::ConcreteStruct,
+        provenance: FactProvenance::UserOverride,
+    };
+    let user_policy = hierarchy_override_application_policy(&user_override, &context, &facts);
+    assert_eq!(user_policy.representation, None);
+    assert!(user_policy.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("hierarchy override references unknown Java type MissingExternal")
+    }));
+}
+
+#[test]
 fn object_representation_policy_is_the_dyn_fallback_entrypoint() {
     let representation_source = include_str!("../src/representation.rs");
     let object_model_source = include_str!("../src/object_model.rs");
@@ -3810,6 +4044,10 @@ class PlatformBoundaryUse {
     assert!(support.contains("pub fn to_path(&self) -> Path"));
     assert!(support.contains("pub fn resolve_sibling<P: JavaPathArg>(&self, sibling: P) -> Path"));
     assert!(support.contains("impl JavaPathArg for Option<Path>"));
+    assert!(support.contains("impl AsRef<std::path::Path> for File"));
+    assert!(support.contains("impl From<&File> for std::path::PathBuf"));
+    assert!(support.contains("impl AsRef<std::path::Path> for Path"));
+    assert!(support.contains("impl From<&Path> for std::path::PathBuf"));
 
     let translation = translate_source(source);
     assert!(translation.rust.contains("pub struct Path"));
@@ -4008,6 +4246,100 @@ class Factory {
             .iter()
             .any(|diagnostic| diagnostic.code == "unsupported_anonymous_class"),
         "anonymous implementations of Tribble FeatureReader should remain erased external boundary values"
+    );
+}
+
+#[test]
+fn anonymous_external_facade_return_keeps_declared_concrete_shape_for_internal_method() {
+    let source = r#"
+class AnonymousFeatureReaderFactory {
+    FeatureReader<String> use() {
+        FeatureReader<String> reader = reader();
+        return reader;
+    }
+
+    private FeatureReader<String> reader() {
+        return new FeatureReader<String>() {
+            public void close() {}
+        };
+    }
+}
+"#;
+    let facts = new_java2rust::external_packs::htsjdk_tribble_feature_pack_facts();
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let signatures = new_java2rust::signature::solve_signatures_with_facts_and_support_context(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+        &resolved.program,
+    );
+    let reader_shape = signatures
+        .method_return_shape_by_rust_name("AnonymousFeatureReaderFactory", "reader")
+        .expect("reader return should be planned");
+    assert_eq!(reader_shape.dispatch, DispatchShape::Concrete);
+    assert_eq!(reader_shape.view, ViewShape::Native);
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn reader(&self) -> FeatureReader")
+            && translation.rust.contains("return Default::default();")
+            && translation
+                .rust
+                .contains("let reader: FeatureReader = self.reader();")
+            && !translation.rust.contains("downcast::<FeatureReader>()")
+            && !translation.rust.contains("invalid Java cast"),
+        "anonymous external facade returns should keep declared concrete shape:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn duplicate_local_names_use_scoped_occurrence_shape_before_map_insert_conversion() {
+    let source = r#"
+class DuplicateReaderLocalMapPut {
+    FeatureReader<String> reader() {
+        return new FeatureReader<String>() {
+            public void close() {}
+        };
+    }
+
+    void put(java.util.Map<String, FeatureReader<String>> map, boolean flag) {
+        if (flag) {
+            FeatureReader<String> reader;
+        }
+        FeatureReader<String> reader = reader();
+        map.put("x", reader);
+    }
+}
+"#;
+    let facts = new_java2rust::external_packs::htsjdk_tribble_feature_pack_facts();
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("let reader: FeatureReader = self.reader();"),
+        "second reader declaration should keep the concrete facade shape:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("downcast::<FeatureReader>()")
+            && !translation.rust.contains("invalid Java cast"),
+        "map value conversion should see the concrete reader occurrence, not the earlier erased declaration:\n{}",
+        translation.rust
     );
 }
 
@@ -7885,12 +8217,10 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
                 RustExpr::Var("values".to_string()),
             ],
         ),
-        RustExpr::Call {
-            function: Box::new(RustExpr::Raw(
-                "hdf5_pure_rust::write_double_array".to_string()
-            )),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("hdf5".to_string())),
+            method: "write_double_array".to_string(),
             args: vec![
-                RustExpr::Var("hdf5".to_string()),
                 RustExpr::Literal("\"/metrics\"".to_string()),
                 RustExpr::Var("values".to_string()),
             ],
@@ -7918,9 +8248,10 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             Some(RustExpr::Var("hdf5".to_string())),
             Vec::new(),
         ),
-        RustExpr::Call {
-            function: Box::new(RustExpr::Raw("hdf5_pure_rust::flush".to_string())),
-            args: vec![RustExpr::Var("hdf5".to_string())],
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("hdf5".to_string())),
+            method: "flush".to_string(),
+            args: Vec::new(),
         }
     );
     let hdf5_library_receiver = Expr::Var("library".to_string());
@@ -7949,9 +8280,10 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             Some(RustExpr::Var("library".to_string())),
             Vec::new(),
         ),
-        RustExpr::Call {
-            function: Box::new(RustExpr::Raw("hdf5_pure_rust::load".to_string())),
-            args: vec![RustExpr::Var("library".to_string())],
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("library".to_string())),
+            method: "load".to_string(),
+            args: Vec::new(),
         }
     );
     let mut override_facts = hdf5_facts.clone();
@@ -8330,6 +8662,72 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             ],
         ),
         RustExpr::Raw("vec![\"a\".to_string(), \"b\".to_string()]".to_string())
+    );
+    let collections = Expr::Var("Collections".to_string());
+    for (method_name, expected_method) in [
+        (
+            "emptyList",
+            NativeCollectionStaticMethod::CollectionsEmptyList,
+        ),
+        (
+            "empty_list",
+            NativeCollectionStaticMethod::CollectionsEmptyList,
+        ),
+        (
+            "emptySortedSet",
+            NativeCollectionStaticMethod::CollectionsEmptySortedSet,
+        ),
+        (
+            "singleton",
+            NativeCollectionStaticMethod::CollectionsSingleton,
+        ),
+        (
+            "singletonList",
+            NativeCollectionStaticMethod::CollectionsSingletonList,
+        ),
+        (
+            "singleton_map",
+            NativeCollectionStaticMethod::CollectionsSingletonMap,
+        ),
+        ("nCopies", NativeCollectionStaticMethod::CollectionsNCopies),
+    ] {
+        assert_eq!(
+            plan_call_target_with_facts(
+                Some(&collections),
+                method_name,
+                None,
+                &FactSet::default(),
+                &collection_types,
+            ),
+            CallTargetPlan::NativeCollectionStatic {
+                method: expected_method
+            }
+        );
+    }
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::NativeCollectionStatic {
+                method: NativeCollectionStaticMethod::CollectionsEmptyList,
+            },
+            None,
+            Vec::new(),
+        ),
+        RustExpr::Raw("Vec::new()".to_string())
+    );
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::NativeCollectionStatic {
+                method: NativeCollectionStaticMethod::CollectionsSingletonMap,
+            },
+            None,
+            vec![
+                RustExpr::Literal("\"sample\".to_string()".to_string()),
+                RustExpr::Var("header".to_string()),
+            ],
+        ),
+        RustExpr::Raw(
+            "std::collections::HashMap::from([(\"sample\".to_string(), header)])".to_string()
+        )
     );
     let string_value = Expr::Var("text".to_string());
     collection_types.insert_local("text", JavaType::String);
@@ -10257,6 +10655,294 @@ fn call_plan_recovers_normalized_static_utility_owner_receivers() {
 }
 
 #[test]
+fn external_crate_static_call_uses_mapped_owner_type() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack external.lib external.lib.SchemaRoot rust-crate-mapping mapped target=schema_facade
+external-pack external.lib SchemaRoot rust-crate-mapping mapped target=schema_facade
+external-pack-object external.lib external.lib.SchemaRoot concrete
+external-pack-object external.lib SchemaRoot concrete
+external-pack-api external.lib SchemaRoot of mapped getter read-only definitely-non-null args=1 return=SchemaRoot rust=of
+"#,
+    )
+    .facts;
+    let mut types = TypeEnv::new();
+    types.insert_static_type_alias("SchemaRoot", "external.lib.SchemaRoot");
+
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("SchemaRoot".to_string())),
+            "of",
+            1,
+            None,
+            &facts,
+            &types,
+        ),
+        CallTargetPlan::StaticOwner { owner, rust_name }
+            if owner == "schema_facade::SchemaRoot" && rust_name == "of"
+    ));
+
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("SchemaRoot".to_string())),
+            "of",
+            1,
+            None,
+            &facts,
+            &TypeEnv::default(),
+        ),
+        CallTargetPlan::StaticOwner { owner, rust_name }
+            if owner == "schema_facade::SchemaRoot" && rust_name == "of"
+    ));
+}
+
+#[test]
+fn external_crate_static_call_without_import_uses_mapped_owner_type() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack external.lib SchemaRoot rust-crate-mapping mapped target=schema_facade
+external-pack external.lib FieldVector rust-crate-mapping mapped target=schema_facade
+external-pack-object external.lib SchemaRoot concrete
+external-pack-object external.lib FieldVector concrete
+external-pack-capability external.lib SchemaRoot clone=true final=true
+external-pack-capability external.lib FieldVector clone=true final=true
+external-pack-api external.lib SchemaRoot of mapped getter read-only definitely-non-null args=1 return=SchemaRoot rust=of
+external-pack-argument external.lib SchemaRoot of 0 definitely-non-null read-only no-alias type=FieldVector[]
+"#,
+    )
+    .facts;
+    let source = r#"
+class UsesUnimportedExternalStaticFactory {
+    void run(FieldVector left, FieldVector right) {
+        SchemaRoot root = SchemaRoot.of(new FieldVector[] { left, right });
+    }
+}
+"#;
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let call = resolved.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) => method.body.as_ref(),
+            _ => None,
+        })
+        .and_then(|body| body.statements.first())
+        .and_then(|stmt| match stmt {
+            Stmt::VarDecl {
+                initializer:
+                    Some(Expr::Call {
+                        receiver,
+                        name,
+                        args,
+                        resolved,
+                    }),
+                ..
+            } => Some((
+                receiver.as_deref(),
+                name.as_str(),
+                args.len(),
+                resolved.as_ref(),
+            )),
+            _ => None,
+        })
+        .expect("fixture should contain static factory initializer");
+    let resolved_plan = plan_call_target_with_facts_and_arity(
+        call.0,
+        call.1,
+        call.2,
+        call.3,
+        &facts,
+        &TypeEnv::default(),
+    );
+    assert!(
+        matches!(
+            resolved_plan,
+            CallTargetPlan::StaticOwner { ref owner, ref rust_name }
+                if owner == "schema_facade::SchemaRoot" && rust_name == "of"
+        ),
+        "{resolved_plan:?}"
+    );
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("schema_facade::SchemaRoot::of(vec!["),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("let root = SchemaRoot::of(vec!["),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_nullable_owned_option_return_does_not_clone_option_value() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack external.db Cursor rust-crate-mapping mapped target=db_facade
+external-pack-object external.db Cursor concrete
+external-pack-api external.db Cursor getName mapped indexed-getter read-only maybe-null args=1 return=String rust=get_name rust-return=Option<String>
+external-pack-argument external.db Cursor getName 0 definitely-non-null read-only borrowed type=String
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesOwnedOptionalExternalGetter {
+    void run(Cursor cursor) {
+        String name = cursor.getName("name");
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let name: Option<String> = cursor.get_name(\"name\".to_string().as_str());"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains(".cloned()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_byte_array_return_recovers_java_signed_bytes_from_rust_unsigned_bytes() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack external.db Cursor rust-crate-mapping mapped target=db_facade
+external-pack-object external.db Cursor concrete
+external-pack-api external.db Cursor getBytes mapped indexed-getter read-only maybe-null args=1 return=byte[] rust=get_bytes
+external-pack-argument external.db Cursor getBytes 0 definitely-non-null read-only borrowed type=String
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesExternalByteArrayReturn {
+    void run(Cursor cursor) {
+        byte[] bytes = cursor.getBytes("name");
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "cursor.get_bytes(\"name\".to_string().as_str()).map(|bytes| bytes.into_iter().map(|byte| byte as i8).collect::<Vec<_>>())"
+        ),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn optional_external_receiver_call_uses_facade_mapping_after_unwrap() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack external.io Reader rust-crate-mapping mapped target=io_facade
+external-pack external.io Record rust-crate-mapping mapped target=io_facade
+external-pack-object external.io Reader concrete
+external-pack-object external.io Record concrete
+external-pack-capability external.io Reader clone=true final=true
+external-pack-capability external.io Record clone=true final=true
+external-pack-constructor external.io Reader 0 mapped rust-type=Reader rust=new
+external-pack-api external.io Reader read mapped getter mutates-receiver maybe-null args=0 return=Record rust=read
+external-pack-api external.io Record getLength mapped getter read-only definitely-non-null args=0 return=int rust=length
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class OptionalExternalReceiverCall {
+    int run() {
+        Reader reader = new Reader();
+        Record record = reader.read();
+        return record.getLength();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("record.as_ref().unwrap().length()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("record.as_ref().unwrap().get_length()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn optional_external_mutating_receiver_call_uses_mutable_unwrap() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack external.io Reader rust-crate-mapping mapped target=io_facade
+external-pack external.io Record rust-crate-mapping mapped target=io_facade
+external-pack-object external.io Reader concrete
+external-pack-object external.io Record concrete
+external-pack-capability external.io Reader clone=true final=true
+external-pack-capability external.io Record clone=true final=true
+external-pack-constructor external.io Reader 0 mapped rust-type=Reader rust=new
+external-pack-api external.io Reader read mapped getter mutates-receiver maybe-null args=0 return=Record rust=read
+external-pack-api external.io Record setFlag mapped setter mutates-receiver definitely-non-null args=1 return=void rust=set_flag
+external-pack-argument external.io Record setFlag 0 definitely-non-null read-only no-alias type=boolean
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class OptionalExternalMutatingReceiverCall {
+    void run() {
+        Reader reader = new Reader();
+        Record record = reader.read();
+        record.setFlag(true);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("record.as_mut().unwrap().set_flag(true);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("record.as_ref().unwrap().set_flag"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn java_string_join_static_call_renders_collection_join() {
     let string_owner = Expr::Var("String".to_string());
     assert!(matches!(
@@ -10350,26 +11036,24 @@ class Hdf5FacadeCall {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("hdf5_pure_rust::write_double_array"),
+        translation.rust.contains("hdf5.write_double_array"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("hdf5_pure_rust::load"),
+        translation.rust.contains("library.load()"),
         "{}",
         translation.rust
     );
     assert!(
         !translation
             .rust
-            .contains("hdf5.write_double_array(\"/metrics\""),
+            .contains("hdf5_pure_rust::write_double_array"),
         "{}",
         translation.rust
     );
     assert!(
-        !translation.rust.contains("library.load()"),
+        !translation.rust.contains("hdf5_pure_rust::load"),
         "{}",
         translation.rust
     );
@@ -10400,67 +11084,37 @@ class SqliteFacadeCall {
     );
 
     assert!(
-        translation.rust.contains("sqlite::create_connection"),
+        translation.rust.contains("config.create_connection"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("sqlite::prepare_statement"),
+        translation.rust.contains("statement.execute_query()"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("sqlite::bind_string"),
+        translation.rust.contains("statement.clear_parameters()"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("sqlite::execute_query"),
+        translation.rust.contains("results.get_string"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("sqlite::clear_parameters"),
+        translation.rust.contains("results.get_long"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("sqlite::get_string"),
+        !translation.rust.contains("sqlite::prepare_statement"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("sqlite::get_long"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        translation.rust.contains("sqlite::get_boolean"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        !translation.rust.contains("config.create_connection(path)"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        !translation.rust.contains("statement.execute_query()"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        !translation.rust.contains("statement.clear_parameters()"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        !translation.rust.contains("results.get_string(\"name\")"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        !translation.rust.contains("results.get_long(1)"),
+        !translation.rust.contains("sqlite::execute_query"),
         "{}",
         translation.rust
     );
@@ -13031,6 +13685,38 @@ class Dog implements Animal {}
         RustExpr::Raw("AnimalValue::Dog(dog)".to_string())
     );
 
+    let erased_facts = new_java2rust::external_packs::htsjdk_tribble_feature_pack_facts();
+    let erased_parsed = parse_java_source("class CastOwner {}");
+    let erased_resolved = resolve_program(&erased_parsed.program, erased_parsed.diagnostics);
+    let erased_representations = plan_representations(&erased_resolved.program, &erased_facts);
+    let feature_reader_ty = JavaType::Named {
+        name: "FeatureReader".to_string(),
+        args: vec![JavaType::String],
+    };
+    let mut erased_env = ShapeEnv::new();
+    let mut concrete_reader_shape = RustSlotShape::conservative(feature_reader_ty.clone());
+    concrete_reader_shape.dispatch = DispatchShape::Concrete;
+    concrete_reader_shape.view = ViewShape::Native;
+    erased_env.insert_local_shape("reader", concrete_reader_shape);
+    let concrete_cast_plan = plan_cast_conversion(
+        &parse_expr("reader"),
+        &JavaType::Named {
+            name: "FeatureReader".to_string(),
+            args: Vec::new(),
+        },
+        &erased_env,
+        ExprShapeContext {
+            signatures: None,
+            representations: Some(&erased_representations),
+            facts: Some(&erased_facts),
+        },
+    );
+    assert_eq!(
+        concrete_cast_plan.semantics,
+        JavaCastSemanticsPolicy::Identity
+    );
+    assert_eq!(concrete_cast_plan.target.dispatch, DispatchShape::Concrete);
+
     let dog_ty = JavaType::Named {
         name: "Dog".to_string(),
         args: Vec::new(),
@@ -13759,6 +14445,20 @@ fn signature_requirement_merge_policy_owns_axis_priorities() {
         ),
         SignatureRequirementMerge {
             kept: OwnershipShape::CopyValue,
+            rejected: None,
+        }
+    );
+    assert_eq!(
+        merge_ownership_requirement_policy(Some(OwnershipShape::Owned), OwnershipShape::CopyValue),
+        SignatureRequirementMerge {
+            kept: OwnershipShape::Owned,
+            rejected: None,
+        }
+    );
+    assert_eq!(
+        merge_ownership_requirement_policy(Some(OwnershipShape::CopyValue), OwnershipShape::Owned),
+        SignatureRequirementMerge {
+            kept: OwnershipShape::Owned,
             rejected: None,
         }
     );
@@ -18962,6 +19662,115 @@ fn binding_boundary_policy_owns_binding_use_boundary_classification() {
 }
 
 #[test]
+fn external_argument_constraints_default_unknown_slots_to_non_null() {
+    let binding = BindingUseFacts {
+        name: "callback".to_string(),
+        java_ty: JavaType::Named {
+            name: "Function".to_string(),
+            args: Vec::new(),
+        },
+        uses: vec![BindingUse::PassedToCall {
+            name: "new".to_string(),
+            arg_index: 6,
+            boundary: CallArgumentBoundary::Unknown,
+        }],
+    };
+
+    let constraints = external_argument_binding_constraints(&binding, &FactSet::default());
+
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::DefinitelyNonNull
+        ))
+    );
+}
+
+#[test]
+fn external_argument_unknown_nullability_fact_keeps_non_null_default() {
+    let binding = BindingUseFacts {
+        name: "callback".to_string(),
+        java_ty: JavaType::Named {
+            name: "Function".to_string(),
+            args: Vec::new(),
+        },
+        uses: vec![BindingUse::PassedToCall {
+            name: "new".to_string(),
+            arg_index: 6,
+            boundary: CallArgumentBoundary::Unknown,
+        }],
+    };
+    let mut facts = FactSet::default();
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "new".to_string(),
+            receiver_type: None,
+            parameter_index: 6,
+            parameter_type: Some(JavaType::Named {
+                name: "Function".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::Unknown,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let constraints = external_argument_binding_constraints(&binding, &facts);
+
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::DefinitelyNonNull
+        ))
+    );
+}
+
+#[test]
+fn external_argument_nullable_fact_overrides_non_null_default() {
+    let binding = BindingUseFacts {
+        name: "callback".to_string(),
+        java_ty: JavaType::Named {
+            name: "Function".to_string(),
+            args: Vec::new(),
+        },
+        uses: vec![BindingUse::PassedToCall {
+            name: "new".to_string(),
+            arg_index: 6,
+            boundary: CallArgumentBoundary::Unknown,
+        }],
+    };
+    let mut facts = FactSet::default();
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "new".to_string(),
+            receiver_type: None,
+            parameter_index: 6,
+            parameter_type: Some(JavaType::Named {
+                name: "Function".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::MaybeNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let constraints = external_argument_binding_constraints(&binding, &facts);
+
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::MaybeNull
+        ))
+    );
+    assert!(
+        !constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::DefinitelyNonNull
+        ))
+    );
+}
+
+#[test]
 fn param_boundary_policies_own_param_use_boundary_classification() {
     let public_parsed = parse_java_source(
         r#"
@@ -21011,6 +21820,90 @@ class BuiltinPrimitiveConstant {
 }
 
 #[test]
+fn external_static_named_constant_support_is_generated_from_field_facts() {
+    let source = r#"
+class UseExternalNamedConstant {
+    ExternalToken token() {
+        return ExternalToken.EMPTY;
+    }
+
+    boolean check(ExternalToken value) {
+        return value == ExternalToken.EMPTY;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FactFieldKey {
+            type_name: "ExternalToken".to_string(),
+            field_name: "EMPTY".to_string(),
+        },
+        field_type: Some(JavaType::Named {
+            name: "ExternalToken".to_string(),
+            args: Vec::new(),
+        }),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("pub struct ExternalToken"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub const EMPTY: ExternalToken = ExternalToken;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("ExternalToken::EMPTY"),
+        "{}",
+        translation.rust
+    );
+
+    let builtin_translation = translate_source(
+        r#"
+import htsjdk.variant.variantcontext.Allele;
+import htsjdk.variant.variantcontext.GenotypeType;
+
+class BuiltinNamedConstant {
+    boolean check(Allele allele, GenotypeType kind) {
+        return allele == Allele.NON_REF_ALLELE && kind == GenotypeType.HET;
+    }
+}
+"#,
+    );
+    assert!(
+        builtin_translation
+            .rust
+            .contains("pub const NON_REF_ALLELE: Allele = Allele;"),
+        "{}",
+        builtin_translation.rust
+    );
+    assert!(
+        builtin_translation
+            .rust
+            .contains("pub const HET: GenotypeType = GenotypeType;"),
+        "{}",
+        builtin_translation.rust
+    );
+    assert!(
+        builtin_translation.rust.contains("Allele::NON_REF_ALLELE")
+            && builtin_translation.rust.contains("GenotypeType::HET"),
+        "{}",
+        builtin_translation.rust
+    );
+}
+
+#[test]
 fn static_string_constant_support_extends_existing_opaque_facade_owner() {
     let source = r#"
 class ExternalConstantFacadeCollision {
@@ -21091,6 +21984,51 @@ class SiblingConstants {
     );
     assert!(
         !translation.rust.contains("pub struct SiblingConstants;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_summary_static_string_constant_emits_external_facade() {
+    let source = r#"
+class UsesSummaryStaticConstant {
+    String key() {
+        return SummaryConstants.NAME;
+    }
+}
+"#;
+    let summary = r#"
+class SummaryConstants {
+    public static final String NAME = "name";
+}
+"#
+    .to_string();
+
+    let translation =
+        translate_source_with_context_summary_sources(source, &[summary], &FactSet::default());
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("pub struct SummaryConstants;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub const NAME: &'static str = \"name\";"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("SummaryConstants::NAME.to_string()"),
         "{}",
         translation.rust
     );
@@ -22788,6 +23726,1314 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
 }
 
 #[test]
+fn java_exception_support_converts_crate_mapped_external_exceptions() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack hdf5 HDF5Error rust-crate-mapping mapped target=hdf5_facade
+external-pack java.sql java.sql.SQLException rust-crate-mapping mapped target=sqlite_facade
+external-pack-exception hdf5 HDF5Error checked
+external-pack-exception java.sql java.sql.SQLException checked
+"#,
+    )
+    .facts;
+
+    let conversions = external_exception_conversions(&facts);
+    assert!(conversions.iter().any(|conversion| {
+        conversion.java_type == "HDF5Error" && conversion.rust_type == "hdf5_facade::HDF5Error"
+    }));
+    assert!(conversions.iter().any(|conversion| {
+        conversion.java_type == "java.sql.SQLException"
+            && conversion.rust_type == "sqlite_facade::SQLException"
+    }));
+    assert!(matches!(
+        java_exception_support_item_with_facts(&facts),
+        new_java2rust::rust_ir::RustItem::Raw(item)
+            if item.contains("impl From<hdf5_facade::HDF5Error> for JavaException")
+                && item.contains("impl From<sqlite_facade::SQLException> for JavaException")
+                && item.contains("JavaException::from_display")
+    ));
+}
+
+#[test]
+fn throwing_external_call_initializer_uses_slot_result_propagation() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack hdf5 HDF5Library rust-crate-mapping mapped target=hdf5_facade
+external-pack hdf5 HDF5Error rust-crate-mapping mapped target=hdf5_facade
+external-pack-exception hdf5 HDF5Error checked
+external-pack-constructor hdf5 HDF5Library 0 mapped rust-type=HDF5Library rust=new
+external-pack-api hdf5 HDF5Library load mapped boolean-getter mutates-receiver definitely-non-null args=0 return=boolean throws=HDF5Error rust=load
+"#,
+    )
+    .facts;
+    let mut type_env = TypeEnv::new();
+    type_env.insert_local(
+        "library",
+        JavaType::Named {
+            name: "HDF5Library".to_string(),
+            args: Vec::new(),
+        },
+    );
+    assert_eq!(
+        plan_call_exception_propagation(
+            Some(&Expr::Var("library".to_string())),
+            "load",
+            &[],
+            None,
+            &facts,
+            &type_env,
+            Some("UsesThrowingExternalInitializer"),
+        ),
+        CallExceptionPropagationPlan::PropagateResult
+    );
+    let parsed = parse_java_source(
+        r#"
+class UsesThrowingExternalInitializer {
+    boolean run() throws HDF5Error {
+        HDF5Library library = new HDF5Library();
+        boolean loaded = library.load();
+        return loaded;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
+    let load_effect = semantic
+        .facts
+        .external_api_effect_for_receiver_with_arity(Some("HDF5Library"), "load", Some(0))
+        .expect("semantic facts should preserve external load effect");
+    assert_eq!(
+        load_effect.thrown,
+        vec![JavaType::Named {
+            name: "HDF5Error".to_string(),
+            args: Vec::new(),
+        }]
+    );
+    let translation = translate_source_with_facts(
+        r#"
+class UsesThrowingExternalInitializer {
+    boolean run() throws HDF5Error {
+        HDF5Library library = new HDF5Library();
+        boolean loaded = library.load();
+        return loaded;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let loaded: bool = library.load()?;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn rust_result_metadata_separates_facade_fallibility_from_java_throws() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack hdf5 HDF5File rust-crate-mapping mapped target=hdf5_facade
+external-pack hdf5 HDF5File.OpenMode rust-crate-mapping mapped target=hdf5_facade
+external-pack hdf5 OpenMode rust-crate-mapping mapped target=hdf5_facade
+external-pack hdf5 HDF5Error rust-crate-mapping mapped target=hdf5_facade
+external-pack-exception hdf5 HDF5Error checked
+external-pack-field hdf5 HDF5File OpenMode mapped
+external-pack-field hdf5 HDF5File.OpenMode CREATE mapped
+external-pack-field hdf5 OpenMode CREATE mapped
+external-pack-constructor hdf5 HDF5File 2 mapped rust-type=HDF5File rust=with_mode rust-result=true
+external-pack-api hdf5 HDF5File getFile mapped getter read-only definitely-non-null args=0 return=File throws=HDF5Error rust=get_file rust-result=false
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesRustFallibilityFacts {
+    Object run(String path) throws HDF5Error {
+        HDF5File file = new HDF5File(path, HDF5File.OpenMode.CREATE);
+        return file.getFile();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains("HDF5File::with_mode")
+            && translation.rust.contains("HDF5File::with_mode(path")
+            && translation.rust.contains("?;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("file.get_file()")
+            && !translation.rust.contains("file.get_file()?"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("hdf5_facade::OpenMode::CREATE"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub struct OpenMode"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("impl OpenMode"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_constructor_argument_fact_borrows_facade_parameter() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack apache.arrow RootAllocator rust-crate-mapping mapped target=arrow_facade
+external-pack apache.arrow IntVector rust-crate-mapping mapped target=arrow_facade
+external-pack-object apache.arrow RootAllocator concrete
+external-pack-object apache.arrow IntVector concrete
+external-pack-capability apache.arrow RootAllocator clone=true final=true
+external-pack-capability apache.arrow IntVector clone=true final=true
+external-pack-constructor apache.arrow RootAllocator 1 mapped rust-type=RootAllocator rust=new
+external-pack-constructor apache.arrow IntVector 2 mapped rust-type=IntVector rust=new
+external-pack-constructor-argument apache.arrow IntVector 2 0 definitely-non-null read-only borrowed type=String
+external-pack-constructor-argument apache.arrow IntVector 2 1 definitely-non-null read-only borrowed type=RootAllocator
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesArrowConstructorArgumentFacts {
+    void run() {
+        RootAllocator allocator = new RootAllocator(64L);
+        IntVector ids = new IntVector("id", allocator);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("arrow_facade::IntVector::new(\"id\".to_string().as_str(), &allocator)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("allocator.clone()"),
+        "borrowed constructor argument should not be recovered through clone:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_crate_mapped_type_uses_constructor_rust_type_name() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack htsjdk SAMSequenceRecord rust-crate-mapping mapped target=htsjdk_facade
+external-pack-object htsjdk SAMSequenceRecord concrete
+external-pack-constructor htsjdk SAMSequenceRecord 2 mapped rust-type=SamSequenceRecord rust=new
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesMappedRustTypeName {
+    SAMSequenceRecord make() {
+        return new SAMSequenceRecord("chr1", 10);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("-> htsjdk_facade::SamSequenceRecord"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("htsjdk_facade::SAMSequenceRecord"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_crate_mapped_type_uses_pack_rust_type_name_for_returns() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep.external dep.external.NativeCursor rust-crate-mapping mapped target=dep_facade rust-type=CursorHandle
+external-pack dep.external dep.external.Reader rust-crate-mapping mapped target=dep_facade
+external-pack dep.external NativeCursor rust-crate-mapping mapped target=dep_facade rust-type=CursorHandle
+external-pack dep.external Reader rust-crate-mapping mapped target=dep_facade
+external-pack-object dep.external dep.external.NativeCursor concrete
+external-pack-object dep.external dep.external.Reader concrete
+external-pack-object dep.external NativeCursor concrete
+external-pack-object dep.external Reader concrete
+external-pack-capability dep.external dep.external.NativeCursor clone=true final=true
+external-pack-capability dep.external dep.external.Reader clone=true final=true
+external-pack-capability dep.external NativeCursor clone=true final=true
+external-pack-capability dep.external Reader clone=true final=true
+external-pack-constructor dep.external dep.external.NativeCursor 0 mapped rust-type=LegacyCursor rust=new
+external-pack-api dep.external dep.external.Reader cursor mapped getter read-only definitely-non-null args=0 return=dep.external.NativeCursor rust=cursor
+external-pack-api dep.external Reader cursor mapped getter read-only definitely-non-null args=0 return=NativeCursor rust=cursor
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesPackRustTypeNameForReturn {
+    NativeCursor read(Reader reader) {
+        return reader.cursor();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains("-> dep_facade::CursorHandle"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("fn cursor(&self) -> dep_facade::CursorHandle"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("dep_facade::LegacyCursor"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_crate_mapped_sequence_type_keeps_facade_storage_type() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack htsjdk SAMSequenceDictionary rust-crate-mapping mapped target=htsjdk_facade
+external-pack htsjdk SAMSequenceRecord rust-crate-mapping mapped target=htsjdk_facade
+external-pack-object htsjdk SAMSequenceDictionary concrete
+external-pack-object htsjdk SAMSequenceRecord concrete
+external-pack-capability htsjdk SAMSequenceDictionary clone=true final=true sequence=SAMSequenceRecord
+external-pack-constructor htsjdk SAMSequenceDictionary 0 mapped rust-type=SamSequenceDictionary rust=new
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesMappedSequenceStorage {
+    void run() {
+        SAMSequenceDictionary dictionary = new SAMSequenceDictionary();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("dictionary: htsjdk_facade::SamSequenceDictionary"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("let mut dictionary: Vec<htsjdk_facade"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_collection_like_facade_no_alias_arg_clones_when_reused() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack htsjdk Interval rust-crate-mapping mapped target=htsjdk_facade
+external-pack htsjdk IntervalList rust-crate-mapping mapped target=htsjdk_facade
+external-pack-object htsjdk Interval concrete
+external-pack-object htsjdk IntervalList concrete
+external-pack-capability htsjdk Interval clone=true final=true
+external-pack-capability htsjdk IntervalList clone=true final=true sequence=Interval
+external-pack-constructor htsjdk Interval 3 mapped rust-type=Interval rust=new
+external-pack-constructor htsjdk IntervalList 0 mapped rust-type=IntervalList rust=new
+external-pack-api htsjdk Interval size mapped getter read-only definitely-non-null args=0 return=int rust=size
+external-pack-api htsjdk IntervalList add mapped mutator mutates-receiver definitely-non-null args=1 return=void rust=add
+external-pack-argument htsjdk IntervalList add 0 definitely-non-null read-only no-alias type=Interval
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesExternalCollectionLikeFacadeNoAliasArg {
+    int run() {
+        Interval target = new Interval("chr1", 2, 5);
+        IntervalList intervals = new IntervalList();
+        intervals.add(target);
+        return target.size();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "intervals.add(target.clone()/* TODO(translation): validate added clone */);"
+        ),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_constructor_argument_unknown_nullability_defaults_to_non_null() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack apache.arrow RootAllocator rust-crate-mapping mapped target=arrow_facade
+external-pack apache.arrow IntVector rust-crate-mapping mapped target=arrow_facade
+external-pack-object apache.arrow RootAllocator concrete
+external-pack-object apache.arrow IntVector concrete
+external-pack-capability apache.arrow RootAllocator clone=true final=true
+external-pack-capability apache.arrow IntVector clone=true final=true
+external-pack-constructor apache.arrow RootAllocator 1 mapped rust-type=RootAllocator rust=new
+external-pack-constructor apache.arrow IntVector 2 mapped rust-type=IntVector rust=new
+external-pack-constructor-argument apache.arrow IntVector 2 0 unknown read-only borrowed type=String
+external-pack-constructor-argument apache.arrow IntVector 2 1 unknown read-only borrowed type=RootAllocator
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesArrowConstructorUnknownNullability {
+    void run() {
+        RootAllocator allocator = new RootAllocator(64L);
+        IntVector ids = new IntVector("id", allocator);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("arrow_facade::IntVector::new(\"id\".to_string().as_str(), &allocator)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("IntVector::new(Some(")
+            && !translation.rust.contains("IntVector::new(None")
+            && !translation
+                .rust
+                .contains("Option<arrow_facade::RootAllocator>")
+            && !translation.rust.contains("Option<String>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn array_initializer_argument_uses_sequence_view_from_external_argument_fact() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack hdf5 HDF5File rust-crate-mapping mapped target=hdf5_facade
+external-pack-object hdf5 HDF5File concrete
+external-pack-constructor hdf5 HDF5File 0 mapped rust-type=HDF5File rust=new
+external-pack-api hdf5 HDF5File makeDoubleMatrix mapped mutator mutates-receiver definitely-non-null args=2 return=double[][] rust=make_double_matrix
+external-pack-argument hdf5 HDF5File makeDoubleMatrix 0 definitely-non-null read-only borrowed type=String
+external-pack-argument hdf5 HDF5File makeDoubleMatrix 1 definitely-non-null read-only borrowed type=double[][]
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesBorrowedArrayArgumentFacts {
+    void run(HDF5File file) {
+        file.makeDoubleMatrix("matrix", new double[][] {{1.0, 2.0}, {3.0, 4.0}});
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("vec![vec![1f64, 2f64], vec![3f64, 4f64]].as_slice()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_conversion_adapter_wraps_array_initializer_elements() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack apache.arrow RootAllocator rust-crate-mapping mapped target=arrow_facade
+external-pack apache.arrow IntVector rust-crate-mapping mapped target=arrow_facade
+external-pack apache.arrow VarCharVector rust-crate-mapping mapped target=arrow_facade
+external-pack apache.arrow FieldVector rust-crate-mapping mapped target=arrow_facade
+external-pack apache.arrow VectorSchemaRoot rust-crate-mapping mapped target=arrow_facade
+external-pack-object apache.arrow RootAllocator concrete
+external-pack-object apache.arrow IntVector concrete
+external-pack-object apache.arrow VarCharVector concrete
+external-pack-object apache.arrow FieldVector concrete
+external-pack-object apache.arrow VectorSchemaRoot concrete
+external-pack-capability apache.arrow RootAllocator clone=true final=true
+external-pack-capability apache.arrow IntVector clone=true final=true
+external-pack-capability apache.arrow VarCharVector clone=true final=true
+external-pack-capability apache.arrow FieldVector clone=true final=true
+external-pack-capability apache.arrow VectorSchemaRoot clone=true final=true
+external-pack-constructor apache.arrow RootAllocator 1 mapped rust-type=RootAllocator rust=new
+external-pack-constructor apache.arrow IntVector 2 mapped rust-type=IntVector rust=new
+external-pack-constructor apache.arrow VarCharVector 2 mapped rust-type=VarCharVector rust=new
+external-pack-constructor-argument apache.arrow IntVector 2 0 definitely-non-null read-only borrowed type=String
+external-pack-constructor-argument apache.arrow IntVector 2 1 definitely-non-null read-only borrowed type=RootAllocator
+external-pack-constructor-argument apache.arrow VarCharVector 2 0 definitely-non-null read-only borrowed type=String
+external-pack-constructor-argument apache.arrow VarCharVector 2 1 definitely-non-null read-only borrowed type=RootAllocator
+external-pack-api apache.arrow VectorSchemaRoot of mapped getter read-only definitely-non-null args=1 return=VectorSchemaRoot rust=of
+external-pack-argument apache.arrow VectorSchemaRoot of 0 definitely-non-null read-only no-alias type=FieldVector[]
+external-pack-api apache.arrow IntVector close mapped side-effect mutates-receiver definitely-non-null args=0 return=void rust=close
+external-pack-api apache.arrow VarCharVector close mapped side-effect mutates-receiver definitely-non-null args=0 return=void rust=close
+external-pack-conversion apache.arrow IntVector FieldVector into
+external-pack-conversion apache.arrow VarCharVector FieldVector into
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class UsesExternalConversionAdapters {
+    void run() {
+        RootAllocator allocator = new RootAllocator(64L);
+        IntVector ids = new IntVector("id", allocator);
+        VarCharVector names = new VarCharVector("name", allocator);
+        VectorSchemaRoot root = VectorSchemaRoot.of(new FieldVector[] { ids, names });
+        ids.close();
+        names.close();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("vec![ids.clone().into(), names.clone().into()]"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_rust_scalar_return_casts_to_java_primitive_slot() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack apache.arrow VectorSchemaRoot rust-crate-mapping mapped target=arrow_facade
+external-pack-object apache.arrow VectorSchemaRoot concrete
+external-pack-capability apache.arrow VectorSchemaRoot clone=true final=true
+external-pack-api apache.arrow VectorSchemaRoot getRowCount mapped getter read-only definitely-non-null args=0 return=int rust=get_row_count rust-return=usize
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class ArrowRustScalarReturn {
+    void run(VectorSchemaRoot root) {
+        int rows = root.getRowCount();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let rows: i32 = root.get_row_count().try_into().unwrap();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_generic_facade_return_local_uses_inferred_rust_type() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack test Assertions rust-crate-mapping mapped target=test_facade
+external-pack test ObjectAssert rust-crate-mapping mapped target=test_facade
+external-pack-object test Assertions concrete
+external-pack-object test ObjectAssert concrete
+external-pack-capability test Assertions clone=true final=true
+external-pack-capability test ObjectAssert clone=true final=true
+external-pack-api test Assertions assertThat mapped getter read-only definitely-non-null args=1 return=ObjectAssert rust=assert_that
+external-pack-api test ObjectAssert isNotNull mapped fluent-mutator read-only definitely-non-null args=0 return=ObjectAssert rust=is_not_null
+external-pack-api test ObjectAssert isEqualTo mapped fluent-mutator read-only definitely-non-null args=1 return=ObjectAssert rust=is_equal_to
+external-pack-argument test ObjectAssert isEqualTo 0 definitely-non-null read-only borrowed type=String
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class ExternalGenericFacadeReturnLocal {
+    void run(String value) {
+        ObjectAssert assertion = Assertions.assertThat(value);
+        assertion.isNotNull();
+        assertion.isEqualTo("expected");
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains("let assertion = "),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("let assertion: test_facade::ObjectAssert"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_facade_support_lowers_raw_collection_returns_to_erased_rust_shapes() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep ExternalReader rust-crate-mapping mapped target=dep_facade
+external-pack-object dep ExternalReader concrete
+external-pack-api dep ExternalReader getAttributes mapped getter read-only definitely-non-null args=0 return=Map rust=get_attributes
+external-pack-api dep ExternalReader getValues mapped getter read-only definitely-non-null args=0 return=List rust=get_values
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class RawExternalCollectionReturns {
+    void run(ExternalReader reader) {
+        Object attributes = reader.getAttributes();
+        Object values = reader.getValues();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "fn get_attributes(&self) -> std::collections::HashMap<String, Box<dyn std::any::Any>>"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("fn get_values(&self) -> Vec<Box<dyn std::any::Any>>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("reader: &dep_facade::ExternalReader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub struct ExternalReader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("impl ExternalReader"),
+        "{}",
+        translation.rust
+    );
+    assert!(!translation.rust.contains("-> Map"), "{}", translation.rust);
+    assert!(
+        !translation.rust.contains("-> List"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_facade_support_uses_crate_mapped_return_type_policy() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep ExternalReader rust-crate-mapping mapped target=dep_facade
+external-pack dep ExternalRecord rust-crate-mapping mapped target=dep_facade
+external-pack-object dep ExternalReader concrete
+external-pack-object dep ExternalRecord concrete
+external-pack-constructor dep ExternalRecord 0 mapped rust-type=RecordHandle rust=new
+external-pack-api dep ExternalReader readRecord mapped getter read-only definitely-non-null args=0 return=ExternalRecord rust=read_record
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class MappedExternalFacadeReturn {
+    void run(ExternalReader reader) {
+        ExternalRecord record = reader.readRecord();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("reader: &dep_facade::ExternalReader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let record = reader.read_record();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub struct ExternalReader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub struct ExternalRecord"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("impl ExternalReader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn read_record(&self) -> ExternalRecord"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_facade_support_uses_exact_rust_return_facts_for_stub_signatures() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep Reader rust-crate-mapping mapped target=dep_facade
+external-pack dep Schema rust-crate-mapping mapped target=dep_facade
+external-pack-object dep Reader concrete
+external-pack-object dep Schema concrete
+external-pack-api dep Reader getSchema mapped getter read-only definitely-non-null args=0 return=Schema rust=get_schema rust-return=&dep_facade::Schema
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class ExactRustReturnSupport {
+    void run(Reader reader) {
+        Object schema = reader.getSchema();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains("reader: &dep_facade::Reader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("reader.get_schema()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub struct Reader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub struct Schema"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("impl Reader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("panic!(\"external facade method get_schema has no fallback value\")"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("-> dep_facade::Schema { Default::default() }"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_facade_support_does_not_require_default_for_crate_return_stubs() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep Reader rust-crate-mapping mapped target=dep_facade
+external-pack dep Record rust-crate-mapping mapped target=dep_facade
+external-pack-object dep Reader concrete
+external-pack-object dep Record concrete
+external-pack-api dep Reader read mapped getter read-only definitely-non-null args=0 return=Record rust=read
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class NonDefaultFacadeReturnStub {
+    void run(Reader reader) {
+        Record record = reader.read();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains("reader: &dep_facade::Reader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("let record = reader.read();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub struct Reader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub struct Record"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("impl Reader"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("-> dep_facade::Record { Default::default() }"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_facade_support_qualifies_borrowed_and_private_crate_return_shapes() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep Reader rust-crate-mapping mapped target=dep_facade
+external-pack dep Schema rust-crate-mapping mapped target=dep_facade
+external-pack dep FieldVector rust-crate-mapping mapped target=dep_facade
+external-pack-object dep Reader concrete
+external-pack-object dep Schema concrete
+external-pack-object dep FieldVector concrete
+external-pack-api dep Reader getSchema mapped getter read-only definitely-non-null args=0 return=Schema rust=get_schema rust-return=&Schema
+external-pack-api dep Reader getVector mapped getter read-only maybe-null args=1 return=FieldVector rust=get_vector rust-return=Option<&FieldVector>
+external-pack-argument dep Reader getVector 0 definitely-non-null read-only borrowed type=String
+external-pack-api dep Reader getObject mapped getter read-only maybe-null args=0 return=Object rust=get_object rust-return=Option<SqlValue>
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class BorrowedAndPrivateCrateReturnSupport {
+    void run(Reader reader) {
+        Object schema = reader.getSchema();
+        Object vector = reader.getVector("id");
+        Object value = reader.getObject();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("fn get_schema(&self) -> &dep_facade::Schema"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("fn get_vector<T0>(&self, _arg0: T0) -> Option<&dep_facade::FieldVector>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("fn get_object(&self) -> Option<dep_facade::SqlValue>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("-> &Schema"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("Option<&FieldVector>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("Option<SqlValue>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_facade_support_uses_rust_acronym_type_name_for_crate_mapped_returns() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep SAMFileWriterFactory rust-crate-mapping mapped target=dep_facade
+external-pack dep SAMFileWriter rust-crate-mapping mapped target=dep_facade
+external-pack-object dep SAMFileWriterFactory concrete
+external-pack-object dep SAMFileWriter concrete
+external-pack-api dep SAMFileWriterFactory makeWriter mapped getter read-only definitely-non-null args=0 return=SAMFileWriter rust=make_writer
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class AcronymMappedReturnSupport {
+    void run(SAMFileWriterFactory factory) {
+        Object writer = factory.makeWriter();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("fn make_writer(&self) -> dep_facade::SamFileWriter"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("fn make_writer(&self) -> dep_facade::SAMFileWriter"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_facade_support_preserves_digit_and_sqlite_crate_type_names() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep Reader rust-crate-mapping mapped target=dep_facade
+external-pack dep SQLiteStatement rust-crate-mapping mapped target=dep_facade
+external-pack dep HDF5Dataset rust-crate-mapping mapped target=dep_facade
+external-pack-object dep Reader concrete
+external-pack-object dep SQLiteStatement concrete
+external-pack-object dep HDF5Dataset concrete
+external-pack-api dep Reader statement mapped getter read-only definitely-non-null args=0 return=SQLiteStatement rust=statement
+external-pack-api dep Reader dataset mapped getter read-only definitely-non-null args=0 return=HDF5Dataset rust=dataset
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class PreservedFacadeTypeNameSupport {
+    void run(Reader reader) {
+        Object statement = reader.statement();
+        Object dataset = reader.dataset();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("fn statement(&self) -> dep_facade::SQLiteStatement"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("fn dataset(&self) -> dep_facade::HDF5Dataset"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("dep_facade::SqLiteStatement"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("dep_facade::Hdf5Dataset"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_dyn_trait_facade_support_uses_impl_trait_arguments() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack htsjdk.samtools.util Locatable rust-crate-mapping mapped target=htsjdk_facade
+external-pack htsjdk.samtools.util Interval rust-crate-mapping mapped target=htsjdk_facade
+external-pack-object htsjdk.samtools.util Locatable dyn-trait Locatable
+external-pack-object htsjdk.samtools.util Interval concrete
+external-pack-capability htsjdk.samtools.util Locatable object-safe=true
+external-pack-capability htsjdk.samtools.util Interval clone=true final=true implements=Locatable
+external-pack-api htsjdk.samtools.util Locatable contains mapped boolean-getter read-only definitely-non-null args=1 return=boolean rust=contains
+external-pack-argument htsjdk.samtools.util Locatable contains 0 definitely-non-null read-only borrowed type=Locatable
+external-pack-api htsjdk.samtools.util Interval contains mapped boolean-getter read-only definitely-non-null args=1 return=boolean rust=contains
+external-pack-argument htsjdk.samtools.util Interval contains 0 definitely-non-null read-only borrowed type=Locatable
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class ExternalDynTraitFacadeSupport {
+    boolean run(Interval interval, Locatable other) {
+        return interval.contains(other);
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return interval.contains(other);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("other: &impl htsjdk_facade::Locatable"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("impl Locatable {\n"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("downcast_ref::<Locatable>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("as &dyn Locatable"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_dyn_trait_source_signatures_use_crate_qualified_trait_path() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep Locatable rust-crate-mapping mapped target=dep_facade
+external-pack dep Interval rust-crate-mapping mapped target=dep_facade
+external-pack-object dep Locatable dyn-trait Locatable
+external-pack-object dep Interval concrete
+external-pack-capability dep Locatable object-safe=true
+external-pack-capability dep Interval clone=true final=true implements=Locatable
+external-pack-api dep Locatable overlaps mapped boolean-getter read-only definitely-non-null args=1 return=boolean rust=overlaps
+external-pack-argument dep Locatable overlaps 0 definitely-non-null read-only borrowed type=Locatable
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class ExternalDynTraitSourceSignatures {
+    boolean overlaps(Locatable left, Locatable right) {
+        return left.overlaps(right);
+    }
+
+    Locatable missing() {
+        return null;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("left: &impl dep_facade::Locatable"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("right: &impl dep_facade::Locatable"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("-> Option<Box<dyn std::any::Any>>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("dyn Locatable"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("Box<dyn dep_facade::Locatable>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn borrowed_external_facade_return_recovers_owned_value_before_erasure() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack apache.arrow VectorSchemaRoot rust-crate-mapping mapped target=arrow_facade
+external-pack apache.arrow Schema rust-crate-mapping mapped target=arrow_facade
+external-pack apache.arrow FieldVector rust-crate-mapping mapped target=arrow_facade
+external-pack-object apache.arrow VectorSchemaRoot concrete
+external-pack-object apache.arrow Schema concrete
+external-pack-object apache.arrow FieldVector concrete
+external-pack-capability apache.arrow VectorSchemaRoot clone=true final=true
+external-pack-capability apache.arrow Schema clone=true final=true
+external-pack-capability apache.arrow FieldVector clone=true final=true
+external-pack-api apache.arrow VectorSchemaRoot getSchema mapped getter read-only definitely-non-null args=0 return=Schema rust=get_schema rust-return=&Schema
+external-pack-api apache.arrow VectorSchemaRoot getVector mapped getter read-only maybe-null args=1 return=FieldVector rust=get_vector rust-return=Option<&FieldVector>
+external-pack-argument apache.arrow VectorSchemaRoot getVector 0 definitely-non-null read-only borrowed type=String
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class BorrowedArrowGetterReturn {
+    void run(VectorSchemaRoot root) {
+        Object schema = root.getSchema();
+        Object vector = root.getVector("id");
+        root.close();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Box::new(root.get_schema().clone()) as Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "root.get_vector(\"id\".to_string().as_str()).map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>)"
+        ),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_borrowed_literal_argument_is_hoisted_when_call_result_is_stored() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack test Assertions rust-crate-mapping mapped target=test_facade
+external-pack test ObjectAssert rust-crate-mapping mapped target=test_facade
+external-pack-object test Assertions concrete
+external-pack-object test ObjectAssert concrete
+external-pack-capability test Assertions clone=true final=true
+external-pack-capability test ObjectAssert clone=true final=true
+external-pack-api test Assertions assertThat mapped getter read-only definitely-non-null args=1 return=ObjectAssert rust=assert_that
+external-pack-argument test Assertions assertThat 0 maybe-null read-only borrowed type=Object
+external-pack-api test ObjectAssert isNotNull mapped fluent-mutator read-only definitely-non-null args=0 return=ObjectAssert rust=is_not_null
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class BorrowedLiteralExternalArgument {
+    void run() {
+        ObjectAssert assertion = Assertions.assertThat("actual");
+        assertion.isNotNull();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let _java_borrowed_assertion_0 = \"actual\".to_string();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let assertion = test_facade::Assertions::assert_that(Some(&_java_borrowed_assertion_0));"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn non_null_external_object_initializer_beats_later_null_check() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack external.schema VectorSchemaRoot rust-crate-mapping mapped target=schema_facade
+external-pack external.schema Schema rust-crate-mapping mapped target=schema_facade
+external-pack external.schema Vector rust-crate-mapping mapped target=schema_facade
+external-pack-object external.schema VectorSchemaRoot concrete
+external-pack-object external.schema Schema concrete
+external-pack-object external.schema Vector concrete
+external-pack-capability external.schema VectorSchemaRoot clone=true final=true
+external-pack-capability external.schema Schema clone=true final=true
+external-pack-capability external.schema Vector clone=true final=true
+external-pack-api external.schema VectorSchemaRoot getSchema mapped getter read-only definitely-non-null args=0 return=Schema rust=get_schema rust-return=&Schema
+external-pack-api external.schema VectorSchemaRoot getVector mapped getter read-only maybe-null args=1 return=Vector rust=get_vector rust-return=Option<&Vector>
+external-pack-argument external.schema VectorSchemaRoot getVector 0 definitely-non-null read-only borrowed type=String
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class NonNullExternalObjectInitializer {
+    boolean run(VectorSchemaRoot root) {
+        Object schema = root.getSchema();
+        Object vector = root.getVector("id");
+        return schema != null && vector != null;
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let schema: Box<dyn std::any::Any> = Box::new(root.get_schema().clone()) as Box<dyn std::any::Any>;"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let vector: Option<Box<dyn std::any::Any>> = root.get_vector"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return true && vector.is_some();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn borrowed_path_facade_return_recovers_owned_path_before_erasure() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack hdf5 HDF5File rust-crate-mapping mapped target=hdf5_facade
+external-pack hdf5 File rust-crate-mapping mapped target=hdf5_facade
+external-pack-object hdf5 HDF5File concrete
+external-pack-object hdf5 File concrete
+external-pack-capability hdf5 HDF5File clone=true final=true
+external-pack-api hdf5 HDF5File getFile mapped getter read-only definitely-non-null args=0 return=File rust=get_file rust-return=&std::path::Path
+"#,
+    )
+    .facts;
+    let translation = translate_source_with_facts(
+        r#"
+class BorrowedPathFacadeReturn {
+    void run(HDF5File reader) {
+        Object backingFile = reader.getFile();
+        reader.close();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Box::new(reader.get_file().to_path_buf()) as Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn exception_plan_does_not_render_rust() {
     let source = include_str!("../src/exception_plan.rs");
 
@@ -24397,6 +26643,50 @@ class ExternalConstructorCallbackUse {
 }
 
 #[test]
+fn unknown_external_constructor_callback_nullability_stays_non_optional() {
+    let mut facts = FactSet::default();
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            receiver_type: Some("ExternalConfig".to_string()),
+            method_name: "new".to_string(),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::Named {
+                name: "Function".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::Unknown,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let shapes = external_constructor_arg_shapes(
+        &JavaType::Named {
+            name: "ExternalConfig".to_string(),
+            args: Vec::new(),
+        },
+        "new",
+        1,
+        &facts,
+    )
+    .expect("external argument fact should shape constructor argument");
+
+    assert_eq!(
+        shapes[0].java_ty,
+        JavaType::Named {
+            name: "Function".to_string(),
+            args: Vec::new(),
+        },
+        "unknown external constructor parameter nullability is absence of nullable evidence"
+    );
+    assert!(
+        new_java2rust::types::optional_element_type(&shapes[0].java_ty).is_none(),
+        "unknown nullability must not introduce Option<_>"
+    );
+}
+
+#[test]
 fn external_constructor_owned_set_param_clones_optional_self_field_element() {
     let mut facts = FactSet::default();
     facts
@@ -25041,7 +27331,7 @@ fn stream_plan_accepts_simple_captureful_lambdas_without_global_capture_veto() {
 
     assert_eq!(
         lowered.expr,
-        RustExpr::Raw("values.iter().map(|value| (*value + base)).sum::<i32>()".to_string())
+        RustExpr::Raw("values.iter().map(|value| *value + base).sum::<i32>()".to_string())
     );
 }
 
@@ -25066,6 +27356,231 @@ fn stream_plan_owns_flat_map_lambda_collection_stream_shape() {
         RustExpr::Raw(
             "groups.iter().flat_map(|group| group.iter()).collect::<Vec<_>>()".to_string()
         )
+    );
+}
+
+#[test]
+fn stream_plan_accepts_arrays_stream_as_source() {
+    let mut env = TypeEnv::new();
+    env.insert_local("values", JavaType::Array(Box::new(JavaType::String)));
+    let expr =
+        parse_expr("Arrays.stream(values).map(value -> value.trim()).collect(Collectors.toList())");
+
+    let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
+    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+
+    assert_eq!(plan.source.expr, &parse_expr("values"));
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw("values.iter().map(|value| value.trim()).collect::<Vec<_>>()".to_string())
+    );
+}
+
+#[test]
+fn stream_plan_lowers_arrays_stream_to_array_and_all_match_terminals() {
+    let mut env = TypeEnv::new();
+    env.insert_local("values", JavaType::Array(Box::new(JavaType::String)));
+    let to_array = parse_expr("Arrays.stream(values).mapToInt(value -> value.length()).toArray()");
+    let all_match = parse_expr("Arrays.stream(values).allMatch(value -> value.length() > 0)");
+
+    let to_array_plan = build_stream_plan(&to_array, &env, &FactSet::default()).unwrap();
+    let to_array_lowered =
+        render_stream_plan(&to_array_plan, RustExpr::Var("values".to_string())).unwrap();
+    assert_eq!(
+        to_array_lowered.expr,
+        RustExpr::Raw(
+            "values.iter().map(|value| value.len() as i32).collect::<Vec<_>>()".to_string()
+        )
+    );
+
+    let all_match_plan = build_stream_plan(&all_match, &env, &FactSet::default()).unwrap();
+    let all_match_lowered =
+        render_stream_plan(&all_match_plan, RustExpr::Var("values".to_string())).unwrap();
+    assert_eq!(
+        all_match_lowered.expr,
+        RustExpr::Raw("values.iter().all(|value| (value.len() as i32) > 0)".to_string())
+    );
+}
+
+#[test]
+fn stream_plan_lowers_temporary_arrays_stream_with_owned_lambda_items() {
+    let mut env = TypeEnv::new();
+    env.insert_local("line", JavaType::String);
+    let expr = parse_expr(
+        "Arrays.stream(line.split(\",\")).mapToDouble(value -> Double.parseDouble(value)).toArray()",
+    );
+
+    let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
+    let lowered = render_stream_plan(
+        &plan,
+        RustExpr::Raw("line.split(\",\").collect::<Vec<_>>()".to_string()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw(
+            "line.split(\",\").collect::<Vec<_>>().into_iter().map(|value| value.parse::<f64>().unwrap()).collect::<Vec<_>>()"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn stream_plan_lowers_method_references_in_map_and_map_to_int() {
+    let mut env = TypeEnv::new();
+    env.insert_local(
+        "counts",
+        list_java_type(JavaType::Primitive(PrimitiveType::Int)),
+    );
+    env.insert_local("names", list_java_type(JavaType::String));
+    let count_sum = parse_expr("counts.stream().mapToInt(Integer::intValue).sum()");
+    let name_strings =
+        parse_expr("names.stream().map(Object::toString).collect(Collectors.toList())");
+
+    let count_plan = build_stream_plan(&count_sum, &env, &FactSet::default()).unwrap();
+    let count_lowered =
+        render_stream_plan(&count_plan, RustExpr::Var("counts".to_string())).unwrap();
+    assert_eq!(
+        count_lowered.expr,
+        RustExpr::Raw("counts.iter().map(|value| *value).sum::<i32>()".to_string())
+    );
+
+    let names_plan = build_stream_plan(&name_strings, &env, &FactSet::default()).unwrap();
+    let names_lowered =
+        render_stream_plan(&names_plan, RustExpr::Var("names".to_string())).unwrap();
+    assert_eq!(
+        names_lowered.expr,
+        RustExpr::Raw(
+            "names.iter().map(|value| (*value).to_string()).collect::<Vec<_>>()".to_string()
+        )
+    );
+}
+
+#[test]
+fn stream_plan_lowers_collectors_joining_terminal() {
+    let mut env = TypeEnv::new();
+    env.insert_local("names", list_java_type(JavaType::String));
+    let expr =
+        parse_expr("names.stream().map(Object::toString).collect(Collectors.joining(\"|\"))");
+
+    let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
+    let lowered = render_stream_plan(&plan, RustExpr::Var("names".to_string())).unwrap();
+
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw(
+            "names.iter().map(|value| (*value).to_string()).map(|item| item.to_string()).collect::<Vec<_>>().join(\"|\")"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn stream_plan_lowers_int_stream_range_source() {
+    let mut env = TypeEnv::new();
+    env.insert_local("limit", JavaType::Primitive(PrimitiveType::Int));
+    let expr = parse_expr("IntStream.range(0, limit).map(value -> value + 1).toArray()");
+
+    let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
+    let lowered = render_stream_plan(&plan, RustExpr::Raw("(0..limit)".to_string())).unwrap();
+
+    assert_eq!(plan.source.expr, &parse_expr("IntStream.range(0, limit)"));
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw(
+            "(0..limit).into_iter().map(|value| value + 1).collect::<Vec<_>>()".to_string()
+        )
+    );
+}
+
+#[test]
+fn translation_lowers_int_stream_range_source_without_static_facade() {
+    let translation = translate_source(
+        r#"
+class IntStreamRangeSource {
+    int[] run(int limit) {
+        return IntStream.range(0, limit).map(value -> value + 1).toArray();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return (0..limit).into_iter().map(|value| value + 1).collect::<Vec<_>>();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("IntStream::range"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn translation_lowers_enhanced_for_over_int_stream_range_as_rust_range() {
+    let translation = translate_source(
+        r#"
+class EnhancedForIntStreamRange {
+    int run(int limit) {
+        int total = 0;
+        for (int i : IntStream.range(0, limit)) {
+            total += i;
+        }
+        return total;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("for i in 0..limit"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("IntStream::range"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("(0..limit).iter()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn translation_lowers_int_stream_range_for_each_as_rust_range_loop() {
+    let translation = translate_source(
+        r#"
+class IntStreamRangeForEach {
+    int run(int limit) {
+        int total = 0;
+        IntStream.range(0, limit).forEach(i -> total += i);
+        return total;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("for i in 0..limit"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("IntStream::range"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("(0..limit).iter()"),
+        "{}",
+        translation.rust
     );
 }
 
@@ -25201,7 +27716,43 @@ class Group {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "groups.iter().flat_map(|group| { let names = group.names(); names.iter().filter(|name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
+            "groups.iter().flat_map(|group| { let names = group.names(); names.into_iter().filter(move |name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn stream_plan_lowers_flat_map_block_temporary_collection_as_owned_subpipeline() {
+    let facts = new_java2rust::external_packs::genomicsdb_pack_facts();
+    let expr = parse_expr(
+        "partitions.stream().flatMap(partition -> { long[] bounds = GenomicsDBUtils.getArrayColumnBounds(workspace, partition); java.util.List<String> names; return names.stream().filter(name -> name.length() >= bounds[0]).map(name -> name.trim()); }).collect(Collectors.toList())",
+    );
+    let mut type_env = TypeEnv::new();
+    type_env.insert_local("partitions", list_java_type(JavaType::String));
+    type_env.insert_field("workspace", JavaType::String);
+
+    let plan = build_stream_plan(&expr, &type_env, &facts).unwrap();
+    let mut shape_env = ShapeEnv::new();
+    shape_env.insert_local_shape(
+        "partitions",
+        RustSlotShape::conservative(list_java_type(JavaType::String)),
+    );
+    shape_env.insert_field_shape(
+        "workspace",
+        RustSlotShape::conservative(optional_java_type(JavaType::String)),
+    );
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("partitions".to_string()),
+        StreamRenderContext::new_with_facts(&shape_env, &facts),
+    )
+    .unwrap();
+
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw(
+            "partitions.iter().flat_map(|partition| { let bounds = GenomicsDBUtils::get_array_column_bounds(self.workspace.as_deref().expect(\"Java null receiver\"), partition.as_str()); let names = Default::default(); names.into_iter().filter(move |name| (name.len() as i32) >= bounds[0 as usize]).map(|name| name.trim()) }).collect::<Vec<_>>()"
                 .to_string()
         )
     );

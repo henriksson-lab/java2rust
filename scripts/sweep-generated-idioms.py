@@ -42,8 +42,8 @@ SIGNALS = [
     ),
     Signal(
         "java_collection_api",
-        "Java collection method spelling on Rust containers",
-        r"\.(add|add_all|size|put|contains_key|entry_set)\(",
+        "Strong Java collection method spelling on Rust containers",
+        r"\.(add_all|size|put|entry_set)\(",
         "CALL-1 / native collection call planning",
         "CollectionAddAllAndSize.java; CollectionsUse.java; MapPutGetJavaApi.java",
     ),
@@ -141,14 +141,46 @@ def rust_files(root: Path) -> list[Path]:
     return sorted(path for path in root.rglob("*.rs") if path.is_file())
 
 
-def count_signal(signal: Signal, files: list[Path], source_map: dict[Path, str]) -> dict[str, object]:
+def signal_matches(signal: Signal, text: str) -> list[re.Match[str]]:
     pattern = re.compile(signal.regex)
+    matches = list(pattern.finditer(text))
+    if signal.key == "concrete_none":
+        return [match for match in matches if not concrete_none_match_is_valid_option(text, match)]
+    return matches
+
+
+def concrete_none_match_is_valid_option(text: str, match: re.Match[str]) -> bool:
+    line_start = text.rfind("\n", 0, match.start()) + 1
+    line_end = text.find("\n", match.end())
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+
+    if re.search(r"\blet\s+(?:mut\s+)?[A-Za-z_][A-Za-z0-9_]*\s*:\s*Option<[^;]+>\s*=\s*None;", line):
+        return True
+
+    if re.search(r"\breturn\s+None;", line):
+        return enclosing_function_returns_option(text, match.start())
+
+    return False
+
+
+def enclosing_function_returns_option(text: str, offset: int) -> bool:
+    prefix = text[:offset]
+    fn_matches = list(re.finditer(r"\bfn\s+[A-Za-z_][A-Za-z0-9_]*[^{;]*\{", prefix, re.MULTILINE))
+    if not fn_matches:
+        return False
+    signature = fn_matches[-1].group(0)
+    return re.search(r"->\s*Option\s*<", signature) is not None
+
+
+def count_signal(signal: Signal, files: list[Path], source_map: dict[Path, str]) -> dict[str, object]:
     occurrences = 0
     matched_files = 0
     examples: list[str] = []
     for path in files:
         text = path.read_text(errors="replace")
-        matches = list(pattern.finditer(text))
+        matches = signal_matches(signal, text)
         if not matches:
             continue
         occurrences += len(matches)

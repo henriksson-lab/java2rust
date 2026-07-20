@@ -154,6 +154,22 @@ if [[ ! -x "$binary" ]]; then
   cargo build --quiet --bin new-java2rust
 fi
 
+external_dependency_lines=""
+if [[ "${#manifest_paths[@]}" -gt 0 ]]; then
+  if ! external_dependency_lines="$(python3 "$repo_root/scripts/extract-external-pack-cargo-deps.py" "${manifest_paths[@]}")"; then
+    echo "failed to extract Cargo dependencies from external-pack manifests" >&2
+    exit 1
+  fi
+fi
+
+external_exception_conversion_impls=""
+if [[ "${#manifest_paths[@]}" -gt 0 ]]; then
+  if ! external_exception_conversion_impls="$(python3 "$repo_root/scripts/extract-external-pack-exception-conversions.py" "${manifest_paths[@]}")"; then
+    echo "failed to extract JavaException conversions from external-pack manifests" >&2
+    exit 1
+  fi
+fi
+
 cat > "$crate_dir/Cargo.toml" <<'TOML'
 [package]
 name = "new-java2rust-focused-output"
@@ -162,6 +178,9 @@ edition = "2021"
 
 [dependencies]
 TOML
+if [[ -n "$external_dependency_lines" ]]; then
+  printf '%s\n' "$external_dependency_lines" >> "$crate_dir/Cargo.toml"
+fi
 
 cat > "$crate_dir/README.md" <<'README'
 # Focused Generated Rust Check
@@ -258,7 +277,7 @@ translate_one() {
   diagnostics="$(wc -l < "$log_path" | tr -d ' ')"
   invalid_patterns="$(
     {
-      grep -E 'compile_error!|downcast::<.*>\(\)\.expect\("invalid Java cast"\)|\.add_all\(|\.size\(|\.put\(|unsupported Java lambda|unsupported Java method reference|unsupported Java array creation' "$rust_path" || true
+      grep -E 'compile_error!|downcast::<.*>\(\)\.expect\("invalid Java cast"\)|\.add_all\(|\.put\(|unsupported Java lambda|unsupported Java method reference|unsupported Java array creation' "$rust_path" || true
       grep -E '= None;' "$rust_path" \
         | grep -v -E 'let mut [A-Za-z_][A-Za-z0-9_]*: Option<.*> = None;' || true
     } | wc -l | tr -d ' '
@@ -269,7 +288,17 @@ translate_one() {
 export -f translate_one
 
 translate_args=()
+if [[ "$enable_builtin_packs" -eq 0 ]]; then
+  translate_args+=("--no-builtin-external-packs")
+fi
 translate_args+=("--context-dir" "$primary")
+for source_root in "${source_roots[@]}"; do
+  case "$source_root" in
+    source-summary:*|source_summary:*|summary:*)
+      translate_args+=("--context-source-summary-dir" "${source_root#*:}")
+      ;;
+  esac
+done
 for source_root_package in "${source_root_packages[@]}"; do
   rest="${source_root_package#*:}"
   context_path="${rest%:*}"
@@ -324,8 +353,22 @@ rm -f "$module_types_path" "$type_counts_path" "$unique_types_path" "$shared_sup
 strip_shared_support_items() {
   local rust_path="$1"
   awk '
-    BEGIN { in_prelude = 1; pending = "" }
+    BEGIN { in_prelude = 1; pending = ""; skip_depth = 0 }
+    skip_depth > 0 {
+      skip_depth += gsub(/\{/, "{")
+      skip_depth -= gsub(/\}/, "}")
+      next
+    }
     in_prelude {
+      if ($0 ~ /^impl[[:space:]]*<[^>]+>[[:space:]]+JavaClass[[:space:]]*</) {
+        skip_depth = 0
+        skip_depth += gsub(/\{/, "{")
+        skip_depth -= gsub(/\}/, "}")
+        if (skip_depth < 1) {
+          skip_depth = 1
+        }
+        next
+      }
       if ($0 ~ /^#\[derive/) {
         pending = pending $0 "\n"
         next
@@ -333,7 +376,7 @@ strip_shared_support_items() {
       if ($0 ~ /^pub[[:space:]]+(struct|enum)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) {
         name = $3
         sub(/[;{(<].*/, "", name)
-        if (name == "JavaException" || name == "Path" || name == "URI" || name == "File" || name == "IOUtils") {
+        if (name == "JavaException" || name == "JavaClass" || name == "Path" || name == "URI" || name == "File" || name == "IOUtils") {
           pending = ""
           next
         }
@@ -372,6 +415,10 @@ impl JavaException {
         JavaException { class_name, message, cause: Some(Box::new(cause)) }
     }
 
+    pub fn from_display(class_name: &'static str, err: impl std::fmt::Display) -> JavaException {
+        JavaException { class_name, message: err.to_string(), cause: None }
+    }
+
     pub fn is_instance(&self, class_names: &[&str]) -> bool {
         class_names.iter().any(|name| self.class_name == *name)
     }
@@ -396,7 +443,45 @@ impl std::fmt::Display for JavaException {
 }
 
 RUST
+  if [[ -n "$external_exception_conversion_impls" ]]; then
+    printf '%s\n' "$external_exception_conversion_impls" >> "$shared_support_path"
+    printf '\n' >> "$shared_support_path"
+  fi
   printf "JavaException\n" >> "$shared_support_types_path"
+fi
+
+if grep -R -q '^pub struct JavaClass' "$generated_dir"; then
+  cat >> "$shared_support_path" <<'RUST'
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaClass<T> {
+    name: String,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> JavaClass<T> {
+    pub fn literal(name: &'static str) -> JavaClass<T> {
+        JavaClass { name: name.to_string(), _marker: std::marker::PhantomData }
+    }
+
+    pub fn for_name<S: Into<String>>(name: S) -> JavaClass<T> {
+        JavaClass { name: name.into(), _marker: std::marker::PhantomData }
+    }
+
+    pub fn get_name(&self) -> String {
+        self.name.clone()
+    }
+
+    pub fn get_simple_name(&self) -> String {
+        self.name.rsplit('.').next().unwrap_or(&self.name).to_string()
+    }
+
+    pub fn equals<U>(&self, other: JavaClass<U>) -> bool {
+        self.name == other.name
+    }
+}
+
+RUST
+  printf "JavaClass\n" >> "$shared_support_types_path"
 fi
 
 if grep -R -q '^pub struct Path' "$generated_dir" || grep -R -q '^pub struct URI' "$generated_dir" || grep -R -q '^pub struct File' "$generated_dir" || grep -R -q '^pub struct IOUtils' "$generated_dir"; then
@@ -435,6 +520,24 @@ impl Path {
 impl std::fmt::Display for Path {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.value)
+    }
+}
+
+impl AsRef<std::path::Path> for Path {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(&self.value)
+    }
+}
+
+impl From<Path> for std::path::PathBuf {
+    fn from(path: Path) -> std::path::PathBuf {
+        std::path::PathBuf::from(path.value)
+    }
+}
+
+impl From<&Path> for std::path::PathBuf {
+    fn from(path: &Path) -> std::path::PathBuf {
+        std::path::PathBuf::from(path.value.clone())
     }
 }
 
@@ -485,6 +588,24 @@ impl File {
 impl std::fmt::Display for File {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.value)
+    }
+}
+
+impl AsRef<std::path::Path> for File {
+    fn as_ref(&self) -> &std::path::Path {
+        std::path::Path::new(&self.value)
+    }
+}
+
+impl From<File> for std::path::PathBuf {
+    fn from(file: File) -> std::path::PathBuf {
+        std::path::PathBuf::from(file.value)
+    }
+}
+
+impl From<&File> for std::path::PathBuf {
+    fn from(file: &File) -> std::path::PathBuf {
+        std::path::PathBuf::from(file.value.clone())
     }
 }
 
@@ -700,9 +821,9 @@ for i in "${!java_files[@]}"; do
   stem="$(printf '%s' "$stem" | tr -c 'A-Za-z0-9_' '_')"
   rust_path="$generated_dir/$stem.rs"
   awk -v module="generated_$stem" '
-    /^pub[[:space:]]+(struct|enum)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
+    /^pub[[:space:]]+(struct|enum|type)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
       name = $3
-      sub(/[;{(<].*/, "", name)
+      sub(/[=;{(<].*/, "", name)
       if (name != "JavaException" &&
           name != "Box" &&
           name != "String" &&
@@ -784,7 +905,6 @@ compile_error_count="$(grep -E 'error(\[[A-Z0-9]+\])?:' "$compile_log" | wc -l |
     'invalid_java_cast_downcast	downcast::<.*>\(\)\.expect\("invalid Java cast"\)' \
     'concrete_none_assignment	= None;' \
     'java_add_all_call	\.add_all\(' \
-    'java_size_call	\.size\(' \
     'java_put_call	\.put\(' \
     'unsupported_lambda	unsupported Java expression: lambda' \
     'unsupported_method_reference	unsupported Java expression: method reference' \

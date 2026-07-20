@@ -131,6 +131,9 @@ fn stream_source_element_type_with_effective_facts(
     env: &TypeEnv,
     facts: &EffectiveFacts,
 ) -> Option<JavaType> {
+    if is_int_stream_range_source(source) {
+        return Some(JavaType::Primitive(PrimitiveType::Int));
+    }
     let source_ty = infer_expr_type(source, env);
     let capability = stream_source_capability_policy_with_effective_facts(&source_ty, facts);
     stream_element_type(&source_ty)
@@ -141,4 +144,19 @@ fn stream_source_element_type_with_effective_facts(
                 stream_source_capability_policy_with_effective_facts(&element_ty, facts);
             stream_element_type(&element_ty).or(capability.capability_element)
         })
+}
+
+fn is_int_stream_range_source(source: &Expr) -> bool {
+    matches!(
+        source,
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if args.len() == 2
+            && matches!(receiver.as_ref(), Expr::Var(owner)
+                if crate::stdlib::canonical_external_receiver_type_key(owner) == "IntStream")
+            && matches!(name.as_str(), "range" | "range_closed")
+    )
 }

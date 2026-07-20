@@ -232,6 +232,23 @@ The pack should produce facts. It should not lower Rust syntax directly. Rust
 crate mappings and facade mappings are facts consumed later by signature,
 shape, conversion, and emission stages.
 
+### Future Goal: Fact And Idea Unification
+
+The fact families in this translator should converge toward one query model
+instead of growing parallel mechanisms for the same idea. Source summaries,
+external-pack manifests, user overrides, built-in Java platform knowledge,
+resolver-derived facts, and semantic-analysis facts should all feed normalized
+queries such as assignability, method effect, argument shape, return shape,
+field shape, object strategy, exception kind, and conversion capability.
+
+When a new corpus pressure appears, first ask whether an existing query can
+represent it. Add a new fact kind only when the information cannot be expressed
+without losing meaning. Add a lowering or stdlib fallback only after proving
+that the rule is genuinely Java-platform behavior, not GATK, HTSJDK, HDF5,
+SQLite, Arrow, or another library-specific fact in disguise. This future
+unification goal should be treated as design debt whenever code adds a second
+path that answers the same question as an existing fact query.
+
 Modeled constructors and fields are pack-manifest declarations. Built-in and
 user-authored packs should emit constructor and field facts through the shared
 manifest boundary application path, not through per-pack loops. This keeps
@@ -425,6 +442,64 @@ trait objects, facade wrappers, `Option<T>`, and `Result<T, E>`.
 Lowering owns only applying the selected plan. It must not know that one Java
 method is "really" a getter, builder, HDF5 handle, SQLite connection, VCF
 header, or HTSJDK allele.
+
+### External Boundary Nullability Default
+
+#### Ideal Rust Target
+
+Unknown external-library reference slots should use ordinary required Rust
+values by default, not `Option<T>`. For example, an external constructor
+parameter representing a callback should lower to a required callback argument
+unless source declarations, external-pack facts, Java call sites, annotations,
+or corpus evidence suggest that `null` is accepted or intentionally passed.
+
+If a nullable external boundary is proved or declared, the Rust target should be
+explicit: `Option<T>`, `Option<&T>`, `Option<Box<dyn Trait>>`, or a named facade
+nullable shape chosen by slot planning. Nullability should appear only at the
+boundary that needs it, and should not leak into unrelated ownership,
+lifetime, coercion, or lowering rules.
+
+#### Implementation Rule
+
+Treat external constructor and method parameters as definitely non-null unless
+there is positive nullable evidence. Positive nullable evidence includes:
+
+- an explicit external-pack or `--facts` argument nullability fact;
+- a Java source declaration or source-summary annotation with nullable
+  semantics;
+- a call site that passes `null`;
+- control flow that intentionally branches between a value and `null` for that
+  same external slot;
+- provider analysis that classifies the library slot as nullable.
+
+Absence of metadata is not nullable evidence. This keeps external-library
+mapping conservative in the Rust direction: the generated facade asks callers
+for real values unless the dependency contract says otherwise.
+
+Future user-injected facts may override or refine this default. They must enter
+through the fact layer and be consumed by slot shape and conversion planning,
+not by ad hoc lowering branches.
+
+#### Required Facts
+
+The default requires only the resolved external receiver/constructor,
+parameter index, and Java parameter type if available. A nullable override
+requires an `external-argument` or external constructor-argument fact carrying
+`maybe-null` or `definitely-null`, or equivalent source-summary/provider
+evidence.
+
+#### Owning Layer
+
+The external fact layer owns declared and injected nullability facts. Semantic
+analysis owns call-site evidence such as literal `null` arguments and
+value-or-null branches. Slot shape and conversion planning own the final
+required-versus-optional Rust slot. Lowering only renders the selected slot.
+
+#### Fallback Shape
+
+When the parameter type itself is unresolved, use an opaque required facade or
+erased required value unless nullable evidence exists. If later evidence proves
+the slot nullable, replan that boundary as an explicit optional shape.
 
 ### Test Strategy For External Packs
 

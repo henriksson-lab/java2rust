@@ -73,21 +73,13 @@ pub fn apply_call_target(
         CallTargetPlan::NativeJavaStatic { method } => {
             apply_native_java_static_method(*method, args)
         }
-        CallTargetPlan::ExternalCrateReceiver {
-            crate_name,
-            rust_name,
-            ..
-        } => {
-            let receiver =
-                lowered_receiver.expect("external crate receiver target must provide receiver");
-            let mut facade_args = Vec::with_capacity(args.len() + 1);
-            facade_args.push(receiver);
-            facade_args.extend(args);
-            RustExpr::Call {
-                function: Box::new(RustExpr::Raw(format!("{crate_name}::{rust_name}"))),
-                args: facade_args,
-            }
-        }
+        CallTargetPlan::ExternalCrateReceiver { rust_name, .. } => RustExpr::MethodCall {
+            receiver: Box::new(
+                lowered_receiver.expect("external crate receiver target must provide receiver"),
+            ),
+            method: rust_name.clone(),
+            args,
+        },
         CallTargetPlan::SuperBoundary {
             return_type,
             propagates_result,
@@ -361,6 +353,50 @@ fn apply_native_collection_static_method(
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
+        NativeCollectionStaticMethod::CollectionsEmptyList => {
+            RustExpr::Raw("Vec::new()".to_string())
+        }
+        NativeCollectionStaticMethod::CollectionsEmptySortedSet => {
+            RustExpr::Raw("std::collections::BTreeSet::new()".to_string())
+        }
+        NativeCollectionStaticMethod::CollectionsSingleton => {
+            let value = args
+                .first()
+                .map(crate::emit::emit_expr)
+                .unwrap_or_else(|| "()".to_string());
+            RustExpr::Raw(format!("std::collections::HashSet::from([{value}])"))
+        }
+        NativeCollectionStaticMethod::CollectionsSingletonList => {
+            let value = args
+                .first()
+                .map(crate::emit::emit_expr)
+                .unwrap_or_else(|| "()".to_string());
+            RustExpr::Raw(format!("vec![{value}]"))
+        }
+        NativeCollectionStaticMethod::CollectionsSingletonMap => {
+            let key = args
+                .first()
+                .map(crate::emit::emit_expr)
+                .unwrap_or_else(|| "()".to_string());
+            let value = args
+                .get(1)
+                .map(crate::emit::emit_expr)
+                .unwrap_or_else(|| "()".to_string());
+            RustExpr::Raw(format!(
+                "std::collections::HashMap::from([({key}, {value})])"
+            ))
+        }
+        NativeCollectionStaticMethod::CollectionsNCopies => {
+            let count = args
+                .first()
+                .map(crate::emit::emit_expr)
+                .unwrap_or_else(|| "0".to_string());
+            let value = args
+                .get(1)
+                .map(crate::emit::emit_expr)
+                .unwrap_or_else(|| "()".to_string());
+            RustExpr::Raw(format!("vec![{value}; {count} as usize]"))
+        }
     }
 }
 

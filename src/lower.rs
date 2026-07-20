@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::access_lowering::{lower_bare_name, lower_field_access};
+use crate::access_lowering::{lower_bare_name, lower_field_access_with_facts};
 use crate::array_lowering::render_array_expr;
 use crate::array_plan::plan_array_expr;
 use crate::call_lowering::{
@@ -12,10 +12,11 @@ use crate::call_plan::{
     ArgumentLoweringPlan, CallExceptionPropagationPlan, CallExprPlan, CallStatementPlan,
     CallTargetPlan, NativeCollectionExtendArgPlan, NativeCollectionMethod,
     NativeCollectionNewTarget, apply_fallback_receiver_rust_name, apply_fallback_self_rust_name,
-    external_call_lowered_type, external_constructor_arg_shapes, native_collection_lowered_type,
-    plan_call_arguments, plan_call_arguments_with_facts_and_args, plan_call_exception_propagation,
-    plan_call_expr, plan_call_statement, plan_constructor_arguments,
-    plan_native_collection_extend_arg, plan_new_target_for_args_with_facts,
+    external_call_lowered_type, external_call_returns_rust_result, external_constructor_arg_shapes,
+    external_constructor_returns_rust_result, native_collection_lowered_type, plan_call_arguments,
+    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation, plan_call_expr,
+    plan_call_statement, plan_constructor_arguments, plan_native_collection_extend_arg,
+    plan_new_target_for_args_with_facts,
 };
 use crate::constructor_plan::{
     ConstructorDelegationPlan, ConstructorFieldValuePlan, DelegatedConstructorTrailingStmt,
@@ -27,18 +28,19 @@ use crate::conversion_lowering::{
     apply_slot_expr_conversion,
 };
 use crate::conversion_plan::{
-    ReturnValuePlan, Slot, actual_shape_for_slot_expr_with_slot, argument_slot,
-    assignment_statement_plan_for_target, assignment_value_plan_for_shape,
-    assignment_value_plan_for_target, condition_slot, index_slot, plan_cast_conversion,
-    plan_instanceof, plan_lowered_slot_conversion, plan_slot_conversion, return_value_plan,
+    DispatchCoercionPolicy, LoweredType, ReturnValuePlan, Slot, SlotConversionPlan,
+    actual_shape_for_slot_expr_with_slot, argument_slot, assignment_statement_plan_for_target,
+    assignment_value_plan_for_shape, assignment_value_plan_for_target, condition_slot, index_slot,
+    plan_cast_conversion, plan_instanceof, plan_lowered_slot_conversion, plan_slot_conversion,
+    return_value_plan,
 };
 use crate::diagnostics::DiagnosticBag;
 use crate::emit;
 use crate::exception_lowering::{
     CatchRenderArm, exception_cause_or_self_if_instance_expr,
     exception_expr_from_new_with_cause_hint, exception_try_ok_type, fallback_exception_expr,
-    java_exception_support_item, return_stmt, throw_stmt, try_catch_stmt, try_finally_scope_stmt,
-    try_with_resources_scope_stmt,
+    java_exception_support_item_with_facts, return_stmt, throw_stmt, try_catch_stmt,
+    try_finally_scope_stmt, try_with_resources_scope_stmt,
 };
 use crate::exception_plan::{
     ProgramExceptionPlan, ThrowExprPlan, TryBlockCompletion, TryStmtPlan, catch_match_class_names,
@@ -79,12 +81,13 @@ use crate::signature::{LocalPlan, ReceiverPlan, SignaturePlan, SolvedSlotShape};
 use crate::slot_shape::RustSlotShape;
 use crate::slot_shape::{DispatchShape, OwnershipShape, ViewShape};
 use crate::statement_render::{
-    assignment_stmt, break_stmt, continue_stmt, expr_stmt, if_stmt, local_let_stmt_with_facts,
-    raw_stmt, render_block_stmt, render_enhanced_for, while_stmt,
+    assignment_stmt, break_stmt, continue_stmt, expr_stmt, if_stmt,
+    local_let_stmt_with_type_annotation, raw_stmt, render_block_stmt, render_enhanced_for,
+    render_enhanced_for_iterator, while_stmt,
 };
 use crate::stdlib::{
     external_api_facade_support_items_with_local_type_program,
-    external_static_string_constant_support_items_with_local_type_program_and_declared_owners,
+    external_static_string_constant_support_items_with_context_programs_and_declared_owners,
     java_class_support_item, java_platform_facade_support_item, java_string_format_support_item,
     java_string_split_support_item, program_uses_java_class_tokens,
     program_uses_java_platform_facades, program_uses_java_string_format,
@@ -141,6 +144,7 @@ struct LowerCtx<'a> {
     control_flow_plans: &'a [MethodControlFlowPlan],
     support_local_type_program: &'a Program,
     catch_future_use_names: Option<&'a std::collections::HashSet<String>>,
+    later_read_names: Option<&'a std::collections::HashSet<String>>,
     preinitialized_try_capture_names: Option<&'a std::collections::HashSet<String>>,
 }
 
@@ -246,11 +250,13 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         control_flow_plans,
         support_local_type_program,
         catch_future_use_names: None,
+        later_read_names: None,
         preinitialized_try_capture_names: None,
     };
     let mut file = RustFile::default();
     if exceptions.support.emit_support_item {
-        file.items.push(java_exception_support_item());
+        file.items
+            .push(java_exception_support_item_with_facts(ctx.facts));
     }
     if program_uses_java_class_tokens(program) {
         file.items.push(java_class_support_item());
@@ -273,10 +279,11 @@ pub fn lower_program_with_semantic_plans_and_support_context(
     let declared_support_owners = support_item_declared_type_names(&facade_support_items);
     file.items.extend(facade_support_items);
     file.items.extend(
-        external_static_string_constant_support_items_with_local_type_program_and_declared_owners(
+        external_static_string_constant_support_items_with_context_programs_and_declared_owners(
             program,
             facts,
             support_local_type_program,
+            source_summary_type_program,
             &declared_support_owners,
         ),
     );
@@ -1042,14 +1049,21 @@ fn lower_block(
         ..ctx
     };
     let mut body = Vec::new();
-    for stmt in &block.statements {
-        lower_stmt(stmt, env, wrap_returns_in_ok, block_ctx, &mut body);
-        learn_stmt_shapes(
-            stmt,
-            env,
-            block_ctx.current_local_shapes,
-            block_ctx.signatures,
-        );
+    for (index, stmt) in block.statements.iter().enumerate() {
+        let later_read_names = statement_suffix_read_names(&block.statements[index + 1..]);
+        let stmt_ctx = LowerCtx {
+            later_read_names: Some(&later_read_names),
+            ..block_ctx
+        };
+        lower_stmt(stmt, env, wrap_returns_in_ok, stmt_ctx, &mut body);
+        if !matches!(stmt, Stmt::VarDecl { .. }) {
+            learn_stmt_shapes(
+                stmt,
+                env,
+                stmt_ctx.current_local_shapes,
+                stmt_ctx.signatures,
+            );
+        }
     }
     body
 }
@@ -1071,33 +1085,29 @@ fn lower_lambda_block_with_result_carrier(
         ..ctx
     };
     let mut body = Vec::new();
-    for stmt in &block.statements {
-        lower_stmt(stmt, env, wrap_returns_in_ok, block_ctx, &mut body);
-        match stmt {
-            Stmt::VarDecl {
-                ty,
-                name,
-                initializer,
-            } => {
-                env.insert_local_shape(
-                    name.clone(),
-                    fallback_local_shape_from_declared_type_and_initializer(
-                        ty,
-                        initializer.as_ref(),
-                        env,
-                        block_ctx,
-                    ),
-                );
-            }
-            _ => learn_stmt_shapes(
+    for (index, stmt) in block.statements.iter().enumerate() {
+        let later_read_names = statement_suffix_read_names(&block.statements[index + 1..]);
+        let stmt_ctx = LowerCtx {
+            later_read_names: Some(&later_read_names),
+            ..block_ctx
+        };
+        lower_stmt(stmt, env, wrap_returns_in_ok, stmt_ctx, &mut body);
+        if !matches!(stmt, Stmt::VarDecl { .. }) {
+            learn_stmt_shapes(
                 stmt,
                 env,
-                block_ctx.current_local_shapes,
-                block_ctx.signatures,
-            ),
+                stmt_ctx.current_local_shapes,
+                stmt_ctx.signatures,
+            );
         }
     }
     body
+}
+
+fn statement_suffix_read_names(statements: &[Stmt]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    collect_stmt_read_names(statements, &mut names);
+    names
 }
 
 fn lower_stmt(
@@ -1118,17 +1128,16 @@ fn lower_stmt(
             name,
             initializer,
         } => {
-            let fallback_local_plan;
-            let local_plan = if let Some(local_plan) =
-                local_plan_for_lowered_var(ctx.current_local_shapes, name, ty)
+            let mut local_plan = if let Some(local_plan) =
+                env.next_local_plan_for_declared_type(ctx.current_local_shapes, name, ty)
             {
-                local_plan
+                local_plan.clone()
             } else {
-                fallback_local_plan =
-                    conservative_lambda_local_plan(name, ty, initializer.as_ref(), env, ctx);
-                &fallback_local_plan
+                conservative_lambda_local_plan(name, ty, initializer.as_ref(), env, ctx)
             };
-            let lowered_initializer = initializer
+            local_plan =
+                refine_local_plan_from_initializer(local_plan, initializer.as_ref(), env, ctx);
+            let mut lowered_initializer = initializer
                 .as_ref()
                 .map(|expr| {
                     lower_expr_for_slot(
@@ -1145,11 +1154,21 @@ fn lower_stmt(
                             .then(|| RustExpr::Raw("Default::default()".to_string()))
                     })
                 });
-            out.push(local_let_stmt_with_facts(
-                local_plan,
+            if let Some(initializer) = lowered_initializer.as_mut() {
+                hoist_borrowed_string_temporaries_in_initializer(name, initializer, out);
+            }
+            out.push(local_let_stmt_with_type_annotation(
+                &local_plan,
                 lowered_initializer,
                 ctx.facts,
-            ))
+                local_decl_should_annotate_type(
+                    &local_plan.java_ty,
+                    initializer.as_ref(),
+                    env,
+                    ctx,
+                ),
+            ));
+            env.insert_local_shape(name.clone(), local_plan.shape.clone());
         }
         Stmt::Assign { target, value } => {
             let shape_ctx = ExprShapeContext {
@@ -1261,7 +1280,9 @@ fn lower_stmt(
         } => {
             for init_stmt in init {
                 lower_stmt(init_stmt, env, wrap_returns_in_ok, ctx, out);
-                learn_stmt_shapes(init_stmt, env, ctx.current_local_shapes, ctx.signatures);
+                if !matches!(init_stmt, Stmt::VarDecl { .. }) {
+                    learn_stmt_shapes(init_stmt, env, ctx.current_local_shapes, ctx.signatures);
+                }
             }
             let mut loop_body =
                 lower_block_for_body(body, update, &mut env.clone(), wrap_returns_in_ok, ctx);
@@ -1328,15 +1349,126 @@ fn lower_stmt(
     }
 }
 
-fn local_plan_for_lowered_var<'a>(
-    locals: &'a [LocalPlan],
-    name: &str,
-    declared_ty: &JavaType,
-) -> Option<&'a LocalPlan> {
-    locals
-        .iter()
-        .find(|local| local.name == name && local.java_ty == *declared_ty)
-        .or_else(|| locals.iter().find(|local| local.name == name))
+fn hoist_borrowed_string_temporaries_in_initializer(
+    local_name: &str,
+    expr: &mut RustExpr,
+    out: &mut Vec<RustStmt>,
+) {
+    let mut counter = 0usize;
+    hoist_borrowed_string_temporaries_in_expr(local_name, expr, out, &mut counter);
+}
+
+fn hoist_borrowed_string_temporaries_in_expr(
+    local_name: &str,
+    expr: &mut RustExpr,
+    out: &mut Vec<RustStmt>,
+    counter: &mut usize,
+) {
+    if let RustExpr::Raw(raw) = expr
+        && let Some((replacement, value)) =
+            borrowed_owned_string_literal_temporary(raw, local_name, *counter)
+    {
+        *counter += 1;
+        out.push(RustStmt::Let {
+            mutable: false,
+            name: replacement.name.clone(),
+            ty: None,
+            value: Some(RustExpr::Raw(value)),
+        });
+        *raw = replacement.expr;
+        return;
+    }
+    match expr {
+        RustExpr::Field(receiver, _)
+        | RustExpr::Index(receiver, _)
+        | RustExpr::Unary { expr: receiver, .. }
+        | RustExpr::Cast { expr: receiver, .. } => {
+            hoist_borrowed_string_temporaries_in_expr(local_name, receiver, out, counter);
+        }
+        RustExpr::Binary { left, right, .. } => {
+            hoist_borrowed_string_temporaries_in_expr(local_name, left, out, counter);
+            hoist_borrowed_string_temporaries_in_expr(local_name, right, out, counter);
+        }
+        RustExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            hoist_borrowed_string_temporaries_in_expr(local_name, condition, out, counter);
+            hoist_borrowed_string_temporaries_in_expr(local_name, then_expr, out, counter);
+            hoist_borrowed_string_temporaries_in_expr(local_name, else_expr, out, counter);
+        }
+        RustExpr::Call { function, args } => {
+            hoist_borrowed_string_temporaries_in_expr(local_name, function, out, counter);
+            for arg in args {
+                hoist_borrowed_string_temporaries_in_expr(local_name, arg, out, counter);
+            }
+        }
+        RustExpr::MethodCall { receiver, args, .. } => {
+            hoist_borrowed_string_temporaries_in_expr(local_name, receiver, out, counter);
+            for arg in args {
+                hoist_borrowed_string_temporaries_in_expr(local_name, arg, out, counter);
+            }
+        }
+        RustExpr::StructLit { fields, .. } => {
+            for (_, value) in fields {
+                hoist_borrowed_string_temporaries_in_expr(local_name, value, out, counter);
+            }
+        }
+        RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::Raw(_) => {}
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BorrowedStringTemporary {
+    name: String,
+    expr: String,
+}
+
+fn borrowed_owned_string_literal_temporary(
+    raw: &str,
+    local_name: &str,
+    counter: usize,
+) -> Option<(BorrowedStringTemporary, String)> {
+    if let Some(inner) = raw
+        .strip_prefix("Some(&")
+        .and_then(|rest| rest.strip_suffix(')'))
+        && string_literal_to_string_expr(inner)
+    {
+        let name = borrowed_string_temporary_name(local_name, counter);
+        return Some((
+            BorrowedStringTemporary {
+                name: name.clone(),
+                expr: format!("Some(&{name})"),
+            },
+            inner.to_string(),
+        ));
+    }
+    if let Some(inner) = raw.strip_prefix('&')
+        && string_literal_to_string_expr(inner)
+    {
+        let name = borrowed_string_temporary_name(local_name, counter);
+        return Some((
+            BorrowedStringTemporary {
+                name: name.clone(),
+                expr: format!("&{name}"),
+            },
+            inner.to_string(),
+        ));
+    }
+    None
+}
+
+fn string_literal_to_string_expr(raw: &str) -> bool {
+    raw.starts_with('"') && raw.ends_with(".to_string()")
+}
+
+fn borrowed_string_temporary_name(local_name: &str, counter: usize) -> String {
+    format!(
+        "_java_borrowed_{}_{}",
+        crate::parser::to_snake_case(local_name),
+        counter
+    )
 }
 
 fn conservative_lambda_local_plan(
@@ -1351,6 +1483,111 @@ fn conservative_lambda_local_plan(
         java_ty: ty.clone(),
         shape: fallback_local_shape_from_declared_type_and_initializer(ty, initializer, env, ctx),
         binding_mutable: true,
+    }
+}
+
+fn refine_local_plan_from_initializer(
+    mut local_plan: LocalPlan,
+    initializer: Option<&Expr>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> LocalPlan {
+    if !local_shape_should_inherit_initializer_shape(&local_plan.shape) {
+        return local_plan;
+    }
+    let Some(initializer) = initializer else {
+        return local_plan;
+    };
+    let initializer_shape =
+        planned_method_call_return_shape(initializer, env, ctx).unwrap_or_else(|| {
+            infer_expr_shape_with_context(
+                initializer,
+                env,
+                ExprShapeContext {
+                    signatures: Some(ctx.signatures),
+                    representations: Some(ctx.representations),
+                    facts: Some(ctx.facts),
+                },
+            )
+        });
+    if !initializer_shape_is_more_specific_for_local(&initializer_shape, &local_plan.shape) {
+        return local_plan;
+    }
+    local_plan.shape = initializer_shape;
+    local_plan
+}
+
+fn local_decl_should_annotate_type(
+    declared_ty: &JavaType,
+    initializer: Option<&Expr>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    !initializer
+        .and_then(|initializer| planned_external_facade_call_java_type(initializer, env, ctx))
+        .as_ref()
+        .is_some_and(|java_ty| {
+            java_types_have_same_erased_identity(declared_ty, java_ty)
+                && java_type_is_rust_crate_mapped_external(java_ty, ctx.facts)
+        })
+}
+
+fn planned_external_facade_call_java_type(
+    initializer: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<JavaType> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = initializer
+    else {
+        return None;
+    };
+    if resolved.is_some() {
+        return None;
+    }
+    crate::call_plan::external_call_lowered_type(
+        receiver.as_deref(),
+        name,
+        args.len(),
+        ctx.facts,
+        env.type_env(),
+        ctx.current_type,
+    )
+    .and_then(|lowered| lowered.java_ty().cloned())
+}
+
+fn java_type_is_rust_crate_mapped_external(java_ty: &JavaType, facts: &FactSet) -> bool {
+    let java_ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+    let JavaType::Named { name, .. } = java_ty else {
+        return false;
+    };
+    facts
+        .external_library_pack_for_type(&name)
+        .is_some_and(|pack| pack.mode == crate::facts::ExternalLibraryMode::RustCrateMapping)
+}
+
+fn local_shape_should_inherit_initializer_shape(shape: &RustSlotShape) -> bool {
+    matches!(shape.dispatch, DispatchShape::ErasedObject)
+        || matches!(shape.view, ViewShape::ErasedObjectView)
+}
+
+fn initializer_shape_is_more_specific_for_local(
+    initializer: &RustSlotShape,
+    local: &RustSlotShape,
+) -> bool {
+    java_types_have_same_erased_identity(&initializer.java_ty, &local.java_ty)
+        && matches!(initializer.dispatch, DispatchShape::Concrete)
+        && matches!(initializer.view, ViewShape::Native)
+}
+
+fn java_types_have_same_erased_identity(left: &JavaType, right: &JavaType) -> bool {
+    match (left, right) {
+        (JavaType::Named { name: left, .. }, JavaType::Named { name: right, .. }) => left == right,
+        _ => left == right,
     }
 }
 
@@ -2495,7 +2732,7 @@ fn lower_throwing_call_expr_stmt(
     ) {
         return None;
     }
-    Some(expr_stmt(propagate_result_expr(lower_expr(expr, env, ctx))))
+    Some(expr_stmt(lower_expr(expr, env, ctx)))
 }
 
 fn lower_iterable_for_each_stmt(
@@ -2534,6 +2771,11 @@ fn lower_iterable_for_each_stmt(
     } else {
         format!("({})", param_names.join(", "))
     };
+    if let Some(iterator) = lower_int_stream_range_expr(receiver, env, ctx) {
+        return Some(render_enhanced_for_iterator(
+            &pattern, &iterator, &loop_body,
+        ));
+    }
     Some(render_enhanced_for(
         &pattern,
         &lower_enhanced_for_iterable_expr(receiver, env, ctx),
@@ -2554,6 +2796,13 @@ fn lower_enhanced_for_stmt(
         infer_stream_source_element_shape_with_facts(iterable, env.type_env(), ctx.facts)
     {
         loop_env.insert_local_shape(var_name.to_string(), element_shape);
+    }
+    if let Some(iterator) = lower_int_stream_range_expr(iterable, env, ctx) {
+        return render_enhanced_for_iterator(
+            var_name,
+            &iterator,
+            &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
+        );
     }
     render_enhanced_for(
         var_name,
@@ -2640,11 +2889,12 @@ fn lower_accessor_field(
 ) -> RustExpr {
     receiver
         .map(|receiver| {
-            lower_field_access(
+            lower_field_access_with_facts(
                 receiver,
                 field_name,
                 env.type_env(),
                 lower_expr(receiver, env, ctx),
+                ctx.facts,
             )
         })
         .unwrap_or_else(|| lower_bare_name(field_name, env))
@@ -2711,11 +2961,12 @@ fn lower_expr_with_refinements(
         Expr::Var(name) => lower_bare_name(name, env),
         Expr::This => this_expr(),
         Expr::Super => super_expr(),
-        Expr::FieldAccess(receiver, field) => lower_field_access(
+        Expr::FieldAccess(receiver, field) => lower_field_access_with_facts(
             receiver,
             field,
             env.type_env(),
             lower_expr_with_refinements(receiver, env, ctx, refinements),
+            ctx.facts,
         ),
         Expr::ArrayAccess(array, index) => indexed_expr(
             lower_expr_with_refinements(array, env, ctx, refinements),
@@ -2816,7 +3067,11 @@ fn lower_expr_with_refinements(
                     fallback_signature.as_ref().map(|(_, signature)| *signature),
                 )
             });
-            apply_call_target(&target, lowered_receiver, rust_args)
+            let mut lowered = apply_call_target(&target, lowered_receiver, rust_args);
+            if slot_expr_needs_result_propagation(expr, env, ctx) {
+                lowered = propagate_result_expr(lowered);
+            }
+            lowered
         }
         Expr::New {
             ty, args, resolved, ..
@@ -2847,7 +3102,11 @@ fn lower_expr_with_refinements(
                 )
             };
             let rust_args = lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
-            apply_new_target_with_facts(&target, rust_args, ctx.facts)
+            let mut lowered = apply_new_target_with_facts(&target, rust_args, ctx.facts);
+            if external_constructor_returns_rust_result(ty, args.len(), ctx.facts) {
+                lowered = propagate_result_expr(lowered);
+            }
+            lowered
         }
         Expr::Cast { ty, expr } => {
             let plan = plan_cast_conversion(
@@ -3027,20 +3286,14 @@ fn lower_binary_expr(
     refinements: &ExprRefinements,
 ) -> RustExpr {
     if is_null_literal(right)
-        && let Some(expr) = lower_null_comparison_expr(
-            op,
-            lower_expr_with_refinements(left, env, ctx, refinements),
-            false,
-        )
+        && let Some(expr) =
+            lower_null_comparison_expr_for_shape(op, left, false, env, ctx, refinements)
     {
         return expr;
     }
     if is_null_literal(left)
-        && let Some(expr) = lower_null_comparison_expr(
-            op,
-            lower_expr_with_refinements(right, env, ctx, refinements),
-            true,
-        )
+        && let Some(expr) =
+            lower_null_comparison_expr_for_shape(op, right, true, env, ctx, refinements)
     {
         return expr;
     }
@@ -3080,6 +3333,37 @@ fn lower_binary_expr(
         op,
         lower_expr_with_refinements(left, env, ctx, refinements),
         lower_expr_with_refinements(right, env, ctx, refinements),
+    )
+}
+
+fn lower_null_comparison_expr_for_shape(
+    op: BinaryOp,
+    value: &Expr,
+    null_on_left: bool,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let shape = infer_expr_shape_with_context(
+        value,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    if shape.optional_element_type().is_none() {
+        return match op {
+            BinaryOp::Eq => Some(RustExpr::Literal("false".to_string())),
+            BinaryOp::Ne => Some(RustExpr::Literal("true".to_string())),
+            _ => None,
+        };
+    }
+    lower_null_comparison_expr(
+        op,
+        lower_expr_with_refinements(value, env, ctx, refinements),
+        null_on_left,
     )
 }
 
@@ -3346,6 +3630,7 @@ fn lower_external_generic_facade_args_with_actual_shapes(
             .iter()
             .zip(shapes)
             .map(|(arg, shape)| {
+                let original_shape = shape.clone();
                 if external_generic_facade_arg_shape_is_unspecified_object(&shape) {
                     let actual_shape = infer_expr_shape_with_context(
                         arg,
@@ -3356,9 +3641,33 @@ fn lower_external_generic_facade_args_with_actual_shapes(
                             facts: Some(ctx.facts),
                         },
                     );
-                    lower_expr_for_slot(arg, env, argument_slot(actual_shape), ctx)
+                    let lowered =
+                        lower_expr_for_slot(arg, env, argument_slot(actual_shape.clone()), ctx);
+                    adapt_reused_owned_argument(
+                        lowered,
+                        arg,
+                        &actual_shape,
+                        Some(&actual_shape),
+                        ctx,
+                    )
                 } else {
-                    lower_expr_for_slot(arg, env, argument_slot(shape), ctx)
+                    let actual_shape = infer_expr_shape_with_context(
+                        arg,
+                        env,
+                        ExprShapeContext {
+                            signatures: Some(ctx.signatures),
+                            representations: Some(ctx.representations),
+                            facts: Some(ctx.facts),
+                        },
+                    );
+                    let lowered = lower_expr_for_slot(arg, env, argument_slot(shape), ctx);
+                    adapt_reused_owned_argument(
+                        lowered,
+                        arg,
+                        &original_shape,
+                        Some(&actual_shape),
+                        ctx,
+                    )
                 }
             })
             .collect(),
@@ -3663,6 +3972,9 @@ fn adapt_call_target_receiver_with_signature(
     {
         return adapt_optional_instance_receiver_with_access(receiver, lowered, env, ctx, "as_mut");
     }
+    if target.adapts_optional_instance_receiver() && target.mutates_receiver() {
+        return adapt_optional_instance_receiver_with_access(receiver, lowered, env, ctx, "as_mut");
+    }
     adapt_call_target_receiver(target, receiver, lowered, env, ctx, refinements)
 }
 
@@ -3823,9 +4135,40 @@ fn lower_stream_plan(
 ) -> Option<crate::coercion::LoweredExpr> {
     render_stream_plan_with_context(
         plan,
-        lower_expr(plan.source.expr, env, ctx),
+        lower_stream_source_expr(plan.source.expr, env, ctx),
         StreamRenderContext::new_with_facts(env, ctx.facts),
     )
+}
+
+fn lower_stream_source_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
+    if let Some(range) = lower_int_stream_range_expr(expr, env, ctx) {
+        return range;
+    }
+    lower_expr(expr, env, ctx)
+}
+
+fn lower_int_stream_range_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<RustExpr> {
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && args.len() == 2
+        && matches!(receiver.as_ref(), Expr::Var(owner)
+            if crate::stdlib::canonical_external_receiver_type_key(owner) == "IntStream")
+        && matches!(name.as_str(), "range" | "range_closed")
+    {
+        let start = crate::emit::emit_expr(&lower_expr(&args[0], env, ctx));
+        let end = crate::emit::emit_expr(&lower_expr(&args[1], env, ctx));
+        let range = if name == "range_closed" {
+            format!("({start}..={end})")
+        } else {
+            format!("({start}..{end})")
+        };
+        return Some(RustExpr::Raw(range));
+    }
+    None
 }
 
 fn lower_expr_for_slot(expr: &Expr, env: &ShapeEnv, slot: Slot, ctx: LowerCtx) -> RustExpr {
@@ -3840,7 +4183,7 @@ fn lower_expr_for_slot_with_refinements(
     refinements: &ExprRefinements,
 ) -> RustExpr {
     if matches!(expr, Expr::Literal(Literal::Null)) && slot_expects_optional(&slot) {
-        return RustExpr::Var("None".to_string());
+        return typed_none_for_slot(&slot).unwrap_or_else(|| RustExpr::Var("None".to_string()));
     }
     if let Some(expr) = lower_optional_cast_source_for_slot(expr, env, &slot, ctx, refinements) {
         return expr;
@@ -3867,6 +4210,9 @@ fn lower_expr_for_slot_with_refinements(
         lower_map_entry_accessor_expr_for_slot(expr, env, &slot, ctx, refinements)
     {
         return map_entry_expr;
+    }
+    if let Some(array_expr) = lower_array_expr_for_slot(expr, env, &slot, ctx, refinements) {
+        return array_expr;
     }
     if let Some(collection_expr) =
         lower_native_collection_call_expr_for_slot(expr, env, ctx, refinements)
@@ -3977,6 +4323,122 @@ fn lower_expr_for_slot_with_refinements(
     }
     let plan = plan_slot_conversion(actual, slot, ctx.facts);
     apply_slot_expr_conversion(lowered_expr, &plan)
+}
+
+fn typed_none_for_slot(slot: &Slot) -> Option<RustExpr> {
+    let shape = match slot {
+        Slot::Assignment(shape) | Slot::Return(shape) | Slot::Argument(shape) => shape,
+        Slot::Value
+        | Slot::Condition
+        | Slot::Index
+        | Slot::StringConcatSegment
+        | Slot::DisplaySegment => return None,
+    };
+    let element_ty = crate::types::optional_element_type(&shape.java_ty)?;
+    let element_shape = crate::slot_shape::RustSlotShape::conservative(element_ty);
+    if !matches!(element_shape.dispatch, DispatchShape::ErasedObject)
+        && !matches!(
+            element_shape.java_ty,
+            JavaType::Named { ref name, .. } if name == "Object" || name == "java.lang.Object"
+        )
+    {
+        return None;
+    }
+    Some(RustExpr::Raw("None::<Box<dyn std::any::Any>>".to_string()))
+}
+
+fn lower_array_expr_for_slot(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let array_plan = plan_array_expr(expr)?;
+    let target = slot_target_shape(slot)?;
+    let element_ty = target.sequence_element_type()?;
+    if matches!(
+        array_plan,
+        crate::array_plan::ArrayExprPlan::Creation { .. }
+    ) {
+        return None;
+    }
+    let element_shape = RustSlotShape::conservative(element_ty);
+    let children = array_plan
+        .child_exprs()
+        .iter()
+        .map(|child| {
+            if let Some(recovered) =
+                lower_reused_external_into_array_child(child, env, &element_shape, ctx, refinements)
+            {
+                return recovered;
+            }
+            lower_expr_for_slot_with_refinements(
+                child,
+                env,
+                argument_slot(element_shape.clone()),
+                ctx,
+                refinements,
+            )
+        })
+        .collect();
+    let lowered = render_array_expr(&array_plan, children);
+    let actual = LoweredType::from_java(target.java_ty.clone());
+    let plan = plan_lowered_slot_conversion(&actual, slot.clone(), ctx.facts);
+    Some(apply_lowered_slot_expr_conversion(
+        crate::coercion::LoweredExpr {
+            expr: lowered,
+            actual,
+        },
+        &plan,
+    ))
+}
+
+fn lower_reused_external_into_array_child(
+    child: &Expr,
+    env: &ShapeEnv,
+    element_shape: &RustSlotShape,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::Var(name) = child else {
+        return None;
+    };
+    if !ctx
+        .later_read_names
+        .is_some_and(|later_reads| later_reads.contains(name))
+    {
+        return None;
+    }
+    let slot = argument_slot(element_shape.clone());
+    let actual = actual_shape_for_slot_expr_with_slot(
+        child,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+        &slot,
+    );
+    if !known_owned_argument_clone_recovery_with_facts(&actual, ctx.facts) {
+        return None;
+    }
+    let plan = plan_slot_conversion(actual, slot, ctx.facts);
+    if !slot_conversion_plan_contains_external_into(&plan.conversion) {
+        return None;
+    }
+    let lowered = lower_expr_with_refinements(child, env, ctx, refinements);
+    let cloned = RustExpr::Raw(format!("{}.clone()", emit::emit_expr(&lowered)));
+    Some(apply_slot_expr_conversion(cloned, &plan))
+}
+
+fn slot_conversion_plan_contains_external_into(plan: &SlotConversionPlan) -> bool {
+    matches!(
+        plan,
+        SlotConversionPlan::Shape(shape)
+            if matches!(shape.dispatch, DispatchCoercionPolicy::ExternalInto { .. })
+    )
 }
 
 fn current_receiver_method_reference_arity(method: &str, ctx: LowerCtx) -> Option<usize> {
@@ -4160,7 +4622,10 @@ fn lower_external_constructor_expr_for_concrete_slot(
     _refinements: &ExprRefinements,
 ) -> Option<RustExpr> {
     let Expr::New {
-        ty, args, resolved, ..
+        ty,
+        args,
+        body,
+        resolved,
     } = expr
     else {
         return None;
@@ -4173,6 +4638,9 @@ fn lower_external_constructor_expr_for_concrete_slot(
     let type_name = concrete_java_type_name(constructed_ty)?;
     if !same_concrete_java_type_name(&target_shape.java_ty, type_name) {
         return None;
+    }
+    if body.is_some() && target_shape.dispatch == DispatchShape::Concrete {
+        return Some(RustExpr::Raw("Default::default()".to_string()));
     }
     let arg_types = vec![JavaType::Unknown("_".to_string()); args.len()];
     if ctx
@@ -4394,6 +4862,25 @@ fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx
     else {
         return false;
     };
+    if external_call_lowered_type(
+        receiver.as_deref(),
+        name,
+        args.len(),
+        ctx.facts,
+        env.type_env(),
+        ctx.current_type,
+    )
+    .is_some()
+    {
+        return external_call_returns_rust_result(
+            receiver.as_deref(),
+            name,
+            args.len(),
+            ctx.facts,
+            env.type_env(),
+            ctx.current_type,
+        );
+    }
     matches!(
         plan_call_exception_propagation(
             receiver.as_deref(),
@@ -4405,7 +4892,54 @@ fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx
             ctx.current_type,
         ),
         CallExceptionPropagationPlan::PropagateResult
+    ) || slot_expr_needs_result_propagation_from_shape_env(
+        receiver.as_deref(),
+        name,
+        args.len(),
+        env,
+        ctx,
     )
+}
+
+fn slot_expr_needs_result_propagation_from_shape_env(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    let Some(receiver_ty) = receiver.and_then(|receiver| receiver_shape_java_type(receiver, env))
+    else {
+        return false;
+    };
+    let Some(receiver_name) = external_receiver_name_from_shape_type(receiver_ty) else {
+        return false;
+    };
+    ctx.facts
+        .external_api_effect_for_receiver_with_arity(Some(receiver_name), name, Some(arg_count))
+        .is_some_and(|effect| !effect.thrown.is_empty())
+}
+
+fn receiver_shape_java_type<'a>(receiver: &Expr, env: &'a ShapeEnv) -> Option<&'a JavaType> {
+    match receiver {
+        Expr::Var(name) => env
+            .local_shape(name)
+            .or_else(|| env.field_shape(name))
+            .map(|shape| &shape.java_ty),
+        Expr::FieldAccess(_, field) => env.field_shape(field).map(|shape| &shape.java_ty),
+        _ => None,
+    }
+}
+
+fn external_receiver_name_from_shape_type(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(
+            name.rsplit_once("::")
+                .map(|(_, simple)| simple)
+                .unwrap_or(name),
+        ),
+        _ => None,
+    }
 }
 
 fn slot_expects_optional(slot: &Slot) -> bool {
@@ -4944,8 +5478,12 @@ fn lower_native_collection_call_expr_for_slot(
         let lowered = lower_expr_with_refinements(receiver, env, ctx, refinements);
         adapt_call_target_receiver(&target, receiver, lowered, env, ctx, refinements)
     });
+    let mut lowered_expr = apply_call_target(&target, lowered_receiver, rust_args);
+    if slot_expr_needs_result_propagation(expr, env, ctx) {
+        lowered_expr = propagate_result_expr(lowered_expr);
+    }
     Some(crate::coercion::LoweredExpr {
-        expr: apply_call_target(&target, lowered_receiver, rust_args),
+        expr: lowered_expr,
         actual,
     })
 }
@@ -5005,8 +5543,20 @@ fn lower_external_call_expr_for_slot(
         let lowered = lower_expr_with_refinements(receiver, env, ctx, refinements);
         adapt_call_target_receiver(&target, receiver, lowered, env, ctx, refinements)
     });
+    let mut lowered_expr = apply_call_target(&target, lowered_receiver, rust_args);
+    if external_call_returns_rust_result(
+        receiver.as_deref(),
+        name,
+        args.len(),
+        ctx.facts,
+        env.type_env(),
+        ctx.current_type,
+    ) || slot_expr_needs_result_propagation(expr, env, ctx)
+    {
+        lowered_expr = propagate_result_expr(lowered_expr);
+    }
     Some(crate::coercion::LoweredExpr {
-        expr: apply_call_target(&target, lowered_receiver, rust_args),
+        expr: lowered_expr,
         actual,
     })
 }
@@ -5046,9 +5596,21 @@ fn lower_block_for_body(
     ctx: LowerCtx,
 ) -> Vec<RustStmt> {
     let mut out = Vec::new();
-    for stmt in &block.statements {
-        lower_stmt_for_body(stmt, update, env, wrap_returns_in_ok, ctx, &mut out);
-        learn_stmt_shapes(stmt, env, ctx.current_local_shapes, ctx.signatures);
+    for (index, stmt) in block.statements.iter().enumerate() {
+        let later_read_names = statement_suffix_read_names(&block.statements[index + 1..]);
+        let stmt_ctx = LowerCtx {
+            later_read_names: Some(&later_read_names),
+            ..ctx
+        };
+        lower_stmt_for_body(stmt, update, env, wrap_returns_in_ok, stmt_ctx, &mut out);
+        if !matches!(stmt, Stmt::VarDecl { .. }) {
+            learn_stmt_shapes(
+                stmt,
+                env,
+                stmt_ctx.current_local_shapes,
+                stmt_ctx.signatures,
+            );
+        }
     }
     out
 }

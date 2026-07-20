@@ -44,6 +44,12 @@ Each selected corpus outcome must become one of:
 Lowering should consume these facts and plans. It should not infer Java meaning
 from class names, method names, package names, or one corpus-specific pattern.
 
+Future unification work is tracked in
+`docs/semantic-fact-layer-next-plan.md` under **Future Goal: Unify Facts And
+Reusable Ideas**. Before adding a new fact-like concept, heuristic, or
+lowering helper, check whether it is a canonical fact, an alias/projection of
+an existing fact, or a consumer plan derived from existing facts.
+
 ## Work Loop
 
 For each implementation slice:

@@ -7344,8 +7344,72 @@ class ExternalArgumentShapeUse {
 
     assert_eq!(params[0].shape.ownership, OwnershipShape::SharedBorrow);
     assert_eq!(params[0].shape.view, ViewShape::Str);
+    assert_eq!(params[0].shape.java_ty, JavaType::String);
     assert_eq!(params[1].shape.ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(
+        params[1].shape.java_ty,
+        JavaType::Named {
+            name: "ExternalBuffer".to_string(),
+            args: Vec::new(),
+        }
+    );
     assert_eq!(params[2].shape.ownership, OwnershipShape::Owned);
+    assert_eq!(
+        params[2].shape.java_ty,
+        JavaType::Named {
+            name: "ExternalPayload".to_string(),
+            args: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn external_constructor_arguments_default_to_non_null_unless_fact_widens_them() {
+    let callback_ty = JavaType::Named {
+        name: "Function".to_string(),
+        args: Vec::new(),
+    };
+    let mut facts = FactSet::default();
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "new".to_string(),
+            receiver_type: Some("ImportConfig".to_string()),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::String),
+            parameter_nullability: NullabilityState::Unknown,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::UserOverride,
+        });
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "new".to_string(),
+            receiver_type: Some("ImportConfig".to_string()),
+            parameter_index: 1,
+            parameter_type: Some(callback_ty.clone()),
+            parameter_nullability: NullabilityState::MaybeNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::UserOverride,
+        });
+
+    let constructed_ty = JavaType::Named {
+        name: "ImportConfig".to_string(),
+        args: Vec::new(),
+    };
+    let shapes = new_java2rust::call_plan::external_constructor_arg_shapes(
+        &constructed_ty,
+        "new",
+        3,
+        &facts,
+    )
+    .expect("one modeled constructor argument should shape the constructor call");
+
+    assert_eq!(shapes[0].java_ty, JavaType::String);
+    assert_eq!(shapes[1].java_ty, optional_java_type(callback_ty));
+    assert_eq!(shapes[2].java_ty, JavaType::Unknown("new:arg2".to_string()));
 }
 
 #[test]

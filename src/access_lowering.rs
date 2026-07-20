@@ -26,7 +26,25 @@ pub fn lower_field_access(
     type_env: &TypeEnv,
     lowered_receiver: RustExpr,
 ) -> RustExpr {
-    if let Some(plan) = crate::member_access_plan::plan_member_access(receiver, field, type_env) {
+    lower_field_access_with_facts(
+        receiver,
+        field,
+        type_env,
+        lowered_receiver,
+        &crate::facts::FactSet::default(),
+    )
+}
+
+pub fn lower_field_access_with_facts(
+    receiver: &Expr,
+    field: &str,
+    type_env: &TypeEnv,
+    lowered_receiver: RustExpr,
+    facts: &crate::facts::FactSet,
+) -> RustExpr {
+    if let Some(plan) =
+        crate::member_access_plan::plan_member_access_with_facts(receiver, field, type_env, facts)
+    {
         apply_member_access_plan(&plan, lowered_receiver)
     } else {
         RustExpr::Field(Box::new(lowered_receiver), field.to_string())

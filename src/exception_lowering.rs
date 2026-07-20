@@ -1,3 +1,6 @@
+use std::collections::BTreeSet;
+
+use crate::facts::{ExternalLibraryMode, FactSet};
 use crate::rust_ir::{RustExpr, RustItem, RustStmt, RustType};
 use crate::slot_shape::RustSlotShape;
 
@@ -8,7 +11,104 @@ pub struct CatchRenderArm {
     pub body: Vec<RustStmt>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExternalExceptionConversion {
+    pub java_type: String,
+    pub rust_type: String,
+}
+
 pub fn java_exception_support_item() -> RustItem {
+    java_exception_support_item_with_facts(&FactSet::default())
+}
+
+pub fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
+    let conversions = external_exception_conversions(facts);
+    let mut item = r#"#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaException {
+    pub class_name: &'static str,
+    pub message: String,
+    pub cause: Option<Box<JavaException>>,
+}
+
+impl JavaException {
+    pub fn new(class_name: &'static str, message: String) -> JavaException {
+        JavaException { class_name, message, cause: None }
+    }
+
+    pub fn with_cause(
+        class_name: &'static str,
+        message: String,
+        cause: JavaException,
+    ) -> JavaException {
+        JavaException { class_name, message, cause: Some(Box::new(cause)) }
+    }
+
+    pub fn from_display(class_name: &'static str, err: impl std::fmt::Display) -> JavaException {
+        JavaException { class_name, message: err.to_string(), cause: None }
+    }
+
+    pub fn is_instance(&self, class_names: &[&str]) -> bool {
+        class_names.iter().any(|name| self.class_name == *name)
+    }
+
+    pub fn cause_or_self_if_instance(mut self, class_names: &[&str]) -> JavaException {
+        if self.cause.as_ref().is_some_and(|cause| cause.is_instance(class_names)) {
+            *self.cause.take().expect("checked Java exception cause")
+        } else {
+            self
+        }
+    }
+
+    pub fn get_message(&self) -> String {
+        self.message.clone()
+    }
+}
+
+impl std::fmt::Display for JavaException {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.class_name, self.message)
+    }
+}"#
+    .to_string();
+    for conversion in conversions {
+        item.push_str("\n\n");
+        item.push_str(&format!(
+            "impl From<{}> for JavaException {{\n    fn from(err: {}) -> JavaException {{\n        JavaException::from_display({:?}, err)\n    }}\n}}",
+            conversion.rust_type, conversion.rust_type, conversion.java_type
+        ));
+    }
+    RustItem::Raw(item)
+}
+
+pub fn external_exception_conversions(facts: &FactSet) -> Vec<ExternalExceptionConversion> {
+    let mut conversions = BTreeSet::new();
+    for exception in &facts.exception_facts {
+        let Some(pack) = facts.external_library_pack_for_type(&exception.type_name) else {
+            continue;
+        };
+        if pack.mode != ExternalLibraryMode::RustCrateMapping {
+            continue;
+        }
+        let Some(crate_name) = pack.rust_target.as_deref() else {
+            continue;
+        };
+        let Some(simple) = exception
+            .type_name
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .next_back()
+        else {
+            continue;
+        };
+        conversions.insert(ExternalExceptionConversion {
+            java_type: exception.type_name.clone(),
+            rust_type: format!("{crate_name}::{simple}"),
+        });
+    }
+    conversions.into_iter().collect()
+}
+
+pub fn legacy_java_exception_support_item() -> RustItem {
     RustItem::Raw(
         r#"#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaException {

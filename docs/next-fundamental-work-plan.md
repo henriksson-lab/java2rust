@@ -410,8 +410,10 @@ When the corpus reveals an external API gap:
 Examples:
 
 - `isX()`, `hasX()`, and `containsX(arg)` are non-null boolean predicate facts.
-- External `getX()` returns an unknown-nullability boundary unless a known model
-  says otherwise.
+- External argument slots default to non-null when no source evidence, library
+  model, source summary, or injected override suggests nullable behavior.
+  Nullable evidence widens the slot to `Option<T>` through facts; lowering must
+  not guess this from method names.
 - External `setX(value)` mutates the receiver, and a fluent setter returns the
   receiver shape.
 - External quality or codec methods can have argument-sensitive return types

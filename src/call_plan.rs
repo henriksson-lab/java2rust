@@ -6,6 +6,7 @@ use crate::facts::{
     AccessorInlinePolicy, ExternalApiArgumentEffectFact, ExternalApiRole,
     ExternalArgumentAliasPolicy, ExternalLibraryMode, FactProvenance, FactSet, HierarchyStrategy,
     NullabilityState, ReceiverMutabilityFact, TrivialAccessorKind,
+    external_parameter_nullability_policy,
 };
 use crate::java_ir::{
     CallKind, Expr, JavaType, LambdaBody, PrimitiveType, ResolvedCall, ResolvedConstructor,
@@ -66,6 +67,7 @@ pub enum CallTargetPlan<'a> {
         receiver: &'a Expr,
         crate_name: String,
         rust_name: String,
+        mutates_receiver: bool,
     },
     SuperBoundary {
         rust_name: String,
@@ -103,6 +105,15 @@ impl<'a> CallTargetPlan<'a> {
                 | CallTargetPlan::NativeJavaInstance { .. }
         )
     }
+
+    pub fn mutates_receiver(&self) -> bool {
+        match self {
+            CallTargetPlan::ExternalCrateReceiver {
+                mutates_receiver, ..
+            } => *mutates_receiver,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +140,12 @@ pub enum NativeCollectionExtendArgPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeCollectionStaticMethod {
     ArraysAsList,
+    CollectionsEmptyList,
+    CollectionsEmptySortedSet,
+    CollectionsSingleton,
+    CollectionsSingletonList,
+    CollectionsSingletonMap,
+    CollectionsNCopies,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,10 +213,56 @@ pub fn external_call_lowered_type(
         Some(arg_count),
     )?;
     let return_ty = effect.return_type.clone()?;
+    let rust_return_type = facts.external_rust_return_type_for_receiver(
+        receiver_key.as_deref(),
+        name,
+        Some(arg_count),
+    );
+    let rust_return_is_shared_borrow = rust_return_type
+        .is_some_and(|fact| rust_return_type_is_shared_borrow(&fact.rust_type_name));
 
-    match effect.return_nullability {
+    if rust_return_is_shared_borrow
+        && matches!(
+            effect.return_nullability,
+            NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+        )
+        && !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void)
+    {
+        return Some(LoweredType::optional_element_borrow_shape(
+            borrowed_sequence_element_shape(return_ty),
+        ));
+    }
+
+    let returns_optional = matches!(
+        effect.return_nullability,
+        NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+    );
+    if java_type_is_byte_array(&return_ty)
+        && rust_return_type
+            .is_none_or(|fact| rust_return_type_is_unsigned_byte_array(&fact.rust_type_name))
+        && receiver_key.as_deref().is_some_and(|receiver_key| {
+            facts
+                .external_library_pack_for_type(receiver_key)
+                .is_some_and(|pack| pack.mode == ExternalLibraryMode::RustCrateMapping)
+                || crate::external_packs::external_library_pack_for_type(receiver_key)
+                    .is_some_and(|pack| pack.mode == ExternalLibraryMode::RustCrateMapping)
+        })
+    {
+        let semantic_ty = if returns_optional {
+            crate::types::optional_java_type(return_ty)
+        } else {
+            return_ty
+        };
+        return Some(LoweredType::rust_unsigned_byte_array_return(
+            semantic_ty,
+            returns_optional,
+        ));
+    }
+
+    let lowered = match effect.return_nullability {
         NullabilityState::MaybeNull
-            if external_return_borrows_receiver(effect.role, &return_ty) =>
+            if external_return_borrows_receiver(effect.role, &return_ty)
+                && rust_return_type.is_none_or(|_| rust_return_is_shared_borrow) =>
         {
             Some(LoweredType::optional_element_borrow_shape(
                 borrowed_sequence_element_shape(return_ty),
@@ -211,7 +274,92 @@ pub fn external_call_lowered_type(
         NullabilityState::DefinitelyNonNull | NullabilityState::Unknown => {
             Some(LoweredType::from_java(return_ty))
         }
+    }?;
+
+    if let Some(rust_return_type) = rust_return_type
+        && let Some(java_ty) = lowered.java_ty()
+    {
+        if rust_return_type_is_shared_borrow(&rust_return_type.rust_type_name)
+            && !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void)
+        {
+            return Some(LoweredType::rust_borrowed_return(
+                java_ty.clone(),
+                rust_return_type.rust_type_name.clone(),
+            ));
+        }
+        if matches!(java_ty, JavaType::Primitive(_)) {
+            return Some(LoweredType::rust_scalar_return(
+                java_ty.clone(),
+                rust_return_type.rust_type_name.clone(),
+            ));
+        }
     }
+
+    Some(lowered)
+}
+
+fn rust_return_type_is_shared_borrow(rust_type_name: &str) -> bool {
+    rust_type_name.starts_with('&') || rust_type_name.contains("<&")
+}
+
+fn rust_return_type_is_unsigned_byte_array(rust_type_name: &str) -> bool {
+    let compact = rust_type_name.replace(' ', "");
+    compact == "Vec<u8>" || compact == "Option<Vec<u8>>"
+}
+
+fn java_type_is_byte_array(java_ty: &JavaType) -> bool {
+    matches!(
+        java_ty,
+        JavaType::Array(element)
+            if matches!(element.as_ref(), JavaType::Primitive(PrimitiveType::Byte))
+    )
+}
+
+pub fn external_call_returns_rust_result(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> bool {
+    let Some(receiver_key) =
+        external_call_receiver_type_key(receiver, name, arg_count, facts, types, current_type)
+    else {
+        return false;
+    };
+    if let Some(fallibility) =
+        facts.external_rust_result_for_receiver(receiver_key.as_deref(), name, Some(arg_count))
+    {
+        return fallibility.returns_result;
+    }
+    facts
+        .external_api_effect_for_receiver_with_arity(receiver_key.as_deref(), name, Some(arg_count))
+        .is_some_and(|effect| !effect.thrown.is_empty())
+}
+
+pub fn external_call_throws(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> bool {
+    external_call_returns_rust_result(receiver, name, arg_count, facts, types, current_type)
+}
+
+pub fn external_constructor_returns_rust_result(
+    ty: &JavaType,
+    arg_count: usize,
+    facts: &FactSet,
+) -> bool {
+    let Some(type_name) = java_type_name(ty) else {
+        return false;
+    };
+    facts
+        .external_constructor_rust_result_for(type_name, arg_count)
+        .is_some_and(|fact| fact.returns_result)
 }
 
 fn external_return_borrows_receiver(role: ExternalApiRole, return_ty: &JavaType) -> bool {
@@ -532,12 +680,18 @@ fn external_receiver_type_key(java_ty: &JavaType, types: &TypeEnv) -> Option<Str
     }
     match java_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+            Some(crate::stdlib::canonical_external_receiver_type_key(
+                rust_path_simple_type_name(name).unwrap_or(name),
+            ))
         }
         JavaType::String => Some("String".to_string()),
         JavaType::Array(_) => Some("Array".to_string()),
         JavaType::Void | JavaType::Primitive(_) | JavaType::Wildcard(_) => None,
     }
+}
+
+fn rust_path_simple_type_name(name: &str) -> Option<&str> {
+    name.rsplit_once("::").map(|(_, simple)| simple)
 }
 
 pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallStatementPlan<'a>> {
@@ -663,6 +817,26 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
         return target;
     }
 
+    if let Some(target) = plan_native_collection_static_call(receiver, name) {
+        return target;
+    }
+
+    if let Some(receiver) = receiver
+        && let Some(target) =
+            plan_external_crate_static_call(receiver, name, arg_count, facts, types)
+    {
+        return target;
+    }
+
+    if let Some(receiver) = receiver
+        && let Some(owner) = static_utility_owner_expr_type_name(receiver, name, facts, types)
+    {
+        return CallTargetPlan::StaticOwner {
+            owner,
+            rust_name: crate::parser::to_snake_case(name),
+        };
+    }
+
     if let Some(receiver) = receiver
         && let Some(target) =
             plan_external_crate_receiver_call(receiver, name, arg_count, facts, types)
@@ -695,10 +869,6 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
         return target;
     }
 
-    if let Some(target) = plan_native_collection_static_call(receiver, name) {
-        return target;
-    }
-
     if let Some(target) = plan_java_class_static_call(receiver, name) {
         return target;
     }
@@ -706,7 +876,7 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
     if let Some(call) = resolved {
         return match (&call.kind, receiver) {
             (CallKind::Static, Some(_)) => CallTargetPlan::StaticOwner {
-                owner: rust_static_owner_type_name(&call.declaring_type),
+                owner: rust_static_owner_type_name_with_facts(&call.declaring_type, facts),
                 rust_name: call.rust_name.clone(),
             },
             (CallKind::Static, None) => CallTargetPlan::StaticSelf {
@@ -723,13 +893,7 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
     }
 
     if let Some(receiver) = receiver {
-        if let Some(owner) = static_utility_owner_expr_type_name(receiver, name, facts, types) {
-            return CallTargetPlan::StaticOwner {
-                owner,
-                rust_name: crate::parser::to_snake_case(name),
-            };
-        }
-        if let Some(owner) = qualified_static_owner_expr_type_name(receiver, types) {
+        if let Some(owner) = qualified_static_owner_expr_type_name(receiver, types, facts) {
             return CallTargetPlan::StaticOwner {
                 owner,
                 rust_name: crate::parser::to_snake_case(name),
@@ -745,14 +909,14 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
     } else {
         if let Some(owner) = types.static_member_import_owner(name) {
             return CallTargetPlan::StaticOwner {
-                owner: rust_static_owner_type_name(owner),
+                owner: rust_static_owner_type_name_with_facts(owner, facts),
                 rust_name: crate::parser::to_snake_case(name),
             };
         }
         let rust_name = crate::parser::to_snake_case(name);
         if let Some(owner) = types.static_member_import_owner(&rust_name) {
             return CallTargetPlan::StaticOwner {
-                owner: rust_static_owner_type_name(owner),
+                owner: rust_static_owner_type_name_with_facts(owner, facts),
                 rust_name,
             };
         }
@@ -794,7 +958,7 @@ fn static_utility_owner_expr_type_name(
         return None;
     }
     if let Some(owner) = types.static_type_alias(receiver_name) {
-        return Some(rust_static_owner_type_name(owner));
+        return Some(rust_static_owner_type_name_with_facts(owner, facts));
     }
     let owner = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
     if facts
@@ -804,13 +968,20 @@ fn static_utility_owner_expr_type_name(
         || crate::stdlib::external_api_method_role(Some(&owner), name, 0)
             != ExternalApiRole::Unknown
     {
-        Some(owner)
+        Some(rust_static_owner_type_name_with_facts(&owner, facts))
     } else {
         None
     }
 }
 
 pub fn rust_static_owner_type_name(owner: &str) -> String {
+    rust_static_owner_type_name_with_facts(owner, &FactSet::default())
+}
+
+pub fn rust_static_owner_type_name_with_facts(owner: &str, facts: &FactSet) -> String {
+    if let Some(mapped_owner) = external_crate_static_owner_type_name(owner, facts) {
+        return mapped_owner;
+    }
     let simple = owner
         .split('.')
         .filter(|segment| !segment.is_empty())
@@ -819,26 +990,85 @@ pub fn rust_static_owner_type_name(owner: &str) -> String {
     upper_camel_from_snake_or_preserved(simple)
 }
 
-fn qualified_static_owner_expr_type_name(receiver: &Expr, types: &TypeEnv) -> Option<String> {
+fn external_crate_static_owner_type_name(owner: &str, facts: &FactSet) -> Option<String> {
+    if let Some(pack) = facts.external_library_pack_for_type(owner) {
+        let owner = external_crate_static_owner_source_name(owner, pack);
+        return external_crate_static_owner_type_name_from_pack(
+            owner,
+            pack.mode,
+            pack.rust_target.as_deref(),
+        );
+    }
+    let pack = crate::external_packs::external_library_pack_for_type(owner)?;
+    let owner = external_crate_static_owner_source_name(owner, &pack);
+    external_crate_static_owner_type_name_from_pack(owner, pack.mode, pack.rust_target.as_deref())
+}
+
+fn external_crate_static_owner_source_name<'a>(
+    owner: &'a str,
+    pack: &'a crate::facts::ExternalLibraryPackFact,
+) -> &'a str {
+    if crate::facts::external_type_name_matches(&pack.package_prefix, owner) {
+        &pack.package_prefix
+    } else {
+        owner
+    }
+}
+
+fn external_crate_static_owner_type_name_from_pack(
+    owner: &str,
+    mode: ExternalLibraryMode,
+    rust_target: Option<&str>,
+) -> Option<String> {
+    if mode != ExternalLibraryMode::RustCrateMapping {
+        return None;
+    }
+    let crate_name = rust_target?;
+    let simple = owner
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .next_back()
+        .unwrap_or(owner);
+    let rust_owner = if simple
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_lowercase())
+    {
+        crate::parser::to_snake_case(simple)
+    } else {
+        upper_camel_from_snake_or_preserved(simple)
+    };
+    Some(format!("{crate_name}::{rust_owner}"))
+}
+
+fn qualified_static_owner_expr_type_name(
+    receiver: &Expr,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<String> {
     let Expr::FieldAccess(_, _) = receiver else {
         return None;
     };
-    static_owner_expr_type_name(receiver, types)
+    static_owner_expr_type_name(receiver, types, facts)
 }
 
-fn static_owner_expr_type_name(receiver: &Expr, types: &TypeEnv) -> Option<String> {
+fn static_owner_expr_type_name(
+    receiver: &Expr,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<String> {
     match receiver {
         Expr::Var(name) => {
             if types.local_type(name).is_some() || types.field_type(name).is_some() {
                 return None;
             }
-            Some(upper_camel_from_snake_or_preserved(name))
+            Some(rust_static_owner_type_name_with_facts(name, facts))
         }
         Expr::FieldAccess(inner, field) => {
             if is_static_constant_member(field) {
                 return None;
             }
-            let _ = static_owner_expr_type_name(inner, types)?;
+            let _ = static_owner_expr_type_name(inner, types, facts)?;
             Some(upper_camel_from_snake_or_preserved(field))
         }
         _ => None,
@@ -885,11 +1115,29 @@ fn plan_native_collection_static_call<'a>(
         return None;
     };
     if crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Arrays"
-        && name == "asList"
+        && matches!(name, "asList" | "as_list")
     {
         return Some(CallTargetPlan::NativeCollectionStatic {
             method: NativeCollectionStaticMethod::ArraysAsList,
         });
+    }
+    if crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Collections" {
+        let method = match name {
+            "emptyList" | "empty_list" => NativeCollectionStaticMethod::CollectionsEmptyList,
+            "emptySortedSet" | "empty_sorted_set" => {
+                NativeCollectionStaticMethod::CollectionsEmptySortedSet
+            }
+            "singleton" => NativeCollectionStaticMethod::CollectionsSingleton,
+            "singletonList" | "singleton_list" => {
+                NativeCollectionStaticMethod::CollectionsSingletonList
+            }
+            "singletonMap" | "singleton_map" => {
+                NativeCollectionStaticMethod::CollectionsSingletonMap
+            }
+            "nCopies" | "n_copies" => NativeCollectionStaticMethod::CollectionsNCopies,
+            _ => return None,
+        };
+        return Some(CallTargetPlan::NativeCollectionStatic { method });
     }
     None
 }
@@ -991,11 +1239,7 @@ fn plan_external_crate_receiver_call<'a>(
     facts: &FactSet,
     types: &TypeEnv,
 ) -> Option<CallTargetPlan<'a>> {
-    let receiver_ty = infer_expr_type(receiver, types);
-    let receiver_name = match receiver_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
-        _ => return None,
-    };
+    let receiver_name = external_receiver_expr_type_key(receiver, facts, types)?;
     let effect = facts
         .external_api_effect_for_receiver_with_arity(Some(&receiver_name), name, Some(arg_count))
         .cloned()
@@ -1032,6 +1276,62 @@ fn plan_external_crate_receiver_call<'a>(
         rust_name: mapping
             .map(|mapping| mapping.rust_name)
             .unwrap_or_else(|| external_method_rust_name(&receiver_name, name, arg_count, facts)),
+        mutates_receiver: effect.receiver_mutability == ReceiverMutabilityFact::MutatesReceiver,
+    })
+}
+
+fn plan_external_crate_static_call(
+    receiver: &Expr,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<CallTargetPlan<'static>> {
+    let Expr::Var(receiver_name) = receiver else {
+        return None;
+    };
+    if types.local_type(receiver_name).is_some() || types.field_type(receiver_name).is_some() {
+        return None;
+    }
+    let receiver_key = types
+        .static_type_alias(receiver_name)
+        .map(crate::stdlib::canonical_external_receiver_type_key)
+        .unwrap_or_else(|| crate::stdlib::canonical_external_receiver_type_key(receiver_name));
+    let effect = facts
+        .external_api_effect_for_receiver_with_arity(Some(&receiver_key), name, Some(arg_count))
+        .cloned()
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                Some(&receiver_key),
+                name,
+                Some(arg_count),
+            )
+        })?;
+    if effect.provenance != FactProvenance::ExternalLibraryPack {
+        return None;
+    }
+    let pack = facts
+        .external_library_pack_for_type(&receiver_key)
+        .cloned()
+        .or_else(|| crate::external_packs::external_library_pack_for_type(&receiver_key))?;
+    if pack.mode != ExternalLibraryMode::RustCrateMapping {
+        return None;
+    }
+    let mapping = facts
+        .external_crate_api_mapping_for_receiver(&receiver_key, name, effect.arg_count)
+        .cloned()
+        .or_else(|| {
+            crate::external_packs::external_crate_api_mapping_for_receiver(
+                &receiver_key,
+                name,
+                effect.arg_count,
+            )
+        });
+    Some(CallTargetPlan::StaticOwner {
+        owner: rust_static_owner_type_name_with_facts(&receiver_key, facts),
+        rust_name: mapping
+            .map(|mapping| mapping.rust_name)
+            .unwrap_or_else(|| external_method_rust_name(&receiver_key, name, arg_count, facts)),
     })
 }
 
@@ -1581,7 +1881,12 @@ pub fn external_constructor_arg_shapes(
     let mut saw_fact = false;
     let shapes = (0..arg_count)
         .map(|index| {
-            if let Some(effect) = facts.external_api_argument_effect_for_receiver(
+            if let Some(effect) =
+                facts.external_constructor_argument_effect_for(receiver_name, arg_count, index)
+            {
+                saw_fact = true;
+                argument_shape_from_external_constructor_effect(effect, &effective_facts)
+            } else if let Some(effect) = facts.external_api_argument_effect_for_receiver(
                 Some(receiver_name),
                 rust_name,
                 index,
@@ -1594,6 +1899,20 @@ pub fn external_constructor_arg_shapes(
         })
         .collect();
     saw_fact.then_some(shapes)
+}
+
+fn argument_shape_from_external_constructor_effect(
+    effect: &crate::facts::ExternalConstructorArgumentEffectFact,
+    facts: &EffectiveFacts<'_>,
+) -> RustSlotShape {
+    argument_shape_from_external_metadata(
+        effect.parameter_type.clone(),
+        effect.parameter_nullability,
+        effect.argument_mutability,
+        effect.alias_policy,
+        false,
+        facts,
+    )
 }
 
 fn external_call_argument_receiver_key(
@@ -1763,30 +2082,57 @@ fn argument_shape_from_external_effect(
     receiver_ty: Option<&JavaType>,
     facts: &EffectiveFacts<'_>,
 ) -> RustSlotShape {
-    let mut java_ty = effect
-        .parameter_type
-        .clone()
-        .unwrap_or_else(|| JavaType::Unknown("Object".to_string()));
-    if matches!(
+    let keep_concrete_unknown = effect.parameter_type.is_none()
+        && receiver_ty.is_some_and(|receiver_ty| {
+            external_generic_facade_receiver_keeps_argument_concrete(receiver_ty, facts)
+        });
+    argument_shape_from_external_metadata(
+        effect.parameter_type.clone(),
         effect.parameter_nullability,
+        effect.argument_mutability,
+        effect.alias_policy,
+        keep_concrete_unknown,
+        facts,
+    )
+}
+
+fn argument_shape_from_external_metadata(
+    parameter_type: Option<JavaType>,
+    parameter_nullability: NullabilityState,
+    argument_mutability: ReceiverMutabilityFact,
+    alias_policy: ExternalArgumentAliasPolicy,
+    keep_concrete_unknown: bool,
+    facts: &EffectiveFacts<'_>,
+) -> RustSlotShape {
+    let base_java_ty = parameter_type.unwrap_or_else(|| JavaType::Unknown("Object".to_string()));
+    let mut java_ty = base_java_ty.clone();
+    let parameter_nullability = external_parameter_nullability_policy(parameter_nullability);
+    if matches!(
+        parameter_nullability,
         NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
     ) {
         java_ty = crate::types::optional_java_type(java_ty);
     }
     let mut shape = RustSlotShape::conservative(java_ty);
-
-    if effect.parameter_type.is_none()
-        && receiver_ty.is_some_and(|receiver_ty| {
-            external_generic_facade_receiver_keeps_argument_concrete(receiver_ty, facts)
-        })
+    if let Some(HierarchyStrategy::DynTrait { trait_name }) =
+        facts.object_representation_override_strategy_for(&base_java_ty)
     {
+        apply_required_dispatch(
+            &mut shape,
+            DispatchShape::DynTrait {
+                trait_name: trait_name.clone(),
+            },
+        );
+    }
+
+    if keep_concrete_unknown {
         if !matches!(shape.java_ty, JavaType::Primitive(_)) {
             shape.ownership = OwnershipShape::Owned;
         }
         return shape;
     }
 
-    match effect.alias_policy {
+    match alias_policy {
         ExternalArgumentAliasPolicy::Borrowed if shape.java_ty == JavaType::String => {
             apply_borrowed_string_content_projection(&mut shape);
         }
@@ -1806,7 +2152,7 @@ fn argument_shape_from_external_effect(
         ExternalArgumentAliasPolicy::Unknown | ExternalArgumentAliasPolicy::Borrowed => {}
     }
 
-    if effect.argument_mutability == ReceiverMutabilityFact::MutatesReceiver
+    if argument_mutability == ReceiverMutabilityFact::MutatesReceiver
         && !matches!(shape.java_ty, JavaType::Primitive(_))
     {
         shape.ownership = OwnershipShape::MutableBorrow;

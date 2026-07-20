@@ -13,10 +13,60 @@ TRAIT_IMPL_RE = re.compile(
     r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)"
 )
 FN_RE = re.compile(r"^\s*(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+CONST_RE = re.compile(r"^\s*pub\s+const\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 
 
 def brace_delta(line: str) -> int:
-    return line.count("{") - line.count("}")
+    delta = 0
+    index = 0
+    state = "code"
+    while index < len(line):
+        ch = line[index]
+        next_ch = line[index + 1] if index + 1 < len(line) else ""
+        if state == "code":
+            if ch == "/" and next_ch == "/":
+                break
+            if ch == "/" and next_ch == "*":
+                state = "block_comment"
+                index += 2
+                continue
+            if ch == '"':
+                state = "string"
+                index += 1
+                continue
+            if ch == "'":
+                state = "char"
+                index += 1
+                continue
+            if ch == "{":
+                delta += 1
+            elif ch == "}":
+                delta -= 1
+            index += 1
+            continue
+        if state == "string":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == '"':
+                state = "code"
+            index += 1
+            continue
+        if state == "char":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == "'":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if ch == "*" and next_ch == "/":
+                state = "code"
+                index += 2
+                continue
+            index += 1
+    return delta
 
 
 def source_type_for(path: Path) -> str:
@@ -160,6 +210,16 @@ def extract_methods(impl_text: str) -> list[tuple[str, str]]:
     return methods
 
 
+def extract_consts(impl_text: str) -> list[tuple[str, str]]:
+    lines = impl_text.splitlines(keepends=True)
+    consts = []
+    for line in lines[1 : max(1, len(lines) - 1)]:
+        match = CONST_RE.match(line)
+        if match:
+            consts.append((match.group(1), line.strip()))
+    return consts
+
+
 def remove_items(path: Path, items: list[dict]) -> None:
     lines = path.read_text().splitlines(keepends=True)
     remove = [False] * len(lines)
@@ -179,6 +239,7 @@ def main() -> int:
 
     generated_dir = Path(args.generated_dir)
     rust_paths = sorted(generated_dir.glob("*.rs"))
+    primary_output_types = {source_type_for(path) for path in rust_paths}
     candidates_by_type = defaultdict(list)
     for path in rust_paths:
         for name in prelude_support_types(path):
@@ -187,7 +248,9 @@ def main() -> int:
     selected = {
         name
         for name, paths in candidates_by_type.items()
-        if len(paths) > 1 and name not in {"Box", "String", "Vec", "Option", "Result"}
+        if len(paths) > 1
+        and name not in primary_output_types
+        and name not in {"Box", "String", "Vec", "Option", "Result"}
     }
 
     conflict_lines = ["type\tkind\tdetail\n"]
@@ -200,6 +263,7 @@ def main() -> int:
     aliases = defaultdict(list)
     trait_impls = defaultdict(list)
     inherent_methods = defaultdict(list)
+    inherent_consts = defaultdict(list)
 
     for path in rust_paths:
         items = parse_items(path, selected)
@@ -214,6 +278,8 @@ def main() -> int:
             elif item["kind"] == "inherent_impl":
                 for method_name, method_text in extract_methods(item["text"]):
                     inherent_methods[(item["name"], method_name)].append((path, method_text))
+                for const_name, const_text in extract_consts(item["text"]):
+                    inherent_consts[(item["name"], const_name)].append((path, const_text))
 
     shared_chunks = []
     shared_aliases = set()
@@ -232,6 +298,21 @@ def main() -> int:
         shared_chunks.append(unique_decls[0].rstrip() + "\n")
 
         methods_for_type = []
+        consts_for_type = []
+        for (type_name, const_name), variants in sorted(inherent_consts.items()):
+            if type_name != name:
+                continue
+            unique_variants = []
+            seen_consts = set()
+            for _, text in variants:
+                if text not in seen_consts:
+                    unique_variants.append(text)
+                    seen_consts.add(text)
+            if len(unique_variants) > 1:
+                conflict_lines.append(
+                    f"{name}\tconst\t{const_name}: kept first of {len(unique_variants)} variants\n"
+                )
+            consts_for_type.append(unique_variants[0])
         for (type_name, method_name), variants in sorted(inherent_methods.items()):
             if type_name != name:
                 continue
@@ -246,8 +327,10 @@ def main() -> int:
                     f"{name}\tmethod\t{method_name}: kept first of {len(unique_variants)} variants\n"
                 )
             methods_for_type.append(unique_variants[0])
-        if methods_for_type:
+        if consts_for_type or methods_for_type:
             shared_chunks.append(f"\nimpl {name} {{\n")
+            for const in consts_for_type:
+                shared_chunks.append(f"    {const}\n")
             for method in methods_for_type:
                 shared_chunks.append("    " + method.replace("\n", "\n    ").rstrip() + "\n")
             shared_chunks.append("}\n")

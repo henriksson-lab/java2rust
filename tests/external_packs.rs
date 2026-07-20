@@ -35,11 +35,11 @@ use new_java2rust::facts::{
     ClosedHierarchyFact, ExceptionFact, ExceptionKind, ExternalApiArgumentEffectFact,
     ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
     ExternalConstructorFact, ExternalCrateApiMappingFact, ExternalCrateConstructorMappingFact,
-    ExternalFieldFact, ExternalLibraryMode, FactProvenance, FactSet, FieldKey,
-    FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy,
-    NullabilityState, ObjectSafetyFact, ObjectSafetyViolation, ReceiverMutabilityFact,
-    TypeCapabilityOverride, UnsupportedExternalApiFact, UnsupportedExternalConstructorFact,
-    UnsupportedExternalFieldFact,
+    ExternalCrateTypeMappingFact, ExternalFieldFact, ExternalLibraryMode, FactProvenance, FactSet,
+    FieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride,
+    HierarchyStrategy, NullabilityState, ObjectSafetyFact, ObjectSafetyViolation,
+    ReceiverMutabilityFact, TypeCapabilityOverride, UnsupportedExternalApiFact,
+    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::{parser, resolve, semantic_analysis};
@@ -705,6 +705,78 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
     assert_eq!(
         utils_validate_arg0.provenance,
         FactProvenance::ExternalLibraryPack
+    );
+
+    let utils_join = external_api_effect_for_receiver_with_arity(
+        Some("org.broadinstitute.hellbender.utils.Utils"),
+        "join",
+        Some(2),
+    )
+    .expect("Utils.join should resolve through builtin pack member lookup");
+    assert_eq!(utils_join.return_type, Some(JavaType::String));
+    assert_eq!(
+        utils_join.return_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+
+    for method_name in [
+        "listFromPrimitives",
+        "nonNull",
+        "filterCollectionByExpressions",
+    ] {
+        let effect = external_api_effect_for_receiver_with_arity(
+            Some("org.broadinstitute.hellbender.utils.Utils"),
+            method_name,
+            None,
+        )
+        .unwrap_or_else(|| panic!("Utils.{method_name} should resolve through builtin pack facts"));
+        assert_eq!(effect.role, ExternalApiRole::Getter);
+        assert_eq!(
+            effect.return_nullability,
+            NullabilityState::DefinitelyNonNull
+        );
+    }
+
+    let utils_random = external_api_effect_for_receiver_with_arity(
+        Some("org.broadinstitute.hellbender.utils.Utils"),
+        "getRandomGenerator",
+        Some(0),
+    )
+    .expect("Utils.getRandomGenerator should resolve through builtin pack member lookup");
+    assert_eq!(
+        utils_random.return_type,
+        Some(JavaType::Named {
+            name: "Random".to_string(),
+            args: Vec::new()
+        })
+    );
+
+    let genotype_het = external_field_for("GenotypeType", "HET")
+        .expect("GenotypeType.HET should resolve through builtin field lookup");
+    assert_eq!(
+        genotype_het.field_type,
+        Some(JavaType::Named {
+            name: "GenotypeType".to_string(),
+            args: Vec::new()
+        })
+    );
+    let vcf_count_a = external_field_for("VCFHeaderLineCount", "A")
+        .expect("VCFHeaderLineCount.A should resolve through builtin field lookup");
+    assert_eq!(
+        vcf_count_a.field_type,
+        Some(JavaType::Named {
+            name: "VCFHeaderLineCount".to_string(),
+            args: Vec::new()
+        })
+    );
+    let vcf_type_integer = external_field_for("VCFHeaderLineType", "Integer")
+        .expect("VCFHeaderLineType.Integer should resolve through builtin field lookup");
+    assert_eq!(
+        vcf_type_integer.field_type,
+        Some(JavaType::Named {
+            name: "VCFHeaderLineType".to_string(),
+            args: Vec::new()
+        })
     );
 }
 
@@ -1738,6 +1810,13 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
             provenance: FactProvenance::ExternalLibraryPack,
         });
     facts
+        .external_crate_type_mapping_facts
+        .push(ExternalCrateTypeMappingFact {
+            type_name: "other.TypeOnly".to_string(),
+            rust_type_name: "Reader".to_string(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts
         .external_crate_constructor_mapping_facts
         .push(ExternalCrateConstructorMappingFact {
             type_name: "other.Reader".to_string(),
@@ -1759,6 +1838,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
     assert!(audit.has_code("external_pack_manifest_unowned_field_nullability_fact"));
     assert!(audit.has_code("external_pack_manifest_unowned_exception_fact"));
     assert!(audit.has_code("external_pack_manifest_unowned_crate_api_mapping_fact"));
+    assert!(audit.has_code("external_pack_manifest_unowned_crate_type_mapping_fact"));
     assert!(audit.has_code("external_pack_manifest_unowned_crate_constructor_mapping_fact"));
 }
 
@@ -1806,6 +1886,27 @@ fn parsed_external_pack_manifest_reports_members_outside_declared_boundaries() {
             parsed.diagnostics
         );
     }
+}
+
+#[test]
+fn external_pack_manifest_parser_records_type_level_rust_type_name() {
+    let parsed = parse_external_pack_manifest(
+        r#"
+        external-pack dep.variant dep.variant.Reader rust-crate-mapping mapped target=dep_facade rust-type=ReaderHandle
+        "#,
+    );
+
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert_eq!(
+        parsed
+            .facts
+            .external_crate_rust_type_name_for("dep.variant.Reader"),
+        Some("ReaderHandle")
+    );
+    assert_eq!(
+        parsed.facts.external_crate_rust_type_name_for("Reader"),
+        Some("ReaderHandle")
+    );
 }
 
 #[test]
@@ -1906,7 +2007,7 @@ fn external_pack_manifest_coverage_lookup_is_member_kind_symmetric() {
 fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
     let parsed = parse_external_pack_manifest(
         r#"
-        external-pack dep.variant dep.variant external-fact-model semantic target=crate::external::dep_variant
+        external-pack dep.variant dep.variant external-fact-model semantic target=crate::external::dep_variant package=dep-variant path=../vendor/dep-variant
         external-pack-object dep.variant dep.variant.Record erased-object
         external-pack-object dep.variant dep.variant.Builder dyn-trait DepVariantBuilder
         external-pack-object dep.variant dep.variant.Kind closed-enum DepVariantKind SNV,INDEL
@@ -1920,11 +2021,13 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         external-pack-object-safety dep.variant dep.variant.GenericFactory nested-self-param acceptAll values
         external-pack-field-nullability dep.variant dep.variant.Record TYPE definitely-non-null
         external-pack-argument dep.variant dep.variant.Builder setContig 0 definitely-non-null read-only borrowed type=String
+        external-pack-constructor-argument dep.variant dep.variant.Builder 2 1 definitely-non-null read-only borrowed type=dep.variant.Options
+        external-pack-conversion dep.variant dep.variant.Leaf dep.variant.Root into
         external-pack-exception dep.variant dep.variant.DecodeError checked
         external-pack-api dep.variant dep.variant.Record getContig semantic getter read-only definitely-non-null return=String
         external-pack-api dep.variant dep.variant.Record hasAttribute semantic boolean-getter read-only definitely-non-null return=boolean
         external-pack-api dep.variant dep.variant.Builder setContig semantic fluent-mutator mutates-receiver definitely-non-null return=dep.variant.Builder
-        external-pack-api dep.variant dep.variant.Reader read mapped getter read-only maybe-null args=1 return=dep.variant.Record throws=DepIoError
+        external-pack-api dep.variant dep.variant.Reader read mapped getter read-only maybe-null args=1 return=dep.variant.Record throws=DepIoError rust-return=usize
         external-pack-constructor dep.variant dep.variant.Builder 0 semantic
         external-pack-constructor dep.variant dep.variant.LegacyReader 1 unsupported
         external-pack-field dep.variant dep.variant.Record TYPE semantic
@@ -2175,6 +2278,35 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         set_contig_argument.provenance,
         FactProvenance::ExternalLibraryPack
     );
+    let builder_constructor_argument = parsed
+        .facts
+        .external_constructor_argument_effect_for("dep.variant.Builder", 2, 1)
+        .expect("external-pack-constructor-argument should emit a constructor argument fact");
+    assert_eq!(
+        builder_constructor_argument.parameter_type,
+        Some(JavaType::Named {
+            name: "Options".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        builder_constructor_argument.parameter_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+    assert_eq!(
+        builder_constructor_argument.argument_mutability,
+        ReceiverMutabilityFact::ReadOnly
+    );
+    assert_eq!(
+        builder_constructor_argument.alias_policy,
+        ExternalArgumentAliasPolicy::Borrowed
+    );
+    let conversion_adapter = parsed
+        .facts
+        .external_conversion_adapter_for("dep.variant.Leaf", "dep.variant.Root")
+        .expect("external-pack-conversion should emit a conversion adapter fact");
+    assert_eq!(conversion_adapter.from_type, "dep.variant.Leaf");
+    assert_eq!(conversion_adapter.to_type, "dep.variant.Root");
     let decode_error = parsed
         .facts
         .exception_facts
@@ -2213,6 +2345,13 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
             name: "DepIoError".to_string(),
             args: Vec::new(),
         }]
+    );
+    assert_eq!(
+        parsed
+            .facts
+            .external_rust_return_type_for_receiver(Some("dep.variant.Reader"), "read", Some(1))
+            .map(|fact| fact.rust_type_name.as_str()),
+        Some("usize")
     );
     assert_eq!(
         parsed
@@ -12898,6 +13037,8 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
             "String",
         ),
         ("GenomicsDBUtils", "isGenomicsDBArray", 1, "String"),
+        ("GenomicsDBUtils", "getArrayColumnBounds", 0, "String"),
+        ("GenomicsDBUtils", "getArrayColumnBounds", 1, "String"),
         ("GenomicsDBUtils", "readEntireFile", 0, "String"),
         ("GenomicsDBUtils", "useGcsHdfsConnector", 0, "boolean"),
     ] {
@@ -16118,6 +16259,74 @@ class VariantPackUse {
         "newly modeled GATK-shaped variantcontext calls should not produce missing-pack diagnostics: {:?}",
         semantic.diagnostics
     );
+}
+
+#[test]
+fn semantic_analysis_uses_variantutils_observed_utils_and_enum_pack_entries() {
+    let semantic = analyze(
+        r#"
+import htsjdk.variant.variantcontext.GenotypeType;
+import htsjdk.variant.vcf.VCFHeaderLineCount;
+import htsjdk.variant.vcf.VCFHeaderLineType;
+import org.broadinstitute.hellbender.utils.Utils;
+import java.util.Collection;
+import java.util.List;
+
+class VariantUtilsObservedPackUse {
+    String joined(List<String> values) {
+        return Utils.join(",", values);
+    }
+
+    Object primitiveList(int[] values) {
+        return Utils.listFromPrimitives(values);
+    }
+
+    Object checked(Object value) {
+        return Utils.nonNull(value);
+    }
+
+    Object filtered(Collection<String> samples, Collection<String> expressions) {
+        return Utils.filterCollectionByExpressions(samples, expressions, false);
+    }
+
+    Object random() {
+        return Utils.getRandomGenerator();
+    }
+
+    Object genotype() {
+        return GenotypeType.HET;
+    }
+
+    Object count() {
+        return VCFHeaderLineCount.A;
+    }
+
+    Object lineType() {
+        return VCFHeaderLineType.Integer;
+    }
+}
+"#,
+    );
+
+    for needle in [
+        "Utils.join",
+        "Utils.listFromPrimitives",
+        "Utils.nonNull",
+        "Utils.filterCollectionByExpressions",
+        "Utils.getRandomGenerator",
+        "GenotypeType.HET",
+        "VCFHeaderLineCount.A",
+        "VCFHeaderLineType.Integer",
+    ] {
+        assert!(
+            !semantic
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(needle)),
+            "{needle} should be covered by external pack facts, diagnostics were {:?}",
+            semantic.diagnostics
+        );
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
 use new_java2rust::external_facts::parse_external_facts;
-use new_java2rust::facts::{FactProvenance, UnresolvedTargetKind};
+use new_java2rust::facts::{FactProvenance, FactSet, TypeCapabilityOverride, UnresolvedTargetKind};
 use new_java2rust::java_ir::{
     CallKind, ConstructorInvocationKind, Expr, JavaCoercionKind, JavaType, Member, Param,
     PrimitiveType, Stmt,
@@ -27,6 +27,27 @@ fn varargs_param(name: &str, element_ty: JavaType) -> Param {
         name: name.to_string(),
         ty: JavaType::Array(Box::new(element_ty)),
         is_varargs: true,
+    }
+}
+
+fn hierarchy_fact(type_name: &str, implements: &[&str]) -> TypeCapabilityOverride {
+    TypeCapabilityOverride {
+        type_name: type_name.to_string(),
+        copy: None,
+        clone: None,
+        string_like: None,
+        sequence_like: None,
+        implements: implements
+            .iter()
+            .map(|name| JavaType::Named {
+                name: (*name).to_string(),
+                args: Vec::new(),
+            })
+            .collect(),
+        extends: None,
+        final_type: None,
+        object_safe_trait: None,
+        provenance: FactProvenance::UserOverride,
     }
 }
 
@@ -4026,7 +4047,7 @@ class UseSourceInterfaceExtendsAssignability {
 }
 
 #[test]
-fn resolver_composes_source_extends_with_known_external_supertype_assignability() {
+fn resolver_composes_source_extends_with_fact_provided_external_supertype_assignability() {
     let parsed = parse_java_source(
         r#"
 class TranscriptFeature extends Feature {
@@ -4044,7 +4065,16 @@ class UseSourceAndExternalHierarchyAssignability {
 }
 "#,
     );
-    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .push(hierarchy_fact("Feature", &["Locatable"]));
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
     assert!(
         !resolved.diagnostics.has_errors(),
         "{:?}",
@@ -4146,7 +4176,7 @@ class ClassLiteralWildcardArgumentResolution {
 }
 
 #[test]
-fn resolver_uses_known_external_feature_subtype_for_wildcard_class_parameters() {
+fn resolver_uses_fact_provided_external_feature_subtype_for_wildcard_class_parameters() {
     let parsed = parse_java_source(
         r#"
 class FeatureInput<T> {}
@@ -4162,7 +4192,16 @@ class ExternalFeatureClassLiteralArgumentResolution {
 }
 "#,
     );
-    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .push(hierarchy_fact("VariantContext", &["Feature"]));
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
     assert!(
         !resolved.diagnostics.has_errors(),
         "{:?}",
@@ -4188,7 +4227,8 @@ class ExternalFeatureClassLiteralArgumentResolution {
 }
 
 #[test]
-fn resolver_uses_known_external_locatable_assignability_for_constructor_overload_arguments() {
+fn resolver_uses_fact_provided_external_locatable_assignability_for_constructor_overload_arguments()
+{
     let parsed = parse_java_source(
         r#"
 class TargetInterval {
@@ -4207,7 +4247,19 @@ class UseExternalLocatableAssignability {
 }
 "#,
     );
-    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .push(hierarchy_fact("VariantContext", &["Locatable"]));
+    facts
+        .type_capability_overrides
+        .push(hierarchy_fact("NamedFeature", &["Locatable"]));
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
     assert!(
         !resolved.diagnostics.has_errors(),
         "{:?}",
@@ -10731,7 +10783,22 @@ class CoreEnumAndQualityUtilityResolution {
 }
 "#,
     );
-    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let external_facts = parse_external_facts(
+        r#"
+external-api getPhredScaledQual VariantRecord getter read-only definitely-non-null args=0 return=double
+"#,
+    );
+    assert!(
+        external_facts.diagnostics.is_empty(),
+        "{:?}",
+        external_facts.diagnostics
+    );
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &external_facts.facts,
+    );
     assert!(
         !resolved.diagnostics.has_errors(),
         "{:?}",
@@ -13322,7 +13389,7 @@ class ExternalMapEntryReceiverResolution {
     assert_eq!(
         get_key.receiver_type,
         Some(JavaType::Named {
-            name: "Entry".to_string(),
+            name: "Map.Entry".to_string(),
             args: vec![
                 JavaType::Named {
                     name: "Allele".to_string(),

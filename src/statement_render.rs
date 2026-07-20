@@ -12,10 +12,19 @@ pub fn local_let_stmt_with_facts(
     value: Option<RustExpr>,
     facts: &FactSet,
 ) -> RustStmt {
+    local_let_stmt_with_type_annotation(local, value, facts, true)
+}
+
+pub fn local_let_stmt_with_type_annotation(
+    local: &LocalPlan,
+    value: Option<RustExpr>,
+    facts: &FactSet,
+    annotate_type: bool,
+) -> RustStmt {
     RustStmt::Let {
         mutable: local.binding_mutable,
         name: local.name.clone(),
-        ty: Some(rust_type_for_slot_with_facts(&local.shape, facts)),
+        ty: annotate_type.then(|| rust_type_for_slot_with_facts(&local.shape, facts)),
         value,
     }
 }
@@ -60,6 +69,18 @@ pub fn render_enhanced_for(var_name: &str, iterable: &RustExpr, body: &[RustStmt
     RustStmt::Raw(format!(
         "for {var_name} in {}.iter() {{\n{}\n}}",
         crate::emit::emit_expr(iterable),
+        crate::emit::emit_statements(body, 1)
+    ))
+}
+
+pub fn render_enhanced_for_iterator(
+    var_name: &str,
+    iterator: &RustExpr,
+    body: &[RustStmt],
+) -> RustStmt {
+    RustStmt::Raw(format!(
+        "for {var_name} in {} {{\n{}\n}}",
+        crate::emit::emit_expr(iterator),
         crate::emit::emit_statements(body, 1)
     ))
 }

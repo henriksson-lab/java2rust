@@ -4,7 +4,8 @@ use crate::conversion_plan::{
     BorrowedElementSlotAdapterPolicy, CloneRecoveryPolicy, DispatchCoercionFallbackPolicy,
     DispatchCoercionPolicy, DynCloneBoxAdapterGenerationPolicy, InstanceOfCheck,
     InstanceOfFallbackPolicy, InvalidCastPolicy, LoweredType, OptionalShapeCoercionPolicy,
-    OwnershipCoercionFallbackPolicy, OwnershipCoercionPolicy, ShapeCoercionPlan, Slot,
+    OwnershipCoercionFallbackPolicy, OwnershipCoercionPolicy, RustBorrowedFacadeReturnPolicy,
+    RustScalarSlotCastPolicy, RustUnsignedByteArrayReturnPolicy, ShapeCoercionPlan, Slot,
     SlotConversionPlan, SyntaxCoercionPlan, SyntaxSlotCoercionPolicy, ViewCoercionPolicy,
     dyn_clone_box_adapter_deferral_message, dyn_clone_box_adapter_generation_policy,
     dyn_clone_box_adapter_requirement,
@@ -87,6 +88,10 @@ pub enum Coercion {
     },
     BorrowConcreteFacade {
         target_type: String,
+    },
+    ExternalInto {
+        from_type: JavaType,
+        to_type: JavaType,
     },
     BoxDynTrait {
         trait_name: String,
@@ -178,6 +183,11 @@ impl ShapeCoercionPlan {
         if !optional_coercions.is_empty() {
             return optional_coercions;
         }
+        if matches!(self.dispatch, DispatchCoercionPolicy::EraseObject) {
+            plan.extend(self.ownership.coercions());
+            plan.extend(self.dispatch.coercions());
+            return non_identity_or_identity(plan);
+        }
         plan.extend(self.dispatch.coercions());
         let view_coercions = self.view.coercions();
         if !view_coercions.is_empty() {
@@ -191,11 +201,15 @@ impl ShapeCoercionPlan {
                 to: policy.to,
             });
         }
-        if plan.is_empty() {
-            plan.push(Coercion::Identity);
-        }
-        plan
+        non_identity_or_identity(plan)
     }
+}
+
+fn non_identity_or_identity(mut coercions: Vec<Coercion>) -> Vec<Coercion> {
+    if coercions.is_empty() {
+        coercions.push(Coercion::Identity);
+    }
+    coercions
 }
 
 pub fn non_identity_coercions(coercions: Vec<Coercion>) -> Vec<Coercion> {
@@ -371,6 +385,12 @@ impl DispatchCoercionPolicy {
             DispatchCoercionPolicy::BorrowConcreteFacade { target_type } => {
                 vec![Coercion::BorrowConcreteFacade {
                     target_type: target_type.clone(),
+                }]
+            }
+            DispatchCoercionPolicy::ExternalInto { from_type, to_type } => {
+                vec![Coercion::ExternalInto {
+                    from_type: from_type.clone(),
+                    to_type: to_type.clone(),
                 }]
             }
             DispatchCoercionPolicy::BoxDynTrait { trait_name } => vec![Coercion::BoxDynTrait {
@@ -585,8 +605,99 @@ pub fn apply_slot_conversion_plan(expr: RustExpr, plan: &SlotConversionPlan) -> 
         SlotConversionPlan::BorrowedElement(policy) => {
             apply_borrowed_element_slot_adapter(expr, policy)
         }
+        SlotConversionPlan::RustScalarCast(policy) => apply_rust_scalar_slot_cast(expr, policy),
+        SlotConversionPlan::RustBorrowedFacadeReturn(policy) => {
+            apply_rust_borrowed_facade_return(expr, policy)
+        }
+        SlotConversionPlan::RustUnsignedByteArrayReturn(policy) => {
+            apply_rust_unsigned_byte_array_return(expr, policy)
+        }
         SlotConversionPlan::Identity { .. } => expr,
     }
+}
+
+fn apply_rust_unsigned_byte_array_return(
+    expr: RustExpr,
+    policy: &RustUnsignedByteArrayReturnPolicy,
+) -> RustExpr {
+    let expr = emit::emit_expr(&expr);
+    if policy.optional {
+        RustExpr::Raw(format!(
+            "{expr}.map(|bytes| bytes.into_iter().map(|byte| byte as i8).collect::<Vec<_>>())"
+        ))
+    } else {
+        RustExpr::Raw(format!(
+            "{expr}.into_iter().map(|byte| byte as i8).collect::<Vec<_>>()"
+        ))
+    }
+}
+
+fn apply_rust_borrowed_facade_return(
+    expr: RustExpr,
+    policy: &RustBorrowedFacadeReturnPolicy,
+) -> RustExpr {
+    let recovered = if rust_borrowed_return_is_path_like(&policy.rust_type_name) {
+        RustExpr::Raw(format!("{}.to_path_buf()", emit::emit_expr(&expr)))
+    } else {
+        RustExpr::Raw(format!("{}.clone()", emit::emit_expr(&expr)))
+    };
+    let erased = RustExpr::Raw(format!(
+        "Box::new({}) as Box<dyn std::any::Any>",
+        emit::emit_expr(&recovered)
+    ));
+    if policy.target.optional_element_type().is_some() {
+        RustExpr::Raw(format!("Some({})", emit::emit_expr(&erased)))
+    } else {
+        erased
+    }
+}
+
+fn rust_borrowed_return_is_path_like(rust_type_name: &str) -> bool {
+    matches!(
+        rust_type_name.trim_start_matches('&').trim(),
+        "Path" | "std::path::Path" | "std::path::PathBuf" | "PathBuf"
+    )
+}
+
+fn apply_rust_scalar_slot_cast(expr: RustExpr, policy: &RustScalarSlotCastPolicy) -> RustExpr {
+    if rust_scalar_type_name_for_primitive(policy.target_primitive)
+        == Some(policy.rust_type_name.as_str())
+    {
+        return expr;
+    }
+    if rust_scalar_is_integral(&policy.rust_type_name)
+        && java_primitive_is_integral(policy.target_primitive)
+    {
+        return RustExpr::Raw(format!("{}.try_into().unwrap()", emit::emit_expr(&expr)));
+    }
+    RustExpr::Cast {
+        expr: Box::new(expr),
+        ty: rust_primitive_type_name_policy(policy.target_primitive)
+            .rust_name
+            .to_string(),
+    }
+}
+
+fn rust_scalar_type_name_for_primitive(primitive: PrimitiveType) -> Option<&'static str> {
+    Some(rust_primitive_type_name_policy(primitive).rust_name)
+}
+
+fn rust_scalar_is_integral(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "usize" | "isize" | "u64" | "u32" | "u16" | "u8" | "i64" | "i32" | "i16" | "i8"
+    )
+}
+
+fn java_primitive_is_integral(primitive: PrimitiveType) -> bool {
+    matches!(
+        primitive,
+        PrimitiveType::Byte
+            | PrimitiveType::Short
+            | PrimitiveType::Char
+            | PrimitiveType::Int
+            | PrimitiveType::Long
+    )
 }
 
 pub fn apply_expr_to_slot(expr: RustExpr, actual: RustSlotShape, slot: &Slot) -> RustExpr {
@@ -990,6 +1101,9 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             "{{ let _java_value = {}; &{target_type} }}",
             emit::emit_expr(&expr)
         )),
+        Coercion::ExternalInto { .. } => {
+            RustExpr::Raw(format!("{}.into()", emit::emit_expr(&expr)))
+        }
         Coercion::BoxDynTrait { trait_name } => RustExpr::Raw(format!(
             "Box::new({}) as Box<dyn {trait_name}>",
             emit::emit_expr(&expr)
