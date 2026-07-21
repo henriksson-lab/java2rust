@@ -367,7 +367,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                 return parenthesize_stream_expr_if_needed(
                     format!(
                         "{}::{}({})",
-                        crate::call_plan::rust_static_owner_type_name(&resolved.declaring_type),
+                        stream_static_owner_type_name_with_context(&resolved.declaring_type, ctx),
                         resolved.rust_name,
                         args.join(", ")
                     ),
@@ -867,6 +867,7 @@ fn emit_stream_method_reference_body(
         ("Integer", "intValue" | "int_value") => Some(value_expr),
         ("Object", "toString" | "to_string") => Some(format!("{receiver}.to_string()")),
         ("String", "valueOf" | "value_of") => Some(format!("{receiver}.to_string()")),
+        (_, method) if is_scala_tuple_accessor(method) => Some(format!("{receiver}.{method}()")),
         (_, method) if method.starts_with("get") || method.starts_with("get_") => Some(format!(
             "{receiver}.{}()",
             crate::parser::to_snake_case(method)
@@ -881,6 +882,12 @@ fn emit_stream_method_reference_body(
             crate::parser::to_snake_case(method)
         )),
     }
+}
+
+fn is_scala_tuple_accessor(method: &str) -> bool {
+    method
+        .strip_prefix('_')
+        .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn emit_nullable_stream_lambda_closure_body(
@@ -1510,6 +1517,12 @@ fn stream_static_owner_expr_type_name(
     stream_static_owner_expr_segment(receiver, locals, ctx)
 }
 
+fn stream_static_owner_type_name_with_context(owner: &str, ctx: StreamRenderContext<'_>) -> String {
+    ctx.facts
+        .map(|facts| crate::call_plan::rust_static_owner_type_name_with_facts(owner, facts))
+        .unwrap_or_else(|| crate::call_plan::rust_static_owner_type_name(owner))
+}
+
 fn stream_static_owner_expr_segment(
     receiver: &Expr,
     locals: &[&str],
@@ -1529,11 +1542,11 @@ fn stream_static_owner_expr_segment(
             if !is_static_owner_name(name) {
                 return None;
             }
-            Some(crate::call_plan::rust_static_owner_type_name(name))
+            Some(stream_static_owner_type_name_with_context(name, ctx))
         }
         Expr::FieldAccess(inner, field) => {
             let _ = stream_static_owner_expr_segment(inner, locals, ctx)?;
-            Some(crate::call_plan::rust_static_owner_type_name(field))
+            Some(stream_static_owner_type_name_with_context(field, ctx))
         }
         _ => None,
     }

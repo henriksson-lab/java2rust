@@ -11,7 +11,8 @@ use crate::rust_ir::{
 };
 use crate::signature::{ReceiverPlan, SignaturePlan};
 use crate::slot_render::{
-    default_expr_for_slot, default_expr_for_slot_with_facts, rust_type_for_slot_with_facts,
+    default_expr_for_slot, default_expr_for_slot_with_facts, rust_name_for_java_named_type,
+    rust_type_for_slot_with_facts,
 };
 use crate::slot_shape::RustSlotShape;
 
@@ -34,14 +35,14 @@ pub fn struct_item_for_type_with_facts_and_support_context(
     support_program: &Program,
 ) -> RustItem {
     RustItem::Struct(RustStruct {
-        name: ty.name.clone(),
+        name: rust_name_for_java_named_type(&ty.name),
         fields: struct_fields_for_type(ty, signatures, facts, support_program),
     })
 }
 
 pub fn impl_item_for_type(ty: &TypeDecl, functions: Vec<RustFunction>) -> RustItem {
     RustItem::Impl(RustImpl {
-        target: ty.name.clone(),
+        target: rust_name_for_java_named_type(&ty.name),
         associated_consts: associated_consts_for_type(ty),
         functions,
     })
@@ -79,7 +80,7 @@ pub fn constructor_function_shell_with_facts(
 
 pub fn constructor_return_body(ty: &TypeDecl, fields: Vec<(String, RustExpr)>) -> Vec<RustStmt> {
     vec![RustStmt::Return(Some(RustExpr::StructLit {
-        name: ty.name.clone(),
+        name: rust_name_for_java_named_type(&ty.name),
         fields: reorder_struct_literal_moves_after_reads(fields),
     }))]
 }
@@ -387,7 +388,7 @@ fn constructor_return_type(
     signatures: &SignaturePlan,
 ) -> RustType {
     let _ = signatures.required_constructor_signature(ty, ctor);
-    RustType::Named(ty.name.clone())
+    RustType::Named(rust_name_for_java_named_type(&ty.name))
 }
 
 fn method_params(

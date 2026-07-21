@@ -20,6 +20,7 @@ pub struct FactSet {
     pub trivial_accessor_facts: Vec<TrivialAccessorFact>,
     pub external_api_effect_facts: Vec<ExternalApiEffectFact>,
     pub external_api_argument_effect_facts: Vec<ExternalApiArgumentEffectFact>,
+    pub external_ffi_handover_facts: Vec<ExternalFfiHandoverFact>,
     pub external_constructor_argument_effect_facts: Vec<ExternalConstructorArgumentEffectFact>,
     pub external_conversion_adapter_facts: Vec<ExternalConversionAdapterFact>,
     pub external_crate_api_mapping_facts: Vec<ExternalCrateApiMappingFact>,
@@ -338,6 +339,21 @@ pub struct ExternalApiArgumentEffectFact {
     pub argument_mutability: ReceiverMutabilityFact,
     pub alias_policy: ExternalArgumentAliasPolicy,
     pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalFfiHandoverFact {
+    pub method_name: String,
+    pub receiver_type: Option<String>,
+    pub slot: ExternalFfiHandoverSlot,
+    pub parameter_type: Option<JavaType>,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalFfiHandoverSlot {
+    Receiver,
+    Argument { parameter_index: usize },
 }
 
 impl ExternalApiArgumentEffectFact {
@@ -917,6 +933,8 @@ impl FactSet {
             .extend(other.external_api_effect_facts);
         self.external_api_argument_effect_facts
             .extend(other.external_api_argument_effect_facts);
+        self.external_ffi_handover_facts
+            .extend(other.external_ffi_handover_facts);
         self.external_constructor_argument_effect_facts
             .extend(other.external_constructor_argument_effect_facts);
         self.external_conversion_adapter_facts
@@ -1252,6 +1270,75 @@ impl FactSet {
                     &key.member.0,
                     parameter_index,
                 )
+            })
+    }
+
+    pub fn external_ffi_argument_handover_for_receiver(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        parameter_index: usize,
+        parameter_type: &JavaType,
+    ) -> Option<&ExternalFfiHandoverFact> {
+        self.external_ffi_handover_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                fact.method_name == method_name
+                    && external_optional_type_name_matches(
+                        fact.receiver_type.as_deref(),
+                        receiver_type,
+                    )
+                    && fact.slot == ExternalFfiHandoverSlot::Argument { parameter_index }
+                    && fact
+                        .parameter_type
+                        .as_ref()
+                        .is_none_or(|fact_ty| fact_ty == parameter_type)
+            })
+            .or_else(|| {
+                self.external_ffi_handover_facts.iter().rev().find(|fact| {
+                    fact.method_name == method_name
+                        && fact.receiver_type.is_none()
+                        && fact.slot == ExternalFfiHandoverSlot::Argument { parameter_index }
+                        && fact
+                            .parameter_type
+                            .as_ref()
+                            .is_none_or(|fact_ty| fact_ty == parameter_type)
+                })
+            })
+    }
+
+    pub fn external_ffi_receiver_handover_for_receiver(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        receiver_java_ty: &JavaType,
+    ) -> Option<&ExternalFfiHandoverFact> {
+        self.external_ffi_handover_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                fact.method_name == method_name
+                    && external_optional_type_name_matches(
+                        fact.receiver_type.as_deref(),
+                        receiver_type,
+                    )
+                    && fact.slot == ExternalFfiHandoverSlot::Receiver
+                    && fact
+                        .parameter_type
+                        .as_ref()
+                        .is_none_or(|fact_ty| fact_ty == receiver_java_ty)
+            })
+            .or_else(|| {
+                self.external_ffi_handover_facts.iter().rev().find(|fact| {
+                    fact.method_name == method_name
+                        && fact.receiver_type.is_none()
+                        && fact.slot == ExternalFfiHandoverSlot::Receiver
+                        && fact
+                            .parameter_type
+                            .as_ref()
+                            .is_none_or(|fact_ty| fact_ty == receiver_java_ty)
+                })
             })
     }
 

@@ -112,6 +112,7 @@ pub enum BindingUse {
     },
     PassedToCall {
         name: String,
+        receiver_type: Option<JavaType>,
         arg_index: usize,
         boundary: CallArgumentBoundary,
     },
@@ -137,6 +138,7 @@ pub enum FieldUse {
     PassedToCall {
         field_name: String,
         name: String,
+        receiver_type: Option<JavaType>,
         arg_index: usize,
         boundary: CallArgumentBoundary,
     },
@@ -1206,6 +1208,7 @@ fn analyze_stmt(
                     semantic_facts,
                     arg,
                     "constructor",
+                    None,
                     arg_index,
                     policy.boundary,
                 );
@@ -1403,6 +1406,7 @@ fn analyze_expr_with_context(
                 boundary: policy.boundary,
                 resolved: resolved.clone(),
             });
+            let receiver_type = call_receiver_java_type(receiver.as_deref(), facts);
             if is_content_read_method(name)
                 && let Some(receiver) = receiver
                 && let Expr::Var(binding) = receiver.as_ref()
@@ -1432,6 +1436,7 @@ fn analyze_expr_with_context(
                     semantic_facts,
                     arg,
                     name,
+                    receiver_type.clone(),
                     arg_index,
                     arg_boundary,
                 );
@@ -1589,6 +1594,7 @@ fn analyze_expr_with_context(
                     semantic_facts,
                     arg,
                     "new",
+                    None,
                     arg_index,
                     CallArgumentBoundary::Unknown,
                 );
@@ -1716,6 +1722,7 @@ fn record_call_arg_use(
     semantic_facts: &FactSet,
     arg: &Expr,
     call_name: &str,
+    receiver_type: Option<JavaType>,
     arg_index: usize,
     boundary: CallArgumentBoundary,
 ) {
@@ -1723,6 +1730,7 @@ fn record_call_arg_use(
         facts.field_uses.push(FieldUse::PassedToCall {
             field_name,
             name: call_name.to_string(),
+            receiver_type,
             arg_index,
             boundary,
         });
@@ -1733,6 +1741,7 @@ fn record_call_arg_use(
             facts.field_uses.push(FieldUse::PassedToCall {
                 field_name: name.clone(),
                 name: call_name.to_string(),
+                receiver_type,
                 arg_index,
                 boundary,
             });
@@ -1742,6 +1751,7 @@ fn record_call_arg_use(
             binding,
             BindingUse::PassedToCall {
                 name: call_name.to_string(),
+                receiver_type,
                 arg_index,
                 boundary,
             },
@@ -1750,12 +1760,23 @@ fn record_call_arg_use(
             facts.field_uses.push(FieldUse::PassedToCall {
                 field_name: field_name.clone(),
                 name: call_name.to_string(),
+                receiver_type,
                 arg_index,
                 boundary,
             });
         }
         _ => {}
     }
+}
+
+fn call_receiver_java_type(receiver: Option<&Expr>, facts: &MethodUsageFacts) -> Option<JavaType> {
+    let Some(Expr::Var(name)) = receiver else {
+        return None;
+    };
+    facts
+        .bindings
+        .get(name)
+        .map(|binding| binding.java_ty.clone())
 }
 
 fn record_trivial_accessor_call_use(

@@ -38,9 +38,9 @@ use crate::diagnostics::DiagnosticBag;
 use crate::emit;
 use crate::exception_lowering::{
     CatchRenderArm, exception_cause_or_self_if_instance_expr,
-    exception_expr_from_new_with_cause_hint, exception_try_ok_type, fallback_exception_expr,
-    java_exception_support_item_with_facts, return_stmt, throw_stmt, try_catch_stmt,
-    try_finally_scope_stmt, try_with_resources_scope_stmt,
+    exception_expr_from_new_with_cause_hint, exception_result_type, exception_try_ok_type,
+    fallback_exception_expr, java_exception_support_item_with_facts, return_stmt, throw_stmt,
+    try_catch_stmt, try_finally_scope_stmt, try_with_resources_scope_stmt,
 };
 use crate::exception_plan::{
     ProgramExceptionPlan, ThrowExprPlan, TryBlockCompletion, TryStmtPlan, catch_match_class_names,
@@ -704,7 +704,9 @@ fn lower_implicit_default_constructor(
     RustFunction {
         name: "new".to_string(),
         params: Vec::new(),
-        return_type: Some(RustType::Named(ty.name.clone())),
+        return_type: Some(RustType::Named(
+            crate::slot_render::rust_name_for_java_named_type(&ty.name),
+        )),
         body: constructor_return_body(ty, fields),
         is_pub: true,
         receiver: None,
@@ -804,8 +806,8 @@ fn lower_delegating_constructor(
 ) -> Option<RustFunction> {
     let plan = plan_constructor_delegation_for_type(Some(ty), body)?;
 
-    let body = match plan {
-        ConstructorDelegationPlan::SameClassCall { args, resolved } => {
+    let (body, returns_result) = match plan {
+        ConstructorDelegationPlan::SameClassCall { args, resolved } => (
             delegating_constructor_return_body(
                 &resolved.rust_name,
                 lower_args_with_plan(
@@ -814,13 +816,28 @@ fn lower_delegating_constructor(
                     plan_constructor_arguments(Some(resolved), args.len(), ctx.signatures),
                     ctx,
                 ),
-            )
-        }
+            ),
+            false,
+        ),
         ConstructorDelegationPlan::SameClassCallWithTrailing {
             args,
             resolved,
             trailing,
-        } => delegated_constructor_with_trailing_body(ty, resolved, args, &trailing, env, ctx),
+        } => {
+            let returns_result = delegated_constructor_trailing_can_throw(&trailing, env, ctx);
+            (
+                delegated_constructor_with_trailing_body(
+                    ty,
+                    resolved,
+                    args,
+                    &trailing,
+                    env,
+                    ctx,
+                    returns_result,
+                ),
+                returns_result,
+            )
+        }
         ConstructorDelegationPlan::ExternalExceptionSuperclass { .. } => {
             let fields = plan_constructor_field_values_with_inherited_fields(
                 ty,
@@ -831,18 +848,19 @@ fn lower_delegating_constructor(
             .into_iter()
             .map(|plan| lower_constructor_field_value_plan(plan, env, ctx))
             .collect();
-            constructor_return_body(ty, fields)
+            (constructor_return_body(ty, fields), false)
         }
-        ConstructorDelegationPlan::Unsupported(kind) => vec![unsupported_constructor_stmt(kind)],
+        ConstructorDelegationPlan::Unsupported(kind) => {
+            (vec![unsupported_constructor_stmt(kind)], false)
+        }
     };
 
-    Some(constructor_function_shell_with_facts(
-        ty,
-        ctor,
-        ctx.signatures,
-        body,
-        ctx.facts,
-    ))
+    let mut function =
+        constructor_function_shell_with_facts(ty, ctor, ctx.signatures, body, ctx.facts);
+    if returns_result {
+        function.return_type = Some(exception_result_type(RustType::Named(ty.name.clone())));
+    }
+    Some(function)
 }
 
 fn delegated_constructor_with_trailing_body(
@@ -852,6 +870,7 @@ fn delegated_constructor_with_trailing_body(
     trailing: &[DelegatedConstructorTrailingStmt<'_>],
     env: &ShapeEnv,
     ctx: LowerCtx,
+    returns_result: bool,
 ) -> Vec<RustStmt> {
     let mut body = vec![RustStmt::Let {
         mutable: true,
@@ -869,13 +888,45 @@ fn delegated_constructor_with_trailing_body(
     }];
     for stmt in trailing {
         body.push(lower_delegated_constructor_trailing_stmt(
-            ty, stmt, env, ctx,
+            ty,
+            stmt,
+            env,
+            ctx,
+            returns_result,
         ));
     }
-    body.push(RustStmt::Return(Some(RustExpr::Var(
-        "__java_self".to_string(),
-    ))));
+    let returned = RustExpr::Var("__java_self".to_string());
+    body.push(RustStmt::Return(Some(if returns_result {
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("Ok".to_string())),
+            args: vec![returned],
+        }
+    } else {
+        returned
+    })));
     body
+}
+
+fn delegated_constructor_trailing_can_throw(
+    trailing: &[DelegatedConstructorTrailingStmt<'_>],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    trailing.iter().any(|stmt| match stmt {
+        DelegatedConstructorTrailingStmt::InstanceCall { resolved, args } => matches!(
+            plan_call_exception_propagation(
+                Some(&Expr::This),
+                &resolved.rust_name,
+                args,
+                Some(resolved),
+                ctx.facts,
+                env.type_env(),
+                ctx.current_type,
+            ),
+            CallExceptionPropagationPlan::PropagateResult
+        ),
+        DelegatedConstructorTrailingStmt::FieldAssignment { .. } => false,
+    })
 }
 
 fn lower_delegated_constructor_trailing_stmt(
@@ -883,6 +934,7 @@ fn lower_delegated_constructor_trailing_stmt(
     stmt: &DelegatedConstructorTrailingStmt<'_>,
     env: &ShapeEnv,
     ctx: LowerCtx,
+    returns_result: bool,
 ) -> RustStmt {
     match stmt {
         DelegatedConstructorTrailingStmt::FieldAssignment { field_name, value } => {
@@ -898,7 +950,8 @@ fn lower_delegated_constructor_trailing_stmt(
             )
         }
         DelegatedConstructorTrailingStmt::InstanceCall { resolved, args } => {
-            expr_stmt(RustExpr::MethodCall {
+            let receiver = Expr::This;
+            let mut lowered = RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::Var("__java_self".to_string())),
                 method: resolved.rust_name.clone(),
                 args: lower_args_with_plan(
@@ -907,7 +960,24 @@ fn lower_delegated_constructor_trailing_stmt(
                     plan_call_arguments(Some(resolved), args.len(), ctx.signatures),
                     ctx,
                 ),
-            })
+            };
+            if returns_result
+                && matches!(
+                    plan_call_exception_propagation(
+                        Some(&receiver),
+                        &resolved.rust_name,
+                        args,
+                        Some(resolved),
+                        ctx.facts,
+                        env.type_env(),
+                        ctx.current_type,
+                    ),
+                    CallExceptionPropagationPlan::PropagateResult
+                )
+            {
+                lowered = propagate_result_expr(lowered);
+            }
+            expr_stmt(lowered)
         }
     }
 }
@@ -1962,11 +2032,18 @@ fn lower_try_stmt(
         TryStmtPlan::FinallyOnly {
             body: planned_body,
             finally_block,
+            completion,
         } => {
             let try_body = lower_block(planned_body, &mut env.clone(), true, ctx);
             let finally_body =
                 lower_block(finally_block, &mut env.clone(), wrap_returns_in_ok, ctx);
-            return try_finally_scope_stmt(try_body, finally_body, wrap_returns_in_ok);
+            return try_finally_scope_stmt(
+                ok_type,
+                try_body,
+                finally_body,
+                matches!(completion, TryBlockCompletion::Terminates),
+                wrap_returns_in_ok,
+            );
         }
         TryStmtPlan::Unsupported => return unsupported_try_catch_finally_stmt(),
     };
@@ -2020,7 +2097,13 @@ fn try_resource_cleanup_stmts(resources: &[Stmt], env: &ShapeEnv, ctx: LowerCtx)
                 method: "close".to_string(),
                 args: Vec::new(),
             };
-            if matches!(
+            if slot_expr_needs_result_propagation_from_shape_env(
+                Some(&receiver),
+                "close",
+                0,
+                env,
+                ctx,
+            ) || matches!(
                 plan_call_exception_propagation(
                     Some(&receiver),
                     "close",
@@ -3087,6 +3170,25 @@ fn lower_expr_with_refinements(
         Expr::New {
             ty, args, resolved, ..
         } => {
+            if concrete_java_type_name(ty)
+                .map(crate::stdlib::canonical_external_receiver_type_key)
+                .as_deref()
+                == Some("URI")
+                && args.len() == 1
+            {
+                let lowered = RustExpr::Call {
+                    function: Box::new(RustExpr::Raw("URI::parse".to_string())),
+                    args: lower_args_with_plan(
+                        args,
+                        env,
+                        ArgumentLoweringPlan::Unshaped {
+                            arg_count: args.len(),
+                        },
+                        ctx,
+                    ),
+                };
+                return propagate_result_expr(lowered);
+            }
             let target = plan_new_target_for_args_with_facts(
                 ty,
                 resolved.as_ref(),

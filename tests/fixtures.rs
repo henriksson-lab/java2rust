@@ -1069,9 +1069,9 @@ fn nested_static_builder_call_uses_resolved_type_owner() {
         translation.diagnostics
     );
     assert!(
-        translation
-            .rust
-            .contains("let builder: Builder = GenomicsDBColumn::new_builder();")
+        translation.rust.contains(
+            "let builder: NestedStaticBuilderCallBuilder = NestedStaticBuilderCallCoordinatesGenomicsDBColumn::new_builder();"
+        )
     );
     assert!(!translation.rust.contains("coordinates.genomics_d_b_column"));
     assert!(!translation.rust.contains("Coordinates::GenomicsDBColumn"));
@@ -1085,11 +1085,9 @@ fn stream_block_lambda_static_owner_uses_type_owner() {
         "{:?}",
         translation.diagnostics
     );
-    assert!(
-        translation
-            .rust
-            .contains("let mut builder = GenomicsDBColumn::new_builder();")
-    );
+    assert!(translation.rust.contains(
+        "let mut builder = StreamBlockStaticOwnerCoordinatesGenomicsDBColumn::new_builder();"
+    ));
     assert!(!translation.rust.contains("coordinates.genomics_d_b_column"));
 }
 

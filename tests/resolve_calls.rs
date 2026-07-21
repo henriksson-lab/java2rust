@@ -14033,6 +14033,40 @@ field ReadLikelihoodCalculationEngine.DEFAULT_EXPECTED_ERROR_RATE_PER_BASE doubl
 }
 
 #[test]
+fn declaration_facts_do_not_model_source_methods_as_external_api_effects() {
+    let parsed = parse_java_source(
+        r#"
+package helper.summary;
+
+class SummaryHelper {
+    static final String DEFAULT_NAME = "default";
+
+    String maybeName(boolean choose) {
+        return choose ? DEFAULT_NAME : null;
+    }
+}
+"#,
+    );
+
+    let facts = new_java2rust::resolve::declaration_facts_from_program(&parsed.program);
+
+    assert!(
+        facts.external_api_effect_facts.is_empty(),
+        "parsed source method declarations must not become external API effects: {:?}",
+        facts.external_api_effect_facts
+    );
+    assert!(
+        facts.external_field_facts.iter().any(|fact| {
+            fact.field.type_name == "helper.summary.SummaryHelper"
+                && fact.field.field_name == "DEFAULT_NAME"
+                && fact.provenance == FactProvenance::ParsedSource
+        }),
+        "source field declarations should still be available as parsed source field facts: {:?}",
+        facts.external_field_facts
+    );
+}
+
+#[test]
 fn resolver_threads_configured_field_facts_through_nested_expressions() {
     let parsed = parse_java_source(
         r#"

@@ -5,9 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use new_java2rust::facts::{
     ExternalApiArgumentEffectFact, ExternalApiEffectFact, ExternalApiRole,
-    ExternalArgumentAliasPolicy, ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet,
-    FieldKey, NullabilityState, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
-    ReceiverMutabilityFact, TypeCapabilityOverride,
+    ExternalArgumentAliasPolicy, ExternalFfiHandoverFact, ExternalFfiHandoverSlot,
+    ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet, FieldKey, NullabilityState,
+    OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, ReceiverMutabilityFact,
+    TypeCapabilityOverride,
 };
 use new_java2rust::java_ir::JavaType;
 use new_java2rust::{
@@ -1396,8 +1397,11 @@ fn constructor_string_argument_reuse_clones_at_owned_boundary() {
 
     assert!(
         translation.rust.contains(
-            "let uri: URI = URI::new(path.clone()/* TODO(translation): validate added clone */);"
-        ) && translation.rust.contains("path.is_empty()")
+            "let uri: URI = URI::parse(path.clone()/* TODO(translation): validate added clone */)?;"
+        ) && translation
+            .rust
+            .contains("pub fn choose(&self, path: String) -> Result<URI, JavaException>")
+            && translation.rust.contains("path.is_empty()")
             && !translation.rust.contains("let uri: URI = URI::new(path);"),
         "{}",
         translation.rust
@@ -1427,7 +1431,14 @@ fn optional_uri_constructor_path_arg_compiles_through_java_path_arg() {
             && translation
                 .rust
                 .contains("pub fn new<P: JavaPathArg>(value: P) -> URI")
-            && translation.rust.contains("let uri: URI = URI::new(path);"),
+            && translation
+                .rust
+                .contains("pub fn parse<P: JavaPathArg>(value: P) -> Result<URI, JavaException>")
+            && translation.rust.contains(
+                "pub fn parse(&self, path: Option<String>) -> Result<URI, JavaException>"
+            )
+            && translation.rust.contains("let uri: URI = URI::parse(")
+            && translation.rust.contains("?;"),
         "{}",
         translation.rust
     );
@@ -2630,13 +2641,27 @@ fn translates_external_exception_super_constructor_without_placeholder() {
 
 #[test]
 fn corpus_picard_imported_constants_need_source_summary_facts() {
+    let receiver = new_java2rust::java_ir::Expr::Var("HelpConstants".to_string());
+    let type_env = new_java2rust::types::TypeEnv::new();
+    assert_eq!(
+        new_java2rust::member_access_plan::java_member_access_policy_with_facts(
+            &receiver,
+            "DOC_CAT_BASE_CALLING",
+            &type_env,
+            &FactSet::default(),
+        )
+        .map(|policy| policy.java_ty),
+        Some(JavaType::String)
+    );
+
     let translation = translate_source(&idiom_gap("SourceSummaryConstantAcrossPackage.java"));
 
     assert!(
         translation
             .rust
-            .contains("HelpConstants::DOC_CAT_BASE_CALLING.downcast::<String>()")
-            && translation.rust.contains("invalid Java cast"),
+            .contains("return HelpConstants::DOC_CAT_BASE_CALLING.to_string();")
+            && !translation.rust.contains("downcast::<String>()")
+            && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
     );
@@ -2670,17 +2695,20 @@ fn corpus_genomicsdb_file_load_constructor_delegation_exposes_exception_type_gap
     let translation = translate_source(&idiom_gap("FileLoadConstructorDelegation.java"));
 
     assert!(
-        translation
+        translation.rust.contains(
+            "pub fn new_path(source: Path) -> Result<FileLoadConstructorDelegation, JavaException>"
+        ) && translation
             .rust
             .contains("let mut __java_self = Self::new();")
-            && translation.rust.contains("__java_self.load(source);")
+            && translation.rust.contains("__java_self.load(source)?;")
+            && translation.rust.contains("return Ok(__java_self);")
             && translation
                 .rust
                 .contains("JavaException::new(\"IllegalArgumentException\"")
             && translation
                 .rust
                 .contains("Err(e) if e.is_instance(&[\"URISyntaxException\"])")
-            && !translation
+            && translation
                 .rust
                 .contains("Err(e) if e.is_instance(&[\"IOException\"])")
             && !translation
@@ -2692,7 +2720,7 @@ fn corpus_genomicsdb_file_load_constructor_delegation_exposes_exception_type_gap
 }
 
 #[test]
-fn corpus_genomicsdb_qualified_nested_builders_still_collide_on_simple_builder_name() {
+fn corpus_genomicsdb_qualified_nested_builders_use_distinct_rust_type_names() {
     let translation = translate_source(&idiom_gap("QualifiedNestedBuilderChain.java"));
 
     assert!(
@@ -2702,7 +2730,11 @@ fn corpus_genomicsdb_qualified_nested_builders_still_collide_on_simple_builder_n
             && translation.rust.contains(
                 "let field_builder: FieldInfoBuilder = mapping_builder.get_fields_builder(index);"
             )
-            && translation.rust.matches("pub struct Builder").count() >= 2
+            && translation.rust.contains("pub struct VidMappingBuilder")
+            && translation.rust.contains("pub struct FieldInfoBuilder")
+            && !translation.rust.contains("pub struct Builder")
+            && !translation.rust.contains("VidMapping.Builder")
+            && !translation.rust.contains("FieldInfo.Builder")
             && translation.rust.contains("return mapping_builder.build();"),
         "{}",
         translation.rust
@@ -2710,39 +2742,58 @@ fn corpus_genomicsdb_qualified_nested_builders_still_collide_on_simple_builder_n
 }
 
 #[test]
-fn corpus_spark_rdd_pipeline_documents_lambda_method_reference_and_null_comparator_gaps() {
+fn corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary() {
     let translation = translate_source(&idiom_gap("SparkRddVariantPipeline.java"));
 
     assert!(
         translation
             .rust
             .contains("variants.map_to_pair(|variant| Tuple2::new(variant, None))")
+            && translation.rust.contains(
+                "let comparator: Option<Comparator> = header.get_v_c_f_record_comparator();"
+            )
+            && translation.rust.contains("if comparator.is_none()")
+            && translation.rust.contains(
+                "pairs.sort_by_key_3(comparator.clone()/* TODO(translation): validate added clone */, true, reducers)"
+            )
+            && translation.rust.contains(
+                "pairs.sort_by_key_1(comparator.clone()/* TODO(translation): validate added clone */)"
+            )
             && translation
                 .rust
                 .contains("return sorted.map(|value| value._1());")
-            && translation.rust.contains("if false")
             && translation
-                .rust
-                .contains("TODO(translation): validate added clone")
+                .diagnostics
+                .has_code("external_pack_boundary_call")
+            && !translation.rust.contains("if false")
+            && !translation.rust.contains("sort_by_key_3(&comparator")
+            && !translation.rust.contains("sort_by_key_1(&comparator")
             && !translation
                 .rust
                 .contains("unsupported Java expression: lambda"),
-        "{}",
-        translation.rust
+        "rust:\n{}\ndiagnostics:{:?}",
+        translation.rust,
+        translation.diagnostics
     );
 }
 
 #[test]
-fn corpus_disq_external_chain_needs_explicit_boundary_not_self_recursion_warning() {
+fn corpus_disq_external_chain_stays_unmodeled_boundary_without_self_recursion_warning() {
     let translation = translate_source(&idiom_gap("DisqExternalBoundaryChain.java"));
 
     assert!(
         translation.rust.contains(
-            "HtsjdkVariantsRddStorage::make_default(ctx).read(input, intervals).get_variants()"
+            "htsjdk_variants_rdd_storage::make_default(ctx).read(input, intervals).get_variants()"
         ) && translation
             .rust
-            .contains("TabixIndexWriteOption::from_boolean(true)")
-            && translation.diagnostics.has_code("recursion_tco_fallback"),
+            .contains("tabix_index_write_option::from_boolean(true)")
+            && translation
+                .diagnostics
+                .has_code("external_pack_boundary_call")
+            && !translation.diagnostics.has_code("recursion_tco_fallback")
+            && !translation
+                .diagnostics
+                .has_code("external_pack_missing_api"),
         "rust:
 {}
 diagnostics:{:?}",
@@ -2781,7 +2832,18 @@ fn corpus_ffi_boundary_manifest_shapes_native_handover_calls() {
                 .contains("pub type NativeLibrary = NativeRuntimeNativeLibrary;")
             && translation
                 .rust
-                .contains("compile_error!(\"unsupported Java statement: try/catch/finally\")")
+                .contains("let __java_try_result = (|| -> Result<i32, JavaException>")
+            && translation.rust.contains("return Ok(query.count());")
+            && translation.rust.contains("array.close();")
+            && translation
+                .rust
+                .contains("return __java_try_result.unwrap_or_else")
+            && translation
+                .rust
+                .contains("panic!(\"uncaught Java exception: {:?}\", ex)")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally")
             && translation.diagnostics.has_code("recursion_tco_fallback"),
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
@@ -2801,8 +2863,23 @@ fn corpus_ffi_owned_handle_transfer_requires_explicit_handover() {
         .push(OwnedRecoveryCapabilityFact {
             type_name: "NativeArray".to_string(),
             capability: OwnedRecoveryCapability::FfiOwnedHandle {
-                java_ty: native_array,
+                java_ty: native_array.clone(),
             },
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts
+        .external_api_argument_effect_facts
+        .push(ExternalApiArgumentEffectFact {
+            method_name: "consume".to_string(),
+            receiver_type: Some("NativeConsumer".to_string()),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::Named {
+                name: "NativeArray".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
             provenance: FactProvenance::ExternalLibraryPack,
         });
     facts
@@ -2819,14 +2896,73 @@ fn corpus_ffi_owned_handle_transfer_requires_explicit_handover() {
             object_safe_trait: None,
             provenance: FactProvenance::UserOverride,
         });
+    let translation_without_handover =
+        translate_source_with_facts(&idiom_gap("FfiOwnedHandleTransfer.java"), &facts);
+    assert!(
+        translation_without_handover
+            .diagnostics
+            .has_code("signature_owned_recovery_requires_ffi_transfer"),
+        "rust:\n{}\ndiagnostics:{:?}",
+        translation_without_handover.rust,
+        translation_without_handover.diagnostics
+    );
 
+    facts
+        .external_ffi_handover_facts
+        .push(ExternalFfiHandoverFact {
+            method_name: "consume".to_string(),
+            receiver_type: Some("NativeConsumer".to_string()),
+            slot: ExternalFfiHandoverSlot::Argument { parameter_index: 0 },
+            parameter_type: Some(native_array.clone()),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts
+        .external_ffi_handover_facts
+        .push(ExternalFfiHandoverFact {
+            method_name: "close".to_string(),
+            receiver_type: Some("NativeArray".to_string()),
+            slot: ExternalFfiHandoverSlot::Receiver,
+            parameter_type: Some(native_array),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    let array_binding = new_java2rust::usage::BindingUseFacts {
+        name: "array".to_string(),
+        java_ty: JavaType::Named {
+            name: "NativeArray".to_string(),
+            args: Vec::new(),
+        },
+        uses: vec![new_java2rust::usage::BindingUse::PassedToCall {
+            name: "consume".to_string(),
+            receiver_type: Some(JavaType::Named {
+                name: "NativeConsumer".to_string(),
+                args: Vec::new(),
+            }),
+            arg_index: 0,
+            boundary: new_java2rust::usage::CallArgumentBoundary::Unknown,
+        }],
+    };
+    let array_constraints =
+        new_java2rust::signature::external_argument_binding_constraints(&array_binding, &facts);
+    assert!(
+        !array_constraints.contains(
+            &new_java2rust::signature::SignatureConstraint::RequiredOwnership(
+                new_java2rust::slot_shape::OwnershipShape::SharedBorrow,
+            )
+        ),
+        "{array_constraints:?}"
+    );
     let translation =
         translate_source_with_facts(&idiom_gap("FfiOwnedHandleTransfer.java"), &facts);
 
     assert!(
-        translation
-            .diagnostics
-            .has_code("signature_owned_recovery_requires_ffi_transfer"),
+        translation.rust.contains("consumer.consume(&array);")
+            && translation.rust.contains("array.close();")
+            && !translation
+                .diagnostics
+                .has_code("signature_owned_recovery_requires_ffi_transfer")
+            && !translation
+                .diagnostics
+                .has_code("unsupported_borrowed_to_ffi_owned_handle"),
         "rust:\n{}\ndiagnostics:{:?}",
         translation.rust,
         translation.diagnostics
@@ -2893,7 +3029,9 @@ fn documents_try_with_resources_copy_gap() {
     assert!(
         translation.rust.contains("pub fn copy")
             && translation.rust.contains("new_input_stream")
-            && translation.rust.contains("output.write(buffer, 0, n);")
+            && translation.rust.contains("input.read(")
+            && translation.rust.contains(")?;")
+            && translation.rust.contains("output.write(")
             && translation.rust.contains("output.close()?;")
             && translation.rust.contains("input.close()?;")
             && !translation
@@ -2911,8 +3049,50 @@ fn translates_return_bearing_try_with_resources_without_placeholder() {
     assert!(
         translation.rust.contains("pub fn read")
             && translation.rust.contains("let __java_twr_result =")
+            && translation.rust.contains("reader.read_line()?")
             && translation.rust.contains("reader.close()?;")
             && translation.rust.contains("return __java_twr_result;")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn translates_exception_propagating_try_with_resources_without_catch() {
+    let translation = translate_source(
+        r#"
+class ExceptionTryWithResourcesPropagation {
+    void copy(Resource resource) throws IOException {
+        try (Resource input = resource) {
+            input.read();
+        }
+    }
+}
+
+class Resource {
+    void read() throws IOException {}
+    void close() throws IOException {}
+}
+
+class IOException extends Exception {}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub fn copy")
+            && translation.rust.contains("let __java_twr_result =")
+            && translation.rust.contains("input.read()?;")
+            && translation.rust.contains("input.close()?;")
+            && translation.rust.contains("__java_twr_result?;")
             && !translation
                 .rust
                 .contains("unsupported Java statement: try/catch/finally"),
@@ -3449,9 +3629,11 @@ fn documents_exception_base_catch_covers_subclass_gap() {
     let translation = translate_source(&idiom_gap("ExceptionBaseCatchCoversSubclass.java"));
 
     assert!(
-        translation.rust.contains(
-            "Err(ex) if ex.is_instance(&[\"MissingFileProblem\", \"RecoverableProblem\"])"
-        ) && !translation
+        (translation.rust.contains(
+            "Err(ex) if ex.is_instance(&[\"MissingFileProblem\", \"RecoverableProblem\"])",
+        ) || translation.rust.contains(
+            "Err(ex) if ex.is_instance(&[\"RecoverableProblem\", \"MissingFileProblem\"])",
+        )) && !translation
             .rust
             .contains("unsupported Java statement: try/catch/finally")
             && translation.rust.contains("RecoverableProblem")

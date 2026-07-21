@@ -199,6 +199,13 @@ fn external_static_constant_type(
             crate::external_packs::external_field_for(&receiver_name, member)
                 .and_then(|fact| fact.field_type)
         })
+        .or_else(|| {
+            let receiver_type = JavaType::Named {
+                name: receiver_name.clone(),
+                args: Vec::new(),
+            };
+            crate::stdlib::known_external_field_type_for_receiver(&receiver_type, member)
+        })
 }
 
 fn external_static_constant_rust_owner(
@@ -218,6 +225,13 @@ fn external_static_constant_rust_owner(
     }
     if facts.external_field_for(&receiver_name, member).is_some()
         || crate::external_packs::external_field_for(&receiver_name, member).is_some()
+        || {
+            let receiver_type = JavaType::Named {
+                name: receiver_name.clone(),
+                args: Vec::new(),
+            };
+            crate::stdlib::known_external_field_type_for_receiver(&receiver_type, member).is_some()
+        }
     {
         let owner = receiver_name.rsplit('.').next().unwrap_or(&receiver_name);
         return static_constant_rust_owner_from_name(owner);

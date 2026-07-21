@@ -268,7 +268,7 @@ pub fn infer_expr_shape_with_context(
             .cloned()
             .unwrap_or_else(|| RustSlotShape::conservative(infer_expr_type(expr, env.type_env()))),
         Expr::FieldAccess(receiver, field) => infer_field_access_shape(receiver, field, env, ctx)
-            .or_else(|| planned_member_access_shape(receiver, field, env))
+            .or_else(|| planned_member_access_shape(receiver, field, env, ctx))
             .unwrap_or_else(|| RustSlotShape::conservative(infer_expr_type(expr, env.type_env()))),
         Expr::ArrayAccess(array, _) => infer_indexed_expr_shape(array, env, ctx),
         Expr::Call {
@@ -454,7 +454,12 @@ fn infer_field_access_shape(
         && let Some(crate::member_access_plan::MemberAccessPlan {
             op: crate::member_access_plan::MemberAccessOp::StaticConstant { owner },
             ..
-        }) = crate::member_access_plan::plan_member_access(receiver, field, env.type_env())
+        }) = crate::member_access_plan::plan_member_access_with_facts(
+            receiver,
+            field,
+            env.type_env(),
+            ctx.facts.unwrap_or(&FactSet::default()),
+        )
     {
         if let Some(shape) = signatures
             .field_shape(&owner, field)
@@ -486,9 +491,15 @@ fn planned_member_access_shape(
     receiver: &Expr,
     field: &str,
     env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
 ) -> Option<RustSlotShape> {
-    crate::member_access_plan::plan_member_access(receiver, field, env.type_env())
-        .map(|plan| plan.shape)
+    crate::member_access_plan::plan_member_access_with_facts(
+        receiver,
+        field,
+        env.type_env(),
+        ctx.facts.unwrap_or(&FactSet::default()),
+    )
+    .map(|plan| plan.shape)
 }
 
 fn infer_indexed_expr_shape(

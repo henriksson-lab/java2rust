@@ -6035,6 +6035,7 @@ class Helper {
                 name,
                 arg_index: 0,
                 boundary: CallArgumentBoundary::Unknown,
+                ..
             } if name == "new"
         )),
         "{second:?}"
@@ -6798,6 +6799,7 @@ class ConstructorDelegationUsageFlow {
                     name,
                     arg_index: 0,
                     boundary: CallArgumentBoundary::InternalSameType,
+                    ..
                 } if name == "constructor"
             ))
     );
@@ -16690,6 +16692,7 @@ class Helper {
                 name,
                 arg_index: 0,
                 boundary: CallArgumentBoundary::Unknown,
+                ..
             } if name == "consume"
         )
     }));
@@ -16882,6 +16885,7 @@ class BulkAddAllBorrowed {
                 name,
                 arg_index: 0,
                 boundary: CallArgumentBoundary::KnownContentRead,
+                ..
             } if name == "addAll"
         )
     }));
@@ -18296,6 +18300,7 @@ class Helper {
                     name,
                     arg_index: 0,
                     boundary: CallArgumentBoundary::Unknown,
+                    ..
                 } if field_name == "cached" && name == "consume"
             )
         }));
@@ -18350,6 +18355,7 @@ class Helper {
                     name,
                     arg_index: 0,
                     boundary: CallArgumentBoundary::Unknown,
+                    ..
                 } if field_name == "cached" && name == "new"
             )
         }));
@@ -18371,6 +18377,7 @@ class Helper {
                 name,
                 arg_index: 0,
                 boundary: CallArgumentBoundary::InternalSameType,
+                ..
             } if field_name == "cached" && name == "constructor"
         )
     }));
@@ -19920,6 +19927,7 @@ fn binding_boundary_policy_owns_binding_use_boundary_classification() {
         java_ty: JavaType::String,
         uses: vec![BindingUse::PassedToCall {
             name: "external".to_string(),
+            receiver_type: None,
             arg_index: 0,
             boundary: CallArgumentBoundary::Unknown,
         }],
@@ -19937,6 +19945,7 @@ fn binding_boundary_policy_owns_binding_use_boundary_classification() {
         uses: vec![
             BindingUse::PassedToCall {
                 name: "external".to_string(),
+                receiver_type: None,
                 arg_index: 0,
                 boundary: CallArgumentBoundary::Unknown,
             },
@@ -19979,6 +19988,7 @@ fn external_argument_constraints_default_unknown_slots_to_non_null() {
         },
         uses: vec![BindingUse::PassedToCall {
             name: "new".to_string(),
+            receiver_type: None,
             arg_index: 6,
             boundary: CallArgumentBoundary::Unknown,
         }],
@@ -20003,6 +20013,7 @@ fn external_argument_unknown_nullability_fact_keeps_non_null_default() {
         },
         uses: vec![BindingUse::PassedToCall {
             name: "new".to_string(),
+            receiver_type: None,
             arg_index: 6,
             boundary: CallArgumentBoundary::Unknown,
         }],
@@ -20043,6 +20054,7 @@ fn external_argument_nullable_fact_overrides_non_null_default() {
         },
         uses: vec![BindingUse::PassedToCall {
             name: "new".to_string(),
+            receiver_type: None,
             arg_index: 6,
             boundary: CallArgumentBoundary::Unknown,
         }],
@@ -25820,8 +25832,10 @@ class TryFinallyUnit {
     );
     assert_eq!(
         try_finally_scope_stmt(
+            RustType::Unit,
             vec![RustStmt::Raw("resource.read()?;".to_string())],
             vec![RustStmt::Raw("resource.close();".to_string())],
+            false,
             true,
         ),
         RustStmt::Raw(

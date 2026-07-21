@@ -1167,6 +1167,7 @@ fn add_method_binding_dependency_edges(
                     name,
                     arg_index,
                     boundary,
+                    ..
                 } => {
                     for call_index in matching_method_call_indexes(method_usage, name, *boundary) {
                         add_call_argument_dependency_edges(
@@ -1273,6 +1274,7 @@ fn add_constructor_binding_dependency_edges(
                     name,
                     arg_index,
                     boundary,
+                    ..
                 } => {
                     for call_index in
                         matching_method_call_indexes(constructor_usage, name, *boundary)
@@ -1381,6 +1383,7 @@ fn add_method_field_dependency_edges(
                 name,
                 arg_index,
                 boundary,
+                ..
             } => {
                 let field = SignatureDependencyNode::Field {
                     field: FieldKey {
@@ -1456,6 +1459,7 @@ fn add_constructor_field_dependency_edges(
                 name,
                 arg_index,
                 boundary,
+                ..
             } => {
                 let field = SignatureDependencyNode::Field {
                     field: FieldKey {
@@ -2071,6 +2075,7 @@ fn propagate_call_site_constraints(
                         name,
                         arg_index,
                         boundary,
+                        ..
                     } = usage
                     else {
                         continue;
@@ -2144,6 +2149,7 @@ fn propagate_constructor_call_site_constraints(
                         name,
                         arg_index,
                         boundary,
+                        ..
                     } = usage
                     else {
                         continue;
@@ -2215,6 +2221,7 @@ fn propagate_constructor_delegation_constraints(
                         name,
                         arg_index,
                         boundary,
+                        ..
                     } = usage
                     else {
                         continue;
@@ -2285,6 +2292,7 @@ fn propagate_call_argument_constraints_to_callees(
                         name,
                         arg_index,
                         boundary,
+                        ..
                     } = usage
                     else {
                         continue;
@@ -2352,6 +2360,7 @@ fn propagate_constructor_call_argument_constraints_to_callees(
                         name,
                         arg_index,
                         boundary,
+                        ..
                     } = usage
                     else {
                         continue;
@@ -2422,6 +2431,7 @@ fn propagate_constructor_delegation_argument_constraints_to_callees(
                         name,
                         arg_index,
                         boundary,
+                        ..
                     } = usage
                     else {
                         continue;
@@ -3464,15 +3474,15 @@ fn push_method_signature_diagnostics(
             .get(index)
             .map(String::as_str)
             .unwrap_or("<unknown>");
-        push_constraint_conflict_diagnostics(
-            diagnostics,
-            format!(
-                "{}::{} parameter {}",
-                method_key.type_name, method_key.rust_name, param_name
-            ),
-            param_constraints,
-        );
         if let Some(param) = method.params.get(index) {
+            push_constraint_conflict_diagnostics(
+                diagnostics,
+                format!(
+                    "{}::{} parameter {}",
+                    method_key.type_name, method_key.rust_name, param_name
+                ),
+                param_constraints,
+            );
             push_capability_diagnostics_for_signature_constraints(
                 diagnostics,
                 format!(
@@ -3532,15 +3542,15 @@ fn push_constructor_signature_diagnostics(
             .get(index)
             .map(String::as_str)
             .unwrap_or("<unknown>");
-        push_constraint_conflict_diagnostics(
-            diagnostics,
-            format!(
-                "{}::{} parameter {}",
-                constructor_key.type_name, constructor_key.rust_name, param_name
-            ),
-            param_constraints,
-        );
         if let Some(param) = ctor.params.get(index) {
+            push_constraint_conflict_diagnostics(
+                diagnostics,
+                format!(
+                    "{}::{} parameter {}",
+                    constructor_key.type_name, constructor_key.rust_name, param_name
+                ),
+                param_constraints,
+            );
             push_capability_diagnostics_for_signature_constraints(
                 diagnostics,
                 format!(
@@ -6933,6 +6943,16 @@ pub fn external_receiver_binding_constraints(
         };
         let receiver_type = external_api_receiver_type_key(&binding.java_ty);
         if facts
+            .external_ffi_receiver_handover_for_receiver(
+                receiver_type.as_deref(),
+                name,
+                &binding.java_ty,
+            )
+            .is_some()
+        {
+            continue;
+        }
+        if facts
             .external_api_effect_for_receiver(receiver_type.as_deref(), name)
             .is_some_and(|effect| {
                 effect.receiver_mutability == ReceiverMutabilityFact::MutatesReceiver
@@ -7007,18 +7027,29 @@ pub fn external_argument_binding_constraints(
     for usage in &binding.uses {
         let BindingUse::PassedToCall {
             name,
+            receiver_type,
             arg_index,
             boundary: CallArgumentBoundary::Unknown,
         } = usage
         else {
             continue;
         };
-        if let Some(effect) =
-            facts.external_api_argument_effect_for_receiver(None, name, *arg_index)
-        {
+        if let Some(effect) = external_api_argument_effect_for_call_arg(
+            receiver_type.as_ref(),
+            name,
+            *arg_index,
+            facts,
+        ) {
             push_unique_signature_constraints(
                 &mut constraints,
-                &external_argument_effect_constraints(effect),
+                &external_argument_effect_constraints_for_binding(
+                    effect,
+                    receiver_type.as_ref(),
+                    name,
+                    *arg_index,
+                    &binding.java_ty,
+                    facts,
+                ),
             );
         } else {
             // External reference/callback parameters default to non-null unless
@@ -7043,13 +7074,18 @@ fn unknown_boundary_is_fully_modeled_by_external_argument_effects(
         match usage {
             BindingUse::PassedToCall {
                 name,
+                receiver_type,
                 arg_index,
                 boundary: CallArgumentBoundary::Unknown,
             } => {
                 saw_unknown = true;
-                if facts
-                    .external_api_argument_effect_for_receiver(None, name, *arg_index)
-                    .is_none()
+                if external_api_argument_effect_for_call_arg(
+                    receiver_type.as_ref(),
+                    name,
+                    *arg_index,
+                    facts,
+                )
+                .is_none()
                 {
                     return false;
                 }
@@ -7066,6 +7102,72 @@ fn unknown_boundary_is_fully_modeled_by_external_argument_effects(
         }
     }
     saw_unknown
+}
+
+fn external_api_argument_effect_for_call_arg<'a>(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_index: usize,
+    facts: &'a FactSet,
+) -> Option<&'a ExternalApiArgumentEffectFact> {
+    receiver_type
+        .and_then(external_api_receiver_type_key)
+        .and_then(|receiver_type| {
+            facts.external_api_argument_effect_for_receiver(Some(&receiver_type), name, arg_index)
+        })
+        .or_else(|| facts.external_api_argument_effect_for_receiver(None, name, arg_index))
+}
+
+fn external_argument_effect_constraints_for_binding(
+    effect: &ExternalApiArgumentEffectFact,
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_index: usize,
+    binding_java_ty: &JavaType,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    if effect.alias_policy == ExternalArgumentAliasPolicy::Borrowed
+        && external_ffi_handover_for_call_arg(
+            receiver_type,
+            name,
+            arg_index,
+            binding_java_ty,
+            facts,
+        )
+        .is_some()
+    {
+        return vec![SignatureConstraint::RequiredStorageNullability(
+            external_parameter_nullability_policy(effect.parameter_nullability),
+        )];
+    }
+    external_argument_effect_constraints(effect)
+}
+
+fn external_ffi_handover_for_call_arg<'a>(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_index: usize,
+    binding_java_ty: &JavaType,
+    facts: &'a FactSet,
+) -> Option<&'a crate::facts::ExternalFfiHandoverFact> {
+    receiver_type
+        .and_then(external_api_receiver_type_key)
+        .and_then(|receiver_type| {
+            facts.external_ffi_argument_handover_for_receiver(
+                Some(&receiver_type),
+                name,
+                arg_index,
+                binding_java_ty,
+            )
+        })
+        .or_else(|| {
+            facts.external_ffi_argument_handover_for_receiver(
+                None,
+                name,
+                arg_index,
+                binding_java_ty,
+            )
+        })
 }
 
 pub fn external_argument_effect_constraints(

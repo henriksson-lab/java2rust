@@ -2560,7 +2560,20 @@ fn collect_thrown_exception_types_from_expr(
                 }
             }
         }
-        Expr::New { args, .. } => {
+        Expr::New { ty, args, .. } => {
+            if matches!(
+                java_type_name(ty).map(|name| name.rsplit('.').next().unwrap_or(name)),
+                Some("URI")
+            ) && args.len() == 1
+            {
+                push_unique_java_type(
+                    thrown,
+                    JavaType::Named {
+                        name: "URISyntaxException".to_string(),
+                        args: Vec::new(),
+                    },
+                );
+            }
             for arg in args {
                 collect_thrown_exception_types_from_expr(arg, exception_env, thrown);
             }
@@ -3162,6 +3175,14 @@ fn collect_type_recursion_fallback_diagnostics(
         match member {
             Member::Method(method) => {
                 if let Some(body) = &method.body {
+                    let env = collect_external_api_type_env(
+                        ty,
+                        &method.type_params,
+                        &method.type_param_bounds,
+                        &method.params,
+                    );
+                    let mut method_body_env = env.clone();
+                    collect_block_declared_locals(body, &mut method_body_env);
                     collect_method_recursion_fallback_diagnostics(
                         ty,
                         method,
@@ -3169,6 +3190,15 @@ fn collect_type_recursion_fallback_diagnostics(
                         facts,
                         control_flow_plans,
                         diagnostics,
+                        &method_body_env,
+                    );
+                    collect_method_external_boundary_diagnostics(
+                        ty,
+                        method,
+                        body,
+                        facts,
+                        diagnostics,
+                        &method_body_env,
                     );
                 }
             }
@@ -3190,6 +3220,7 @@ fn collect_method_recursion_fallback_diagnostics(
     facts: &FactSet,
     control_flow_plans: &[MethodControlFlowPlan],
     diagnostics: &mut Vec<SemanticDiagnostic>,
+    env: &TypeEnv,
 ) {
     let has_safe_tail_plan =
         method_has_safe_tail_loop_plan(control_flow_plans, &ty.name, &method.name);
@@ -3242,7 +3273,7 @@ fn collect_method_recursion_fallback_diagnostics(
         );
     }
 
-    if block_has_receiver_recursive_call(body, &method.name) {
+    if block_has_receiver_recursive_call(body, &method.name, facts, env, &ty.name) {
         push_semantic_diagnostic_once(
             diagnostics,
             "recursion_tco_fallback",
@@ -3252,6 +3283,174 @@ fn collect_method_recursion_fallback_diagnostics(
             ),
         );
     }
+}
+
+fn collect_block_declared_locals(body: &Block, env: &mut TypeEnv) {
+    for stmt in &body.statements {
+        collect_stmt_declared_locals(stmt, env);
+    }
+}
+
+fn collect_stmt_declared_locals(stmt: &Stmt, env: &mut TypeEnv) {
+    match stmt {
+        Stmt::VarDecl { ty, name, .. } => {
+            env.insert_local(name.clone(), ty.clone());
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_block_declared_locals(then_block, env);
+            if let Some(else_block) = else_block {
+                collect_block_declared_locals(else_block, env);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::Block(body) => collect_block_declared_locals(body, env),
+        Stmt::For { init, body, .. } => {
+            for init in init {
+                collect_stmt_declared_locals(init, env);
+            }
+            collect_block_declared_locals(body, env);
+        }
+        Stmt::EnhancedFor {
+            var_type,
+            var_name,
+            body,
+            ..
+        } => {
+            env.insert_local(var_name.clone(), var_type.clone());
+            collect_block_declared_locals(body, env);
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+            ..
+        } => {
+            for resource in resources {
+                collect_stmt_declared_locals(resource, env);
+            }
+            collect_block_declared_locals(body, env);
+            for catch in catches {
+                env.insert_local(
+                    catch.name.clone(),
+                    catch
+                        .types
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| JavaType::Unknown("exception".to_string())),
+                );
+                collect_block_declared_locals(&catch.body, env);
+            }
+            if let Some(finally_block) = finally_block {
+                collect_block_declared_locals(finally_block, env);
+            }
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for stmt in &case.statements {
+                    collect_stmt_declared_locals(stmt, env);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_method_external_boundary_diagnostics(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    body: &Block,
+    facts: &FactSet,
+    diagnostics: &mut Vec<SemanticDiagnostic>,
+    env: &TypeEnv,
+) {
+    walk_block_exprs(body, &mut |expr| {
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            return;
+        };
+        let Some(pack_name) = external_boundary_pack_for_call_receiver(
+            receiver.as_deref(),
+            name,
+            args.len(),
+            facts,
+            env,
+            &ty.name,
+        ) else {
+            return;
+        };
+        push_semantic_diagnostic_once(
+            diagnostics,
+            "external_pack_boundary_call",
+            format!(
+                "{}::{} crosses external {} boundary at {}({} args)",
+                ty.name,
+                method.name,
+                pack_name,
+                name,
+                args.len()
+            ),
+        );
+    });
+}
+
+fn external_boundary_pack_for_call_receiver(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    env: &TypeEnv,
+    current_type: &str,
+) -> Option<&'static str> {
+    if let Some(pack_name) = receiver.and_then(unmodeled_static_external_boundary_pack) {
+        return Some(pack_name);
+    }
+    let Some(Some(receiver_type)) = crate::call_plan::external_call_receiver_type_key(
+        receiver,
+        name,
+        arg_count,
+        facts,
+        env,
+        Some(current_type),
+    ) else {
+        return None;
+    };
+    facts
+        .external_library_pack_for_type(&receiver_type)
+        .cloned()
+        .or_else(|| crate::external_packs::external_library_pack_for_type(&receiver_type))
+        .and_then(|pack| match pack.pack_name.as_str() {
+            "org.apache.spark" => Some("org.apache.spark"),
+            "org.disq_bio.disq" => Some("org.disq_bio.disq"),
+            _ => None,
+        })
+}
+
+fn unmodeled_static_external_boundary_pack(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::Var(name) if is_unmodeled_disq_static_owner(name) => Some("org.disq_bio.disq"),
+        Expr::FieldAccess(receiver, _) => unmodeled_static_external_boundary_pack(receiver),
+        Expr::Call {
+            receiver: Some(receiver),
+            ..
+        } => unmodeled_static_external_boundary_pack(receiver),
+        _ => None,
+    }
+}
+
+fn is_unmodeled_disq_static_owner(name: &str) -> bool {
+    matches!(
+        name,
+        "htsjdk_variants_rdd_storage" | "tabix_index_write_option"
+    )
 }
 
 fn method_has_safe_tail_loop_plan(
@@ -3299,31 +3498,73 @@ fn stmt_tail_returns_any_method(stmt: &Stmt, method_names: &HashSet<&str>) -> bo
     }
 }
 
-fn block_has_receiver_recursive_call(body: &Block, method_name: &str) -> bool {
+fn block_has_receiver_recursive_call(
+    body: &Block,
+    method_name: &str,
+    facts: &FactSet,
+    env: &TypeEnv,
+    current_type: &str,
+) -> bool {
     body.statements
         .iter()
-        .any(|stmt| stmt_has_receiver_recursive_call(stmt, method_name))
+        .any(|stmt| stmt_has_receiver_recursive_call(stmt, method_name, facts, env, current_type))
 }
 
-fn stmt_has_receiver_recursive_call(stmt: &Stmt, method_name: &str) -> bool {
+fn stmt_has_receiver_recursive_call(
+    stmt: &Stmt,
+    method_name: &str,
+    facts: &FactSet,
+    env: &TypeEnv,
+    current_type: &str,
+) -> bool {
     let mut found = false;
     walk_stmt_exprs(stmt, &mut |expr| {
-        if expr_has_receiver_recursive_call(expr, method_name) {
+        if expr_has_receiver_recursive_call(expr, method_name, facts, env, current_type) {
             found = true;
         }
     });
     found
 }
 
-fn expr_has_receiver_recursive_call(expr: &Expr, method_name: &str) -> bool {
-    matches!(
-        expr,
-        Expr::Call {
-            receiver: Some(receiver),
-            name,
-            ..
-        } if name == method_name && !matches!(receiver.as_ref(), Expr::This)
+fn expr_has_receiver_recursive_call(
+    expr: &Expr,
+    method_name: &str,
+    facts: &FactSet,
+    env: &TypeEnv,
+    current_type: &str,
+) -> bool {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return false;
+    };
+    if name != method_name || matches!(receiver.as_ref(), Expr::This) {
+        return false;
+    }
+    !receiver_call_is_external_pack_boundary(receiver, name, args.len(), facts, env, current_type)
+}
+
+fn receiver_call_is_external_pack_boundary(
+    receiver: &Expr,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    env: &TypeEnv,
+    current_type: &str,
+) -> bool {
+    external_boundary_pack_for_call_receiver(
+        Some(receiver),
+        name,
+        arg_count,
+        facts,
+        env,
+        current_type,
     )
+    .is_some()
 }
 
 fn collect_assignment_in_condition_plans(body: &Block, rewrites: &mut Vec<ControlFlowRewritePlan>) {

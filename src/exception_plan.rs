@@ -51,6 +51,7 @@ pub enum TryStmtPlan<'a> {
     FinallyOnly {
         body: &'a Block,
         finally_block: &'a Block,
+        completion: TryBlockCompletion,
     },
     Unsupported,
 }
@@ -83,15 +84,88 @@ impl Default for ProgramExceptionPlan {
     }
 }
 
-pub fn program_uses_java_exception_with_facts(_program: &Program, facts: &FactSet) -> bool {
+pub fn program_uses_java_exception_with_facts(program: &Program, facts: &FactSet) -> bool {
     facts.has_method_throw_effects()
         || !facts.exception_facts.is_empty()
         || !facts.catch_facts.is_empty()
+        || program_has_lowerable_try_scope(program)
 }
 
 pub fn plan_java_exception_support(program: &Program, facts: &FactSet) -> JavaExceptionSupportPlan {
     JavaExceptionSupportPlan {
         emit_support_item: program_uses_java_exception_with_facts(program, facts),
+    }
+}
+
+fn program_has_lowerable_try_scope(program: &Program) -> bool {
+    program.types.iter().any(type_has_lowerable_try_scope)
+}
+
+fn type_has_lowerable_try_scope(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| match member {
+        Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(block_has_lowerable_try_scope),
+        Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(block_has_lowerable_try_scope),
+        Member::Type(nested) => type_has_lowerable_try_scope(nested),
+        Member::Field(_) | Member::Unsupported { .. } => false,
+    })
+}
+
+fn block_has_lowerable_try_scope(block: &Block) -> bool {
+    block.statements.iter().any(stmt_has_lowerable_try_scope)
+}
+
+fn stmt_has_lowerable_try_scope(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            !matches!(
+                plan_try_stmt(resources, body, catches, finally_block.as_ref()),
+                TryStmtPlan::Unsupported
+            ) || block_has_lowerable_try_scope(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_has_lowerable_try_scope(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_has_lowerable_try_scope)
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            block_has_lowerable_try_scope(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_has_lowerable_try_scope)
+        }
+        Stmt::While { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::EnhancedFor { body, .. }
+        | Stmt::Block(body) => block_has_lowerable_try_scope(body),
+        Stmt::Switch { cases, .. } => cases
+            .iter()
+            .any(|case| case.statements.iter().any(stmt_has_lowerable_try_scope)),
+        Stmt::LocalType(nested) => type_has_lowerable_try_scope(nested),
+        Stmt::VarDecl { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return(_)
+        | Stmt::Throw(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => false,
     }
 }
 
@@ -123,20 +197,18 @@ pub fn plan_try_stmt<'a>(
     finally_block: Option<&'a Block>,
 ) -> TryStmtPlan<'a> {
     if let Some(finally_block) = finally_block {
+        let completion = plan_block_exception_completion(body);
         if resources.is_empty()
             && catches.is_empty()
-            && plan_block_exception_completion(body) == TryBlockCompletion::FallsThroughUnit
             && plan_block_exception_completion(finally_block)
                 == TryBlockCompletion::FallsThroughUnit
         {
             return TryStmtPlan::FinallyOnly {
                 body,
                 finally_block,
+                completion,
             };
         }
-        return TryStmtPlan::Unsupported;
-    }
-    if catches.is_empty() {
         return TryStmtPlan::Unsupported;
     }
     let completion = plan_block_exception_completion(body);
@@ -156,6 +228,9 @@ pub fn plan_try_stmt<'a>(
             catches,
             completion,
         };
+    }
+    if catches.is_empty() {
+        return TryStmtPlan::Unsupported;
     }
     if catches
         .iter()
@@ -197,20 +272,49 @@ pub fn catch_match_class_names(
     catch: &CatchClause,
     facts: &FactSet,
 ) -> Vec<String> {
-    let names = current_type
+    let mut names = catch_assignable_class_names(&catch.types, facts);
+    let fact_names = current_type
         .zip(current_method)
         .and_then(|(type_name, method_name)| {
             facts
                 .catch_facts_for(type_name, method_name)
-                .get(clause_index)
+                .into_iter()
+                .find(|fact| fact.clause_index == clause_index && fact.types == catch.types)
                 .map(|fact| fact.assignable_from.as_slice())
-        })
-        .unwrap_or(catch.types.as_slice());
-    let mut out = Vec::new();
-    for ty in names {
-        let name = exception_class_name(ty);
-        if !out.contains(&name) {
-            out.push(name);
+        });
+    if let Some(fact_names) = fact_names {
+        for ty in fact_names {
+            let name = exception_class_name(ty);
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+fn catch_assignable_class_names(catch_types: &[JavaType], facts: &FactSet) -> Vec<String> {
+    let mut out = catch_types
+        .iter()
+        .map(exception_class_name)
+        .collect::<Vec<_>>();
+    for exception in &facts.exception_facts {
+        let exception_ty = JavaType::Named {
+            name: exception.type_name.clone(),
+            args: Vec::new(),
+        };
+        if catch_types.iter().any(|catch_ty| {
+            exception_class_name(catch_ty) == exception.type_name
+                || facts
+                    .hierarchy_subtype_policy(&exception_ty, catch_ty)
+                    .reaches
+                || crate::stdlib::is_known_java_subtype(
+                    &exception.type_name,
+                    &exception_class_name(catch_ty),
+                )
+        }) && !out.contains(&exception.type_name)
+        {
+            out.push(exception.type_name.clone());
         }
     }
     out
@@ -249,6 +353,9 @@ fn stmt_terminates_with_exception_boundary(stmt: &Stmt) -> bool {
                 completion: TryBlockCompletion::Terminates,
                 ..
             } | TryStmtPlan::WithResources {
+                completion: TryBlockCompletion::Terminates,
+                ..
+            } | TryStmtPlan::FinallyOnly {
                 completion: TryBlockCompletion::Terminates,
                 ..
             }

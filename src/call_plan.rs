@@ -638,6 +638,18 @@ pub fn plan_call_exception_propagation(
     {
         return CallExceptionPropagationPlan::PropagateResult;
     }
+    if matches!(receiver, Some(Expr::This))
+        && let Some(current_type) = current_type
+        && facts.method_has_thrown_exceptions(current_type, name)
+    {
+        return CallExceptionPropagationPlan::PropagateResult;
+    }
+    if let Some(receiver_type) =
+        receiver.and_then(|receiver| receiver_source_type_name(receiver, types))
+        && facts.method_has_thrown_exceptions(receiver_type, name)
+    {
+        return CallExceptionPropagationPlan::PropagateResult;
+    }
 
     if let Some(effect) = external_call_effect(receiver, name, args, facts, types, current_type)
         && !effect.thrown.is_empty()
@@ -646,6 +658,14 @@ pub fn plan_call_exception_propagation(
     }
 
     CallExceptionPropagationPlan::NoPropagation
+}
+
+fn receiver_source_type_name<'a>(receiver: &Expr, types: &'a TypeEnv) -> Option<&'a str> {
+    match receiver {
+        Expr::Var(name) => java_type_name(types.local_type(name)?),
+        Expr::FieldAccess(_, field) => java_type_name(types.field_type(field)?),
+        _ => None,
+    }
 }
 
 pub fn plan_call_expr<'a>(
@@ -1016,15 +1036,12 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
         };
     }
 
+    if let Some(target) = plan_resolved_static_call(receiver, resolved, facts) {
+        return target;
+    }
+
     if let Some(call) = resolved {
         return match (&call.kind, receiver) {
-            (CallKind::Static, Some(_)) => CallTargetPlan::StaticOwner {
-                owner: rust_static_owner_type_name_with_facts(&call.declaring_type, facts),
-                rust_name: call.rust_name.clone(),
-            },
-            (CallKind::Static, None) => CallTargetPlan::StaticSelf {
-                rust_name: &call.rust_name,
-            },
             (CallKind::Instance, Some(receiver)) => CallTargetPlan::InstanceReceiver {
                 receiver,
                 rust_name: &call.rust_name,
@@ -1032,6 +1049,7 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
             (CallKind::Instance, None) => CallTargetPlan::InstanceSelf {
                 rust_name: &call.rust_name,
             },
+            (CallKind::Static, Some(_)) | (CallKind::Static, None) => unreachable!(),
         };
     }
 
@@ -1067,6 +1085,26 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
             rust_name: crate::parser::to_snake_case(name),
         }
     }
+}
+
+fn plan_resolved_static_call<'a>(
+    receiver: Option<&'a Expr>,
+    resolved: Option<&'a ResolvedCall>,
+    facts: &FactSet,
+) -> Option<CallTargetPlan<'a>> {
+    let call = resolved?;
+    if call.kind != CallKind::Static {
+        return None;
+    }
+    Some(match receiver {
+        Some(_) => CallTargetPlan::StaticOwner {
+            owner: rust_static_owner_type_name_with_facts(&call.declaring_type, facts),
+            rust_name: call.rust_name.clone(),
+        },
+        None => CallTargetPlan::StaticSelf {
+            rust_name: &call.rust_name,
+        },
+    })
 }
 
 fn plan_external_facade_receiver_call<'a>(
@@ -1148,12 +1186,7 @@ pub fn rust_static_owner_type_name_with_facts(owner: &str, facts: &FactSet) -> S
     if let Some(mapped_owner) = external_crate_static_owner_type_name(owner, facts) {
         return mapped_owner;
     }
-    let simple = owner
-        .split('.')
-        .filter(|segment| !segment.is_empty())
-        .next_back()
-        .unwrap_or(owner);
-    upper_camel_from_snake_or_preserved(simple)
+    crate::slot_render::rust_name_for_java_named_type(owner)
 }
 
 fn external_crate_static_owner_type_name(owner: &str, facts: &FactSet) -> Option<String> {

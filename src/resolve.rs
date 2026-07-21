@@ -128,6 +128,7 @@ pub fn resolve_program_with_source_program_and_facts(
 pub fn source_symbols_from_program(source_program: &Program) -> SourceSymbols {
     let mut symbol_program = source_program.clone();
     let mut diagnostics = DiagnosticBag::new();
+    qualify_nested_type_names(&mut symbol_program);
     for ty in &mut symbol_program.types {
         assign_type_rust_names(ty, &mut diagnostics);
     }
@@ -157,6 +158,7 @@ pub fn resolve_program_with_source_symbols_and_facts(
 ) -> ResolvedProgram {
     let mut diagnostics = diagnostics;
     let mut program = program.clone();
+    qualify_nested_type_names(&mut program);
     for ty in &mut program.types {
         assign_type_rust_names(ty, &mut diagnostics);
     }
@@ -182,10 +184,347 @@ pub fn resolve_program_with_source_symbols_and_facts(
 }
 
 pub fn declaration_facts_from_program(program: &Program) -> FactSet {
+    let mut program = program.clone();
+    qualify_nested_type_names(&mut program);
     let mut facts = FactSet::default();
-    collect_type_capability_facts(program, &mut facts);
-    collect_field_declaration_facts(program, &mut facts);
+    collect_type_capability_facts(&program, &mut facts);
+    collect_field_declaration_facts(&program, &mut facts);
     facts
+}
+
+fn qualify_nested_type_names(program: &mut Program) {
+    for ty in &mut program.types {
+        qualify_nested_type_names_for_type(ty, &HashMap::new());
+    }
+}
+
+fn qualify_nested_type_names_for_type(
+    ty: &mut TypeDecl,
+    enclosing_nested: &HashMap<String, String>,
+) {
+    let direct_nested = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Type(nested) => Some((
+                nested.name.clone(),
+                format!(
+                    "{}.{}",
+                    ty.name,
+                    nested.name.rsplit('.').next().unwrap_or(&nested.name)
+                ),
+            )),
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut visible_nested = enclosing_nested.clone();
+    visible_nested.extend(direct_nested.clone());
+
+    rewrite_type_decl_references(ty, &visible_nested);
+
+    for member in &mut ty.members {
+        if let Member::Type(nested) = member {
+            if let Some(qualified) = direct_nested.get(&nested.name).cloned() {
+                nested.name = qualified;
+            }
+            qualify_nested_type_names_for_type(nested, &visible_nested);
+        }
+    }
+}
+
+fn rewrite_type_decl_references(ty: &mut TypeDecl, direct_nested: &HashMap<String, String>) {
+    for bound in &mut ty.type_param_bounds {
+        if let Some(bound) = bound {
+            qualify_nested_java_type(bound, direct_nested);
+        }
+    }
+    for member in &mut ty.members {
+        match member {
+            Member::Field(field) => {
+                qualify_nested_java_type(&mut field.ty, direct_nested);
+                if let Some(initializer) = &mut field.initializer {
+                    qualify_nested_expr_types(initializer, direct_nested);
+                }
+            }
+            Member::Method(method) => {
+                qualify_nested_java_type(&mut method.return_type, direct_nested);
+                for bound in &mut method.type_param_bounds {
+                    if let Some(bound) = bound {
+                        qualify_nested_java_type(bound, direct_nested);
+                    }
+                }
+                for param in &mut method.params {
+                    qualify_nested_java_type(&mut param.ty, direct_nested);
+                }
+                for thrown in &mut method.throws {
+                    qualify_nested_java_type(thrown, direct_nested);
+                }
+                if let Some(body) = &mut method.body {
+                    qualify_nested_block_types(body, direct_nested);
+                }
+            }
+            Member::Constructor(ctor) => {
+                for bound in &mut ctor.type_param_bounds {
+                    if let Some(bound) = bound {
+                        qualify_nested_java_type(bound, direct_nested);
+                    }
+                }
+                for param in &mut ctor.params {
+                    qualify_nested_java_type(&mut param.ty, direct_nested);
+                }
+                for thrown in &mut ctor.throws {
+                    qualify_nested_java_type(thrown, direct_nested);
+                }
+                if let Some(body) = &mut ctor.body {
+                    qualify_nested_block_types(body, direct_nested);
+                }
+            }
+            Member::Type(_) | Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn qualify_nested_block_types(block: &mut Block, direct_nested: &HashMap<String, String>) {
+    for stmt in &mut block.statements {
+        qualify_nested_stmt_types(stmt, direct_nested);
+    }
+}
+
+fn qualify_nested_stmt_types(stmt: &mut Stmt, direct_nested: &HashMap<String, String>) {
+    match stmt {
+        Stmt::VarDecl {
+            ty, initializer, ..
+        } => {
+            qualify_nested_java_type(ty, direct_nested);
+            if let Some(initializer) = initializer {
+                qualify_nested_expr_types(initializer, direct_nested);
+            }
+        }
+        Stmt::Assign { target, value } => {
+            qualify_nested_expr_types(target, direct_nested);
+            qualify_nested_expr_types(value, direct_nested);
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            qualify_nested_expr_types(expr, direct_nested);
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            qualify_nested_expr_types(condition, direct_nested);
+            qualify_nested_block_types(then_block, direct_nested);
+            if let Some(else_block) = else_block {
+                qualify_nested_block_types(else_block, direct_nested);
+            }
+        }
+        Stmt::While { condition, body } => {
+            qualify_nested_expr_types(condition, direct_nested);
+            qualify_nested_block_types(body, direct_nested);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                qualify_nested_stmt_types(stmt, direct_nested);
+            }
+            if let Some(condition) = condition {
+                qualify_nested_expr_types(condition, direct_nested);
+            }
+            for expr in update {
+                qualify_nested_expr_types(expr, direct_nested);
+            }
+            qualify_nested_block_types(body, direct_nested);
+        }
+        Stmt::EnhancedFor {
+            var_type,
+            iterable,
+            body,
+            ..
+        } => {
+            qualify_nested_java_type(var_type, direct_nested);
+            qualify_nested_expr_types(iterable, direct_nested);
+            qualify_nested_block_types(body, direct_nested);
+        }
+        Stmt::Switch { selector, cases } => {
+            qualify_nested_expr_types(selector, direct_nested);
+            for case in cases {
+                for stmt in &mut case.statements {
+                    qualify_nested_stmt_types(stmt, direct_nested);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                qualify_nested_stmt_types(resource, direct_nested);
+            }
+            qualify_nested_block_types(body, direct_nested);
+            for catch in catches {
+                for ty in &mut catch.types {
+                    qualify_nested_java_type(ty, direct_nested);
+                }
+                qualify_nested_block_types(&mut catch.body, direct_nested);
+            }
+            if let Some(finally_block) = finally_block {
+                qualify_nested_block_types(finally_block, direct_nested);
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                qualify_nested_expr_types(arg, direct_nested);
+            }
+        }
+        Stmt::LocalType(local) => rewrite_type_decl_references(local, direct_nested),
+        Stmt::Block(body) => qualify_nested_block_types(body, direct_nested),
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn qualify_nested_expr_types(expr: &mut Expr, direct_nested: &HashMap<String, String>) {
+    match expr {
+        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+            qualify_nested_expr_types(receiver, direct_nested);
+        }
+        Expr::ArrayAccess(array, index)
+        | Expr::Binary {
+            left: array,
+            right: index,
+            ..
+        } => {
+            qualify_nested_expr_types(array, direct_nested);
+            qualify_nested_expr_types(index, direct_nested);
+        }
+        Expr::ArrayCreation {
+            element_type,
+            dimensions,
+            initializer,
+        } => {
+            qualify_nested_java_type(element_type, direct_nested);
+            for expr in dimensions {
+                qualify_nested_expr_types(expr, direct_nested);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    qualify_nested_expr_types(expr, direct_nested);
+                }
+            }
+        }
+        Expr::ArrayInitializer(values) => {
+            for expr in values {
+                qualify_nested_expr_types(expr, direct_nested);
+            }
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            qualify_nested_expr_types(condition, direct_nested);
+            qualify_nested_expr_types(then_expr, direct_nested);
+            qualify_nested_expr_types(else_expr, direct_nested);
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                qualify_nested_expr_types(receiver, direct_nested);
+            }
+            for arg in args {
+                qualify_nested_expr_types(arg, direct_nested);
+            }
+        }
+        Expr::New { ty, args, body, .. } => {
+            qualify_nested_java_type(ty, direct_nested);
+            for arg in args {
+                qualify_nested_expr_types(arg, direct_nested);
+            }
+            if let Some(members) = body {
+                for member in members {
+                    match member {
+                        Member::Field(field) => {
+                            qualify_nested_java_type(&mut field.ty, direct_nested);
+                            if let Some(initializer) = &mut field.initializer {
+                                qualify_nested_expr_types(initializer, direct_nested);
+                            }
+                        }
+                        Member::Method(method) => {
+                            qualify_nested_java_type(&mut method.return_type, direct_nested);
+                            for param in &mut method.params {
+                                qualify_nested_java_type(&mut param.ty, direct_nested);
+                            }
+                            if let Some(body) = &mut method.body {
+                                qualify_nested_block_types(body, direct_nested);
+                            }
+                        }
+                        Member::Constructor(ctor) => {
+                            for param in &mut ctor.params {
+                                qualify_nested_java_type(&mut param.ty, direct_nested);
+                            }
+                            if let Some(body) = &mut ctor.body {
+                                qualify_nested_block_types(body, direct_nested);
+                            }
+                        }
+                        Member::Type(_) | Member::Unsupported { .. } => {}
+                    }
+                }
+            }
+        }
+        Expr::Cast { ty, expr } | Expr::InstanceOf { ty, expr } => {
+            qualify_nested_java_type(ty, direct_nested);
+            qualify_nested_expr_types(expr, direct_nested);
+        }
+        Expr::Lambda { params, body } => {
+            for param in params {
+                if let Some(ty) = &mut param.ty {
+                    qualify_nested_java_type(ty, direct_nested);
+                }
+            }
+            match body {
+                LambdaBody::Expr(expr) => qualify_nested_expr_types(expr, direct_nested),
+                LambdaBody::Block(block) => qualify_nested_block_types(block, direct_nested),
+            }
+        }
+        Expr::ClassLiteral(ty) => qualify_nested_java_type(ty, direct_nested),
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn qualify_nested_java_type(ty: &mut JavaType, direct_nested: &HashMap<String, String>) {
+    match ty {
+        JavaType::Named { name, args } => {
+            if let Some(qualified) = direct_nested.get(name) {
+                *name = qualified.clone();
+            }
+            for arg in args {
+                qualify_nested_java_type(arg, direct_nested);
+            }
+        }
+        JavaType::Unknown(name) => {
+            if let Some(qualified) = direct_nested.get(name) {
+                *name = qualified.clone();
+            }
+        }
+        JavaType::Array(inner) => qualify_nested_java_type(inner, direct_nested),
+        JavaType::Wildcard(Some(bound)) => match bound {
+            WildcardBound::Extends(inner) | WildcardBound::Super(inner) => {
+                qualify_nested_java_type(inner, direct_nested)
+            }
+        },
+        JavaType::Void | JavaType::Primitive(_) | JavaType::String | JavaType::Wildcard(None) => {}
+    }
 }
 
 fn assign_type_rust_names(ty: &mut TypeDecl, diagnostics: &mut DiagnosticBag) {
@@ -426,7 +765,7 @@ fn collect_field_symbols(ty: &TypeDecl, outer: Option<&TypeDecl>) -> Vec<FieldSy
             Member::Type(nested) => Some(FieldSymbol {
                 declaring_type: ty.name.clone(),
                 outer_type: outer.map(|outer| outer.name.clone()),
-                java_name: crate::parser::to_snake_case(&nested.name),
+                java_name: crate::parser::to_snake_case(nested_simple_type_name(&nested.name)),
                 ty: JavaType::Named {
                     name: nested.name.clone(),
                     args: Vec::new(),
@@ -505,8 +844,10 @@ impl ProgramSymbols {
                 })
                 .collect::<Vec<_>>();
             for outer_alias in outer_aliases {
-                self.canonical_type_names
-                    .insert(format!("{outer_alias}.{}", ty.name), ty.name.clone());
+                self.canonical_type_names.insert(
+                    format!("{outer_alias}.{}", nested_simple_type_name(&ty.name)),
+                    ty.name.clone(),
+                );
             }
         }
         if is_source_functional_interface(ty) {
@@ -2855,6 +3196,10 @@ fn java_type_simple_name(java_ty: &JavaType) -> String {
     }
 }
 
+fn nested_simple_type_name(type_name: &str) -> &str {
+    type_name.rsplit('.').next().unwrap_or(type_name)
+}
+
 fn unresolved_receiver_type(
     receiver: &Expr,
     current_type: &str,
@@ -4971,25 +5316,56 @@ fn collect_type_capability_facts(program: &Program, facts: &mut FactSet) {
 
 fn collect_field_declaration_facts(program: &Program, facts: &mut FactSet) {
     for ty in &program.types {
-        collect_field_declaration_facts_for_type(ty, facts);
+        collect_field_declaration_facts_for_type(ty, facts, program.package.as_deref(), None);
     }
 }
 
-fn collect_field_declaration_facts_for_type(ty: &TypeDecl, facts: &mut FactSet) {
+fn collect_field_declaration_facts_for_type(
+    ty: &TypeDecl,
+    facts: &mut FactSet,
+    package: Option<&str>,
+    outer_name: Option<&str>,
+) {
+    let type_name = package_qualified_source_type_name(ty, package, outer_name);
     for member in &ty.members {
         match member {
             Member::Field(field) => facts.external_field_facts.push(ExternalFieldFact {
                 field: FieldKey {
-                    type_name: ty.name.clone(),
+                    type_name: type_name.clone(),
                     field_name: field.name.clone(),
                 },
                 field_type: Some(field.ty.clone()),
-                field_kind: ExternalFieldKind::Unknown,
+                field_kind: if field.modifiers.contains(&Modifier::Static)
+                    && field.modifiers.contains(&Modifier::Final)
+                {
+                    ExternalFieldKind::StaticFinal
+                } else {
+                    ExternalFieldKind::Unknown
+                },
                 provenance: FactProvenance::ParsedSource,
             }),
-            Member::Type(nested) => collect_field_declaration_facts_for_type(nested, facts),
+            Member::Type(nested) => {
+                collect_field_declaration_facts_for_type(nested, facts, package, Some(&type_name))
+            }
             _ => {}
         }
+    }
+}
+
+fn package_qualified_source_type_name(
+    ty: &TypeDecl,
+    package: Option<&str>,
+    outer_name: Option<&str>,
+) -> String {
+    if ty.name.contains('.') {
+        return ty.name.clone();
+    }
+    if let Some(outer_name) = outer_name {
+        return format!("{outer_name}.{}", ty.name);
+    }
+    match package {
+        Some(package) if !package.is_empty() => format!("{package}.{}", ty.name),
+        _ => ty.name.clone(),
     }
 }
 

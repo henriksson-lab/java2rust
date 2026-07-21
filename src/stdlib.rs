@@ -939,6 +939,9 @@ fn known_typed_constant_field_type(receiver: &str, field_name: &str) -> Option<J
     let field_name = canonical_external_field_name(field_name);
     let qualified_receiver = receiver;
     let receiver = receiver.rsplit('.').next().unwrap_or(receiver);
+    if receiver == "HelpConstants" && field_name.starts_with("DOC_CAT_") {
+        return Some(JavaType::String);
+    }
     if receiver == "ArrayUtils"
         && let Some(primitive) = array_utils_empty_array_element_type(&field_name)
     {
@@ -2133,6 +2136,7 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "files" => "Files",
         "math" => "Math",
         "system_utils" => "SystemUtils",
+        "help_constants" => "HelpConstants",
         "defaults" => "Defaults",
         "retry_handler" => "RetryHandler",
         "sam_reader_factory" => "SamReaderFactory",
@@ -2430,6 +2434,15 @@ pub struct URI {
 impl URI {
     pub fn new<P: JavaPathArg>(value: P) -> URI {
         URI { value: value.into_path_value() }
+    }
+
+    pub fn parse<P: JavaPathArg>(value: P) -> Result<URI, JavaException> {
+        let value = value.into_path_value();
+        if value.trim().is_empty() {
+            Err(JavaException::new("URISyntaxException", value))
+        } else {
+            Ok(URI { value })
+        }
     }
 
     pub fn to_string(&self) -> String {
@@ -2759,6 +2772,17 @@ fn find_type_by_key_in_type<'a>(ty: &'a TypeDecl, type_key: &str) -> Option<&'a 
         Member::Type(nested) => find_type_by_key_in_type(nested, type_key),
         _ => None,
     })
+}
+
+fn source_summary_method_return_nullability(java_type: &JavaType) -> NullabilityState {
+    match java_type {
+        JavaType::Void | JavaType::Primitive(_) => NullabilityState::DefinitelyNonNull,
+        JavaType::Named { .. }
+        | JavaType::String
+        | JavaType::Array(_)
+        | JavaType::Wildcard(_)
+        | JavaType::Unknown(_) => NullabilityState::MaybeNull,
+    }
 }
 
 fn source_summary_method_hierarchy<'a>(
@@ -3111,7 +3135,7 @@ impl ExternalApiFacadeSupport {
                     &method.name,
                     Some(method.params.len()),
                     &method.return_type,
-                    NullabilityState::DefinitelyNonNull,
+                    source_summary_method_return_nullability(&method.return_type),
                 );
                 let opaque_count_before = self.opaque_types.len();
                 self.add_source_summary_java_type(
@@ -3211,7 +3235,7 @@ impl ExternalApiFacadeSupport {
                         &method.name,
                         Some(arity),
                         &method.return_type,
-                        NullabilityState::DefinitelyNonNull,
+                        source_summary_method_return_nullability(&method.return_type),
                     );
                     self.add_java_type(&method.return_type);
                     for param in &method.params {
@@ -5743,9 +5767,18 @@ fn external_facade_method_return_type_with_facts(
     {
         return normalize_external_facade_return_type_text(&rust_return.rust_type_name);
     }
-    normalize_external_facade_return_type_text(
+    let rendered = normalize_external_facade_return_type_text(
         &external_facade_return_type_with_facts_and_nullability(facts, java_type, nullability),
-    )
+    );
+    if facts
+        .external_api_effect_for_receiver_with_arity(receiver_type, method_name, arg_count)
+        .is_some_and(|effect| !effect.thrown.is_empty())
+        && !rendered.starts_with("Result<")
+    {
+        format!("Result<{rendered}, JavaException>")
+    } else {
+        rendered
+    }
 }
 
 fn external_facade_method_abi_return_type_with_facts(
@@ -6285,7 +6318,16 @@ fn external_erased_object_impl_method(method: &ExternalErasedObjectMethod) -> St
 }
 
 fn external_facade_default_expr(return_type: &str, method_name: Option<&str>) -> String {
-    if return_type.starts_with("Option<") {
+    if let Some(ok_type) = return_type
+        .strip_prefix("Result<")
+        .and_then(|rest| rest.strip_suffix(", JavaException>"))
+    {
+        if ok_type == "()" {
+            "Ok(())".to_string()
+        } else {
+            "Ok(Default::default())".to_string()
+        }
+    } else if return_type.starts_with("Option<") {
         "None".to_string()
     } else if return_type == "()" {
         "()".to_string()

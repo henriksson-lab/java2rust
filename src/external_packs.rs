@@ -8,13 +8,14 @@ use crate::facts::{
     ExternalArgumentAliasPolicy, ExternalConstructorArgumentEffectFact, ExternalConstructorFact,
     ExternalConstructorRustResultFact, ExternalConversionAdapterFact,
     ExternalConversionAdapterKind, ExternalCrateApiMappingFact,
-    ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFieldFact,
-    ExternalFieldKind, ExternalLibraryMode, ExternalLibraryPackFact, ExternalRustResultFact,
-    ExternalRustReturnTypeFact, FacadeSlot, FactProvenance, FactSet, FieldKey,
-    FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy,
-    NullabilityState, ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability,
-    OwnedRecoveryCapabilityFact, ReceiverMutabilityFact, TypeCapabilityOverride,
-    UnsupportedExternalApiFact, UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
+    ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFfiHandoverFact,
+    ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode,
+    ExternalLibraryPackFact, ExternalRustResultFact, ExternalRustReturnTypeFact, FacadeSlot,
+    FactProvenance, FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
+    HierarchyOverride, HierarchyStrategy, NullabilityState, ObjectSafetyFact,
+    ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
+    ReceiverMutabilityFact, TypeCapabilityOverride, UnsupportedExternalApiFact,
+    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
 };
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::parser::parse_type;
@@ -1819,6 +1820,24 @@ pub fn parse_external_pack_manifest(source: &str) -> ExternalPackManifestParse {
                     metadata,
                 );
             }
+            [
+                "external-pack-ffi-handover",
+                _pack_name,
+                receiver_type,
+                method_name,
+                slot,
+                metadata @ ..,
+            ] => {
+                push_external_pack_ffi_handover_fact(
+                    &mut facts,
+                    &mut diagnostics,
+                    line_index,
+                    receiver_type,
+                    method_name,
+                    slot,
+                    metadata,
+                );
+            }
             ["external-pack-exception", _pack_name, type_name, kind] => {
                 push_external_pack_exception_fact(
                     &mut facts,
@@ -3190,6 +3209,34 @@ fn push_external_pack_argument_effect_fact(
         });
 }
 
+fn push_external_pack_ffi_handover_fact(
+    facts: &mut FactSet,
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    receiver_type: &str,
+    method_name: &str,
+    slot: &str,
+    metadata: &[&str],
+) {
+    let Some(slot) = parse_external_pack_ffi_handover_slot(diagnostics, line_index, slot) else {
+        return;
+    };
+    let Some(parameter_type) =
+        parse_external_ffi_handover_metadata(diagnostics, line_index, metadata)
+    else {
+        return;
+    };
+    facts
+        .external_ffi_handover_facts
+        .push(ExternalFfiHandoverFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            slot,
+            parameter_type,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+}
+
 fn push_external_pack_constructor_argument_fact(
     facts: &mut FactSet,
     diagnostics: &mut DiagnosticBag,
@@ -4017,6 +4064,56 @@ fn parse_external_argument_metadata(
         }
     }
     Some(parameter_type)
+}
+
+fn parse_external_ffi_handover_metadata(
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    metadata: &[&str],
+) -> Option<Option<JavaType>> {
+    let mut parameter_type = None;
+    for token in metadata {
+        if let Some(value) = token.strip_prefix("type=") {
+            if value.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-ffi-handover type metadata must name a Java type",
+                );
+                return None;
+            }
+            parameter_type = Some(parse_type(value));
+        } else {
+            push_external_pack_parse_error(
+                diagnostics,
+                line_index,
+                "unrecognized external-pack-ffi-handover metadata; expected type=Type",
+            );
+            return None;
+        }
+    }
+    Some(parameter_type)
+}
+
+fn parse_external_pack_ffi_handover_slot(
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    slot: &str,
+) -> Option<ExternalFfiHandoverSlot> {
+    if slot == "receiver" {
+        return Some(ExternalFfiHandoverSlot::Receiver);
+    }
+    if let Some(index) = slot.strip_prefix("arg") {
+        if let Ok(parameter_index) = index.parse::<usize>() {
+            return Some(ExternalFfiHandoverSlot::Argument { parameter_index });
+        }
+    }
+    push_external_pack_parse_error(
+        diagnostics,
+        line_index,
+        "invalid external-pack-ffi-handover slot; expected receiver or argN",
+    );
+    None
 }
 
 fn push_external_pack_parse_error(
@@ -10837,7 +10934,7 @@ const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "Comparator<VariantContext>",
-        NullabilityState::DefinitelyNonNull,
+        NullabilityState::MaybeNull,
     ),
     semantic_typed_effect(
         "VCFHeader",
@@ -10845,7 +10942,7 @@ const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "Comparator<VariantContext>",
-        NullabilityState::DefinitelyNonNull,
+        NullabilityState::MaybeNull,
     ),
     semantic_typed_effect(
         "VCFHeader",
@@ -26469,11 +26566,15 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
     method_name: &str,
     arg_count: Option<usize>,
 ) -> Option<ExternalApiEffectFact> {
+    let matches_arg_count =
+        |expected: usize| arg_count.is_none_or(|arg_count| arg_count == expected);
+    if let Some(effect) = java_platform_io_api_effect(receiver_type, method_name, matches_arg_count)
+    {
+        return Some(effect);
+    }
     if !is_java_platform_class_receiver(receiver_type) {
         return None;
     }
-    let matches_arg_count =
-        |expected: usize| arg_count.is_none_or(|arg_count| arg_count == expected);
     let (expected_args, role, return_type, return_nullability, thrown) = match method_name {
         "getSimpleName" | "getName" if matches_arg_count(0) => (
             0,
@@ -26520,6 +26621,93 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
         return_type,
         return_nullability,
         thrown,
+        provenance: FactProvenance::BuiltinExternalModel,
+    })
+}
+
+fn java_platform_io_api_effect(
+    receiver_type: &str,
+    method_name: &str,
+    matches_arg_count: impl Fn(usize) -> bool,
+) -> Option<ExternalApiEffectFact> {
+    let simple_receiver = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
+    let (expected_args, role, return_type) = match (simple_receiver, method_name) {
+        ("Files" | "JavaNioFileFiles", "newInputStream" | "new_input_stream")
+            if matches_arg_count(1) =>
+        {
+            (
+                1,
+                ExternalApiRole::Getter,
+                JavaType::Named {
+                    name: "InputStream".to_string(),
+                    args: Vec::new(),
+                },
+            )
+        }
+        ("Files" | "JavaNioFileFiles", "newOutputStream" | "new_output_stream")
+            if matches_arg_count(1) =>
+        {
+            (
+                1,
+                ExternalApiRole::Getter,
+                JavaType::Named {
+                    name: "OutputStream".to_string(),
+                    args: Vec::new(),
+                },
+            )
+        }
+        ("Files" | "JavaNioFileFiles", "newBufferedReader" | "new_buffered_reader")
+            if matches_arg_count(1) =>
+        {
+            (
+                1,
+                ExternalApiRole::Getter,
+                JavaType::Named {
+                    name: "Reader".to_string(),
+                    args: Vec::new(),
+                },
+            )
+        }
+        ("Files" | "JavaNioFileFiles", "readAllLines" | "read_all_lines")
+            if matches_arg_count(1) =>
+        {
+            (
+                1,
+                ExternalApiRole::Getter,
+                JavaType::Named {
+                    name: "List".to_string(),
+                    args: vec![JavaType::String],
+                },
+            )
+        }
+        ("InputStream", "read") if matches_arg_count(1) => (
+            1,
+            ExternalApiRole::Getter,
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        ("OutputStream", "write") if matches_arg_count(3) => {
+            (3, ExternalApiRole::SideEffect, JavaType::Void)
+        }
+        ("InputStream" | "OutputStream" | "Reader", "close") if matches_arg_count(0) => {
+            (0, ExternalApiRole::SideEffect, JavaType::Void)
+        }
+        ("Reader", "readLine" | "read_line") if matches_arg_count(0) => {
+            (0, ExternalApiRole::Getter, JavaType::String)
+        }
+        _ => return None,
+    };
+    Some(ExternalApiEffectFact {
+        method_name: method_name.to_string(),
+        receiver_type: Some(receiver_type.to_string()),
+        arg_count: Some(expected_args),
+        role,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(return_type),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: vec![JavaType::Named {
+            name: "IOException".to_string(),
+            args: Vec::new(),
+        }],
         provenance: FactProvenance::BuiltinExternalModel,
     })
 }

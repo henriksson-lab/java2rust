@@ -262,20 +262,30 @@ pub fn try_with_resources_scope_stmt(
 }
 
 pub fn try_finally_scope_stmt(
+    ok_type: RustType,
     body: Vec<RustStmt>,
     finally_body: Vec<RustStmt>,
+    body_terminates_with_value: bool,
     outer_returns_result: bool,
 ) -> RustStmt {
     let mut body_with_ok = body;
-    body_with_ok.push(return_stmt(None, true));
+    if !body_terminates_with_value {
+        body_with_ok.push(return_stmt(None, true));
+    }
     let mut scope_body = Vec::new();
     scope_body.push(RustStmt::Raw(format!(
         "let __java_try_result = (|| -> {} {{\n{}}})();",
-        crate::emit::emit_type(&exception_result_type(RustType::Unit)),
+        crate::emit::emit_type(&exception_result_type(ok_type)),
         crate::emit::emit_statements(&body_with_ok, 1)
     )));
     scope_body.extend(finally_body);
-    if outer_returns_result {
+    if body_terminates_with_value {
+        if outer_returns_result {
+            scope_body.push(RustStmt::Raw("return __java_try_result;".to_string()));
+        } else {
+            scope_body.push(RustStmt::Raw("return __java_try_result.unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));".to_string()));
+        }
+    } else if outer_returns_result {
         scope_body.push(RustStmt::Raw("__java_try_result?;".to_string()));
     } else {
         scope_body.push(RustStmt::Raw(
