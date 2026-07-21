@@ -5,6 +5,7 @@ use crate::call_plan::{
 use crate::conversion_plan::{BorrowedElementRecoveryPolicy, borrowed_element_recovery_policy};
 use crate::emit;
 use crate::facts::FactSet;
+use crate::facts::ReceiverAbi;
 use crate::java_ir::{Expr, JavaType, LambdaBody};
 use crate::rust_ir::RustExpr;
 use crate::slot_render::rust_type_for_slot_with_facts;
@@ -73,19 +74,75 @@ pub fn apply_call_target(
         CallTargetPlan::NativeJavaStatic { method } => {
             apply_native_java_static_method(*method, args)
         }
-        CallTargetPlan::ExternalCrateReceiver { rust_name, .. } => RustExpr::MethodCall {
-            receiver: Box::new(
+        CallTargetPlan::ExternalCrateReceiver {
+            crate_name,
+            rust_name,
+            ..
+        } => {
+            let mut all_args = Vec::with_capacity(args.len() + 1);
+            all_args.push(
                 lowered_receiver.expect("external crate receiver target must provide receiver"),
-            ),
-            method: rust_name.clone(),
+            );
+            all_args.extend(args);
+            RustExpr::Call {
+                function: Box::new(RustExpr::Raw(format!("{crate_name}::{rust_name}"))),
+                args: all_args,
+            }
+        }
+        CallTargetPlan::ExternalFacadeReceiver {
+            rust_path,
+            receiver_abi,
+            ..
+        } => apply_external_facade_receiver_call(
+            lowered_receiver.expect("external facade target must provide receiver"),
+            rust_path,
+            *receiver_abi,
             args,
-        },
+        ),
         CallTargetPlan::SuperBoundary {
             return_type,
             propagates_result,
             ..
         } => apply_super_boundary_call(return_type, *propagates_result),
     }
+}
+
+fn apply_external_facade_receiver_call(
+    receiver: RustExpr,
+    rust_path: &str,
+    receiver_abi: ReceiverAbi,
+    args: Vec<RustExpr>,
+) -> RustExpr {
+    match receiver_abi {
+        ReceiverAbi::FreeFunction => {
+            let mut all_args = Vec::with_capacity(args.len() + 1);
+            all_args.push(receiver);
+            all_args.extend(args);
+            RustExpr::Call {
+                function: Box::new(RustExpr::Raw(rust_path.to_string())),
+                args: all_args,
+            }
+        }
+        ReceiverAbi::AssociatedFunction => RustExpr::Call {
+            function: Box::new(RustExpr::Raw(rust_path.to_string())),
+            args,
+        },
+        ReceiverAbi::BorrowedSelf | ReceiverAbi::MutBorrowedSelf | ReceiverAbi::OwnedSelf => {
+            RustExpr::MethodCall {
+                receiver: Box::new(receiver),
+                method: facade_method_name(rust_path),
+                args,
+            }
+        }
+    }
+}
+
+fn facade_method_name(rust_path: &str) -> String {
+    rust_path
+        .rsplit("::")
+        .next()
+        .unwrap_or(rust_path)
+        .to_string()
 }
 
 fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) -> RustExpr {
@@ -110,9 +167,24 @@ fn apply_native_java_instance_method(
             "{}.len() as i32",
             crate::emit::emit_expr(&receiver)
         )),
+        NativeJavaInstanceMethod::StringIsEmpty => RustExpr::MethodCall {
+            receiver: Box::new(receiver),
+            method: "is_empty".to_string(),
+            args,
+        },
+        NativeJavaInstanceMethod::StringTrim => RustExpr::MethodCall {
+            receiver: Box::new(receiver),
+            method: "trim".to_string(),
+            args,
+        },
         NativeJavaInstanceMethod::StringToLowercase => RustExpr::MethodCall {
             receiver: Box::new(receiver),
             method: "to_lowercase".to_string(),
+            args,
+        },
+        NativeJavaInstanceMethod::StringToString => RustExpr::MethodCall {
+            receiver: Box::new(receiver),
+            method: "to_string".to_string(),
             args,
         },
         NativeJavaInstanceMethod::StringContains => RustExpr::MethodCall {
@@ -187,6 +259,37 @@ fn apply_native_java_static_method(
                 function: Box::new(RustExpr::Raw("std::cmp::max".to_string())),
                 args: vec![left, right],
             }
+        }
+        NativeJavaStaticMethod::MathToIntExact => {
+            let Some(arg) = args.into_iter().next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"Math.toIntExact requires one argument\")".to_string(),
+                );
+            };
+            RustExpr::Raw(format!("{} as i32", crate::emit::emit_expr(&arg)))
+        }
+        NativeJavaStaticMethod::IntegerParseInt => {
+            let Some(arg) = args.into_iter().next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"Integer.parseInt requires at least one argument\")"
+                        .to_string(),
+                );
+            };
+            RustExpr::Raw(format!(
+                "{}.parse::<i32>().unwrap()",
+                crate::emit::emit_expr(&arg)
+            ))
+        }
+        NativeJavaStaticMethod::DoubleParseDouble => {
+            let Some(arg) = args.into_iter().next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"Double.parseDouble requires one argument\")".to_string(),
+                );
+            };
+            RustExpr::Raw(format!(
+                "{}.parse::<f64>().unwrap()",
+                crate::emit::emit_expr(&arg)
+            ))
         }
         NativeJavaStaticMethod::StringFormat => apply_string_format(args),
         NativeJavaStaticMethod::StringJoin => apply_string_join(args),
@@ -519,7 +622,13 @@ pub fn apply_new_target_with_facts(
     }
     let owner_type =
         crate::emit::emit_type(&rust_type_for_slot_with_facts(&target.owner_shape, facts));
-    if owner_type == "Box<dyn std::any::Any>" {
+    if owner_type == "Box<dyn std::any::Any>"
+        || matches!(
+            &target.owner_shape.java_ty,
+            JavaType::Named { name, .. } | JavaType::Unknown(name)
+                if name == "Object" || name == "java.lang.Object"
+        )
+    {
         return erased_object_new_expr(args);
     }
     RustExpr::Call {

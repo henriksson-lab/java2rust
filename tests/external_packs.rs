@@ -32,14 +32,15 @@ use new_java2rust::external_packs::{
     unsupported_external_api_for_receiver,
 };
 use new_java2rust::facts::{
-    ClosedHierarchyFact, ExceptionFact, ExceptionKind, ExternalApiArgumentEffectFact,
-    ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
-    ExternalConstructorFact, ExternalCrateApiMappingFact, ExternalCrateConstructorMappingFact,
-    ExternalCrateTypeMappingFact, ExternalFieldFact, ExternalLibraryMode, FactProvenance, FactSet,
+    CallableKey, CallableKind, ClosedHierarchyFact, ExceptionFact, ExceptionKind,
+    ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole,
+    ExternalArgumentAliasPolicy, ExternalConstructorFact, ExternalCrateApiMappingFact,
+    ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFieldFact,
+    ExternalFieldKind, ExternalLibraryMode, FacadeAbiFact, FacadeSlot, FactProvenance, FactSet,
     FieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride,
-    HierarchyStrategy, NullabilityState, ObjectSafetyFact, ObjectSafetyViolation,
-    ReceiverMutabilityFact, TypeCapabilityOverride, UnsupportedExternalApiFact,
-    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
+    HierarchyStrategy, NullabilityState, ObjectSafetyFact, ObjectSafetyViolation, ReceiverAbi,
+    ReceiverMutabilityFact, ResultAbi, Staticness, TypeCapabilityOverride,
+    UnsupportedExternalApiFact, UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::{parser, resolve, semantic_analysis};
@@ -751,6 +752,94 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
         })
     );
 
+    for (method_name, arity, return_type, role) in [
+        (
+            "getPath",
+            1,
+            Some(JavaType::Named {
+                name: "Path".to_string(),
+                args: Vec::new(),
+            }),
+            ExternalApiRole::Getter,
+        ),
+        (
+            "appendPathToDir",
+            2,
+            Some(JavaType::String),
+            ExternalApiRole::Getter,
+        ),
+        (
+            "createTempFile",
+            2,
+            Some(JavaType::Named {
+                name: "File".to_string(),
+                args: Vec::new(),
+            }),
+            ExternalApiRole::Getter,
+        ),
+        (
+            "replaceExtension",
+            2,
+            Some(JavaType::String),
+            ExternalApiRole::Getter,
+        ),
+        ("assertFileIsReadable", 1, None, ExternalApiRole::SideEffect),
+        (
+            "assertPathsAreReadable",
+            1,
+            None,
+            ExternalApiRole::SideEffect,
+        ),
+    ] {
+        let effect = utils_facts
+            .external_api_effect_for_receiver_with_arity(Some("IOUtils"), method_name, Some(arity))
+            .unwrap_or_else(|| panic!("IOUtils.{method_name}/{arity} should be pack-owned"));
+        assert_eq!(effect.return_type, return_type);
+        assert_eq!(effect.role, role);
+        assert_eq!(effect.provenance, FactProvenance::ExternalLibraryPack);
+
+        let policy =
+            new_java2rust::stdlib::external_api_method_policy(Some("IOUtils"), method_name, arity);
+        assert_eq!(policy.role, role);
+        assert_eq!(policy.provenance, FactProvenance::ExternalLibraryPack);
+    }
+
+    let gatk_constants_pack = utils_facts
+        .external_library_pack_for_type(
+            "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        )
+        .expect("GATKVCFConstants should be owned by the Broad Hellbender utils pack");
+    assert_eq!(
+        gatk_constants_pack.pack_name,
+        "org.broadinstitute.hellbender.utils"
+    );
+
+    for field_name in [
+        "RAW_MAPPING_QUALITY_WITH_DEPTH_KEY",
+        "MAPPING_QUALITY_DEPTH_DEPRECATED",
+        "TREE_SCORE",
+    ] {
+        let field = utils_facts
+            .external_field_for("GATKVCFConstants", field_name)
+            .unwrap_or_else(|| panic!("GATKVCFConstants.{field_name} should be typed by the pack"));
+        assert_eq!(field.field_type, Some(JavaType::String));
+        assert_eq!(field.field_kind, ExternalFieldKind::StaticFinal);
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+
+        let dispatched = external_field_for("GATKVCFConstants", field_name).unwrap_or_else(|| {
+            panic!("GATKVCFConstants.{field_name} should resolve through builtin field lookup")
+        });
+        assert_eq!(dispatched.field_type, Some(JavaType::String));
+        assert_eq!(dispatched.field_kind, ExternalFieldKind::StaticFinal);
+
+        let snake_dispatched = external_field_for("g_a_t_k_v_c_f_constants", field_name)
+            .unwrap_or_else(|| {
+                panic!("g_a_t_k_v_c_f_constants.{field_name} should resolve through pack aliases")
+            });
+        assert_eq!(snake_dispatched.field_type, Some(JavaType::String));
+        assert_eq!(snake_dispatched.field_kind, ExternalFieldKind::StaticFinal);
+    }
+
     let genotype_het = external_field_for("GenotypeType", "HET")
         .expect("GenotypeType.HET should resolve through builtin field lookup");
     assert_eq!(
@@ -760,6 +849,7 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
             args: Vec::new()
         })
     );
+    assert_eq!(genotype_het.field_kind, ExternalFieldKind::EnumVariant);
     let vcf_count_a = external_field_for("VCFHeaderLineCount", "A")
         .expect("VCFHeaderLineCount.A should resolve through builtin field lookup");
     assert_eq!(
@@ -1176,7 +1266,7 @@ fn pack_owned_domain_getters_take_precedence_over_generic_stdlib_provenance() {
         assert_eq!(pack_fact.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_api_method_policy(Some(receiver), method, 0).provenance,
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{receiver}.{method} should be owned by its external pack, not generic stdlib"
         );
     }
@@ -1207,7 +1297,7 @@ fn pack_owned_fields_and_constructors_take_precedence_over_generic_stdlib_proven
         assert_eq!(pack_fact.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} should be owned by its external pack, not generic stdlib"
         );
     }
@@ -1228,7 +1318,7 @@ fn pack_owned_fields_and_constructors_take_precedence_over_generic_stdlib_proven
         assert_eq!(pack_fact.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} should be owned by its external pack, not generic stdlib",
             args.len()
         );
@@ -1331,11 +1421,15 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
             ExternalPackModeledField {
                 type_name: "dep.audit.Record",
                 field_name: "KNOWN",
+                field_type: None,
+                field_kind: ExternalFieldKind::StaticFinal,
                 coverage: ExternalApiCoverage::Semantic,
             },
             ExternalPackModeledField {
                 type_name: "dep.audit.Record",
                 field_name: "RAW_HANDLE",
+                field_type: None,
+                field_kind: ExternalFieldKind::StaticFinal,
                 coverage: ExternalApiCoverage::Unsupported,
             },
         ],
@@ -1412,6 +1506,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
             field_name: "MISSING".to_string(),
         },
         field_type: None,
+        field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts
@@ -1755,6 +1850,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
             field_name: "RAW".to_string(),
         },
         field_type: None,
+        field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.hierarchy_overrides.push(HierarchyOverride {
@@ -1950,11 +2046,15 @@ fn external_pack_manifest_coverage_lookup_is_member_kind_symmetric() {
             ExternalPackModeledField {
                 type_name: "dep.boundary.Record",
                 field_name: "KIND",
+                field_type: None,
+                field_kind: ExternalFieldKind::StaticFinal,
                 coverage: ExternalApiCoverage::Semantic,
             },
             ExternalPackModeledField {
                 type_name: "dep.boundary.Record",
                 field_name: "RAW_HANDLE",
+                field_type: None,
+                field_kind: ExternalFieldKind::StaticFinal,
                 coverage: ExternalApiCoverage::Unsupported,
             },
         ],
@@ -2030,7 +2130,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         external-pack-api dep.variant dep.variant.Reader read mapped getter read-only maybe-null args=1 return=dep.variant.Record throws=DepIoError rust-return=usize
         external-pack-constructor dep.variant dep.variant.Builder 0 semantic
         external-pack-constructor dep.variant dep.variant.LegacyReader 1 unsupported
-        external-pack-field dep.variant dep.variant.Record TYPE semantic
+        external-pack-field dep.variant dep.variant.Record TYPE semantic type=dep.variant.RecordType const-kind=enum-variant
         external-pack-field dep.variant dep.variant.Record RAW_HANDLE unsupported
         external-pack-unsupported dep.variant dep.variant.Reader rawDecode requires runtime codec state
         "#,
@@ -2373,6 +2473,14 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         .external_field_for("dep.variant.Record", "TYPE")
         .expect("manifest field entry should produce field fact");
     assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(
+        field.field_type,
+        Some(JavaType::Named {
+            name: "RecordType".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(field.field_kind, ExternalFieldKind::EnumVariant);
 
     let unsupported = parsed
         .facts
@@ -2400,6 +2508,90 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         unsupported_field.reason,
         "declared unsupported by external pack manifest"
     );
+}
+
+#[test]
+fn callable_keys_lookup_external_pack_api_constructor_and_field_facts() {
+    let parsed = parse_external_pack_manifest(
+        r#"
+        external-pack dep.keys dep.keys external-fact-model semantic
+        external-pack-api dep.keys dep.keys.Record name semantic getter read-only definitely-non-null args=0 return=String
+        external-pack-constructor dep.keys dep.keys.Builder 1 semantic
+        external-pack-field dep.keys dep.keys.Record TYPE semantic type=dep.keys.RecordType const-kind=enum-variant
+        "#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method_key = CallableKey::method("dep.keys.Record", "name", Staticness::Unknown, 0);
+    let method = parsed
+        .facts
+        .external_api_effect_for_key(&method_key)
+        .expect("method fact should be addressable by callable key");
+    assert_eq!(method.return_type, Some(JavaType::String));
+
+    let constructor_key = CallableKey::constructor(
+        "dep.keys.Builder",
+        vec![new_java2rust::facts::TypePattern::Any],
+    );
+    let constructor = parsed
+        .facts
+        .external_constructor_for_key(&constructor_key)
+        .expect("constructor fact should be addressable by callable key");
+    assert_eq!(constructor.arg_types.len(), 1);
+
+    let field_key = CallableKey::field(
+        "dep.keys.Record",
+        "TYPE",
+        CallableKind::StaticField,
+        Staticness::Static,
+    );
+    let field = parsed
+        .facts
+        .external_field_for_key(&field_key)
+        .expect("field fact should be addressable by callable key");
+    assert_eq!(field.field_kind, ExternalFieldKind::EnumVariant);
+
+    let builtin_key = CallableKey::field(
+        "GenotypeType",
+        "HET",
+        CallableKind::StaticField,
+        Staticness::Static,
+    );
+    let builtin_field = new_java2rust::external_packs::external_field_for_key(&builtin_key)
+        .expect("builtin pack field should be addressable through the key index");
+    assert_eq!(builtin_field.field_kind, ExternalFieldKind::EnumVariant);
+}
+
+#[test]
+fn facade_abi_lookup_uses_callable_key_and_prefers_user_override() {
+    let key = CallableKey::method("dep.facade.Reader", "read", Staticness::Unknown, 1);
+    let mut facts = FactSet::default();
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: key.clone(),
+        rust_path: "dep_facade::read".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: vec![FacadeSlot::Borrowed],
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::ResultWrapped,
+        borrow_source: None,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: key.clone(),
+        rust_path: "override_facade::read".to_string(),
+        receiver: ReceiverAbi::FreeFunction,
+        args: vec![FacadeSlot::CrateHandle("ReaderHandle".to_string())],
+        return_slot: FacadeSlot::Optional(Box::new(FacadeSlot::Owned)),
+        result: ResultAbi::Plain,
+        borrow_source: Some(new_java2rust::facts::BorrowSource::Argument(0)),
+        provenance: FactProvenance::UserOverride,
+    });
+
+    let selected = facts
+        .facade_abi_for_key(&key)
+        .expect("facade ABI should be addressable by callable key");
+    assert_eq!(selected.rust_path, "override_facade::read");
+    assert_eq!(selected.receiver, ReceiverAbi::FreeFunction);
 }
 
 #[test]
@@ -2801,7 +2993,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{:?} should be owned by the variantcontext external pack, not stdlib",
             args.len()
         );
@@ -2818,9 +3010,10 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
             args: Vec::new(),
         })
     );
+    assert_eq!(variant_type.field_kind, ExternalFieldKind::NestedType);
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("VariantContext", "Type"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "VariantContext.Type precision should come from the variantcontext pack, not stdlib"
     );
     for field_name in ["SNP", "MNP", "SYMBOLIC"] {
@@ -2890,12 +3083,13 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
             .unwrap_or_else(|| panic!("Allele.{field_name} should be pack-owned"));
         assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(field.field_type, Some(expected_type));
+        assert_eq!(field.field_kind, ExternalFieldKind::StaticFinal);
         let dispatched = new_java2rust::external_packs::external_field_for("Allele", field_name)
             .unwrap_or_else(|| panic!("Allele.{field_name} should be globally pack-dispatched"));
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("Allele", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "Allele.{field_name} precision should come from the variantcontext pack, not stdlib"
         );
     }
@@ -2927,7 +3121,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
             "GenotypeLikelihoods",
             "MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED"
         ),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "GenotypeLikelihoods max alt allele limit precision should come from the variantcontext pack, not stdlib"
     );
     let no_genotypes = facts
@@ -2950,7 +3144,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
     );
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("GenotypesContext", "NO_GENOTYPES"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "GenotypesContext.NO_GENOTYPES precision should come from the variantcontext pack, not stdlib"
     );
     for type_name in [
@@ -2975,7 +3169,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, "NO_LOG10_PERROR"),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.NO_LOG10_PERROR precision should come from the variantcontext pack, not stdlib"
         );
     }
@@ -2999,7 +3193,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
     );
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("Genotype", "UNPHASED_ALLELE_SEPARATOR"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "Genotype.UNPHASED_ALLELE_SEPARATOR precision should come from the variantcontext pack, not stdlib"
     );
     for field_name in ["INDEL", "NO_VARIATION"] {
@@ -3019,7 +3213,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("Type", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "Type.{field_name} precision should come from the variantcontext pack, not stdlib"
         );
     }
@@ -3047,7 +3241,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
                 "GenotypeLikelihoodsAllelePair",
                 field_name
             ),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "GenotypeLikelihoodsAllelePair.{field_name} precision should come from the variantcontext pack, not stdlib"
         );
     }
@@ -3074,7 +3268,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("JexlVCMatchExp", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "JexlVCMatchExp.{field_name} precision should come from the variantcontext pack, not stdlib"
         );
     }
@@ -3105,7 +3299,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
                 "JexlMissingValueTreatment",
                 field_name
             ),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "JexlMissingValueTreatment.{field_name} precision should come from the variantcontext pack, not stdlib"
         );
     }
@@ -3131,7 +3325,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
     );
     assert_eq!(
         new_java2rust::stdlib::external_api_method_policy(Some("Allele"), "create", 1).provenance,
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "Allele.create precision should come from the variantcontext pack, not stdlib"
     );
     let allele_base_string = facts
@@ -3145,7 +3339,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
     assert_eq!(
         new_java2rust::stdlib::external_api_method_policy(Some("Allele"), "getBaseString", 0)
             .provenance,
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "Allele.getBaseString precision should come from the variantcontext pack, not stdlib"
     );
     for (receiver, method) in [
@@ -3162,7 +3356,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
         );
         assert_eq!(
             new_java2rust::stdlib::external_api_method_policy(Some(receiver), method, 0).provenance,
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{receiver}.{method} precision should come from the variantcontext pack, not stdlib"
         );
     }
@@ -3863,6 +4057,188 @@ class VariantContextGenotypeFlowUse {
 }
 
 #[test]
+fn htsjdk_constructor_knowledge_is_not_hardcoded_in_stdlib() {
+    let stdlib_source = include_str!("../src/stdlib.rs");
+
+    assert!(
+        !stdlib_source.contains("is_known_htsjdk_constructor"),
+        "HTSJDK constructor behavior should be declared by external packs, not stdlib.rs"
+    );
+}
+
+#[test]
+fn gatk_vcf_constant_field_typing_is_not_hardcoded_in_stdlib() {
+    let stdlib_source = include_str!("../src/stdlib.rs");
+
+    assert!(
+        !stdlib_source.contains("MAPPING_QUALITY_DEPTH_DEPRECATED"),
+        "GATK-specific constant names should live in external pack manifests"
+    );
+    assert!(
+        !stdlib_source.contains("TREE_SCORE"),
+        "GATK-specific constant names should live in external pack manifests"
+    );
+    assert!(
+        !stdlib_source.contains("\"g_a_t_k_v_c_f_constants\" => \"GATKVCFConstants\""),
+        "GATKVCFConstants snake-case aliases should come from external pack lookup aliases"
+    );
+}
+
+#[test]
+fn htsjdk_structural_subtype_knowledge_is_not_hardcoded_in_stdlib() {
+    let stdlib_source = include_str!("../src/stdlib.rs");
+
+    assert!(
+        !stdlib_source.contains("\"Locatable\" =>"),
+        "Locatable subtype knowledge should be declared by external pack capability facts"
+    );
+    assert!(
+        !stdlib_source.contains("\"Feature\" =>"),
+        "Feature subtype knowledge should be declared by external pack capability facts"
+    );
+    assert!(
+        !stdlib_source.contains("is_known_locatable_type"),
+        "Locatable subtype helper should not live in stdlib"
+    );
+    assert!(
+        !stdlib_source.contains("is_known_feature_type"),
+        "Feature subtype helper should not live in stdlib"
+    );
+    assert!(
+        !stdlib_source.contains("\"SimpleInterval\" | \"Interval\" | \"Locatable\""),
+        "HTSJDK getter return surfaces should be declared by external API facts"
+    );
+}
+
+#[test]
+fn hdf5_type_alias_knowledge_is_not_hardcoded_in_stdlib() {
+    let stdlib_source = include_str!("../src/stdlib.rs");
+
+    assert!(
+        !stdlib_source.contains("\"h_d_f5_file\" => \"HDF5File\""),
+        "HDF5 snake-case type aliases should come from external pack lookup aliases"
+    );
+
+    let ctor = external_constructor_for(
+        "h_d_f5_file",
+        &[
+            JavaType::Unknown("_".to_string()),
+            JavaType::Unknown("_".to_string()),
+        ],
+    )
+    .expect("HDF5File snake-case constructor lookup should be pack-owned");
+    assert_eq!(ctor.provenance, FactProvenance::ExternalLibraryPack);
+
+    let mapping = external_crate_constructor_mapping_for("h_d_f5_file", 2)
+        .expect("HDF5File snake-case constructor mapping should be pack-owned");
+    assert_eq!(mapping.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(mapping.rust_name, "new");
+}
+
+#[test]
+fn non_jdk_pack_type_aliases_are_not_hardcoded_in_stdlib() {
+    let stdlib_source = include_str!("../src/stdlib.rs");
+
+    for removed_alias in [
+        "\"variant_context\" => \"VariantContext\"",
+        "\"genomics_d_b_column\" => \"GenomicsDBColumn\"",
+        "\"variant_context_writer_builder\" => \"VariantContextWriterBuilder\"",
+        "\"genomics_d_b_export_configuration\" => \"GenomicsDBExportConfiguration\"",
+        "\"mapper_feature\" => \"MapperFeature\"",
+        "\"feature_codec_header\" => \"FeatureCodecHeader\"",
+        "\"genomics_d_b_import_configuration\" => \"GenomicsDBImportConfiguration\"",
+        "\"genomics_d_b_vid_map_proto\" => \"GenomicsDBVidMapProto\"",
+    ] {
+        assert!(
+            !stdlib_source.contains(removed_alias),
+            "{removed_alias} should come from external pack lookup aliases"
+        );
+    }
+    assert!(
+        !stdlib_source.contains("simple.starts_with(\"SQLite\")"),
+        "SQLite facade type names should be preserved by generic Rust identifier rendering and pack facts"
+    );
+    for removed_broad_utils_fragment in [
+        "(Some(\"Utils\"), \"stream\"",
+        "\"utils\" => \"Utils\"",
+        "simple == \"Utils\"",
+        "\"quality_utils\" => \"QualityUtils\"",
+        "(Some(\"QualityUtils\"), \"qualToProb\"",
+    ] {
+        assert!(
+            !stdlib_source.contains(removed_broad_utils_fragment),
+            "{removed_broad_utils_fragment} should live in javalibs or external pack facts, not stdlib.rs"
+        );
+    }
+
+    let variant_getter =
+        external_api_effect_for_receiver_with_arity(Some("variant_context"), "getContig", Some(0))
+            .expect("VariantContext snake-case API lookup should be pack-owned");
+    assert_eq!(
+        variant_getter.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+
+    let builder_ctor = external_constructor_for("variant_context_writer_builder", &[])
+        .expect("VariantContextWriterBuilder snake-case constructor lookup should be pack-owned");
+    assert_eq!(builder_ctor.provenance, FactProvenance::ExternalLibraryPack);
+
+    for type_name in [
+        "genomics_d_b_column",
+        "genomics_d_b_export_configuration",
+        "genomics_d_b_import_configuration",
+        "genomics_d_b_vid_map_proto",
+        "feature_codec_header",
+        "mapper_feature",
+    ] {
+        let pack = external_library_pack_for_type(type_name)
+            .unwrap_or_else(|| panic!("{type_name} should resolve to a pack by alias"));
+        assert_eq!(pack.provenance, FactProvenance::ExternalLibraryPack);
+    }
+
+    let column_builder = external_api_effect_for_receiver_with_arity(
+        Some("genomics_d_b_column"),
+        "newBuilder",
+        Some(0),
+    )
+    .expect("GenomicsDBColumn snake-case static method lookup should be pack-owned");
+    assert_eq!(
+        column_builder.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+
+    for (type_name, field_name) in [
+        ("genomics_d_b_export_configuration", "ExportConfiguration"),
+        ("genomics_d_b_import_configuration", "ImportConfiguration"),
+        ("genomics_d_b_vid_map_proto", "VidMappingPB"),
+        ("feature_codec_header", "NO_HEADER_END"),
+        ("mapper_feature", "ACCEPT_CASE_INSENSITIVE_PROPERTIES"),
+    ] {
+        let field = external_field_for(type_name, field_name)
+            .unwrap_or_else(|| panic!("{type_name}.{field_name} should be pack-owned"));
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+    }
+}
+
+#[test]
+fn broad_ioutils_semantics_are_not_hardcoded_in_stdlib() {
+    let stdlib_source = include_str!("../src/stdlib.rs");
+
+    assert!(
+        !stdlib_source.contains("(Some(\"IOUtils\"), \"getPath\""),
+        "IOUtils return facts should be declared by the Broad Hellbender external pack"
+    );
+    assert!(
+        !stdlib_source.contains("\"i_o_utils\" => \"IOUtils\""),
+        "IOUtils snake-case aliases should come from external pack lookup aliases"
+    );
+    assert!(
+        !stdlib_source.contains("| Some(\"IOUtils\")"),
+        "IOUtils static utility ownership should come from external pack API facts"
+    );
+}
+
+#[test]
 fn htsjdk_variantcontext_pack_models_sequence_like_genotypes_context() {
     let facts = htsjdk_variantcontext_pack_facts();
     let element = facts
@@ -3899,7 +4275,7 @@ fn htsjdk_bcf_pack_declares_codec_boundary() {
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("BCF2Codec", &[]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "BCF2Codec/0 precision should come from the BCF pack, not stdlib"
     );
 }
@@ -3949,7 +4325,7 @@ fn htsjdk_vcf_pack_declares_header_metadata_boundary() {
     ] {
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} constructor precision should come from the VCF pack, not stdlib fallback",
             args.len()
         );
@@ -4125,7 +4501,7 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("VCFConstants", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "VCFConstants.{field_name} precision should come from the VCF pack, not stdlib"
         );
     }
@@ -4147,7 +4523,7 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("VCFHeader", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "VCFHeader.{field_name} precision should come from the VCF pack, not stdlib"
         );
     }
@@ -4171,7 +4547,7 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
             "VCFCompoundHeaderLine",
             "SupportedHeaderLineType"
         ),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "VCFCompoundHeaderLine.SupportedHeaderLineType precision should come from the VCF pack, not stdlib"
     );
 
@@ -4197,7 +4573,7 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("SupportedHeaderLineType", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "SupportedHeaderLineType.{field_name} precision should come from the VCF pack, not stdlib"
         );
     }
@@ -4221,7 +4597,7 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
             "VariantContextWriterBuilder",
             "OutputType"
         ),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "VariantContextWriterBuilder.OutputType precision should come from the VCF pack, not stdlib"
     );
     let default_options = facts
@@ -4252,7 +4628,7 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
             "VariantContextWriterBuilder",
             "DEFAULT_OPTIONS"
         ),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "VariantContextWriterBuilder.DEFAULT_OPTIONS precision should come from the VCF pack, not stdlib"
     );
 
@@ -4994,7 +5370,7 @@ fn apache_commons_math_optim_pack_declares_gatk_shaped_constructor_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("GoalType", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "GoalType constants should come from the optimization pack, not generic stdlib"
         );
     }
@@ -5080,7 +5456,7 @@ fn picard_programgroups_pack_declares_help_category_boundary() {
     ] {
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &[]),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/0 constructor precision should come from the Picard pack, not stdlib fallback"
         );
 
@@ -5137,7 +5513,7 @@ fn picard_markduplicates_pack_declares_duplicate_tagging_policy_boundary() {
             "MarkDuplicates",
             "DuplicateTaggingPolicy"
         ),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "MarkDuplicates.DuplicateTaggingPolicy precision should come from the Picard markduplicates pack, not stdlib"
     );
 
@@ -5161,7 +5537,7 @@ fn picard_markduplicates_pack_declares_duplicate_tagging_policy_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("DuplicateTaggingPolicy", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "DuplicateTaggingPolicy.{field_name} precision should come from the Picard markduplicates pack, not stdlib"
         );
     }
@@ -5184,7 +5560,7 @@ fn picard_markduplicates_pack_declares_duplicate_tagging_policy_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("ReadEnds", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "ReadEnds.{field_name} precision should come from the Picard markduplicates pack, not stdlib"
         );
     }
@@ -5197,7 +5573,7 @@ fn picard_markduplicates_pack_declares_duplicate_tagging_policy_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} precision should come from the Picard markduplicates pack, not stdlib"
         );
     }
@@ -5264,7 +5640,7 @@ fn picard_metrics_pack_models_duplication_metrics_public_fields() {
         assert_eq!(dispatched.field_type, Some(expected_ty));
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("DuplicationMetrics", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "DuplicationMetrics.{field_name} precision should come from the Picard metrics pack, not stdlib"
         );
     }
@@ -5360,7 +5736,7 @@ fn avro_pack_declares_schema_parser_boundary() {
                 args: Vec::new(),
             }],
         ),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "Avro GenericDatumReader constructor precision should come from the pack, not stdlib fallback"
     );
 
@@ -5483,7 +5859,7 @@ fn barclay_help_pack_declares_doc_exception_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("TemplateProperties", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "TemplateProperties.{field_name} precision should come from the Barclay help pack, not stdlib"
         );
     }
@@ -5567,7 +5943,7 @@ fn barclay_argparser_pack_declares_command_line_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} precision should come from the Barclay argparser pack, not stdlib fallback"
         );
     }
@@ -5594,7 +5970,7 @@ fn barclay_argparser_pack_declares_command_line_boundary() {
             "SpecialArgumentsCollection",
             "SHOW_HIDDEN"
         ),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "SpecialArgumentsCollection.SHOW_HIDDEN precision should come from the Barclay argparser pack, not stdlib"
     );
 }
@@ -5657,7 +6033,7 @@ fn barclay_utils_pack_declares_class_finder_boundary() {
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("ClassFinder", &[]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "ClassFinder/0 precision should come from the Barclay utils pack, not stdlib fallback"
     );
 }
@@ -5686,7 +6062,7 @@ fn scala_tuple_pack_declares_tuple_boundaries() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arity} precision should come from the Scala tuple pack, not stdlib"
         );
 
@@ -5826,7 +6202,7 @@ fn kryo_pack_declares_core_serializer_runtime_constructors() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} should not be a generic stdlib fallback",
             args.len()
         );
@@ -6117,7 +6493,7 @@ fn opencsv_pack_declares_reader_writer_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} should not be a generic stdlib fallback",
             args.len()
         );
@@ -6242,7 +6618,7 @@ fn org_json_pack_declares_object_array_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} should not be a generic stdlib fallback",
             args.len()
         );
@@ -6375,7 +6751,7 @@ fn reflections_pack_declares_conservative_scanning_boundary() {
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("Reflections", &constructor_args),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "Reflections/1 should not be a generic stdlib fallback"
     );
 
@@ -6477,7 +6853,7 @@ fn hadoop_conf_pack_declares_configuration_boundary() {
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("Configuration", &[]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "Configuration/0 should not be a generic stdlib fallback"
     );
 
@@ -6597,7 +6973,7 @@ fn apache_commons_config_pack_declares_builder_boundary_without_claiming_configu
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("Configurations", &[]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "Configurations/0 should not be a generic stdlib fallback"
     );
 
@@ -6739,7 +7115,7 @@ fn spark_pack_declares_runtime_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} should not be a generic stdlib fallback",
             args.len()
         );
@@ -7261,7 +7637,7 @@ fn bwa_pack_declares_native_wrapper_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} should not be a generic stdlib fallback",
             args.len()
         );
@@ -7279,7 +7655,7 @@ fn bwa_pack_declares_native_wrapper_boundary() {
     );
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("BwaMemAligner", "MEM_F_ALL"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "BwaMemAligner.MEM_F_ALL should not be a generic stdlib field fallback"
     );
 
@@ -7437,7 +7813,7 @@ fn jgrapht_pack_declares_graph_algorithm_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} should not be a generic stdlib fallback",
             args.len()
         );
@@ -7636,7 +8012,7 @@ fn fastutil_pack_declares_primitive_collection_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} should not be a generic stdlib fallback",
             args.len()
         );
@@ -7780,7 +8156,7 @@ fn disq_write_pack_declares_temp_parts_option_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/2 constructor precision should come from the DISQ pack, not stdlib fallback"
         );
     }
@@ -7904,7 +8280,7 @@ fn intel_gkl_pack_declares_native_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &[]),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/0 constructor precision should come from the Intel GKL pack, not stdlib fallback"
         );
     }
@@ -8004,7 +8380,7 @@ fn intel_gkl_pack_declares_native_boundary() {
         assert_eq!(dispatched.field_type, Some(expected_type));
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the Intel GKL pack, not stdlib fallback"
         );
     }
@@ -8293,7 +8669,7 @@ fn guava_concurrent_pack_declares_thread_factory_builder_boundary() {
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("ThreadFactoryBuilder", &[]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "ThreadFactoryBuilder constructor precision should come from the Guava concurrent pack, not stdlib fallback"
     );
 
@@ -8408,7 +8784,7 @@ fn broad_http_pack_declares_retry_settings_boundary() {
                 },
             ],
         ),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "Broad HTTP constructor precision should come from the pack, not stdlib fallback"
     );
 
@@ -8477,7 +8853,7 @@ fn broad_http_pack_declares_retry_settings_boundary() {
             "HttpFileSystemProviderSettings",
             "DEFAULT_SETTINGS"
         ),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "HttpFileSystemProviderSettings.DEFAULT_SETTINGS precision should come from the Broad HTTP pack, not stdlib"
     );
 
@@ -8492,7 +8868,7 @@ fn broad_http_pack_declares_retry_settings_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, "SCHEME"),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.SCHEME precision should come from the Broad HTTP pack, not stdlib"
         );
     }
@@ -8521,7 +8897,7 @@ fn broad_http_pack_declares_retry_settings_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("RetryHandler", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "RetryHandler.{field_name} precision should come from the Broad HTTP pack, not stdlib"
         );
     }
@@ -8637,7 +9013,7 @@ fn picard_vcf_pack_declares_truth_and_call_states_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} precision should come from the Picard VCF pack, not stdlib"
         );
     }
@@ -8670,7 +9046,7 @@ fn picard_vcf_pack_declares_truth_and_call_states_boundary() {
                 "GenotypeConcordanceStates",
                 field_name
             ),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "GenotypeConcordanceStates.{field_name} precision should come from the Picard VCF pack, not stdlib"
         );
     }
@@ -8694,7 +9070,7 @@ fn picard_vcf_pack_declares_truth_and_call_states_boundary() {
         );
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("TruthAndCallStates", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "TruthAndCallStates.{field_name} precision should come from the Picard VCF pack, not stdlib"
         );
     }
@@ -8723,7 +9099,7 @@ fn picard_vcf_pack_declares_truth_and_call_states_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the Picard VCF pack, not stdlib"
         );
     }
@@ -8755,7 +9131,7 @@ fn picard_vcf_pack_declares_truth_and_call_states_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the Picard VCF pack, not stdlib"
         );
     }
@@ -8863,7 +9239,7 @@ fn htsjdk_sam_header_pack_declares_selected_header_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{:?} should be owned by the SAM header external pack, not stdlib",
             args.len()
         );
@@ -9137,7 +9513,7 @@ fn htsjdk_sam_header_pack_models_dictionary_header_and_read_group_effects() {
             "SAMSequenceRecord",
             "UNKNOWN_SEQUENCE_LENGTH"
         ),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "SAMSequenceRecord.UNKNOWN_SEQUENCE_LENGTH precision should come from the SAM header pack, not stdlib"
     );
 
@@ -9155,7 +9531,7 @@ fn htsjdk_sam_header_pack_models_dictionary_header_and_read_group_effects() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("SAMReadGroupRecord", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "SAMReadGroupRecord.{field_name} precision should come from the SAM header pack, not stdlib"
         );
     }
@@ -9183,7 +9559,7 @@ fn htsjdk_sam_header_pack_models_dictionary_header_and_read_group_effects() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("SAMFileHeader", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "SAMFileHeader.{field_name} precision should come from the SAM header pack, not stdlib"
         );
     }
@@ -9212,7 +9588,7 @@ fn htsjdk_sam_header_pack_models_dictionary_header_and_read_group_effects() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the SAM header pack, not stdlib"
         );
     }
@@ -9623,7 +9999,7 @@ fn htsjdk_sam_record_pack_declares_record_boundary() {
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("SAMRecord", &args),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "SAMRecord/1 should not be a generic stdlib fallback"
     );
     let filter_pack = facts
@@ -9683,7 +10059,7 @@ fn htsjdk_sam_record_pack_declares_record_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} should not be a generic stdlib fallback",
             args.len()
         );
@@ -9700,7 +10076,7 @@ fn htsjdk_sam_record_pack_declares_record_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &[]),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/0 should not be a generic stdlib fallback"
         );
     }
@@ -10177,7 +10553,7 @@ fn htsjdk_sam_record_pack_declares_record_boundary() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("SAMRecord", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "SAMRecord.{field_name} precision should come from the SAM record pack, not stdlib"
         );
     }
@@ -10214,7 +10590,7 @@ fn htsjdk_sam_record_pack_declares_record_boundary() {
         assert_eq!(dispatched.field_type, Some(expected_ty));
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the SAM record pack, not stdlib"
         );
     }
@@ -10252,7 +10628,7 @@ fn htsjdk_sam_record_pack_declares_record_boundary() {
         );
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("CigarOperator", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "CigarOperator.{field_name} precision should come from the SAM record pack, not stdlib"
         );
     }
@@ -10629,7 +11005,7 @@ fn htsjdk_sam_reference_pack_declares_reference_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} should not be a generic stdlib fallback",
             args.len()
         );
@@ -10831,6 +11207,38 @@ fn htsjdk_tribble_feature_pack_declares_feature_boundary() {
         )
         .expect("SimpleFeature constructor should be pack-owned by arity");
     assert_eq!(feature.provenance, FactProvenance::ExternalLibraryPack);
+    let simple_feature_ty = JavaType::Named {
+        name: "SimpleFeature".to_string(),
+        args: Vec::new(),
+    };
+    let feature_ty = JavaType::Named {
+        name: "Feature".to_string(),
+        args: Vec::new(),
+    };
+    let locatable_ty = JavaType::Named {
+        name: "Locatable".to_string(),
+        args: Vec::new(),
+    };
+    assert!(
+        facts
+            .hierarchy_subtype_policy(&simple_feature_ty, &feature_ty)
+            .reaches,
+        "SimpleFeature -> Feature should be provided by external pack capability facts"
+    );
+    assert!(
+        facts
+            .hierarchy_subtype_policy(&simple_feature_ty, &locatable_ty)
+            .reaches,
+        "SimpleFeature -> Locatable should be provided by external pack capability facts"
+    );
+    assert!(
+        !new_java2rust::stdlib::is_known_java_subtype("SimpleFeature", "Feature"),
+        "non-JDK Feature subtype knowledge should not be hardcoded in stdlib"
+    );
+    assert!(
+        !new_java2rust::stdlib::is_known_java_subtype("SimpleFeature", "Locatable"),
+        "non-JDK Locatable subtype knowledge should not be hardcoded in stdlib"
+    );
 
     let args = vec![
         JavaType::String,
@@ -10839,7 +11247,7 @@ fn htsjdk_tribble_feature_pack_declares_feature_boundary() {
     ];
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("SimpleFeature", &args),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "SimpleFeature/3 constructor precision should come from the tribble feature pack, not stdlib"
     );
 
@@ -10879,7 +11287,7 @@ fn htsjdk_tribble_feature_pack_declares_feature_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} constructor precision should come from the tribble feature pack, not stdlib",
             args.len()
         );
@@ -10902,7 +11310,7 @@ fn htsjdk_tribble_feature_pack_declares_feature_boundary() {
     assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("FeatureCodecHeader", "NO_HEADER_END"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "FeatureCodecHeader.NO_HEADER_END precision should come from the tribble feature pack, not stdlib"
     );
 }
@@ -11159,7 +11567,7 @@ fn htsjdk_sam_reader_pack_declares_factory_option_nested_enum() {
     );
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("SamReaderFactory", "Option"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "SamReaderFactory.Option precision should come from the SAM reader pack, not stdlib"
     );
     for field_name in ["CACHE_FILE_BASED_INDEXES", "INCLUDE_SOURCE_IN_RECORDS"] {
@@ -11184,7 +11592,7 @@ fn htsjdk_sam_reader_pack_declares_factory_option_nested_enum() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("SamReaderFactory.Option", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "SamReaderFactory.Option.{field_name} precision should come from the SAM reader pack, not stdlib"
         );
         assert_eq!(
@@ -11221,7 +11629,7 @@ fn htsjdk_sam_reader_pack_declares_factory_option_nested_enum() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("ValidationStringency", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "ValidationStringency.{field_name} precision should come from the SAM reader pack, not stdlib"
         );
     }
@@ -11273,7 +11681,7 @@ fn htsjdk_sam_reader_pack_declares_factory_option_nested_enum() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} precision should come from the SAM reader pack, not stdlib",
             args.len()
         );
@@ -11328,7 +11736,7 @@ fn htsjdk_sam_writer_pack_declares_file_writer_factory_boundary() {
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("SAMFileWriterFactory", &[]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "SAMFileWriterFactory/0 precision should come from the SAM writer pack, not stdlib"
     );
 
@@ -11509,7 +11917,7 @@ fn htsjdk_sam_bam_pack_declares_codec_and_indexer_boundaries() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} precision should come from the SAM BAM pack, not stdlib",
             args.len()
         );
@@ -11541,7 +11949,7 @@ fn htsjdk_sam_bam_pack_declares_codec_and_indexer_boundaries() {
     );
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("SBIIndexWriter", "DEFAULT_GRANULARITY"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "SBIIndexWriter.DEFAULT_GRANULARITY precision should come from the SAM BAM pack, not stdlib"
     );
 
@@ -11571,7 +11979,7 @@ fn htsjdk_sam_bam_pack_declares_codec_and_indexer_boundaries() {
     );
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("BAMFileConstants", "FIXED_BLOCK_SIZE"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "BAMFileConstants.FIXED_BLOCK_SIZE precision should come from the SAM BAM pack, not stdlib"
     );
 }
@@ -11636,7 +12044,7 @@ fn htsjdk_sam_cram_pack_declares_container_and_reference_boundaries() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{} precision should come from the SAM CRAM pack, not stdlib",
             args.len()
         );
@@ -11666,7 +12074,7 @@ fn htsjdk_sam_cram_pack_declares_container_and_reference_boundaries() {
     );
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("DataSeriesType", "BYTE_ARRAY"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "DataSeriesType.BYTE_ARRAY precision should come from the SAM CRAM pack, not stdlib"
     );
 }
@@ -11689,7 +12097,7 @@ fn htsjdk_sam_metrics_pack_declares_metrics_file_boundary() {
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("MetricsFile", &[]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "MetricsFile/0 precision should come from the SAM metrics pack, not stdlib"
     );
 }
@@ -11712,7 +12120,7 @@ fn htsjdk_nested_helper_pack_declares_component_methods_boundary() {
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("ComponentMethods", &[]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "ComponentMethods/0 precision should come from the nested-helper pack, not stdlib"
     );
 }
@@ -11745,7 +12153,7 @@ fn apache_commons_collections_pack_declares_iterator_and_map_constructor_boundar
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} precision should come from the Apache Commons Collections pack, not stdlib"
         );
     }
@@ -11837,7 +12245,7 @@ fn apache_commons_compress_and_lang_packs_declare_helper_constructor_boundaries(
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} precision should come from the Apache Commons Compress pack, not stdlib"
         );
     }
@@ -11889,7 +12297,7 @@ fn apache_commons_compress_and_lang_packs_declare_helper_constructor_boundaries(
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the Apache Commons Compress pack, not stdlib"
         );
     }
@@ -11934,7 +12342,7 @@ fn apache_commons_compress_and_lang_packs_declare_helper_constructor_boundaries(
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} precision should come from the Apache Commons Lang pack, not stdlib"
         );
     }
@@ -11970,7 +12378,7 @@ fn apache_commons_compress_and_lang_packs_declare_helper_constructor_boundaries(
                 arg_len
             )
             .provenance,
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{method_name}/{arg_len} precision should come from the Apache Commons Lang pack, not stdlib"
         );
     }
@@ -12035,7 +12443,7 @@ fn apache_commons_compress_and_lang_packs_declare_helper_constructor_boundaries(
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the Apache Commons Lang pack, not stdlib"
         );
     }
@@ -12098,7 +12506,7 @@ fn apache_commons_codec_pack_declares_digest_algorithm_constants() {
     assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("MessageDigestAlgorithms", "SHA_256"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "MessageDigestAlgorithms.SHA_256 precision should come from the Apache Commons Codec pack, not stdlib"
     );
 }
@@ -12155,7 +12563,7 @@ fn apache_commons_math_pack_declares_remaining_math_constructor_boundaries() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} precision should come from the Apache Commons Math pack, not stdlib"
         );
     }
@@ -12168,7 +12576,7 @@ fn apache_commons_math_pack_declares_remaining_math_constructor_boundaries() {
     assert_eq!(brent.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("BrentOptimizer", &brent_args),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "BrentOptimizer/2 precision should come from the optim pack, not stdlib"
     );
 }
@@ -12195,7 +12603,7 @@ fn jama_and_hipparchus_packs_declare_matrix_and_empirical_distribution_boundarie
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance("Matrix", &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "Matrix/{arg_len} precision should come from the Jama pack, not stdlib"
         );
     }
@@ -12250,7 +12658,7 @@ fn jama_and_hipparchus_packs_declare_matrix_and_empirical_distribution_boundarie
     assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("EmpiricalDistribution", &[]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "EmpiricalDistribution/0 precision should come from the Hipparchus pack, not stdlib"
     );
 }
@@ -12349,7 +12757,7 @@ fn apache_http_pack_declares_request_and_connection_manager_boundaries() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} precision should come from the Apache HTTP pack, not stdlib"
         );
     }
@@ -12401,7 +12809,7 @@ fn apache_commons_math_stats_pack_declares_percentile_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance("Percentile", &arg_types),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "Percentile constructor precision should come from the stats pack, not stdlib"
         );
     }
@@ -12419,7 +12827,7 @@ fn apache_commons_math_stats_pack_declares_percentile_boundary() {
     );
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("Percentile", "EstimationType"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "Percentile.EstimationType precision should come from the stats pack, not stdlib"
     );
 
@@ -12439,7 +12847,7 @@ fn apache_commons_math_stats_pack_declares_percentile_boundary() {
     assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("EstimationType", "R_1"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "EstimationType.R_1 precision should come from the stats pack, not stdlib"
     );
 }
@@ -12482,7 +12890,7 @@ fn google_bigquery_pack_declares_nested_enum_qualifiers() {
         );
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the BigQuery pack, not stdlib"
         );
     }
@@ -12510,7 +12918,7 @@ fn google_bigquery_pack_declares_nested_enum_qualifiers() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the BigQuery pack, not stdlib"
         );
     }
@@ -12559,7 +12967,7 @@ fn google_bigquery_storage_pack_declares_data_format_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("DataFormat", field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "DataFormat.{field_name} precision should come from the BigQuery Storage pack, not stdlib"
         );
     }
@@ -12599,7 +13007,7 @@ fn jackson_databind_pack_declares_feature_enum_boundaries() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the Jackson databind pack, not stdlib"
         );
     }
@@ -12630,7 +13038,7 @@ fn google_storage_pack_declares_sign_url_option_qualifier() {
     );
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance("Storage", "SignUrlOption"),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "Storage.SignUrlOption precision should come from the Google Storage pack, not stdlib"
     );
 }
@@ -12672,7 +13080,7 @@ fn google_cloud_nio_pack_declares_static_configuration_fields() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the Google Cloud NIO pack, not stdlib"
         );
     }
@@ -12702,7 +13110,7 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &arg_types),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arg_len} precision should come from the GenomicsDB pack, not stdlib"
         );
     }
@@ -12783,7 +13191,7 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
         );
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the GenomicsDB pack, not stdlib"
         );
     }
@@ -13316,7 +13724,7 @@ fn htsjdk_tribble_index_pack_declares_index_factory_nested_enums() {
         );
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the tribble index pack, not stdlib"
         );
     }
@@ -13347,7 +13755,7 @@ fn htsjdk_tribble_index_pack_declares_index_factory_nested_enums() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the tribble index pack, not stdlib"
         );
     }
@@ -13369,7 +13777,7 @@ fn htsjdk_tribble_index_pack_declares_index_factory_nested_enums() {
             assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
             assert_eq!(
                 new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-                FactProvenance::ConservativeFallback,
+                FactProvenance::ExternalLibraryPack,
                 "{type_name}.{field_name} precision should come from the tribble index pack, not stdlib"
             );
         }
@@ -13410,7 +13818,7 @@ fn htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary() {
         );
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the samtools-util pack, not stdlib"
         );
     }
@@ -13494,7 +13902,7 @@ fn htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the samtools-util pack, not stdlib"
         );
     }
@@ -13528,7 +13936,7 @@ fn htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary() {
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the samtools-util pack, not stdlib"
         );
     }
@@ -13560,7 +13968,7 @@ fn htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary() {
                 "BlockCompressedInputStream",
                 &arg_types
             ),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "BlockCompressedInputStream/{} precision should come from the samtools-util pack, not stdlib",
             arg_types.len()
         );
@@ -13600,7 +14008,7 @@ fn htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary() {
                 "BlockCompressedOutputStream",
                 &arg_types
             ),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "BlockCompressedOutputStream/{} precision should come from the samtools-util pack, not stdlib",
             arg_types.len()
         );
@@ -13808,7 +14216,7 @@ fn htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary() {
         assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{:?} should be owned by the samtools-util external pack, not stdlib",
             args.len()
         );
@@ -16653,7 +17061,7 @@ fn hdf5_pack_declares_hdf5_pure_rust_crate_mapping() {
     };
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("HDF5File", &[file_arg.clone()]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "HDF5 constructor precision should come from the crate-mapping pack, not stdlib fallback"
     );
 
@@ -16700,7 +17108,7 @@ fn hdf5_pack_declares_hdf5_pure_rust_crate_mapping() {
         );
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the HDF5 pack, not stdlib"
         );
     }
@@ -17100,7 +17508,7 @@ fn sqlite_pack_declares_sqlite_crate_mapping() {
 
     assert_eq!(
         new_java2rust::stdlib::external_constructor_provenance("SQLiteConfig", &[]),
-        FactProvenance::ConservativeFallback,
+        FactProvenance::ExternalLibraryPack,
         "SQLite constructor precision should come from the crate-mapping pack, not stdlib fallback"
     );
 

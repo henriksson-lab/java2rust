@@ -3,18 +3,18 @@ use std::sync::OnceLock;
 
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
-    ClosedHierarchyFact, ExceptionFact, ExceptionKind, ExternalApiArgumentEffectFact,
-    ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
-    ExternalConstructorArgumentEffectFact, ExternalConstructorFact,
+    CallableKey, CallableKind, ClosedHierarchyFact, ExceptionFact, ExceptionKind,
+    ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole,
+    ExternalArgumentAliasPolicy, ExternalConstructorArgumentEffectFact, ExternalConstructorFact,
     ExternalConstructorRustResultFact, ExternalConversionAdapterFact,
     ExternalConversionAdapterKind, ExternalCrateApiMappingFact,
     ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFieldFact,
-    ExternalLibraryMode, ExternalLibraryPackFact, ExternalRustResultFact,
-    ExternalRustReturnTypeFact, FactProvenance, FactSet, FieldKey, FieldNullabilityFact,
-    FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy, NullabilityState,
-    ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
-    ReceiverMutabilityFact, TypeCapabilityOverride, UnsupportedExternalApiFact,
-    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
+    ExternalFieldKind, ExternalLibraryMode, ExternalLibraryPackFact, ExternalRustResultFact,
+    ExternalRustReturnTypeFact, FacadeSlot, FactProvenance, FactSet, FieldKey,
+    FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy,
+    NullabilityState, ObjectSafetyFact, ObjectSafetyViolation, OwnedRecoveryCapability,
+    OwnedRecoveryCapabilityFact, ReceiverMutabilityFact, TypeCapabilityOverride,
+    UnsupportedExternalApiFact, UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
 };
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::parser::parse_type;
@@ -234,6 +234,8 @@ pub struct ExternalPackModeledConstructor {
 pub struct ExternalPackModeledField {
     pub type_name: &'static str,
     pub field_name: &'static str,
+    pub field_type: Option<&'static str>,
+    pub field_kind: ExternalFieldKind,
     pub coverage: ExternalApiCoverage,
 }
 
@@ -405,7 +407,10 @@ impl ExternalPackManifest {
                     type_name: field.type_name.to_string(),
                     field_name: field.field_name.to_string(),
                 },
-                field_type: external_pack_modeled_field_type(field.type_name, field.field_name),
+                field_type: field.field_type.map(parse_type).or_else(|| {
+                    external_pack_modeled_field_type(field.type_name, field.field_name)
+                }),
+                field_kind: field.field_kind,
                 provenance: FactProvenance::ExternalLibraryPack,
             });
         }
@@ -1681,6 +1686,7 @@ pub fn parse_external_pack_manifest(source: &str) -> ExternalPackManifestParse {
                 type_name,
                 field_name,
                 coverage,
+                metadata @ ..,
             ] => {
                 push_external_pack_field_fact(
                     &mut facts,
@@ -1690,6 +1696,7 @@ pub fn parse_external_pack_manifest(source: &str) -> ExternalPackManifestParse {
                     type_name,
                     field_name,
                     coverage,
+                    metadata,
                 );
             }
             [
@@ -1994,6 +2001,7 @@ fn push_external_pack_api_fact(
             });
     }
     if let Some(rust_type_name) = parsed_metadata.rust_return_type {
+        let return_slot = facade_slot_for_manifest_rust_type(&rust_type_name);
         facts
             .external_rust_return_type_facts
             .push(ExternalRustReturnTypeFact {
@@ -2001,6 +2009,7 @@ fn push_external_pack_api_fact(
                 method_name: method_name.to_string(),
                 arg_count: parsed_metadata.arg_count,
                 rust_type_name,
+                return_slot,
                 provenance: FactProvenance::ExternalLibraryPack,
             });
     }
@@ -2113,9 +2122,15 @@ fn push_external_pack_field_fact(
     type_name: &str,
     field_name: &str,
     coverage: &str,
+    metadata: &[&str],
 ) {
     let Some(coverage) = parse_external_api_coverage(coverage) else {
         push_external_pack_parse_error(diagnostics, line_index, "invalid field coverage");
+        return;
+    };
+    let Some(parsed_metadata) =
+        parse_external_pack_field_metadata(diagnostics, line_index, metadata)
+    else {
         return;
     };
     if coverage == ExternalApiCoverage::Unsupported {
@@ -2137,9 +2152,76 @@ fn push_external_pack_field_fact(
             type_name: type_name.to_string(),
             field_name: field_name.to_string(),
         },
-        field_type: external_pack_modeled_field_type(type_name, field_name),
+        field_type: parsed_metadata
+            .field_type
+            .or_else(|| external_pack_modeled_field_type(type_name, field_name)),
+        field_kind: parsed_metadata.field_kind,
         provenance: FactProvenance::ExternalLibraryPack,
     });
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalPackFieldMetadata {
+    field_type: Option<JavaType>,
+    field_kind: ExternalFieldKind,
+}
+
+impl Default for ExternalPackFieldMetadata {
+    fn default() -> Self {
+        Self {
+            field_type: None,
+            field_kind: ExternalFieldKind::StaticFinal,
+        }
+    }
+}
+
+fn parse_external_pack_field_metadata(
+    diagnostics: &mut DiagnosticBag,
+    line_index: usize,
+    metadata: &[&str],
+) -> Option<ExternalPackFieldMetadata> {
+    let mut parsed = ExternalPackFieldMetadata::default();
+    for token in metadata {
+        if let Some(type_name) = token.strip_prefix("type=") {
+            if type_name.is_empty() {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-field type metadata must name a Java type",
+                );
+                return None;
+            }
+            parsed.field_type = Some(parse_type(type_name));
+        } else if let Some(kind) = token.strip_prefix("const-kind=") {
+            let Some(field_kind) = parse_external_field_kind(kind) else {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "invalid external-pack-field const-kind",
+                );
+                return None;
+            };
+            parsed.field_kind = field_kind;
+        } else {
+            push_external_pack_parse_error(
+                diagnostics,
+                line_index,
+                "unrecognized external-pack-field metadata; expected type=Type or const-kind=static-final",
+            );
+            return None;
+        }
+    }
+    Some(parsed)
+}
+
+fn parse_external_field_kind(value: &str) -> Option<ExternalFieldKind> {
+    match value {
+        "static-final" => Some(ExternalFieldKind::StaticFinal),
+        "enum-variant" => Some(ExternalFieldKind::EnumVariant),
+        "nested-type" => Some(ExternalFieldKind::NestedType),
+        "unknown" => Some(ExternalFieldKind::Unknown),
+        _ => None,
+    }
 }
 
 fn push_external_pack_field_nullability_fact(
@@ -2182,12 +2264,6 @@ fn external_pack_modeled_field_type(type_name: &str, field_name: &str) -> Option
             _ => None,
         };
     }
-    if simple_type_name == "VariantContext" && field_name == "Type" {
-        return Some(JavaType::Named {
-            name: "Type".to_string(),
-            args: Vec::new(),
-        });
-    }
     if simple_type_name == "Type"
         && matches!(
             field_name,
@@ -2214,10 +2290,6 @@ fn external_pack_modeled_field_type(type_name: &str, field_name: &str) -> Option
             _ => None,
         };
     }
-    if simple_type_name == "ReadEnds" && matches!(field_name, "FF" | "FR" | "RF" | "RR" | "F" | "R")
-    {
-        return Some(JavaType::Primitive(PrimitiveType::Byte));
-    }
     if matches!(simple_type_name, "SAMTagAndValue" | "SAMBinaryTagAndValue") {
         return match field_name {
             "tag" => Some(JavaType::String),
@@ -2233,43 +2305,6 @@ fn external_pack_modeled_field_type(type_name: &str, field_name: &str) -> Option
             "alleleIndex1" | "alleleIndex2" => Some(JavaType::Primitive(PrimitiveType::Int)),
             _ => None,
         };
-    }
-    if simple_type_name == "Allele" {
-        return match field_name {
-            "NON_REF_STRING" | "UNSPECIFIED_ALTERNATE_ALLELE_STRING" => Some(JavaType::String),
-            "NO_CALL"
-            | "NON_REF_ALLELE"
-            | "SPAN_DEL"
-            | "SV_SIMPLE_DEL"
-            | "SV_SIMPLE_DUP"
-            | "UNSPECIFIED_ALTERNATE_ALLELE" => Some(JavaType::Named {
-                name: "Allele".to_string(),
-                args: Vec::new(),
-            }),
-            _ => None,
-        };
-    }
-    if simple_type_name == "GenotypeLikelihoods"
-        && field_name == "MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED"
-    {
-        return Some(JavaType::Primitive(PrimitiveType::Int));
-    }
-    if simple_type_name == "GenotypesContext" && field_name == "NO_GENOTYPES" {
-        return Some(JavaType::Named {
-            name: "GenotypesContext".to_string(),
-            args: Vec::new(),
-        });
-    }
-    if simple_type_name == "GenotypeType"
-        && matches!(
-            field_name,
-            "HET" | "HOM_REF" | "HOM_VAR" | "NO_CALL" | "UNAVAILABLE"
-        )
-    {
-        return Some(JavaType::Named {
-            name: "GenotypeType".to_string(),
-            args: Vec::new(),
-        });
     }
     if simple_type_name == "VCFHeaderLineCount" && matches!(field_name, "A" | "R" | "G") {
         return Some(JavaType::Named {
@@ -2306,14 +2341,6 @@ fn external_pack_modeled_field_type(type_name: &str, field_name: &str) -> Option
             name: "GoalType".to_string(),
             args: Vec::new(),
         });
-    }
-    if matches!(simple_type_name, "CommonInfo" | "VariantContext")
-        && field_name == "NO_LOG10_PERROR"
-    {
-        return Some(JavaType::Primitive(PrimitiveType::Double));
-    }
-    if simple_type_name == "Genotype" && field_name == "UNPHASED_ALLELE_SEPARATOR" {
-        return Some(JavaType::Primitive(PrimitiveType::Char));
     }
     if simple_type_name == "Type" && matches!(field_name, "INDEL" | "NO_VARIATION") {
         return Some(JavaType::Named {
@@ -3785,6 +3812,34 @@ struct ExternalApiMetadata {
     rust_return_type: Option<String>,
 }
 
+fn facade_slot_for_manifest_rust_type(ty: &str) -> FacadeSlot {
+    let ty = ty.trim();
+    if let Some(inner) = ty
+        .strip_prefix("Option<")
+        .and_then(|ty| ty.strip_suffix('>'))
+        .or_else(|| {
+            ty.strip_prefix("std::option::Option<")
+                .and_then(|ty| ty.strip_suffix('>'))
+        })
+    {
+        return FacadeSlot::Optional(Box::new(facade_slot_for_manifest_rust_type(inner)));
+    }
+    if let Some(inner) = ty.strip_prefix("&mut ") {
+        if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
+            return FacadeSlot::Slice(Box::new(facade_slot_for_manifest_rust_type(slice)));
+        }
+        return FacadeSlot::MutBorrowed;
+    }
+    if let Some(inner) = ty.strip_prefix('&') {
+        let inner = inner.trim();
+        if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
+            return FacadeSlot::Slice(Box::new(facade_slot_for_manifest_rust_type(slice)));
+        }
+        return FacadeSlot::Borrowed;
+    }
+    FacadeSlot::Owned
+}
+
 fn parse_external_api_metadata(
     diagnostics: &mut DiagnosticBag,
     line_index: usize,
@@ -4656,8 +4711,16 @@ const GUAVA_CONCURRENT_OWNED_TYPES: &[&str] = &[
     "com.google.common.util.concurrent.ThreadFactoryBuilder",
     "ThreadFactoryBuilder",
 ];
-const BROAD_HELLBENDER_UTILS_OWNED_TYPES: &[&str] =
-    &["org.broadinstitute.hellbender.utils.Utils", "Utils"];
+const BROAD_HELLBENDER_UTILS_OWNED_TYPES: &[&str] = &[
+    "org.broadinstitute.hellbender.utils.Utils",
+    "Utils",
+    "org.broadinstitute.hellbender.utils.QualityUtils",
+    "QualityUtils",
+    "org.broadinstitute.hellbender.utils.io.IOUtils",
+    "IOUtils",
+    "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+    "GATKVCFConstants",
+];
 const BROAD_HTTP_OWNED_TYPES: &[&str] = &[
     "org.broadinstitute.http.nio.HttpFileSystemProviderSettings",
     "HttpFileSystemProviderSettings",
@@ -19205,68 +19268,234 @@ const VCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
 ];
 
 const VARIANTCONTEXT_MODELED_FIELDS: &[ExternalPackModeledField] = &[
-    modeled_semantic_field("htsjdk.variant.variantcontext.Allele", "NO_CALL"),
-    modeled_semantic_field("Allele", "NO_CALL"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.Allele", "NON_REF_ALLELE"),
-    modeled_semantic_field("Allele", "NON_REF_ALLELE"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.Allele", "SPAN_DEL"),
-    modeled_semantic_field("Allele", "SPAN_DEL"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.Allele", "SV_SIMPLE_DEL"),
-    modeled_semantic_field("Allele", "SV_SIMPLE_DEL"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.Allele", "SV_SIMPLE_DUP"),
-    modeled_semantic_field("Allele", "SV_SIMPLE_DUP"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.Allele",
+        "NO_CALL",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "Allele",
+        "NO_CALL",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.Allele",
+        "NON_REF_ALLELE",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "Allele",
+        "NON_REF_ALLELE",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.Allele",
+        "SPAN_DEL",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "Allele",
+        "SPAN_DEL",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.Allele",
+        "SV_SIMPLE_DEL",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "Allele",
+        "SV_SIMPLE_DEL",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.Allele",
+        "SV_SIMPLE_DUP",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "Allele",
+        "SV_SIMPLE_DUP",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.Allele",
         "UNSPECIFIED_ALTERNATE_ALLELE",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
     ),
-    modeled_semantic_field("Allele", "UNSPECIFIED_ALTERNATE_ALLELE"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.Allele", "NON_REF_STRING"),
-    modeled_semantic_field("Allele", "NON_REF_STRING"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "Allele",
+        "UNSPECIFIED_ALTERNATE_ALLELE",
+        "Allele",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.Allele",
+        "NON_REF_STRING",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "Allele",
+        "NON_REF_STRING",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.Allele",
         "UNSPECIFIED_ALTERNATE_ALLELE_STRING",
+        "String",
+        ExternalFieldKind::StaticFinal,
     ),
-    modeled_semantic_field("Allele", "UNSPECIFIED_ALTERNATE_ALLELE_STRING"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "Allele",
+        "UNSPECIFIED_ALTERNATE_ALLELE_STRING",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.GenotypeLikelihoods",
         "MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED",
+        "int",
+        ExternalFieldKind::StaticFinal,
     ),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
         "GenotypeLikelihoods",
         "MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED",
+        "int",
+        ExternalFieldKind::StaticFinal,
     ),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.GenotypesContext",
         "NO_GENOTYPES",
+        "GenotypesContext",
+        ExternalFieldKind::StaticFinal,
     ),
-    modeled_semantic_field("GenotypesContext", "NO_GENOTYPES"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.VariantContext", "Type"),
-    modeled_semantic_field("VariantContext", "Type"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.GenotypeType", "HET"),
-    modeled_semantic_field("GenotypeType", "HET"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.GenotypeType", "HOM_REF"),
-    modeled_semantic_field("GenotypeType", "HOM_REF"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.GenotypeType", "HOM_VAR"),
-    modeled_semantic_field("GenotypeType", "HOM_VAR"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.GenotypeType", "NO_CALL"),
-    modeled_semantic_field("GenotypeType", "NO_CALL"),
-    modeled_semantic_field("htsjdk.variant.variantcontext.GenotypeType", "UNAVAILABLE"),
-    modeled_semantic_field("GenotypeType", "UNAVAILABLE"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "GenotypesContext",
+        "NO_GENOTYPES",
+        "GenotypesContext",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.VariantContext",
+        "Type",
+        "Type",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
+        "VariantContext",
+        "Type",
+        "Type",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.GenotypeType",
+        "HET",
+        "GenotypeType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "GenotypeType",
+        "HET",
+        "GenotypeType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.GenotypeType",
+        "HOM_REF",
+        "GenotypeType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "GenotypeType",
+        "HOM_REF",
+        "GenotypeType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.GenotypeType",
+        "HOM_VAR",
+        "GenotypeType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "GenotypeType",
+        "HOM_VAR",
+        "GenotypeType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.GenotypeType",
+        "NO_CALL",
+        "GenotypeType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "GenotypeType",
+        "NO_CALL",
+        "GenotypeType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.variantcontext.GenotypeType",
+        "UNAVAILABLE",
+        "GenotypeType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "GenotypeType",
+        "UNAVAILABLE",
+        "GenotypeType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.CommonInfo",
         "NO_LOG10_PERROR",
+        "double",
+        ExternalFieldKind::StaticFinal,
     ),
-    modeled_semantic_field("CommonInfo", "NO_LOG10_PERROR"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "CommonInfo",
+        "NO_LOG10_PERROR",
+        "double",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.VariantContext",
         "NO_LOG10_PERROR",
+        "double",
+        ExternalFieldKind::StaticFinal,
     ),
-    modeled_semantic_field("VariantContext", "NO_LOG10_PERROR"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "VariantContext",
+        "NO_LOG10_PERROR",
+        "double",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.Genotype",
         "UNPHASED_ALLELE_SEPARATOR",
+        "char",
+        ExternalFieldKind::StaticFinal,
     ),
-    modeled_semantic_field("Genotype", "UNPHASED_ALLELE_SEPARATOR"),
+    modeled_semantic_field_typed(
+        "Genotype",
+        "UNPHASED_ALLELE_SEPARATOR",
+        "char",
+        ExternalFieldKind::StaticFinal,
+    ),
     modeled_semantic_field("htsjdk.variant.variantcontext.VariantContext.Type", "INDEL"),
     modeled_semantic_field("VariantContext.Type", "INDEL"),
     modeled_semantic_field("Type", "INDEL"),
@@ -21127,18 +21356,48 @@ const PICARD_MARKDUPLICATES_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     ),
     modeled_semantic_field("MarkDuplicates.DuplicateTaggingPolicy", "All"),
     modeled_semantic_field("DuplicateTaggingPolicy", "All"),
-    modeled_semantic_field("picard.sam.markduplicates.util.ReadEnds", "FF"),
-    modeled_semantic_field("ReadEnds", "FF"),
-    modeled_semantic_field("picard.sam.markduplicates.util.ReadEnds", "FR"),
-    modeled_semantic_field("ReadEnds", "FR"),
-    modeled_semantic_field("picard.sam.markduplicates.util.ReadEnds", "RF"),
-    modeled_semantic_field("ReadEnds", "RF"),
-    modeled_semantic_field("picard.sam.markduplicates.util.ReadEnds", "RR"),
-    modeled_semantic_field("ReadEnds", "RR"),
-    modeled_semantic_field("picard.sam.markduplicates.util.ReadEnds", "F"),
-    modeled_semantic_field("ReadEnds", "F"),
-    modeled_semantic_field("picard.sam.markduplicates.util.ReadEnds", "R"),
-    modeled_semantic_field("ReadEnds", "R"),
+    modeled_semantic_field_typed(
+        "picard.sam.markduplicates.util.ReadEnds",
+        "FF",
+        "byte",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed("ReadEnds", "FF", "byte", ExternalFieldKind::StaticFinal),
+    modeled_semantic_field_typed(
+        "picard.sam.markduplicates.util.ReadEnds",
+        "FR",
+        "byte",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed("ReadEnds", "FR", "byte", ExternalFieldKind::StaticFinal),
+    modeled_semantic_field_typed(
+        "picard.sam.markduplicates.util.ReadEnds",
+        "RF",
+        "byte",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed("ReadEnds", "RF", "byte", ExternalFieldKind::StaticFinal),
+    modeled_semantic_field_typed(
+        "picard.sam.markduplicates.util.ReadEnds",
+        "RR",
+        "byte",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed("ReadEnds", "RR", "byte", ExternalFieldKind::StaticFinal),
+    modeled_semantic_field_typed(
+        "picard.sam.markduplicates.util.ReadEnds",
+        "F",
+        "byte",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed("ReadEnds", "F", "byte", ExternalFieldKind::StaticFinal),
+    modeled_semantic_field_typed(
+        "picard.sam.markduplicates.util.ReadEnds",
+        "R",
+        "byte",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed("ReadEnds", "R", "byte", ExternalFieldKind::StaticFinal),
 ];
 
 const PICARD_METRICS_MODELED_FIELDS: &[ExternalPackModeledField] = &[
@@ -22072,6 +22331,54 @@ const BROAD_HELLBENDER_UTILS_API_EFFECTS: &[ExternalPackApiEffect] = &[
     ),
     semantic_typed_effect(
         "org.broadinstitute.hellbender.utils.Utils",
+        "split",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<String>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Utils",
+        "split",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<String>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.QualityUtils",
+        "qualToProb",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "double",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "QualityUtils",
+        "qualToProb",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "double",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.QualityUtils",
+        "qualToProbLog10",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "double",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "QualityUtils",
+        "qualToProbLog10",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "double",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.Utils",
         "getRandomGenerator",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
@@ -22126,11 +22433,119 @@ const BROAD_HELLBENDER_UTILS_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::Unknown,
     ),
     semantic_side_effect_with_arity("Utils", "validateArg", 2, NullabilityState::Unknown),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "getPath",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Path",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "IOUtils",
+        "getPath",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Path",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "appendPathToDir",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "IOUtils",
+        "appendPathToDir",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "createTempFile",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "File",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "IOUtils",
+        "createTempFile",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "File",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "replaceExtension",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "IOUtils",
+        "replaceExtension",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_side_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "assertFileIsReadable",
+        1,
+        NullabilityState::Unknown,
+    ),
+    semantic_side_effect_with_arity(
+        "IOUtils",
+        "assertFileIsReadable",
+        1,
+        NullabilityState::Unknown,
+    ),
+    semantic_side_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "assertPathsAreReadable",
+        1,
+        NullabilityState::Unknown,
+    ),
+    semantic_side_effect_with_arity(
+        "IOUtils",
+        "assertPathsAreReadable",
+        1,
+        NullabilityState::Unknown,
+    ),
 ];
 
 const BROAD_HELLBENDER_UTILS_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "join"),
     modeled_semantic("Utils", "join"),
+    modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "split"),
+    modeled_semantic("Utils", "split"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.QualityUtils",
+        "qualToProb",
+    ),
+    modeled_semantic("QualityUtils", "qualToProb"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.QualityUtils",
+        "qualToProbLog10",
+    ),
+    modeled_semantic("QualityUtils", "qualToProbLog10"),
     modeled_semantic(
         "org.broadinstitute.hellbender.utils.Utils",
         "listFromPrimitives",
@@ -22152,6 +22567,72 @@ const BROAD_HELLBENDER_UTILS_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("Utils", "validate"),
     modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "validateArg"),
     modeled_semantic("Utils", "validateArg"),
+    modeled_semantic("org.broadinstitute.hellbender.utils.io.IOUtils", "getPath"),
+    modeled_semantic("IOUtils", "getPath"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "appendPathToDir",
+    ),
+    modeled_semantic("IOUtils", "appendPathToDir"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "createTempFile",
+    ),
+    modeled_semantic("IOUtils", "createTempFile"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "replaceExtension",
+    ),
+    modeled_semantic("IOUtils", "replaceExtension"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "assertFileIsReadable",
+    ),
+    modeled_semantic("IOUtils", "assertFileIsReadable"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.io.IOUtils",
+        "assertPathsAreReadable",
+    ),
+    modeled_semantic("IOUtils", "assertPathsAreReadable"),
+];
+
+const BROAD_HELLBENDER_UTILS_MODELED_FIELDS: &[ExternalPackModeledField] = &[
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "RAW_MAPPING_QUALITY_WITH_DEPTH_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "RAW_MAPPING_QUALITY_WITH_DEPTH_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "MAPPING_QUALITY_DEPTH_DEPRECATED",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "MAPPING_QUALITY_DEPTH_DEPRECATED",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "TREE_SCORE",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "TREE_SCORE",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
 ];
 
 const BROAD_HTTP_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
@@ -24153,6 +24634,23 @@ const fn modeled_semantic_field(
     ExternalPackModeledField {
         type_name,
         field_name,
+        field_type: None,
+        field_kind: ExternalFieldKind::StaticFinal,
+        coverage: ExternalApiCoverage::Semantic,
+    }
+}
+
+const fn modeled_semantic_field_typed(
+    type_name: &'static str,
+    field_name: &'static str,
+    field_type: &'static str,
+    field_kind: ExternalFieldKind,
+) -> ExternalPackModeledField {
+    ExternalPackModeledField {
+        type_name,
+        field_name,
+        field_type: Some(field_type),
+        field_kind,
         coverage: ExternalApiCoverage::Semantic,
     }
 }
@@ -24164,6 +24662,8 @@ const fn modeled_mapped_field(
     ExternalPackModeledField {
         type_name,
         field_name,
+        field_type: None,
+        field_kind: ExternalFieldKind::StaticFinal,
         coverage: ExternalApiCoverage::Mapped,
     }
 }
@@ -25250,7 +25750,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             api_effects: BROAD_HELLBENDER_UTILS_API_EFFECTS,
             modeled_apis: BROAD_HELLBENDER_UTILS_MODELED_APIS,
             modeled_constructors: &[],
-            modeled_fields: NO_MODELED_FIELDS,
+            modeled_fields: BROAD_HELLBENDER_UTILS_MODELED_FIELDS,
             unsupported_apis: &[],
         },
         ExternalPackManifest {
@@ -25644,10 +26144,13 @@ fn builtin_external_pack_fact_sets() -> &'static [(String, FactSet)] {
 
 #[derive(Default)]
 struct BuiltinExternalPackLookupIndex {
+    api_effects_by_key: HashMap<CallableKey, ExternalApiEffectFact>,
     api_effects: HashMap<(String, String, Option<usize>), ExternalApiEffectFact>,
     unsupported_apis: HashMap<(String, String), UnsupportedExternalApiFact>,
+    constructors_by_key: HashMap<CallableKey, ExternalConstructorFact>,
     constructors: HashMap<(String, usize), ExternalConstructorFact>,
     unsupported_constructors: HashMap<(String, usize), UnsupportedExternalConstructorFact>,
+    fields_by_key: HashMap<CallableKey, ExternalFieldFact>,
     fields: HashMap<(String, String), ExternalFieldFact>,
     unsupported_fields: HashMap<(String, String), UnsupportedExternalFieldFact>,
     crate_api_mappings: HashMap<(String, String, Option<usize>), ExternalCrateApiMappingFact>,
@@ -25664,6 +26167,17 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                 if let Some(receiver_type) = &fact.receiver_type {
                     for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
                         for method_alias in external_method_name_lookup_aliases(&fact.method_name) {
+                            if let Some(arg_count) = fact.arg_count {
+                                index
+                                    .api_effects_by_key
+                                    .entry(CallableKey::method(
+                                        receiver_alias.clone(),
+                                        method_alias.clone(),
+                                        crate::facts::Staticness::Unknown,
+                                        arg_count,
+                                    ))
+                                    .or_insert_with(|| fact.clone());
+                            }
                             index
                                 .api_effects
                                 .entry((receiver_alias.clone(), method_alias, fact.arg_count))
@@ -25683,6 +26197,13 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
             for fact in facts.external_constructor_facts.iter().rev() {
                 for type_alias in external_receiver_lookup_aliases(&fact.type_name) {
                     index
+                        .constructors_by_key
+                        .entry(CallableKey::constructor(
+                            type_alias.clone(),
+                            vec![crate::facts::TypePattern::Any; fact.arg_types.len()],
+                        ))
+                        .or_insert_with(|| fact.clone());
+                    index
                         .constructors
                         .entry((type_alias, fact.arg_types.len()))
                         .or_insert_with(|| fact.clone());
@@ -25699,6 +26220,16 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
             for fact in facts.external_field_facts.iter().rev() {
                 for type_alias in external_field_type_lookup_aliases(&fact.field.type_name) {
                     for field_alias in external_field_name_lookup_aliases(&fact.field.field_name) {
+                        let (kind, staticness) = external_field_fact_key_shape(fact);
+                        index
+                            .fields_by_key
+                            .entry(CallableKey::field(
+                                type_alias.clone(),
+                                field_alias.clone(),
+                                kind,
+                                staticness,
+                            ))
+                            .or_insert_with(|| fact.clone());
                         index
                             .fields
                             .entry((type_alias.clone(), field_alias))
@@ -25795,6 +26326,22 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
         }
         index
     })
+}
+
+fn external_field_fact_key_shape(
+    fact: &ExternalFieldFact,
+) -> (CallableKind, crate::facts::Staticness) {
+    match fact.field_kind {
+        ExternalFieldKind::EnumVariant
+        | ExternalFieldKind::NestedType
+        | ExternalFieldKind::StaticFinal => {
+            (CallableKind::StaticField, crate::facts::Staticness::Static)
+        }
+        ExternalFieldKind::Unknown => (
+            CallableKind::InstanceField,
+            crate::facts::Staticness::Unknown,
+        ),
+    }
 }
 
 fn external_receiver_lookup_aliases(receiver_type: &str) -> Vec<String> {
@@ -25899,6 +26446,24 @@ pub fn external_api_effect_for_receiver_with_arity(
     None
 }
 
+pub fn external_api_effect_for_key(key: &CallableKey) -> Option<ExternalApiEffectFact> {
+    if key.kind != CallableKind::Method {
+        return None;
+    }
+    if let Some(effect) = builtin_external_pack_lookup_index()
+        .api_effects_by_key
+        .get(key)
+        .cloned()
+    {
+        return Some(effect);
+    }
+    external_api_effect_for_receiver_with_arity(
+        Some(&key.owner.type_name),
+        &key.member.0,
+        Some(key.arity),
+    )
+}
+
 pub fn java_platform_api_effect_for_receiver_with_arity(
     receiver_type: &str,
     method_name: &str,
@@ -25994,6 +26559,21 @@ pub fn external_constructor_for(
         .cloned()
 }
 
+pub fn external_constructor_for_key(key: &CallableKey) -> Option<ExternalConstructorFact> {
+    if key.kind != CallableKind::Constructor {
+        return None;
+    }
+    if let Some(constructor) = builtin_external_pack_lookup_index()
+        .constructors_by_key
+        .get(key)
+        .cloned()
+    {
+        return Some(constructor);
+    }
+    let arg_types = vec![JavaType::Unknown("_".to_string()); key.arity];
+    external_constructor_for(&key.owner.type_name, &arg_types)
+}
+
 pub fn external_field_for(type_name: &str, field_name: &str) -> Option<ExternalFieldFact> {
     let canonical_type_name = crate::stdlib::canonical_external_receiver_type_key(type_name);
     let snake_type_name = crate::parser::to_snake_case(type_name);
@@ -26014,6 +26594,26 @@ pub fn external_field_for(type_name: &str, field_name: &str) -> Option<ExternalF
             .get(&(type_key.to_string(), field_key.to_string()))
             .cloned()
     })
+}
+
+pub fn external_field_for_key(key: &CallableKey) -> Option<ExternalFieldFact> {
+    if !matches!(
+        key.kind,
+        CallableKind::StaticField
+            | CallableKind::InstanceField
+            | CallableKind::FieldGetter
+            | CallableKind::FieldSetter
+    ) {
+        return None;
+    }
+    if let Some(field) = builtin_external_pack_lookup_index()
+        .fields_by_key
+        .get(key)
+        .cloned()
+    {
+        return Some(field);
+    }
+    external_field_for(&key.owner.type_name, &key.member.0)
 }
 
 pub fn unsupported_external_constructor_for(
@@ -26239,9 +26839,30 @@ fn push_builtin_pack_matcher(
     if pattern.is_empty() {
         return;
     }
-    if matchers
-        .iter()
-        .any(|matcher| matcher.pattern == pattern && matcher.kind == kind)
+    push_builtin_pack_matcher_entry(matchers, pattern, kind, pack);
+
+    for alias in external_pack_type_matcher_aliases(pattern) {
+        if alias != pattern {
+            push_builtin_pack_matcher_entry(
+                matchers,
+                &alias,
+                BuiltinExternalPackTypeMatcherKind::Exact,
+                pack,
+            );
+        }
+    }
+}
+
+fn push_builtin_pack_matcher_entry(
+    matchers: &mut Vec<BuiltinExternalPackTypeMatcher>,
+    pattern: &str,
+    kind: BuiltinExternalPackTypeMatcherKind,
+    pack: &ExternalLibraryPackFact,
+) {
+    if pattern.is_empty()
+        || matchers
+            .iter()
+            .any(|matcher| matcher.pattern == pattern && matcher.kind == kind)
     {
         return;
     }
@@ -26250,6 +26871,15 @@ fn push_builtin_pack_matcher(
         kind,
         pack: pack.clone(),
     });
+}
+
+fn external_pack_type_matcher_aliases(pattern: &str) -> Vec<String> {
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(pattern);
+    let snake = crate::parser::to_snake_case(pattern);
+    let mut aliases = vec![pattern.to_string(), canonical, snake];
+    aliases.sort();
+    aliases.dedup();
+    aliases
 }
 
 fn manifest_pack_fact(manifest: &ExternalPackManifest) -> ExternalLibraryPackFact {

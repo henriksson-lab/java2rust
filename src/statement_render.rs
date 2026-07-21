@@ -12,10 +12,10 @@ pub fn local_let_stmt_with_facts(
     value: Option<RustExpr>,
     facts: &FactSet,
 ) -> RustStmt {
-    local_let_stmt_with_type_annotation(local, value, facts, true)
+    local_let_stmt_with_facts_and_type_annotation(local, value, facts, true)
 }
 
-pub fn local_let_stmt_with_type_annotation(
+pub fn local_let_stmt_with_facts_and_type_annotation(
     local: &LocalPlan,
     value: Option<RustExpr>,
     facts: &FactSet,

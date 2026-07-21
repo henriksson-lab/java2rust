@@ -104,8 +104,20 @@ pub fn borrowed_string_content_shape() -> RustSlotShape {
     shape
 }
 
+pub fn storage_shape(java_ty: JavaType) -> RustSlotShape {
+    RustSlotShape::for_storage(java_ty)
+}
+
+pub fn value_shape(java_ty: JavaType) -> RustSlotShape {
+    RustSlotShape::conservative(java_ty)
+}
+
 pub fn owned_string_value_shape() -> RustSlotShape {
     RustSlotShape::conservative(JavaType::String)
+}
+
+pub fn string_list_value_shape() -> RustSlotShape {
+    RustSlotShape::conservative(crate::types::list_java_type(JavaType::String))
 }
 
 pub fn apply_borrowed_string_content_projection(shape: &mut RustSlotShape) {
@@ -122,6 +134,29 @@ pub fn borrowed_sequence_element_shape(element_ty: JavaType) -> RustSlotShape {
     let mut shape = RustSlotShape::conservative(element_ty);
     apply_borrowed_sequence_element_projection(&mut shape);
     shape
+}
+
+pub fn shape_is_erased_object_boundary(shape: &RustSlotShape) -> bool {
+    matches!(shape.dispatch, DispatchShape::ErasedObject)
+        || matches!(shape.view, ViewShape::ErasedObjectView)
+}
+
+pub fn shape_is_concrete_native(shape: &RustSlotShape) -> bool {
+    matches!(shape.dispatch, DispatchShape::Concrete) && matches!(shape.view, ViewShape::Native)
+}
+
+pub fn shape_is_owned_non_erased(shape: &RustSlotShape) -> bool {
+    shape.ownership == OwnershipShape::Owned && !shape_is_erased_object_boundary(shape)
+}
+
+pub fn shape_is_borrowed_string_content(shape: &RustSlotShape) -> bool {
+    shape.java_ty == JavaType::String
+        && shape.ownership == OwnershipShape::SharedBorrow
+        && shape.view == ViewShape::Str
+}
+
+pub fn shape_is_owned(shape: &RustSlotShape) -> bool {
+    shape.ownership == OwnershipShape::Owned
 }
 
 pub fn apply_borrowed_sequence_element_projection(shape: &mut RustSlotShape) {

@@ -3,7 +3,7 @@ use crate::facts::FactSet;
 use crate::java_ir::{Expr, JavaType, PrimitiveType};
 use crate::shape_projection::{
     borrowed_string_content_shape, iteration_element_shape_with_effective_facts,
-    owned_string_value_shape,
+    owned_string_value_shape, string_list_value_shape,
 };
 use crate::slot_shape::RustSlotShape;
 use crate::stdlib::{is_borrowed_string_view_method, is_owned_string_result_method};
@@ -34,14 +34,23 @@ pub fn stream_source_capability_policy_with_effective_facts(
 }
 
 pub fn infer_stream_lambda_body_shape(expr: &Expr, default: &RustSlotShape) -> RustSlotShape {
+    infer_stream_lambda_body_shape_with_facts(expr, default, &TypeEnv::new(), &FactSet::default())
+}
+
+pub fn infer_stream_lambda_body_shape_with_facts(
+    expr: &Expr,
+    default: &RustSlotShape,
+    env: &TypeEnv,
+    facts: &FactSet,
+) -> RustSlotShape {
+    if let Some(shape) = infer_stream_lambda_call_shape_from_shared_plan(expr, env, facts) {
+        return shape;
+    }
     if stream_lambda_body_is_borrowed_str(expr) {
         return borrowed_string_content_shape();
     }
     if stream_lambda_body_is_owned_string(expr) {
         return owned_string_value_shape();
-    }
-    if stream_lambda_body_is_i32(expr) {
-        return RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int));
     }
     default.clone()
 }
@@ -94,36 +103,72 @@ fn stream_lambda_body_is_owned_string(expr: &Expr) -> bool {
     )
 }
 
-fn stream_lambda_body_is_i32(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Call {
-            receiver: Some(receiver),
-            name,
-            args,
+fn infer_stream_lambda_call_shape_from_shared_plan(
+    expr: &Expr,
+    env: &TypeEnv,
+    facts: &FactSet,
+) -> Option<RustSlotShape> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        resolved,
+    } = expr
+    else {
+        return None;
+    };
+    let target = crate::call_plan::plan_call_target_with_facts_and_arity(
+        Some(receiver),
+        name,
+        args.len(),
+        resolved.as_ref(),
+        facts,
+        env,
+    );
+    match target {
+        crate::call_plan::CallTargetPlan::NativeJavaStatic {
+            method:
+                crate::call_plan::NativeJavaStaticMethod::IntegerParseInt
+                | crate::call_plan::NativeJavaStaticMethod::MathToIntExact,
+        }
+        | crate::call_plan::CallTargetPlan::NativeJavaInstance {
+            method: crate::call_plan::NativeJavaInstanceMethod::StringLen,
             ..
-        } if args.len() == 1
-            && matches!(
-                receiver.as_ref(),
-                Expr::Var(owner)
-                    if crate::stdlib::canonical_external_receiver_type_key(owner) == "Integer"
-                        && name == "parseInt"
-            )
-    ) || matches!(
-        expr,
-        Expr::Call {
-            receiver: Some(receiver),
-            name,
-            args,
+        } => Some(RustSlotShape::conservative(JavaType::Primitive(
+            PrimitiveType::Int,
+        ))),
+        crate::call_plan::CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::DoubleParseDouble,
+        } => Some(RustSlotShape::conservative(JavaType::Primitive(
+            PrimitiveType::Double,
+        ))),
+        crate::call_plan::CallTargetPlan::NativeJavaInstance {
+            method:
+                crate::call_plan::NativeJavaInstanceMethod::StringIsEmpty
+                | crate::call_plan::NativeJavaInstanceMethod::StringContains
+                | crate::call_plan::NativeJavaInstanceMethod::StringStartsWith
+                | crate::call_plan::NativeJavaInstanceMethod::StringEndsWith
+                | crate::call_plan::NativeJavaInstanceMethod::Equals,
             ..
-        } if args.len() == 1
-            && matches!(
-                receiver.as_ref(),
-                Expr::Var(owner)
-                    if crate::stdlib::canonical_external_receiver_type_key(owner) == "Math"
-                        && name == "toIntExact"
-            )
-    )
+        } => Some(RustSlotShape::conservative(JavaType::Primitive(
+            PrimitiveType::Boolean,
+        ))),
+        crate::call_plan::CallTargetPlan::NativeJavaInstance {
+            method: crate::call_plan::NativeJavaInstanceMethod::StringTrim,
+            ..
+        } => Some(borrowed_string_content_shape()),
+        crate::call_plan::CallTargetPlan::NativeJavaInstance {
+            method:
+                crate::call_plan::NativeJavaInstanceMethod::StringToLowercase
+                | crate::call_plan::NativeJavaInstanceMethod::StringToString,
+            ..
+        } => Some(owned_string_value_shape()),
+        crate::call_plan::CallTargetPlan::NativeJavaInstance {
+            method: crate::call_plan::NativeJavaInstanceMethod::StringSplit,
+            ..
+        } => Some(string_list_value_shape()),
+        _ => None,
+    }
 }
 
 fn stream_source_element_type_with_effective_facts(

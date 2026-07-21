@@ -3,6 +3,21 @@ use crate::literal_lowering::literal_to_rust;
 use crate::operator_lowering::binary_op_to_rust;
 use crate::rust_ir::RustExpr;
 
+pub fn named_constructor_expr(
+    type_name: &str,
+    constructor_name: &str,
+    args: Vec<RustExpr>,
+) -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw(format!(
+            "{}::{}",
+            crate::slot_render::rust_name_for_java_named_type(type_name),
+            constructor_name
+        ))),
+        args,
+    }
+}
+
 pub fn this_expr() -> RustExpr {
     RustExpr::Var("self".to_string())
 }

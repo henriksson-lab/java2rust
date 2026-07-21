@@ -11,8 +11,8 @@ use new_java2rust::external_packs::{
 };
 use new_java2rust::facts::{
     ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole, ExternalFieldFact,
-    ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet, FieldKey,
-    HierarchyOverride, HierarchyStrategy, NullabilityState, ReceiverMutabilityFact,
+    ExternalFieldKind, ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet,
+    FieldKey, HierarchyOverride, HierarchyStrategy, NullabilityState, ReceiverMutabilityFact,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType, Program};
 use new_java2rust::object_model::ObjectRepresentation;
@@ -3340,6 +3340,7 @@ class UsesSummaryConstant {
             field_name: "MAX_COUNT".to_string(),
         },
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::UserOverride,
     });
 

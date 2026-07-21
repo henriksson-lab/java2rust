@@ -225,7 +225,7 @@ fn translates_stream_flat_map_block_pipeline() {
     );
     assert!(
         translation.rust.contains(
-            "groups.iter().flat_map(|group| { let mut names = group.names(); names.iter().filter(|name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
+            "groups.iter().flat_map(|group| { let names = group.names(); names.into_iter().filter(move |name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
         ),
         "{}",
         translation.rust
@@ -765,7 +765,7 @@ fn stream_block_lambda_generated_rust_preserves_behavior() {
     );
     assert!(
         translation.rust.contains(
-            "values.iter().map(|value| { let mut trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
+            "values.iter().map(|value| { let trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
         ) && !translation.rust.contains("unsupported Java expression: lambda")
             && !translation.rust.contains(".cloned().collect::<Vec<_>>()"),
         "{}",

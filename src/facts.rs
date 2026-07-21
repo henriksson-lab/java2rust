@@ -25,6 +25,7 @@ pub struct FactSet {
     pub external_crate_api_mapping_facts: Vec<ExternalCrateApiMappingFact>,
     pub external_crate_type_mapping_facts: Vec<ExternalCrateTypeMappingFact>,
     pub external_crate_constructor_mapping_facts: Vec<ExternalCrateConstructorMappingFact>,
+    pub facade_abi_facts: Vec<FacadeAbiFact>,
     pub external_rust_result_facts: Vec<ExternalRustResultFact>,
     pub external_rust_return_type_facts: Vec<ExternalRustReturnTypeFact>,
     pub external_constructor_rust_result_facts: Vec<ExternalConstructorRustResultFact>,
@@ -83,6 +84,7 @@ pub enum FactKind {
     ExternalConversionAdapter,
     ExternalCrateApiMapping,
     ExternalCrateConstructorMapping,
+    FacadeAbi,
     ExternalRustReturnType,
     ExternalConstructor,
     ExternalField,
@@ -99,6 +101,100 @@ pub enum FactKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeKey {
     pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemberName(pub String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallableKind {
+    Method,
+    Constructor,
+    StaticField,
+    InstanceField,
+    FieldGetter,
+    FieldSetter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Staticness {
+    Static,
+    Instance,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypePattern {
+    Exact(TypeKey),
+    Erased(TypeKey),
+    TypeParam(String),
+    Any,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CallableKey {
+    pub owner: TypeKey,
+    pub member: MemberName,
+    pub kind: CallableKind,
+    pub staticness: Staticness,
+    pub arity: usize,
+    pub params: Vec<TypePattern>,
+    pub generic_arity: Option<usize>,
+}
+
+impl CallableKey {
+    pub fn method(
+        owner: impl Into<String>,
+        method: impl Into<String>,
+        staticness: Staticness,
+        arity: usize,
+    ) -> Self {
+        Self {
+            owner: TypeKey {
+                type_name: owner.into(),
+            },
+            member: MemberName(method.into()),
+            kind: CallableKind::Method,
+            staticness,
+            arity,
+            params: vec![TypePattern::Any; arity],
+            generic_arity: None,
+        }
+    }
+
+    pub fn constructor(owner: impl Into<String>, params: Vec<TypePattern>) -> Self {
+        let arity = params.len();
+        Self {
+            owner: TypeKey {
+                type_name: owner.into(),
+            },
+            member: MemberName("<init>".to_string()),
+            kind: CallableKind::Constructor,
+            staticness: Staticness::Static,
+            arity,
+            params,
+            generic_arity: None,
+        }
+    }
+
+    pub fn field(
+        owner: impl Into<String>,
+        field: impl Into<String>,
+        kind: CallableKind,
+        staticness: Staticness,
+    ) -> Self {
+        Self {
+            owner: TypeKey {
+                type_name: owner.into(),
+            },
+            member: MemberName(field.into()),
+            kind,
+            staticness,
+            arity: 0,
+            params: Vec::new(),
+            generic_arity: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -213,6 +309,17 @@ pub struct ExternalApiEffectFact {
     pub provenance: FactProvenance,
 }
 
+impl ExternalApiEffectFact {
+    pub fn callable_key(&self) -> Option<CallableKey> {
+        Some(CallableKey::method(
+            self.receiver_type.clone()?,
+            self.method_name.clone(),
+            Staticness::Unknown,
+            self.arg_count?,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalArgumentAliasPolicy {
     Unknown,
@@ -233,6 +340,17 @@ pub struct ExternalApiArgumentEffectFact {
     pub provenance: FactProvenance,
 }
 
+impl ExternalApiArgumentEffectFact {
+    pub fn callable_key(&self) -> Option<CallableKey> {
+        Some(CallableKey::method(
+            self.receiver_type.clone()?,
+            self.method_name.clone(),
+            Staticness::Unknown,
+            self.parameter_index + 1,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalConstructorArgumentEffectFact {
     pub type_name: String,
@@ -243,6 +361,15 @@ pub struct ExternalConstructorArgumentEffectFact {
     pub argument_mutability: ReceiverMutabilityFact,
     pub alias_policy: ExternalArgumentAliasPolicy,
     pub provenance: FactProvenance,
+}
+
+impl ExternalConstructorArgumentEffectFact {
+    pub fn callable_key(&self) -> CallableKey {
+        CallableKey::constructor(
+            self.type_name.clone(),
+            vec![TypePattern::Any; self.arg_count],
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +410,51 @@ pub struct ExternalCrateConstructorMappingFact {
     pub provenance: FactProvenance,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverAbi {
+    FreeFunction,
+    AssociatedFunction,
+    BorrowedSelf,
+    MutBorrowedSelf,
+    OwnedSelf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FacadeSlot {
+    Owned,
+    Borrowed,
+    MutBorrowed,
+    Optional(Box<FacadeSlot>),
+    Slice(Box<FacadeSlot>),
+    DynTrait(String),
+    CrateHandle(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultAbi {
+    Plain,
+    ResultWrapped,
+    OptionWrapped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorrowSource {
+    Receiver,
+    Argument(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FacadeAbiFact {
+    pub key: CallableKey,
+    pub rust_path: String,
+    pub receiver: ReceiverAbi,
+    pub args: Vec<FacadeSlot>,
+    pub return_slot: FacadeSlot,
+    pub result: ResultAbi,
+    pub borrow_source: Option<BorrowSource>,
+    pub provenance: FactProvenance,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalRustResultFact {
     pub receiver_type: Option<String>,
@@ -298,6 +470,7 @@ pub struct ExternalRustReturnTypeFact {
     pub method_name: String,
     pub arg_count: Option<usize>,
     pub rust_type_name: String,
+    pub return_slot: FacadeSlot,
     pub provenance: FactProvenance,
 }
 
@@ -369,11 +542,67 @@ pub struct ExternalConstructorFact {
     pub provenance: FactProvenance,
 }
 
+impl ExternalConstructorFact {
+    pub fn callable_key(&self) -> CallableKey {
+        CallableKey::constructor(
+            self.type_name.clone(),
+            self.arg_types
+                .iter()
+                .map(external_type_pattern_for_java_type)
+                .collect(),
+        )
+    }
+}
+
+fn external_type_pattern_for_java_type(ty: &JavaType) -> TypePattern {
+    match ty {
+        JavaType::Named { name, .. } => TypePattern::Erased(TypeKey {
+            type_name: name.clone(),
+        }),
+        JavaType::Primitive(primitive) => TypePattern::Exact(TypeKey {
+            type_name: format!("{primitive:?}").to_ascii_lowercase(),
+        }),
+        JavaType::String => TypePattern::Exact(TypeKey {
+            type_name: "String".to_string(),
+        }),
+        JavaType::Array(element) => TypePattern::Erased(TypeKey {
+            type_name: format!("{:?}[]", external_type_pattern_for_java_type(element)),
+        }),
+        JavaType::Unknown(_) | JavaType::Wildcard(_) | JavaType::Void => TypePattern::Any,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExternalFieldKind {
+    Unknown,
+    StaticFinal,
+    EnumVariant,
+    NestedType,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalFieldFact {
     pub field: FieldKey,
     pub field_type: Option<JavaType>,
+    pub field_kind: ExternalFieldKind,
     pub provenance: FactProvenance,
+}
+
+impl ExternalFieldFact {
+    pub fn callable_key(&self) -> CallableKey {
+        let (kind, staticness) = match self.field_kind {
+            ExternalFieldKind::EnumVariant
+            | ExternalFieldKind::NestedType
+            | ExternalFieldKind::StaticFinal => (CallableKind::StaticField, Staticness::Static),
+            ExternalFieldKind::Unknown => (CallableKind::InstanceField, Staticness::Unknown),
+        };
+        CallableKey::field(
+            self.field.type_name.clone(),
+            self.field.field_name.clone(),
+            kind,
+            staticness,
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -698,6 +927,7 @@ impl FactSet {
             .extend(other.external_crate_type_mapping_facts);
         self.external_crate_constructor_mapping_facts
             .extend(other.external_crate_constructor_mapping_facts);
+        self.facade_abi_facts.extend(other.facade_abi_facts);
         self.external_rust_result_facts
             .extend(other.external_rust_result_facts);
         self.external_rust_return_type_facts
@@ -806,6 +1036,23 @@ impl FactSet {
         method_name: &str,
     ) -> Option<&ExternalApiEffectFact> {
         self.external_api_effect_for_receiver_with_arity(receiver_type, method_name, None)
+    }
+
+    pub fn external_api_effect_for_key(&self, key: &CallableKey) -> Option<&ExternalApiEffectFact> {
+        if key.kind != CallableKind::Method {
+            return None;
+        }
+        self.external_api_effect_facts
+            .iter()
+            .rev()
+            .find(|fact| fact.callable_key().as_ref() == Some(key))
+            .or_else(|| {
+                self.external_api_effect_for_receiver_with_arity(
+                    Some(&key.owner.type_name),
+                    &key.member.0,
+                    Some(key.arity),
+                )
+            })
     }
 
     pub fn external_api_effect_for_receiver_with_arity(
@@ -980,6 +1227,34 @@ impl FactSet {
             })
     }
 
+    pub fn external_api_argument_effect_for_key(
+        &self,
+        key: &CallableKey,
+        parameter_index: usize,
+    ) -> Option<&ExternalApiArgumentEffectFact> {
+        if key.kind != CallableKind::Method || parameter_index >= key.arity {
+            return None;
+        }
+        self.external_api_argument_effect_facts
+            .iter()
+            .rev()
+            .find(|fact| {
+                fact.callable_key().is_some_and(|fact_key| {
+                    fact_key.owner == key.owner
+                        && fact_key.member == key.member
+                        && fact_key.kind == key.kind
+                        && fact.parameter_index == parameter_index
+                })
+            })
+            .or_else(|| {
+                self.external_api_argument_effect_for_receiver(
+                    Some(&key.owner.type_name),
+                    &key.member.0,
+                    parameter_index,
+                )
+            })
+    }
+
     pub fn external_constructor_argument_effect_for(
         &self,
         type_name: &str,
@@ -1028,6 +1303,19 @@ impl FactSet {
                         external_type_name_matches(&fact.from_type, from_type)
                             && external_type_name_matches(&fact.to_type, to_type)
                     })
+            })
+    }
+
+    pub fn facade_abi_for_key(&self, key: &CallableKey) -> Option<&FacadeAbiFact> {
+        self.facade_abi_facts
+            .iter()
+            .rev()
+            .find(|fact| &fact.key == key && fact.provenance == FactProvenance::UserOverride)
+            .or_else(|| {
+                self.facade_abi_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| &fact.key == key)
             })
     }
 
@@ -1319,6 +1607,23 @@ impl FactSet {
             .or_else(|| self.find_external_constructor_for(type_name, arg_types, false))
     }
 
+    pub fn external_constructor_for_key(
+        &self,
+        key: &CallableKey,
+    ) -> Option<&ExternalConstructorFact> {
+        if key.kind != CallableKind::Constructor {
+            return None;
+        }
+        self.external_constructor_facts
+            .iter()
+            .rev()
+            .find(|fact| &fact.callable_key() == key)
+            .or_else(|| {
+                let arg_types = vec![JavaType::Unknown("_".to_string()); key.arity];
+                self.external_constructor_for(&key.owner.type_name, &arg_types)
+            })
+    }
+
     pub fn external_field_for(
         &self,
         type_name: &str,
@@ -1326,6 +1631,23 @@ impl FactSet {
     ) -> Option<&ExternalFieldFact> {
         self.find_external_field_for(type_name, field_name, true)
             .or_else(|| self.find_external_field_for(type_name, field_name, false))
+    }
+
+    pub fn external_field_for_key(&self, key: &CallableKey) -> Option<&ExternalFieldFact> {
+        if !matches!(
+            key.kind,
+            CallableKind::StaticField
+                | CallableKind::InstanceField
+                | CallableKind::FieldGetter
+                | CallableKind::FieldSetter
+        ) {
+            return None;
+        }
+        self.external_field_facts
+            .iter()
+            .rev()
+            .find(|fact| &fact.callable_key() == key)
+            .or_else(|| self.external_field_for(&key.owner.type_name, &key.member.0))
     }
 
     fn find_external_constructor_for(
@@ -1378,6 +1700,34 @@ impl FactSet {
                     .rev()
                     .find(|pack| external_pack_owns_type(pack, type_name))
             })
+            .or_else(|| {
+                self.external_library_packs
+                    .iter()
+                    .rev()
+                    .find(|pack| self.external_pack_has_member_for_type(pack, type_name))
+            })
+    }
+
+    fn external_pack_has_member_for_type(
+        &self,
+        pack: &ExternalLibraryPackFact,
+        type_name: &str,
+    ) -> bool {
+        if !type_name.contains('.') {
+            return false;
+        }
+        self.external_api_effect_facts.iter().any(|fact| {
+            fact.receiver_type.as_deref().is_some_and(|receiver_type| {
+                external_type_name_matches(receiver_type, type_name)
+                    && external_pack_owns_type(pack, receiver_type)
+            })
+        }) || self.external_constructor_facts.iter().any(|fact| {
+            external_type_name_matches(&fact.type_name, type_name)
+                && external_pack_owns_type(pack, &fact.type_name)
+        }) || self.external_field_facts.iter().any(|fact| {
+            external_type_name_matches(&fact.field.type_name, type_name)
+                && external_pack_owns_type(pack, &fact.field.type_name)
+        })
     }
 
     pub fn unsupported_external_api_for_receiver(

@@ -172,6 +172,11 @@ pub fn slot_value_rust_type_policy_with_effective_facts(
             }
         }
         (ViewShape::Str, _, _) if content.string_content => SlotValueRustTypePolicy::StringView,
+        (ViewShape::Slice, _, java_ty)
+            if crate::types::two_dimensional_array_element_type(java_ty).is_some() =>
+        {
+            slot_dispatch_rust_type_policy(shape)
+        }
         (ViewShape::Slice, _, _) => {
             if let Some(element_ty) = content.sequence_element {
                 SlotValueRustTypePolicy::SliceView { element_ty }
@@ -477,6 +482,13 @@ pub fn native_java_rust_type_policy_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> NativeJavaRustTypePolicy {
+    if let Some(element_ty) = crate::types::two_dimensional_array_element_type(ty) {
+        return NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Array2(Box::new(
+                rust_type_for_java_generic_arg_with_effective_facts(&element_ty, facts),
+            )),
+        };
+    }
     if matches!(
         facts.object_representation_override_strategy_for(ty),
         Some(HierarchyStrategy::ErasedObject)

@@ -462,8 +462,17 @@ fn load_external_fact_providers(
 struct FacadeFnAbi {
     return_type: Option<String>,
     params: Vec<String>,
+    receiver: FacadeFnReceiver,
     generic_params: Vec<String>,
     generic_bounds: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FacadeFnReceiver {
+    None,
+    BorrowedSelf,
+    MutBorrowedSelf,
+    OwnedSelf,
 }
 
 #[derive(Debug, Clone)]
@@ -517,9 +526,17 @@ fn enrich_external_pack_facade_abi(
             abi_map,
             receiver_type.rsplit('.').next().unwrap_or(receiver_type),
         );
-        let Some(abi) = abi_map.fns.get(&(owner, rust_name.clone())) else {
+        let Some(abi) = abi_map.fns.get(&(owner.clone(), rust_name.clone())) else {
             continue;
         };
+        append_facade_structured_method_abi_fact(
+            facts,
+            &effect,
+            crate_name.as_str(),
+            abi,
+            &owner,
+            &rust_name,
+        );
         append_facade_method_abi_facts(facts, &effect, abi);
         append_facade_argument_abi_facts(
             facts,
@@ -531,7 +548,6 @@ fn enrich_external_pack_facade_abi(
         if rust_name != effect.method_name {
             append_facade_argument_abi_facts(facts, &effect, &effect.method_name, &rust_name, abi);
         }
-        let _ = crate_name;
     }
 
     let constructors = facts.external_constructor_facts.clone();
@@ -641,6 +657,7 @@ fn append_facade_method_abi_facts(
                 method_name: effect.method_name.clone(),
                 arg_count: effect.arg_count,
                 rust_type_name: unwrapped,
+                return_slot: facade_return_slot_for_rust_type(return_type),
                 provenance: new_java2rust::facts::FactProvenance::ExternalLibraryPack,
             },
         );
@@ -656,6 +673,117 @@ fn append_facade_method_abi_facts(
         adjusted.provenance = new_java2rust::facts::FactProvenance::ExternalLibraryPack;
         facts.external_api_effect_facts.push(adjusted);
     }
+}
+
+fn append_facade_structured_method_abi_fact(
+    facts: &mut new_java2rust::facts::FactSet,
+    effect: &new_java2rust::facts::ExternalApiEffectFact,
+    crate_name: &str,
+    abi: &FacadeFnAbi,
+    owner: &str,
+    rust_name: &str,
+) {
+    let Some(receiver_type) = effect.receiver_type.as_deref() else {
+        return;
+    };
+    let arg_count = effect.arg_count.unwrap_or(abi.params.len());
+    let key = new_java2rust::facts::CallableKey::method(
+        receiver_type.to_string(),
+        effect.method_name.clone(),
+        new_java2rust::facts::Staticness::Unknown,
+        arg_count,
+    );
+    if facts.facade_abi_for_key(&key).is_some() {
+        return;
+    }
+
+    let Some(return_type) = abi.return_type.as_deref() else {
+        return;
+    };
+    facts
+        .facade_abi_facts
+        .push(new_java2rust::facts::FacadeAbiFact {
+            key,
+            rust_path: format!("{crate_name}::{owner}::{rust_name}"),
+            receiver: facade_receiver_abi(abi.receiver),
+            args: abi
+                .params
+                .iter()
+                .map(|param| facade_slot_for_rust_type(param))
+                .collect(),
+            return_slot: facade_return_slot_for_rust_type(return_type),
+            result: facade_result_abi(return_type),
+            borrow_source: if rust_return_payload_type(return_type)
+                .trim_start()
+                .starts_with('&')
+            {
+                Some(new_java2rust::facts::BorrowSource::Receiver)
+            } else {
+                None
+            },
+            provenance: new_java2rust::facts::FactProvenance::ExternalLibraryPack,
+        });
+}
+
+fn facade_receiver_abi(receiver: FacadeFnReceiver) -> new_java2rust::facts::ReceiverAbi {
+    match receiver {
+        FacadeFnReceiver::None => new_java2rust::facts::ReceiverAbi::AssociatedFunction,
+        FacadeFnReceiver::BorrowedSelf => new_java2rust::facts::ReceiverAbi::BorrowedSelf,
+        FacadeFnReceiver::MutBorrowedSelf => new_java2rust::facts::ReceiverAbi::MutBorrowedSelf,
+        FacadeFnReceiver::OwnedSelf => new_java2rust::facts::ReceiverAbi::OwnedSelf,
+    }
+}
+
+fn facade_result_abi(return_type: &str) -> new_java2rust::facts::ResultAbi {
+    if rust_type_is_result(return_type) {
+        new_java2rust::facts::ResultAbi::ResultWrapped
+    } else if rust_return_payload_is_optional(return_type) {
+        new_java2rust::facts::ResultAbi::OptionWrapped
+    } else {
+        new_java2rust::facts::ResultAbi::Plain
+    }
+}
+
+fn facade_return_slot_for_rust_type(return_type: &str) -> new_java2rust::facts::FacadeSlot {
+    facade_slot_for_rust_type(&rust_return_payload_type(return_type))
+}
+
+fn facade_slot_for_rust_type(ty: &str) -> new_java2rust::facts::FacadeSlot {
+    let ty = ty.trim();
+    if let Some(inner) = ty
+        .strip_prefix("Option<")
+        .and_then(|ty| ty.strip_suffix('>'))
+    {
+        return new_java2rust::facts::FacadeSlot::Optional(Box::new(facade_slot_for_rust_type(
+            inner,
+        )));
+    }
+    if let Some(inner) = ty
+        .strip_prefix("std::option::Option<")
+        .and_then(|ty| ty.strip_suffix('>'))
+    {
+        return new_java2rust::facts::FacadeSlot::Optional(Box::new(facade_slot_for_rust_type(
+            inner,
+        )));
+    }
+    if let Some(inner) = ty.strip_prefix("&mut ") {
+        if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
+            return new_java2rust::facts::FacadeSlot::Slice(Box::new(facade_slot_for_rust_type(
+                slice,
+            )));
+        }
+        return new_java2rust::facts::FacadeSlot::MutBorrowed;
+    }
+    if let Some(inner) = ty.strip_prefix('&') {
+        let inner = inner.trim();
+        if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
+            return new_java2rust::facts::FacadeSlot::Slice(Box::new(facade_slot_for_rust_type(
+                slice,
+            )));
+        }
+        return new_java2rust::facts::FacadeSlot::Borrowed;
+    }
+    new_java2rust::facts::FacadeSlot::Owned
 }
 
 fn append_facade_argument_abi_facts(
@@ -959,10 +1087,17 @@ fn parse_facade_fn_signature(signature: &str) -> Option<(String, FacadeFnAbi)> {
     let generic_bounds = parse_facade_generic_bounds(rest);
     let params_start = rest.find('(')?;
     let params_end = matching_paren(rest, params_start)?;
+    let mut receiver = FacadeFnReceiver::None;
     let params = split_top_level(&rest[params_start + 1..params_end], ',')
         .into_iter()
         .filter_map(|param| {
             let param = param.trim();
+            receiver = match param {
+                "self" => FacadeFnReceiver::OwnedSelf,
+                "&self" => FacadeFnReceiver::BorrowedSelf,
+                "&mut self" => FacadeFnReceiver::MutBorrowedSelf,
+                _ => receiver,
+            };
             if param == "self" || param == "&self" || param == "&mut self" || param.is_empty() {
                 return None;
             }
@@ -978,6 +1113,7 @@ fn parse_facade_fn_signature(signature: &str) -> Option<(String, FacadeFnAbi)> {
         FacadeFnAbi {
             return_type,
             params,
+            receiver,
             generic_params,
             generic_bounds,
         },
@@ -1829,7 +1965,9 @@ mod tests {
         std::fs::write(
             facade_dir.join("lib.rs"),
             "pub struct Assert;\n\
+             pub struct Schema;\n\
              impl Assert {\n\
+                 pub fn get_schema(&self) -> Option<&Schema> { None }\n\
                  pub fn assert_null<T>(_actual: T) {}\n\
                  pub fn set_string<S: Into<String>>(_actual: S) {}\n\
              }\n",
@@ -1839,6 +1977,8 @@ mod tests {
         std::fs::write(
             &manifest_path,
             "external-pack dep Assert rust-crate-mapping mapped target=dep_facade path=facade\n\
+             external-pack dep Schema rust-crate-mapping mapped target=dep_facade path=facade\n\
+             external-pack-api dep Assert getSchema mapped getter read-only maybe-null args=0 return=Schema rust=get_schema\n\
              external-pack-api dep Assert assertNull mapped side-effect read-only definitely-non-null args=1 return=void rust=assert_null\n\
              external-pack-argument dep Assert assertNull 0 maybe-null read-only borrowed type=Object\n\
              external-pack-api dep Assert setString mapped side-effect read-only definitely-non-null args=1 return=void rust=set_string\n\
@@ -1876,6 +2016,30 @@ mod tests {
                 .parameter_nullability,
             NullabilityState::DefinitelyNonNull
         );
+        let key = new_java2rust::facts::CallableKey::method(
+            "Assert",
+            "getSchema",
+            new_java2rust::facts::Staticness::Unknown,
+            0,
+        );
+        let abi = facts.facade_abi_for_key(&key).unwrap_or_else(|| {
+            panic!(
+                "facade crate signature should generate a structured ABI fact; got {:?}",
+                facts.facade_abi_facts
+            )
+        });
+        assert_eq!(
+            abi.receiver,
+            new_java2rust::facts::ReceiverAbi::BorrowedSelf
+        );
+        assert_eq!(
+            abi.return_slot,
+            new_java2rust::facts::FacadeSlot::Optional(Box::new(
+                new_java2rust::facts::FacadeSlot::Borrowed,
+            ))
+        );
+        assert_eq!(abi.result, new_java2rust::facts::ResultAbi::OptionWrapped);
+        assert_eq!(abi.rust_path, "dep_facade::Assert::get_schema");
 
         std::fs::remove_dir_all(temp_dir).unwrap();
     }

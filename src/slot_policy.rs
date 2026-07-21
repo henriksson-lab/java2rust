@@ -354,7 +354,7 @@ fn method_return_allows_borrowed_param_content(
         && binding
             .uses
             .iter()
-            .all(|usage| matches!(usage, BindingUse::Returned))
+            .all(|usage| matches!(usage, BindingUse::Returned | BindingUse::ContentRead))
 }
 
 fn usage_allows_borrowed_content(usage: &MethodUsageFacts, param_name: &str) -> bool {

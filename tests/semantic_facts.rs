@@ -368,7 +368,10 @@ fn nullable_field_storage_uses_option_shape_and_assignment_wrapping() {
         translation.rust
     );
     assert!(
-        translation.rust.contains("self.cached = Some(value);"),
+        translation.rust.contains("self.cached = Some(value")
+            && translation
+                .rust
+                .contains("/* TODO(translation): validate added clone */);"),
         "{}",
         translation.rust
     );
@@ -1336,7 +1339,7 @@ class TupleLikeConstructorUse {
         let args = vec![JavaType::Unknown("arg".to_string()); arity];
         assert_eq!(
             new_java2rust::stdlib::external_constructor_provenance(type_name, &args),
-            FactProvenance::ConservativeFallback,
+            FactProvenance::ExternalLibraryPack,
             "{type_name}/{arity} precision should come from the {owner} pack, not stdlib"
         );
     }
@@ -3264,10 +3267,13 @@ class KnownExternalFieldConstantUse {
         ("SWOverhangStrategy", "SOFTCLIP"),
     ] {
         if let Some(fact) = semantic.facts.external_field_for(type_name, field_name) {
-            assert_eq!(
-                fact.provenance,
-                FactProvenance::BuiltinExternalModel,
-                "known external field {type_name}.{field_name} should not use conservative fallback"
+            assert!(
+                matches!(
+                    fact.provenance,
+                    FactProvenance::BuiltinExternalModel | FactProvenance::ExternalLibraryPack
+                ),
+                "known external field {type_name}.{field_name} should not use conservative fallback: {:?}",
+                fact.provenance
             );
         }
     }
@@ -3451,9 +3457,13 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         ("Pattern", "CASE_INSENSITIVE"),
         ("RoundingMode", "HALF_UP"),
     ] {
-        assert_eq!(
-            external_field_provenance(type_name, field_name),
-            FactProvenance::BuiltinExternalModel
+        let provenance = external_field_provenance(type_name, field_name);
+        assert!(
+            matches!(
+                provenance,
+                FactProvenance::BuiltinExternalModel | FactProvenance::ExternalLibraryPack
+            ),
+            "{type_name}.{field_name} should not use conservative fallback: {provenance:?}"
         );
     }
     let apache_commons_math_optim_facts =
@@ -3472,7 +3482,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance("GoalType", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let picard_metrics_facts = new_java2rust::external_packs::picard_metrics_pack_facts();
@@ -3496,7 +3506,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance("DuplicationMetrics", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let broad_http_facts = new_java2rust::external_packs::broad_http_pack_facts();
@@ -3524,7 +3534,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(JavaType::String));
         assert_eq!(
             external_field_provenance(type_name, "SCHEME"),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for field_name in [
@@ -3547,7 +3557,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance("RetryHandler", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let barclay_help_facts = new_java2rust::external_packs::barclay_help_pack_facts();
@@ -3565,7 +3575,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(JavaType::String));
         assert_eq!(
             external_field_provenance("TemplateProperties", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let barclay_argparser_facts = new_java2rust::external_packs::barclay_argparser_pack_facts();
@@ -3581,7 +3591,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("SpecialArgumentsCollection", "SHOW_HIDDEN"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let hdf5_facts = new_java2rust::external_packs::hdf5_pack_facts();
     for (type_name, field_name) in [
@@ -3604,7 +3614,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let variantcontext_facts = new_java2rust::external_packs::htsjdk_variantcontext_pack_facts();
@@ -3663,7 +3673,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_type));
         assert_eq!(
             external_field_provenance("Allele", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let max_diploid_alt_alleles = variantcontext_facts
@@ -3687,7 +3697,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
             "GenotypeLikelihoods",
             "MAX_DIPLOID_ALT_ALLELES_THAT_CAN_BE_GENOTYPED"
         ),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let no_genotypes = variantcontext_facts
         .external_field_for("GenotypesContext", "NO_GENOTYPES")
@@ -3702,7 +3712,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("GenotypesContext", "NO_GENOTYPES"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let variant_type = variantcontext_facts
         .external_field_for("VariantContext", "Type")
@@ -3717,7 +3727,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("VariantContext", "Type"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     for type_name in [
         "CommonInfo",
@@ -3737,7 +3747,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance(type_name, "NO_LOG10_PERROR"),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let unphased_separator = variantcontext_facts
@@ -3753,7 +3763,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("Genotype", "UNPHASED_ALLELE_SEPARATOR"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     for field_name in ["INDEL", "NO_VARIATION"] {
         let field = variantcontext_facts
@@ -3771,7 +3781,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance("Type", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for field_name in ["alleleIndex1", "alleleIndex2"] {
@@ -3789,7 +3799,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance("GenotypeLikelihoodsAllelePair", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let sam_bam_facts = new_java2rust::external_packs::htsjdk_sam_bam_pack_facts();
@@ -3806,7 +3816,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("SBIIndexWriter", "DEFAULT_GRANULARITY"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let sam_record_facts = new_java2rust::external_packs::htsjdk_sam_record_pack_facts();
     let cigar_operator = sam_record_facts
@@ -3825,7 +3835,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("CigarOperator", "MATCH_OR_MISMATCH"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     for (field_name, expected_ty) in [
         (
@@ -3871,7 +3881,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance("SAMRecord", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (type_name, field_name, expected_ty) in [
@@ -3903,7 +3913,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (field_name, expected_type) in [
@@ -3925,7 +3935,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_type));
         assert_eq!(
             external_field_provenance("JexlVCMatchExp", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for field_name in ["TREAT_AS_MATCH", "TREAT_AS_MISMATCH"] {
@@ -3946,7 +3956,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance("JexlMissingValueTreatment", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let vcf_facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
@@ -3970,7 +3980,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance("VCFConstants", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (field_name, expected_ty) in [
@@ -3990,7 +4000,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance("VCFHeader", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let supported_header_line_type = vcf_facts
@@ -4009,7 +4019,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("VCFCompoundHeaderLine", "SupportedHeaderLineType"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     for field_name in ["FORMAT", "INFO"] {
         let field = vcf_facts
@@ -4027,7 +4037,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance("SupportedHeaderLineType", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let writer_output_type = vcf_facts
@@ -4046,7 +4056,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("VariantContextWriterBuilder", "OutputType"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let default_options = vcf_facts
         .external_field_for("VariantContextWriterBuilder", "DEFAULT_OPTIONS")
@@ -4067,7 +4077,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("VariantContextWriterBuilder", "DEFAULT_OPTIONS"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let picard_vcf_facts = new_java2rust::external_packs::picard_vcf_pack_facts();
     for (field_name, expected_ty) in [
@@ -4097,7 +4107,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance("GenotypeConcordanceStates", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (type_name, field_name, expected_ty) in [
@@ -4143,7 +4153,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (type_name, field_name) in [
@@ -4170,7 +4180,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(JavaType::String));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let picard_markduplicates_facts =
@@ -4191,7 +4201,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("MarkDuplicates", "DuplicateTaggingPolicy"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     for field_name in ["DontTag", "OpticalOnly", "All"] {
         let field = picard_markduplicates_facts
@@ -4209,7 +4219,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance("DuplicateTaggingPolicy", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let sam_header_facts = new_java2rust::external_packs::htsjdk_sam_header_pack_facts();
@@ -4238,7 +4248,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance("SAMFileHeader", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for field_name in ["READ_GROUP_ID_TAG", "READ_GROUP_SAMPLE_TAG"] {
@@ -4251,7 +4261,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(JavaType::String));
         assert_eq!(
             external_field_provenance("SAMReadGroupRecord", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (type_name, field_name, expected_type_name) in [
@@ -4274,7 +4284,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let samtools_util_facts = new_java2rust::external_packs::htsjdk_samtools_util_pack_facts();
@@ -4313,7 +4323,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (type_name, field_name, expected_ty) in [
@@ -4392,7 +4402,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (type_name, field_name, expected_ty) in [
@@ -4478,7 +4488,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let tribble_feature_facts = new_java2rust::external_packs::htsjdk_tribble_feature_pack_facts();
@@ -4495,7 +4505,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("FeatureCodecHeader", "NO_HEADER_END"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let tribble_index_facts = new_java2rust::external_packs::htsjdk_tribble_index_pack_facts();
     for (field_name, expected_ty) in [
@@ -4523,7 +4533,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance("IndexFactory", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (type_name, field_name, expected_ty) in [
@@ -4553,7 +4563,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (type_name, field_name) in [
@@ -4574,7 +4584,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let sam_bam_facts = new_java2rust::external_packs::htsjdk_sam_bam_pack_facts();
@@ -4591,7 +4601,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("BAMFileConstants", "FIXED_BLOCK_SIZE"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let sam_reader_facts = new_java2rust::external_packs::htsjdk_sam_reader_pack_facts();
     let reader_option = sam_reader_facts
@@ -4610,7 +4620,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("SamReaderFactory", "Option"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     for field_name in ["CACHE_FILE_BASED_INDEXES", "INCLUDE_SOURCE_IN_RECORDS"] {
         let field = sam_reader_facts
@@ -4630,7 +4640,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance("SamReaderFactory.Option", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
         assert_eq!(
             external_field_provenance("Option", field_name),
@@ -4654,7 +4664,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("Percentile", "EstimationType"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let r1 = apache_stats_facts
         .external_field_for("EstimationType", "R_1")
@@ -4669,7 +4679,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("EstimationType", "R_1"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let commons_compress_facts =
         new_java2rust::external_packs::apache_commons_compress_pack_facts();
@@ -4710,7 +4720,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let commons_lang_facts = new_java2rust::external_packs::apache_commons_lang_pack_facts();
@@ -4742,7 +4752,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let commons_codec_facts = new_java2rust::external_packs::apache_commons_codec_pack_facts();
@@ -4753,7 +4763,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     assert_eq!(sha_256.field_type, Some(JavaType::String));
     assert_eq!(
         external_field_provenance("MessageDigestAlgorithms", "SHA_256"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let bigquery_facts = new_java2rust::external_packs::google_bigquery_pack_facts();
     for (type_name, field_name, expected_ty) in [
@@ -4783,7 +4793,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     for (type_name, field_name, expected_ty) in [
@@ -4821,7 +4831,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     assert_eq!(
@@ -4850,7 +4860,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance("DataFormat", field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let jackson_facts = new_java2rust::external_packs::jackson_databind_pack_facts();
@@ -4873,7 +4883,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         );
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let storage_facts = new_java2rust::external_packs::google_storage_pack_facts();
@@ -4893,7 +4903,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("Storage", "SignUrlOption"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     let cloud_nio_facts = new_java2rust::external_packs::google_cloud_nio_pack_facts();
     for (type_name, field_name, expected_ty) in [
@@ -4916,7 +4926,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let genomicsdb_facts = new_java2rust::external_packs::genomicsdb_pack_facts();
@@ -4995,7 +5005,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
         assert_eq!(field.field_type, Some(expected_ty));
         assert_eq!(
             external_field_provenance(type_name, field_name),
-            FactProvenance::ConservativeFallback
+            FactProvenance::ExternalLibraryPack
         );
     }
     let bwa_facts = new_java2rust::external_packs::bwa_pack_facts();
@@ -5009,7 +5019,7 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("BwaMemAligner", "MEM_F_ALL"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     assert_eq!(
         external_field_provenance("ExternalBox", "count"),
@@ -5021,11 +5031,11 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
     );
     assert_eq!(
         external_field_provenance("SAMSequenceRecord", "UNKNOWN_SEQUENCE_LENGTH"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
     assert_eq!(
         external_field_provenance("HttpFileSystemProviderSettings", "DEFAULT_SETTINGS"),
-        FactProvenance::ConservativeFallback
+        FactProvenance::ExternalLibraryPack
     );
 }
 

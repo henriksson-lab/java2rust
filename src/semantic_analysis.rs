@@ -5,9 +5,10 @@ use crate::facts::{
     AccessorInlinePolicy, CatchFact, ConstructorKey, ConstructorRecursionFact, ControlFlowFact,
     ControlFlowFactKind, DispatchRequirementFact, DispatchRequirementKind, ExceptionFact,
     ExceptionKind, ExternalApiEffectFact, ExternalConstructorFact, ExternalFieldFact,
-    FactProvenance, FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
-    MethodEffectFact, MethodKey, NullabilityState, ReceiverMutabilityFact, RecursionFact,
-    RecursionKind, TrivialAccessorFact, TrivialAccessorKind, UnresolvedTargetKind,
+    ExternalFieldKind, FactProvenance, FactSet, FieldKey, FieldNullabilityFact,
+    FieldNullabilityProvenance, MethodEffectFact, MethodKey, NullabilityState,
+    ReceiverMutabilityFact, RecursionFact, RecursionKind, TrivialAccessorFact, TrivialAccessorKind,
+    UnresolvedTargetKind,
 };
 use crate::graph::strongly_connected_components;
 use crate::java_ir::{
@@ -441,9 +442,10 @@ fn collect_external_constructor_facts(
             .push(ExternalConstructorFact {
                 type_name: type_name.to_string(),
                 arg_types: fact.arg_types.clone(),
-                provenance: crate::stdlib::external_constructor_provenance(
+                provenance: crate::stdlib::external_constructor_provenance_with_builtin_packs(
                     type_name,
                     &fact.arg_types,
+                    enable_builtin_external_packs,
                 ),
             });
     }
@@ -543,7 +545,12 @@ fn collect_external_field_facts(
                 },
                 &fact.target_name,
             ),
-            provenance: crate::stdlib::external_field_provenance(&type_name, &fact.target_name),
+            field_kind: ExternalFieldKind::Unknown,
+            provenance: crate::stdlib::external_field_provenance_with_builtin_packs(
+                &type_name,
+                &fact.target_name,
+                enable_builtin_external_packs,
+            ),
         });
     }
 }
@@ -1713,8 +1720,12 @@ fn push_external_api_effect_guess(
         facts.external_api_effect_facts.push(pack_fact);
         return;
     }
-    let policy =
-        crate::stdlib::external_api_method_policy(receiver_type_key.as_deref(), name, arg_count);
+    let policy = crate::stdlib::external_api_method_policy_with_builtin_packs(
+        receiver_type_key.as_deref(),
+        name,
+        arg_count,
+        enable_builtin_external_packs,
+    );
     if policy.provenance == FactProvenance::BuiltinExternalModel {
         facts.external_api_effect_facts.push(ExternalApiEffectFact {
             method_name: name.to_string(),

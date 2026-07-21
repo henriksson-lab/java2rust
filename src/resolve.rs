@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
     Capture, CaptureFacts, CaptureOrigin, CaptureOwner, CaptureOwnerKind, CaptureSource,
-    ClosedHierarchyFact, ExternalFieldFact, FactProvenance, FactSet, FieldKey, NodeId,
-    ObjectSafetyFact, ObjectSafetyViolation, SealedPermitsFact, TypeCapabilityOverride,
+    ClosedHierarchyFact, ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet, FieldKey,
+    NodeId, ObjectSafetyFact, ObjectSafetyViolation, SealedPermitsFact, TypeCapabilityOverride,
     UnresolvedTargetFact, UnresolvedTargetKind,
 };
 use crate::java_ir::{
@@ -3272,7 +3272,7 @@ fn known_resolver_external_method_return_type_for_call(
     if !matches!(
         receiver_type,
         Some(JavaType::Named { name, .. } | JavaType::Unknown(name))
-            if crate::stdlib::canonical_external_receiver_type_key(name) == "Utils"
+            if crate::javalibs::is_broad_utils_type_name(name)
     ) || name != "stream"
         || arg_types.len() != 1
     {
@@ -4984,6 +4984,7 @@ fn collect_field_declaration_facts_for_type(ty: &TypeDecl, facts: &mut FactSet) 
                     field_name: field.name.clone(),
                 },
                 field_type: Some(field.ty.clone()),
+                field_kind: ExternalFieldKind::Unknown,
                 provenance: FactProvenance::ParsedSource,
             }),
             Member::Type(nested) => collect_field_declaration_facts_for_type(nested, facts),

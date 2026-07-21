@@ -5,8 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use new_java2rust::facts::{
     ExternalApiArgumentEffectFact, ExternalApiEffectFact, ExternalApiRole,
-    ExternalArgumentAliasPolicy, ExternalFieldFact, FactProvenance, FactSet, FieldKey,
-    NullabilityState, ReceiverMutabilityFact,
+    ExternalArgumentAliasPolicy, ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet,
+    FieldKey, NullabilityState, ReceiverMutabilityFact,
 };
 use new_java2rust::java_ir::JavaType;
 use new_java2rust::{
@@ -1128,7 +1128,7 @@ mod generated_tests {
     fn typechecks_method_reference_flat_map() {
         let fixture = MethodReferenceFlatMap {};
         let groups = vec![vec!["a".to_string()], vec!["b".to_string()]];
-        let _: HashSet<String> = fixture.flatten(groups);
+        let _: HashSet<String> = fixture.flatten(&groups);
     }
 }
 "#,
@@ -2501,7 +2501,7 @@ mod generated_tests {
             .into_iter()
             .map(|v| v.to_string())
             .collect::<HashSet<_>>();
-        assert_eq!(streams.flatten(groups), expected);
+        assert_eq!(streams.flatten(&groups), expected);
     }
 }
 "#
@@ -3322,6 +3322,7 @@ fn external_field_throwing_call_in_try_uses_external_field_facts() {
             name: "Validator".to_string(),
             args: Vec::new(),
         }),
+        field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::UserOverride,
     });
     facts.external_api_effect_facts.push(ExternalApiEffectFact {
@@ -3989,6 +3990,136 @@ public class ProgressMeter {
     );
     assert!(
         translation.rust.contains("self.progress_meter.record();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn two_dimensional_numeric_arrays_lower_to_ndarray_array2() {
+    let translation = translate_source(
+        r#"
+class NdarrayMatrixLowering {
+    double[][] literal() {
+        return new double[][] {{1.0, 2.0}, {3.0, 4.0}};
+    }
+
+    double[][] create(int rows, int cols) {
+        double[][] values = new double[rows][cols];
+        values[0][0] = 1.0;
+        return values;
+    }
+
+    double read(double[][] values, int row, int col) {
+        return values[row][col];
+    }
+
+    void write(double[][] values, int row, int col, double value) {
+        values[row][col] = value;
+    }
+
+    int rows(double[][] values) {
+        return values.length;
+    }
+
+    int cols(double[][] values, int row) {
+        return values[row].length;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn literal(&self) -> ndarray::Array2<f64>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return ndarray::arr2(&[[1f64, 2f64], [3f64, 4f64]]);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "let mut values: ndarray::Array2<f64> = ndarray::Array2::from_elem((rows as usize, cols as usize), 0.0);"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return values[[row as usize, col as usize]];"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("values: &mut ndarray::Array2<f64>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("values[[row as usize, col as usize]] = value;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("return values.nrows() as i32;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("return values.row(row as usize).to_vec().len() as i32;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("Vec<Vec<f64>>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("Java array creation: Primitive(Double)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn two_dimensional_row_replacement_lowers_to_ndarray_row_mut_assign() {
+    let translation = translate_source(
+        r#"
+class NdarrayRowReplacement {
+    void replace(double[][] values, int row, double[] replacement) {
+        values[row] = replacement;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("values: &mut ndarray::Array2<f64>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "values.row_mut(row as usize).assign(&ndarray::ArrayView1::from(replacement));"
+        ),
         "{}",
         translation.rust
     );

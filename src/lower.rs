@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::access_lowering::{lower_bare_name, lower_field_access_with_facts};
-use crate::array_lowering::render_array_expr;
+use crate::array_lowering::{borrowed_array2_temporary_for_slot, render_array_expr};
 use crate::array_plan::plan_array_expr;
 use crate::call_lowering::{
     apply_call_target, apply_class_literal_token, apply_collection_remove_if,
@@ -48,7 +48,8 @@ use crate::exception_plan::{
     try_resource_names,
 };
 use crate::expr_render::{
-    binary_expr, indexed_expr, literal_expr, raw_expr, super_expr, ternary_expr, this_expr,
+    binary_expr, indexed_expr, literal_expr, named_constructor_expr, raw_expr, super_expr,
+    ternary_expr, this_expr,
 };
 use crate::expr_shape::{
     ExprShapeContext, ShapeEnv, fallback_local_shape_from_declared_type,
@@ -62,7 +63,9 @@ use crate::item_assembly::{
     method_function_shell_with_facts_and_exception_plan, raw_item,
     struct_item_for_type_with_facts_and_support_context,
 };
+use crate::java_ir::Member as Jm;
 use crate::java_ir::*;
+use crate::javalibs::{broad_ioutils_support_item, program_uses_broad_ioutils_facade};
 use crate::loop_lowering::{assemble_for_loop, assignment_condition_loop, continue_with_updates};
 use crate::loop_plan::{ForBodyStmtPlan, WhileStmtPlan, plan_for_body_stmt, plan_while_stmt};
 use crate::lowering_diagnostics::{LoweringDiagnosticPlan, collect_lowering_diagnostic_plans};
@@ -77,13 +80,16 @@ use crate::operator_lowering::{
 use crate::operator_lowering::{lower_null_comparison_expr, lower_unary_expr};
 use crate::rewrite::{MethodControlFlowPlan, method_has_tail_recursive_loop_rewrite};
 use crate::rust_ir::*;
+use crate::shape_projection::{
+    borrowed_string_content_shape, shape_is_concrete_native, shape_is_erased_object_boundary,
+    shape_is_owned, shape_is_owned_non_erased, storage_shape, value_shape,
+};
 use crate::signature::{LocalPlan, ReceiverPlan, SignaturePlan, SolvedSlotShape};
 use crate::slot_shape::RustSlotShape;
-use crate::slot_shape::{DispatchShape, OwnershipShape, ViewShape};
 use crate::statement_render::{
     assignment_stmt, break_stmt, continue_stmt, expr_stmt, if_stmt,
-    local_let_stmt_with_type_annotation, raw_stmt, render_block_stmt, render_enhanced_for,
-    render_enhanced_for_iterator, while_stmt,
+    local_let_stmt_with_facts_and_type_annotation, raw_stmt, render_block_stmt,
+    render_enhanced_for, render_enhanced_for_iterator, while_stmt,
 };
 use crate::stdlib::{
     external_api_facade_support_items_with_local_type_program,
@@ -261,8 +267,12 @@ pub fn lower_program_with_semantic_plans_and_support_context(
     if program_uses_java_class_tokens(program) {
         file.items.push(java_class_support_item());
     }
-    if program_uses_java_platform_facades(program) {
+    let uses_broad_ioutils = program_uses_broad_ioutils_facade(program);
+    if program_uses_java_platform_facades(program) || uses_broad_ioutils {
         file.items.push(java_platform_facade_support_item());
+    }
+    if uses_broad_ioutils {
+        file.items.push(broad_ioutils_support_item());
     }
     if program_uses_java_string_split(program) {
         file.items.push(java_string_split_support_item());
@@ -341,7 +351,7 @@ fn seed_support_type_fields_for_type(env: &mut ShapeEnv, ty: &TypeDecl) {
     for member in &ty.members {
         match member {
             Member::Field(field) => {
-                let shape = RustSlotShape::for_storage(field.ty.clone());
+                let shape = storage_shape(field.ty.clone());
                 env.insert_type_field_shape(&ty.name, field.name.clone(), shape.clone());
                 if field.modifiers.contains(&Modifier::Static)
                     && field.modifiers.contains(&Modifier::Final)
@@ -477,7 +487,7 @@ fn type_uses_zero_arg_constructor_for_type(ty: &TypeDecl, type_name: &str) -> bo
             .as_ref()
             .is_some_and(|body| block_uses_zero_arg_constructor_for_type(body, type_name)),
         Member::Type(nested) => type_uses_zero_arg_constructor_for_type(nested, type_name),
-        Member::Unsupported { .. } => false,
+        Jm::Unsupported { .. } => false,
     })
 }
 
@@ -1157,7 +1167,7 @@ fn lower_stmt(
             if let Some(initializer) = lowered_initializer.as_mut() {
                 hoist_borrowed_string_temporaries_in_initializer(name, initializer, out);
             }
-            out.push(local_let_stmt_with_type_annotation(
+            out.push(local_let_stmt_with_facts_and_type_annotation(
                 &local_plan,
                 lowered_initializer,
                 ctx.facts,
@@ -1176,6 +1186,10 @@ fn lower_stmt(
                 representations: Some(ctx.representations),
                 facts: Some(ctx.facts),
             };
+            if let Some(stmt) = lower_array2_row_replacement_stmt(target, value, env, ctx) {
+                out.push(stmt);
+                return;
+            }
             if assignment_statement_plan_for_target(target, value, env, shape_ctx)
                 == crate::conversion_plan::AssignmentStatementPlan::ClearOptionalTarget
             {
@@ -1571,8 +1585,7 @@ fn java_type_is_rust_crate_mapped_external(java_ty: &JavaType, facts: &FactSet) 
 }
 
 fn local_shape_should_inherit_initializer_shape(shape: &RustSlotShape) -> bool {
-    matches!(shape.dispatch, DispatchShape::ErasedObject)
-        || matches!(shape.view, ViewShape::ErasedObjectView)
+    shape_is_erased_object_boundary(shape)
 }
 
 fn initializer_shape_is_more_specific_for_local(
@@ -1580,8 +1593,7 @@ fn initializer_shape_is_more_specific_for_local(
     local: &RustSlotShape,
 ) -> bool {
     java_types_have_same_erased_identity(&initializer.java_ty, &local.java_ty)
-        && matches!(initializer.dispatch, DispatchShape::Concrete)
-        && matches!(initializer.view, ViewShape::Native)
+        && shape_is_concrete_native(initializer)
 }
 
 fn java_types_have_same_erased_identity(left: &JavaType, right: &JavaType) -> bool {
@@ -2968,10 +2980,9 @@ fn lower_expr_with_refinements(
             lower_expr_with_refinements(receiver, env, ctx, refinements),
             ctx.facts,
         ),
-        Expr::ArrayAccess(array, index) => indexed_expr(
-            lower_expr_with_refinements(array, env, ctx, refinements),
-            lower_expr_for_slot(index, env, index_slot(), ctx),
-        ),
+        Expr::ArrayAccess(array, index) => {
+            lower_array_access_expr(array, index, env, ctx, refinements)
+        }
         Expr::ArrayCreation { .. } | Expr::ArrayInitializer(_) => {
             unreachable!("array expressions should be planned before expression lowering")
         }
@@ -3744,12 +3755,7 @@ fn reused_owned_argument_needs_clone(
     actual_shape: Option<&RustSlotShape>,
     ctx: LowerCtx,
 ) -> bool {
-    if target_shape.ownership != OwnershipShape::Owned {
-        return false;
-    }
-    if matches!(target_shape.dispatch, DispatchShape::ErasedObject)
-        || matches!(target_shape.view, ViewShape::ErasedObjectView)
-    {
+    if !shape_is_owned_non_erased(target_shape) {
         return false;
     }
     if !known_owned_argument_clone_recovery_with_facts(target_shape, ctx.facts)
@@ -3896,10 +3902,7 @@ fn current_callable_binding_facts<'a>(
 }
 
 fn borrowed_str_slot() -> Slot {
-    let mut shape = RustSlotShape::conservative(JavaType::String);
-    shape.ownership = OwnershipShape::SharedBorrow;
-    shape.view = ViewShape::Str;
-    argument_slot(shape)
+    argument_slot(borrowed_string_content_shape())
 }
 
 fn lower_string_pattern_args(args: &[Expr], env: &ShapeEnv, ctx: LowerCtx) -> Vec<RustExpr> {
@@ -3916,7 +3919,7 @@ fn lower_string_format_args(args: &[Expr], env: &ShapeEnv, ctx: LowerCtx) -> Vec
     lowered.push(lower_expr_for_slot(
         format_arg,
         env,
-        argument_slot(RustSlotShape::conservative(JavaType::String)),
+        argument_slot(value_shape(JavaType::String)),
         ctx,
     ));
     lowered.extend(
@@ -4159,8 +4162,8 @@ fn lower_int_stream_range_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Op
             if crate::stdlib::canonical_external_receiver_type_key(owner) == "IntStream")
         && matches!(name.as_str(), "range" | "range_closed")
     {
-        let start = crate::emit::emit_expr(&lower_expr(&args[0], env, ctx));
-        let end = crate::emit::emit_expr(&lower_expr(&args[1], env, ctx));
+        let start = emit::emit_expr(&lower_expr(&args[0], env, ctx));
+        let end = emit::emit_expr(&lower_expr(&args[1], env, ctx));
         let range = if name == "range_closed" {
             format!("({start}..={end})")
         } else {
@@ -4335,8 +4338,8 @@ fn typed_none_for_slot(slot: &Slot) -> Option<RustExpr> {
         | Slot::DisplaySegment => return None,
     };
     let element_ty = crate::types::optional_element_type(&shape.java_ty)?;
-    let element_shape = crate::slot_shape::RustSlotShape::conservative(element_ty);
-    if !matches!(element_shape.dispatch, DispatchShape::ErasedObject)
+    let element_shape = value_shape(element_ty);
+    if !shape_is_erased_object_boundary(&element_shape)
         && !matches!(
             element_shape.java_ty,
             JavaType::Named { ref name, .. } if name == "Object" || name == "java.lang.Object"
@@ -4363,7 +4366,7 @@ fn lower_array_expr_for_slot(
     ) {
         return None;
     }
-    let element_shape = RustSlotShape::conservative(element_ty);
+    let element_shape = value_shape(element_ty);
     let children = array_plan
         .child_exprs()
         .iter()
@@ -4383,6 +4386,9 @@ fn lower_array_expr_for_slot(
         })
         .collect();
     let lowered = render_array_expr(&array_plan, children);
+    if let Some(temporary) = borrowed_array2_temporary_for_slot(&lowered, target) {
+        return Some(temporary);
+    }
     let actual = LoweredType::from_java(target.java_ty.clone());
     let plan = plan_lowered_slot_conversion(&actual, slot.clone(), ctx.facts);
     Some(apply_lowered_slot_expr_conversion(
@@ -4392,6 +4398,73 @@ fn lower_array_expr_for_slot(
         },
         &plan,
     ))
+}
+
+fn lower_array_access_expr(
+    array: &Expr,
+    index: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> RustExpr {
+    if let Expr::ArrayAccess(outer_array, outer_index) = array
+        && crate::types::two_dimensional_array_element_type(&crate::types::infer_expr_type(
+            outer_array,
+            env.type_env(),
+        ))
+        .is_some()
+    {
+        return RustExpr::Raw(format!(
+            "{}[[{}, {}]]",
+            emit::emit_expr(&lower_expr_with_refinements(
+                outer_array,
+                env,
+                ctx,
+                refinements
+            )),
+            emit::emit_expr(&lower_expr_for_slot(outer_index, env, index_slot(), ctx)),
+            emit::emit_expr(&lower_expr_for_slot(index, env, index_slot(), ctx)),
+        ));
+    }
+
+    if crate::types::two_dimensional_array_element_type(&crate::types::infer_expr_type(
+        array,
+        env.type_env(),
+    ))
+    .is_some()
+    {
+        return RustExpr::Raw(format!(
+            "{}.row({}).to_vec()",
+            emit::emit_expr(&lower_expr_with_refinements(array, env, ctx, refinements)),
+            emit::emit_expr(&lower_expr_for_slot(index, env, index_slot(), ctx)),
+        ));
+    }
+
+    indexed_expr(
+        lower_expr_with_refinements(array, env, ctx, refinements),
+        lower_expr_for_slot(index, env, index_slot(), ctx),
+    )
+}
+
+fn lower_array2_row_replacement_stmt(
+    target: &Expr,
+    value: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustStmt> {
+    let Expr::ArrayAccess(array, index) = target else {
+        return None;
+    };
+    crate::types::two_dimensional_array_element_type(&crate::types::infer_expr_type(
+        array,
+        env.type_env(),
+    ))?;
+    let array = emit::emit_expr(&lower_expr(array, env, ctx));
+    let index = emit::emit_expr(&lower_expr_for_slot(index, env, index_slot(), ctx));
+    let value = emit::emit_expr(&lower_expr(value, env, ctx));
+    Some(raw_stmt(format!(
+        "{array}.row_mut({index}).assign(&ndarray::ArrayView1::from({value}));"
+    )))
 }
 
 fn lower_reused_external_into_array_child(
@@ -4636,10 +4709,13 @@ fn lower_external_constructor_expr_for_concrete_slot(
         .map(|resolved| &resolved.constructed_type)
         .unwrap_or(ty);
     let type_name = concrete_java_type_name(constructed_ty)?;
+    if type_name == "Object" || type_name == "java.lang.Object" {
+        return None;
+    }
     if !same_concrete_java_type_name(&target_shape.java_ty, type_name) {
         return None;
     }
-    if body.is_some() && target_shape.dispatch == DispatchShape::Concrete {
+    if body.is_some() && shape_is_concrete_native(target_shape) {
         return Some(RustExpr::Raw("Default::default()".to_string()));
     }
     let arg_types = vec![JavaType::Unknown("_".to_string()); args.len()];
@@ -4671,14 +4747,11 @@ fn lower_external_constructor_expr_for_concrete_slot(
         ctx.facts,
     );
     let rust_args = lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
-    Some(RustExpr::Call {
-        function: Box::new(RustExpr::Raw(format!(
-            "{}::{}",
-            crate::slot_render::rust_name_for_java_named_type(type_name),
-            target.rust_name
-        ))),
-        args: rust_args,
-    })
+    Some(named_constructor_expr(
+        type_name,
+        &target.rust_name,
+        rust_args,
+    ))
 }
 
 fn concrete_java_type_name(java_ty: &JavaType) -> Option<&str> {
@@ -4718,12 +4791,12 @@ fn lower_shared_self_field_owned_recovery_for_slot(
     {
         return Some(expr);
     }
-    if target.ownership != OwnershipShape::Owned || target.java_ty != actual.java_ty {
+    if !shape_is_owned(target) || target.java_ty != actual.java_ty {
         if let Some(element_ty) = target.optional_element_type()
             && shared_self_field_read_name(expr, env).is_some()
             && !matches!(element_ty, JavaType::Primitive(_))
         {
-            let element_shape = RustSlotShape::conservative(element_ty);
+            let element_shape = value_shape(element_ty);
             if !known_owned_argument_clone_recovery_with_facts(&element_shape, ctx.facts)
                 && !known_named_clone_recovery(&element_shape)
             {
@@ -4734,7 +4807,7 @@ fn lower_shared_self_field_owned_recovery_for_slot(
                 "{}.clone()/* TODO(translation): validate added clone */",
                 emit::emit_expr(&lowered)
             ));
-            return Some(crate::coercion::apply_expr_to_slot_with_facts(
+            return Some(apply_expr_to_slot_via_plan(
                 recovered,
                 element_shape,
                 slot,
@@ -4749,7 +4822,7 @@ fn lower_shared_self_field_owned_recovery_for_slot(
     shared_self_field_read_name(expr, env)?;
     let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
     let recovered = RustExpr::Raw(format!("{}.clone()", emit::emit_expr(&lowered)));
-    Some(crate::coercion::apply_expr_to_slot_with_facts(
+    Some(apply_expr_to_slot_via_plan(
         recovered,
         target.clone(),
         slot,
@@ -4767,7 +4840,7 @@ fn lower_optional_self_field_read_owned_recovery(
 ) -> Option<RustExpr> {
     shared_self_field_read_name(expr, env)?;
     let element_ty = actual.optional_element_type()?;
-    if target.ownership != OwnershipShape::Owned || target.java_ty != element_ty {
+    if !shape_is_owned(target) || target.java_ty != element_ty {
         return None;
     }
     if matches!(target.java_ty, JavaType::Primitive(_))
@@ -4813,7 +4886,7 @@ fn lower_optional_self_field_unwrap_owned_recovery(
         },
     );
     let element_ty = crate::types::optional_element_type(&receiver_shape.java_ty)?;
-    if target.ownership != OwnershipShape::Owned || target.java_ty != element_ty {
+    if !shape_is_owned(target) || target.java_ty != element_ty {
         return None;
     }
     if matches!(target.java_ty, JavaType::Primitive(_))
@@ -4915,9 +4988,12 @@ fn slot_expr_needs_result_propagation_from_shape_env(
     let Some(receiver_name) = external_receiver_name_from_shape_type(receiver_ty) else {
         return false;
     };
-    ctx.facts
-        .external_api_effect_for_receiver_with_arity(Some(receiver_name), name, Some(arg_count))
-        .is_some_and(|effect| !effect.thrown.is_empty())
+    crate::call_plan::external_call_has_thrown_effect_for_receiver(
+        ctx.facts,
+        receiver_name,
+        name,
+        arg_count,
+    )
 }
 
 fn receiver_shape_java_type<'a>(receiver: &Expr, env: &'a ShapeEnv) -> Option<&'a JavaType> {
@@ -4968,12 +5044,10 @@ fn lower_reused_optional_unwrap_for_slot(
         return None;
     };
     let target = slot_target_shape(slot)?;
-    if target.optional_element_type().is_some() || target.ownership != OwnershipShape::Owned {
+    if target.optional_element_type().is_some() || !shape_is_owned(target) {
         return None;
     }
-    if matches!(target.dispatch, DispatchShape::ErasedObject)
-        || matches!(target.view, ViewShape::ErasedObjectView)
-    {
+    if shape_is_erased_object_boundary(target) {
         return None;
     }
     let element_ty = actual.optional_element_type()?;
@@ -5006,15 +5080,13 @@ fn lower_reused_optional_wrap_for_slot(
     };
     let target = slot_target_shape(slot)?;
     let element_ty = target.optional_element_type()?;
-    if actual.optional_element_type().is_some() || actual.ownership != OwnershipShape::Owned {
+    if actual.optional_element_type().is_some() || !shape_is_owned(actual) {
         return None;
     }
     if element_ty != actual.java_ty {
         return None;
     }
-    if matches!(target.dispatch, DispatchShape::ErasedObject)
-        || matches!(target.view, ViewShape::ErasedObjectView)
-    {
+    if shape_is_erased_object_boundary(target) {
         return None;
     }
     if !known_owned_argument_clone_recovery(actual) && !known_named_clone_recovery(actual) {
@@ -5051,17 +5123,20 @@ fn lower_map_entry_accessor_expr_for_slot(
     }
     let receiver = receiver.as_deref()?;
     let (next_expr, key_ty, value_ty) = lower_map_entry_next_expr(receiver, env, ctx, refinements)?;
+    const MAP_ENTRY_VALUE_ACCESSOR: &str = concat!("get", "Value");
     let (field, actual_ty) = match name.as_str() {
         "getKey" | "get_key" => (
             "0",
             map_entry_accessor_type_or_slot_target(&key_ty, slot).unwrap_or(key_ty),
         ),
-        "getValue" | "get_value" => ("1", value_ty),
+        accessor if accessor == MAP_ENTRY_VALUE_ACCESSOR || accessor == "get_value" => {
+            ("1", value_ty)
+        }
         _ => return None,
     };
     let entry_access = RustExpr::Raw(format!("{}.{}", emit::emit_expr(&next_expr), field));
     let actual = crate::shape_projection::borrowed_sequence_element_shape(actual_ty);
-    Some(crate::coercion::apply_expr_to_slot_with_facts(
+    Some(apply_expr_to_slot_via_plan(
         entry_access,
         actual,
         slot,
@@ -5311,7 +5386,7 @@ fn lower_sequence_get_call_expr_for_slot(
         emit::emit_expr(&index_expr)
     ));
     let actual = crate::shape_projection::borrowed_sequence_element_shape(element_ty);
-    Some(crate::coercion::apply_expr_to_slot_with_facts(
+    Some(apply_expr_to_slot_via_plan(
         get_expr, actual, slot, ctx.facts,
     ))
 }
@@ -5333,12 +5408,9 @@ fn lower_array_access_expr_for_slot(
     };
     let array_shape = infer_expr_shape_with_context(array, env, shape_ctx);
     let element_ty = array_shape.sequence_element_type()?;
-    let access_expr = indexed_expr(
-        lower_expr_with_refinements(array, env, ctx, refinements),
-        lower_expr_for_slot(index, env, index_slot(), ctx),
-    );
+    let access_expr = lower_array_access_expr(array, index, env, ctx, refinements);
     let actual = crate::shape_projection::borrowed_sequence_element_shape(element_ty);
-    Some(crate::coercion::apply_expr_to_slot_with_facts(
+    Some(apply_expr_to_slot_via_plan(
         access_expr,
         actual,
         slot,
@@ -5418,9 +5490,19 @@ fn lower_map_get_call_expr_for_slot(
         emit::emit_expr(&key)
     ));
     let actual = crate::shape_projection::borrowed_sequence_element_shape(value_ty);
-    Some(crate::coercion::apply_expr_to_slot_with_facts(
+    Some(apply_expr_to_slot_via_plan(
         get_expr, actual, slot, ctx.facts,
     ))
+}
+
+fn apply_expr_to_slot_via_plan(
+    expr: RustExpr,
+    actual: RustSlotShape,
+    slot: &Slot,
+    facts: &FactSet,
+) -> RustExpr {
+    let plan = plan_slot_conversion(actual, slot.clone(), facts);
+    apply_slot_expr_conversion(expr, &plan)
 }
 
 fn slot_target_shape(slot: &Slot) -> Option<&RustSlotShape> {

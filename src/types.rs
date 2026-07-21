@@ -248,6 +248,37 @@ pub fn sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
     }
 }
 
+pub fn two_dimensional_array_element_type(java_ty: &JavaType) -> Option<JavaType> {
+    match java_ty {
+        JavaType::Array(row_ty) => match row_ty.as_ref() {
+            JavaType::Array(element_ty) if !matches!(element_ty.as_ref(), JavaType::Array(_)) => {
+                Some((**element_ty).clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrayLengthDimension {
+    Rows,
+    Columns,
+    Linear,
+}
+
+pub fn array_length_dimension(receiver: &Expr, env: &TypeEnv) -> ArrayLengthDimension {
+    if two_dimensional_array_element_type(&infer_expr_type(receiver, env)).is_some() {
+        return ArrayLengthDimension::Rows;
+    }
+    if let Expr::ArrayAccess(array, _) = receiver
+        && two_dimensional_array_element_type(&infer_expr_type(array, env)).is_some()
+    {
+        return ArrayLengthDimension::Columns;
+    }
+    ArrayLengthDimension::Linear
+}
+
 pub fn optional_element_type(java_ty: &JavaType) -> Option<JavaType> {
     match java_ty {
         JavaType::Named { name, args } if name == "Optional" && args.len() == 1 => {

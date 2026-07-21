@@ -2,6 +2,7 @@ use crate::coercion::{Coercion, apply_coercions};
 use crate::facts::FactSet;
 use crate::java_ir::{BinaryOp, JavaType, PrimitiveType, UnaryOp};
 use crate::rust_ir::RustExpr;
+use crate::shape_projection::shape_is_borrowed_string_content;
 use crate::slot_shape::RustSlotShape;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,12 +204,7 @@ pub fn plan_equality_comparison_with_facts(
 }
 
 fn is_borrowed_string_view(shape: &RustSlotShape) -> bool {
-    shape.java_ty == JavaType::String
-        && matches!(
-            shape.ownership,
-            crate::slot_shape::OwnershipShape::SharedBorrow
-        )
-        && matches!(shape.view, crate::slot_shape::ViewShape::Str)
+    shape_is_borrowed_string_content(shape)
 }
 
 fn custom_equals_method(java_ty: &JavaType, facts: &FactSet) -> Option<String> {

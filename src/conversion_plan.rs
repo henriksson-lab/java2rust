@@ -1057,6 +1057,7 @@ pub fn view_coercion_policy_with_effective_facts(
         && actual.view == ViewShape::Native
         && target.ownership == OwnershipShape::SharedBorrow
         && target.view == ViewShape::Slice
+        && crate::types::two_dimensional_array_element_type(&actual.java_ty).is_none()
         && sequence_view_element_types_match(&actual.java_ty, &target.java_ty)
     {
         return ViewCoercionPolicy::BorrowSequenceSliceView;

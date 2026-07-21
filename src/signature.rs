@@ -9,8 +9,8 @@ use crate::facts::{
 };
 use crate::graph::strongly_connected_components;
 use crate::java_ir::{
-    BinaryOp, Block, ConstructorDecl, Expr, FieldDecl, JavaType, Literal, MethodDecl, Modifier,
-    Param, Program, Stmt, TypeDecl, UnaryOp,
+    BinaryOp, Block, ConstructorDecl, Expr, FieldDecl, JavaType, LambdaBody, Literal, MethodDecl,
+    Modifier, Param, Program, Stmt, TypeDecl, UnaryOp,
 };
 use crate::lattice::{
     dispatch_shape_lattice_rank, join_ranked_lattice, ownership_lattice_rank,
@@ -1947,6 +1947,7 @@ fn apply_signature_propagation_sweep(
         | propagate_constructor_call_result_constraints_to_bindings(constraints, usage)
         | propagate_call_result_constraints_to_fields(constraints, usage)
         | propagate_constructor_call_result_constraints_to_fields(constraints, usage)
+        | propagate_call_result_constraints_to_returns(constraints, usage)
         | propagate_method_local_alias_constraints(constraints, usage)
         | propagate_method_local_alias_source_constraints(constraints, usage)
         | propagate_constructor_local_alias_constraints(constraints, usage)
@@ -2693,6 +2694,33 @@ fn propagate_constructor_call_result_constraints_to_fields(
     let mut changed = false;
     for (type_name, field_name, constraint) in pending {
         changed |= add_field_constraint(constraints, &type_name, &field_name, constraint);
+    }
+    changed
+}
+
+fn propagate_call_result_constraints_to_returns(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+) -> bool {
+    let mut pending = Vec::new();
+    for (usage_key, method_usage) in &usage.methods {
+        let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
+            continue;
+        };
+        for returned in &method_usage.returned_call_results {
+            for constraint in internal_call_return_constraints(
+                constraints,
+                &method_usage.call_sites,
+                &returned.name,
+                returned.boundary,
+            ) {
+                pending.push((method_key.clone(), constraint.clone()));
+            }
+        }
+    }
+    let mut changed = false;
+    for (method_key, constraint) in pending {
+        changed |= add_method_return_constraint(constraints, &method_key, constraint);
     }
     changed
 }
@@ -4166,11 +4194,12 @@ pub fn method_param_shape_constraints(
     if public_readonly_receiver_read_product {
         boundary_kind = None;
     }
-    if boundary_kind == Some(SignatureBoundaryKind::UnknownApi)
+    let unknown_boundary_fully_modeled_by_external_arguments = boundary_kind
+        == Some(SignatureBoundaryKind::UnknownApi)
         && binding.is_some_and(|binding| {
             unknown_boundary_is_fully_modeled_by_external_argument_effects(binding, facts)
-        })
-    {
+        });
+    if unknown_boundary_fully_modeled_by_external_arguments {
         boundary_kind = None;
     }
     if boundary_kind == Some(SignatureBoundaryKind::UnknownApi)
@@ -4193,16 +4222,29 @@ pub fn method_param_shape_constraints(
                     || public_readonly_receiver_read_product,
             ),
         );
-        push_unique_signature_constraints(
-            &mut constraints,
-            &external_argument_binding_constraints(binding, facts),
-        );
+        if boundary_kind != Some(SignatureBoundaryKind::UnknownApi)
+            || unknown_boundary_fully_modeled_by_external_arguments
+        {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &external_argument_binding_constraints(binding, facts),
+            );
+        }
     }
     if let Some(body) = &method.body {
         push_unique_signature_constraints(
             &mut constraints,
             &source_binding_nullability_constraints(body, &param.name),
         );
+        if collect_array_element_mutated_names(body).contains(&param.name) {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[
+                    SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+                    SignatureConstraint::MutableBinding,
+                ],
+            );
+        }
     }
     push_unique_signature_constraints(
         &mut constraints,
@@ -4449,7 +4491,9 @@ fn signature_erased_object_boundary_constraints_with_effective_facts(
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> Vec<SignatureConstraint> {
-    if !is_declared_java_object_type(java_ty) || facts.has_object_representation_facts(java_ty) {
+    let fact_policy =
+        signature_boundary_representation_fact_policy_with_effective_facts(java_ty, facts);
+    if !is_declared_java_object_type(java_ty) || fact_policy.object_representation_facts {
         return Vec::new();
     }
     vec![
@@ -4793,11 +4837,12 @@ pub fn constructor_param_shape_constraints(
     {
         boundary_kind = None;
     }
-    if boundary_kind == Some(SignatureBoundaryKind::UnknownApi)
+    let unknown_boundary_fully_modeled_by_external_arguments = boundary_kind
+        == Some(SignatureBoundaryKind::UnknownApi)
         && binding.is_some_and(|binding| {
             unknown_boundary_is_fully_modeled_by_external_argument_effects(binding, facts)
-        })
-    {
+        });
+    if unknown_boundary_fully_modeled_by_external_arguments {
         boundary_kind = None;
     }
     let mut constraints =
@@ -4807,10 +4852,14 @@ pub fn constructor_param_shape_constraints(
             &mut constraints,
             &external_receiver_binding_constraints(binding, facts, true, true),
         );
-        push_unique_signature_constraints(
-            &mut constraints,
-            &external_argument_binding_constraints(binding, facts),
-        );
+        if boundary_kind != Some(SignatureBoundaryKind::UnknownApi)
+            || unknown_boundary_fully_modeled_by_external_arguments
+        {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &external_argument_binding_constraints(binding, facts),
+            );
+        }
     }
     if let Some(body) = &ctor.body {
         push_unique_signature_constraints(
@@ -6757,6 +6806,28 @@ fn local_shape_constraints_with_usage_and_effective_facts(
             &mut constraints,
             &external_call_return_binding_constraints(binding, facts),
         );
+    }
+    let modeled_native_map_get_final_facade_value = usage
+        .and_then(|usage| usage.bindings.get(name))
+        .is_some_and(|binding| {
+            !native_map_get_final_facade_value_binding_constraints(
+                binding,
+                java_ty,
+                effective_facts,
+            )
+            .is_empty()
+        });
+    if let Some(kind) = usage
+        .and_then(|usage| usage.bindings.get(name))
+        .and_then(|binding| binding_boundary_policy(binding).kind)
+        .filter(|_| !modeled_native_map_get_final_facade_value)
+    {
+        constraints.extend(
+            signature_boundary_policy_with_effective_facts(kind, java_ty, effective_facts)
+                .constraints,
+        );
+    }
+    if let Some(binding) = usage.and_then(|usage| usage.bindings.get(name)) {
         push_unique_signature_constraints(
             &mut constraints,
             &native_map_get_final_facade_value_binding_constraints(
@@ -6764,15 +6835,6 @@ fn local_shape_constraints_with_usage_and_effective_facts(
                 java_ty,
                 effective_facts,
             ),
-        );
-    }
-    if let Some(kind) = usage
-        .and_then(|usage| usage.bindings.get(name))
-        .and_then(|binding| binding_boundary_policy(binding).kind)
-    {
-        constraints.extend(
-            signature_boundary_policy_with_effective_facts(kind, java_ty, effective_facts)
-                .constraints,
         );
     }
     constraints
@@ -7226,6 +7288,190 @@ fn collect_mutated_local_names(block: &Block) -> HashSet<String> {
     mutated
 }
 
+fn collect_array_element_mutated_names(block: &Block) -> HashSet<String> {
+    let mut mutated = HashSet::new();
+    collect_array_element_mutated_names_from_stmts(&block.statements, &mut mutated);
+    mutated
+}
+
+fn collect_array_element_mutated_names_from_stmts(
+    statements: &[Stmt],
+    mutated: &mut HashSet<String>,
+) {
+    for stmt in statements {
+        match stmt {
+            Stmt::Assign { target, value } => {
+                collect_array_element_assignment_target_name(target, mutated);
+                collect_array_element_mutated_names_from_expr(value, mutated);
+            }
+            Stmt::VarDecl { initializer, .. } => {
+                if let Some(expr) = initializer {
+                    collect_array_element_mutated_names_from_expr(expr, mutated);
+                }
+            }
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+                collect_array_element_mutated_names_from_expr(expr, mutated);
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                collect_array_element_mutated_names_from_expr(condition, mutated);
+                collect_array_element_mutated_names_from_stmts(&then_block.statements, mutated);
+                if let Some(else_block) = else_block {
+                    collect_array_element_mutated_names_from_stmts(&else_block.statements, mutated);
+                }
+            }
+            Stmt::While { condition, body } => {
+                collect_array_element_mutated_names_from_expr(condition, mutated);
+                collect_array_element_mutated_names_from_stmts(&body.statements, mutated);
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+                ..
+            } => {
+                collect_array_element_mutated_names_from_stmts(init, mutated);
+                if let Some(condition) = condition {
+                    collect_array_element_mutated_names_from_expr(condition, mutated);
+                }
+                for expr in update {
+                    collect_array_element_mutated_names_from_expr(expr, mutated);
+                }
+                collect_array_element_mutated_names_from_stmts(&body.statements, mutated);
+            }
+            Stmt::EnhancedFor { iterable, body, .. } => {
+                collect_array_element_mutated_names_from_expr(iterable, mutated);
+                collect_array_element_mutated_names_from_stmts(&body.statements, mutated);
+            }
+            Stmt::Switch { selector, cases } => {
+                collect_array_element_mutated_names_from_expr(selector, mutated);
+                for case in cases {
+                    collect_array_element_mutated_names_from_stmts(&case.statements, mutated);
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                collect_array_element_mutated_names_from_stmts(resources, mutated);
+                collect_array_element_mutated_names_from_stmts(&body.statements, mutated);
+                for catch in catches {
+                    collect_array_element_mutated_names_from_stmts(&catch.body.statements, mutated);
+                }
+                if let Some(finally_block) = finally_block {
+                    collect_array_element_mutated_names_from_stmts(
+                        &finally_block.statements,
+                        mutated,
+                    );
+                }
+            }
+            Stmt::Block(block) => {
+                collect_array_element_mutated_names_from_stmts(&block.statements, mutated);
+            }
+            Stmt::Return(None)
+            | Stmt::LocalType(_)
+            | Stmt::ConstructorInvocation { .. }
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => {}
+        }
+    }
+}
+
+fn collect_array_element_mutated_names_from_expr(expr: &Expr, mutated: &mut HashSet<String>) {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        } => {
+            collect_array_element_assignment_target_name(left, mutated);
+            collect_array_element_mutated_names_from_expr(right, mutated);
+        }
+        Expr::Unary {
+            op: UnaryOp::PostInc | UnaryOp::PostDec | UnaryOp::PreInc | UnaryOp::PreDec,
+            expr,
+        } => collect_array_element_assignment_target_name(expr, mutated),
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::InstanceOf { expr, .. }
+        | Expr::FieldAccess(expr, _) => {
+            collect_array_element_mutated_names_from_expr(expr, mutated)
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_array_element_mutated_names_from_expr(left, mutated);
+            collect_array_element_mutated_names_from_expr(right, mutated);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_array_element_mutated_names_from_expr(condition, mutated);
+            collect_array_element_mutated_names_from_expr(then_expr, mutated);
+            collect_array_element_mutated_names_from_expr(else_expr, mutated);
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_array_element_mutated_names_from_expr(array, mutated);
+            collect_array_element_mutated_names_from_expr(index, mutated);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_array_element_mutated_names_from_expr(expr, mutated);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_array_element_mutated_names_from_expr(expr, mutated);
+                }
+            }
+        }
+        Expr::ArrayInitializer(elements) | Expr::New { args: elements, .. } => {
+            for expr in elements {
+                collect_array_element_mutated_names_from_expr(expr, mutated);
+            }
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_array_element_mutated_names_from_expr(receiver, mutated);
+            }
+            for arg in args {
+                collect_array_element_mutated_names_from_expr(arg, mutated);
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => collect_array_element_mutated_names_from_expr(expr, mutated),
+            LambdaBody::Block(block) => {
+                collect_array_element_mutated_names_from_stmts(&block.statements, mutated);
+            }
+        },
+        Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn collect_array_element_assignment_target_name(expr: &Expr, mutated: &mut HashSet<String>) {
+    if let Expr::ArrayAccess(_, _) = expr
+        && let Some(name) = array_access_root_name(expr)
+    {
+        mutated.insert(name.to_string());
+    }
+}
+
 fn collect_mutated_local_names_from_stmts(statements: &[Stmt], mutated: &mut HashSet<String>) {
     for stmt in statements {
         collect_mutated_local_names_from_stmt(stmt, mutated);
@@ -7415,11 +7661,22 @@ fn collect_assignment_target_name(expr: &Expr, mutated: &mut HashSet<String>) {
             mutated.insert(name.clone());
         }
         Expr::ArrayAccess(array, index) => {
+            if let Some(name) = array_access_root_name(expr) {
+                mutated.insert(name.to_string());
+            }
             collect_mutated_local_names_from_expr(array, mutated);
             collect_mutated_local_names_from_expr(index, mutated);
         }
         Expr::FieldAccess(receiver, _) => collect_mutated_local_names_from_expr(receiver, mutated),
         _ => collect_mutated_local_names_from_expr(expr, mutated),
+    }
+}
+
+fn array_access_root_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Var(name) => Some(name),
+        Expr::ArrayAccess(array, _) => array_access_root_name(array),
+        _ => None,
     }
 }
 

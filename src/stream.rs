@@ -6,7 +6,7 @@ use crate::shape_projection::iteration_element_shape;
 use crate::slot_shape::RustSlotShape;
 use crate::stdlib::JavaCollectionKind;
 use crate::stream_shape::{
-    infer_stream_lambda_body_shape, infer_stream_map_to_int_shape,
+    infer_stream_lambda_body_shape_with_facts, infer_stream_map_to_int_shape,
     infer_stream_source_element_shape_with_facts,
 };
 use crate::types::{TypeEnv, optional_java_type, sequence_element_type};
@@ -377,7 +377,8 @@ fn collect_stream_chain<'a>(
             let lambda = lambda_plan(&args[0])?;
             let (source, mut ops, current_shape) =
                 collect_stream_chain(receiver.as_deref()?, input_shape, env, facts)?;
-            let output_shape = infer_stream_lambda_output_shape(&lambda, &current_shape);
+            let output_shape =
+                infer_stream_lambda_output_shape(&lambda, &current_shape, env, facts);
             ops.push(StreamOp::Map {
                 lambda,
                 output_shape: output_shape.clone(),
@@ -388,7 +389,8 @@ fn collect_stream_chain<'a>(
             let lambda = lambda_plan(&args[0])?;
             let (source, mut ops, current_shape) =
                 collect_stream_chain(receiver.as_deref()?, input_shape, env, facts)?;
-            let output_shape = infer_stream_lambda_output_shape(&lambda, &current_shape);
+            let output_shape =
+                infer_stream_lambda_output_shape(&lambda, &current_shape, env, facts);
             ops.push(StreamOp::Map {
                 lambda,
                 output_shape: output_shape.clone(),
@@ -405,6 +407,8 @@ fn collect_stream_chain<'a>(
                 infer_stream_lambda_output_shape(
                     &lambda,
                     &RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+                    env,
+                    facts,
                 )
             } else {
                 infer_stream_map_to_int_shape(lambda.body.return_expr()?)
@@ -479,6 +483,8 @@ fn block_returns_value(block: &Block) -> bool {
 fn infer_stream_lambda_output_shape(
     lambda: &LambdaPlan<'_>,
     input_shape: &RustSlotShape,
+    env: &TypeEnv,
+    facts: &FactSet,
 ) -> RustSlotShape {
     if let StreamLambdaBody::MethodReference { target, method } = lambda.body {
         return infer_stream_method_reference_output_shape(target, method, input_shape)
@@ -487,7 +493,11 @@ fn infer_stream_lambda_output_shape(
     let Some(return_expr) = lambda.body.return_expr() else {
         return input_shape.clone();
     };
-    let output_shape = infer_stream_lambda_body_shape(return_expr, input_shape);
+    let mut lambda_env = env.clone();
+    lambda_env.insert_local(lambda.param_name.clone(), input_shape.java_ty.clone());
+    insert_lambda_prefix_locals(lambda, &mut lambda_env);
+    let output_shape =
+        infer_stream_lambda_body_shape_with_facts(return_expr, input_shape, &lambda_env, facts);
     if matches!(lambda.body, StreamLambdaBody::Block(block) if block_has_null_return(block)) {
         let mut nullable = output_shape.clone();
         nullable.java_ty = optional_java_type(output_shape.java_ty);

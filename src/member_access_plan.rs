@@ -3,11 +3,15 @@ use crate::java_ir::{Expr, JavaType};
 use crate::rust_ir::RustType;
 use crate::shape_projection::project_java_value_shape;
 use crate::slot_shape::{OwnershipShape, RustSlotShape, ViewShape};
-use crate::types::{TypeEnv, infer_member_access_type};
+use crate::types::{
+    ArrayLengthDimension, TypeEnv, array_length_dimension, infer_member_access_type,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemberAccessOp {
     LenAsI32,
+    Array2RowsAsI32,
+    Array2ColsAsI32,
     StaticConstant { owner: String },
     RustField { rust_name: String },
 }
@@ -108,7 +112,7 @@ pub fn plan_member_access_with_facts(
 ) -> Option<MemberAccessPlan> {
     let policy = java_member_access_policy_with_facts(receiver, member, env, facts)?;
     let op = match policy.kind {
-        JavaMemberAccessKind::ArrayLength => MemberAccessOp::LenAsI32,
+        JavaMemberAccessKind::ArrayLength => array_length_member_access_op(receiver, env),
         JavaMemberAccessKind::StaticConstant => MemberAccessOp::StaticConstant {
             owner: external_static_constant_rust_owner(
                 receiver,
@@ -129,6 +133,14 @@ pub fn plan_member_access_with_facts(
         shape,
         op,
     })
+}
+
+fn array_length_member_access_op(receiver: &Expr, env: &TypeEnv) -> MemberAccessOp {
+    match array_length_dimension(receiver, env) {
+        ArrayLengthDimension::Rows => MemberAccessOp::Array2RowsAsI32,
+        ArrayLengthDimension::Columns => MemberAccessOp::Array2ColsAsI32,
+        ArrayLengthDimension::Linear => MemberAccessOp::LenAsI32,
+    }
 }
 
 fn member_access_shape(kind: JavaMemberAccessKind, java_ty: JavaType) -> RustSlotShape {

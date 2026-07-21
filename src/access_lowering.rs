@@ -5,7 +5,18 @@ use crate::rust_ir::RustExpr;
 use crate::types::TypeEnv;
 
 pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
-    RustExpr::Raw(render_bare_name(name, env))
+    if env.local_type(name).is_none()
+        && let Some(static_name) = env.static_field_access_name(name)
+    {
+        RustExpr::Raw(format!("Self::{static_name}"))
+    } else if env.local_type(name).is_none() && env.field_type(name).is_some() {
+        RustExpr::Field(
+            Box::new(RustExpr::Var("self".to_string())),
+            crate::parser::to_snake_case(name),
+        )
+    } else {
+        RustExpr::Var(crate::parser::to_snake_case(name))
+    }
 }
 
 pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
@@ -54,6 +65,14 @@ pub fn lower_field_access_with_facts(
 fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> RustExpr {
     match &plan.op {
         MemberAccessOp::LenAsI32 => RustExpr::Raw(format!(
+            "{}.len() as i32",
+            crate::emit::emit_expr(&receiver)
+        )),
+        MemberAccessOp::Array2RowsAsI32 => RustExpr::Raw(format!(
+            "{}.nrows() as i32",
+            crate::emit::emit_expr(&receiver)
+        )),
+        MemberAccessOp::Array2ColsAsI32 => RustExpr::Raw(format!(
             "{}.len() as i32",
             crate::emit::emit_expr(&receiver)
         )),

@@ -3,10 +3,10 @@ use std::collections::BTreeSet;
 use crate::conversion_plan::LoweredType;
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::{
-    AccessorInlinePolicy, ExternalApiArgumentEffectFact, ExternalApiRole,
-    ExternalArgumentAliasPolicy, ExternalLibraryMode, FactProvenance, FactSet, HierarchyStrategy,
-    NullabilityState, ReceiverMutabilityFact, TrivialAccessorKind,
-    external_parameter_nullability_policy,
+    AccessorInlinePolicy, CallableKey, ExternalApiArgumentEffectFact, ExternalApiRole,
+    ExternalArgumentAliasPolicy, ExternalLibraryMode, FacadeAbiFact, FacadeSlot, FactProvenance,
+    FactSet, HierarchyStrategy, NullabilityState, ReceiverAbi, ReceiverMutabilityFact, ResultAbi,
+    Staticness, TrivialAccessorKind, external_parameter_nullability_policy,
 };
 use crate::java_ir::{
     CallKind, Expr, JavaType, LambdaBody, PrimitiveType, ResolvedCall, ResolvedConstructor,
@@ -69,6 +69,12 @@ pub enum CallTargetPlan<'a> {
         rust_name: String,
         mutates_receiver: bool,
     },
+    ExternalFacadeReceiver {
+        receiver: &'a Expr,
+        rust_path: String,
+        receiver_abi: ReceiverAbi,
+        mutates_receiver: bool,
+    },
     SuperBoundary {
         rust_name: String,
         return_type: JavaType,
@@ -82,6 +88,7 @@ impl<'a> CallTargetPlan<'a> {
             CallTargetPlan::InstanceReceiver { receiver, .. }
             | CallTargetPlan::FallbackReceiver { receiver, .. }
             | CallTargetPlan::ExternalCrateReceiver { receiver, .. }
+            | CallTargetPlan::ExternalFacadeReceiver { receiver, .. }
             | CallTargetPlan::NativeCollectionMethod { receiver, .. }
             | CallTargetPlan::NativeJavaInstance { receiver, .. } => Some(receiver),
             CallTargetPlan::StaticSelf { .. }
@@ -102,6 +109,7 @@ impl<'a> CallTargetPlan<'a> {
             CallTargetPlan::InstanceReceiver { .. }
                 | CallTargetPlan::FallbackReceiver { .. }
                 | CallTargetPlan::ExternalCrateReceiver { .. }
+                | CallTargetPlan::ExternalFacadeReceiver { .. }
                 | CallTargetPlan::NativeJavaInstance { .. }
         )
     }
@@ -109,6 +117,9 @@ impl<'a> CallTargetPlan<'a> {
     pub fn mutates_receiver(&self) -> bool {
         match self {
             CallTargetPlan::ExternalCrateReceiver {
+                mutates_receiver, ..
+            }
+            | CallTargetPlan::ExternalFacadeReceiver {
                 mutates_receiver, ..
             } => *mutates_receiver,
             _ => false,
@@ -151,7 +162,10 @@ pub enum NativeCollectionStaticMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeJavaInstanceMethod {
     StringLen,
+    StringIsEmpty,
+    StringTrim,
     StringToLowercase,
+    StringToString,
     StringContains,
     StringStartsWith,
     StringEndsWith,
@@ -162,6 +176,9 @@ pub enum NativeJavaInstanceMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeJavaStaticMethod {
     MathMax,
+    MathToIntExact,
+    IntegerParseInt,
+    DoubleParseDouble,
     StringFormat,
     StringJoin,
     ObjectsEquals,
@@ -213,13 +230,22 @@ pub fn external_call_lowered_type(
         Some(arg_count),
     )?;
     let return_ty = effect.return_type.clone()?;
+    if let Some(facade_lowered) = facade_abi_external_call_lowered_type(
+        receiver_key.as_deref(),
+        name,
+        arg_count,
+        facts,
+        &return_ty,
+    ) {
+        return Some(facade_lowered);
+    }
     let rust_return_type = facts.external_rust_return_type_for_receiver(
         receiver_key.as_deref(),
         name,
         Some(arg_count),
     );
     let rust_return_is_shared_borrow = rust_return_type
-        .is_some_and(|fact| rust_return_type_is_shared_borrow(&fact.rust_type_name));
+        .is_some_and(|fact| external_return_slot_contains_shared_borrow(&fact.return_slot));
 
     if rust_return_is_shared_borrow
         && matches!(
@@ -279,7 +305,7 @@ pub fn external_call_lowered_type(
     if let Some(rust_return_type) = rust_return_type
         && let Some(java_ty) = lowered.java_ty()
     {
-        if rust_return_type_is_shared_borrow(&rust_return_type.rust_type_name)
+        if external_return_slot_contains_shared_borrow(&rust_return_type.return_slot)
             && !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void)
         {
             return Some(LoweredType::rust_borrowed_return(
@@ -298,8 +324,96 @@ pub fn external_call_lowered_type(
     Some(lowered)
 }
 
-fn rust_return_type_is_shared_borrow(rust_type_name: &str) -> bool {
-    rust_type_name.starts_with('&') || rust_type_name.contains("<&")
+fn facade_abi_external_call_lowered_type(
+    receiver_key: Option<&str>,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    return_ty: &JavaType,
+) -> Option<LoweredType> {
+    let receiver_key = receiver_key?;
+    let key = CallableKey::method(
+        receiver_key.to_string(),
+        name.to_string(),
+        Staticness::Unknown,
+        arg_count,
+    );
+    let abi = facts.facade_abi_for_key(&key)?;
+    lowered_type_for_facade_abi(abi, return_ty)
+}
+
+fn lowered_type_for_facade_abi(abi: &FacadeAbiFact, return_ty: &JavaType) -> Option<LoweredType> {
+    if matches!(return_ty, JavaType::Void) {
+        return Some(LoweredType::from_java(return_ty.clone()));
+    }
+
+    let unwrapped_slot = match &abi.return_slot {
+        FacadeSlot::Optional(slot) => slot.as_ref(),
+        slot => slot,
+    };
+    let returns_optional = matches!(abi.result, ResultAbi::OptionWrapped)
+        || matches!(abi.return_slot, FacadeSlot::Optional(_));
+
+    if returns_optional && matches!(unwrapped_slot, FacadeSlot::Borrowed) {
+        return Some(LoweredType::optional_element_borrow_shape(
+            borrowed_sequence_element_shape(return_ty.clone()),
+        ));
+    }
+
+    if java_type_is_byte_array(return_ty)
+        && matches!(unwrapped_slot, FacadeSlot::Owned | FacadeSlot::Slice(_))
+    {
+        let semantic_ty = if returns_optional {
+            crate::types::optional_java_type(return_ty.clone())
+        } else {
+            return_ty.clone()
+        };
+        return Some(LoweredType::rust_unsigned_byte_array_return(
+            semantic_ty,
+            returns_optional,
+        ));
+    }
+
+    match unwrapped_slot {
+        FacadeSlot::Borrowed if !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void) => {
+            Some(LoweredType::rust_borrowed_return(
+                return_ty.clone(),
+                abi.rust_path.clone(),
+            ))
+        }
+        FacadeSlot::Owned
+        | FacadeSlot::Borrowed
+        | FacadeSlot::MutBorrowed
+        | FacadeSlot::Slice(_) => {
+            let semantic_ty = if returns_optional {
+                crate::types::optional_java_type(return_ty.clone())
+            } else {
+                return_ty.clone()
+            };
+            Some(LoweredType::from_java(semantic_ty))
+        }
+        FacadeSlot::DynTrait(_) | FacadeSlot::CrateHandle(_) => {
+            Some(LoweredType::from_java(if returns_optional {
+                crate::types::optional_java_type(return_ty.clone())
+            } else {
+                return_ty.clone()
+            }))
+        }
+        FacadeSlot::Optional(_) => None,
+    }
+}
+
+fn external_return_slot_contains_shared_borrow(slot: &FacadeSlot) -> bool {
+    match slot {
+        FacadeSlot::Borrowed => true,
+        FacadeSlot::Optional(inner) | FacadeSlot::Slice(inner) => {
+            external_return_slot_contains_shared_borrow(inner)
+        }
+        FacadeSlot::Owned
+        | FacadeSlot::MutBorrowed
+        | FacadeSlot::DynTrait(_)
+        | FacadeSlot::CrateHandle(_) => false,
+    }
 }
 
 fn rust_return_type_is_unsigned_byte_array(rust_type_name: &str) -> bool {
@@ -328,6 +442,17 @@ pub fn external_call_returns_rust_result(
     else {
         return false;
     };
+    if let Some(receiver_key) = receiver_key.as_deref() {
+        let key = CallableKey::method(
+            receiver_key.to_string(),
+            name.to_string(),
+            Staticness::Unknown,
+            arg_count,
+        );
+        if let Some(abi) = facts.facade_abi_for_key(&key) {
+            return matches!(abi.result, ResultAbi::ResultWrapped);
+        }
+    }
     if let Some(fallibility) =
         facts.external_rust_result_for_receiver(receiver_key.as_deref(), name, Some(arg_count))
     {
@@ -335,6 +460,17 @@ pub fn external_call_returns_rust_result(
     }
     facts
         .external_api_effect_for_receiver_with_arity(receiver_key.as_deref(), name, Some(arg_count))
+        .is_some_and(|effect| !effect.thrown.is_empty())
+}
+
+pub fn external_call_has_thrown_effect_for_receiver(
+    facts: &FactSet,
+    receiver_name: &str,
+    name: &str,
+    arg_count: usize,
+) -> bool {
+    facts
+        .external_api_effect_for_receiver_with_arity(Some(receiver_name), name, Some(arg_count))
         .is_some_and(|effect| !effect.thrown.is_empty())
 }
 
@@ -828,29 +964,21 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
         return target;
     }
 
+    if let Some(target) = plan_native_java_static_call(receiver, name) {
+        return target;
+    }
+
     if let Some(receiver) = receiver
-        && let Some(owner) = static_utility_owner_expr_type_name(receiver, name, facts, types)
+        && let Some(target) =
+            plan_external_facade_receiver_call(receiver, name, arg_count, facts, types)
     {
-        return CallTargetPlan::StaticOwner {
-            owner,
-            rust_name: crate::parser::to_snake_case(name),
-        };
+        return target;
     }
 
     if let Some(receiver) = receiver
         && let Some(target) =
             plan_external_crate_receiver_call(receiver, name, arg_count, facts, types)
     {
-        return target;
-    }
-
-    if let Some(receiver) = receiver
-        && let Some(target) = plan_native_collection_receiver_call(receiver, name, types)
-    {
-        return target;
-    }
-
-    if let Some(target) = plan_native_java_static_call(receiver, name) {
         return target;
     }
 
@@ -864,6 +992,12 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
     }
 
     if let Some(receiver) = receiver
+        && let Some(target) = plan_native_collection_receiver_call(receiver, name, types)
+    {
+        return target;
+    }
+
+    if let Some(receiver) = receiver
         && let Some(target) = plan_native_java_receiver_call(receiver, name, types)
     {
         return target;
@@ -871,6 +1005,15 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
 
     if let Some(target) = plan_java_class_static_call(receiver, name) {
         return target;
+    }
+
+    if let Some(receiver) = receiver
+        && let Some(owner) = static_utility_owner_expr_type_name(receiver, name, facts, types)
+    {
+        return CallTargetPlan::StaticOwner {
+            owner,
+            rust_name: crate::parser::to_snake_case(name),
+        };
     }
 
     if let Some(call) = resolved {
@@ -924,6 +1067,29 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
             rust_name: crate::parser::to_snake_case(name),
         }
     }
+}
+
+fn plan_external_facade_receiver_call<'a>(
+    receiver: &'a Expr,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<CallTargetPlan<'a>> {
+    let receiver_name = external_receiver_expr_type_key(receiver, facts, types)?;
+    let key = CallableKey::method(
+        receiver_name,
+        name.to_string(),
+        Staticness::Unknown,
+        arg_count,
+    );
+    let abi = facts.facade_abi_for_key(&key)?;
+    Some(CallTargetPlan::ExternalFacadeReceiver {
+        receiver,
+        rust_path: abi.rust_path.clone(),
+        receiver_abi: abi.receiver,
+        mutates_receiver: matches!(abi.receiver, ReceiverAbi::MutBorrowedSelf),
+    })
 }
 
 fn plan_java_logging_facade_call<'a>(receiver: &'a Expr, name: &str) -> Option<CallTargetPlan<'a>> {
@@ -1186,7 +1352,10 @@ fn plan_native_java_receiver_call<'a>(
         crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
     let method = match (&effective_receiver_ty, name) {
         (JavaType::String, "length") => NativeJavaInstanceMethod::StringLen,
+        (JavaType::String, "isEmpty") => NativeJavaInstanceMethod::StringIsEmpty,
+        (JavaType::String, "trim") => NativeJavaInstanceMethod::StringTrim,
         (JavaType::String, "toLowerCase") => NativeJavaInstanceMethod::StringToLowercase,
+        (JavaType::String, "toString") => NativeJavaInstanceMethod::StringToString,
         (JavaType::String, "contains") => NativeJavaInstanceMethod::StringContains,
         (JavaType::String, "startsWith") => NativeJavaInstanceMethod::StringStartsWith,
         (JavaType::String, "endsWith") => NativeJavaInstanceMethod::StringEndsWith,
@@ -1207,6 +1376,9 @@ fn plan_native_java_static_call<'a>(
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
     let method = match (receiver_key.as_str(), name) {
         ("Math", "max") => NativeJavaStaticMethod::MathMax,
+        ("Math", "toIntExact") => NativeJavaStaticMethod::MathToIntExact,
+        ("Integer", "parseInt") => NativeJavaStaticMethod::IntegerParseInt,
+        ("Double", "parseDouble") => NativeJavaStaticMethod::DoubleParseDouble,
         ("String", "format") => NativeJavaStaticMethod::StringFormat,
         ("String", "join") => NativeJavaStaticMethod::StringJoin,
         ("Objects", "equals") => NativeJavaStaticMethod::ObjectsEquals,
@@ -1249,8 +1421,19 @@ fn plan_external_crate_receiver_call<'a>(
                 name,
                 Some(arg_count),
             )
-        })?;
-    if effect.provenance != FactProvenance::ExternalLibraryPack {
+        })
+        .or_else(|| {
+            facts
+                .external_api_effect_for_receiver(Some(&receiver_name), name)
+                .cloned()
+        })
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver(Some(&receiver_name), name)
+        });
+    if effect
+        .as_ref()
+        .is_some_and(|effect| effect.provenance != FactProvenance::ExternalLibraryPack)
+    {
         return None;
     }
     let pack = facts
@@ -1261,22 +1444,31 @@ fn plan_external_crate_receiver_call<'a>(
         return None;
     }
     let mapping = facts
-        .external_crate_api_mapping_for_receiver(&receiver_name, name, effect.arg_count)
+        .external_crate_api_mapping_for_receiver(
+            &receiver_name,
+            name,
+            effect.as_ref().and_then(|effect| effect.arg_count),
+        )
         .cloned()
         .or_else(|| {
             crate::external_packs::external_crate_api_mapping_for_receiver(
                 &receiver_name,
                 name,
-                effect.arg_count,
+                effect.as_ref().and_then(|effect| effect.arg_count),
             )
         });
+    if effect.is_none() && mapping.is_none() {
+        return None;
+    }
     Some(CallTargetPlan::ExternalCrateReceiver {
         receiver,
         crate_name: pack.rust_target.clone()?,
         rust_name: mapping
             .map(|mapping| mapping.rust_name)
             .unwrap_or_else(|| external_method_rust_name(&receiver_name, name, arg_count, facts)),
-        mutates_receiver: effect.receiver_mutability == ReceiverMutabilityFact::MutatesReceiver,
+        mutates_receiver: effect.as_ref().is_some_and(|effect| {
+            effect.receiver_mutability == ReceiverMutabilityFact::MutatesReceiver
+        }),
     })
 }
 
@@ -1306,6 +1498,14 @@ fn plan_external_crate_static_call(
                 name,
                 Some(arg_count),
             )
+        })
+        .or_else(|| {
+            facts
+                .external_api_effect_for_receiver(Some(&receiver_key), name)
+                .cloned()
+        })
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver(Some(&receiver_key), name)
         })?;
     if effect.provenance != FactProvenance::ExternalLibraryPack {
         return None;

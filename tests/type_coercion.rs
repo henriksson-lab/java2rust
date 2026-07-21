@@ -76,6 +76,28 @@ use new_java2rust::types::{
     TypeEnv, infer_expr_type, list_java_type, optional_java_type, set_java_type,
 };
 
+fn simple_interval_locatable_facts() -> FactSet {
+    let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "SimpleInterval".to_string(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: vec![JavaType::Named {
+                name: "Locatable".to_string(),
+                args: Vec::new(),
+            }],
+            extends: None,
+            final_type: None,
+            object_safe_trait: None,
+            provenance: FactProvenance::UserOverride,
+        });
+    facts
+}
+
 #[test]
 fn runtime_type_target_policy_names_nominal_runtime_targets() {
     let named = JavaType::Named {
@@ -4216,6 +4238,7 @@ fn optional_borrowed_concrete_element_unwraps_to_dyn_trait_target() {
         trait_name: "Locatable".to_string(),
     };
     let expected_element_shape = element_shape.clone();
+    let facts = simple_interval_locatable_facts();
 
     let plan = lowered_slot_conversion_plan_with_facts(
         &LoweredType::OptionalElementBorrow {
@@ -4223,7 +4246,7 @@ fn optional_borrowed_concrete_element_unwraps_to_dyn_trait_target() {
             element_shape: Box::new(element_shape.clone()),
         },
         &Slot::Argument(target.clone()),
-        &FactSet::default(),
+        &facts,
     );
 
     assert_eq!(
@@ -4265,6 +4288,7 @@ fn optional_borrowed_concrete_element_unwraps_to_concrete_facade_target() {
     let option_shape = RustSlotShape::conservative(optional_java_type(simple_interval));
     let mut target = RustSlotShape::conservative(locatable);
     target.ownership = OwnershipShape::SharedBorrow;
+    let facts = simple_interval_locatable_facts();
 
     let plan = lowered_slot_conversion_plan_with_facts(
         &LoweredType::OptionalElementBorrow {
@@ -4272,7 +4296,7 @@ fn optional_borrowed_concrete_element_unwraps_to_concrete_facade_target() {
             element_shape: Box::new(element_shape),
         },
         &Slot::Argument(target),
-        &FactSet::default(),
+        &facts,
     );
 
     assert!(matches!(

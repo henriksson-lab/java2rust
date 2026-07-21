@@ -4,12 +4,12 @@ use crate::facts::{
     CatchFact, ClosedHierarchyFact, ControlFlowFact, ControlFlowFactKind, DispatchRequirementFact,
     DispatchRequirementKind, ExternalApiArgumentEffectFact, ExternalApiEffectFact, ExternalApiRole,
     ExternalArgumentAliasPolicy, ExternalConstructorFact, ExternalCrateApiMappingFact,
-    ExternalCrateConstructorMappingFact, ExternalFieldFact, FactProvenance, FactSet, FieldKey,
-    FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy,
-    MethodEffectFact, MethodKey, NodeId, NullabilityState, ObjectSafetyFact, ObjectSafetyViolation,
-    ReceiverMutabilityFact, RecursionFact, RecursionKind, TrivialAccessorFact, TrivialAccessorKind,
-    TypeCapabilityOverride, UnsupportedExternalApiFact, UnsupportedExternalConstructorFact,
-    UnsupportedExternalFieldFact,
+    ExternalCrateConstructorMappingFact, ExternalFieldFact, ExternalFieldKind, FactProvenance,
+    FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride,
+    HierarchyStrategy, MethodEffectFact, MethodKey, NodeId, NullabilityState, ObjectSafetyFact,
+    ObjectSafetyViolation, ReceiverMutabilityFact, RecursionFact, RecursionKind,
+    TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride, UnsupportedExternalApiFact,
+    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
 };
 use crate::java_ir::JavaType;
 use crate::parser::parse_type;
@@ -1624,6 +1624,7 @@ fn push_external_field_fact(
             field_name: field_name.to_string(),
         },
         field_type: Some(parse_type(field_type)),
+        field_kind: ExternalFieldKind::Unknown,
         provenance: FactProvenance::UserOverride,
     });
 }

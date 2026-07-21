@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::FactSet;
 use crate::facts::{
-    ExternalApiRole, ExternalArgumentAliasPolicy, FactProvenance, HierarchyStrategy,
-    NullabilityState, ReceiverMutabilityFact,
+    CallableKey, ExternalApiRole, ExternalArgumentAliasPolicy, FacadeAbiFact, FacadeSlot,
+    FactProvenance, HierarchyStrategy, NullabilityState, ReceiverMutabilityFact, ResultAbi,
+    Staticness,
 };
 use crate::java_ir::{
     Block, Expr, JavaType, Member, MethodDecl, PrimitiveType, Program, Stmt, TypeDecl,
@@ -192,8 +193,6 @@ pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
         "OutputStream" => is_known_output_stream_type(actual),
         "Reader" => is_known_reader_type(actual),
         "Writer" => is_known_writer_type(actual),
-        "Locatable" => is_known_locatable_type(actual),
-        "Feature" => is_known_feature_type(actual),
         "WriteOption" => is_known_write_option_type(actual),
         _ => false,
     }
@@ -214,10 +213,7 @@ pub fn is_known_single_arg_generic_supertype(actual: &str, target: &str) -> bool
 }
 
 pub fn is_known_structural_reference_target(name: &str) -> bool {
-    matches!(
-        name,
-        "Locatable" | "Feature" | "Iterable" | "Comparable" | "Serializable"
-    )
+    matches!(name, "Iterable" | "Comparable" | "Serializable")
 }
 
 fn is_known_iterable_type(name: &str) -> bool {
@@ -460,14 +456,6 @@ fn is_known_writer_type(name: &str) -> bool {
     )
 }
 
-fn is_known_locatable_type(name: &str) -> bool {
-    name.rsplit('.').next().unwrap_or(name) == "Locatable"
-}
-
-fn is_known_feature_type(name: &str) -> bool {
-    name.rsplit('.').next().unwrap_or(name) == "Feature"
-}
-
 fn is_known_write_option_type(name: &str) -> bool {
     matches!(
         name.rsplit('.').next().unwrap_or(name),
@@ -536,6 +524,16 @@ pub fn known_external_method_return_type(
     name: &str,
     arg_count: usize,
 ) -> Option<JavaType> {
+    if let Some(return_type) =
+        crate::javalibs::broad_utils_dynamic_return_type(receiver_type, name, &[])
+    {
+        return Some(return_type);
+    }
+    if let Some(return_type) =
+        crate::javalibs::broad_static_utility_return_type(receiver_type, name, arg_count)
+    {
+        return Some(return_type);
+    }
     if arg_count == 1
         && name == "submit"
         && receiver_type
@@ -697,30 +695,13 @@ pub fn known_external_method_return_type(
         }
         (Some("StringUtils"), "isEmpty", 1) => Some(JavaType::Primitive(PrimitiveType::Boolean)),
         (Some("StringUtils"), "split", 2) => Some(JavaType::Array(Box::new(JavaType::String))),
-        (Some("Utils"), "split", 2 | 3) => Some(JavaType::Named {
-            name: "List".to_string(),
-            args: vec![JavaType::String],
-        }),
         (Some(owner), "writeString", 2 | 3) if is_java_nio_files_receiver(owner) => {
             Some(JavaType::Named {
                 name: "Path".to_string(),
                 args: Vec::new(),
             })
         }
-        (Some("IOUtils"), "getPath", 1) => Some(JavaType::Named {
-            name: "Path".to_string(),
-            args: Vec::new(),
-        }),
-        (Some("IOUtils"), "appendPathToDir", 2) => Some(JavaType::String),
-        (Some("IOUtils"), "createTempFile", 2) => Some(JavaType::Named {
-            name: "File".to_string(),
-            args: Vec::new(),
-        }),
-        (Some("IOUtils"), "replaceExtension", 2) => Some(JavaType::String),
         (Some("Integer"), "parseInt", 1 | 2) => Some(JavaType::Primitive(PrimitiveType::Int)),
-        (Some("QualityUtils"), "qualToProb" | "qualToProbLog10", 1) => {
-            Some(JavaType::Primitive(PrimitiveType::Double))
-        }
         (_, "getReadGroup", 0) => Some(JavaType::Named {
             name: "SAMReadGroupRecord".to_string(),
             args: Vec::new(),
@@ -1108,15 +1089,6 @@ fn is_known_string_constant_field(receiver: &str, field_name: &str) -> bool {
     }
 
     match receiver {
-        "GATKVCFConstants" => {
-            field_name.ends_with("_KEY")
-                || field_name.ends_with("_FIELD")
-                || field_name.ends_with("_SEPARATOR")
-                || matches!(
-                    field_name.as_str(),
-                    "MAPPING_QUALITY_DEPTH_DEPRECATED" | "TREE_SCORE"
-                )
-        }
         "FileExtensions" => true,
         _ => is_conventionally_string_constant_field(&field_name),
     }
@@ -1147,6 +1119,19 @@ fn known_argument_sensitive_external_method_return_type(
     name: &str,
     arg_types: &[JavaType],
 ) -> Option<JavaType> {
+    let receiver_key = receiver_type.and_then(external_receiver_type_key);
+    if let Some(return_type) =
+        crate::javalibs::broad_utils_dynamic_return_type(receiver_key.as_deref(), name, arg_types)
+    {
+        return Some(return_type);
+    }
+    if let Some(return_type) = crate::javalibs::broad_static_utility_return_type(
+        receiver_key.as_deref(),
+        name,
+        arg_types.len(),
+    ) {
+        return Some(return_type);
+    }
     if name == "toArray" {
         if let Some(JavaType::Array(element)) = arg_types.first() {
             return Some(JavaType::Array(element.clone()));
@@ -1164,7 +1149,6 @@ fn known_argument_sensitive_external_method_return_type(
         }
     }
 
-    let receiver_key = receiver_type.and_then(external_receiver_type_key);
     match (receiver_key.as_deref(), name, arg_types) {
         (Some("Option"), "apply", [value]) => Some(JavaType::Named {
             name: "Option".to_string(),
@@ -1231,9 +1215,6 @@ fn known_argument_sensitive_external_method_return_type(
             name: "Pair".to_string(),
             args: vec![left.clone(), right.clone()],
         }),
-        (Some("Utils"), "stream", [source]) => {
-            collection_element_type(source).map(|element| stream_return_type(element.clone()))
-        }
         (Some("ListUtils"), "union", [left, right]) => {
             Some(collection_union_return_type("List", left, right))
         }
@@ -1986,7 +1967,7 @@ fn is_string_formatting_receiver(receiver: &str) -> bool {
 fn is_string_join_receiver(receiver: &str) -> bool {
     matches!(
         receiver.rsplit('.').next().unwrap_or(receiver),
-        "String" | "Utils" | "StringUtils" | "StringUtil"
+        "String" | "StringUtils" | "StringUtil"
     )
 }
 
@@ -2141,8 +2122,6 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "int_stream" => "IntStream",
         "long_stream" => "LongStream",
         "double_stream" => "DoubleStream",
-        "utils" => "Utils",
-        "quality_utils" => "QualityUtils",
         "list_utils" => "ListUtils",
         "listutils" => "ListUtils",
         "objects" => "Objects",
@@ -2181,11 +2160,8 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "immutable_sorted_map" => "ImmutableSortedMap",
         "text_cigar_codec" => "TextCigarCodec",
         "v_c_f_constants" => "VCFConstants",
-        "g_a_t_k_v_c_f_constants" => "GATKVCFConstants",
         "constants" => "Constants",
         "file_extensions" => "FileExtensions",
-        "i_o_utils" => "IOUtils",
-        "h_d_f5_file" => "HDF5File",
         "s_a_m_file_header" => "SAMFileHeader",
         "field_value" => "FieldValue",
         "query_job_configuration" => "QueryJobConfiguration",
@@ -2211,7 +2187,6 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "cigar_operator" => "CigarOperator",
         "s_a_m_tag" => "SAMTag",
         "s_a_m_record" => "SAMRecord",
-        "variant_context" => "VariantContext",
         "type" => "Type",
         "s_a_m_flag" => "SAMFlag",
         "v_c_f_header_version" => "VCFHeaderVersion",
@@ -2223,7 +2198,6 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "common_info" => "CommonInfo",
         "block_compressed_stream_constants" => "BlockCompressedStreamConstants",
         "coordinates" => "Coordinates",
-        "genomics_d_b_column" => "GenomicsDBColumn",
         "contig_position" => "ContigPosition",
         "jexl_v_c_match_exp" => "JexlVCMatchExp",
         "s_a_m_tag_and_value" => "SAMTagAndValue",
@@ -2250,7 +2224,6 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "genotype_concordance_summary_metrics" => "GenotypeConcordanceSummaryMetrics",
         "v_c_f_header" => "VCFHeader",
         "time_unit" => "TimeUnit",
-        "variant_context_writer_builder" => "VariantContextWriterBuilder",
         "output_type" => "OutputType",
         "reserved_tag_constants" => "ReservedTagConstants",
         "sequence_util" => "SequenceUtil",
@@ -2270,12 +2243,10 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "locale" => "Locale",
         "fastq_constants" => "FastqConstants",
         "element_kind" => "ElementKind",
-        "genomics_d_b_export_configuration" => "GenomicsDBExportConfiguration",
         "export_configuration" => "ExportConfiguration",
         "read_likelihood_calculation_engine" => "ReadLikelihoodCalculationEngine",
         "special_arguments_collection" => "SpecialArgumentsCollection",
         "http_method" => "HttpMethod",
-        "mapper_feature" => "MapperFeature",
         "data_format" => "DataFormat",
         "data_series_type" => "DataSeriesType",
         "cloud_storage_configuration" => "CloudStorageConfiguration",
@@ -2285,15 +2256,12 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "index_factory" => "IndexFactory",
         "file_cardinality_write_option" => "FileCardinalityWriteOption",
         "genotypes_context" => "GenotypesContext",
-        "feature_codec_header" => "FeatureCodecHeader",
         "message_digest_algorithms" => "MessageDigestAlgorithms",
         "s_a_m_read_group_record" => "SAMReadGroupRecord",
         "deserialization_feature" => "DeserializationFeature",
         "jexl_missing_value_treatment" => "JexlMissingValueTreatment",
         "w_d_l_work_unit_handler" => "WDLWorkUnitHandler",
         "genotype" => "Genotype",
-        "genomics_d_b_import_configuration" => "GenomicsDBImportConfiguration",
-        "genomics_d_b_vid_map_proto" => "GenomicsDBVidMapProto",
         "vid_mapping_p_b" => "VidMappingPB",
         "field_length_descriptor_component_p_b" => "FieldLengthDescriptorComponentPB",
         "read_session" => "ReadSession",
@@ -2601,34 +2569,6 @@ impl JavaPathArg for File {
 impl JavaPathArg for &File {
     fn into_path_value(self) -> String {
         self.value.clone()
-    }
-}
-
-pub struct IOUtils;
-
-impl IOUtils {
-    pub fn get_path<P: JavaPathArg>(path: P) -> Path {
-        Path::new(path.into_path_value())
-    }
-
-    pub fn append_path_to_dir<D: JavaPathArg, P: JavaPathArg>(dir: D, path: P) -> String {
-        let dir = dir.into_path_value();
-        let path = path.into_path_value();
-        if dir.is_empty() {
-            path
-        } else if dir.ends_with('/') {
-            format!("{dir}{path}")
-        } else {
-            format!("{dir}/{path}")
-        }
-    }
-
-    pub fn assert_file_is_readable<P: JavaPathArg>(_path: P) {}
-
-    pub fn assert_paths_are_readable<P: JavaPathArg>(_path: P) {}
-
-    pub fn create_temp_file<P: JavaPathArg, S: JavaPathArg>(prefix: P, suffix: S) -> File {
-        File::new(format!("{}{}", prefix.into_path_value(), suffix.into_path_value()))
     }
 }
 
@@ -3857,10 +3797,6 @@ impl ExternalApiFacadeSupport {
         arg_count: usize,
     ) -> Option<JavaType> {
         match (owner, name, arg_count) {
-            ("SimpleInterval" | "Interval" | "Locatable", "getContig", 0) => Some(JavaType::String),
-            ("SimpleInterval" | "Interval" | "Locatable", "getStart" | "getEnd", 0) => {
-                Some(JavaType::Primitive(PrimitiveType::Int))
-            }
             ("IntervalArgumentCollection", "intervalsSpecified", 0) => {
                 Some(JavaType::Primitive(PrimitiveType::Boolean))
             }
@@ -5748,10 +5684,9 @@ fn external_facade_return_type_with_facts(java_type: &JavaType, facts: &FactSet)
                 crate::emit::emit_type(&rust_type_for_java_type_with_facts(java_type, facts))
             })
         }
-        JavaType::Array(inner) => format!(
-            "Vec<{}>",
-            external_facade_return_type_with_facts(inner, facts)
-        ),
+        JavaType::Array(_) => {
+            crate::emit::emit_type(&rust_type_for_java_type_with_facts(java_type, facts))
+        }
         JavaType::Unknown(name) => external_facade_crate_mapped_return_type(name, &[], facts)
             .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string()),
         JavaType::Wildcard(_) => "Box<dyn std::any::Any>".to_string(),
@@ -5794,6 +5729,15 @@ fn external_facade_method_return_type_with_facts(
     java_type: &JavaType,
     nullability: NullabilityState,
 ) -> String {
+    if let Some(return_type) = external_facade_method_abi_return_type_with_facts(
+        facts,
+        receiver_type,
+        method_name,
+        arg_count,
+        java_type,
+    ) {
+        return normalize_external_facade_return_type_text(&return_type);
+    }
     if let Some(rust_return) =
         facts.external_rust_return_type_for_receiver(receiver_type, method_name, arg_count)
     {
@@ -5802,6 +5746,74 @@ fn external_facade_method_return_type_with_facts(
     normalize_external_facade_return_type_text(
         &external_facade_return_type_with_facts_and_nullability(facts, java_type, nullability),
     )
+}
+
+fn external_facade_method_abi_return_type_with_facts(
+    facts: &FactSet,
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_count: Option<usize>,
+    java_type: &JavaType,
+) -> Option<String> {
+    let receiver_type = receiver_type?;
+    let arg_count = arg_count?;
+    let key = CallableKey::method(
+        receiver_type.to_string(),
+        method_name.to_string(),
+        Staticness::Unknown,
+        arg_count,
+    );
+    let abi = facts.facade_abi_for_key(&key)?;
+    external_facade_abi_return_type(facts, receiver_type, abi, java_type)
+}
+
+fn external_facade_abi_return_type(
+    facts: &FactSet,
+    receiver_type: &str,
+    abi: &FacadeAbiFact,
+    java_type: &JavaType,
+) -> Option<String> {
+    let base = external_facade_return_type_with_facts(java_type, facts);
+    let rendered =
+        external_facade_slot_return_type(facts, Some(receiver_type), &base, &abi.return_slot)?;
+    Some(match abi.result {
+        ResultAbi::Plain => rendered,
+        ResultAbi::OptionWrapped if rendered.starts_with("Option<") => rendered,
+        ResultAbi::OptionWrapped => format!("Option<{rendered}>"),
+        ResultAbi::ResultWrapped => format!("Result<{rendered}, JavaException>"),
+    })
+}
+
+fn external_facade_slot_return_type(
+    facts: &FactSet,
+    receiver_type: Option<&str>,
+    base: &str,
+    slot: &FacadeSlot,
+) -> Option<String> {
+    match slot {
+        FacadeSlot::Owned => Some(base.to_string()),
+        FacadeSlot::Borrowed => Some(format!(
+            "&{}",
+            normalize_external_facade_support_return_type(facts, receiver_type, base)
+        )),
+        FacadeSlot::MutBorrowed => Some(format!(
+            "&mut {}",
+            normalize_external_facade_support_return_type(facts, receiver_type, base)
+        )),
+        FacadeSlot::Optional(inner) => {
+            let inner = external_facade_slot_return_type(facts, receiver_type, base, inner)?;
+            if inner.starts_with("Option<") {
+                Some(inner)
+            } else {
+                Some(format!("Option<{inner}>"))
+            }
+        }
+        FacadeSlot::Slice(inner) => {
+            let inner = external_facade_slot_return_type(facts, receiver_type, base, inner)?;
+            Some(format!("&[{inner}]"))
+        }
+        FacadeSlot::DynTrait(path) | FacadeSlot::CrateHandle(path) => Some(path.clone()),
+    }
 }
 
 fn normalize_external_facade_return_type_text(return_type: &str) -> String {
@@ -5824,9 +5836,7 @@ fn normalize_external_facade_return_type_text(return_type: &str) -> String {
 
 fn default_external_crate_rust_type_name(name: &str) -> String {
     let simple = name.rsplit('.').next().unwrap_or(name);
-    if valid_rust_type_ident(simple)
-        && (simple.contains(|ch: char| ch.is_ascii_digit()) || simple.starts_with("SQLite"))
-    {
+    if valid_rust_type_ident(simple) && simple.contains(|ch: char| ch.is_ascii_digit()) {
         return simple.to_string();
     }
     acronym_prefix_rust_type_name(&rust_name_for_java_named_type(simple))
@@ -6113,12 +6123,9 @@ fn known_imported_static_method_return_type(
 }
 
 fn imported_static_method_returns_first_arg(owner_key: &str, name: &str, arg_count: usize) -> bool {
-    arg_count >= 1
-        && matches!(name, "non_null" | "nonNull")
-        && canonical_external_receiver_type_key(owner_key)
-            .rsplit('.')
-            .next()
-            .is_some_and(|simple| simple == "Utils")
+    crate::javalibs::imported_static_method_returns_broad_utils_first_arg(
+        owner_key, name, arg_count,
+    )
 }
 
 fn external_facade_imported_static_first_arg_method(name: &str, arg_count: usize) -> String {
@@ -6575,7 +6582,6 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "Set"
             | "Stream"
             | "File"
-            | "IOUtils"
             | "Path"
             | "URI"
             | "URL"
@@ -6589,7 +6595,7 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "f64"
             | "char"
             | "()"
-    )
+    ) || crate::javalibs::is_builtin_external_facade_type(name)
 }
 
 fn valid_external_facade_type_ident(name: &str) -> bool {
@@ -7427,11 +7433,7 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
     program.imports.iter().any(|import| {
         matches!(
             import.path.as_str(),
-            "java.nio.file.Path"
-                | "java.net.URI"
-                | "java.io.File"
-                | "java.net.URL"
-                | "org.broadinstitute.hellbender.utils.io.IOUtils"
+            "java.nio.file.Path" | "java.net.URI" | "java.io.File" | "java.net.URL"
         )
     }) || program.types.iter().any(type_uses_java_platform_facades)
 }
@@ -8209,18 +8211,58 @@ pub fn external_api_method_policy(
     name: &str,
     arg_count: usize,
 ) -> ExternalApiMethodPolicy {
+    external_api_method_policy_with_builtin_packs(receiver_type, name, arg_count, true)
+}
+
+pub fn external_api_method_policy_with_builtin_packs(
+    receiver_type: Option<&str>,
+    name: &str,
+    arg_count: usize,
+    enable_builtin_external_packs: bool,
+) -> ExternalApiMethodPolicy {
+    if let Some(receiver_type) = receiver_type
+        && enable_builtin_external_packs
+        && let Some(effect) = crate::external_packs::external_api_effect_for_receiver_with_arity(
+            Some(receiver_type),
+            name,
+            Some(arg_count),
+        )
+    {
+        return ExternalApiMethodPolicy {
+            role: effect.role,
+            receiver_mutability: effect.receiver_mutability,
+            return_nullability: effect.return_nullability,
+            provenance: effect.provenance,
+        };
+    }
     let role = external_api_method_role(receiver_type, name, arg_count);
     ExternalApiMethodPolicy {
         role,
         receiver_mutability: external_api_receiver_mutability(role),
         return_nullability: external_api_return_nullability(receiver_type, name, arg_count, role),
-        provenance: external_api_method_policy_provenance(receiver_type, name, arg_count),
+        provenance: external_api_method_policy_provenance_with_builtin_packs(
+            receiver_type,
+            name,
+            arg_count,
+            enable_builtin_external_packs,
+        ),
     }
 }
 
 pub fn external_constructor_provenance(type_name: &str, arg_types: &[JavaType]) -> FactProvenance {
-    if crate::external_packs::external_constructor_for(type_name, arg_types).is_some() {
-        return FactProvenance::ConservativeFallback;
+    external_constructor_provenance_with_builtin_packs(type_name, arg_types, true)
+}
+
+pub fn external_constructor_provenance_with_builtin_packs(
+    type_name: &str,
+    arg_types: &[JavaType],
+    enable_builtin_external_packs: bool,
+) -> FactProvenance {
+    if enable_builtin_external_packs
+        && let Some(constructor) =
+            crate::external_packs::external_constructor_for(type_name, arg_types)
+    {
+        return constructor.provenance;
     }
     if is_known_collection_constructor(type_name, arg_types)
         || is_known_map_constructor(type_name, arg_types)
@@ -8229,7 +8271,6 @@ pub fn external_constructor_provenance(type_name: &str, arg_types: &[JavaType]) 
         || is_known_jdk_utility_constructor(type_name, arg_types)
         || is_known_file_constructor(type_name, arg_types)
         || is_known_format_constructor(type_name, arg_types)
-        || is_known_htsjdk_constructor(type_name, arg_types)
         || is_known_string_builder_constructor(type_name, arg_types)
         || is_known_tuple_constructor(type_name, arg_types)
     {
@@ -8240,8 +8281,18 @@ pub fn external_constructor_provenance(type_name: &str, arg_types: &[JavaType]) 
 }
 
 pub fn external_field_provenance(type_name: &str, field_name: &str) -> FactProvenance {
-    if crate::external_packs::external_field_for(type_name, field_name).is_some() {
-        return FactProvenance::ConservativeFallback;
+    external_field_provenance_with_builtin_packs(type_name, field_name, true)
+}
+
+pub fn external_field_provenance_with_builtin_packs(
+    type_name: &str,
+    field_name: &str,
+    enable_builtin_external_packs: bool,
+) -> FactProvenance {
+    if enable_builtin_external_packs
+        && let Some(field) = crate::external_packs::external_field_for(type_name, field_name)
+    {
+        return field.provenance;
     }
     let receiver_type = JavaType::Named {
         name: type_name.to_string(),
@@ -8315,10 +8366,6 @@ fn is_known_format_constructor(type_name: &str, arg_types: &[JavaType]) -> bool 
     ) && arg_types.len() <= 2
 }
 
-fn is_known_htsjdk_constructor(_type_name: &str, _arg_types: &[JavaType]) -> bool {
-    false
-}
-
 fn is_known_string_builder_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
     matches!(type_name, "StringBuilder" | "StringBuffer") && arg_types.len() <= 1
 }
@@ -8328,22 +8375,25 @@ fn is_known_tuple_constructor(type_name: &str, arg_types: &[JavaType]) -> bool {
     false
 }
 
-fn external_api_method_policy_provenance(
+fn external_api_method_policy_provenance_with_builtin_packs(
     receiver_type: Option<&str>,
     name: &str,
     arg_count: usize,
+    enable_builtin_external_packs: bool,
 ) -> FactProvenance {
     if receiver_type.is_some() && is_known_object_inherited_method(name, arg_count) {
         return FactProvenance::BuiltinExternalModel;
     }
-    if receiver_type.is_some_and(|receiver_type| {
-        crate::external_packs::external_api_effect_for_receiver_with_arity(
-            Some(receiver_type),
-            name,
-            Some(arg_count),
-        )
-        .is_some()
-    }) {
+    if enable_builtin_external_packs
+        && receiver_type.is_some_and(|receiver_type| {
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                Some(receiver_type),
+                name,
+                Some(arg_count),
+            )
+            .is_some()
+        })
+    {
         return FactProvenance::ConservativeFallback;
     }
     if receiver_type.is_some() && name == "length" && arg_count == 0 {
@@ -8640,17 +8690,7 @@ pub fn external_api_return_nullability(
         (_, "getCanonicalPath", 0) => NullabilityState::DefinitelyNonNull,
         (Some("StringUtils"), "isEmpty", 1) => NullabilityState::DefinitelyNonNull,
         (Some("StringUtils"), "split", 2) => NullabilityState::DefinitelyNonNull,
-        (Some("Utils"), "split", 2 | 3) => NullabilityState::DefinitelyNonNull,
-        (Some("Utils"), "stream", 1) => NullabilityState::DefinitelyNonNull,
-        (
-            Some("IOUtils"),
-            "getPath" | "appendPathToDir" | "createTempFile" | "replaceExtension",
-            _,
-        ) => NullabilityState::DefinitelyNonNull,
         (Some("Integer"), "parseInt", 1 | 2) => NullabilityState::DefinitelyNonNull,
-        (Some("QualityUtils"), "qualToProb" | "qualToProbLog10", 1) => {
-            NullabilityState::DefinitelyNonNull
-        }
         (Some("Objects"), "equals", 2) => NullabilityState::DefinitelyNonNull,
         (Some("Objects"), "nonNull" | "isNull", 1) => NullabilityState::DefinitelyNonNull,
         (Some("Collections"), "emptyList" | "emptySet" | "emptyMap", 0) => {
@@ -8735,23 +8775,11 @@ fn static_utility_method_role(
         (Some("String"), "format", _) => ExternalApiRole::Getter,
         (Some("String"), "split", 1 | 2) => ExternalApiRole::Getter,
         (Some("String"), "substring", 1 | 2) => ExternalApiRole::Getter,
-        (Some("String" | "Utils" | "StringUtils" | "StringUtil"), "join", _) => {
-            ExternalApiRole::Getter
-        }
+        (Some("String" | "StringUtils" | "StringUtil"), "join", _) => ExternalApiRole::Getter,
         (Some("Long"), "toBinaryString", 1) => ExternalApiRole::Getter,
         (Some("StringUtils"), "isEmpty", 1) => ExternalApiRole::BooleanGetter,
         (Some("StringUtils"), "split", 2) => ExternalApiRole::Getter,
-        (Some("Utils"), "split", 2 | 3) | (Some("Utils"), "stream", 1) => ExternalApiRole::Getter,
-        (
-            Some("IOUtils"),
-            "getPath" | "appendPathToDir" | "createTempFile" | "replaceExtension",
-            _,
-        ) => ExternalApiRole::Getter,
-        (Some("IOUtils"), "assertFileIsReadable" | "assertPathsAreReadable", _) => {
-            ExternalApiRole::SideEffect
-        }
         (Some("Integer"), "parseInt", 1 | 2) => ExternalApiRole::Getter,
-        (Some("QualityUtils"), "qualToProb" | "qualToProbLog10", 1) => ExternalApiRole::Getter,
         (Some("Beta"), "logBeta", 2) => ExternalApiRole::Getter,
         (Some("Objects"), "nonNull" | "isNull", 1) => ExternalApiRole::BooleanGetter,
         (Some("Objects"), "equals", 2) => ExternalApiRole::Getter,
@@ -8800,10 +8828,7 @@ fn is_static_utility_owner(receiver_type: Option<&str>) -> bool {
             | Some("Integer")
             | Some("StringUtils")
             | Some("StringUtil")
-            | Some("Utils")
-            | Some("QualityUtils")
             | Some("Beta")
-            | Some("IOUtils")
             | Some("Objects")
             | Some("Collections")
             | Some("ImmutableMap")

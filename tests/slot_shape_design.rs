@@ -12,14 +12,14 @@ use new_java2rust::call_plan::{
     ArgumentLoweringPlan, CallExceptionPropagationPlan, CallExprPlan, CallStatementPlan,
     CallTargetPlan, NativeCollectionMethod, NativeCollectionNewTarget,
     NativeCollectionStaticMethod, NativeJavaInstanceMethod, NativeJavaStaticMethod,
-    TrivialAccessorCallPlan, external_call_lowered_type, external_constructor_arg_shapes,
-    native_collection_arg_shapes, native_collection_arg_shapes_with_facts,
-    native_collection_lowered_type, plan_call_arguments, plan_call_arguments_with_facts,
-    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation, plan_call_expr,
-    plan_call_statement, plan_call_target, plan_call_target_with_facts,
-    plan_call_target_with_facts_and_arity, plan_constructor_arguments, plan_new_target,
-    plan_new_target_with_facts, plan_trivial_accessor_call, resolved_call_arg_shapes,
-    resolved_constructor_arg_shapes,
+    TrivialAccessorCallPlan, external_call_lowered_type, external_call_returns_rust_result,
+    external_constructor_arg_shapes, native_collection_arg_shapes,
+    native_collection_arg_shapes_with_facts, native_collection_lowered_type, plan_call_arguments,
+    plan_call_arguments_with_facts, plan_call_arguments_with_facts_and_args,
+    plan_call_exception_propagation, plan_call_expr, plan_call_statement, plan_call_target,
+    plan_call_target_with_facts, plan_call_target_with_facts_and_arity, plan_constructor_arguments,
+    plan_new_target, plan_new_target_with_facts, plan_trivial_accessor_call,
+    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::Coercion;
 use new_java2rust::constructor_plan::{
@@ -60,16 +60,17 @@ use new_java2rust::expr_shape::{
 use new_java2rust::external_facts::parse_external_facts;
 use new_java2rust::external_packs::parse_external_pack_manifest;
 use new_java2rust::facts::{
-    AccessorInlinePolicy, CaptureOrigin, CaptureOwnerKind, CaptureSource, ClosedHierarchyFact,
-    ControlFlowFactKind, DispatchRequirementFact, DispatchRequirementKind,
+    AccessorInlinePolicy, CallableKey, CaptureOrigin, CaptureOwnerKind, CaptureSource,
+    ClosedHierarchyFact, ControlFlowFactKind, DispatchRequirementFact, DispatchRequirementKind,
     ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole,
     ExternalArgumentAliasPolicy, ExternalConstructorFact, ExternalCrateConstructorMappingFact,
-    ExternalFieldFact, ExternalLibraryMode, ExternalLibraryPackFact, FactProvenance, FactSet,
+    ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode, ExternalLibraryPackFact,
+    ExternalRustReturnTypeFact, FacadeAbiFact, FacadeSlot, FactProvenance, FactSet,
     FieldKey as FactFieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyEdgeFact,
     HierarchyOverride, HierarchyStrategy, MethodEffectFact, MethodKey as FactMethodKey,
     NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
-    ReceiverMutabilityFact, RecursionKind, TrivialAccessorFact, TrivialAccessorKind,
-    TypeCapabilityOverride,
+    ReceiverAbi, ReceiverMutabilityFact, RecursionKind, ResultAbi, Staticness, TrivialAccessorFact,
+    TrivialAccessorKind, TypeCapabilityOverride,
 };
 use new_java2rust::item_assembly::{
     constructor_default_field_value, constructor_function_shell, constructor_return_body,
@@ -81,6 +82,7 @@ use new_java2rust::java_ir::{
     Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, LambdaParam, Literal, Member,
     Modifier, PrimitiveType, Stmt, WildcardBound,
 };
+use new_java2rust::javalibs::{broad_ioutils_support_item, program_uses_broad_ioutils_facade};
 use new_java2rust::literal_lowering::literal_to_rust;
 use new_java2rust::loop_lowering::{
     assemble_for_loop, assignment_condition_loop, continue_with_updates,
@@ -244,7 +246,8 @@ use new_java2rust::stream_lowering::{
     emit_stream_lambda_body_with_context, render_stream_plan, render_stream_plan_with_context,
 };
 use new_java2rust::stream_shape::{
-    StreamSourceCapabilityPolicy, infer_stream_lambda_body_shape, infer_stream_map_to_int_shape,
+    StreamSourceCapabilityPolicy, infer_stream_lambda_body_shape,
+    infer_stream_lambda_body_shape_with_facts, infer_stream_map_to_int_shape,
     infer_stream_source_element_shape, infer_stream_source_element_shape_with_effective_facts,
     infer_stream_source_element_shape_with_facts, stream_source_capability_policy,
     stream_source_capability_policy_with_effective_facts,
@@ -4030,6 +4033,7 @@ class PlatformBoundaryUse {
 "#;
     let parsed = parse_java_source(source);
     assert!(program_uses_java_platform_facades(&parsed.program));
+    assert!(program_uses_broad_ioutils_facade(&parsed.program));
 
     let RustItem::Raw(support) = java_platform_facade_support_item() else {
         panic!("expected raw Java platform facade support item");
@@ -4037,9 +4041,7 @@ class PlatformBoundaryUse {
     assert!(support.contains("pub struct Path"));
     assert!(support.contains("pub struct URI"));
     assert!(support.contains("pub struct File"));
-    assert!(support.contains("pub struct IOUtils"));
     assert!(support.contains("pub mod logger"));
-    assert!(support.contains("pub fn get_path<P: JavaPathArg>(path: P) -> Path"));
     assert!(support.contains("pub fn to_uri(&self) -> URI"));
     assert!(support.contains("pub fn to_path(&self) -> Path"));
     assert!(support.contains("pub fn resolve_sibling<P: JavaPathArg>(&self, sibling: P) -> Path"));
@@ -4048,6 +4050,12 @@ class PlatformBoundaryUse {
     assert!(support.contains("impl From<&File> for std::path::PathBuf"));
     assert!(support.contains("impl AsRef<std::path::Path> for Path"));
     assert!(support.contains("impl From<&Path> for std::path::PathBuf"));
+
+    let RustItem::Raw(ioutils_support) = broad_ioutils_support_item() else {
+        panic!("expected raw Broad IOUtils support item");
+    };
+    assert!(ioutils_support.contains("pub struct IOUtils"));
+    assert!(ioutils_support.contains("pub fn get_path<P: JavaPathArg>(path: P) -> Path"));
 
     let translation = translate_source(source);
     assert!(translation.rust.contains("pub struct Path"));
@@ -8217,10 +8225,12 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
                 RustExpr::Var("values".to_string()),
             ],
         ),
-        RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Var("hdf5".to_string())),
-            method: "write_double_array".to_string(),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw(
+                "hdf5_pure_rust::write_double_array".to_string(),
+            )),
             args: vec![
+                RustExpr::Var("hdf5".to_string()),
                 RustExpr::Literal("\"/metrics\"".to_string()),
                 RustExpr::Var("values".to_string()),
             ],
@@ -8248,10 +8258,9 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             Some(RustExpr::Var("hdf5".to_string())),
             Vec::new(),
         ),
-        RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Var("hdf5".to_string())),
-            method: "flush".to_string(),
-            args: Vec::new(),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("hdf5_pure_rust::flush".to_string())),
+            args: vec![RustExpr::Var("hdf5".to_string())],
         }
     );
     let hdf5_library_receiver = Expr::Var("library".to_string());
@@ -8280,10 +8289,9 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             Some(RustExpr::Var("library".to_string())),
             Vec::new(),
         ),
-        RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Var("library".to_string())),
-            method: "load".to_string(),
-            args: Vec::new(),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("hdf5_pure_rust::load".to_string())),
+            args: vec![RustExpr::Var("library".to_string())],
         }
     );
     let mut override_facts = hdf5_facts.clone();
@@ -9663,6 +9671,65 @@ class Uses {
 }
 
 #[test]
+fn facade_abi_fact_selects_receiver_call_shape_before_crate_mapping() {
+    let hdf5_receiver = Expr::Var("hdf5".to_string());
+    let mut hdf5_types = TypeEnv::new();
+    hdf5_types.insert_local(
+        "hdf5",
+        JavaType::Named {
+            name: "HDF5File".to_string(),
+            args: Vec::new(),
+        },
+    );
+    let mut abi_facts = new_java2rust::external_packs::hdf5_pack_facts();
+    abi_facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("HDF5File", "writeDoubleArray", Staticness::Unknown, 2),
+        rust_path: "hdf5_facade::write_array".to_string(),
+        receiver: ReceiverAbi::FreeFunction,
+        args: vec![FacadeSlot::Borrowed, FacadeSlot::Borrowed],
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        provenance: FactProvenance::UserOverride,
+    });
+
+    let abi_target = plan_call_target_with_facts_and_arity(
+        Some(&hdf5_receiver),
+        "writeDoubleArray",
+        2,
+        None,
+        &abi_facts,
+        &hdf5_types,
+    );
+    assert!(matches!(
+        abi_target,
+        CallTargetPlan::ExternalFacadeReceiver {
+            ref rust_path,
+            receiver_abi: ReceiverAbi::FreeFunction,
+            ..
+        } if rust_path == "hdf5_facade::write_array"
+    ));
+    assert_eq!(
+        apply_call_target(
+            &abi_target,
+            Some(RustExpr::Var("hdf5".to_string())),
+            vec![
+                RustExpr::Literal("\"/metrics\"".to_string()),
+                RustExpr::Var("values".to_string()),
+            ],
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("hdf5_facade::write_array".to_string())),
+            args: vec![
+                RustExpr::Var("hdf5".to_string()),
+                RustExpr::Literal("\"/metrics\"".to_string()),
+                RustExpr::Var("values".to_string()),
+            ],
+        }
+    );
+}
+
+#[test]
 fn static_external_owner_argument_shapes_use_external_effect_facts() {
     let signatures = SignaturePlan::default();
     let mut facts = FactSet::default();
@@ -10569,12 +10636,13 @@ class ExternalFacadeDisplayEquality {
 
 #[test]
 fn call_plan_recovers_normalized_static_utility_owner_receivers() {
+    let facts = new_java2rust::external_packs::broad_hellbender_utils_pack_facts();
     assert!(matches!(
         plan_call_target_with_facts(
             Some(&Expr::Var("i_o_utils".to_string())),
             "getPath",
             None,
-            &FactSet::default(),
+            &facts,
             &new_java2rust::types::TypeEnv::default(),
         ),
         CallTargetPlan::StaticOwner {
@@ -10590,7 +10658,7 @@ fn call_plan_recovers_normalized_static_utility_owner_receivers() {
             Some(&Expr::Var("i_o_utils".to_string())),
             "getPath",
             None,
-            &FactSet::default(),
+            &facts,
             &shadowed_types,
         ),
         CallTargetPlan::FallbackReceiver { .. }
@@ -10807,9 +10875,9 @@ class UsesOwnedOptionalExternalGetter {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("let name: Option<String> = cursor.get_name(\"name\".to_string().as_str());"),
+        translation.rust.contains(
+            "let name: Option<String> = db_facade::get_name(cursor, \"name\".to_string().as_str());"
+        ),
         "{}",
         translation.rust
     );
@@ -10844,7 +10912,7 @@ class UsesExternalByteArrayReturn {
 
     assert!(
         translation.rust.contains(
-            "cursor.get_bytes(\"name\".to_string().as_str()).map(|bytes| bytes.into_iter().map(|byte| byte as i8).collect::<Vec<_>>())"
+            "db_facade::get_bytes(cursor, \"name\".to_string().as_str()).map(|bytes| bytes.into_iter().map(|byte| byte as i8).collect::<Vec<_>>())"
         ),
         "{}",
         translation.rust
@@ -10883,7 +10951,7 @@ class OptionalExternalReceiverCall {
     assert!(
         translation
             .rust
-            .contains("record.as_ref().unwrap().length()"),
+            .contains("io_facade::length(record.as_ref().unwrap())"),
         "{}",
         translation.rust
     );
@@ -10929,7 +10997,7 @@ class OptionalExternalMutatingReceiverCall {
     assert!(
         translation
             .rust
-            .contains("record.as_mut().unwrap().set_flag(true);"),
+            .contains("io_facade::set_flag(record.as_mut().unwrap(), true);"),
         "{}",
         translation.rust
     );
@@ -11036,24 +11104,14 @@ class Hdf5FacadeCall {
     );
 
     assert!(
-        translation.rust.contains("hdf5.write_double_array"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        translation.rust.contains("library.load()"),
-        "{}",
-        translation.rust
-    );
-    assert!(
-        !translation
+        translation
             .rust
             .contains("hdf5_pure_rust::write_double_array"),
         "{}",
         translation.rust
     );
     assert!(
-        !translation.rust.contains("hdf5_pure_rust::load"),
+        translation.rust.contains("hdf5_pure_rust::load"),
         "{}",
         translation.rust
     );
@@ -11084,37 +11142,37 @@ class SqliteFacadeCall {
     );
 
     assert!(
-        translation.rust.contains("config.create_connection"),
+        translation.rust.contains("sqlite::create_connection"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("statement.execute_query()"),
+        translation.rust.contains("sqlite::execute_query"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("statement.clear_parameters()"),
+        translation.rust.contains("sqlite::clear_parameters"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("results.get_string"),
+        translation.rust.contains("sqlite::get_string"),
         "{}",
         translation.rust
     );
     assert!(
-        translation.rust.contains("results.get_long"),
+        translation.rust.contains("sqlite::get_long"),
         "{}",
         translation.rust
     );
     assert!(
-        !translation.rust.contains("sqlite::prepare_statement"),
+        translation.rust.contains("sqlite::prepare_statement"),
         "{}",
         translation.rust
     );
     assert!(
-        !translation.rust.contains("sqlite::execute_query"),
+        translation.rust.contains("sqlite::execute_query"),
         "{}",
         translation.rust
     );
@@ -12367,7 +12425,10 @@ class Holder {
     );
     assert!(
         translation.rust.contains("helper.consume(self.value);")
-            || translation.rust.contains("helper.consume(&self.value);"),
+            || translation.rust.contains("helper.consume(&self.value);")
+            || translation
+                .rust
+                .contains("helper.consume(self.value.clone());"),
         "{}",
         translation.rust
     );
@@ -12415,10 +12476,10 @@ class Holder {
     assert!(
         translation
             .rust
-            .contains("external_util::consume(self.workspace.clone()")
+            .contains("ExternalUtil::consume(self.workspace.clone()")
             && !translation
                 .rust
-                .contains("external_util::consume(self.workspace);"),
+                .contains("ExternalUtil::consume(self.workspace);"),
         "{}",
         translation.rust
     );
@@ -12468,11 +12529,11 @@ class Holder {
     assert!(
         translation
             .rust
-            .contains("external_util::consume(workspace_dir.clone()")
+            .contains("ExternalUtil::consume(workspace_dir.clone()")
             && translation.rust.contains("return workspace_dir;")
             && !translation
                 .rust
-                .contains("external_util::consume(workspace_dir);"),
+                .contains("ExternalUtil::consume(workspace_dir);"),
         "{}",
         translation.rust
     );
@@ -12549,7 +12610,7 @@ class Holder {
         translation
             .rust
             .contains(".set_workspace(workspace.clone()")
-            && translation.rust.contains("external_util::exists(workspace")
+            && translation.rust.contains("ExternalUtil::exists(workspace")
             && translation.rust.contains("return workspace;")
             && !translation.rust.contains(".set_workspace(workspace)"),
         "{}",
@@ -13209,6 +13270,253 @@ fn external_nullable_getter_return_shape_flows_as_owned_optional_carrier() {
         actual,
         LoweredType::from_java(new_java2rust::types::optional_java_type(JavaType::String))
     );
+}
+
+#[test]
+fn facade_abi_borrowed_return_shape_does_not_require_rust_type_string_heuristic() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getName".to_string(),
+        receiver_type: Some("ExternalRecord".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method(
+            "ExternalRecord".to_string(),
+            "getName".to_string(),
+            Staticness::Unknown,
+            0,
+        ),
+        rust_path: "external_facade::name".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: Vec::new(),
+        return_slot: FacadeSlot::Borrowed,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        provenance: FactProvenance::UserOverride,
+    });
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "record",
+        JavaType::Named {
+            name: "ExternalRecord".to_string(),
+            args: Vec::new(),
+        },
+    );
+
+    let actual = external_call_lowered_type(
+        Some(&Expr::Var("record".to_string())),
+        "getName",
+        0,
+        &facts,
+        &types,
+        Some("Owner"),
+    )
+    .expect("facade ABI should select a borrowed return shape");
+
+    assert_eq!(
+        actual,
+        LoweredType::rust_borrowed_return(JavaType::String, "external_facade::name".to_string())
+    );
+}
+
+#[test]
+fn legacy_rust_return_shape_uses_explicit_slot_not_type_string_heuristic() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getName".to_string(),
+        receiver_type: Some("ExternalRecord".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    facts
+        .external_rust_return_type_facts
+        .push(ExternalRustReturnTypeFact {
+            receiver_type: Some("ExternalRecord".to_string()),
+            method_name: "getName".to_string(),
+            arg_count: Some(0),
+            rust_type_name: "&str".to_string(),
+            return_slot: FacadeSlot::Owned,
+            provenance: FactProvenance::UserOverride,
+        });
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "record",
+        JavaType::Named {
+            name: "ExternalRecord".to_string(),
+            args: Vec::new(),
+        },
+    );
+
+    let actual = external_call_lowered_type(
+        Some(&Expr::Var("record".to_string())),
+        "getName",
+        0,
+        &facts,
+        &types,
+        Some("Owner"),
+    )
+    .expect("legacy Rust return fact should produce a lowered return carrier");
+
+    assert_eq!(actual, LoweredType::from_java(JavaType::String));
+}
+
+#[test]
+fn facade_abi_byte_array_return_shape_does_not_require_rust_type_string_heuristic() {
+    let mut facts = FactSet::default();
+    let byte_array = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)));
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "readBytes".to_string(),
+        receiver_type: Some("BinaryFile".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Unknown,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(byte_array.clone()),
+        return_nullability: NullabilityState::MaybeNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method(
+            "BinaryFile".to_string(),
+            "readBytes".to_string(),
+            Staticness::Unknown,
+            0,
+        ),
+        rust_path: "binary_facade::read_bytes".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: Vec::new(),
+        return_slot: FacadeSlot::Optional(Box::new(FacadeSlot::Owned)),
+        result: ResultAbi::OptionWrapped,
+        borrow_source: None,
+        provenance: FactProvenance::UserOverride,
+    });
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "file",
+        JavaType::Named {
+            name: "BinaryFile".to_string(),
+            args: Vec::new(),
+        },
+    );
+
+    let actual = external_call_lowered_type(
+        Some(&Expr::Var("file".to_string())),
+        "readBytes",
+        0,
+        &facts,
+        &types,
+        Some("Owner"),
+    )
+    .expect("facade ABI should select a byte-array return shape");
+
+    assert_eq!(
+        actual,
+        LoweredType::rust_unsigned_byte_array_return(
+            new_java2rust::types::optional_java_type(byte_array),
+            true,
+        )
+    );
+}
+
+#[test]
+fn facade_abi_result_shape_drives_external_call_fallibility() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "read".to_string(),
+        receiver_type: Some("Reader".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("Reader", "read", Staticness::Unknown, 0),
+        rust_path: "reader_facade::Reader::read".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: Vec::new(),
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::ResultWrapped,
+        borrow_source: None,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "reader",
+        JavaType::Named {
+            name: "Reader".to_string(),
+            args: Vec::new(),
+        },
+    );
+
+    assert!(external_call_returns_rust_result(
+        Some(&Expr::Var("reader".to_string())),
+        "read",
+        0,
+        &facts,
+        &types,
+        Some("Owner"),
+    ));
+}
+
+#[test]
+fn facade_abi_plain_result_overrides_thrown_exception_guess() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getName".to_string(),
+        receiver_type: Some("Reader".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: vec![JavaType::Named {
+            name: "IOException".to_string(),
+            args: Vec::new(),
+        }],
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("Reader", "getName", Staticness::Unknown, 0),
+        rust_path: "reader_facade::Reader::get_name".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: Vec::new(),
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "reader",
+        JavaType::Named {
+            name: "Reader".to_string(),
+            args: Vec::new(),
+        },
+    );
+
+    assert!(!external_call_returns_rust_result(
+        Some(&Expr::Var("reader".to_string())),
+        "getName",
+        0,
+        &facts,
+        &types,
+        Some("Owner"),
+    ));
 }
 
 #[test]
@@ -20776,7 +21084,7 @@ class Shelter {
     assert!(
         translation
             .rust
-            .contains("self.resident = Box::new(dog) as Box<dyn Animal>;"),
+            .contains("self.resident = Some(Box::new(dog) as Box<dyn Animal>);"),
         "{}",
         translation.rust
     );
@@ -20824,7 +21132,7 @@ class Shelter {
     assert!(
         translation
             .rust
-            .contains("self.visit(self.resident.as_ref() as &dyn Animal);"),
+            .contains("self.visit(self.resident.as_ref().expect(\"Java null receiver\").as_ref() as &dyn Animal);"),
         "{}",
         translation.rust
     );
@@ -20906,7 +21214,7 @@ class Registry {
     assert!(
         translation
             .rust
-            .contains("self.current = Box::new(metric) as Box<dyn Metric>;"),
+            .contains("self.current = Some(Box::new(metric) as Box<dyn Metric>);"),
         "{}",
         translation.rust
     );
@@ -21708,6 +22016,7 @@ class UseExternalConstant {
             field_name: "NAME".to_string(),
         },
         field_type: Some(JavaType::String),
+        field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
     });
 
@@ -21756,6 +22065,7 @@ class UseExternalPrimitiveConstant {
             field_name: "MAX_COUNT".to_string(),
         },
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
     });
 
@@ -21842,6 +22152,7 @@ class UseExternalNamedConstant {
             name: "ExternalToken".to_string(),
             args: Vec::new(),
         }),
+        field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
     });
 
@@ -21922,6 +22233,7 @@ class ExternalConstantFacadeCollision {
             field_name: "NAME".to_string(),
         },
         field_type: Some(JavaType::String),
+        field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
     });
 
@@ -22105,6 +22417,7 @@ class UseExternalRecord {
             field_name: "batchCount".to_string(),
         },
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.external_field_facts.push(ExternalFieldFact {
@@ -22113,6 +22426,7 @@ class UseExternalRecord {
             field_name: "totalBatchCount".to_string(),
         },
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
     });
 
@@ -22125,7 +22439,7 @@ class UseExternalRecord {
     assert!(
         translation
             .rust
-            .contains("#[derive(Clone, Debug, Default)]\npub struct ExternalRecord {"),
+            .contains("#[derive(Clone, Debug)]\npub struct ExternalRecord {"),
         "{}",
         translation.rust
     );
@@ -22220,6 +22534,7 @@ class UseExternalBuilder {
             name: "Product".to_string(),
             args: Vec::new(),
         }),
+        field_kind: ExternalFieldKind::NestedType,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.external_api_effect_facts.push(ExternalApiEffectFact {
@@ -23648,6 +23963,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
                 name: "Validator".to_string(),
                 args: Vec::new(),
             }),
+            field_kind: ExternalFieldKind::StaticFinal,
             provenance: FactProvenance::ExternalLibraryPack,
         });
     let mut external_types = new_java2rust::types::TypeEnv::new();
@@ -23831,7 +24147,7 @@ class UsesThrowingExternalInitializer {
     assert!(
         translation
             .rust
-            .contains("let loaded: bool = library.load()?;"),
+            .contains("let loaded: bool = hdf5_facade::load(library)?;"),
         "{}",
         translation.rust
     );
@@ -23874,8 +24190,8 @@ class UsesRustFallibilityFacts {
         translation.rust
     );
     assert!(
-        translation.rust.contains("file.get_file()")
-            && !translation.rust.contains("file.get_file()?"),
+        translation.rust.contains("hdf5_facade::get_file(file)")
+            && !translation.rust.contains("hdf5_facade::get_file(file)?"),
         "{}",
         translation.rust
     );
@@ -24102,7 +24418,7 @@ class UsesExternalCollectionLikeFacadeNoAliasArg {
 
     assert!(
         translation.rust.contains(
-            "intervals.add(target.clone()/* TODO(translation): validate added clone */);"
+            "htsjdk_facade::add(intervals, target.clone()/* TODO(translation): validate added clone */);"
         ),
         "{}",
         translation.rust
@@ -24184,7 +24500,7 @@ class UsesBorrowedArrayArgumentFacts {
     assert!(
         translation
             .rust
-            .contains("vec![vec![1f64, 2f64], vec![3f64, 4f64]].as_slice()"),
+            .contains("&ndarray::arr2(&[[1f64, 2f64], [3f64, 4f64]])"),
         "{}",
         translation.rust
     );
@@ -24275,7 +24591,7 @@ class ArrowRustScalarReturn {
     assert!(
         translation
             .rust
-            .contains("let rows: i32 = root.get_row_count().try_into().unwrap();"),
+            .contains("let rows: i32 = arrow_facade::get_row_count(root).try_into().unwrap();"),
         "{}",
         translation.rust
     );
@@ -24421,7 +24737,7 @@ class MappedExternalFacadeReturn {
     assert!(
         translation
             .rust
-            .contains("let record = reader.read_record();"),
+            .contains("let record = dep_facade::read_record(reader);"),
         "{}",
         translation.rust
     );
@@ -24478,7 +24794,7 @@ class ExactRustReturnSupport {
         translation.rust
     );
     assert!(
-        translation.rust.contains("reader.get_schema()"),
+        translation.rust.contains("dep_facade::get_schema(reader)"),
         "{}",
         translation.rust
     );
@@ -24514,6 +24830,60 @@ class ExactRustReturnSupport {
 }
 
 #[test]
+fn external_facade_support_uses_structured_abi_for_stub_return_signatures() {
+    let mut facts = parse_external_pack_manifest(
+        r#"
+external-pack dep Reader rust-crate-mapping mapped target=dep_facade
+external-pack dep Schema rust-crate-mapping mapped target=dep_facade
+external-pack-object dep Reader concrete
+external-pack-object dep Schema concrete
+external-pack-api dep Reader getSchema mapped getter read-only maybe-null args=0 return=Schema rust=get_schema
+"#,
+    )
+    .facts;
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("Reader", "getSchema", Staticness::Unknown, 0),
+        rust_path: "dep_facade::Reader::get_schema".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: Vec::new(),
+        return_slot: FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed)),
+        result: ResultAbi::OptionWrapped,
+        borrow_source: None,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class StructuredAbiReturnSupport {
+    void run(Reader reader) {
+        Object schema = reader.getSchema();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("fn get_schema(&self) -> Option<&dep_facade::Schema>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("fn get_schema(&self) -> Option<&dep_facade::Schema> { None }"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("rust-return"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_facade_support_does_not_require_default_for_crate_return_stubs() {
     let facts = parse_external_pack_manifest(
         r#"
@@ -24542,7 +24912,9 @@ class NonDefaultFacadeReturnStub {
         translation.rust
     );
     assert!(
-        translation.rust.contains("let record = reader.read();"),
+        translation
+            .rust
+            .contains("let record = dep_facade::read(reader);"),
         "{}",
         translation.rust
     );
@@ -24761,7 +25133,7 @@ class ExternalDynTraitFacadeSupport {
     assert!(
         translation
             .rust
-            .contains("return interval.contains(other);"),
+            .contains("return htsjdk_facade::contains(interval, other);"),
         "{}",
         translation.rust
     );
@@ -24887,13 +25259,13 @@ class BorrowedArrowGetterReturn {
     assert!(
         translation
             .rust
-            .contains("Box::new(root.get_schema().clone()) as Box<dyn std::any::Any>"),
+            .contains("Box::new(arrow_facade::get_schema(root).clone()) as Box<dyn std::any::Any>"),
         "{}",
         translation.rust
     );
     assert!(
         translation.rust.contains(
-            "root.get_vector(\"id\".to_string().as_str()).map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>)"
+            "arrow_facade::get_vector(root, \"id\".to_string().as_str()).map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>)"
         ),
         "{}",
         translation.rust
@@ -24978,7 +25350,7 @@ class NonNullExternalObjectInitializer {
 
     assert!(
         translation.rust.contains(
-            "let schema: Box<dyn std::any::Any> = Box::new(root.get_schema().clone()) as Box<dyn std::any::Any>;"
+            "let schema: Box<dyn std::any::Any> = Box::new(schema_facade::get_schema(root).clone()) as Box<dyn std::any::Any>;"
         ),
         "{}",
         translation.rust
@@ -24986,7 +25358,7 @@ class NonNullExternalObjectInitializer {
     assert!(
         translation
             .rust
-            .contains("let vector: Option<Box<dyn std::any::Any>> = root.get_vector"),
+            .contains("let vector: Option<Box<dyn std::any::Any>> = schema_facade::get_vector"),
         "{}",
         translation.rust
     );
@@ -25025,9 +25397,9 @@ class BorrowedPathFacadeReturn {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("Box::new(reader.get_file().to_path_buf()) as Box<dyn std::any::Any>"),
+        translation.rust.contains(
+            "Box::new(hdf5_facade::get_file(reader).to_path_buf()) as Box<dyn std::any::Any>"
+        ),
         "{}",
         translation.rust
     );
@@ -25724,6 +26096,33 @@ fn stream_shape_owns_lambda_body_borrowed_string_views() {
 
     let owned_shape = infer_stream_lambda_body_shape(&parse_expr("value.toLowerCase()"), &default);
     assert_eq!(owned_shape, owned_string_value_shape());
+}
+
+#[test]
+fn stream_shape_uses_shared_call_plan_for_lambda_call_results() {
+    let default = RustSlotShape::conservative(JavaType::String);
+    let facts = FactSet::default();
+
+    let int_shape = infer_stream_lambda_body_shape_with_facts(
+        &parse_expr("Integer.parseInt(value)"),
+        &default,
+        &TypeEnv::new(),
+        &facts,
+    );
+    assert_eq!(int_shape.java_ty, JavaType::Primitive(PrimitiveType::Int));
+
+    let mut env = TypeEnv::new();
+    env.insert_local("value", JavaType::String);
+    let length_shape = infer_stream_lambda_body_shape_with_facts(
+        &parse_expr("value.length()"),
+        &default,
+        &env,
+        &facts,
+    );
+    assert_eq!(
+        length_shape.java_ty,
+        JavaType::Primitive(PrimitiveType::Int)
+    );
 }
 
 #[test]
@@ -26822,9 +27221,7 @@ fn array_plan_and_lowering_own_java_array_shape_before_orchestrator() {
                 RustExpr::Var("cols".to_string()),
             ],
         ),
-        RustExpr::Raw(
-            "/* Java array creation: Primitive(Int)[rows][cols] */ Vec::new()".to_string()
-        )
+        RustExpr::Raw("ndarray::Array2::from_elem((rows as usize, cols as usize), 0)".to_string())
     );
     assert_eq!(
         render_array_expr(
@@ -27904,7 +28301,7 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value| { let pieces = value.split(\",\").collect::<Vec<_>>(); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
+            "values.iter().map(|value| { let pieces = java_string_split(value.as_str(), \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
                 .to_string()
         )
     );

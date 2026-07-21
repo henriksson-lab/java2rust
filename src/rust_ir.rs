@@ -75,6 +75,7 @@ pub enum RustType {
     Char,
     String,
     Vec(Box<RustType>),
+    Array2(Box<RustType>),
     Slice(Box<RustType>),
     Option(Box<RustType>),
     Named(String),
