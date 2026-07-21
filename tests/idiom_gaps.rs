@@ -6,12 +6,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use new_java2rust::facts::{
     ExternalApiArgumentEffectFact, ExternalApiEffectFact, ExternalApiRole,
     ExternalArgumentAliasPolicy, ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet,
-    FieldKey, NullabilityState, ReceiverMutabilityFact,
+    FieldKey, NullabilityState, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
+    ReceiverMutabilityFact, TypeCapabilityOverride,
 };
 use new_java2rust::java_ir::JavaType;
 use new_java2rust::{
-    translate_source, translate_source_with_context_sources,
-    translate_source_with_context_summary_sources, translate_source_with_facts,
+    external_packs::parse_external_pack_manifest, translate_source,
+    translate_source_with_context_sources, translate_source_with_context_summary_sources,
+    translate_source_with_facts,
 };
 
 fn idiom_gap(path: &str) -> String {
@@ -2623,6 +2625,211 @@ fn translates_external_exception_super_constructor_without_placeholder() {
                 .contains("super(...) requires inheritance lowering"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn corpus_picard_imported_constants_need_source_summary_facts() {
+    let translation = translate_source(&idiom_gap("SourceSummaryConstantAcrossPackage.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("HelpConstants::DOC_CAT_BASE_CALLING.downcast::<String>()")
+            && translation.rust.contains("invalid Java cast"),
+        "{}",
+        translation.rust
+    );
+
+    let constants = r#"
+package picard.util.help;
+
+public final class HelpConstants {
+    public static final String DOC_CAT_BASE_CALLING = "Base Calling";
+    public static final String DOC_CAT_BASE_CALLING_SUMMARY = "Tools that process sequencing machine data";
+}
+"#;
+    let with_summary = translate_source_with_context_summary_sources(
+        &idiom_gap("SourceSummaryConstantAcrossPackage.java"),
+        &[constants.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        with_summary
+            .rust
+            .contains("return HelpConstants::DOC_CAT_BASE_CALLING.to_string();")
+            && !with_summary.rust.contains("downcast::<String>()"),
+        "{}",
+        with_summary.rust
+    );
+}
+
+#[test]
+fn corpus_genomicsdb_file_load_constructor_delegation_exposes_exception_type_gap() {
+    let translation = translate_source(&idiom_gap("FileLoadConstructorDelegation.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut __java_self = Self::new();")
+            && translation.rust.contains("__java_self.load(source);")
+            && translation
+                .rust
+                .contains("JavaException::new(\"IllegalArgumentException\"")
+            && translation
+                .rust
+                .contains("Err(e) if e.is_instance(&[\"URISyntaxException\"])")
+            && !translation
+                .rust
+                .contains("Err(e) if e.is_instance(&[\"IOException\"])")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn corpus_genomicsdb_qualified_nested_builders_still_collide_on_simple_builder_name() {
+    let translation = translate_source(&idiom_gap("QualifiedNestedBuilderChain.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("let mapping_builder: VidMappingBuilder = mapping.to_builder();")
+            && translation.rust.contains(
+                "let field_builder: FieldInfoBuilder = mapping_builder.get_fields_builder(index);"
+            )
+            && translation.rust.matches("pub struct Builder").count() >= 2
+            && translation.rust.contains("return mapping_builder.build();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn corpus_spark_rdd_pipeline_documents_lambda_method_reference_and_null_comparator_gaps() {
+    let translation = translate_source(&idiom_gap("SparkRddVariantPipeline.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("variants.map_to_pair(|variant| Tuple2::new(variant, None))")
+            && translation
+                .rust
+                .contains("return sorted.map(|value| value._1());")
+            && translation.rust.contains("if false")
+            && translation
+                .rust
+                .contains("TODO(translation): validate added clone")
+            && !translation
+                .rust
+                .contains("unsupported Java expression: lambda"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn corpus_disq_external_chain_needs_explicit_boundary_not_self_recursion_warning() {
+    let translation = translate_source(&idiom_gap("DisqExternalBoundaryChain.java"));
+
+    assert!(
+        translation.rust.contains(
+            "HtsjdkVariantsRddStorage::make_default(ctx).read(input, intervals).get_variants()"
+        ) && translation
+            .rust
+            .contains("TabixIndexWriteOption::from_boolean(true)")
+            && translation.diagnostics.has_code("recursion_tco_fallback"),
+        "rust:
+{}
+diagnostics:{:?}",
+        translation.rust,
+        translation.diagnostics
+    );
+}
+
+#[test]
+fn corpus_ffi_boundary_manifest_shapes_native_handover_calls() {
+    let manifest = parse_external_pack_manifest(
+        r#"
+        external-pack native.runtime native.runtime ffi-boundary conservative target=native_runtime
+        external-pack-api native.runtime native.runtime.NativeLibrary openArray conservative getter unknown definitely-non-null return=native.runtime.NativeArray
+        external-pack-api native.runtime native.runtime.NativeArray query conservative getter read-only definitely-non-null return=native.runtime.NativeQuery
+        external-pack-api native.runtime native.runtime.NativeQuery count conservative getter read-only definitely-non-null return=int
+        external-pack-api native.runtime native.runtime.NativeArray close conservative mutator mutates-receiver definitely-non-null return=void
+        external-pack-owned-recovery native.runtime native.runtime.NativeArray ffi-owned-handle
+        "#,
+    );
+    assert!(
+        manifest.diagnostics.is_empty(),
+        "manifest diagnostics: {:?}",
+        manifest.diagnostics
+    );
+
+    let translation =
+        translate_source_with_facts(&idiom_gap("FfiNativeHandoverCall.java"), &manifest.facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("NativeLibrary::open_array(workspace)")
+            && translation
+                .rust
+                .contains("pub type NativeLibrary = NativeRuntimeNativeLibrary;")
+            && translation
+                .rust
+                .contains("compile_error!(\"unsupported Java statement: try/catch/finally\")")
+            && translation.diagnostics.has_code("recursion_tco_fallback"),
+        "rust:\n{}\ndiagnostics:{:?}",
+        translation.rust,
+        translation.diagnostics
+    );
+}
+
+#[test]
+fn corpus_ffi_owned_handle_transfer_requires_explicit_handover() {
+    let mut facts = FactSet::default();
+    let native_array = JavaType::Named {
+        name: "NativeArray".to_string(),
+        args: Vec::new(),
+    };
+    facts
+        .owned_recovery_capability_facts
+        .push(OwnedRecoveryCapabilityFact {
+            type_name: "NativeArray".to_string(),
+            capability: OwnedRecoveryCapability::FfiOwnedHandle {
+                java_ty: native_array,
+            },
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "NativeArray".to_string(),
+            copy: Some(false),
+            clone: Some(false),
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: None,
+            object_safe_trait: None,
+            provenance: FactProvenance::UserOverride,
+        });
+
+    let translation =
+        translate_source_with_facts(&idiom_gap("FfiOwnedHandleTransfer.java"), &facts);
+
+    assert!(
+        translation
+            .diagnostics
+            .has_code("signature_owned_recovery_requires_ffi_transfer"),
+        "rust:\n{}\ndiagnostics:{:?}",
+        translation.rust,
+        translation.diagnostics
     );
 }
 

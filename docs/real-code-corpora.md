@@ -30,6 +30,7 @@ Tier 1 should be the first real-code gate:
 - `varscan`
 - `htsjdk-fastq`
 - `htsjdk-vcf`
+- `picard-programgroups`
 - `biojava-aaprop`
 - `biojava-alignment`
 - `jhlabs`
@@ -39,6 +40,8 @@ dependency-heavy corpuses:
 
 - `jsoup`
 - `fastqc`
+- `gatk-genomicsdb`
+- `gatk-disq-spark-datasources`
 
 Tier 3 is for larger real project coverage:
 
@@ -63,6 +66,9 @@ Tier 4 is the stress corpus:
 | `varscan` | 18 | 1 | `/home/mahogny/github/claude/java2rust/testdata/varscan` |
 | `htsjdk-fastq` | 8 | 1 | `/home/mahogny/github/claude/java2rust/testdata/htsjdk_fastq` |
 | `htsjdk-vcf` | 32 | 1 | `/home/mahogny/github/claude/java2rust/testdata/htsjdk_vcf` |
+| `picard-programgroups` | 11 | 1 | `/home/mahogny/github/claude/java2rust/testdata/picard/src/main/java/picard/cmdline/programgroups` |
+| `gatk-genomicsdb` | 6 | 2 | `/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/tools/genomicsdb` |
+| `gatk-disq-spark-datasources` | 10 | 2 | `/home/mahogny/github/claude/java2rust/testdata/gatk/src/main/java/org/broadinstitute/hellbender/engine/spark/datasources` |
 | `biojava-aaprop` | 33 | 1 | `/home/mahogny/github/claude/java2rust/testdata/biojava_aaprop` |
 | `biojava-alignment` | 53 | 1 | `/home/mahogny/github/claude/java2rust/testdata/biojava_alignment` |
 | `jhlabs` | 203 | 1 | `/home/mahogny/github/claude/java2rust/testdata/jhlabs` |
