@@ -2106,21 +2106,16 @@ fn execute_signature_solver_pass_plan_with_stats(
         let mut component_changed = true;
         while component_changed {
             stats.component_sweeps += 1;
-            stats.state_clones += 1;
-            let clone_start = std::time::Instant::now();
-            let before = constraints.clone();
-            stats.state_clone_ms += clone_start.elapsed().as_millis();
             let propagation_start = std::time::Instant::now();
-            let (_, propagation_stats) =
-                apply_signature_propagation_sweep_with_stats(constraints, usage);
+            let scope = SignatureMutationScope {
+                analysis,
+                component_index: *component_index,
+            };
+            let (scoped_changed, propagation_stats) =
+                apply_signature_propagation_sweep_with_stats(constraints, usage, Some(scope));
             stats.propagation_sweep_ms += propagation_start.elapsed().as_millis();
             stats.add_propagation_arm_stats(&propagation_stats);
-            let rollback_start = std::time::Instant::now();
-            keep_signature_component_changes_only(constraints, &before, analysis, *component_index);
-            stats.component_rollback_ms += rollback_start.elapsed().as_millis();
-            let change_check_start = std::time::Instant::now();
-            component_changed = constraints != &before;
-            stats.component_change_check_ms += change_check_start.elapsed().as_millis();
+            component_changed = scoped_changed;
             if component_changed {
                 stats.changed_component_sweeps += 1;
             }
@@ -2133,174 +2128,92 @@ fn execute_signature_solver_pass_plan_with_stats(
     (changed, stats)
 }
 
-fn keep_signature_component_changes_only(
-    constraints: &mut SignatureConstraintState,
-    before: &SignatureConstraintState,
-    analysis: &SignatureDependencySccAnalysis,
+#[derive(Debug, Clone, Copy)]
+struct SignatureMutationScope<'a> {
+    analysis: &'a SignatureDependencySccAnalysis,
     component_index: usize,
-) {
-    for (method_key, method_constraints) in &mut constraints.methods {
-        let Some(before_method) = before.methods.get(method_key) else {
-            continue;
-        };
-        for (param_index, param_constraints) in method_constraints.params.iter_mut().enumerate() {
-            let Some(param_name) = method_constraints.param_names.get(param_index) else {
-                continue;
-            };
-            let node = SignatureDependencyNode::MethodParam {
-                method: method_key.clone(),
-                name: param_name.clone(),
-                index: param_index,
-            };
-            if !signature_node_in_component(analysis, &node, component_index)
-                && let Some(before_constraints) = before_method.params.get(param_index)
-            {
-                *param_constraints = before_constraints.clone();
-            }
-        }
-
-        let return_node = SignatureDependencyNode::MethodReturn {
-            method: method_key.clone(),
-        };
-        if !signature_node_in_component(analysis, &return_node, component_index) {
-            method_constraints.return_constraints = before_method.return_constraints.clone();
-        }
-
-        for local_constraints in &mut method_constraints.locals {
-            let node = SignatureDependencyNode::MethodLocal {
-                method: method_key.clone(),
-                name: local_constraints.name.clone(),
-            };
-            if !signature_node_in_component(analysis, &node, component_index)
-                && let Some(before_local) = before_method
-                    .locals
-                    .iter()
-                    .find(|local| local.name == local_constraints.name)
-            {
-                local_constraints.constraints = before_local.constraints.clone();
-            }
-        }
-    }
-
-    for (constructor_key, constructor_constraints) in &mut constraints.constructors {
-        let Some(before_constructor) = before.constructors.get(constructor_key) else {
-            continue;
-        };
-        for (param_index, param_constraints) in
-            constructor_constraints.params.iter_mut().enumerate()
-        {
-            let Some(param_name) = constructor_constraints.param_names.get(param_index) else {
-                continue;
-            };
-            let node = SignatureDependencyNode::ConstructorParam {
-                constructor: constructor_key.clone(),
-                name: param_name.clone(),
-                index: param_index,
-            };
-            if !signature_node_in_component(analysis, &node, component_index)
-                && let Some(before_constraints) = before_constructor.params.get(param_index)
-            {
-                *param_constraints = before_constraints.clone();
-            }
-        }
-
-        for local_constraints in &mut constructor_constraints.locals {
-            let node = SignatureDependencyNode::ConstructorLocal {
-                constructor: constructor_key.clone(),
-                name: local_constraints.name.clone(),
-            };
-            if !signature_node_in_component(analysis, &node, component_index)
-                && let Some(before_local) = before_constructor
-                    .locals
-                    .iter()
-                    .find(|local| local.name == local_constraints.name)
-            {
-                local_constraints.constraints = before_local.constraints.clone();
-            }
-        }
-    }
-
-    for (field_key, field_constraints) in &mut constraints.fields {
-        let node = SignatureDependencyNode::Field {
-            field: field_key.clone(),
-        };
-        if !signature_node_in_component(analysis, &node, component_index)
-            && let Some(before_constraints) = before.fields.get(field_key)
-        {
-            *field_constraints = before_constraints.clone();
-        }
-    }
 }
 
-fn signature_node_in_component(
-    analysis: &SignatureDependencySccAnalysis,
-    node: &SignatureDependencyNode,
-    component_index: usize,
-) -> bool {
-    analysis
-        .component_by_node
-        .get(node)
-        .is_some_and(|actual| *actual == component_index)
+impl SignatureMutationScope<'_> {
+    fn permits(&self, node: &SignatureDependencyNode) -> bool {
+        self.analysis
+            .component_by_node
+            .get(node)
+            .is_some_and(|actual| *actual == self.component_index)
+    }
 }
 
 fn apply_signature_propagation_sweep_with_stats(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> (bool, BTreeMap<String, SignaturePropagationArmProfile>) {
     let mut stats = BTreeMap::new();
     let changed =
         record_signature_propagation_arm(&mut stats, "call_site", || {
-            propagate_call_site_constraints(constraints, usage)
+            propagate_call_site_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "constructor_call_site", || {
-            propagate_constructor_call_site_constraints(constraints, usage)
+            propagate_constructor_call_site_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "constructor_delegation", || {
-            propagate_constructor_delegation_constraints(constraints, usage)
+            propagate_constructor_delegation_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "call_argument_to_callee", || {
-            propagate_call_argument_constraints_to_callees(constraints, usage)
+            propagate_call_argument_constraints_to_callees(constraints, usage, scope)
         }) | record_signature_propagation_arm(
             &mut stats,
             "constructor_call_argument_to_callee",
-            || propagate_constructor_call_argument_constraints_to_callees(constraints, usage),
+            || {
+                propagate_constructor_call_argument_constraints_to_callees(
+                    constraints,
+                    usage,
+                    scope,
+                )
+            },
         ) | record_signature_propagation_arm(
             &mut stats,
             "constructor_delegation_argument_to_callee",
-            || propagate_constructor_delegation_argument_constraints_to_callees(constraints, usage),
+            || {
+                propagate_constructor_delegation_argument_constraints_to_callees(
+                    constraints,
+                    usage,
+                    scope,
+                )
+            },
         ) | record_signature_propagation_arm(&mut stats, "null_call_argument_to_callee", || {
-            propagate_null_call_argument_constraints_to_callees(constraints, usage)
+            propagate_null_call_argument_constraints_to_callees(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "call_result_to_binding", || {
-            propagate_call_result_constraints_to_bindings(constraints, usage)
+            propagate_call_result_constraints_to_bindings(constraints, usage, scope)
         }) | record_signature_propagation_arm(
             &mut stats,
             "constructor_call_result_to_binding",
-            || propagate_constructor_call_result_constraints_to_bindings(constraints, usage),
+            || propagate_constructor_call_result_constraints_to_bindings(constraints, usage, scope),
         ) | record_signature_propagation_arm(&mut stats, "call_result_to_field", || {
-            propagate_call_result_constraints_to_fields(constraints, usage)
+            propagate_call_result_constraints_to_fields(constraints, usage, scope)
         }) | record_signature_propagation_arm(
             &mut stats,
             "constructor_call_result_to_field",
-            || propagate_constructor_call_result_constraints_to_fields(constraints, usage),
+            || propagate_constructor_call_result_constraints_to_fields(constraints, usage, scope),
         ) | record_signature_propagation_arm(&mut stats, "call_result_to_return", || {
-            propagate_call_result_constraints_to_returns(constraints, usage)
+            propagate_call_result_constraints_to_returns(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "method_local_alias", || {
-            propagate_method_local_alias_constraints(constraints, usage)
+            propagate_method_local_alias_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "method_local_alias_source", || {
-            propagate_method_local_alias_source_constraints(constraints, usage)
+            propagate_method_local_alias_source_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "constructor_local_alias", || {
-            propagate_constructor_local_alias_constraints(constraints, usage)
+            propagate_constructor_local_alias_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "constructor_local_alias_source", || {
-            propagate_constructor_local_alias_source_constraints(constraints, usage)
+            propagate_constructor_local_alias_source_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "method_field_storage", || {
-            propagate_method_field_storage_constraints(constraints, usage)
+            propagate_method_field_storage_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "constructor_field_storage", || {
-            propagate_constructor_field_storage_constraints(constraints, usage)
+            propagate_constructor_field_storage_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "method_return_binding", || {
-            propagate_method_return_binding_constraints(constraints, usage)
+            propagate_method_return_binding_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "method_binding_return", || {
-            propagate_method_binding_return_constraints(constraints, usage)
+            propagate_method_binding_return_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "method_return_field", || {
-            propagate_method_return_field_constraints(constraints, usage)
+            propagate_method_return_field_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "method_field_return", || {
-            propagate_method_field_return_constraints(constraints, usage)
+            propagate_method_field_return_constraints(constraints, usage, scope)
         });
     (changed, stats)
 }
@@ -2392,6 +2305,7 @@ fn push_unique_signature_constraints(
 fn propagate_call_site_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -2460,10 +2374,16 @@ fn propagate_call_site_constraints(
     for (method_key, param_name, constraint) in pending {
         changed |= match constraint {
             PendingSignatureConstraint::Binding(constraint) => {
-                add_method_binding_constraint(constraints, &method_key, &param_name, constraint)
+                add_method_binding_constraint_scoped(
+                    constraints,
+                    &method_key,
+                    &param_name,
+                    constraint,
+                    scope,
+                )
             }
             PendingSignatureConstraint::Return(constraint) => {
-                add_method_return_constraint(constraints, &method_key, constraint)
+                add_method_return_constraint_scoped(constraints, &method_key, constraint, scope)
             }
         };
     }
@@ -2473,6 +2393,7 @@ fn propagate_call_site_constraints(
 fn propagate_constructor_call_site_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, constructor_usage) in &usage.constructors {
@@ -2532,11 +2453,12 @@ fn propagate_constructor_call_site_constraints(
     }
     let mut changed = false;
     for (constructor_key, binding_name, constraint) in pending {
-        changed |= add_constructor_binding_constraint(
+        changed |= add_constructor_binding_constraint_scoped(
             constraints,
             &constructor_key,
             &binding_name,
             constraint,
+            scope,
         );
     }
     changed
@@ -2545,6 +2467,7 @@ fn propagate_constructor_call_site_constraints(
 fn propagate_constructor_delegation_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, constructor_usage) in &usage.constructors {
@@ -2604,11 +2527,12 @@ fn propagate_constructor_delegation_constraints(
     }
     let mut changed = false;
     for (constructor_key, binding_name, constraint) in pending {
-        changed |= add_constructor_binding_constraint(
+        changed |= add_constructor_binding_constraint_scoped(
             constraints,
             &constructor_key,
             &binding_name,
             constraint,
+            scope,
         );
     }
     changed
@@ -2617,6 +2541,7 @@ fn propagate_constructor_delegation_constraints(
 fn propagate_call_argument_constraints_to_callees(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -2674,8 +2599,13 @@ fn propagate_call_argument_constraints_to_callees(
             .and_then(|method_constraints| method_constraints.param_names.get(arg_index))
             .cloned();
         if let Some(param_name) = param_name {
-            changed |=
-                add_method_param_constraint(constraints, &callee_key, &param_name, constraint);
+            changed |= add_method_param_constraint_scoped(
+                constraints,
+                &callee_key,
+                &param_name,
+                constraint,
+                scope,
+            );
         }
     }
     changed
@@ -2684,6 +2614,7 @@ fn propagate_call_argument_constraints_to_callees(
 fn propagate_constructor_call_argument_constraints_to_callees(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, constructor_usage) in &usage.constructors {
@@ -2745,8 +2676,13 @@ fn propagate_constructor_call_argument_constraints_to_callees(
             .and_then(|method_constraints| method_constraints.param_names.get(arg_index))
             .cloned();
         if let Some(param_name) = param_name {
-            changed |=
-                add_method_param_constraint(constraints, &callee_key, &param_name, constraint);
+            changed |= add_method_param_constraint_scoped(
+                constraints,
+                &callee_key,
+                &param_name,
+                constraint,
+                scope,
+            );
         }
     }
     changed
@@ -2755,6 +2691,7 @@ fn propagate_constructor_call_argument_constraints_to_callees(
 fn propagate_constructor_delegation_argument_constraints_to_callees(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, constructor_usage) in &usage.constructors {
@@ -2816,8 +2753,13 @@ fn propagate_constructor_delegation_argument_constraints_to_callees(
             .and_then(|constructor_constraints| constructor_constraints.param_names.get(arg_index))
             .cloned();
         if let Some(param_name) = param_name {
-            changed |=
-                add_constructor_param_constraint(constraints, &callee_key, &param_name, constraint);
+            changed |= add_constructor_param_constraint_scoped(
+                constraints,
+                &callee_key,
+                &param_name,
+                constraint,
+                scope,
+            );
         }
     }
     changed
@@ -2826,6 +2768,7 @@ fn propagate_constructor_delegation_argument_constraints_to_callees(
 fn propagate_null_call_argument_constraints_to_callees(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut method_pending = Vec::new();
     let mut constructor_pending = Vec::new();
@@ -2891,11 +2834,12 @@ fn propagate_null_call_argument_constraints_to_callees(
             .and_then(|method_constraints| method_constraints.param_names.get(arg_index))
             .cloned();
         if let Some(param_name) = param_name {
-            changed |= add_method_param_constraint(
+            changed |= add_method_param_constraint_scoped(
                 constraints,
                 &callee_key,
                 &param_name,
                 nullability.clone(),
+                scope,
             );
         }
     }
@@ -2906,11 +2850,12 @@ fn propagate_null_call_argument_constraints_to_callees(
             .and_then(|constructor_constraints| constructor_constraints.param_names.get(arg_index))
             .cloned();
         if let Some(param_name) = param_name {
-            changed |= add_constructor_param_constraint(
+            changed |= add_constructor_param_constraint_scoped(
                 constraints,
                 &callee_key,
                 &param_name,
                 nullability.clone(),
+                scope,
             );
         }
     }
@@ -2920,6 +2865,7 @@ fn propagate_null_call_argument_constraints_to_callees(
 fn propagate_call_result_constraints_to_bindings(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -2944,8 +2890,13 @@ fn propagate_call_result_constraints_to_bindings(
     }
     let mut changed = false;
     for (method_key, binding_name, constraint) in pending {
-        changed |=
-            add_method_binding_constraint(constraints, &method_key, &binding_name, constraint);
+        changed |= add_method_binding_constraint_scoped(
+            constraints,
+            &method_key,
+            &binding_name,
+            constraint,
+            scope,
+        );
     }
     changed
 }
@@ -2953,6 +2904,7 @@ fn propagate_call_result_constraints_to_bindings(
 fn propagate_constructor_call_result_constraints_to_bindings(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (constructor_key, constructor_usage) in &usage.constructors {
@@ -2978,11 +2930,12 @@ fn propagate_constructor_call_result_constraints_to_bindings(
     }
     let mut changed = false;
     for (constructor_key, binding_name, constraint) in pending {
-        changed |= add_constructor_binding_constraint(
+        changed |= add_constructor_binding_constraint_scoped(
             constraints,
             &constructor_key,
             &binding_name,
             constraint,
+            scope,
         );
     }
     changed
@@ -2991,6 +2944,7 @@ fn propagate_constructor_call_result_constraints_to_bindings(
 fn propagate_call_result_constraints_to_fields(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -3023,7 +2977,8 @@ fn propagate_call_result_constraints_to_fields(
     }
     let mut changed = false;
     for (type_name, field_name, constraint) in pending {
-        changed |= add_field_constraint(constraints, &type_name, &field_name, constraint);
+        changed |=
+            add_field_constraint_scoped(constraints, &type_name, &field_name, constraint, scope);
     }
     changed
 }
@@ -3031,6 +2986,7 @@ fn propagate_call_result_constraints_to_fields(
 fn propagate_constructor_call_result_constraints_to_fields(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (constructor_key, constructor_usage) in &usage.constructors {
@@ -3060,7 +3016,8 @@ fn propagate_constructor_call_result_constraints_to_fields(
     }
     let mut changed = false;
     for (type_name, field_name, constraint) in pending {
-        changed |= add_field_constraint(constraints, &type_name, &field_name, constraint);
+        changed |=
+            add_field_constraint_scoped(constraints, &type_name, &field_name, constraint, scope);
     }
     changed
 }
@@ -3068,6 +3025,7 @@ fn propagate_constructor_call_result_constraints_to_fields(
 fn propagate_call_result_constraints_to_returns(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -3087,7 +3045,7 @@ fn propagate_call_result_constraints_to_returns(
     }
     let mut changed = false;
     for (method_key, constraint) in pending {
-        changed |= add_method_return_constraint(constraints, &method_key, constraint);
+        changed |= add_method_return_constraint_scoped(constraints, &method_key, constraint, scope);
     }
     changed
 }
@@ -3121,6 +3079,7 @@ enum PendingSignatureConstraint {
 fn propagate_method_local_alias_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -3143,8 +3102,13 @@ fn propagate_method_local_alias_constraints(
     }
     let mut changed = false;
     for (method_key, binding_name, constraint) in pending {
-        changed |=
-            add_method_binding_constraint(constraints, &method_key, &binding_name, constraint);
+        changed |= add_method_binding_constraint_scoped(
+            constraints,
+            &method_key,
+            &binding_name,
+            constraint,
+            scope,
+        );
     }
     changed
 }
@@ -3152,6 +3116,7 @@ fn propagate_method_local_alias_constraints(
 fn propagate_constructor_local_alias_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (constructor_key, constructor_usage) in &usage.constructors {
@@ -3177,11 +3142,12 @@ fn propagate_constructor_local_alias_constraints(
     }
     let mut changed = false;
     for (constructor_key, binding_name, constraint) in pending {
-        changed |= add_constructor_binding_constraint(
+        changed |= add_constructor_binding_constraint_scoped(
             constraints,
             &constructor_key,
             &binding_name,
             constraint,
+            scope,
         );
     }
     changed
@@ -3190,6 +3156,7 @@ fn propagate_constructor_local_alias_constraints(
 fn propagate_method_local_alias_source_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -3212,7 +3179,13 @@ fn propagate_method_local_alias_source_constraints(
     }
     let mut changed = false;
     for (method_key, local_name, constraint) in pending {
-        changed |= add_method_local_constraint(constraints, &method_key, &local_name, constraint);
+        changed |= add_method_local_constraint_scoped(
+            constraints,
+            &method_key,
+            &local_name,
+            constraint,
+            scope,
+        );
     }
     changed
 }
@@ -3220,6 +3193,7 @@ fn propagate_method_local_alias_source_constraints(
 fn propagate_constructor_local_alias_source_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (constructor_key, constructor_usage) in &usage.constructors {
@@ -3245,11 +3219,12 @@ fn propagate_constructor_local_alias_source_constraints(
     }
     let mut changed = false;
     for (constructor_key, local_name, constraint) in pending {
-        changed |= add_constructor_local_constraint(
+        changed |= add_constructor_local_constraint_scoped(
             constraints,
             &constructor_key,
             &local_name,
             constraint,
+            scope,
         );
     }
     changed
@@ -3258,6 +3233,7 @@ fn propagate_constructor_local_alias_source_constraints(
 fn propagate_method_field_storage_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -3279,8 +3255,13 @@ fn propagate_method_field_storage_constraints(
     }
     let mut changed = false;
     for (method_key, binding_name, constraint) in pending {
-        changed |=
-            add_method_binding_constraint(constraints, &method_key, &binding_name, constraint);
+        changed |= add_method_binding_constraint_scoped(
+            constraints,
+            &method_key,
+            &binding_name,
+            constraint,
+            scope,
+        );
     }
     changed
 }
@@ -3288,6 +3269,7 @@ fn propagate_method_field_storage_constraints(
 fn propagate_constructor_field_storage_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (constructor_key, constructor_usage) in &usage.constructors {
@@ -3312,11 +3294,12 @@ fn propagate_constructor_field_storage_constraints(
     }
     let mut changed = false;
     for (constructor_key, binding_name, constraint) in pending {
-        changed |= add_constructor_binding_constraint(
+        changed |= add_constructor_binding_constraint_scoped(
             constraints,
             &constructor_key,
             &binding_name,
             constraint,
+            scope,
         );
     }
     changed
@@ -3325,6 +3308,7 @@ fn propagate_constructor_field_storage_constraints(
 fn propagate_method_return_binding_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -3355,8 +3339,13 @@ fn propagate_method_return_binding_constraints(
     }
     let mut changed = false;
     for (method_key, binding_name, constraint) in pending {
-        changed |=
-            add_method_binding_constraint(constraints, &method_key, &binding_name, constraint);
+        changed |= add_method_binding_constraint_scoped(
+            constraints,
+            &method_key,
+            &binding_name,
+            constraint,
+            scope,
+        );
     }
     changed
 }
@@ -3364,6 +3353,7 @@ fn propagate_method_return_binding_constraints(
 fn propagate_method_binding_return_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -3388,7 +3378,7 @@ fn propagate_method_binding_return_constraints(
     }
     let mut changed = false;
     for (method_key, constraint) in pending {
-        changed |= add_method_return_constraint(constraints, &method_key, constraint);
+        changed |= add_method_return_constraint_scoped(constraints, &method_key, constraint, scope);
     }
     changed
 }
@@ -3396,6 +3386,7 @@ fn propagate_method_binding_return_constraints(
 fn propagate_method_return_field_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -3426,7 +3417,8 @@ fn propagate_method_return_field_constraints(
     }
     let mut changed = false;
     for (type_name, field_name, constraint) in pending {
-        changed |= add_field_constraint(constraints, &type_name, &field_name, constraint);
+        changed |=
+            add_field_constraint_scoped(constraints, &type_name, &field_name, constraint, scope);
     }
     changed
 }
@@ -3434,6 +3426,7 @@ fn propagate_method_return_field_constraints(
 fn propagate_method_field_return_constraints(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
@@ -3455,7 +3448,7 @@ fn propagate_method_field_return_constraints(
     }
     let mut changed = false;
     for (method_key, constraint) in pending {
-        changed |= add_method_return_constraint(constraints, &method_key, constraint);
+        changed |= add_method_return_constraint_scoped(constraints, &method_key, constraint, scope);
     }
     changed
 }
@@ -3579,6 +3572,27 @@ fn add_field_constraint(
     }
 }
 
+fn add_field_constraint_scoped(
+    constraints: &mut SignatureConstraintState,
+    type_name: &str,
+    field_name: &str,
+    constraint: SignatureConstraint,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    let field = FieldKey {
+        type_name: type_name.to_string(),
+        field_name: field_name.to_string(),
+    };
+    if let Some(scope) = scope
+        && !scope.permits(&SignatureDependencyNode::Field {
+            field: field.clone(),
+        })
+    {
+        return false;
+    }
+    add_field_constraint(constraints, type_name, field_name, constraint)
+}
+
 fn add_method_param_constraint(
     constraints: &mut SignatureConstraintState,
     method_key: &MethodKey,
@@ -3600,6 +3614,32 @@ fn add_method_param_constraint(
     }
 }
 
+fn add_method_param_constraint_scoped(
+    constraints: &mut SignatureConstraintState,
+    method_key: &MethodKey,
+    param_name: &str,
+    constraint: SignatureConstraint,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    let Some(param_index) = constraints
+        .methods
+        .get(method_key)
+        .and_then(|method_constraints| method_constraints.param_index(param_name))
+    else {
+        return false;
+    };
+    if let Some(scope) = scope
+        && !scope.permits(&SignatureDependencyNode::MethodParam {
+            method: method_key.clone(),
+            name: param_name.to_string(),
+            index: param_index,
+        })
+    {
+        return false;
+    }
+    add_method_param_constraint(constraints, method_key, param_name, constraint)
+}
+
 fn add_method_return_constraint(
     constraints: &mut SignatureConstraintState,
     method_key: &MethodKey,
@@ -3616,14 +3656,36 @@ fn add_method_return_constraint(
     }
 }
 
-fn add_method_binding_constraint(
+fn add_method_return_constraint_scoped(
+    constraints: &mut SignatureConstraintState,
+    method_key: &MethodKey,
+    constraint: SignatureConstraint,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    if let Some(scope) = scope
+        && !scope.permits(&SignatureDependencyNode::MethodReturn {
+            method: method_key.clone(),
+        })
+    {
+        return false;
+    }
+    add_method_return_constraint(constraints, method_key, constraint)
+}
+
+fn add_method_binding_constraint_scoped(
     constraints: &mut SignatureConstraintState,
     method_key: &MethodKey,
     binding_name: &str,
     constraint: SignatureConstraint,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
-    add_method_param_constraint(constraints, method_key, binding_name, constraint.clone())
-        | add_method_local_constraint(constraints, method_key, binding_name, constraint)
+    add_method_param_constraint_scoped(
+        constraints,
+        method_key,
+        binding_name,
+        constraint.clone(),
+        scope,
+    ) | add_method_local_constraint_scoped(constraints, method_key, binding_name, constraint, scope)
 }
 
 fn add_method_local_constraint(
@@ -3646,18 +3708,52 @@ fn add_method_local_constraint(
     }
 }
 
-fn add_constructor_binding_constraint(
+fn add_method_local_constraint_scoped(
+    constraints: &mut SignatureConstraintState,
+    method_key: &MethodKey,
+    local_name: &str,
+    constraint: SignatureConstraint,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    if constraints
+        .methods
+        .get(method_key)
+        .and_then(|method_constraints| method_constraints.local(local_name))
+        .is_none()
+    {
+        return false;
+    }
+    if let Some(scope) = scope
+        && !scope.permits(&SignatureDependencyNode::MethodLocal {
+            method: method_key.clone(),
+            name: local_name.to_string(),
+        })
+    {
+        return false;
+    }
+    add_method_local_constraint(constraints, method_key, local_name, constraint)
+}
+
+fn add_constructor_binding_constraint_scoped(
     constraints: &mut SignatureConstraintState,
     constructor_key: &ConstructorKey,
     binding_name: &str,
     constraint: SignatureConstraint,
+    scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
-    add_constructor_param_constraint(
+    add_constructor_param_constraint_scoped(
         constraints,
         constructor_key,
         binding_name,
         constraint.clone(),
-    ) | add_constructor_local_constraint(constraints, constructor_key, binding_name, constraint)
+        scope,
+    ) | add_constructor_local_constraint_scoped(
+        constraints,
+        constructor_key,
+        binding_name,
+        constraint,
+        scope,
+    )
 }
 
 fn add_constructor_param_constraint(
@@ -3681,6 +3777,32 @@ fn add_constructor_param_constraint(
     }
 }
 
+fn add_constructor_param_constraint_scoped(
+    constraints: &mut SignatureConstraintState,
+    constructor_key: &ConstructorKey,
+    param_name: &str,
+    constraint: SignatureConstraint,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    let Some(param_index) = constraints
+        .constructors
+        .get(constructor_key)
+        .and_then(|constructor_constraints| constructor_constraints.param_index(param_name))
+    else {
+        return false;
+    };
+    if let Some(scope) = scope
+        && !scope.permits(&SignatureDependencyNode::ConstructorParam {
+            constructor: constructor_key.clone(),
+            name: param_name.to_string(),
+            index: param_index,
+        })
+    {
+        return false;
+    }
+    add_constructor_param_constraint(constraints, constructor_key, param_name, constraint)
+}
+
 fn add_constructor_local_constraint(
     constraints: &mut SignatureConstraintState,
     constructor_key: &ConstructorKey,
@@ -3699,6 +3821,32 @@ fn add_constructor_local_constraint(
         local_constraints.constraints.push(constraint);
         true
     }
+}
+
+fn add_constructor_local_constraint_scoped(
+    constraints: &mut SignatureConstraintState,
+    constructor_key: &ConstructorKey,
+    local_name: &str,
+    constraint: SignatureConstraint,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    if constraints
+        .constructors
+        .get(constructor_key)
+        .and_then(|constructor_constraints| constructor_constraints.local(local_name))
+        .is_none()
+    {
+        return false;
+    }
+    if let Some(scope) = scope
+        && !scope.permits(&SignatureDependencyNode::ConstructorLocal {
+            constructor: constructor_key.clone(),
+            name: local_name.to_string(),
+        })
+    {
+        return false;
+    }
+    add_constructor_local_constraint(constraints, constructor_key, local_name, constraint)
 }
 
 fn signature_diagnostics_for_constraints(

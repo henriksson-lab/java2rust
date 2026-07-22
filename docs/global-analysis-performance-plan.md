@@ -208,6 +208,28 @@ Implementation status:
   and mutual recursive ownership flows can gain conflicts. Do not keep this
   replacement without an explicit redesign of boundary-aware global propagation
   and equivalence tests.
+- Accepted follow-up: SCC-local mutation scopes replace speculative
+  whole-state clone/rollback. Each propagation arm still runs under the same
+  SCC pass order and only mutates slots in the active component, preserving the
+  boundary isolation that the global-sweep experiment violated. This removes
+  state clones and rollback instead of changing the solver into a new global
+  propagation algorithm.
+- Scoped-mutation evidence:
+  `.tmp/global-analysis-profile-varscan-scoped-mutation-solver/analysis-profile.tsv`
+  shows VarScan at about 13.5s global analysis, 11.9s signature solving, 10.1s
+  signature fixpoint, `signature_state_clones=0`, and
+  `signature_component_rollback_ms=0`. Generated Rust hashes, invalid-pattern
+  tables, and top compile errors match
+  `.tmp/global-analysis-profile-varscan-hierarchy-fact-index-r2`; only
+  diagnostic counts dropped from 37 to 36 per file while the generated Rust
+  stayed hash-identical.
+- JAligner scoped-mutation evidence:
+  `.tmp/global-analysis-profile-jaligner-scoped-mutation-solver/analysis-profile.tsv`
+  shows about 3.7s global analysis, 3.1s signature solving, 2.8s signature
+  fixpoint, `signature_state_clones=0`, and
+  `signature_component_rollback_ms=0`. Generated Rust hashes, invalid-pattern
+  tables, and top compile errors match
+  `.tmp/global-analysis-profile-jaligner-hierarchy-fact-index-r2`.
 - Rejected experiment: a per-sweep `PassedToCall` usage index was not kept. It
   preserved generated output but made VarScan propagation materially slower
   because the index was rebuilt for every component sweep. If usage adjacency is
