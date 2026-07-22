@@ -15,7 +15,7 @@ use crate::facts::{
     HierarchyOverride, HierarchyStrategy, NullabilityState, ObjectSafetyFact,
     ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
     ReceiverMutabilityFact, TypeCapabilityOverride, UnsupportedExternalApiFact,
-    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
+    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact, external_type_name_matches,
 };
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::parser::parse_type;
@@ -247,6 +247,13 @@ pub struct ExternalPackUnsupportedApi {
     pub reason: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalTemplateMethodHook {
+    pub inherited_method: &'static str,
+    pub arg_count: usize,
+    pub hook_method: &'static str,
+}
+
 impl ExternalPackManifest {
     pub fn owns_type(&self, type_name: &str) -> bool {
         self.owned_type_patterns
@@ -353,6 +360,12 @@ impl ExternalPackManifest {
                 .type_capability_overrides
                 .push(capability.as_type_capability_override());
         }
+        if self.pack_name == DISQ_WRITE_PACK {
+            push_disq_write_option_conversion_facts(facts);
+        }
+        if self.pack_name == BROAD_HELLBENDER_UTILS_PACK {
+            push_broad_hellbender_conversion_facts(facts);
+        }
         for field in self.field_nullability {
             facts
                 .field_nullability_facts
@@ -426,6 +439,101 @@ impl ExternalPackManifest {
                     provenance: FactProvenance::ExternalLibraryPack,
                 });
         }
+    }
+}
+
+pub fn modeled_no_state_external_super_constructor(type_name: &str, arg_count: usize) -> bool {
+    external_type_name_matches(
+        erased_external_type_name(type_name),
+        "htsjdk.samtools.util.AbstractAsyncWriter",
+    ) && arg_count == 1
+}
+
+pub fn external_template_method_hook_for_super_method(
+    super_type: &str,
+    method_name: &str,
+    arg_count: usize,
+) -> Option<ExternalTemplateMethodHook> {
+    if !external_type_name_matches(
+        erased_external_type_name(super_type),
+        "htsjdk.samtools.util.AbstractAsyncWriter",
+    ) {
+        return None;
+    }
+    match (method_name, arg_count) {
+        ("write", 1) => Some(ExternalTemplateMethodHook {
+            inherited_method: "write",
+            arg_count,
+            hook_method: "synchronously_write",
+        }),
+        ("close", 0) => Some(ExternalTemplateMethodHook {
+            inherited_method: "close",
+            arg_count,
+            hook_method: "synchronously_close",
+        }),
+        _ => None,
+    }
+}
+
+fn erased_external_type_name(type_name: &str) -> &str {
+    type_name.split('<').next().unwrap_or(type_name).trim()
+}
+
+fn push_disq_write_option_conversion_facts(facts: &mut FactSet) {
+    for ty in [
+        "org.disq_bio.disq.ReadsFormatWriteOption",
+        "ReadsFormatWriteOption",
+        "org.disq_bio.disq.FileCardinalityWriteOption",
+        "FileCardinalityWriteOption",
+        "org.disq_bio.disq.TempPartsDirectoryWriteOption",
+        "TempPartsDirectoryWriteOption",
+        "org.disq_bio.disq.BaiWriteOption",
+        "BaiWriteOption",
+        "org.disq_bio.disq.SbiWriteOption",
+        "SbiWriteOption",
+        "org.disq_bio.disq.TabixIndexWriteOption",
+        "TabixIndexWriteOption",
+    ] {
+        facts
+            .external_conversion_adapter_facts
+            .push(ExternalConversionAdapterFact {
+                from_type: ty.to_string(),
+                to_type: "WriteOption".to_string(),
+                kind: ExternalConversionAdapterKind::Into,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
+}
+
+fn push_broad_hellbender_conversion_facts(facts: &mut FactSet) {
+    for (from_type, to_type) in [
+        (
+            "org.broadinstitute.hellbender.engine.ReadsPathDataSource",
+            "org.broadinstitute.hellbender.engine.ReadsDataSource",
+        ),
+        ("ReadsPathDataSource", "ReadsDataSource"),
+        (
+            "org.broadinstitute.hellbender.utils.read.HeaderlessSAMRecordCoordinateComparator",
+            "java.util.Comparator",
+        ),
+        (
+            "org.broadinstitute.hellbender.utils.read.HeaderlessSAMRecordCoordinateComparator",
+            "Comparator",
+        ),
+        (
+            "HeaderlessSAMRecordCoordinateComparator",
+            "java.util.Comparator",
+        ),
+        ("HeaderlessSAMRecordCoordinateComparator", "Comparator"),
+    ] {
+        facts
+            .external_conversion_adapter_facts
+            .push(ExternalConversionAdapterFact {
+                from_type: from_type.to_string(),
+                to_type: to_type.to_string(),
+                kind: ExternalConversionAdapterKind::Into,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
     }
 }
 
@@ -2236,6 +2344,7 @@ fn parse_external_pack_field_metadata(
 fn parse_external_field_kind(value: &str) -> Option<ExternalFieldKind> {
     match value {
         "static-final" => Some(ExternalFieldKind::StaticFinal),
+        "instance-field" => Some(ExternalFieldKind::InstanceField),
         "enum-variant" => Some(ExternalFieldKind::EnumVariant),
         "nested-type" => Some(ExternalFieldKind::NestedType),
         "unknown" => Some(ExternalFieldKind::Unknown),
@@ -4154,6 +4263,8 @@ const JAVA_SQL_OWNED_TYPES: &[&str] = &[
     "java.sql.SQLException",
 ];
 const SAMTOOLS_UTIL_OWNED_TYPES: &[&str] = &[
+    "htsjdk.samtools.util.AbstractAsyncWriter",
+    "AbstractAsyncWriter",
     "htsjdk.samtools.util.Locatable",
     "htsjdk.samtools.util.Interval",
     "htsjdk.samtools.util.IntervalList",
@@ -4173,6 +4284,8 @@ const SAMTOOLS_UTIL_OWNED_TYPES: &[&str] = &[
     "SeekableBufferedStream",
     "htsjdk.samtools.seekablestream.SeekablePathStream",
     "SeekablePathStream",
+    "htsjdk.samtools.seekablestream.SeekableStreamFactory",
+    "SeekableStreamFactory",
     "htsjdk.samtools.util.BinaryCodec",
     "BinaryCodec",
     "htsjdk.samtools.util.BufferedLineReader",
@@ -4538,6 +4651,7 @@ const GOOGLE_CLOUD_NIO_OWNED_TYPES: &[&str] = &[
     "CloudStorageConfiguration",
 ];
 const GENOMICSDB_OWNED_TYPES: &[&str] = &[
+    "org.genomicsdb.Constants",
     "org.genomicsdb.GenomicsDBUtils",
     "GenomicsDBUtils",
     "com.intel.genomicsdb.GenomicsDBFeatureReader",
@@ -4709,6 +4823,8 @@ const SPARK_OWNED_TYPES: &[&str] = &[
     "JavaRDD",
     "org.apache.spark.api.java.JavaPairRDD",
     "JavaPairRDD",
+    "org.apache.spark.api.java.function.FlatMapFunction",
+    "FlatMapFunction",
     "org.apache.spark.rdd.PartitionGroup",
     "PartitionGroup",
     "org.apache.spark.mllib.linalg.distributed.RowMatrix",
@@ -4759,8 +4875,12 @@ const KRYO_SERIALIZERS_OWNED_TYPES: &[&str] = &[
 const DISQ_WRITE_OWNED_TYPES: &[&str] = &[
     "org.disq_bio.disq.HtsjdkReadsRdd",
     "HtsjdkReadsRdd",
+    "org.disq_bio.disq.HtsjdkReadsRddStorage",
+    "HtsjdkReadsRddStorage",
     "org.disq_bio.disq.HtsjdkVariantsRdd",
     "HtsjdkVariantsRdd",
+    "org.disq_bio.disq.HtsjdkVariantsRddStorage",
+    "HtsjdkVariantsRddStorage",
     "org.disq_bio.disq.HtsjdkReadsTraversalParameters",
     "HtsjdkReadsTraversalParameters",
     "org.disq_bio.disq.TempPartsDirectoryWriteOption",
@@ -4769,6 +4889,12 @@ const DISQ_WRITE_OWNED_TYPES: &[&str] = &[
     "ReadsFormatWriteOption",
     "org.disq_bio.disq.FileCardinalityWriteOption",
     "FileCardinalityWriteOption",
+    "org.disq_bio.disq.BaiWriteOption",
+    "BaiWriteOption",
+    "org.disq_bio.disq.SbiWriteOption",
+    "SbiWriteOption",
+    "org.disq_bio.disq.TabixIndexWriteOption",
+    "TabixIndexWriteOption",
 ];
 const INTEL_GKL_OWNED_TYPES: &[&str] = &[
     "com.intel.gkl.compression.IntelDeflaterFactory",
@@ -4809,6 +4935,47 @@ const GUAVA_CONCURRENT_OWNED_TYPES: &[&str] = &[
     "ThreadFactoryBuilder",
 ];
 const BROAD_HELLBENDER_UTILS_OWNED_TYPES: &[&str] = &[
+    "org.broadinstitute.hellbender.engine.GATKTool",
+    "GATKTool",
+    "org.broadinstitute.hellbender.engine.GATKPath",
+    "GATKPath",
+    "org.broadinstitute.hellbender.engine.ReadsDataSource",
+    "ReadsDataSource",
+    "org.broadinstitute.hellbender.engine.ReadsPathDataSource",
+    "ReadsPathDataSource",
+    "org.broadinstitute.hellbender.engine.FeatureInput",
+    "FeatureInput",
+    "org.broadinstitute.hellbender.engine.ProgressMeter",
+    "org.broadinstitute.hellbender.utils.progressmeter.ProgressMeter",
+    "ProgressMeter",
+    "org.broadinstitute.hellbender.cmdline.argumentcollections.IntervalArgumentCollection",
+    "IntervalArgumentCollection",
+    "org.broadinstitute.hellbender.engine.TraversalParameters",
+    "TraversalParameters",
+    "org.broadinstitute.hellbender.utils.SimpleInterval",
+    "SimpleInterval",
+    "org.broadinstitute.hellbender.utils.read.GATKRead",
+    "GATKRead",
+    "org.broadinstitute.hellbender.utils.read.ReadUtils",
+    "ReadUtils",
+    "org.broadinstitute.hellbender.utils.read.SAMRecordToGATKReadAdapter",
+    "SAMRecordToGATKReadAdapter",
+    "org.broadinstitute.hellbender.utils.variant.GATKVariant",
+    "GATKVariant",
+    "org.broadinstitute.hellbender.utils.variant.VariantContextVariantAdapter",
+    "VariantContextVariantAdapter",
+    "org.broadinstitute.hellbender.utils.read.HeaderlessSAMRecordCoordinateComparator",
+    "HeaderlessSAMRecordCoordinateComparator",
+    "org.broadinstitute.hellbender.utils.read.ReadConstants",
+    "ReadConstants",
+    "org.broadinstitute.hellbender.utils.read.ReadsWriteFormat",
+    "ReadsWriteFormat",
+    "org.broadinstitute.hellbender.utils.reference.ReferenceBases",
+    "ReferenceBases",
+    "org.broadinstitute.hellbender.utils.reference.TwoBitReference",
+    "TwoBitReference",
+    "org.broadinstitute.hellbender.utils.spark.SparkUtils",
+    "SparkUtils",
     "org.broadinstitute.hellbender.utils.Utils",
     "Utils",
     "org.broadinstitute.hellbender.utils.QualityUtils",
@@ -5589,12 +5756,30 @@ const DISQ_WRITE_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("HtsjdkVariantsRdd"),
     cloneable_final_capability("org.disq_bio.disq.HtsjdkReadsTraversalParameters"),
     cloneable_final_capability("HtsjdkReadsTraversalParameters"),
-    cloneable_final_capability("org.disq_bio.disq.TempPartsDirectoryWriteOption"),
-    cloneable_final_capability("TempPartsDirectoryWriteOption"),
-    cloneable_final_capability("org.disq_bio.disq.ReadsFormatWriteOption"),
-    cloneable_final_capability("ReadsFormatWriteOption"),
-    cloneable_final_capability("org.disq_bio.disq.FileCardinalityWriteOption"),
-    cloneable_final_capability("FileCardinalityWriteOption"),
+    cloneable_final_implements_capability(
+        "org.disq_bio.disq.TempPartsDirectoryWriteOption",
+        &["WriteOption"],
+    ),
+    cloneable_final_implements_capability("TempPartsDirectoryWriteOption", &["WriteOption"]),
+    cloneable_final_implements_capability(
+        "org.disq_bio.disq.ReadsFormatWriteOption",
+        &["WriteOption"],
+    ),
+    cloneable_final_implements_capability("ReadsFormatWriteOption", &["WriteOption"]),
+    cloneable_final_implements_capability(
+        "org.disq_bio.disq.FileCardinalityWriteOption",
+        &["WriteOption"],
+    ),
+    cloneable_final_implements_capability("FileCardinalityWriteOption", &["WriteOption"]),
+    cloneable_final_implements_capability("org.disq_bio.disq.BaiWriteOption", &["WriteOption"]),
+    cloneable_final_implements_capability("BaiWriteOption", &["WriteOption"]),
+    cloneable_final_implements_capability("org.disq_bio.disq.SbiWriteOption", &["WriteOption"]),
+    cloneable_final_implements_capability("SbiWriteOption", &["WriteOption"]),
+    cloneable_final_implements_capability(
+        "org.disq_bio.disq.TabixIndexWriteOption",
+        &["WriteOption"],
+    ),
+    cloneable_final_implements_capability("TabixIndexWriteOption", &["WriteOption"]),
 ];
 
 const INTEL_GKL_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
@@ -5695,6 +5880,8 @@ const SAM_HEADER_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("SAMProgramRecord"),
     cloneable_final_capability("htsjdk.samtools.SAMTextHeaderCodec"),
     cloneable_final_capability("SAMTextHeaderCodec"),
+    extends_capability("htsjdk.samtools.SAMException", "RuntimeException"),
+    extends_capability("SAMException", "RuntimeException"),
     extends_capability("htsjdk.samtools.SAMFormatException", "RuntimeException"),
     extends_capability("SAMFormatException", "RuntimeException"),
     cloneable_final_capability("htsjdk.samtools.SAMFileHeader.SortOrder"),
@@ -5824,6 +6011,11 @@ const TRIBBLE_INDEX_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("IndexBalanceApproach"),
     cloneable_final_capability("htsjdk.tribble.index.tabix.TabixFormat"),
     cloneable_final_capability("TabixFormat"),
+    cloneable_final_implements_capability(
+        "org.broadinstitute.hellbender.utils.SimpleInterval",
+        LOCATABLE_IMPL,
+    ),
+    cloneable_final_implements_capability("SimpleInterval", LOCATABLE_IMPL),
 ];
 
 const BCF_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
@@ -5852,6 +6044,8 @@ const SAMTOOLS_UTIL_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("SeekableBufferedStream"),
     cloneable_final_capability("htsjdk.samtools.seekablestream.SeekablePathStream"),
     cloneable_final_capability("SeekablePathStream"),
+    cloneable_final_capability("htsjdk.samtools.seekablestream.SeekableStreamFactory"),
+    cloneable_final_capability("SeekableStreamFactory"),
     cloneable_final_capability("htsjdk.samtools.util.BinaryCodec"),
     cloneable_final_capability("BinaryCodec"),
     cloneable_final_capability("htsjdk.samtools.util.BufferedLineReader"),
@@ -5922,22 +6116,6 @@ const fn semantic_boolean_getter_effect(
         receiver_type,
         method_name,
         ExternalApiRole::BooleanGetter,
-        ReceiverMutabilityFact::ReadOnly,
-        None,
-        return_nullability,
-        &[],
-    )
-}
-
-const fn semantic_indexed_getter_effect(
-    receiver_type: &'static str,
-    method_name: &'static str,
-    return_nullability: NullabilityState,
-) -> ExternalPackApiEffect {
-    api_effect(
-        receiver_type,
-        method_name,
-        ExternalApiRole::IndexedGetter,
         ReceiverMutabilityFact::ReadOnly,
         None,
         return_nullability,
@@ -7822,7 +8000,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "parallelize",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "JavaRDD",
+        "JavaRDD<SAMRecord>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -7830,7 +8008,23 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "parallelize",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "JavaRDD",
+        "JavaRDD<SAMRecord>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.apache.spark.api.java.JavaSparkContext",
+        "emptyRDD",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "JavaRDD<VariantContext>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "JavaSparkContext",
+        "emptyRDD",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "JavaRDD<VariantContext>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -8022,6 +8216,24 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
     semantic_typed_effect(
         "JavaRDD",
         "partitionBy",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "JavaRDD",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.apache.spark.api.java.JavaRDD",
+        "union",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "JavaRDD",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "JavaRDD",
+        "union",
+        1,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "JavaRDD",
@@ -8446,7 +8658,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "value",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "Object",
+        "T0",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -8454,7 +8666,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "value",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "Object",
+        "T0",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -8462,7 +8674,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getValue",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "Object",
+        "T0",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -8470,7 +8682,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getValue",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "Object",
+        "T0",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -8532,6 +8744,8 @@ const SPARK_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("SparkConf", "set"),
     modeled_semantic("org.apache.spark.api.java.JavaSparkContext", "parallelize"),
     modeled_semantic("JavaSparkContext", "parallelize"),
+    modeled_semantic("org.apache.spark.api.java.JavaSparkContext", "emptyRDD"),
+    modeled_semantic("JavaSparkContext", "emptyRDD"),
     modeled_semantic("org.apache.spark.api.java.JavaSparkContext", "broadcast"),
     modeled_semantic("JavaSparkContext", "broadcast"),
     modeled_semantic(
@@ -8595,6 +8809,8 @@ const SPARK_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("JavaRDD", "repartition"),
     modeled_semantic("org.apache.spark.api.java.JavaRDD", "partitionBy"),
     modeled_semantic("JavaRDD", "partitionBy"),
+    modeled_semantic("org.apache.spark.api.java.JavaRDD", "union"),
+    modeled_semantic("JavaRDD", "union"),
     modeled_semantic("org.apache.spark.api.java.JavaRDD", "collect"),
     modeled_semantic("JavaRDD", "collect"),
     modeled_semantic("org.apache.spark.api.java.JavaRDD", "count"),
@@ -10595,6 +10811,22 @@ const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
+        "htsjdk.variant.vcf.VCFFileReader",
+        "getSequenceDictionary",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMSequenceDictionary",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "VCFFileReader",
+        "getSequenceDictionary",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMSequenceDictionary",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
         "htsjdk.variant.vcf.VCFHeader",
         "getGenotypeSamples",
         ExternalApiRole::Getter,
@@ -11377,14 +11609,20 @@ const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
-    semantic_indexed_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.SAMSequenceDictionary",
         "getSequence",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMSequenceRecord",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_indexed_getter_effect(
+    semantic_typed_effect(
         "SAMSequenceDictionary",
         "getSequence",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMSequenceRecord",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_getter_effect(
@@ -11513,14 +11751,20 @@ const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getSequenceName",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.SAMSequenceRecord",
         "getSequenceLength",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "SAMSequenceRecord",
         "getSequenceLength",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_fluent_mutator_effect(
@@ -11653,14 +11897,20 @@ const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.SAMFileHeader",
         "getSortOrder",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SortOrder",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "SAMFileHeader",
         "getSortOrder",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SortOrder",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_getter_effect(
@@ -11695,6 +11945,30 @@ const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.samtools.SAMFileHeader.SortOrder",
+        "getComparatorInstance",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Comparator",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "SAMFileHeader.SortOrder",
+        "getComparatorInstance",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Comparator",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "SortOrder",
+        "getComparatorInstance",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Comparator",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -13536,6 +13810,22 @@ const SAM_READER_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
+        "htsjdk.samtools.SamReaderFactory",
+        "validationStringency",
+        ExternalApiRole::FluentMutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "SamReaderFactory",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "SamReaderFactory",
+        "validationStringency",
+        ExternalApiRole::FluentMutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "SamReaderFactory",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "htsjdk.samtools.SamFileHeaderMerger",
         "getMergedHeader",
         ExternalApiRole::Getter,
@@ -13602,6 +13892,27 @@ const SAM_WRITER_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "SAMFileWriterFactory",
         NullabilityState::DefinitelyNonNull,
     ),
+];
+
+const SAM_READER_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
+    ExternalPackArgumentEffect {
+        receiver_type: "htsjdk.samtools.SamReaderFactory",
+        method_name: "referenceSequence",
+        parameter_index: 0,
+        parameter_type: Some("Path"),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+    },
+    ExternalPackArgumentEffect {
+        receiver_type: "SamReaderFactory",
+        method_name: "referenceSequence",
+        parameter_index: 0,
+        parameter_type: Some("Path"),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+    },
 ];
 
 const SAM_REFERENCE_API_EFFECTS: &[ExternalPackApiEffect] = &[
@@ -13687,6 +13998,72 @@ const SAM_REFERENCE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::Unknown,
         &[],
     ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.samtools.reference.ReferenceSequenceFile",
+        "getSubsequenceAt",
+        3,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "ReferenceSequence",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "ReferenceSequenceFile",
+        "getSubsequenceAt",
+        3,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "ReferenceSequence",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.samtools.reference.ReferenceSequenceFile",
+        "nextSequence",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "ReferenceSequence",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "ReferenceSequenceFile",
+        "nextSequence",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "ReferenceSequence",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.samtools.reference.ReferenceSequenceFile",
+        "getSequenceDictionary",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMSequenceDictionary",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "ReferenceSequenceFile",
+        "getSequenceDictionary",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMSequenceDictionary",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.samtools.reference.ReferenceSequenceFile",
+        "close",
+        ExternalApiRole::SideEffect,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::Unknown,
+    ),
+    semantic_typed_effect(
+        "ReferenceSequenceFile",
+        "close",
+        ExternalApiRole::SideEffect,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::Unknown,
+    ),
     semantic_typed_effect(
         "htsjdk.samtools.reference.ReferenceSequenceFileWalker",
         "getSequenceDictionary",
@@ -13724,6 +14101,66 @@ const SAM_REFERENCE_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const SAMTOOLS_UTIL_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_side_effect_with_arity(
+        "htsjdk.samtools.util.AbstractAsyncWriter",
+        "write",
+        1,
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_side_effect_with_arity(
+        "AbstractAsyncWriter",
+        "write",
+        1,
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_side_effect_with_arity(
+        "htsjdk.samtools.util.AbstractAsyncWriter",
+        "close",
+        0,
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_side_effect_with_arity(
+        "AbstractAsyncWriter",
+        "close",
+        0,
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.samtools.seekablestream.SeekableStreamFactory",
+        "getInstance",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SeekableStreamFactory",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "SeekableStreamFactory",
+        "getInstance",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SeekableStreamFactory",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.samtools.seekablestream.SeekableStreamFactory",
+        "getStreamFor",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Object",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "SeekableStreamFactory",
+        "getStreamFor",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Object",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_typed_effect(
         "htsjdk.samtools.util.Locatable",
         "getContig",
@@ -14012,12 +14449,13 @@ const SAMTOOLS_UTIL_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_getter_effect("IntervalList", "size", NullabilityState::DefinitelyNonNull),
-    semantic_mutator_effect(
+    semantic_side_effect_with_arity(
         "htsjdk.samtools.util.IntervalList",
         "add",
+        1,
         NullabilityState::Unknown,
     ),
-    semantic_mutator_effect("IntervalList", "add", NullabilityState::Unknown),
+    semantic_side_effect_with_arity("IntervalList", "add", 1, NullabilityState::Unknown),
     semantic_mutator_effect(
         "htsjdk.samtools.util.IntervalList",
         "write",
@@ -17867,10 +18305,20 @@ const VARIANTCONTEXT_EXCEPTIONS: &[ExternalPackException] = &[
     },
 ];
 
-const SAM_HEADER_EXCEPTIONS: &[ExternalPackException] = &[ExternalPackException {
-    type_name: "AssertionError",
-    kind: ExceptionKind::Unchecked,
-}];
+const SAM_HEADER_EXCEPTIONS: &[ExternalPackException] = &[
+    ExternalPackException {
+        type_name: "htsjdk.samtools.SAMException",
+        kind: ExceptionKind::Unchecked,
+    },
+    ExternalPackException {
+        type_name: "SAMException",
+        kind: ExceptionKind::Unchecked,
+    },
+    ExternalPackException {
+        type_name: "AssertionError",
+        kind: ExceptionKind::Unchecked,
+    },
+];
 
 const SAMTOOLS_UTIL_EXCEPTIONS: &[ExternalPackException] = &[
     ExternalPackException {
@@ -19832,6 +20280,18 @@ const SAMTOOLS_UTIL_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
 ];
 
 const SAMTOOLS_UTIL_MODELED_FIELDS: &[ExternalPackModeledField] = &[
+    modeled_semantic_field_typed(
+        "htsjdk.samtools.util.AbstractAsyncWriter",
+        "DEFAULT_QUEUE_SIZE",
+        "int",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "AbstractAsyncWriter",
+        "DEFAULT_QUEUE_SIZE",
+        "int",
+        ExternalFieldKind::StaticFinal,
+    ),
     modeled_semantic_field("htsjdk.samtools.Defaults", "COMPRESSION_LEVEL"),
     modeled_semantic_field("Defaults", "COMPRESSION_LEVEL"),
     modeled_semantic_field("htsjdk.samtools.Defaults", "USE_ASYNC_IO_READ_FOR_SAMTOOLS"),
@@ -19880,6 +20340,18 @@ const SAMTOOLS_UTIL_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("FastqConstants", "SECOND_OF_PAIR"),
     modeled_semantic_field("htsjdk.samtools.util.SequenceUtil", "VALID_BASES_UPPER"),
     modeled_semantic_field("SequenceUtil", "VALID_BASES_UPPER"),
+    modeled_semantic_field_typed(
+        "htsjdk.samtools.util.FileExtensions",
+        "FASTA",
+        "List<String>",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "FileExtensions",
+        "FASTA",
+        "List<String>",
+        ExternalFieldKind::StaticFinal,
+    ),
     modeled_semantic_field(
         "htsjdk.samtools.util.BlockCompressedInputStream",
         "FileTermination",
@@ -20482,37 +20954,108 @@ const GENOMICSDB_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
 ];
 
 const GENOMICSDB_MODELED_FIELDS: &[ExternalPackModeledField] = &[
-    modeled_semantic_field("com.intel.genomicsdb.model.Coordinates", "GenomicsDBColumn"),
-    modeled_semantic_field("Coordinates", "GenomicsDBColumn"),
-    modeled_semantic_field("com.intel.genomicsdb.model.Coordinates", "ContigPosition"),
-    modeled_semantic_field("Coordinates", "ContigPosition"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "org.genomicsdb.Constants",
+        "CHROMOSOME_FOLDER_DELIMITER_SYMBOL_REGEX",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "com.intel.genomicsdb.model.Coordinates",
+        "GenomicsDBColumn",
+        "GenomicsDBColumn",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
+        "Coordinates",
+        "GenomicsDBColumn",
+        "GenomicsDBColumn",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
+        "com.intel.genomicsdb.model.Coordinates",
+        "ContigPosition",
+        "ContigPosition",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
+        "Coordinates",
+        "ContigPosition",
+        "ContigPosition",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
         "com.intel.genomicsdb.model.GenomicsDBExportConfiguration",
         "ExportConfiguration",
+        "ExportConfiguration",
+        ExternalFieldKind::NestedType,
     ),
-    modeled_semantic_field("GenomicsDBExportConfiguration", "ExportConfiguration"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "GenomicsDBExportConfiguration",
+        "ExportConfiguration",
+        "ExportConfiguration",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
         "com.intel.genomicsdb.model.GenomicsDBImportConfiguration",
         "ImportConfiguration",
+        "ImportConfiguration",
+        ExternalFieldKind::NestedType,
     ),
-    modeled_semantic_field("GenomicsDBImportConfiguration", "ImportConfiguration"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "GenomicsDBImportConfiguration",
+        "ImportConfiguration",
+        "ImportConfiguration",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
         "com.intel.genomicsdb.model.GenomicsDBImportConfiguration",
         "Partition",
+        "Partition",
+        ExternalFieldKind::NestedType,
     ),
-    modeled_semantic_field("GenomicsDBImportConfiguration", "Partition"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "GenomicsDBImportConfiguration",
+        "Partition",
+        "Partition",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto",
         "VidMappingPB",
+        "VidMappingPB",
+        ExternalFieldKind::NestedType,
     ),
-    modeled_semantic_field("GenomicsDBVidMapProto", "VidMappingPB"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "GenomicsDBVidMapProto",
+        "VidMappingPB",
+        "VidMappingPB",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto",
         "FieldLengthDescriptorComponentPB",
+        "FieldLengthDescriptorComponentPB",
+        ExternalFieldKind::NestedType,
     ),
-    modeled_semantic_field("GenomicsDBVidMapProto", "FieldLengthDescriptorComponentPB"),
-    modeled_semantic_field("com.intel.genomicsdb.model.ReadSession", "TableReadOptions"),
-    modeled_semantic_field("ReadSession", "TableReadOptions"),
+    modeled_semantic_field_typed(
+        "GenomicsDBVidMapProto",
+        "FieldLengthDescriptorComponentPB",
+        "FieldLengthDescriptorComponentPB",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
+        "com.intel.genomicsdb.model.ReadSession",
+        "TableReadOptions",
+        "TableReadOptions",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
+        "ReadSession",
+        "TableReadOptions",
+        "TableReadOptions",
+        ExternalFieldKind::NestedType,
+    ),
 ];
 
 const GENOMICSDB_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
@@ -20759,6 +21302,36 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "ExportConfiguration",
         NullabilityState::DefinitelyNonNull,
     ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+        "setWorkspace",
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "ExportConfiguration.Builder",
+        "setWorkspace",
+        "ExportConfiguration.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+        "setArrayName",
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "ExportConfiguration.Builder",
+        "setArrayName",
+        "ExportConfiguration.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+        "setGenerateArrayNameFromPartitionBounds",
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "ExportConfiguration.Builder",
+        "setGenerateArrayNameFromPartitionBounds",
+        "ExportConfiguration.Builder",
+    ),
     semantic_typed_effect(
         "com.intel.genomicsdb.model.GenomicsDBImportConfiguration.ImportConfiguration",
         "newBuilder",
@@ -20888,6 +21461,14 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
+        "GenomicsDBVidMapProtoVidMappingPB",
+        "toBuilder",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBVidMapProtoVidMappingPBBuilder",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "getContigsList",
         ExternalApiRole::Getter,
@@ -20905,6 +21486,14 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
     ),
     semantic_typed_effect(
         "GenomicsDBVidMapProto.VidMappingPB",
+        "getContigsList",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<GenomicsDBVidMapProto.Chromosome>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBVidMapProtoVidMappingPB",
         "getContigsList",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
@@ -21034,6 +21623,15 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "GenomicsDBVidMapProto.FieldInfo",
         NullabilityState::DefinitelyNonNull,
     ),
+    semantic_typed_effect_with_arity(
+        "GenomicsDBVidMapProtoVidMappingPB",
+        "getFields",
+        1,
+        ExternalApiRole::IndexedGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBVidMapProtoFieldInfo",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_typed_effect(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "getFieldsCount",
@@ -21052,6 +21650,14 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
     ),
     semantic_typed_effect(
         "GenomicsDBVidMapProto.VidMappingPB",
+        "getFieldsCount",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenomicsDBVidMapProtoVidMappingPB",
         "getFieldsCount",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
@@ -21107,12 +21713,128 @@ const GENOMICSDB_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
+        "GenomicsDBVidMapProtoFieldLengthDescriptorComponentPBBuilder",
+        "build",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBVidMapProtoFieldLengthDescriptorComponentPB",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "FieldLengthDescriptorComponentPB.Builder",
         "build",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "FieldLengthDescriptorComponentPB",
         NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "GenomicsDBVidMapProtoVidMappingPBBuilder",
+        "getFieldsBuilder",
+        1,
+        ExternalApiRole::IndexedGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "GenomicsDBVidMapProto.VidMappingPB.Builder",
+        "getFieldsBuilder",
+        1,
+        ExternalApiRole::IndexedGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "setVCFFieldCombineOperation",
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "setVCFFieldCombineOperation",
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "clearLength",
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "clearLength",
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "clearVcfDelimiter",
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "clearVcfDelimiter",
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "clearType",
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "clearType",
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "addLength",
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "addLength",
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "addVcfDelimiter",
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "addVcfDelimiter",
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "addType",
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "addType",
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "setDisableRemapMissingWithNonRef",
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "setDisableRemapMissingWithNonRef",
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB.Builder",
+        "setVariableLengthDescriptor",
+        "GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB.Builder",
+    ),
+    semantic_fluent_mutator_effect(
+        "GenomicsDBVidMapProtoFieldLengthDescriptorComponentPBBuilder",
+        "setVariableLengthDescriptor",
+        "GenomicsDBVidMapProtoFieldLengthDescriptorComponentPBBuilder",
     ),
     semantic_typed_effect(
         "com.intel.genomicsdb.GenomicsDBImporter",
@@ -21254,6 +21976,24 @@ const GENOMICSDB_MODELED_APIS: &[ExternalPackModeledApi] = &[
     ),
     modeled_semantic("ExportConfiguration.Builder", "build"),
     modeled_semantic(
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+        "setWorkspace",
+    ),
+    modeled_semantic("ExportConfiguration.Builder", "setWorkspace"),
+    modeled_semantic(
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+        "setArrayName",
+    ),
+    modeled_semantic("ExportConfiguration.Builder", "setArrayName"),
+    modeled_semantic(
+        "GenomicsDBExportConfiguration.ExportConfiguration.Builder",
+        "setGenerateArrayNameFromPartitionBounds",
+    ),
+    modeled_semantic(
+        "ExportConfiguration.Builder",
+        "setGenerateArrayNameFromPartitionBounds",
+    ),
+    modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBImportConfiguration.ImportConfiguration",
         "newBuilder",
     ),
@@ -21284,12 +22024,14 @@ const GENOMICSDB_MODELED_APIS: &[ExternalPackModeledApi] = &[
     ),
     modeled_semantic("VidMappingPB", "toBuilder"),
     modeled_semantic("GenomicsDBVidMapProto.VidMappingPB", "toBuilder"),
+    modeled_semantic("GenomicsDBVidMapProtoVidMappingPB", "toBuilder"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "getContigsList",
     ),
     modeled_semantic("VidMappingPB", "getContigsList"),
     modeled_semantic("GenomicsDBVidMapProto.VidMappingPB", "getContigsList"),
+    modeled_semantic("GenomicsDBVidMapProtoVidMappingPB", "getContigsList"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome",
         "getName",
@@ -21326,12 +22068,14 @@ const GENOMICSDB_MODELED_APIS: &[ExternalPackModeledApi] = &[
     ),
     modeled_semantic("VidMappingPB", "getFields"),
     modeled_semantic("GenomicsDBVidMapProto.VidMappingPB", "getFields"),
+    modeled_semantic("GenomicsDBVidMapProtoVidMappingPB", "getFields"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.VidMappingPB",
         "getFieldsCount",
     ),
     modeled_semantic("VidMappingPB", "getFieldsCount"),
     modeled_semantic("GenomicsDBVidMapProto.VidMappingPB", "getFieldsCount"),
+    modeled_semantic("GenomicsDBVidMapProtoVidMappingPB", "getFieldsCount"),
     modeled_semantic(
         "com.intel.genomicsdb.model.GenomicsDBVidMapProto.FieldInfo",
         "getName",
@@ -21347,7 +22091,89 @@ const GENOMICSDB_MODELED_APIS: &[ExternalPackModeledApi] = &[
         "GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB.Builder",
         "build",
     ),
+    modeled_semantic(
+        "GenomicsDBVidMapProtoFieldLengthDescriptorComponentPBBuilder",
+        "build",
+    ),
     modeled_semantic("FieldLengthDescriptorComponentPB.Builder", "build"),
+    modeled_semantic(
+        "GenomicsDBVidMapProtoVidMappingPBBuilder",
+        "getFieldsBuilder",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.VidMappingPB.Builder",
+        "getFieldsBuilder",
+    ),
+    modeled_semantic("VidMappingPB.Builder", "getFieldsBuilder"),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "setVCFFieldCombineOperation",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "setVCFFieldCombineOperation",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "clearLength",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "clearLength",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "clearVcfDelimiter",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "clearVcfDelimiter",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "clearType",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "clearType",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "addLength",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "addLength",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "addVcfDelimiter",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "addVcfDelimiter",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "addType",
+    ),
+    modeled_semantic("GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder", "addType"),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.GenomicsDBFieldInfo.Builder",
+        "setDisableRemapMissingWithNonRef",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProtoGenomicsDBFieldInfoBuilder",
+        "setDisableRemapMissingWithNonRef",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProto.FieldLengthDescriptorComponentPB.Builder",
+        "setVariableLengthDescriptor",
+    ),
+    modeled_semantic(
+        "GenomicsDBVidMapProtoFieldLengthDescriptorComponentPBBuilder",
+        "setVariableLengthDescriptor",
+    ),
     modeled_semantic(
         "com.intel.genomicsdb.GenomicsDBImporter",
         "getProtobufVidMapping",
@@ -22191,6 +23017,334 @@ const DISQ_WRITE_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
     modeled_semantic_constructor("TempPartsDirectoryWriteOption", 1),
 ];
 
+const DISQ_WRITE_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect(
+        "org.disq_bio.disq.HtsjdkReadsRdd",
+        "getReads",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "JavaRDD<SAMRecord>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "HtsjdkReadsRdd",
+        "getReads",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "JavaRDD<SAMRecord>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.disq_bio.disq.HtsjdkReadsRdd",
+        "getHeader",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMFileHeader",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "HtsjdkReadsRdd",
+        "getHeader",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMFileHeader",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "makeDefault",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "HtsjdkReadsRddStorage",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "HtsjdkReadsRddStorage",
+        "makeDefault",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "HtsjdkReadsRddStorage",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_fluent_mutator_effect(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "useNio",
+        "HtsjdkReadsRddStorage",
+    ),
+    semantic_fluent_mutator_effect("HtsjdkReadsRddStorage", "useNio", "HtsjdkReadsRddStorage"),
+    semantic_fluent_mutator_effect(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "splitSize",
+        "HtsjdkReadsRddStorage",
+    ),
+    semantic_fluent_mutator_effect(
+        "HtsjdkReadsRddStorage",
+        "splitSize",
+        "HtsjdkReadsRddStorage",
+    ),
+    semantic_fluent_mutator_effect(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "validationStringency",
+        "HtsjdkReadsRddStorage",
+    ),
+    semantic_fluent_mutator_effect(
+        "HtsjdkReadsRddStorage",
+        "validationStringency",
+        "HtsjdkReadsRddStorage",
+    ),
+    semantic_fluent_mutator_effect(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "referenceSourcePath",
+        "HtsjdkReadsRddStorage",
+    ),
+    semantic_fluent_mutator_effect(
+        "HtsjdkReadsRddStorage",
+        "referenceSourcePath",
+        "HtsjdkReadsRddStorage",
+    ),
+    semantic_fluent_mutator_effect(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "sbiIndexGranularity",
+        "HtsjdkReadsRddStorage",
+    ),
+    semantic_fluent_mutator_effect(
+        "HtsjdkReadsRddStorage",
+        "sbiIndexGranularity",
+        "HtsjdkReadsRddStorage",
+    ),
+    semantic_typed_effect_with_arity(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "read",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "HtsjdkReadsRdd",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "HtsjdkReadsRddStorage",
+        "read",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "HtsjdkReadsRdd",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "read",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "HtsjdkReadsRdd",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "HtsjdkReadsRddStorage",
+        "read",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "HtsjdkReadsRdd",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "write",
+        ExternalApiRole::SideEffect,
+        ReceiverMutabilityFact::ReadOnly,
+        "void",
+        NullabilityState::Unknown,
+    ),
+    semantic_typed_effect(
+        "HtsjdkReadsRddStorage",
+        "write",
+        ExternalApiRole::SideEffect,
+        ReceiverMutabilityFact::ReadOnly,
+        "void",
+        NullabilityState::Unknown,
+    ),
+    semantic_typed_effect(
+        "org.disq_bio.disq.HtsjdkVariantsRddStorage",
+        "makeDefault",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "HtsjdkVariantsRddStorage",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "HtsjdkVariantsRddStorage",
+        "makeDefault",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "HtsjdkVariantsRddStorage",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.disq_bio.disq.HtsjdkVariantsRddStorage",
+        "write",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Void",
+        NullabilityState::Unknown,
+    ),
+    semantic_typed_effect(
+        "HtsjdkVariantsRddStorage",
+        "write",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Void",
+        NullabilityState::Unknown,
+    ),
+    semantic_typed_effect(
+        "org.disq_bio.disq.HtsjdkVariantsRddStorage",
+        "read",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "HtsjdkVariantsRdd",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "HtsjdkVariantsRddStorage",
+        "read",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "HtsjdkVariantsRdd",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.disq_bio.disq.HtsjdkVariantsRdd",
+        "getVariants",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "JavaRDD<VariantContext>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "HtsjdkVariantsRdd",
+        "getVariants",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "JavaRDD<VariantContext>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.disq_bio.disq.BaiWriteOption",
+        "fromBoolean",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "BaiWriteOption",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "BaiWriteOption",
+        "fromBoolean",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "BaiWriteOption",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.disq_bio.disq.SbiWriteOption",
+        "fromBoolean",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SbiWriteOption",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "SbiWriteOption",
+        "fromBoolean",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SbiWriteOption",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.disq_bio.disq.TabixIndexWriteOption",
+        "fromBoolean",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "TabixIndexWriteOption",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "TabixIndexWriteOption",
+        "fromBoolean",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "TabixIndexWriteOption",
+        NullabilityState::DefinitelyNonNull,
+    ),
+];
+
+const DISQ_WRITE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
+    ExternalPackArgumentEffect {
+        receiver_type: "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        method_name: "referenceSourcePath",
+        parameter_index: 0,
+        parameter_type: Some("String"),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+    },
+    ExternalPackArgumentEffect {
+        receiver_type: "HtsjdkReadsRddStorage",
+        method_name: "referenceSourcePath",
+        parameter_index: 0,
+        parameter_type: Some("String"),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+    },
+];
+
+const DISQ_WRITE_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("org.disq_bio.disq.HtsjdkReadsRdd", "getReads"),
+    modeled_semantic("HtsjdkReadsRdd", "getReads"),
+    modeled_semantic("org.disq_bio.disq.HtsjdkReadsRdd", "getHeader"),
+    modeled_semantic("HtsjdkReadsRdd", "getHeader"),
+    modeled_semantic("org.disq_bio.disq.HtsjdkReadsRddStorage", "makeDefault"),
+    modeled_semantic("HtsjdkReadsRddStorage", "makeDefault"),
+    modeled_semantic("org.disq_bio.disq.HtsjdkReadsRddStorage", "useNio"),
+    modeled_semantic("HtsjdkReadsRddStorage", "useNio"),
+    modeled_semantic("org.disq_bio.disq.HtsjdkReadsRddStorage", "splitSize"),
+    modeled_semantic("HtsjdkReadsRddStorage", "splitSize"),
+    modeled_semantic(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "validationStringency",
+    ),
+    modeled_semantic("HtsjdkReadsRddStorage", "validationStringency"),
+    modeled_semantic(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "referenceSourcePath",
+    ),
+    modeled_semantic("HtsjdkReadsRddStorage", "referenceSourcePath"),
+    modeled_semantic(
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "sbiIndexGranularity",
+    ),
+    modeled_semantic("HtsjdkReadsRddStorage", "sbiIndexGranularity"),
+    modeled_semantic("org.disq_bio.disq.HtsjdkReadsRddStorage", "read"),
+    modeled_semantic("HtsjdkReadsRddStorage", "read"),
+    modeled_semantic("org.disq_bio.disq.HtsjdkReadsRddStorage", "write"),
+    modeled_semantic("HtsjdkReadsRddStorage", "write"),
+    modeled_semantic("org.disq_bio.disq.HtsjdkVariantsRddStorage", "makeDefault"),
+    modeled_semantic("HtsjdkVariantsRddStorage", "makeDefault"),
+    modeled_semantic("org.disq_bio.disq.HtsjdkVariantsRddStorage", "write"),
+    modeled_semantic("HtsjdkVariantsRddStorage", "write"),
+    modeled_semantic("org.disq_bio.disq.HtsjdkVariantsRddStorage", "read"),
+    modeled_semantic("HtsjdkVariantsRddStorage", "read"),
+    modeled_semantic("org.disq_bio.disq.HtsjdkVariantsRdd", "getVariants"),
+    modeled_semantic("HtsjdkVariantsRdd", "getVariants"),
+    modeled_semantic("org.disq_bio.disq.BaiWriteOption", "fromBoolean"),
+    modeled_semantic("BaiWriteOption", "fromBoolean"),
+    modeled_semantic("org.disq_bio.disq.SbiWriteOption", "fromBoolean"),
+    modeled_semantic("SbiWriteOption", "fromBoolean"),
+    modeled_semantic("org.disq_bio.disq.TabixIndexWriteOption", "fromBoolean"),
+    modeled_semantic("TabixIndexWriteOption", "fromBoolean"),
+];
+
 const DISQ_WRITE_FIELD_NULLABILITY: &[ExternalPackFieldNullability] = &[
     non_null_field("org.disq_bio.disq.ReadsFormatWriteOption", "BAM"),
     non_null_field("ReadsFormatWriteOption", "BAM"),
@@ -22198,6 +23352,14 @@ const DISQ_WRITE_FIELD_NULLABILITY: &[ExternalPackFieldNullability] = &[
     non_null_field("FileCardinalityWriteOption", "MULTIPLE"),
     non_null_field("org.disq_bio.disq.FileCardinalityWriteOption", "SINGLE"),
     non_null_field("FileCardinalityWriteOption", "SINGLE"),
+    non_null_field("org.disq_bio.disq.BaiWriteOption", "WRITE_BAI"),
+    non_null_field("BaiWriteOption", "WRITE_BAI"),
+    non_null_field("org.disq_bio.disq.BaiWriteOption", "DONT_WRITE_BAI"),
+    non_null_field("BaiWriteOption", "DONT_WRITE_BAI"),
+    non_null_field("org.disq_bio.disq.SbiWriteOption", "WRITE_SBI"),
+    non_null_field("SbiWriteOption", "WRITE_SBI"),
+    non_null_field("org.disq_bio.disq.SbiWriteOption", "DONT_WRITE_SBI"),
+    non_null_field("SbiWriteOption", "DONT_WRITE_SBI"),
 ];
 
 const DISQ_WRITE_MODELED_FIELDS: &[ExternalPackModeledField] = &[
@@ -22207,6 +23369,14 @@ const DISQ_WRITE_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("FileCardinalityWriteOption", "MULTIPLE"),
     modeled_semantic_field("org.disq_bio.disq.FileCardinalityWriteOption", "SINGLE"),
     modeled_semantic_field("FileCardinalityWriteOption", "SINGLE"),
+    modeled_semantic_field("org.disq_bio.disq.BaiWriteOption", "WRITE_BAI"),
+    modeled_semantic_field("BaiWriteOption", "WRITE_BAI"),
+    modeled_semantic_field("org.disq_bio.disq.BaiWriteOption", "DONT_WRITE_BAI"),
+    modeled_semantic_field("BaiWriteOption", "DONT_WRITE_BAI"),
+    modeled_semantic_field("org.disq_bio.disq.SbiWriteOption", "WRITE_SBI"),
+    modeled_semantic_field("SbiWriteOption", "WRITE_SBI"),
+    modeled_semantic_field("org.disq_bio.disq.SbiWriteOption", "DONT_WRITE_SBI"),
+    modeled_semantic_field("SbiWriteOption", "DONT_WRITE_SBI"),
 ];
 
 const INTEL_GKL_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
@@ -22223,77 +23393,77 @@ const INTEL_GKL_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
 ];
 
 const INTEL_GKL_MODELED_FIELDS: &[ExternalPackModeledField] = &[
-    modeled_semantic_field("com.intel.gkl.pdhmm.PDHMMNativeArguments", "avxLevel"),
-    modeled_semantic_field("PDHMMNativeArguments", "avxLevel"),
-    modeled_semantic_field("com.intel.gkl.pdhmm.PDHMMNativeArguments", "openMPSetting"),
-    modeled_semantic_field("PDHMMNativeArguments", "openMPSetting"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("com.intel.gkl.pdhmm.PDHMMNativeArguments", "avxLevel"),
+    modeled_semantic_instance_field("PDHMMNativeArguments", "avxLevel"),
+    modeled_semantic_instance_field("com.intel.gkl.pdhmm.PDHMMNativeArguments", "openMPSetting"),
+    modeled_semantic_instance_field("PDHMMNativeArguments", "openMPSetting"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pdhmm.PDHMMNativeArguments",
         "maxNumberOfThreads",
     ),
-    modeled_semantic_field("PDHMMNativeArguments", "maxNumberOfThreads"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("PDHMMNativeArguments", "maxNumberOfThreads"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.PairHMMNativeArguments",
         "maxNumberOfThreads",
     ),
-    modeled_semantic_field("PairHMMNativeArguments", "maxNumberOfThreads"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("PairHMMNativeArguments", "maxNumberOfThreads"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.PairHMMNativeArguments",
         "useDoublePrecision",
     ),
-    modeled_semantic_field("PairHMMNativeArguments", "useDoublePrecision"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("PairHMMNativeArguments", "useDoublePrecision"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.IntelPairHmm.ReadDataHolder",
         "readBases",
     ),
-    modeled_semantic_field("ReadDataHolder", "readBases"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("ReadDataHolder", "readBases"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.IntelPairHmm.ReadDataHolder",
         "readQuals",
     ),
-    modeled_semantic_field("ReadDataHolder", "readQuals"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("ReadDataHolder", "readQuals"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.IntelPairHmm.ReadDataHolder",
         "insertionGOP",
     ),
-    modeled_semantic_field("ReadDataHolder", "insertionGOP"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("ReadDataHolder", "insertionGOP"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.IntelPairHmm.ReadDataHolder",
         "deletionGOP",
     ),
-    modeled_semantic_field("ReadDataHolder", "deletionGOP"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("ReadDataHolder", "deletionGOP"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.IntelPairHmm.ReadDataHolder",
         "overallGCP",
     ),
-    modeled_semantic_field("ReadDataHolder", "overallGCP"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("ReadDataHolder", "overallGCP"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.IntelPairHmm.HaplotypeDataHolder",
         "haplotypeBases",
     ),
-    modeled_semantic_field("HaplotypeDataHolder", "haplotypeBases"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("HaplotypeDataHolder", "haplotypeBases"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.IntelPairHmm.HaplotypeDataHolder",
         "haplotypePDBases",
     ),
-    modeled_semantic_field("HaplotypeDataHolder", "haplotypePDBases"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("HaplotypeDataHolder", "haplotypePDBases"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.IntelPairHmm.BatchCompletionCallbackFunctionArgument",
         "batchCount",
     ),
-    modeled_semantic_field("BatchCompletionCallbackFunctionArgument", "batchCount"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("BatchCompletionCallbackFunctionArgument", "batchCount"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.pairhmm.IntelPairHmm.BatchCompletionCallbackFunctionArgument",
         "totalBatchCount",
     ),
-    modeled_semantic_field("BatchCompletionCallbackFunctionArgument", "totalBatchCount"),
-    modeled_semantic_field(
+    modeled_semantic_instance_field("BatchCompletionCallbackFunctionArgument", "totalBatchCount"),
+    modeled_semantic_instance_field(
         "com.intel.gkl.smithwaterman.SWNativeAlignerResult",
         "alignment_offset",
     ),
-    modeled_semantic_field("SWNativeAlignerResult", "alignment_offset"),
-    modeled_semantic_field("com.intel.gkl.smithwaterman.SWNativeAlignerResult", "cigar"),
-    modeled_semantic_field("SWNativeAlignerResult", "cigar"),
+    modeled_semantic_instance_field("SWNativeAlignerResult", "alignment_offset"),
+    modeled_semantic_instance_field("com.intel.gkl.smithwaterman.SWNativeAlignerResult", "cigar"),
+    modeled_semantic_instance_field("SWNativeAlignerResult", "cigar"),
 ];
 
 const GUAVA_IMMUTABLE_COLLECT_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
@@ -22392,6 +23562,50 @@ const GUAVA_IMMUTABLE_COLLECT_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("ImmutableMap.Builder", "build"),
 ];
 
+const BROAD_HELLBENDER_UTILS_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
+    cloneable_final_implements_capability(
+        "org.broadinstitute.hellbender.utils.SimpleInterval",
+        LOCATABLE_IMPL,
+    ),
+    cloneable_final_implements_capability("SimpleInterval", LOCATABLE_IMPL),
+    cloneable_final_implements_capability(
+        "org.broadinstitute.hellbender.engine.ReadsPathDataSource",
+        &[
+            "org.broadinstitute.hellbender.engine.ReadsDataSource",
+            "ReadsDataSource",
+        ],
+    ),
+    cloneable_final_implements_capability("ReadsPathDataSource", &["ReadsDataSource"]),
+    cloneable_final_implements_capability(
+        "org.broadinstitute.hellbender.utils.read.HeaderlessSAMRecordCoordinateComparator",
+        &["java.util.Comparator", "Comparator"],
+    ),
+    cloneable_final_implements_capability(
+        "HeaderlessSAMRecordCoordinateComparator",
+        &["java.util.Comparator", "Comparator"],
+    ),
+    cloneable_final_implements_capability(
+        "org.broadinstitute.hellbender.utils.variant.GATKVariant",
+        LOCATABLE_IMPL,
+    ),
+    cloneable_final_implements_capability("GATKVariant", LOCATABLE_IMPL),
+    cloneable_final_implements_capability(
+        "org.broadinstitute.hellbender.utils.variant.VariantContextVariantAdapter",
+        &[
+            "org.broadinstitute.hellbender.utils.variant.GATKVariant",
+            "GATKVariant",
+            "htsjdk.samtools.util.Locatable",
+            "Locatable",
+        ],
+    ),
+    cloneable_final_implements_capability(
+        "VariantContextVariantAdapter",
+        &["GATKVariant", "Locatable"],
+    ),
+    cloneable_final_capability("org.broadinstitute.hellbender.utils.spark.SparkUtils"),
+    cloneable_final_capability("SparkUtils"),
+];
+
 const BROAD_HELLBENDER_UTILS_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     readonly_borrowed_argument(
         "org.broadinstitute.hellbender.utils.Utils",
@@ -22407,9 +23621,102 @@ const BROAD_HELLBENDER_UTILS_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &
         "boolean",
     ),
     readonly_borrowed_argument("Utils", "validateArg", 0, "boolean"),
+    ExternalPackArgumentEffect {
+        receiver_type: "org.broadinstitute.hellbender.utils.read.GATKRead",
+        method_name: "convertToSAMRecord",
+        parameter_index: 0,
+        parameter_type: Some("SAMFileHeader"),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+    },
+    ExternalPackArgumentEffect {
+        receiver_type: "GATKRead",
+        method_name: "convertToSAMRecord",
+        parameter_index: 0,
+        parameter_type: Some("SAMFileHeader"),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+    },
+];
+
+const BROAD_HELLBENDER_UTILS_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
+    modeled_semantic_constructor("org.broadinstitute.hellbender.engine.GATKPath", 1),
+    modeled_semantic_constructor("GATKPath", 1),
+    modeled_semantic_constructor(
+        "org.broadinstitute.hellbender.engine.ReadsPathDataSource",
+        2,
+    ),
+    modeled_semantic_constructor("ReadsPathDataSource", 2),
+    modeled_semantic_constructor(
+        "org.broadinstitute.hellbender.utils.read.HeaderlessSAMRecordCoordinateComparator",
+        1,
+    ),
+    modeled_semantic_constructor("HeaderlessSAMRecordCoordinateComparator", 1),
+    modeled_semantic_constructor("org.broadinstitute.hellbender.utils.SimpleInterval", 1),
+    modeled_semantic_constructor("SimpleInterval", 1),
+    modeled_semantic_constructor("org.broadinstitute.hellbender.utils.SimpleInterval", 3),
+    modeled_semantic_constructor("SimpleInterval", 3),
+    modeled_semantic_constructor(
+        "org.broadinstitute.hellbender.utils.reference.ReferenceBases",
+        2,
+    ),
+    modeled_semantic_constructor("ReferenceBases", 2),
 ];
 
 const BROAD_HELLBENDER_UTILS_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.engine.GATKTool",
+        "getDefaultToolVCFHeaderLines",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Set<VCFHeaderLine>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "GATKTool",
+        "getDefaultToolVCFHeaderLines",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Set<VCFHeaderLine>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_side_effect(
+        "org.broadinstitute.hellbender.engine.ProgressMeter",
+        "setRecordsBetweenTimeChecks",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_side_effect(
+        "org.broadinstitute.hellbender.utils.progressmeter.ProgressMeter",
+        "setRecordsBetweenTimeChecks",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_side_effect(
+        "ProgressMeter",
+        "setRecordsBetweenTimeChecks",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.spark.SparkUtils",
+        "hadoopPathExists",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "SparkUtils",
+        "hadoopPathExists",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_typed_effect(
         "org.broadinstitute.hellbender.utils.Utils",
         "join",
@@ -22626,9 +23933,438 @@ const BROAD_HELLBENDER_UTILS_API_EFFECTS: &[ExternalPackApiEffect] = &[
         1,
         NullabilityState::Unknown,
     ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.GATKPath",
+        "toPath",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Path",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GATKPath",
+        "toPath",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Path",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.FeatureInput",
+        "toPath",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Path",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "FeatureInput",
+        "toPath",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Path",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.GATKPath",
+        "getRawInputString",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GATKPath",
+        "getRawInputString",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.GATKPath",
+        "getURI",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "URI",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GATKPath",
+        "getURI",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "URI",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.GATKPath",
+        "isCram",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GATKPath",
+        "isCram",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.GATKPath",
+        "isHadoopURL",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GATKPath",
+        "isHadoopURL",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.GATKPath",
+        "isFasta",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GATKPath",
+        "isFasta",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.SimpleInterval",
+        "getContig",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "SimpleInterval",
+        "getContig",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.SimpleInterval",
+        "getStart",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "SimpleInterval",
+        "getStart",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.SimpleInterval",
+        "getEnd",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "SimpleInterval",
+        "getEnd",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.SimpleInterval",
+        "overlaps",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "SimpleInterval",
+        "overlaps",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.read.GATKRead",
+        "getContig",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GATKRead",
+        "getContig",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.read.GATKRead",
+        "getStart",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GATKRead",
+        "getStart",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.read.GATKRead",
+        "getEnd",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GATKRead",
+        "getEnd",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.read.GATKRead",
+        "convertToSAMRecord",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMRecord",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "GATKRead",
+        "convertToSAMRecord",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMRecord",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.read.ReadUtils",
+        "isReadNameGroupedBam",
+        1,
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "ReadUtils",
+        "isReadNameGroupedBam",
+        1,
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.read.ReadUtils",
+        "getBasesReverseComplement",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "byte[]",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "ReadUtils",
+        "getBasesReverseComplement",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "byte[]",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.read.SAMRecordToGATKReadAdapter",
+        "headerlessReadAdapter",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GATKRead",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "SAMRecordToGATKReadAdapter",
+        "headerlessReadAdapter",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GATKRead",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.variant.VariantContextVariantAdapter",
+        "sparkVariantAdapter",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GATKVariant",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "VariantContextVariantAdapter",
+        "sparkVariantAdapter",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GATKVariant",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.TraversalParameters",
+        "getIntervalsForTraversal",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<SimpleInterval>",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "TraversalParameters",
+        "getIntervalsForTraversal",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<SimpleInterval>",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.TraversalParameters",
+        "traverseUnmappedReads",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "TraversalParameters",
+        "traverseUnmappedReads",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.reference.TwoBitReference",
+        "getSequenceDictionary",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMSequenceDictionary",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "TwoBitReference",
+        "getSequenceDictionary",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMSequenceDictionary",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.utils.reference.TwoBitReference",
+        "getReferenceBases",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "ReferenceSequence",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "TwoBitReference",
+        "getReferenceBases",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "ReferenceSequence",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.ReadsDataSource",
+        "close",
+        ExternalApiRole::SideEffect,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::Unknown,
+    ),
+    semantic_typed_effect(
+        "ReadsDataSource",
+        "close",
+        ExternalApiRole::SideEffect,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::Unknown,
+    ),
+    semantic_typed_effect(
+        "org.broadinstitute.hellbender.engine.ReadsDataSource",
+        "getHeader",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMFileHeader",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "ReadsDataSource",
+        "getHeader",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "SAMFileHeader",
+        NullabilityState::DefinitelyNonNull,
+    ),
 ];
 
 const BROAD_HELLBENDER_UTILS_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic(
+        "org.broadinstitute.hellbender.engine.GATKTool",
+        "getDefaultToolVCFHeaderLines",
+    ),
+    modeled_semantic("GATKTool", "getDefaultToolVCFHeaderLines"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.engine.ProgressMeter",
+        "setRecordsBetweenTimeChecks",
+    ),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.progressmeter.ProgressMeter",
+        "setRecordsBetweenTimeChecks",
+    ),
+    modeled_semantic("ProgressMeter", "setRecordsBetweenTimeChecks"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.spark.SparkUtils",
+        "hadoopPathExists",
+    ),
+    modeled_semantic("SparkUtils", "hadoopPathExists"),
     modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "join"),
     modeled_semantic("Utils", "join"),
     modeled_semantic("org.broadinstitute.hellbender.utils.Utils", "split"),
@@ -22691,10 +24427,207 @@ const BROAD_HELLBENDER_UTILS_MODELED_APIS: &[ExternalPackModeledApi] = &[
         "assertPathsAreReadable",
     ),
     modeled_semantic("IOUtils", "assertPathsAreReadable"),
+    modeled_semantic("org.broadinstitute.hellbender.engine.GATKPath", "toPath"),
+    modeled_semantic("GATKPath", "toPath"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.engine.FeatureInput",
+        "toPath",
+    ),
+    modeled_semantic("FeatureInput", "toPath"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.engine.GATKPath",
+        "getRawInputString",
+    ),
+    modeled_semantic("GATKPath", "getRawInputString"),
+    modeled_semantic("org.broadinstitute.hellbender.engine.GATKPath", "getURI"),
+    modeled_semantic("GATKPath", "getURI"),
+    modeled_semantic("org.broadinstitute.hellbender.engine.GATKPath", "isCram"),
+    modeled_semantic("GATKPath", "isCram"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.engine.GATKPath",
+        "isHadoopURL",
+    ),
+    modeled_semantic("GATKPath", "isHadoopURL"),
+    modeled_semantic("org.broadinstitute.hellbender.engine.GATKPath", "isFasta"),
+    modeled_semantic("GATKPath", "isFasta"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.SimpleInterval",
+        "getContig",
+    ),
+    modeled_semantic("SimpleInterval", "getContig"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.SimpleInterval",
+        "getStart",
+    ),
+    modeled_semantic("SimpleInterval", "getStart"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.SimpleInterval",
+        "getEnd",
+    ),
+    modeled_semantic("SimpleInterval", "getEnd"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.SimpleInterval",
+        "overlaps",
+    ),
+    modeled_semantic("SimpleInterval", "overlaps"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.read.GATKRead",
+        "getContig",
+    ),
+    modeled_semantic("GATKRead", "getContig"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.read.GATKRead",
+        "getStart",
+    ),
+    modeled_semantic("GATKRead", "getStart"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.read.GATKRead",
+        "getEnd",
+    ),
+    modeled_semantic("GATKRead", "getEnd"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.read.GATKRead",
+        "convertToSAMRecord",
+    ),
+    modeled_semantic("GATKRead", "convertToSAMRecord"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.read.ReadUtils",
+        "isReadNameGroupedBam",
+    ),
+    modeled_semantic("ReadUtils", "isReadNameGroupedBam"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.read.ReadUtils",
+        "getBasesReverseComplement",
+    ),
+    modeled_semantic("ReadUtils", "getBasesReverseComplement"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.read.SAMRecordToGATKReadAdapter",
+        "headerlessReadAdapter",
+    ),
+    modeled_semantic("SAMRecordToGATKReadAdapter", "headerlessReadAdapter"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.variant.VariantContextVariantAdapter",
+        "sparkVariantAdapter",
+    ),
+    modeled_semantic("VariantContextVariantAdapter", "sparkVariantAdapter"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.engine.TraversalParameters",
+        "getIntervalsForTraversal",
+    ),
+    modeled_semantic("TraversalParameters", "getIntervalsForTraversal"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.engine.TraversalParameters",
+        "traverseUnmappedReads",
+    ),
+    modeled_semantic("TraversalParameters", "traverseUnmappedReads"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.reference.TwoBitReference",
+        "getSequenceDictionary",
+    ),
+    modeled_semantic("TwoBitReference", "getSequenceDictionary"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.reference.TwoBitReference",
+        "getReferenceBases",
+    ),
+    modeled_semantic("TwoBitReference", "getReferenceBases"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.engine.ReadsDataSource",
+        "close",
+    ),
+    modeled_semantic("ReadsDataSource", "close"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.engine.ReadsDataSource",
+        "getHeader",
+    ),
+    modeled_semantic("ReadsDataSource", "getHeader"),
 ];
 
 const BROAD_HELLBENDER_UTILS_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.engine.GATKTool",
+        "intervalArgumentCollection",
+        "IntervalArgumentCollection",
+        ExternalFieldKind::Unknown,
+    ),
+    modeled_semantic_field_typed(
+        "GATKTool",
+        "intervalArgumentCollection",
+        "IntervalArgumentCollection",
+        ExternalFieldKind::Unknown,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.engine.GATKTool",
+        "progressMeter",
+        "ProgressMeter",
+        ExternalFieldKind::Unknown,
+    ),
+    modeled_semantic_field_typed(
+        "GATKTool",
+        "progressMeter",
+        "ProgressMeter",
+        ExternalFieldKind::Unknown,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.engine.GATKTool",
+        "cloudPrefetchBuffer",
+        "int",
+        ExternalFieldKind::Unknown,
+    ),
+    modeled_semantic_field_typed(
+        "GATKTool",
+        "cloudPrefetchBuffer",
+        "int",
+        ExternalFieldKind::Unknown,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.engine.GATKTool",
+        "cloudIndexPrefetchBuffer",
+        "int",
+        ExternalFieldKind::Unknown,
+    ),
+    modeled_semantic_field_typed(
+        "GATKTool",
+        "cloudIndexPrefetchBuffer",
+        "int",
+        ExternalFieldKind::Unknown,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.read.ReadConstants",
+        "DEFAULT_READ_VALIDATION_STRINGENCY",
+        "ValidationStringency",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "ReadConstants",
+        "DEFAULT_READ_VALIDATION_STRINGENCY",
+        "ValidationStringency",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.read.ReadsWriteFormat",
+        "SINGLE",
+        "ReadsWriteFormat",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "ReadsWriteFormat",
+        "SINGLE",
+        "ReadsWriteFormat",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.read.ReadsWriteFormat",
+        "SHARDED",
+        "ReadsWriteFormat",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "ReadsWriteFormat",
+        "SHARDED",
+        "ReadsWriteFormat",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
         "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
         "RAW_MAPPING_QUALITY_WITH_DEPTH_KEY",
         "String",
@@ -22727,6 +24660,126 @@ const BROAD_HELLBENDER_UTILS_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field_typed(
         "GATKVCFConstants",
         "TREE_SCORE",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "AS_RAW_RMS_MAPPING_QUALITY_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "AS_RAW_RMS_MAPPING_QUALITY_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "RAW_QUAL_APPROX_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "RAW_QUAL_APPROX_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "VARIANT_DEPTH_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "VARIANT_DEPTH_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "RAW_GENOTYPE_COUNT_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "RAW_GENOTYPE_COUNT_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "AS_RAW_QUAL_APPROX_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "AS_RAW_QUAL_APPROX_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "AS_SB_TABLE_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "AS_SB_TABLE_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "HAPLOTYPE_COMPLEXITY_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "HAPLOTYPE_COMPLEXITY_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "HAPLOTYPE_DOMINANCE_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "HAPLOTYPE_DOMINANCE_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "HAPLOTYPES_BEFORE_FILTERING_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "HAPLOTYPES_BEFORE_FILTERING_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "org.broadinstitute.hellbender.utils.variant.GATKVCFConstants",
+        "HAPLOTYPES_FILTERED_KEY",
+        "String",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GATKVCFConstants",
+        "HAPLOTYPES_FILTERED_KEY",
         "String",
         ExternalFieldKind::StaticFinal,
     ),
@@ -22765,6 +24818,42 @@ const BROAD_HTTP_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "Function<SeekableByteChannel, SeekableByteChannel>",
         NullabilityState::DefinitelyNonNull,
     ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.gcs.BucketUtils",
+        "makeFilePathAbsolute",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "BucketUtils",
+        "makeFilePathAbsolute",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "org.broadinstitute.hellbender.utils.gcs.BucketUtils",
+        "isGcsUrl",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "BucketUtils",
+        "isGcsUrl",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_typed_effect(
         "org.broadinstitute.http.nio.HttpFileSystemProviderSettings",
         "redirect",
@@ -22789,6 +24878,16 @@ const BROAD_HTTP_MODELED_APIS: &[ExternalPackModeledApi] = &[
         "getPrefetchingWrapper",
     ),
     modeled_semantic("BucketUtils", "getPrefetchingWrapper"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.gcs.BucketUtils",
+        "makeFilePathAbsolute",
+    ),
+    modeled_semantic("BucketUtils", "makeFilePathAbsolute"),
+    modeled_semantic(
+        "org.broadinstitute.hellbender.utils.gcs.BucketUtils",
+        "isGcsUrl",
+    ),
+    modeled_semantic("BucketUtils", "isGcsUrl"),
     modeled_semantic(
         "org.broadinstitute.http.nio.HttpFileSystemProviderSettings",
         "redirect",
@@ -23851,6 +25950,8 @@ const VCF_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("VCFFileReader", "getFileHeader"),
     modeled_semantic("htsjdk.variant.vcf.VCFFileReader", "iterator"),
     modeled_semantic("VCFFileReader", "iterator"),
+    modeled_semantic("htsjdk.variant.vcf.VCFFileReader", "getSequenceDictionary"),
+    modeled_semantic("VCFFileReader", "getSequenceDictionary"),
     modeled_semantic("htsjdk.variant.vcf.VCFHeader", "getGenotypeSamples"),
     modeled_semantic("VCFHeader", "getGenotypeSamples"),
     modeled_semantic("htsjdk.variant.vcf.VCFHeader", "getSampleNamesInOrder"),
@@ -24112,6 +26213,12 @@ const SAM_HEADER_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("htsjdk.samtools.SAMFileHeader.SortOrder", "name"),
     modeled_semantic("SAMFileHeader.SortOrder", "name"),
     modeled_semantic("SortOrder", "name"),
+    modeled_semantic(
+        "htsjdk.samtools.SAMFileHeader.SortOrder",
+        "getComparatorInstance",
+    ),
+    modeled_semantic("SAMFileHeader.SortOrder", "getComparatorInstance"),
+    modeled_semantic("SortOrder", "getComparatorInstance"),
     modeled_semantic("htsjdk.samtools.SAMFileHeader.GroupOrder", "name"),
     modeled_semantic("SAMFileHeader.GroupOrder", "name"),
     modeled_semantic("GroupOrder", "name"),
@@ -24179,6 +26286,10 @@ const SAM_RECORD_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("SAMRecord", "getEnd"),
     modeled_semantic("htsjdk.samtools.SAMRecord", "getReadName"),
     modeled_semantic("SAMRecord", "getReadName"),
+    modeled_semantic("htsjdk.samtools.SAMRecord", "getReadString"),
+    modeled_semantic("SAMRecord", "getReadString"),
+    modeled_semantic("htsjdk.samtools.SAMRecord", "getBaseQualityString"),
+    modeled_semantic("SAMRecord", "getBaseQualityString"),
     modeled_semantic("htsjdk.samtools.SAMRecord", "getHeader"),
     modeled_semantic("SAMRecord", "getHeader"),
     modeled_semantic("htsjdk.samtools.SAMRecordCoordinateComparator", "compare"),
@@ -24384,6 +26495,8 @@ const SAM_READER_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("SamReaderFactory", "open"),
     modeled_semantic("htsjdk.samtools.SamReaderFactory", "referenceSequence"),
     modeled_semantic("SamReaderFactory", "referenceSequence"),
+    modeled_semantic("htsjdk.samtools.SamReaderFactory", "validationStringency"),
+    modeled_semantic("SamReaderFactory", "validationStringency"),
     modeled_semantic("htsjdk.samtools.SamFileHeaderMerger", "getMergedHeader"),
     modeled_semantic("SamFileHeaderMerger", "getMergedHeader"),
 ];
@@ -24414,6 +26527,23 @@ const SAM_REFERENCE_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("FastaSequenceFile", "nextSequence"),
     modeled_semantic("htsjdk.samtools.reference.FastaSequenceFile", "close"),
     modeled_semantic("FastaSequenceFile", "close"),
+    modeled_semantic(
+        "htsjdk.samtools.reference.ReferenceSequenceFile",
+        "getSubsequenceAt",
+    ),
+    modeled_semantic("ReferenceSequenceFile", "getSubsequenceAt"),
+    modeled_semantic(
+        "htsjdk.samtools.reference.ReferenceSequenceFile",
+        "nextSequence",
+    ),
+    modeled_semantic("ReferenceSequenceFile", "nextSequence"),
+    modeled_semantic(
+        "htsjdk.samtools.reference.ReferenceSequenceFile",
+        "getSequenceDictionary",
+    ),
+    modeled_semantic("ReferenceSequenceFile", "getSequenceDictionary"),
+    modeled_semantic("htsjdk.samtools.reference.ReferenceSequenceFile", "close"),
+    modeled_semantic("ReferenceSequenceFile", "close"),
     modeled_semantic(
         "htsjdk.samtools.reference.ReferenceSequenceFileWalker",
         "getSequenceDictionary",
@@ -24478,6 +26608,20 @@ const TRIBBLE_FEATURE_MODELED_APIS: &[ExternalPackModeledApi] = &[
 ];
 
 const SAMTOOLS_UTIL_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("htsjdk.samtools.util.AbstractAsyncWriter", "write"),
+    modeled_semantic("AbstractAsyncWriter", "write"),
+    modeled_semantic("htsjdk.samtools.util.AbstractAsyncWriter", "close"),
+    modeled_semantic("AbstractAsyncWriter", "close"),
+    modeled_semantic(
+        "htsjdk.samtools.seekablestream.SeekableStreamFactory",
+        "getInstance",
+    ),
+    modeled_semantic("SeekableStreamFactory", "getInstance"),
+    modeled_semantic(
+        "htsjdk.samtools.seekablestream.SeekableStreamFactory",
+        "getStreamFor",
+    ),
+    modeled_semantic("SeekableStreamFactory", "getStreamFor"),
     modeled_semantic("htsjdk.samtools.util.Locatable", "getContig"),
     modeled_semantic("Locatable", "getContig"),
     modeled_semantic("htsjdk.samtools.util.Interval", "getContig"),
@@ -24737,6 +26881,19 @@ const fn modeled_semantic_field(
     }
 }
 
+const fn modeled_semantic_instance_field(
+    type_name: &'static str,
+    field_name: &'static str,
+) -> ExternalPackModeledField {
+    ExternalPackModeledField {
+        type_name,
+        field_name,
+        field_type: None,
+        field_kind: ExternalFieldKind::InstanceField,
+        coverage: ExternalApiCoverage::Semantic,
+    }
+}
+
 const fn modeled_semantic_field_typed(
     type_name: &'static str,
     field_name: &'static str,
@@ -24949,7 +27106,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAM_READER_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
-            argument_effects: NO_ARGUMENT_EFFECTS,
+            argument_effects: SAM_READER_ARGUMENT_EFFECTS,
             exceptions: NO_EXCEPTIONS,
             api_effects: SAM_READER_API_EFFECTS,
             modeled_apis: SAM_READER_MODELED_APIS,
@@ -25086,7 +27243,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             exceptions: NO_EXCEPTIONS,
             api_effects: &[],
             modeled_apis: &[],
-            modeled_constructors: &[],
+            modeled_constructors: BROAD_HELLBENDER_UTILS_MODELED_CONSTRUCTORS,
             modeled_fields: TRIBBLE_INDEX_MODELED_FIELDS,
             unsupported_apis: &[],
         },
@@ -25766,10 +27923,10 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             object_safety: NO_OBJECT_SAFETY,
             type_capabilities: DISQ_WRITE_TYPE_CAPABILITIES,
             field_nullability: DISQ_WRITE_FIELD_NULLABILITY,
-            argument_effects: NO_ARGUMENT_EFFECTS,
+            argument_effects: DISQ_WRITE_ARGUMENT_EFFECTS,
             exceptions: NO_EXCEPTIONS,
-            api_effects: &[],
-            modeled_apis: &[],
+            api_effects: DISQ_WRITE_API_EFFECTS,
+            modeled_apis: DISQ_WRITE_MODELED_APIS,
             modeled_constructors: DISQ_WRITE_MODELED_CONSTRUCTORS,
             modeled_fields: DISQ_WRITE_MODELED_FIELDS,
             unsupported_apis: &[],
@@ -25840,7 +27997,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             object_strategies: &[],
             closed_hierarchy: NO_CLOSED_HIERARCHY,
             object_safety: NO_OBJECT_SAFETY,
-            type_capabilities: NO_TYPE_CAPABILITIES,
+            type_capabilities: BROAD_HELLBENDER_UTILS_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: BROAD_HELLBENDER_UTILS_ARGUMENT_EFFECTS,
             exceptions: NO_EXCEPTIONS,
@@ -26073,14 +28230,19 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
 }
 
 pub fn java_platform_exception_facts() -> Vec<ExceptionFact> {
-    ["ClassNotFoundException", "java.lang.ClassNotFoundException"]
-        .into_iter()
-        .map(|type_name| ExceptionFact {
-            type_name: type_name.to_string(),
-            kind: ExceptionKind::Checked,
-            provenance: FactProvenance::BuiltinExternalModel,
-        })
-        .collect()
+    [
+        ("ClassNotFoundException", ExceptionKind::Checked),
+        ("java.lang.ClassNotFoundException", ExceptionKind::Checked),
+        ("RuntimeException", ExceptionKind::Unchecked),
+        ("java.lang.RuntimeException", ExceptionKind::Unchecked),
+    ]
+    .into_iter()
+    .map(|(type_name, kind)| ExceptionFact {
+        type_name: type_name.to_string(),
+        kind,
+        provenance: FactProvenance::BuiltinExternalModel,
+    })
+    .collect()
 }
 
 pub fn builtin_external_pack_facts(pack_name: &str) -> Option<FactSet> {
@@ -26236,6 +28398,20 @@ fn builtin_external_pack_fact_sets() -> &'static [(String, FactSet)] {
             (SQLITE_PACK.to_string(), sqlite_pack_facts()),
             (JAVA_SQL_PACK.to_string(), java_sql_pack_facts()),
         ]
+    })
+}
+
+pub fn builtin_external_final_erased_object_type(name: &str) -> bool {
+    let java_ty = JavaType::Named {
+        name: name.to_string(),
+        args: Vec::new(),
+    };
+    builtin_external_pack_fact_sets().iter().any(|(_, facts)| {
+        let effective_facts = crate::effective_facts::EffectiveFacts::new(facts);
+        matches!(
+            effective_facts.object_representation_override_strategy_for(&java_ty),
+            Some(HierarchyStrategy::ErasedObject)
+        ) && effective_facts.is_final_type(&java_ty)
     })
 }
 
@@ -26434,6 +28610,10 @@ fn external_field_fact_key_shape(
         | ExternalFieldKind::StaticFinal => {
             (CallableKind::StaticField, crate::facts::Staticness::Static)
         }
+        ExternalFieldKind::InstanceField => (
+            CallableKind::InstanceField,
+            crate::facts::Staticness::Instance,
+        ),
         ExternalFieldKind::Unknown => (
             CallableKind::InstanceField,
             crate::facts::Staticness::Unknown,
@@ -26508,6 +28688,22 @@ pub fn external_api_effect_for_receiver(
     external_api_effect_for_receiver_with_arity(receiver_type, method_name, None)
 }
 
+pub fn builtin_external_pack_models_api(receiver_type: &str, method_name: &str) -> bool {
+    for manifest in builtin_external_pack_manifests() {
+        for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+            for method_alias in external_method_name_lookup_aliases(method_name) {
+                if manifest
+                    .modeled_api(&receiver_alias, &method_alias)
+                    .is_some()
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn external_api_effect_for_receiver_with_arity(
     receiver_type: Option<&str>,
     method_name: &str,
@@ -26543,6 +28739,79 @@ pub fn external_api_effect_for_receiver_with_arity(
     None
 }
 
+pub fn external_api_effects_for_method_arity(
+    method_name: &str,
+    arg_count: usize,
+) -> Vec<ExternalApiEffectFact> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for fact in java_platform_api_effects_for_method_arity(method_name, arg_count) {
+        let key = (
+            fact.receiver_type.clone(),
+            fact.method_name.clone(),
+            fact.arg_count,
+        );
+        if seen.insert(key) {
+            out.push(fact);
+        }
+    }
+    for (_, facts) in builtin_external_pack_fact_sets() {
+        for fact in &facts.external_api_effect_facts {
+            if fact
+                .arg_count
+                .is_some_and(|fact_arity| fact_arity != arg_count)
+            {
+                continue;
+            }
+            if !external_method_name_lookup_aliases(&fact.method_name)
+                .iter()
+                .any(|alias| alias == method_name)
+            {
+                continue;
+            }
+            let key = (
+                fact.receiver_type.clone(),
+                fact.method_name.clone(),
+                fact.arg_count,
+            );
+            if seen.insert(key) {
+                out.push(fact.clone());
+            }
+        }
+    }
+    out
+}
+
+fn java_platform_api_effects_for_method_arity(
+    method_name: &str,
+    arg_count: usize,
+) -> Vec<ExternalApiEffectFact> {
+    [
+        "java.io.PrintStream",
+        "PrintStream",
+        "java.lang.Appendable",
+        "Appendable",
+        "java.io.InputStream",
+        "InputStream",
+        "java.io.OutputStream",
+        "OutputStream",
+        "java.io.Reader",
+        "Reader",
+        "java.io.BufferedReader",
+        "BufferedReader",
+        "java.nio.file.Files",
+        "Files",
+        "JavaNioFileFiles",
+        "java.lang.Class",
+        "Class",
+    ]
+    .into_iter()
+    .filter_map(|receiver| {
+        java_platform_api_effect_for_receiver_with_arity(receiver, method_name, Some(arg_count))
+    })
+    .collect()
+}
+
 pub fn external_api_effect_for_key(key: &CallableKey) -> Option<ExternalApiEffectFact> {
     if key.kind != CallableKind::Method {
         return None;
@@ -26571,6 +28840,24 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
     if let Some(effect) = java_platform_io_api_effect(receiver_type, method_name, matches_arg_count)
     {
         return Some(effect);
+    }
+    if let Some(effect) =
+        java_platform_concurrent_api_effect(receiver_type, method_name, matches_arg_count)
+    {
+        return Some(effect);
+    }
+    if matches!(method_name, "toString" | "to_string") && matches_arg_count(0) {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::String),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
     }
     if !is_java_platform_class_receiver(receiver_type) {
         return None;
@@ -26680,6 +28967,11 @@ fn java_platform_io_api_effect(
                 },
             )
         }
+        ("Files" | "JavaNioFileFiles", "exists") if matches_arg_count(1) => (
+            1,
+            ExternalApiRole::BooleanGetter,
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
         ("InputStream", "read") if matches_arg_count(1) => (
             1,
             ExternalApiRole::Getter,
@@ -26688,12 +28980,105 @@ fn java_platform_io_api_effect(
         ("OutputStream", "write") if matches_arg_count(3) => {
             (3, ExternalApiRole::SideEffect, JavaType::Void)
         }
-        ("InputStream" | "OutputStream" | "Reader", "close") if matches_arg_count(0) => {
+        ("InputStream" | "OutputStream" | "Reader" | "BufferedReader", "close")
+            if matches_arg_count(0) =>
+        {
             (0, ExternalApiRole::SideEffect, JavaType::Void)
         }
-        ("Reader", "readLine" | "read_line") if matches_arg_count(0) => {
+        ("Reader" | "BufferedReader", "readLine" | "read_line") if matches_arg_count(0) => {
             (0, ExternalApiRole::Getter, JavaType::String)
         }
+        ("PrintStream", "checkError" | "check_error") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::BooleanGetter,
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        ("PrintStream", "println" | "flush" | "close") if matches_arg_count(0) => {
+            (0, ExternalApiRole::SideEffect, JavaType::Void)
+        }
+        ("Appendable", "append") if matches_arg_count(1) => (
+            1,
+            ExternalApiRole::FluentMutator,
+            JavaType::Named {
+                name: "Appendable".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        _ => return None,
+    };
+    let thrown = if (matches!(simple_receiver, "Files" | "JavaNioFileFiles")
+        && matches!(method_name, "exists"))
+        || matches!(simple_receiver, "PrintStream")
+    {
+        Vec::new()
+    } else {
+        vec![JavaType::Named {
+            name: "IOException".to_string(),
+            args: Vec::new(),
+        }]
+    };
+    let receiver_mutability = if role == ExternalApiRole::FluentMutator {
+        ReceiverMutabilityFact::MutatesReceiver
+    } else {
+        ReceiverMutabilityFact::ReadOnly
+    };
+    Some(ExternalApiEffectFact {
+        method_name: method_name.to_string(),
+        receiver_type: Some(receiver_type.to_string()),
+        arg_count: Some(expected_args),
+        role,
+        receiver_mutability,
+        return_type: Some(return_type),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown,
+        provenance: FactProvenance::BuiltinExternalModel,
+    })
+}
+
+pub fn java_platform_constructor_argument_effect_for(
+    type_name: &str,
+    arg_count: usize,
+    parameter_index: usize,
+) -> Option<ExternalConstructorArgumentEffectFact> {
+    if arg_count == 1
+        && parameter_index == 0
+        && crate::facts::external_type_name_matches(type_name, "java.io.PrintStream")
+    {
+        return Some(ExternalConstructorArgumentEffectFact {
+            type_name: type_name.to_string(),
+            arg_count,
+            parameter_index,
+            parameter_type: Some(JavaType::Named {
+                name: "OutputStream".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Escapes,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    None
+}
+
+fn java_platform_concurrent_api_effect(
+    receiver_type: &str,
+    method_name: &str,
+    matches_arg_count: impl Fn(usize) -> bool,
+) -> Option<ExternalApiEffectFact> {
+    let simple_receiver = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
+    let (expected_args, role, return_type) = match (simple_receiver, method_name) {
+        (
+            "Executors" | "JavaUtilConcurrentExecutors" | "java.util.concurrent.Executors",
+            "newFixedThreadPool" | "new_fixed_thread_pool",
+        ) if matches_arg_count(2) => (
+            2,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "ExecutorService".to_string(),
+                args: Vec::new(),
+            },
+        ),
         _ => return None,
     };
     Some(ExternalApiEffectFact {
@@ -26704,10 +29089,7 @@ fn java_platform_io_api_effect(
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(return_type),
         return_nullability: NullabilityState::DefinitelyNonNull,
-        thrown: vec![JavaType::Named {
-            name: "IOException".to_string(),
-            args: Vec::new(),
-        }],
+        thrown: Vec::new(),
         provenance: FactProvenance::BuiltinExternalModel,
     })
 }
@@ -26822,6 +29204,75 @@ pub fn unsupported_external_field_for(
         .unsupported_fields
         .get(&(type_name.to_string(), field_name.to_string()))
         .cloned()
+}
+
+pub fn external_conversion_adapter_for(
+    from_type: &str,
+    to_type: &str,
+) -> Option<ExternalConversionAdapterFact> {
+    if let Some(fact) = java_platform_conversion_adapter_for(from_type, to_type) {
+        return Some(fact);
+    }
+    builtin_external_pack_fact_sets()
+        .iter()
+        .flat_map(|(_, facts)| &facts.external_conversion_adapter_facts)
+        .rev()
+        .find(|fact| {
+            crate::facts::external_type_name_matches(&fact.from_type, from_type)
+                && crate::facts::external_type_name_matches(&fact.to_type, to_type)
+        })
+        .cloned()
+}
+
+pub fn external_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for fact in java_platform_conversion_adapters() {
+        let key = (fact.from_type.clone(), fact.to_type.clone(), fact.kind);
+        if seen.insert(key) {
+            out.push(fact);
+        }
+    }
+    for (_, facts) in builtin_external_pack_fact_sets() {
+        for fact in &facts.external_conversion_adapter_facts {
+            let key = (fact.from_type.clone(), fact.to_type.clone(), fact.kind);
+            if seen.insert(key) {
+                out.push(fact.clone());
+            }
+        }
+    }
+    out
+}
+
+fn java_platform_conversion_adapter_for(
+    from_type: &str,
+    to_type: &str,
+) -> Option<ExternalConversionAdapterFact> {
+    java_platform_conversion_adapters()
+        .into_iter()
+        .find(|fact| {
+            crate::facts::external_type_name_matches(&fact.from_type, from_type)
+                && crate::facts::external_type_name_matches(&fact.to_type, to_type)
+        })
+}
+
+fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
+    [
+        "java.lang.StringBuilder",
+        "StringBuilder",
+        "java.lang.StringBuffer",
+        "StringBuffer",
+        "java.io.PrintStream",
+        "PrintStream",
+    ]
+    .into_iter()
+    .map(|from_type| ExternalConversionAdapterFact {
+        from_type: from_type.to_string(),
+        to_type: "Appendable".to_string(),
+        kind: ExternalConversionAdapterKind::Into,
+        provenance: FactProvenance::BuiltinExternalModel,
+    })
+    .collect()
 }
 
 pub fn external_crate_api_mapping_for_receiver(

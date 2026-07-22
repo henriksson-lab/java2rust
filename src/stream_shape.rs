@@ -68,6 +68,13 @@ pub fn infer_stream_source_element_shape_with_facts(
     env: &TypeEnv,
     facts: &FactSet,
 ) -> Option<RustSlotShape> {
+    if let Some(element_ty) = external_call_stream_source_element_type(source, env, facts) {
+        let effective_facts = EffectiveFacts::new(facts);
+        return Some(iteration_element_shape_with_effective_facts(
+            element_ty,
+            &effective_facts,
+        ));
+    }
     let effective_facts = EffectiveFacts::new(facts);
     infer_stream_source_element_shape_with_effective_facts(source, env, &effective_facts)
 }
@@ -129,6 +136,7 @@ fn infer_stream_lambda_call_shape_from_shared_plan(
         crate::call_plan::CallTargetPlan::NativeJavaStatic {
             method:
                 crate::call_plan::NativeJavaStaticMethod::IntegerParseInt
+                | crate::call_plan::NativeJavaStaticMethod::MathMin
                 | crate::call_plan::NativeJavaStaticMethod::MathToIntExact,
         }
         | crate::call_plan::CallTargetPlan::NativeJavaInstance {
@@ -189,6 +197,32 @@ fn stream_source_element_type_with_effective_facts(
                 stream_source_capability_policy_with_effective_facts(&element_ty, facts);
             stream_element_type(&element_ty).or(capability.capability_element)
         })
+}
+
+fn external_call_stream_source_element_type(
+    source: &Expr,
+    env: &TypeEnv,
+    facts: &FactSet,
+) -> Option<JavaType> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = source
+    else {
+        return None;
+    };
+    let lowered = crate::call_plan::external_call_lowered_type(
+        receiver.as_deref(),
+        name,
+        args.len(),
+        facts,
+        env,
+        None,
+    )?;
+    let java_ty = lowered.java_ty()?;
+    stream_element_type(java_ty)
 }
 
 fn is_int_stream_range_source(source: &Expr) -> bool {

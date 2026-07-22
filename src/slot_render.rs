@@ -354,6 +354,11 @@ pub fn slot_default_policy_with_effective_facts(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
 ) -> SlotDefaultPolicy {
+    if shape.optional_element_type().is_some() {
+        return SlotDefaultPolicy::Value {
+            policy: SlotDefaultValuePolicy::DefaultTrait,
+        };
+    }
     match &shape.dispatch {
         DispatchShape::ClosedEnum { enum_name } => {
             return SlotDefaultPolicy::NoDefaultForClosedEnum {
@@ -496,6 +501,13 @@ pub fn native_java_rust_type_policy_with_effective_facts(
     {
         return NativeJavaRustTypePolicy::Direct {
             ty: RustType::Raw("Box<dyn std::any::Any>".to_string()),
+        };
+    }
+    if external_final_facade_should_keep_named_type(ty, facts)
+        && let JavaType::Named { name, .. } = ty
+    {
+        return NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Named(rust_name_for_java_named_type(name)),
         };
     }
     if let JavaType::Named { name, args } = ty
@@ -745,10 +757,32 @@ fn raw_java_collection_erasure_name(name: &str) -> bool {
 }
 
 fn external_final_facade_should_keep_named_type(ty: &JavaType, facts: &EffectiveFacts<'_>) -> bool {
+    let erased;
+    let ty = if let JavaType::Named { name, args } = ty
+        && !args.is_empty()
+    {
+        erased = JavaType::Named {
+            name: name.clone(),
+            args: Vec::new(),
+        };
+        &erased
+    } else {
+        ty
+    };
     matches!(
         facts.object_representation_override_strategy_for(ty),
         Some(HierarchyStrategy::ErasedObject)
     ) && facts.is_final_type(ty)
+        || java_type_name_for_builtin_final_erased_lookup(ty)
+            .is_some_and(crate::external_packs::builtin_external_final_erased_object_type)
+}
+
+fn java_type_name_for_builtin_final_erased_lookup(ty: &JavaType) -> Option<&str> {
+    match ty {
+        JavaType::Named { name, .. } => Some(name.as_str()),
+        JavaType::Unknown(name) => Some(name.as_str()),
+        _ => None,
+    }
 }
 
 fn erased_final_facade_generic_arg_should_keep_named_type(

@@ -15,6 +15,7 @@ pub enum RustItem {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RustStruct {
     pub name: String,
+    pub derives: Vec<String>,
     pub fields: Vec<RustField>,
 }
 

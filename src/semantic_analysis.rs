@@ -6,14 +6,14 @@ use crate::facts::{
     ControlFlowFactKind, DispatchRequirementFact, DispatchRequirementKind, ExceptionFact,
     ExceptionKind, ExternalApiEffectFact, ExternalConstructorFact, ExternalFieldFact,
     ExternalFieldKind, FactProvenance, FactSet, FieldKey, FieldNullabilityFact,
-    FieldNullabilityProvenance, MethodEffectFact, MethodKey, NullabilityState,
-    ReceiverMutabilityFact, RecursionFact, RecursionKind, TrivialAccessorFact, TrivialAccessorKind,
-    UnresolvedTargetKind,
+    FieldNullabilityProvenance, HierarchyFactLookupIndex, MethodEffectFact, MethodKey,
+    NullabilityState, ReceiverMutabilityFact, RecursionFact, RecursionKind, TrivialAccessorFact,
+    TrivialAccessorKind, UnresolvedTargetKind,
 };
 use crate::graph::strongly_connected_components;
 use crate::java_ir::{
-    BinaryOp, Block, ConstructorDecl, ConstructorInvocationKind, Expr, FieldDecl, JavaType,
-    LambdaBody, Literal, Member, MethodDecl, Modifier, Param, Program, Stmt, TypeDecl,
+    BinaryOp, Block, CatchClause, ConstructorDecl, ConstructorInvocationKind, Expr, FieldDecl,
+    JavaType, LambdaBody, Literal, Member, MethodDecl, Modifier, Param, Program, Stmt, TypeDecl,
 };
 use crate::lattice::field_nullability_join;
 use crate::rewrite::{
@@ -95,6 +95,7 @@ pub fn analyze_program_with_config(
         collect_external_api_effect_facts(program, &mut facts, &config, &mut diagnostics);
         collect_java_platform_api_argument_effect_facts(&mut facts);
         collect_java_platform_exception_facts(&mut facts);
+        collect_builtin_external_exception_facts(&mut facts, config.enable_builtin_external_packs);
         collect_builtin_external_api_argument_effect_facts(
             &mut facts,
             config.enable_builtin_external_packs,
@@ -122,8 +123,9 @@ pub fn analyze_program_with_config(
     } else {
         Vec::new()
     };
-    collect_exception_facts(program, &mut facts, &mut diagnostics);
-    collect_catch_facts(program, &mut facts);
+    let hierarchy_index = facts.hierarchy_lookup_index();
+    collect_exception_facts(program, &mut facts, &hierarchy_index, &mut diagnostics);
+    collect_catch_facts(program, &mut facts, &hierarchy_index);
     collect_recursion_fallback_diagnostics(program, &facts, &control_flow_plans, &mut diagnostics);
 
     SemanticFacts {
@@ -317,6 +319,21 @@ fn collect_java_platform_api_argument_effect_facts(facts: &mut FactSet) {
 
 fn collect_java_platform_exception_facts(facts: &mut FactSet) {
     for fact in crate::external_packs::java_platform_exception_facts() {
+        let already_present = facts.exception_facts.iter().any(|existing| {
+            existing.type_name == fact.type_name && existing.provenance == fact.provenance
+        });
+        if !already_present {
+            facts.exception_facts.push(fact);
+        }
+    }
+}
+
+fn collect_builtin_external_exception_facts(facts: &mut FactSet, enabled: bool) {
+    if !enabled {
+        return;
+    }
+
+    for fact in crate::external_packs::builtin_external_library_packs().exception_facts {
         let already_present = facts.exception_facts.iter().any(|existing| {
             existing.type_name == fact.type_name && existing.provenance == fact.provenance
         });
@@ -663,7 +680,7 @@ fn collect_stmt_type_names(stmt: &Stmt, names: &mut HashSet<String>) {
                 collect_block_type_names(else_block, names);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_expr_type_names(condition, names);
             collect_block_type_names(body, names);
         }
@@ -1187,7 +1204,7 @@ fn collect_external_api_effects_from_stmt_with_env(
                 );
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_external_api_effects_from_expr_with_env(
                 condition,
                 facts,
@@ -1741,6 +1758,13 @@ fn push_external_api_effect_guess(
         *guessed_count += 1;
         return;
     }
+    if enable_builtin_external_packs
+        && receiver_type_key.as_deref().is_some_and(|receiver_type| {
+            crate::external_packs::builtin_external_pack_models_api(receiver_type, name)
+        })
+    {
+        return;
+    }
     if let Some(receiver_type) = receiver_type_key.as_deref()
         && let Some(pack) = facts.external_library_pack_for_type(receiver_type)
     {
@@ -2153,22 +2177,33 @@ fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &m
     for member in &ty.members {
         match member {
             Member::Method(method) => {
-                let mut thrown = method_thrown_exception_types(method);
+                let mut thrown = method_thrown_exception_types(method, facts);
                 for external_throw in external_api_thrown_exception_types(ty, method, facts) {
                     push_unique_java_type(&mut thrown, external_throw);
                 }
                 let receiver_mutability = method_receiver_mutability_effect(ty, method, usage);
-                let return_nullability = method_return_nullability_effect(method);
-                facts.method_effect_facts.push(MethodEffectFact {
-                    method: MethodKey {
-                        type_name: ty.name.clone(),
-                        method_name: method.name.clone(),
-                    },
-                    receiver_mutability,
-                    return_nullability,
-                    thrown,
-                    provenance: FactProvenance::ParsedSource,
-                });
+                let mut return_nullability = method_return_nullability_effect(method);
+                if return_nullability == NullabilityState::Unknown
+                    && let Some(existing) = facts.method_effect_for(&ty.name, &method.name)
+                    && existing.return_nullability != NullabilityState::Unknown
+                {
+                    return_nullability = existing.return_nullability;
+                }
+                if receiver_mutability != ReceiverMutabilityFact::Unknown
+                    || return_nullability != NullabilityState::Unknown
+                    || !thrown.is_empty()
+                {
+                    facts.method_effect_facts.push(MethodEffectFact {
+                        method: MethodKey {
+                            type_name: ty.name.clone(),
+                            method_name: method.name.clone(),
+                        },
+                        receiver_mutability,
+                        return_nullability,
+                        thrown,
+                        provenance: FactProvenance::ParsedSource,
+                    });
+                }
             }
             Member::Type(nested) => collect_type_method_effect_facts(nested, usage, facts),
             _ => {}
@@ -2191,42 +2226,187 @@ fn external_api_thrown_exception_types(
         &method.params,
     );
     let mut thrown = Vec::new();
-    for stmt in &body.statements {
-        walk_stmt_exprs(stmt, &mut |expr| {
-            let Expr::Call {
-                receiver,
-                name,
-                args,
-                resolved,
-            } = expr
-            else {
-                return;
-            };
-            if resolved.is_some() {
-                return;
-            }
-            let Some(receiver_type_key) = crate::call_plan::external_call_receiver_type_key(
-                receiver.as_deref(),
-                name,
-                args.len(),
-                facts,
-                &env,
-                Some(&ty.name),
-            ) else {
-                return;
-            };
-            let Some(effect) =
-                facts.external_api_effect_for_receiver(receiver_type_key.as_deref(), name)
-            else {
-                return;
-            };
-            for ty in &effect.thrown {
-                push_unique_java_type(&mut thrown, ty.clone());
-            }
-        });
+    collect_external_api_thrown_exception_types_from_stmts(
+        &body.statements,
+        &ty.name,
+        facts,
+        &mut env,
+        &mut thrown,
+    );
+    thrown
+}
+
+fn collect_external_api_thrown_exception_types_from_stmts(
+    statements: &[Stmt],
+    current_type: &str,
+    facts: &FactSet,
+    env: &mut TypeEnv,
+    thrown: &mut Vec<JavaType>,
+) {
+    for stmt in statements {
+        collect_external_api_thrown_exception_types_from_stmt(
+            stmt,
+            current_type,
+            facts,
+            env,
+            thrown,
+        );
         env.learn_stmt(stmt);
     }
-    thrown
+}
+
+fn collect_external_api_thrown_exception_types_from_stmt(
+    stmt: &Stmt,
+    current_type: &str,
+    facts: &FactSet,
+    env: &mut TypeEnv,
+    thrown: &mut Vec<JavaType>,
+) {
+    match stmt {
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            let mut try_env = env.clone();
+            let mut try_thrown = Vec::new();
+            collect_external_api_thrown_exception_types_from_stmts(
+                resources,
+                current_type,
+                facts,
+                &mut try_env,
+                &mut try_thrown,
+            );
+            collect_external_api_thrown_exception_types_from_stmts(
+                &body.statements,
+                current_type,
+                facts,
+                &mut try_env,
+                &mut try_thrown,
+            );
+            push_uncaught_after_catches(&mut try_thrown, catches, facts, thrown);
+            for catch in catches {
+                let mut catch_env = env.clone();
+                collect_external_api_thrown_exception_types_from_stmts(
+                    &catch.body.statements,
+                    current_type,
+                    facts,
+                    &mut catch_env,
+                    thrown,
+                );
+            }
+            if let Some(finally_block) = finally_block {
+                collect_external_api_thrown_exception_types_from_stmts(
+                    &finally_block.statements,
+                    current_type,
+                    facts,
+                    env,
+                    thrown,
+                );
+            }
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            let mut then_env = env.clone();
+            collect_external_api_thrown_exception_types_from_stmts(
+                &then_block.statements,
+                current_type,
+                facts,
+                &mut then_env,
+                thrown,
+            );
+            if let Some(else_block) = else_block {
+                let mut else_env = env.clone();
+                collect_external_api_thrown_exception_types_from_stmts(
+                    &else_block.statements,
+                    current_type,
+                    facts,
+                    &mut else_env,
+                    thrown,
+                );
+            }
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::EnhancedFor { body, .. }
+        | Stmt::Block(body) => {
+            let mut block_env = env.clone();
+            collect_external_api_thrown_exception_types_from_stmts(
+                &body.statements,
+                current_type,
+                facts,
+                &mut block_env,
+                thrown,
+            );
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                let mut case_env = env.clone();
+                collect_external_api_thrown_exception_types_from_stmts(
+                    &case.statements,
+                    current_type,
+                    facts,
+                    &mut case_env,
+                    thrown,
+                );
+            }
+        }
+        _ => {
+            collect_external_api_thrown_exception_types_from_exprs(
+                stmt,
+                current_type,
+                facts,
+                env,
+                thrown,
+            );
+        }
+    }
+}
+
+fn collect_external_api_thrown_exception_types_from_exprs(
+    stmt: &Stmt,
+    current_type: &str,
+    facts: &FactSet,
+    env: &TypeEnv,
+    thrown: &mut Vec<JavaType>,
+) {
+    walk_stmt_exprs(stmt, &mut |expr| {
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved,
+        } = expr
+        else {
+            return;
+        };
+        if resolved.is_some() {
+            return;
+        }
+        let Some(receiver_type_key) = crate::call_plan::external_call_receiver_type_key(
+            receiver.as_deref(),
+            name,
+            args.len(),
+            facts,
+            env,
+            Some(current_type),
+        ) else {
+            return;
+        };
+        let Some(effect) =
+            facts.external_api_effect_for_receiver(receiver_type_key.as_deref(), name)
+        else {
+            return;
+        };
+        for ty in &effect.thrown {
+            push_unique_java_type(thrown, ty.clone());
+        }
+    });
 }
 
 fn method_receiver_mutability_effect(
@@ -2253,7 +2433,7 @@ fn method_receiver_mutability_effect(
         .unwrap_or(ReceiverMutabilityFact::Unknown)
 }
 
-fn method_return_nullability_effect(method: &MethodDecl) -> NullabilityState {
+pub(crate) fn method_return_nullability_effect(method: &MethodDecl) -> NullabilityState {
     if matches!(method.return_type, JavaType::Void | JavaType::Primitive(_)) {
         return NullabilityState::DefinitelyNonNull;
     }
@@ -2286,6 +2466,7 @@ fn collect_return_nullability_states_from_stmt(stmt: &Stmt, states: &mut Vec<Nul
             }
         }
         Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::EnhancedFor { body, .. }
         | Stmt::Block(body) => collect_return_nullability_states_from_block(body, states),
@@ -2376,14 +2557,14 @@ fn merge_return_nullability_states(states: &[NullabilityState]) -> NullabilitySt
     }
 }
 
-fn method_thrown_exception_types(method: &MethodDecl) -> Vec<JavaType> {
+fn method_thrown_exception_types(method: &MethodDecl, facts: &FactSet) -> Vec<JavaType> {
     let mut thrown = Vec::new();
     for ty in &method.throws {
         push_unique_java_type(&mut thrown, ty.clone());
     }
     if let Some(body) = &method.body {
         let mut exception_env = HashMap::new();
-        collect_thrown_exception_types_from_block(body, &mut exception_env, &mut thrown);
+        collect_thrown_exception_types_from_block(body, &mut exception_env, facts, &mut thrown);
     }
     thrown
 }
@@ -2391,16 +2572,18 @@ fn method_thrown_exception_types(method: &MethodDecl) -> Vec<JavaType> {
 fn collect_thrown_exception_types_from_block(
     block: &Block,
     exception_env: &mut HashMap<String, JavaType>,
+    facts: &FactSet,
     thrown: &mut Vec<JavaType>,
 ) {
     for stmt in &block.statements {
-        collect_thrown_exception_types_from_stmt(stmt, exception_env, thrown);
+        collect_thrown_exception_types_from_stmt(stmt, exception_env, facts, thrown);
     }
 }
 
 fn collect_thrown_exception_types_from_stmt(
     stmt: &Stmt,
     exception_env: &mut HashMap<String, JavaType>,
+    facts: &FactSet,
     thrown: &mut Vec<JavaType>,
 ) {
     match stmt {
@@ -2408,28 +2591,29 @@ fn collect_thrown_exception_types_from_stmt(
             if let Some(ty) = thrown_exception_type_from_expr(expr, exception_env) {
                 push_unique_java_type(thrown, ty);
             }
-            collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(expr, exception_env, facts, thrown);
         }
         Stmt::If {
             then_block,
             else_block,
             ..
         } => {
-            collect_thrown_exception_types_from_block(then_block, exception_env, thrown);
+            collect_thrown_exception_types_from_block(then_block, exception_env, facts, thrown);
             if let Some(else_block) = else_block {
-                collect_thrown_exception_types_from_block(else_block, exception_env, thrown);
+                collect_thrown_exception_types_from_block(else_block, exception_env, facts, thrown);
             }
         }
         Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::EnhancedFor { body, .. }
         | Stmt::Block(body) => {
-            collect_thrown_exception_types_from_block(body, exception_env, thrown)
+            collect_thrown_exception_types_from_block(body, exception_env, facts, thrown)
         }
         Stmt::Switch { cases, .. } => {
             for case in cases {
                 for stmt in &case.statements {
-                    collect_thrown_exception_types_from_stmt(stmt, exception_env, thrown);
+                    collect_thrown_exception_types_from_stmt(stmt, exception_env, facts, thrown);
                 }
             }
         }
@@ -2439,17 +2623,29 @@ fn collect_thrown_exception_types_from_stmt(
             catches,
             finally_block,
         } => {
+            let mut try_thrown = Vec::new();
             for resource in resources {
-                collect_thrown_exception_types_from_stmt(resource, exception_env, thrown);
+                collect_thrown_exception_types_from_stmt(
+                    resource,
+                    exception_env,
+                    facts,
+                    &mut try_thrown,
+                );
             }
-            collect_thrown_exception_types_from_block(body, exception_env, thrown);
+            collect_thrown_exception_types_from_block(body, exception_env, facts, &mut try_thrown);
+            push_uncaught_after_catches(&mut try_thrown, catches, facts, thrown);
             for catch in catches {
                 let previous = catch
                     .types
                     .first()
                     .cloned()
                     .and_then(|ty| exception_env.insert(catch.name.clone(), ty));
-                collect_thrown_exception_types_from_block(&catch.body, exception_env, thrown);
+                collect_thrown_exception_types_from_block(
+                    &catch.body,
+                    exception_env,
+                    facts,
+                    thrown,
+                );
                 if let Some(previous) = previous {
                     exception_env.insert(catch.name.clone(), previous);
                 } else {
@@ -2457,13 +2653,18 @@ fn collect_thrown_exception_types_from_stmt(
                 }
             }
             if let Some(finally_block) = finally_block {
-                collect_thrown_exception_types_from_block(finally_block, exception_env, thrown);
+                collect_thrown_exception_types_from_block(
+                    finally_block,
+                    exception_env,
+                    facts,
+                    thrown,
+                );
             }
         }
         Stmt::LocalType(ty) => {
             for member in &ty.members {
                 if let Member::Method(method) = member {
-                    for ty in method_thrown_exception_types(method) {
+                    for ty in method_thrown_exception_types(method, facts) {
                         push_unique_java_type(thrown, ty);
                     }
                 }
@@ -2471,15 +2672,15 @@ fn collect_thrown_exception_types_from_stmt(
         }
         Stmt::VarDecl { initializer, .. } => {
             if let Some(initializer) = initializer {
-                collect_thrown_exception_types_from_expr(initializer, exception_env, thrown);
+                collect_thrown_exception_types_from_expr(initializer, exception_env, facts, thrown);
             }
         }
         Stmt::Assign { target, value } => {
-            collect_thrown_exception_types_from_expr(target, exception_env, thrown);
-            collect_thrown_exception_types_from_expr(value, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(target, exception_env, facts, thrown);
+            collect_thrown_exception_types_from_expr(value, exception_env, facts, thrown);
         }
         Stmt::Expr(expr) | Stmt::Return(Some(expr)) => {
-            collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(expr, exception_env, facts, thrown);
         }
         Stmt::Return(None)
         | Stmt::ConstructorInvocation { .. }
@@ -2492,15 +2693,16 @@ fn collect_thrown_exception_types_from_stmt(
 fn collect_thrown_exception_types_from_expr(
     expr: &Expr,
     exception_env: &mut HashMap<String, JavaType>,
+    facts: &FactSet,
     thrown: &mut Vec<JavaType>,
 ) {
     match expr {
         Expr::FieldAccess(receiver, _) => {
-            collect_thrown_exception_types_from_expr(receiver, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(receiver, exception_env, facts, thrown);
         }
         Expr::ArrayAccess(array, index) => {
-            collect_thrown_exception_types_from_expr(array, exception_env, thrown);
-            collect_thrown_exception_types_from_expr(index, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(array, exception_env, facts, thrown);
+            collect_thrown_exception_types_from_expr(index, exception_env, facts, thrown);
         }
         Expr::ArrayCreation {
             dimensions,
@@ -2508,34 +2710,34 @@ fn collect_thrown_exception_types_from_expr(
             ..
         } => {
             for dimension in dimensions {
-                collect_thrown_exception_types_from_expr(dimension, exception_env, thrown);
+                collect_thrown_exception_types_from_expr(dimension, exception_env, facts, thrown);
             }
             if let Some(initializer) = initializer {
                 for expr in initializer {
-                    collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+                    collect_thrown_exception_types_from_expr(expr, exception_env, facts, thrown);
                 }
             }
         }
         Expr::ArrayInitializer(values) => {
             for value in values {
-                collect_thrown_exception_types_from_expr(value, exception_env, thrown);
+                collect_thrown_exception_types_from_expr(value, exception_env, facts, thrown);
             }
         }
         Expr::Binary { left, right, .. } => {
-            collect_thrown_exception_types_from_expr(left, exception_env, thrown);
-            collect_thrown_exception_types_from_expr(right, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(left, exception_env, facts, thrown);
+            collect_thrown_exception_types_from_expr(right, exception_env, facts, thrown);
         }
         Expr::Unary { expr, .. } => {
-            collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(expr, exception_env, facts, thrown);
         }
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            collect_thrown_exception_types_from_expr(condition, exception_env, thrown);
-            collect_thrown_exception_types_from_expr(then_expr, exception_env, thrown);
-            collect_thrown_exception_types_from_expr(else_expr, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(condition, exception_env, facts, thrown);
+            collect_thrown_exception_types_from_expr(then_expr, exception_env, facts, thrown);
+            collect_thrown_exception_types_from_expr(else_expr, exception_env, facts, thrown);
         }
         Expr::Call {
             receiver,
@@ -2544,7 +2746,7 @@ fn collect_thrown_exception_types_from_expr(
             ..
         } => {
             if let Some(receiver) = receiver {
-                collect_thrown_exception_types_from_expr(receiver, exception_env, thrown);
+                collect_thrown_exception_types_from_expr(receiver, exception_env, facts, thrown);
             }
             for arg in args {
                 if let Expr::Lambda { body, .. } = arg {
@@ -2552,11 +2754,12 @@ fn collect_thrown_exception_types_from_expr(
                         collect_thrown_exception_types_from_lambda_body(
                             body,
                             exception_env,
+                            facts,
                             thrown,
                         );
                     }
                 } else {
-                    collect_thrown_exception_types_from_expr(arg, exception_env, thrown);
+                    collect_thrown_exception_types_from_expr(arg, exception_env, facts, thrown);
                 }
             }
         }
@@ -2575,11 +2778,11 @@ fn collect_thrown_exception_types_from_expr(
                 );
             }
             for arg in args {
-                collect_thrown_exception_types_from_expr(arg, exception_env, thrown);
+                collect_thrown_exception_types_from_expr(arg, exception_env, facts, thrown);
             }
         }
         Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
-            collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(expr, exception_env, facts, thrown);
         }
         Expr::Lambda { .. } => {}
         Expr::Literal(_)
@@ -2595,20 +2798,42 @@ fn collect_thrown_exception_types_from_expr(
 fn collect_thrown_exception_types_from_lambda_body(
     body: &LambdaBody,
     exception_env: &mut HashMap<String, JavaType>,
+    facts: &FactSet,
     thrown: &mut Vec<JavaType>,
 ) {
     match body {
         LambdaBody::Expr(expr) => {
-            collect_thrown_exception_types_from_expr(expr, exception_env, thrown);
+            collect_thrown_exception_types_from_expr(expr, exception_env, facts, thrown);
         }
         LambdaBody::Block(block) => {
-            collect_thrown_exception_types_from_block(block, exception_env, thrown);
+            collect_thrown_exception_types_from_block(block, exception_env, facts, thrown);
         }
     }
 }
 
 fn call_captures_lambda_for_deferred_throw_projection(name: &str) -> bool {
     matches!(name, "submit" | "execute" | "supplyAsync" | "runAsync")
+}
+
+fn push_uncaught_after_catches(
+    try_thrown: &mut Vec<JavaType>,
+    catches: &[CatchClause],
+    facts: &FactSet,
+    out: &mut Vec<JavaType>,
+) {
+    let hierarchy_index = facts.hierarchy_lookup_index();
+    for thrown_ty in try_thrown.drain(..) {
+        let caught = java_type_name(&thrown_ty).is_some_and(|thrown_name| {
+            catches.iter().any(|catch| {
+                catch.types.iter().any(|catch_ty| {
+                    exception_assignable_to_catch(thrown_name, catch_ty, facts, &hierarchy_index)
+                })
+            })
+        });
+        if !caught {
+            push_unique_java_type(out, thrown_ty);
+        }
+    }
 }
 
 fn thrown_exception_type_from_expr(
@@ -2897,7 +3122,7 @@ fn collect_dispatch_requirement_facts_from_stmt(stmt: &Stmt, facts: &mut FactSet
                 collect_dispatch_requirement_facts_from_block(else_block, facts);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_dispatch_requirement_facts_from_expr(condition, facts);
             collect_dispatch_requirement_facts_from_block(body, facts);
         }
@@ -3306,7 +3531,9 @@ fn collect_stmt_declared_locals(stmt: &Stmt, env: &mut TypeEnv) {
                 collect_block_declared_locals(else_block, env);
             }
         }
-        Stmt::While { body, .. } | Stmt::Block(body) => collect_block_declared_locals(body, env),
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+            collect_block_declared_locals(body, env)
+        }
         Stmt::For { init, body, .. } => {
             for init in init {
                 collect_stmt_declared_locals(init, env);
@@ -3583,7 +3810,7 @@ fn collect_assignment_in_condition_plans(body: &Block, rewrites: &mut Vec<Contro
                     collect_assignment_in_condition_plans(else_block, rewrites);
                 }
             }
-            Stmt::While { condition, body } => {
+            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
                 if let Some(plan) = assignment_in_condition_plan(condition) {
                     rewrites.push(ControlFlowRewritePlan::AssignmentInCondition(plan));
                 }
@@ -3696,15 +3923,22 @@ fn block_is_single_value_return(block: &Block) -> bool {
 fn collect_exception_facts(
     program: &Program,
     facts: &mut FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) {
     let mut exception_names = HashSet::new();
     for ty in &program.types {
-        collect_exception_candidate_names(ty, facts, &mut exception_names, diagnostics);
+        collect_exception_candidate_names(
+            ty,
+            facts,
+            hierarchy_index,
+            &mut exception_names,
+            diagnostics,
+        );
     }
     for type_name in exception_names {
         facts.exception_facts.push(ExceptionFact {
-            kind: classify_exception_type(&type_name, facts, diagnostics),
+            kind: classify_exception_type(&type_name, facts, hierarchy_index, diagnostics),
             type_name,
             provenance: FactProvenance::ParsedSource,
         });
@@ -3714,11 +3948,12 @@ fn collect_exception_facts(
 fn collect_exception_candidate_names(
     ty: &TypeDecl,
     facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
     exception_names: &mut HashSet<String>,
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) {
     if ty.extends.as_deref().is_some_and(is_exception_root_name)
-        || type_reaches_exception(&ty.name, facts, diagnostics)
+        || type_reaches_exception(&ty.name, facts, hierarchy_index, diagnostics)
     {
         exception_names.insert(ty.name.clone());
     }
@@ -3744,9 +3979,13 @@ fn collect_exception_candidate_names(
                     collect_exception_names_from_block(body, exception_names);
                 }
             }
-            Member::Type(nested) => {
-                collect_exception_candidate_names(nested, facts, exception_names, diagnostics)
-            }
+            Member::Type(nested) => collect_exception_candidate_names(
+                nested,
+                facts,
+                hierarchy_index,
+                exception_names,
+                diagnostics,
+            ),
             _ => {}
         }
     }
@@ -3785,6 +4024,7 @@ fn collect_exception_names_from_block(block: &Block, exception_names: &mut HashS
                 }
             }
             Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
             | Stmt::For { body, .. }
             | Stmt::EnhancedFor { body, .. }
             | Stmt::Block(body) => collect_exception_names_from_block(body, exception_names),
@@ -3808,21 +4048,29 @@ fn collect_exception_names_from_stmt(stmt: &Stmt, exception_names: &mut HashSet<
     }
 }
 
-fn collect_catch_facts(program: &Program, facts: &mut FactSet) {
+fn collect_catch_facts(
+    program: &Program,
+    facts: &mut FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
+) {
     for ty in &program.types {
-        collect_type_catch_facts(ty, facts);
+        collect_type_catch_facts(ty, facts, hierarchy_index);
     }
 }
 
-fn collect_type_catch_facts(ty: &TypeDecl, facts: &mut FactSet) {
+fn collect_type_catch_facts(
+    ty: &TypeDecl,
+    facts: &mut FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
+) {
     for member in &ty.members {
         match member {
             Member::Method(method) => {
                 if let Some(body) = &method.body {
-                    collect_method_catch_facts(ty, method, body, facts);
+                    collect_method_catch_facts(ty, method, body, facts, hierarchy_index);
                 }
             }
-            Member::Type(nested) => collect_type_catch_facts(nested, facts),
+            Member::Type(nested) => collect_type_catch_facts(nested, facts, hierarchy_index),
             _ => {}
         }
     }
@@ -3833,6 +4081,7 @@ fn collect_method_catch_facts(
     method: &MethodDecl,
     body: &Block,
     facts: &mut FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
 ) {
     let mut clause_index = 0usize;
     collect_catch_facts_from_block(
@@ -3843,6 +4092,7 @@ fn collect_method_catch_facts(
         },
         &mut clause_index,
         facts,
+        hierarchy_index,
     );
 }
 
@@ -3851,6 +4101,7 @@ fn collect_catch_facts_from_block(
     method: &MethodKey,
     clause_index: &mut usize,
     facts: &mut FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
 ) {
     for stmt in &body.statements {
         match stmt {
@@ -3860,20 +4111,36 @@ fn collect_catch_facts_from_block(
                 finally_block,
                 ..
             } => {
-                collect_catch_facts_from_block(body, method, clause_index, facts);
+                collect_catch_facts_from_block(body, method, clause_index, facts, hierarchy_index);
                 for catch in catches {
                     facts.catch_facts.push(CatchFact {
                         method: method.clone(),
                         clause_index: *clause_index,
-                        assignable_from: catch_assignable_from_types(&catch.types, facts),
+                        assignable_from: catch_assignable_from_types(
+                            &catch.types,
+                            facts,
+                            hierarchy_index,
+                        ),
                         types: catch.types.clone(),
                         provenance: FactProvenance::ParsedSource,
                     });
                     *clause_index += 1;
-                    collect_catch_facts_from_block(&catch.body, method, clause_index, facts);
+                    collect_catch_facts_from_block(
+                        &catch.body,
+                        method,
+                        clause_index,
+                        facts,
+                        hierarchy_index,
+                    );
                 }
                 if let Some(finally_block) = finally_block {
-                    collect_catch_facts_from_block(finally_block, method, clause_index, facts);
+                    collect_catch_facts_from_block(
+                        finally_block,
+                        method,
+                        clause_index,
+                        facts,
+                        hierarchy_index,
+                    );
                 }
             }
             Stmt::If {
@@ -3881,20 +4148,39 @@ fn collect_catch_facts_from_block(
                 else_block,
                 ..
             } => {
-                collect_catch_facts_from_block(then_block, method, clause_index, facts);
+                collect_catch_facts_from_block(
+                    then_block,
+                    method,
+                    clause_index,
+                    facts,
+                    hierarchy_index,
+                );
                 if let Some(else_block) = else_block {
-                    collect_catch_facts_from_block(else_block, method, clause_index, facts);
+                    collect_catch_facts_from_block(
+                        else_block,
+                        method,
+                        clause_index,
+                        facts,
+                        hierarchy_index,
+                    );
                 }
             }
             Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
             | Stmt::For { body, .. }
             | Stmt::EnhancedFor { body, .. }
             | Stmt::Block(body) => {
-                collect_catch_facts_from_block(body, method, clause_index, facts)
+                collect_catch_facts_from_block(body, method, clause_index, facts, hierarchy_index)
             }
             Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    collect_catch_facts_from_stmts(&case.statements, method, clause_index, facts);
+                    collect_catch_facts_from_stmts(
+                        &case.statements,
+                        method,
+                        clause_index,
+                        facts,
+                        hierarchy_index,
+                    );
                 }
             }
             _ => {}
@@ -3907,15 +4193,20 @@ fn collect_catch_facts_from_stmts(
     method: &MethodKey,
     clause_index: &mut usize,
     facts: &mut FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
 ) {
     for stmt in statements {
         if let Stmt::Block(block) = stmt {
-            collect_catch_facts_from_block(block, method, clause_index, facts);
+            collect_catch_facts_from_block(block, method, clause_index, facts, hierarchy_index);
         }
     }
 }
 
-fn catch_assignable_from_types(catch_types: &[JavaType], facts: &FactSet) -> Vec<JavaType> {
+fn catch_assignable_from_types(
+    catch_types: &[JavaType],
+    facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
+) -> Vec<JavaType> {
     let mut assignable = facts
         .exception_facts
         .iter()
@@ -3923,7 +4214,12 @@ fn catch_assignable_from_types(catch_types: &[JavaType], facts: &FactSet) -> Vec
             catch_types
                 .iter()
                 .any(|catch_ty| {
-                    exception_assignable_to_catch(&exception.type_name, catch_ty, facts)
+                    exception_assignable_to_catch(
+                        &exception.type_name,
+                        catch_ty,
+                        facts,
+                        hierarchy_index,
+                    )
                 })
                 .then_some(JavaType::Named {
                     name: exception.type_name.clone(),
@@ -3940,12 +4236,13 @@ fn exception_assignable_to_catch(
     exception_name: &str,
     catch_ty: &JavaType,
     facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
 ) -> bool {
     let Some(catch_name) = java_type_name(catch_ty) else {
         return false;
     };
-    exception_name == catch_name
-        || type_reaches_without_diagnostics(exception_name, catch_name, facts)
+    crate::facts::external_type_name_matches(exception_name, catch_name)
+        || type_reaches_without_diagnostics(exception_name, catch_name, facts, hierarchy_index)
 }
 
 fn java_type_sort_key(java_ty: &JavaType) -> String {
@@ -4225,7 +4522,7 @@ fn collect_field_assignments_from_stmts(
                     );
                 }
             }
-            Stmt::While { body, .. } | Stmt::Block(body) => {
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
                 let mut body_shadows = local_shadows.clone();
                 collect_field_assignments_from_stmts(
                     &body.statements,
@@ -4867,15 +5164,22 @@ fn types_compatible(left: &JavaType, right: &JavaType) -> bool {
 fn classify_exception_type(
     type_name: &str,
     facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) -> ExceptionKind {
     if is_unchecked_exception_name(type_name)
-        || type_reaches(type_name, "RuntimeException", facts, diagnostics)
+        || type_reaches(
+            type_name,
+            "RuntimeException",
+            facts,
+            hierarchy_index,
+            diagnostics,
+        )
     {
         ExceptionKind::Unchecked
     } else if is_checked_exception_root_name(type_name)
-        || type_reaches(type_name, "Exception", facts, diagnostics)
-        || type_reaches(type_name, "Throwable", facts, diagnostics)
+        || type_reaches(type_name, "Exception", facts, hierarchy_index, diagnostics)
+        || type_reaches(type_name, "Throwable", facts, hierarchy_index, diagnostics)
     {
         ExceptionKind::Checked
     } else {
@@ -4886,30 +5190,50 @@ fn classify_exception_type(
 fn type_reaches_exception(
     type_name: &str,
     facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) -> bool {
     is_exception_root_name(type_name)
-        || type_reaches(type_name, "Exception", facts, diagnostics)
-        || type_reaches(type_name, "RuntimeException", facts, diagnostics)
-        || type_reaches(type_name, "Throwable", facts, diagnostics)
+        || type_reaches(type_name, "Exception", facts, hierarchy_index, diagnostics)
+        || type_reaches(
+            type_name,
+            "RuntimeException",
+            facts,
+            hierarchy_index,
+            diagnostics,
+        )
+        || type_reaches(type_name, "Throwable", facts, hierarchy_index, diagnostics)
 }
 
-fn type_reaches_without_diagnostics(type_name: &str, super_name: &str, facts: &FactSet) -> bool {
+fn type_reaches_without_diagnostics(
+    type_name: &str,
+    super_name: &str,
+    facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
+) -> bool {
     let mut diagnostics = Vec::new();
-    type_reaches(type_name, super_name, facts, &mut diagnostics)
+    type_reaches(
+        type_name,
+        super_name,
+        facts,
+        hierarchy_index,
+        &mut diagnostics,
+    )
 }
 
 fn type_reaches(
     type_name: &str,
     super_name: &str,
     facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex,
     diagnostics: &mut Vec<SemanticDiagnostic>,
 ) -> bool {
     let java_ty = JavaType::Named {
         name: type_name.to_string(),
         args: Vec::new(),
     };
-    let reachability = facts.reachable_hierarchy_edges_for_type_with_stats(&java_ty);
+    let reachability =
+        hierarchy_index.reachable_hierarchy_edges_for_type_with_stats(facts, &java_ty);
     diagnostics.extend(
         reachability
             .diagnostics
@@ -4972,7 +5296,7 @@ fn stmt_has_assignment_in_condition(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_has_assignment_in_condition)
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             expr_looks_like_assignment_condition(condition)
                 || block_has_assignment_in_condition(body)
         }
@@ -5100,7 +5424,7 @@ fn walk_stmt_exprs(stmt: &Stmt, visit: &mut impl FnMut(&Expr)) {
                 walk_block_exprs(else_block, visit);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             walk_expr(condition, visit);
             walk_block_exprs(body, visit);
         }

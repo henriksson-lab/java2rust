@@ -1,6 +1,31 @@
 use std::collections::HashSet;
 
-use crate::java_ir::{FieldDecl, Member, Modifier, Program, TypeDecl};
+use crate::facts::{ExternalApiEffectFact, ExternalFieldKind, FactSet};
+use crate::java_ir::{FieldDecl, JavaType, Member, Modifier, Program, TypeDecl};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternalInheritedInstanceField {
+    pub declaring_type: String,
+    pub field_name: String,
+    pub rust_name: String,
+    pub field_type: JavaType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternalInheritedStaticField {
+    pub declaring_type: String,
+    pub field_name: String,
+    pub field_type: JavaType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternalInheritedInstanceMethod {
+    pub declaring_type: String,
+    pub method_name: String,
+    pub rust_name: String,
+    pub arg_count: usize,
+    pub fact: ExternalApiEffectFact,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct InheritedInstanceField {
@@ -27,6 +52,131 @@ pub fn inherited_instance_fields_for_type(
         .collect()
 }
 
+pub fn external_inherited_instance_fields_for_type(
+    ty: &TypeDecl,
+    facts: &FactSet,
+) -> Vec<ExternalInheritedInstanceField> {
+    let direct_fields = direct_instance_field_names(ty);
+    let super_names = external_super_names_for_type(ty, facts);
+    let mut fields = Vec::new();
+    let mut seen_fields = direct_fields;
+    let mut field_facts = facts.external_field_facts.clone();
+    field_facts
+        .extend(crate::external_packs::builtin_external_library_packs().external_field_facts);
+    for super_name in super_names {
+        for fact in &field_facts {
+            if fact.field_kind != ExternalFieldKind::Unknown {
+                continue;
+            }
+            if !type_name_matches(&fact.field.type_name, &super_name) {
+                continue;
+            }
+            let rust_name = rust_field_name(&fact.field.field_name);
+            if !seen_fields.insert(rust_name.clone()) {
+                continue;
+            }
+            fields.push(ExternalInheritedInstanceField {
+                declaring_type: fact.field.type_name.clone(),
+                field_name: fact.field.field_name.clone(),
+                rust_name,
+                field_type: fact
+                    .field_type
+                    .clone()
+                    .unwrap_or_else(|| JavaType::Unknown("Object".to_string())),
+            });
+        }
+    }
+    fields
+}
+
+pub fn external_inherited_static_final_fields_for_type(
+    ty: &TypeDecl,
+    facts: &FactSet,
+) -> Vec<ExternalInheritedStaticField> {
+    let direct_fields = direct_static_final_field_names(ty);
+    let super_names = external_super_names_for_type(ty, facts);
+    let mut fields = Vec::new();
+    let mut seen_fields = direct_fields;
+    let mut field_facts = facts.external_field_facts.clone();
+    field_facts
+        .extend(crate::external_packs::builtin_external_library_packs().external_field_facts);
+    for super_name in super_names {
+        for fact in &field_facts {
+            if fact.field_kind != ExternalFieldKind::StaticFinal {
+                continue;
+            }
+            if !type_name_matches(&fact.field.type_name, &super_name) {
+                continue;
+            }
+            if !seen_fields.insert(fact.field.field_name.clone()) {
+                continue;
+            }
+            let Some(field_type) = fact.field_type.clone() else {
+                continue;
+            };
+            fields.push(ExternalInheritedStaticField {
+                declaring_type: fact.field.type_name.clone(),
+                field_name: fact.field.field_name.clone(),
+                field_type,
+            });
+        }
+    }
+    fields
+}
+
+pub fn external_inherited_instance_methods_for_type(
+    ty: &TypeDecl,
+    facts: &FactSet,
+) -> Vec<ExternalInheritedInstanceMethod> {
+    let super_names = external_super_names_for_type(ty, facts);
+    let mut api_facts = facts.external_api_effect_facts.clone();
+    api_facts
+        .extend(crate::external_packs::builtin_external_library_packs().external_api_effect_facts);
+    let mut methods = Vec::new();
+    let mut seen = HashSet::new();
+    for super_name in super_names {
+        for fact in &api_facts {
+            let Some(receiver_type) = fact.receiver_type.as_deref() else {
+                continue;
+            };
+            if !type_name_matches(receiver_type, &super_name) {
+                continue;
+            }
+            let Some(arg_count) = fact.arg_count else {
+                continue;
+            };
+            let rust_name = crate::parser::to_snake_case(&fact.method_name);
+            if !seen.insert((rust_name.clone(), arg_count)) {
+                continue;
+            }
+            methods.push(ExternalInheritedInstanceMethod {
+                declaring_type: receiver_type.to_string(),
+                method_name: fact.method_name.clone(),
+                rust_name,
+                arg_count,
+                fact: fact.clone(),
+            });
+        }
+    }
+    methods
+}
+
+fn external_super_names_for_type(ty: &TypeDecl, facts: &FactSet) -> Vec<String> {
+    let mut super_names = ty.extends.iter().cloned().collect::<Vec<_>>();
+    super_names.extend(
+        facts
+            .reachable_hierarchy_edges_for_type(&JavaType::Named {
+                name: ty.name.clone(),
+                args: Vec::new(),
+            })
+            .into_iter()
+            .map(|edge| edge.super_name),
+    );
+    super_names.sort();
+    super_names.dedup();
+    super_names
+}
+
 pub fn inherited_instance_field_refs_for_type<'a>(
     ty: &TypeDecl,
     support_program: &'a Program,
@@ -51,7 +201,7 @@ pub fn inherited_instance_field_refs_for_type<'a>(
             if is_static_field(field) {
                 continue;
             }
-            if seen_fields.insert(field.name.clone()) {
+            if seen_fields.insert(rust_field_name(&field.name)) {
                 fields.push(InheritedInstanceFieldRef {
                     declaring_type: &super_ty.name,
                     field,
@@ -69,10 +219,29 @@ fn direct_instance_field_names(ty: &TypeDecl) -> HashSet<String> {
     ty.members
         .iter()
         .filter_map(|member| match member {
-            Member::Field(field) if !is_static_field(field) => Some(field.name.clone()),
+            Member::Field(field) if !is_static_field(field) => Some(rust_field_name(&field.name)),
             _ => None,
         })
         .collect()
+}
+
+fn direct_static_final_field_names(ty: &TypeDecl) -> HashSet<String> {
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field)
+                if field.modifiers.contains(&Modifier::Static)
+                    && field.modifiers.contains(&Modifier::Final) =>
+            {
+                Some(field.name.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn rust_field_name(name: &str) -> String {
+    crate::parser::to_snake_case(name)
 }
 
 fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {

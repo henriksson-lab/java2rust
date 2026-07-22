@@ -139,6 +139,7 @@ fn stmt_contains_unlabeled_break(stmt: &Stmt) -> bool {
                     .is_some_and(block_contains_unlabeled_break)
         }
         Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::EnhancedFor { body, .. }
         | Stmt::Block(body) => block_contains_unlabeled_break(body),

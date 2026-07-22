@@ -580,8 +580,17 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
         OptionalShapeCoercionPolicy::MapElement { element_plan, .. } => {
             let mapped_value =
                 apply_shape_coercion_plan(RustExpr::Var("value".to_string()), element_plan);
+            if emit::emit_expr(&mapped_value) == "&value" {
+                return RustExpr::Raw(format!("{}.as_ref()", emit::emit_expr(&expr)));
+            }
             if emit::emit_expr(&mapped_value) == "value" {
                 return expr;
+            }
+            if emit::emit_expr(&mapped_value) == "value.as_str()" {
+                return RustExpr::Raw(format!(
+                    "{}.as_ref().map(|value| value.as_str())",
+                    emit::emit_expr(&expr)
+                ));
             }
             return RustExpr::Raw(format!(
                 "{}.map(|value| {})",
@@ -1081,7 +1090,14 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             emit::emit_expr(&expr)
         )),
         Coercion::AsStr => RustExpr::Raw(format!("{}.as_str()", emit::emit_expr(&expr))),
-        Coercion::ToOwnedString => RustExpr::Raw(format!("{}.to_string()", emit::emit_expr(&expr))),
+        Coercion::ToOwnedString => {
+            let rendered = emit::emit_expr(&expr);
+            if rendered.ends_with(".to_string()") {
+                expr
+            } else {
+                RustExpr::Raw(format!("{rendered}.to_string()"))
+            }
+        }
         Coercion::AsSlice => RustExpr::Raw(format!("{}.as_slice()", emit::emit_expr(&expr))),
         Coercion::WrapClosedEnum {
             enum_name,
@@ -1209,6 +1225,9 @@ fn apply_erased_object_downcast(
     target_type: &str,
     invalid_cast: &InvalidCastPolicy,
 ) -> RustExpr {
+    if !plausible_rust_nominal_type_name(target_type) {
+        return expr;
+    }
     match invalid_cast {
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
             "*{}.downcast::<{target_type}>().expect(\"invalid Java cast\")",
@@ -1217,12 +1236,33 @@ fn apply_erased_object_downcast(
     }
 }
 
+fn plausible_rust_nominal_type_name(target_type: &str) -> bool {
+    target_type
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+}
+
 fn apply_clone_recovery(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
+    let rendered = emit::emit_expr(&expr);
+    if rendered.ends_with(".clone()")
+        || rendered.ends_with(".clone()/* TODO(translation): validate added clone */")
+    {
+        return expr;
+    }
+    let receiver = if rust_method_receiver_needs_parentheses(&rendered) {
+        format!("({rendered})")
+    } else {
+        rendered
+    };
     RustExpr::Raw(format!(
-        "{}.clone(){}",
-        emit::emit_expr(&expr),
+        "{receiver}.clone(){}",
         render_clone_recovery_policy(policy)
     ))
+}
+
+fn rust_method_receiver_needs_parentheses(rendered: &str) -> bool {
+    rendered.contains(" as ")
 }
 
 fn render_clone_recovery_policy(policy: &CloneRecoveryPolicy) -> &'static str {

@@ -14,6 +14,12 @@ real Java corpuses under `/home/mahogny/github/claude/java2rust/testdata`.
 - When a real corpus exposes a new failure class, add one minimized fixture to
   `examples/java` before changing translator rules.
 - Keep corpus progress as reports/gates, not as ad hoc translation logic.
+- Do not infer that only the currently rerun focused corpuses have idiom gaps.
+  Every corpus below is either a regression guard or an assumed backlog source.
+  If a rerun fails `cargo check`, emits invalid idiom patterns, or times out
+  before crate assembly, promote its failure classes into
+  `docs/corpus-rerun-idiom-gap-plan.md` and keep them tracked until a clean
+  rerun removes them.
 
 ## Gate Tiers
 

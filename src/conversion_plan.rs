@@ -1314,7 +1314,7 @@ pub fn optional_shape_coercion_policy_with_facts(
     OptionalShapeCoercionPolicy::NoChange
 }
 
-fn optional_element_slot_shape(
+pub(crate) fn optional_element_slot_shape(
     option_shape: &RustSlotShape,
     element_ty: JavaType,
 ) -> RustSlotShape {
@@ -1780,21 +1780,25 @@ fn external_conversion_adapter_policy(
     target: &RustSlotShape,
     facts: &FactSet,
 ) -> Option<DispatchCoercionPolicy> {
-    let (
-        JavaType::Named {
-            name: from_type, ..
-        },
-        JavaType::Named { name: to_type, .. },
-    ) = (&actual.java_ty, &target.java_ty)
-    else {
-        return None;
-    };
-    let adapter = facts.external_conversion_adapter_for(from_type, to_type)?;
+    let from_type = external_conversion_adapter_type_name(&actual.java_ty)?;
+    let to_type = external_conversion_adapter_type_name(&target.java_ty)?;
+    let adapter = facts
+        .external_conversion_adapter_for(from_type, to_type)
+        .cloned()
+        .or_else(|| crate::external_packs::external_conversion_adapter_for(from_type, to_type))?;
     match adapter.kind {
         ExternalConversionAdapterKind::Into => Some(DispatchCoercionPolicy::ExternalInto {
             from_type: actual.java_ty.clone(),
             to_type: target.java_ty.clone(),
         }),
+    }
+}
+
+fn external_conversion_adapter_type_name(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } => Some(name),
+        JavaType::Unknown(name) => Some(name),
+        _ => None,
     }
 }
 
@@ -2476,6 +2480,14 @@ pub fn plan_cast_conversion(
     ctx: ExprShapeContext<'_>,
 ) -> CastConversionPlan {
     let actual = infer_expr_shape_with_context(expr, env, ctx);
+    plan_cast_conversion_from_actual(actual, target_ty, ctx)
+}
+
+pub fn plan_cast_conversion_from_actual(
+    actual: RustSlotShape,
+    target_ty: &JavaType,
+    ctx: ExprShapeContext<'_>,
+) -> CastConversionPlan {
     let mut target = project_java_value_shape(ctx.representations, target_ty.clone());
     if same_java_type_cast_should_preserve_actual_shape(&actual, &target) {
         target = actual.clone();
@@ -2497,10 +2509,17 @@ fn same_java_type_cast_should_preserve_actual_shape(
     actual: &RustSlotShape,
     target: &RustSlotShape,
 ) -> bool {
-    java_types_have_same_erased_cast_identity(&actual.java_ty, &target.java_ty)
-        && matches!(actual.dispatch, DispatchShape::Concrete)
-        && matches!(actual.view, ViewShape::Native)
-        && matches!(target.dispatch, DispatchShape::ErasedObject)
+    if !java_types_have_same_erased_cast_identity(&actual.java_ty, &target.java_ty) {
+        return false;
+    }
+    if !matches!(actual.dispatch, DispatchShape::Concrete)
+        || !matches!(actual.view, ViewShape::Native)
+    {
+        return false;
+    }
+    matches!(target.dispatch, DispatchShape::ErasedObject)
+        || (matches!(target.dispatch, DispatchShape::Concrete)
+            && java_type_erases_generic_detail(&actual.java_ty, &target.java_ty))
 }
 
 fn java_types_have_same_erased_cast_identity(left: &JavaType, right: &JavaType) -> bool {
@@ -2508,6 +2527,16 @@ fn java_types_have_same_erased_cast_identity(left: &JavaType, right: &JavaType) 
         (JavaType::Named { name: left, .. }, JavaType::Named { name: right, .. }) => left == right,
         _ => left == right,
     }
+}
+
+fn java_type_erases_generic_detail(actual: &JavaType, target: &JavaType) -> bool {
+    matches!(
+        (actual, target),
+        (
+            JavaType::Named { args: actual_args, .. },
+            JavaType::Named { args: target_args, .. }
+        ) if !actual_args.is_empty() && target_args.is_empty()
+    )
 }
 
 pub fn plan_instanceof(
@@ -2606,10 +2635,50 @@ pub fn actual_shape_for_slot_expr(
     env: &ShapeEnv,
     ctx: ExprShapeContext<'_>,
 ) -> RustSlotShape {
-    if let Expr::Cast { ty, .. } = expr {
-        project_java_value_shape(ctx.representations, ty.clone())
+    if let Expr::Cast { ty, expr: inner } = expr {
+        let inner_shape = infer_expr_shape_with_context(inner, env, ctx);
+        if cast_target_only_erases_generic_detail(&inner_shape.java_ty, ty) {
+            inner_shape
+        } else {
+            cast_target_shape_preserving_inner_ownership(ctx, ty.clone(), &inner_shape)
+        }
     } else {
         infer_expr_shape_with_context(expr, env, ctx)
+    }
+}
+
+fn cast_target_shape_preserving_inner_ownership(
+    ctx: ExprShapeContext<'_>,
+    target_ty: JavaType,
+    inner_shape: &RustSlotShape,
+) -> RustSlotShape {
+    let mut target_shape = project_java_value_shape(ctx.representations, target_ty);
+    if !matches!(
+        (&inner_shape.java_ty, &target_shape.java_ty),
+        (JavaType::Primitive(_), _) | (_, JavaType::Primitive(_))
+    ) {
+        target_shape.ownership = inner_shape.ownership;
+    }
+    target_shape
+}
+
+fn cast_target_only_erases_generic_detail(actual: &JavaType, target: &JavaType) -> bool {
+    match (actual, target) {
+        (
+            JavaType::Named {
+                name: actual_name,
+                args: actual_args,
+            },
+            JavaType::Named {
+                name: target_name,
+                args: target_args,
+            },
+        ) => {
+            actual_name == target_name
+                && !actual_args.is_empty()
+                && (target_args.is_empty() || actual_args == target_args)
+        }
+        _ => false,
     }
 }
 
@@ -2648,12 +2717,12 @@ pub fn actual_shape_for_slot_expr_with_slot(
     match slot {
         Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target) => {
             if let Some(element_ty) = target.optional_element_type() {
-                if matches!(target.dispatch, DispatchShape::ErasedObject) {
+                if matches!(target.dispatch, DispatchShape::ErasedObject)
+                    && java_type_is_erased_object_like(&element_ty)
+                {
                     RustSlotShape::conservative(actual.java_ty)
                 } else {
-                    let mut element_shape = optional_element_slot_shape(target, element_ty);
-                    element_shape.java_ty = actual.java_ty;
-                    element_shape
+                    optional_element_slot_shape(target, element_ty)
                 }
             } else {
                 target.clone()

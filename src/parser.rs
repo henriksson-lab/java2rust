@@ -258,7 +258,7 @@ fn qualify_java_sql_stmt(stmt: &mut Stmt, imported: &JavaSqlImports) {
                 qualify_java_sql_block(else_block, imported);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             qualify_java_sql_expr(condition, imported);
             qualify_java_sql_block(body, imported);
         }
@@ -1150,6 +1150,7 @@ fn parse_block_like(
             | "return_statement"
             | "if_statement"
             | "while_statement"
+            | "do_statement"
             | "for_statement"
             | "enhanced_for_statement"
             | "try_statement"
@@ -1198,6 +1199,7 @@ fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut Diag
             .unwrap_or(Stmt::Return(None)),
         "if_statement" => parse_if_node(node, source, diagnostics),
         "while_statement" => parse_while_node(node, source, diagnostics),
+        "do_statement" => parse_do_while_node(node, source, diagnostics),
         "for_statement" => parse_for_node(node, source, diagnostics),
         "enhanced_for_statement" => parse_enhanced_for_node(node, source, diagnostics),
         "break_statement" => {
@@ -1504,6 +1506,23 @@ fn parse_while_node(
             .child_by_field_name("body")
             .map(|stmt| statement_as_block(stmt, source, diagnostics))
             .unwrap_or_default(),
+    }
+}
+
+fn parse_do_while_node(
+    node: tree_sitter::Node,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
+) -> Stmt {
+    Stmt::DoWhile {
+        body: node
+            .child_by_field_name("body")
+            .map(|stmt| statement_as_block(stmt, source, diagnostics))
+            .unwrap_or_default(),
+        condition: node
+            .child_by_field_name("condition")
+            .map(|condition| parse_condition_node(condition, source))
+            .unwrap_or_else(|| Expr::Raw("true".to_string())),
     }
 }
 
@@ -1834,7 +1853,10 @@ fn parse_cast_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
             .filter(|text| !text.is_empty());
         if let Some(ty_text) = ty_text {
             let parsed = parse_type_text(ty_text);
-            if matches!(parsed, JavaType::Array(_)) || field_ty.is_none() {
+            if matches!(parsed, JavaType::Array(_))
+                || matches!(parsed, JavaType::Named { ref args, .. } if !args.is_empty())
+                || field_ty.is_none()
+            {
                 return parsed;
             }
         }

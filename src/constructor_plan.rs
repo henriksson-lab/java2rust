@@ -1,4 +1,7 @@
-use crate::item_assembly::is_static_field;
+use std::collections::HashSet;
+
+use crate::facts::FactSet;
+use crate::item_assembly::{is_static_field, is_static_final_non_const_field};
 use crate::java_ir::{
     Block, CallKind, ConstructorInvocationKind, Expr, Member, ResolvedCall, ResolvedConstructor,
     Stmt, TypeDecl,
@@ -17,6 +20,13 @@ pub enum ConstructorDelegationPlan<'a> {
     SameClassCallWithTrailing {
         args: &'a [Expr],
         resolved: &'a ResolvedConstructor,
+        trailing: Vec<DelegatedConstructorTrailingStmt<'a>>,
+    },
+    SuperNoArgWithTrailing {
+        trailing: Vec<DelegatedConstructorTrailingStmt<'a>>,
+    },
+    ModeledExternalSuperclassWithTrailing {
+        superclass: String,
         trailing: Vec<DelegatedConstructorTrailingStmt<'a>>,
     },
     ExternalExceptionSuperclass {
@@ -95,6 +105,28 @@ pub fn plan_constructor_delegation_for_type<'a>(
             })
         }
         ConstructorInvocationKind::Super => {
+            if explicit_object_super_constructor_is_noop(ty, args, body) {
+                return None;
+            }
+            if args.is_empty()
+                && let Some(trailing) = delegated_constructor_trailing_stmts(&body.statements[1..])
+            {
+                return Some(ConstructorDelegationPlan::SuperNoArgWithTrailing { trailing });
+            }
+            if let Some(superclass) = ty.and_then(|ty| ty.extends.as_deref())
+                && crate::external_packs::modeled_no_state_external_super_constructor(
+                    superclass,
+                    args.len(),
+                )
+                && let Some(trailing) = delegated_constructor_trailing_stmts(&body.statements[1..])
+            {
+                return Some(
+                    ConstructorDelegationPlan::ModeledExternalSuperclassWithTrailing {
+                        superclass: superclass.to_string(),
+                        trailing,
+                    },
+                );
+            }
             if body.statements.len() == 1
                 && let Some(superclass) = ty.and_then(external_exception_superclass)
             {
@@ -108,6 +140,40 @@ pub fn plan_constructor_delegation_for_type<'a>(
             ))
         }
     }
+}
+
+fn explicit_object_super_constructor_is_noop(
+    ty: Option<&TypeDecl>,
+    args: &[Expr],
+    body: &Block,
+) -> bool {
+    args.is_empty()
+        && type_extends_only_object(ty)
+        && body
+            .statements
+            .iter()
+            .skip(1)
+            .all(is_constructor_field_assignment_stmt)
+}
+
+fn type_extends_only_object(ty: Option<&TypeDecl>) -> bool {
+    let Some(superclass) = ty.and_then(|ty| ty.extends.as_deref()) else {
+        return true;
+    };
+    matches!(
+        superclass.rsplit(['.', '$']).next().unwrap_or(superclass),
+        "Object"
+    )
+}
+
+fn is_constructor_field_assignment_stmt(stmt: &Stmt) -> bool {
+    matches!(
+        stmt,
+        Stmt::Assign {
+            target: Expr::FieldAccess(receiver, _),
+            ..
+        } if matches!(receiver.as_ref(), Expr::This)
+    )
 }
 
 fn external_exception_superclass(ty: &TypeDecl) -> Option<String> {
@@ -165,9 +231,25 @@ pub fn plan_constructor_field_values_with_inherited_fields<'a>(
     signatures: &SignaturePlan,
     support_program: &'a Program,
 ) -> Vec<ConstructorFieldValuePlan<'a>> {
+    plan_constructor_field_values_with_inherited_context(
+        ty,
+        body,
+        signatures,
+        support_program,
+        &FactSet::default(),
+    )
+}
+
+pub fn plan_constructor_field_values_with_inherited_context<'a>(
+    ty: &'a TypeDecl,
+    body: Option<&'a Block>,
+    signatures: &SignaturePlan,
+    support_program: &'a Program,
+    facts: &FactSet,
+) -> Vec<ConstructorFieldValuePlan<'a>> {
     let inherited_fields =
         crate::inherited_members::inherited_instance_field_refs_for_type(ty, support_program);
-    plan_constructor_field_values_with_inherited_field_decls(
+    let mut plans = plan_constructor_field_values_with_inherited_field_decls(
         ty,
         body,
         signatures,
@@ -175,7 +257,20 @@ pub fn plan_constructor_field_values_with_inherited_fields<'a>(
             .iter()
             .map(|inherited| inherited.field)
             .collect(),
-    )
+    );
+    plans.extend(
+        crate::inherited_members::external_inherited_instance_fields_for_type(ty, facts)
+            .into_iter()
+            .map(|inherited| {
+                let shape = signatures.required_field_shape(&ty.name, &inherited.rust_name);
+                ConstructorFieldValuePlan::Default {
+                    field_name: inherited.rust_name,
+                    shape,
+                }
+            }),
+    );
+    dedup_constructor_field_value_plans(&mut plans);
+    plans
 }
 
 fn plan_constructor_field_values_with_inherited_field_decls<'a>(
@@ -189,9 +284,18 @@ fn plan_constructor_field_values_with_inherited_field_decls<'a>(
         .members
         .iter()
         .filter_map(|member| match member {
-            Member::Field(field) if !is_static_field(field) => {
+            Member::Field(field)
+                if !is_static_field(field) || is_static_final_non_const_field(field) =>
+            {
                 let shape = signatures.required_field_shape(&ty.name, &field.name);
-                Some(plan_constructor_field_value(field, shape, &assigned))
+                if is_static_final_non_const_field(field) {
+                    Some(ConstructorFieldValuePlan::Default {
+                        field_name: field.name.clone(),
+                        shape,
+                    })
+                } else {
+                    Some(plan_constructor_field_value(field, shape, &assigned))
+                }
             }
             _ => None,
         })
@@ -200,7 +304,23 @@ fn plan_constructor_field_values_with_inherited_field_decls<'a>(
         let shape = signatures.required_field_shape(&ty.name, &field.name);
         plan_constructor_field_value(field, shape, &assigned)
     }));
+    dedup_constructor_field_value_plans(&mut plans);
     plans
+}
+
+fn dedup_constructor_field_value_plans(plans: &mut Vec<ConstructorFieldValuePlan<'_>>) {
+    let mut seen = HashSet::new();
+    plans.retain(|plan| seen.insert(plan.field_name().to_string()));
+}
+
+impl<'a> ConstructorFieldValuePlan<'a> {
+    fn field_name(&self) -> &str {
+        match self {
+            ConstructorFieldValuePlan::Assigned { field_name, .. }
+            | ConstructorFieldValuePlan::FieldInitializer { field_name, .. }
+            | ConstructorFieldValuePlan::Default { field_name, .. } => field_name,
+        }
+    }
 }
 
 fn plan_constructor_field_value<'a>(

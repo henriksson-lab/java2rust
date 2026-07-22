@@ -5,27 +5,27 @@ use crate::rust_ir::RustExpr;
 use crate::types::TypeEnv;
 
 pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
-    if env.local_type(name).is_none()
-        && let Some(static_name) = env.static_field_access_name(name)
-    {
-        RustExpr::Raw(format!("Self::{static_name}"))
-    } else if env.local_type(name).is_none() && env.field_type(name).is_some() {
+    if env.local_type(name).is_none() && env.is_instance_field(name) {
         RustExpr::Field(
             Box::new(RustExpr::Var("self".to_string())),
             crate::parser::to_snake_case(name),
         )
+    } else if env.local_type(name).is_none()
+        && let Some(static_name) = env.static_field_access_name(name)
+    {
+        RustExpr::Raw(format!("Self::{static_name}"))
     } else {
         RustExpr::Var(crate::parser::to_snake_case(name))
     }
 }
 
 pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
-    if env.local_type(name).is_none()
+    if env.local_type(name).is_none() && env.is_instance_field(name) {
+        format!("self.{}", crate::parser::to_snake_case(name))
+    } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
         format!("Self::{static_name}")
-    } else if env.local_type(name).is_none() && env.field_type(name).is_some() {
-        format!("self.{}", crate::parser::to_snake_case(name))
     } else {
         crate::parser::to_snake_case(name)
     }

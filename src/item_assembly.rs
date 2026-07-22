@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::exception_lowering::exception_result_type;
 use crate::exception_plan::MethodExceptionPlan;
 use crate::facts::FactSet;
@@ -12,7 +14,7 @@ use crate::rust_ir::{
 use crate::signature::{ReceiverPlan, SignaturePlan};
 use crate::slot_render::{
     default_expr_for_slot, default_expr_for_slot_with_facts, rust_name_for_java_named_type,
-    rust_type_for_slot_with_facts,
+    rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
 };
 use crate::slot_shape::RustSlotShape;
 
@@ -34,9 +36,11 @@ pub fn struct_item_for_type_with_facts_and_support_context(
     facts: &FactSet,
     support_program: &Program,
 ) -> RustItem {
+    let fields = struct_fields_for_type(ty, signatures, facts, support_program);
     RustItem::Struct(RustStruct {
         name: rust_name_for_java_named_type(&ty.name),
-        fields: struct_fields_for_type(ty, signatures, facts, support_program),
+        derives: struct_derives_for_fields(&fields, signatures, facts, support_program),
+        fields,
     })
 }
 
@@ -223,17 +227,45 @@ pub fn method_function_shell_with_facts_and_exception_plan(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
 ) -> RustFunction {
+    let needs_lifetime =
+        static_method_needs_borrowed_return_lifetime(ty, method, signatures, facts);
+    let mut name = method
+        .rust_name
+        .clone()
+        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+    if needs_lifetime {
+        name.push_str("<'a>");
+    }
     RustFunction {
-        name: method
-            .rust_name
-            .clone()
-            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
-        params: method_params(ty, method, signatures, facts),
-        return_type: method_return_type_with_exceptions(ty, method, signatures, facts, exceptions),
+        name,
+        params: method_params_with_optional_lifetime(ty, method, signatures, facts, needs_lifetime),
+        return_type: method_return_type_with_optional_lifetime(
+            ty,
+            method,
+            signatures,
+            facts,
+            exceptions,
+            needs_lifetime,
+        ),
         body,
         is_pub: true,
         receiver: lower_receiver(method_receiver(ty, method, signatures)),
     }
+}
+
+fn static_method_needs_borrowed_return_lifetime(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+) -> bool {
+    method.modifiers.contains(&Modifier::Static)
+        && method_return_type_with_facts(ty, method, signatures, facts)
+            .as_ref()
+            .is_some_and(rust_type_contains_ref)
+        && method_params(ty, method, signatures, facts)
+            .iter()
+            .any(|param| rust_type_contains_ref(&param.ty))
 }
 
 pub fn method_return_shape(
@@ -275,14 +307,18 @@ fn struct_fields_for_type(
         .members
         .iter()
         .filter_map(|member| match member {
-            Member::Field(field) if !is_static_field(field) => Some(RustField {
-                name: field.name.clone(),
-                ty: rust_type_for_slot_with_facts(
-                    &signatures.required_field_shape(&ty.name, &field.name),
-                    facts,
-                ),
-                is_pub: false,
-            }),
+            Member::Field(field)
+                if !is_static_field(field) || is_static_final_non_const_field(field) =>
+            {
+                Some(RustField {
+                    name: field.name.clone(),
+                    ty: rust_type_for_slot_with_facts(
+                        &signatures.required_field_shape(&ty.name, &field.name),
+                        facts,
+                    ),
+                    is_pub: false,
+                })
+            }
             _ => None,
         })
         .collect();
@@ -298,7 +334,153 @@ fn struct_fields_for_type(
                 is_pub: false,
             }),
     );
+    fields.extend(
+        crate::inherited_members::external_inherited_instance_fields_for_type(ty, facts)
+            .into_iter()
+            .map(|inherited| RustField {
+                name: inherited.rust_name.clone(),
+                ty: rust_type_for_slot_with_facts(
+                    &signatures.required_field_shape(&ty.name, &inherited.rust_name),
+                    facts,
+                ),
+                is_pub: false,
+            }),
+    );
+    let mut seen = HashSet::new();
+    fields.retain(|field| seen.insert(field.name.clone()));
     fields
+}
+
+fn struct_derives_for_fields(
+    fields: &[RustField],
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+) -> Vec<String> {
+    let mut derives = Vec::new();
+    if fields.iter().all(|field| {
+        rust_type_supports_struct_derive_clone(
+            &field.ty,
+            signatures,
+            facts,
+            support_program,
+            &mut HashSet::new(),
+        )
+    }) {
+        derives.push("Clone".to_string());
+    }
+    if fields
+        .iter()
+        .all(|field| rust_type_supports_struct_derive_partial_eq(&field.ty))
+    {
+        derives.push("PartialEq".to_string());
+    }
+    derives
+}
+
+fn rust_type_supports_struct_derive_clone(
+    ty: &RustType,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    match ty {
+        RustType::Unit
+        | RustType::Bool
+        | RustType::I8
+        | RustType::I16
+        | RustType::I32
+        | RustType::I64
+        | RustType::F32
+        | RustType::F64
+        | RustType::Char
+        | RustType::String => true,
+        RustType::Vec(inner) | RustType::Array2(inner) | RustType::Option(inner) => {
+            rust_type_supports_struct_derive_clone(
+                inner,
+                signatures,
+                facts,
+                support_program,
+                visiting,
+            )
+        }
+        RustType::Named(name) => rust_named_type_supports_struct_derive_clone(
+            name,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        ),
+        RustType::Slice(_) | RustType::Ref { .. } | RustType::Raw(_) => false,
+    }
+}
+
+fn rust_named_type_supports_struct_derive_clone(
+    name: &str,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    let Some(ty) = find_type_decl_by_rust_name(support_program, name) else {
+        return true;
+    };
+    if !visiting.insert(ty.name.clone()) {
+        return true;
+    }
+    let fields = struct_fields_for_type(ty, signatures, facts, support_program);
+    let supports_clone = fields.iter().all(|field| {
+        rust_type_supports_struct_derive_clone(
+            &field.ty,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        )
+    });
+    visiting.remove(&ty.name);
+    supports_clone
+}
+
+fn find_type_decl_by_rust_name<'a>(program: &'a Program, rust_name: &str) -> Option<&'a TypeDecl> {
+    program
+        .types
+        .iter()
+        .find_map(|ty| find_type_decl_by_rust_name_in_type(ty, rust_name))
+}
+
+fn find_type_decl_by_rust_name_in_type<'a>(
+    ty: &'a TypeDecl,
+    rust_name: &str,
+) -> Option<&'a TypeDecl> {
+    if rust_name_for_java_named_type(&ty.name) == rust_name {
+        return Some(ty);
+    }
+    ty.members.iter().find_map(|member| match member {
+        Member::Type(nested) => find_type_decl_by_rust_name_in_type(nested, rust_name),
+        _ => None,
+    })
+}
+
+fn rust_type_supports_struct_derive_partial_eq(ty: &RustType) -> bool {
+    match ty {
+        RustType::Unit
+        | RustType::Bool
+        | RustType::I8
+        | RustType::I16
+        | RustType::I32
+        | RustType::I64
+        | RustType::F32
+        | RustType::F64
+        | RustType::Char
+        | RustType::String => true,
+        RustType::Vec(inner) | RustType::Array2(inner) | RustType::Option(inner) => {
+            rust_type_supports_struct_derive_partial_eq(inner)
+        }
+        RustType::Named(_) => false,
+        RustType::Slice(_) | RustType::Ref { .. } | RustType::Raw(_) => false,
+    }
 }
 
 pub fn is_static_field(field: &FieldDecl) -> bool {
@@ -307,6 +489,16 @@ pub fn is_static_field(field: &FieldDecl) -> bool {
 
 pub fn is_static_final_field(field: &FieldDecl) -> bool {
     field.modifiers.contains(&Modifier::Static) && field.modifiers.contains(&Modifier::Final)
+}
+
+pub fn is_static_final_non_const_field(field: &FieldDecl) -> bool {
+    if !is_static_final_field(field) {
+        return false;
+    }
+    field
+        .initializer
+        .as_ref()
+        .is_none_or(|initializer| const_type_and_value(&field.ty, initializer).is_none())
 }
 
 fn associated_consts_for_type(ty: &TypeDecl) -> Vec<RustAssociatedConst> {
@@ -397,30 +589,381 @@ fn method_params(
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> Vec<RustParam> {
+    method_params_with_optional_lifetime(ty, method, signatures, facts, false)
+}
+
+fn method_params_with_optional_lifetime(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    lifetime: bool,
+) -> Vec<RustParam> {
     signatures
         .required_method_signature(ty, method)
         .params
         .iter()
-        .map(|param| RustParam {
-            name: param.name.clone(),
-            ty: rust_type_for_slot_with_facts(&param.shape, facts),
+        .map(|param| {
+            let callback_param =
+                method_param_is_nonescaping_functional_callback(method, &param.name);
+            RustParam {
+                name: if callback_param {
+                    format!("mut {}", param.name)
+                } else {
+                    param.name.clone()
+                },
+                ty: if callback_param {
+                    functional_callback_param_type(&param.java_ty, facts).unwrap_or_else(|| {
+                        maybe_add_lifetime_to_refs(
+                            rust_type_for_slot_with_facts(&param.shape, facts),
+                            lifetime,
+                        )
+                    })
+                } else {
+                    maybe_add_lifetime_to_refs(
+                        rust_type_for_slot_with_facts(&param.shape, facts),
+                        lifetime,
+                    )
+                },
+            }
         })
         .collect()
 }
 
-fn method_return_type_with_exceptions(
+fn functional_callback_param_type(java_ty: &JavaType, facts: &FactSet) -> Option<RustType> {
+    let JavaType::Named { name, args } = java_ty else {
+        return None;
+    };
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+    let simple = canonical.rsplit('.').next().unwrap_or(name.as_str());
+    let input_count = match simple {
+        "Supplier" | "Runnable" => 0,
+        "Consumer" | "Function" | "Predicate" | "UnaryOperator" => 1,
+        "BiConsumer" | "BiFunction" | "BinaryOperator" => 2,
+        _ => return None,
+    };
+    if args.len() < input_count {
+        return None;
+    }
+    let inputs = args
+        .iter()
+        .take(input_count)
+        .map(|arg| crate::emit::emit_type(&rust_type_for_java_type_with_facts(arg, facts)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let return_ty = match simple {
+        "Function" | "UnaryOperator" => args
+            .get(1)
+            .map(|ty| crate::emit::emit_type(&rust_type_for_java_type_with_facts(ty, facts))),
+        "BiFunction" | "BinaryOperator" => args
+            .get(2)
+            .map(|ty| crate::emit::emit_type(&rust_type_for_java_type_with_facts(ty, facts))),
+        "Predicate" => Some("bool".to_string()),
+        _ => None,
+    };
+    let rendered = return_ty
+        .map(|ret| format!("impl FnMut({inputs}) -> {ret}"))
+        .unwrap_or_else(|| format!("impl FnMut({inputs})"));
+    Some(RustType::Raw(rendered))
+}
+
+fn method_param_is_nonescaping_functional_callback(method: &MethodDecl, param_name: &str) -> bool {
+    if !method.params.iter().any(|param| {
+        param.name == param_name
+            && functional_callback_param_type(&param.ty, &FactSet::default()).is_some()
+    }) {
+        return false;
+    }
+    let Some(body) = &method.body else {
+        return false;
+    };
+    let mut saw_callback_call = false;
+    let mut escaped = false;
+    scan_block_for_callback_param(body, param_name, &mut saw_callback_call, &mut escaped);
+    saw_callback_call && !escaped
+}
+
+fn scan_block_for_callback_param(
+    block: &crate::java_ir::Block,
+    param_name: &str,
+    saw_callback_call: &mut bool,
+    escaped: &mut bool,
+) {
+    for stmt in &block.statements {
+        scan_stmt_for_callback_param(stmt, param_name, saw_callback_call, escaped);
+    }
+}
+
+fn scan_stmt_for_callback_param(
+    stmt: &crate::java_ir::Stmt,
+    param_name: &str,
+    saw_callback_call: &mut bool,
+    escaped: &mut bool,
+) {
+    match stmt {
+        crate::java_ir::Stmt::VarDecl { initializer, .. } => {
+            if let Some(expr) = initializer {
+                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+            }
+        }
+        crate::java_ir::Stmt::Assign { target, value } => {
+            scan_expr_for_callback_param(target, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(value, param_name, saw_callback_call, escaped);
+        }
+        crate::java_ir::Stmt::Expr(expr)
+        | crate::java_ir::Stmt::Return(Some(expr))
+        | crate::java_ir::Stmt::Throw(expr) => {
+            scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+        }
+        crate::java_ir::Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            scan_expr_for_callback_param(condition, param_name, saw_callback_call, escaped);
+            scan_block_for_callback_param(then_block, param_name, saw_callback_call, escaped);
+            if let Some(block) = else_block {
+                scan_block_for_callback_param(block, param_name, saw_callback_call, escaped);
+            }
+        }
+        crate::java_ir::Stmt::While { condition, body }
+        | crate::java_ir::Stmt::DoWhile { condition, body } => {
+            scan_expr_for_callback_param(condition, param_name, saw_callback_call, escaped);
+            scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
+        }
+        crate::java_ir::Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                scan_stmt_for_callback_param(stmt, param_name, saw_callback_call, escaped);
+            }
+            if let Some(expr) = condition {
+                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+            }
+            for expr in update {
+                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+            }
+            scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
+        }
+        crate::java_ir::Stmt::EnhancedFor { iterable, body, .. } => {
+            scan_expr_for_callback_param(iterable, param_name, saw_callback_call, escaped);
+            scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
+        }
+        crate::java_ir::Stmt::Switch { selector, cases } => {
+            scan_expr_for_callback_param(selector, param_name, saw_callback_call, escaped);
+            for case in cases {
+                for label in &case.labels {
+                    if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                        scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                    }
+                }
+                for stmt in &case.statements {
+                    scan_stmt_for_callback_param(stmt, param_name, saw_callback_call, escaped);
+                }
+            }
+        }
+        crate::java_ir::Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for stmt in resources {
+                scan_stmt_for_callback_param(stmt, param_name, saw_callback_call, escaped);
+            }
+            scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
+            for catch in catches {
+                scan_block_for_callback_param(&catch.body, param_name, saw_callback_call, escaped);
+            }
+            if let Some(block) = finally_block {
+                scan_block_for_callback_param(block, param_name, saw_callback_call, escaped);
+            }
+        }
+        crate::java_ir::Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                scan_expr_for_callback_param(arg, param_name, saw_callback_call, escaped);
+            }
+        }
+        crate::java_ir::Stmt::Block(block) => {
+            scan_block_for_callback_param(block, param_name, saw_callback_call, escaped);
+        }
+        crate::java_ir::Stmt::Return(None)
+        | crate::java_ir::Stmt::LocalType(_)
+        | crate::java_ir::Stmt::Break(_)
+        | crate::java_ir::Stmt::Continue(_)
+        | crate::java_ir::Stmt::Unsupported(_) => {}
+    }
+}
+
+fn scan_expr_for_callback_param(
+    expr: &Expr,
+    param_name: &str,
+    saw_callback_call: &mut bool,
+    escaped: &mut bool,
+) {
+    match expr {
+        Expr::Var(name) if name == param_name => *escaped = true,
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if matches!(receiver.as_ref(), Expr::Var(receiver_name) if receiver_name == param_name)
+            && matches!(
+                name.as_str(),
+                "accept" | "apply" | "test" | "get" | "run" | "call"
+            ) =>
+        {
+            *saw_callback_call = true;
+            for arg in args {
+                scan_expr_for_callback_param(arg, param_name, saw_callback_call, escaped);
+            }
+        }
+        Expr::FieldAccess(receiver, _)
+        | Expr::ArrayAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            scan_expr_for_callback_param(receiver, param_name, saw_callback_call, escaped);
+        }
+        Expr::Binary { left, right, .. } => {
+            scan_expr_for_callback_param(left, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(right, param_name, saw_callback_call, escaped);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            scan_expr_for_callback_param(condition, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(then_expr, param_name, saw_callback_call, escaped);
+            scan_expr_for_callback_param(else_expr, param_name, saw_callback_call, escaped);
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                scan_expr_for_callback_param(receiver, param_name, saw_callback_call, escaped);
+            }
+            for arg in args {
+                scan_expr_for_callback_param(arg, param_name, saw_callback_call, escaped);
+            }
+        }
+        Expr::New { args, body, .. } => {
+            for arg in args {
+                scan_expr_for_callback_param(arg, param_name, saw_callback_call, escaped);
+            }
+            if let Some(members) = body {
+                for member in members {
+                    if let Member::Method(method) = member
+                        && let Some(body) = &method.body
+                    {
+                        scan_block_for_callback_param(body, param_name, saw_callback_call, escaped);
+                    }
+                }
+            }
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+                }
+            }
+        }
+        Expr::ArrayInitializer(values) => {
+            for expr in values {
+                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped);
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => {
+                scan_expr_for_callback_param(expr, param_name, saw_callback_call, escaped)
+            }
+            crate::java_ir::LambdaBody::Block(block) => {
+                scan_block_for_callback_param(block, param_name, saw_callback_call, escaped)
+            }
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn maybe_add_lifetime_to_refs(ty: RustType, lifetime: bool) -> RustType {
+    if lifetime {
+        add_lifetime_to_refs(ty)
+    } else {
+        ty
+    }
+}
+
+fn add_lifetime_to_refs(ty: RustType) -> RustType {
+    match ty {
+        RustType::Ref { mutable, inner } => {
+            let inner = add_lifetime_to_refs(*inner);
+            RustType::Raw(format!(
+                "&'a {}{}",
+                if mutable { "mut " } else { "" },
+                crate::emit::emit_type(&inner)
+            ))
+        }
+        RustType::Option(inner) => RustType::Option(Box::new(add_lifetime_to_refs(*inner))),
+        RustType::Vec(inner) => RustType::Vec(Box::new(add_lifetime_to_refs(*inner))),
+        RustType::Array2(inner) => RustType::Array2(Box::new(add_lifetime_to_refs(*inner))),
+        RustType::Slice(inner) => RustType::Slice(Box::new(add_lifetime_to_refs(*inner))),
+        other => other,
+    }
+}
+
+fn rust_type_contains_ref(ty: &RustType) -> bool {
+    match ty {
+        RustType::Ref { .. } => true,
+        RustType::Option(inner)
+        | RustType::Vec(inner)
+        | RustType::Array2(inner)
+        | RustType::Slice(inner) => rust_type_contains_ref(inner),
+        RustType::Unit
+        | RustType::Bool
+        | RustType::I8
+        | RustType::I16
+        | RustType::I32
+        | RustType::I64
+        | RustType::F32
+        | RustType::F64
+        | RustType::Char
+        | RustType::String
+        | RustType::Named(_)
+        | RustType::Raw(_) => false,
+    }
+}
+
+fn method_return_type_with_optional_lifetime(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
+    lifetime: bool,
 ) -> Option<RustType> {
+    let base = method_return_type_with_facts(ty, method, signatures, facts)
+        .map(|ty| maybe_add_lifetime_to_refs(ty, lifetime));
     if exceptions.wrap_returns_in_result {
-        Some(exception_result_type(
-            method_return_type_with_facts(ty, method, signatures, facts).unwrap_or(RustType::Unit),
-        ))
+        Some(exception_result_type(base.unwrap_or(RustType::Unit)))
     } else {
-        method_return_type_with_facts(ty, method, signatures, facts)
+        base
     }
 }
 

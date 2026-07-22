@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 fn main() -> ExitCode {
     let Some(args) = parse_args(env::args().skip(1)) else {
         eprintln!(
-            "usage: new-java2rust [--context-dir dir] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt] <file.java>\n       new-java2rust resolver-bench [--source-root mode:path] [--source-root-package mode:path:package.prefix] [--no-builtin-external-packs] [--builtin-external-pack name] [--facts facts.txt] [--external-pack-manifest pack.txt] <dir>"
+            "usage: new-java2rust [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt] <file.java>\n       new-java2rust translate-batch --primary dir --out-dir dir [--generated-dir dir] [--jobs n, default 10] [--phase-events path] [--worker-events path] [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt]\n       new-java2rust resolver-bench [--source-root mode:path] [--source-root-package mode:path:package.prefix] [--no-builtin-external-packs] [--builtin-external-pack name] [--facts facts.txt] [--external-pack-manifest pack.txt] <dir>"
         );
         return ExitCode::from(2);
     };
@@ -57,12 +60,48 @@ fn main() -> ExitCode {
         };
     }
 
+    if let Args::TranslateBatch {
+        primary_path,
+        out_dir,
+        generated_dir,
+        external_inputs,
+        context_dirs,
+        context_summary_dirs,
+        context_dir_packages,
+        context_dirs_are_emitted,
+        jobs,
+        phase_events_path,
+        worker_events_path,
+    } = args
+    {
+        return match run_translate_batch(
+            &primary_path,
+            &out_dir,
+            generated_dir.as_deref(),
+            &external_inputs,
+            &context_dirs,
+            &context_summary_dirs,
+            &context_dir_packages,
+            context_dirs_are_emitted,
+            jobs,
+            phase_events_path.as_deref(),
+            worker_events_path.as_deref(),
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
     let Args::Translate {
         source_path,
         external_inputs,
         context_dirs,
         context_summary_dirs,
         context_dir_packages,
+        context_dirs_are_emitted,
     } = args
     else {
         unreachable!();
@@ -106,6 +145,7 @@ fn main() -> ExitCode {
             &source,
             &context_sources,
             &context_summary_sources,
+            context_dirs_are_emitted,
             &external_facts,
         )
     };
@@ -123,6 +163,20 @@ enum Args {
         context_dirs: Vec<String>,
         context_summary_dirs: Vec<String>,
         context_dir_packages: Vec<ContextDirPackage>,
+        context_dirs_are_emitted: bool,
+    },
+    TranslateBatch {
+        primary_path: String,
+        out_dir: String,
+        generated_dir: Option<String>,
+        external_inputs: ExternalInputPaths,
+        context_dirs: Vec<String>,
+        context_summary_dirs: Vec<String>,
+        context_dir_packages: Vec<ContextDirPackage>,
+        context_dirs_are_emitted: bool,
+        jobs: usize,
+        phase_events_path: Option<String>,
+        worker_events_path: Option<String>,
     },
     ResolverBench {
         root_path: String,
@@ -169,7 +223,63 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
     let mut context_dirs = Vec::new();
     let mut context_summary_dirs = Vec::new();
     let mut context_dir_packages = Vec::new();
+    let mut context_dirs_are_emitted = false;
     let mut args = args.peekable();
+    if args.peek().is_some_and(|arg| arg == "translate-batch") {
+        args.next();
+        let mut primary_path = None;
+        let mut out_dir = None;
+        let mut generated_dir = None;
+        let mut jobs = 10usize;
+        let mut phase_events_path = None;
+        let mut worker_events_path = None;
+        while let Some(arg) = args.next() {
+            if arg == "--primary" {
+                primary_path = Some(args.next()?);
+            } else if arg == "--out-dir" {
+                out_dir = Some(args.next()?);
+            } else if arg == "--generated-dir" {
+                generated_dir = Some(args.next()?);
+            } else if arg == "--jobs" {
+                jobs = parse_positive_usize(&args.next()?)?;
+            } else if arg == "--phase-events" {
+                phase_events_path = Some(args.next()?);
+            } else if arg == "--worker-events" {
+                worker_events_path = Some(args.next()?);
+            } else if arg == "--facts" {
+                external_inputs.facts_paths.push(args.next()?);
+            } else if arg == "--external-pack-manifest" {
+                external_inputs.pack_manifest_paths.push(args.next()?);
+            } else if arg == "--builtin-external-pack" {
+                external_inputs.builtin_pack_names.push(args.next()?);
+            } else if arg == "--context-dir" {
+                context_dirs.push(args.next()?);
+            } else if arg == "--context-dir-emitted" {
+                context_dirs_are_emitted = true;
+            } else if arg == "--context-source-summary-dir" {
+                context_summary_dirs.push(args.next()?);
+            } else if arg == "--context-dir-package" {
+                context_dir_packages.push(parse_context_dir_package_spec(&args.next()?)?);
+            } else if arg == "--no-builtin-external-packs" {
+                external_inputs.enable_builtin_external_packs = false;
+            } else {
+                return None;
+            }
+        }
+        return Some(Args::TranslateBatch {
+            primary_path: primary_path?,
+            out_dir: out_dir?,
+            generated_dir,
+            external_inputs,
+            context_dirs,
+            context_summary_dirs,
+            context_dir_packages,
+            context_dirs_are_emitted,
+            jobs,
+            phase_events_path,
+            worker_events_path,
+        });
+    }
     if args.peek().is_some_and(|arg| arg == "resolver-bench") {
         args.next();
         let mut root_path = None;
@@ -208,6 +318,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
             external_inputs.builtin_pack_names.push(args.next()?);
         } else if arg == "--context-dir" {
             context_dirs.push(args.next()?);
+        } else if arg == "--context-dir-emitted" {
+            context_dirs_are_emitted = true;
         } else if arg == "--context-source-summary-dir" {
             context_summary_dirs.push(args.next()?);
         } else if arg == "--context-dir-package" {
@@ -226,6 +338,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
         context_dirs,
         context_summary_dirs,
         context_dir_packages,
+        context_dirs_are_emitted,
     })
 }
 
@@ -277,6 +390,11 @@ fn parse_dependency_mode(mode: &str) -> Option<new_java2rust::dependency_mode::D
     }
 }
 
+fn parse_positive_usize(value: &str) -> Option<usize> {
+    let value = value.parse::<usize>().ok()?;
+    (value > 0).then_some(value)
+}
+
 fn load_context_sources(
     context_dirs: &[String],
     context_dir_packages: &[ContextDirPackage],
@@ -300,6 +418,574 @@ fn load_context_sources(
             fs::read_to_string(&path).map_err(|err| format!("failed to read {path}: {err}"))
         })
         .collect()
+}
+
+fn load_batch_sources(path: &str) -> Result<Vec<new_java2rust::BatchSource>, String> {
+    let mut paths = Vec::new();
+    collect_java_paths(path, &mut paths)?;
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            fs::read_to_string(&path)
+                .map(|source| new_java2rust::BatchSource {
+                    path: path.clone(),
+                    source,
+                })
+                .map_err(|err| format!("failed to read {path}: {err}"))
+        })
+        .collect()
+}
+
+fn run_translate_batch(
+    primary_path: &str,
+    out_dir: &str,
+    generated_dir_override: Option<&str>,
+    external_inputs: &ExternalInputPaths,
+    context_dirs: &[String],
+    context_summary_dirs: &[String],
+    context_dir_packages: &[ContextDirPackage],
+    context_dirs_are_emitted: bool,
+    jobs: usize,
+    phase_events_path: Option<&str>,
+    worker_events_path: Option<&str>,
+) -> Result<(), String> {
+    let command_start = Instant::now();
+    fs::create_dir_all(out_dir).map_err(|err| format!("failed to create {out_dir}: {err}"))?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_command_start",
+        "running",
+        0,
+        primary_path,
+    )?;
+
+    let input_start = Instant::now();
+    let primary_sources = load_batch_sources(primary_path)?;
+    if primary_sources.is_empty() {
+        return Err(format!("no Java files found under: {primary_path}"));
+    }
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_input_collection",
+        "ok",
+        input_start.elapsed().as_millis(),
+        &format!("{} primary files", primary_sources.len()),
+    )?;
+
+    let fact_start = Instant::now();
+    let (external_facts, fact_diagnostics) = load_external_inputs(external_inputs)?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_external_facts",
+        "ok",
+        fact_start.elapsed().as_millis(),
+        "loaded",
+    )?;
+
+    let context_load_start = Instant::now();
+    let context_sources = load_context_sources(context_dirs, &[])?;
+    let context_summary_sources = load_context_sources(context_summary_dirs, context_dir_packages)?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_context_load",
+        "ok",
+        context_load_start.elapsed().as_millis(),
+        &format!(
+            "{} context files, {} summary files",
+            context_sources.len(),
+            context_summary_sources.len()
+        ),
+    )?;
+
+    let generated_dir = generated_dir_override
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(out_dir).join("generated"));
+    fs::create_dir_all(&generated_dir)
+        .map_err(|err| format!("failed to create {}: {err}", generated_dir.display()))?;
+
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_parse_global_emit_start",
+        "running",
+        command_start.elapsed().as_millis(),
+        &format!("jobs={jobs}"),
+    )?;
+    let event_sink = worker_events_path.map(|event_path| {
+        let event_path = event_path.to_string();
+        let generated_dir = generated_dir.clone();
+        let event_write_lock = Arc::new(Mutex::new(()));
+        Arc::new(move |event: new_java2rust::BatchTranslationEvent| {
+            let _guard = event_write_lock
+                .lock()
+                .expect("batch event write lock poisoned");
+            let rust_path = generated_dir.join(batch_stem(event.index, &event.path) + ".rs");
+            if let Err(err) = append_batch_worker_event(
+                Some(&event_path),
+                event.phase,
+                event.index,
+                &event.path,
+                event.elapsed_ms,
+                event.status,
+                &rust_path,
+            ) {
+                eprintln!("{err}");
+            }
+        }) as Arc<dyn Fn(new_java2rust::BatchTranslationEvent) + Send + Sync>
+    });
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &context_sources,
+            &context_summary_sources,
+            context_dirs_are_emitted,
+            &external_facts,
+            &new_java2rust::BatchTranslationOptions {
+                emission_jobs: jobs,
+                event_sink,
+            },
+        );
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_primary_parse",
+        "ok",
+        report.timings.primary_parse_ms,
+        &format!("{} primary files", primary_sources.len()),
+    )?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_context_parse",
+        "ok",
+        report.timings.context_parse_ms,
+        &format!("{} context files", context_sources.len()),
+    )?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_summary_parse",
+        "ok",
+        report.timings.summary_parse_ms,
+        &format!("{} summary files", context_summary_sources.len()),
+    )?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_global_analysis",
+        "ok",
+        report.timings.global_analysis_ms,
+        "resolver/semantic/representation/signature",
+    )?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_global_resolve_context",
+        "ok",
+        report.timings.global_resolve_ms,
+        "resolve_program_with_source_program_and_facts",
+    )?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_global_semantic",
+        "ok",
+        report.timings.global_semantic_ms,
+        "semantic_analysis::analyze_program",
+    )?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_global_representation",
+        "ok",
+        report.timings.global_representation_ms,
+        "representation::plan_representations",
+    )?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_global_signature",
+        "ok",
+        report.timings.global_signature_ms,
+        "signature::solve_signatures",
+    )?;
+    append_signature_profile_phase_events(phase_events_path, &report.analysis_profile.signature)?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_emission",
+        "ok",
+        report.timings.emission_ms,
+        &format!("jobs={jobs}"),
+    )?;
+
+    let status_path = Path::new(out_dir).join("status.tsv");
+    let manifest_path = Path::new(out_dir).join("batch-manifest.tsv");
+    let analysis_profile_path = Path::new(out_dir).join("analysis-profile.tsv");
+    write_analysis_profile(
+        &analysis_profile_path,
+        &report.analysis_profile,
+        &report.timings,
+    )?;
+    let mut status =
+        String::from("source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\n");
+    let mut manifest =
+        String::from("index\tsource\trust_path\trust_hash\tdiagnostics\tinvalid_patterns\n");
+    let write_start = Instant::now();
+    for (index, translation) in report.translations.iter().enumerate() {
+        let rust_path = generated_dir.join(batch_stem(index + 1, &translation.path) + ".rs");
+        fs::write(&rust_path, &translation.rust)
+            .map_err(|err| format!("failed to write {}: {err}", rust_path.display()))?;
+        for diagnostic in translation.diagnostics.iter() {
+            eprintln!(
+                "{:?} {}: {}",
+                diagnostic.severity, diagnostic.code, diagnostic.message
+            );
+        }
+        let invalid_patterns = count_invalid_patterns(&translation.rust);
+        status.push_str(&format!(
+            "{}\t{}\tok\t{}\t{}\n",
+            translation.path,
+            rust_path.display(),
+            translation.diagnostics.len(),
+            invalid_patterns
+        ));
+        manifest.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            index + 1,
+            translation.path,
+            rust_path.display(),
+            stable_hash_hex(&translation.rust),
+            translation.diagnostics.len(),
+            invalid_patterns
+        ));
+    }
+    if worker_events_path.is_none() {
+        for event in &report.events {
+            append_batch_worker_event(
+                worker_events_path,
+                event.phase,
+                event.index,
+                &event.path,
+                event.elapsed_ms,
+                event.status,
+                &generated_dir.join(batch_stem(event.index, &event.path) + ".rs"),
+            )?;
+        }
+    }
+    fs::write(&status_path, status)
+        .map_err(|err| format!("failed to write {}: {err}", status_path.display()))?;
+    fs::write(&manifest_path, manifest)
+        .map_err(|err| format!("failed to write {}: {err}", manifest_path.display()))?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_status_write",
+        "ok",
+        write_start.elapsed().as_millis(),
+        &status_path.display().to_string(),
+    )?;
+    append_batch_phase_event(
+        phase_events_path,
+        "batch_command_end",
+        "ok",
+        command_start.elapsed().as_millis(),
+        primary_path,
+    )?;
+    print_diagnostics(&fact_diagnostics);
+    Ok(())
+}
+
+fn stable_hash_hex(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn append_signature_profile_phase_events(
+    path: Option<&str>,
+    profile: &new_java2rust::signature::SignatureSolverProfile,
+) -> Result<(), String> {
+    append_batch_phase_event(
+        path,
+        "batch_global_signature_collect_constraints",
+        "ok",
+        profile.collect_constraints_ms,
+        "signature::collect_signature_constraints",
+    )?;
+    append_batch_phase_event(
+        path,
+        "batch_global_signature_dependency_graph",
+        "ok",
+        profile.dependency_graph_ms,
+        "signature::build_signature_dependency_graph",
+    )?;
+    append_batch_phase_event(
+        path,
+        "batch_global_signature_scc",
+        "ok",
+        profile.scc_analysis_ms,
+        "signature::analyze_signature_dependency_sccs",
+    )?;
+    append_batch_phase_event(
+        path,
+        "batch_global_signature_pass_plan",
+        "ok",
+        profile.pass_plan_ms,
+        "signature::plan_signature_solver_passes",
+    )?;
+    append_batch_phase_event(
+        path,
+        "batch_global_signature_fixpoint",
+        "ok",
+        profile.fixpoint_ms,
+        "signature constraint saturation",
+    )?;
+    append_batch_phase_event(
+        path,
+        "batch_global_signature_plan_build",
+        "ok",
+        profile.plan_build_ms,
+        "signature plan build",
+    )
+}
+
+fn write_analysis_profile(
+    path: &Path,
+    profile: &new_java2rust::BatchAnalysisProfile,
+    timings: &new_java2rust::BatchTranslationTimings,
+) -> Result<(), String> {
+    let mut out = String::from("metric\tvalue\n");
+    push_profile_metric(&mut out, "primary_files", profile.primary_files);
+    push_profile_metric(&mut out, "context_files", profile.context_files);
+    push_profile_metric(&mut out, "summary_files", profile.summary_files);
+    push_profile_metric(&mut out, "program_types", profile.program_types);
+    push_profile_metric(&mut out, "program_methods", profile.program_methods);
+    push_profile_metric(
+        &mut out,
+        "program_constructors",
+        profile.program_constructors,
+    );
+    push_profile_metric(&mut out, "program_fields", profile.program_fields);
+    push_profile_metric(&mut out, "external_fact_count", profile.external_fact_count);
+    push_profile_metric(&mut out, "global_analysis_ms", timings.global_analysis_ms);
+    push_profile_metric(&mut out, "global_resolve_ms", timings.global_resolve_ms);
+    push_profile_metric(&mut out, "global_semantic_ms", timings.global_semantic_ms);
+    push_profile_metric(
+        &mut out,
+        "global_representation_ms",
+        timings.global_representation_ms,
+    );
+    push_profile_metric(&mut out, "global_signature_ms", timings.global_signature_ms);
+    let signature = &profile.signature;
+    push_profile_metric(
+        &mut out,
+        "signature_collect_constraints_ms",
+        signature.collect_constraints_ms,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_dependency_graph_ms",
+        signature.dependency_graph_ms,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_scc_analysis_ms",
+        signature.scc_analysis_ms,
+    );
+    push_profile_metric(&mut out, "signature_pass_plan_ms", signature.pass_plan_ms);
+    push_profile_metric(&mut out, "signature_fixpoint_ms", signature.fixpoint_ms);
+    push_profile_metric(&mut out, "signature_plan_build_ms", signature.plan_build_ms);
+    push_profile_metric(&mut out, "signature_slot_count", signature.slot_count);
+    push_profile_metric(
+        &mut out,
+        "signature_unique_constraint_count",
+        signature.unique_constraint_count,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_iteration_budget",
+        signature.iteration_budget,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_graph_node_count",
+        signature.graph_node_count,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_graph_edge_count",
+        signature.graph_edge_count,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_component_count",
+        signature.component_count,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_cyclic_component_count",
+        signature.cyclic_component_count,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_max_component_size",
+        signature.max_component_size,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_planned_components",
+        signature.planned_components,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_planned_mutable_components",
+        signature.planned_mutable_components,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_fixpoint_iterations",
+        signature.fixpoint_iterations,
+    );
+    push_profile_metric(&mut out, "signature_diagnostics", signature.diagnostics);
+    push_profile_metric(
+        &mut out,
+        "signature_component_sweeps",
+        signature.component_sweeps,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_changed_component_sweeps",
+        signature.changed_component_sweeps,
+    );
+    push_profile_metric(&mut out, "signature_state_clones", signature.state_clones);
+    push_profile_metric(
+        &mut out,
+        "signature_state_clone_ms",
+        signature.state_clone_ms,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_propagation_sweep_ms",
+        signature.propagation_sweep_ms,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_component_rollback_ms",
+        signature.component_rollback_ms,
+    );
+    push_profile_metric(
+        &mut out,
+        "signature_component_change_check_ms",
+        signature.component_change_check_ms,
+    );
+    for (label, arm) in &signature.propagation_arms {
+        push_profile_metric(
+            &mut out,
+            &format!("signature_propagation_arm_{label}_sweeps"),
+            arm.sweeps,
+        );
+        push_profile_metric(
+            &mut out,
+            &format!("signature_propagation_arm_{label}_changed_sweeps"),
+            arm.changed_sweeps,
+        );
+        push_profile_metric(
+            &mut out,
+            &format!("signature_propagation_arm_{label}_ms"),
+            arm.elapsed_ns / 1_000_000,
+        );
+        push_profile_metric(
+            &mut out,
+            &format!("signature_propagation_arm_{label}_us"),
+            arm.elapsed_ns / 1_000,
+        );
+    }
+    fs::write(path, out).map_err(|err| format!("failed to write {}: {err}", path.display()))
+}
+
+fn push_profile_metric(out: &mut String, name: &str, value: impl std::fmt::Display) {
+    out.push_str(name);
+    out.push('\t');
+    out.push_str(&value.to_string());
+    out.push('\n');
+}
+
+fn append_batch_phase_event(
+    path: Option<&str>,
+    phase: &str,
+    status: &str,
+    elapsed_ms: u128,
+    detail: &str,
+) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| format!("failed to append {path}: {err}"))?;
+    writeln!(file, "{phase}\t{status}\t{elapsed_ms}\t{detail}")
+        .map_err(|err| format!("failed to write {path}: {err}"))
+}
+
+fn append_batch_worker_event(
+    path: Option<&str>,
+    event: &str,
+    index: usize,
+    source: &str,
+    elapsed_ms: u128,
+    status: &str,
+    rust_path: &Path,
+) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| format!("failed to append {path}: {err}"))?;
+    writeln!(
+        file,
+        "{event}\t{}\t{index}\t{source}\t{elapsed_ms}\t{status}\t{}",
+        std::process::id(),
+        rust_path.display()
+    )
+    .map_err(|err| format!("failed to write {path}: {err}"))
+}
+
+fn batch_stem(index: usize, java_file: &str) -> String {
+    let base = Path::new(java_file)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("Source");
+    sanitize_rust_file_stem(&format!("{index:05}_{base}"))
+}
+
+fn sanitize_rust_file_stem(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn count_invalid_patterns(rust: &str) -> usize {
+    rust.lines()
+        .filter(|line| {
+            line.contains("compile_error!")
+                || (line.contains("downcast::<") && line.contains(".expect(\"invalid Java cast\")"))
+                || line.contains(".add_all(")
+                || line.contains(".put(")
+                || line.contains("unsupported Java lambda")
+                || line.contains("unsupported Java method reference")
+                || line.contains("unsupported Java array creation")
+                || (line.contains("= None;")
+                    && !line.contains("let mut ")
+                    && !line.contains(": Option<"))
+        })
+        .count()
 }
 
 fn collect_java_paths(path: &str, out: &mut Vec<String>) -> Result<(), String> {
@@ -1377,6 +2063,7 @@ mod tests {
                 context_dirs: Vec::new(),
                 context_summary_dirs: Vec::new(),
                 context_dir_packages: Vec::new(),
+                context_dirs_are_emitted: false,
             })
         );
     }
@@ -1587,6 +2274,7 @@ mod tests {
                 context_dirs: Vec::new(),
                 context_summary_dirs: Vec::new(),
                 context_dir_packages: Vec::new(),
+                context_dirs_are_emitted: false,
             })
         );
     }
@@ -1605,6 +2293,31 @@ mod tests {
                 context_dirs: vec!["src/main/java/pkg".to_string()],
                 context_summary_dirs: Vec::new(),
                 context_dir_packages: Vec::new(),
+                context_dirs_are_emitted: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_accepts_emitted_context_dir_for_translation() {
+        assert_eq!(
+            parse_args(
+                [
+                    "--context-dir",
+                    "src/main/java/pkg",
+                    "--context-dir-emitted",
+                    "Example.java",
+                ]
+                .into_iter()
+                .map(str::to_string)
+            ),
+            Some(Args::Translate {
+                source_path: "Example.java".to_string(),
+                external_inputs: ExternalInputPaths::default(),
+                context_dirs: vec!["src/main/java/pkg".to_string()],
+                context_summary_dirs: Vec::new(),
+                context_dir_packages: Vec::new(),
+                context_dirs_are_emitted: true,
             })
         );
     }
@@ -1627,6 +2340,7 @@ mod tests {
                 context_dirs: Vec::new(),
                 context_summary_dirs: vec!["deps/summary/src/main/java".to_string()],
                 context_dir_packages: Vec::new(),
+                context_dirs_are_emitted: false,
             })
         );
     }
@@ -1652,6 +2366,7 @@ mod tests {
                     path: "src/main/java".to_string(),
                     package_prefix: "org.example.engine".to_string(),
                 }],
+                context_dirs_are_emitted: false,
             })
         );
     }

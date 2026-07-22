@@ -53,6 +53,12 @@ pub enum TryStmtPlan<'a> {
         finally_block: &'a Block,
         completion: TryBlockCompletion,
     },
+    CatchFinally {
+        body: &'a Block,
+        catches: &'a [CatchClause],
+        finally_block: &'a Block,
+        completion: TryBlockCompletion,
+    },
     Unsupported,
 }
 
@@ -150,6 +156,7 @@ fn stmt_has_lowerable_try_scope(stmt: &Stmt) -> bool {
                     .is_some_and(block_has_lowerable_try_scope)
         }
         Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
         | Stmt::For { body, .. }
         | Stmt::EnhancedFor { body, .. }
         | Stmt::Block(body) => block_has_lowerable_try_scope(body),
@@ -199,12 +206,26 @@ pub fn plan_try_stmt<'a>(
     if let Some(finally_block) = finally_block {
         let completion = plan_block_exception_completion(body);
         if resources.is_empty()
-            && catches.is_empty()
             && plan_block_exception_completion(finally_block)
                 == TryBlockCompletion::FallsThroughUnit
         {
-            return TryStmtPlan::FinallyOnly {
+            if catches.is_empty() {
+                return TryStmtPlan::FinallyOnly {
+                    body,
+                    finally_block,
+                    completion,
+                };
+            }
+            if completion == TryBlockCompletion::Terminates
+                && catches
+                    .iter()
+                    .any(|catch| !block_terminates_with_exception_boundary(&catch.body))
+            {
+                return TryStmtPlan::Unsupported;
+            }
+            return TryStmtPlan::CatchFinally {
                 body,
+                catches,
                 finally_block,
                 completion,
             };
@@ -230,12 +251,6 @@ pub fn plan_try_stmt<'a>(
         };
     }
     if catches.is_empty() {
-        return TryStmtPlan::Unsupported;
-    }
-    if catches
-        .iter()
-        .any(|catch| !block_terminates_with_exception_boundary(&catch.body))
-    {
         return TryStmtPlan::Unsupported;
     }
     TryStmtPlan::CatchOnly {
@@ -290,6 +305,8 @@ pub fn catch_match_class_names(
             }
         }
     }
+    names.sort();
+    names.dedup();
     names
 }
 
@@ -317,6 +334,8 @@ fn catch_assignable_class_names(catch_types: &[JavaType], facts: &FactSet) -> Ve
             out.push(exception.type_name.clone());
         }
     }
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -356,6 +375,9 @@ fn stmt_terminates_with_exception_boundary(stmt: &Stmt) -> bool {
                 completion: TryBlockCompletion::Terminates,
                 ..
             } | TryStmtPlan::FinallyOnly {
+                completion: TryBlockCompletion::Terminates,
+                ..
+            } | TryStmtPlan::CatchFinally {
                 completion: TryBlockCompletion::Terminates,
                 ..
             }

@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
     Capture, CaptureFacts, CaptureOrigin, CaptureOwner, CaptureOwnerKind, CaptureSource,
     ClosedHierarchyFact, ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet, FieldKey,
-    NodeId, ObjectSafetyFact, ObjectSafetyViolation, SealedPermitsFact, TypeCapabilityOverride,
-    UnresolvedTargetFact, UnresolvedTargetKind,
+    MethodEffectFact, MethodKey, NodeId, NullabilityState, ObjectSafetyFact, ObjectSafetyViolation,
+    ReceiverMutabilityFact, SealedPermitsFact, TypeCapabilityOverride, UnresolvedTargetFact,
+    UnresolvedTargetKind,
 };
 use crate::java_ir::{
     Block, CallKind, ConstructorDecl, ConstructorInvocationKind, Expr, JavaCoercionEvidence,
@@ -162,8 +164,7 @@ pub fn resolve_program_with_source_symbols_and_facts(
     for ty in &mut program.types {
         assign_type_rust_names(ty, &mut diagnostics);
     }
-    let symbols_with_facts = source_symbols.symbols.with_external_facts(external_facts);
-    let symbols = &symbols_with_facts;
+    let symbols = &source_symbols.symbols;
     let mut resolver_facts = FactSet::default();
     for ty in &mut program.types {
         resolve_type_calls(
@@ -189,7 +190,48 @@ pub fn declaration_facts_from_program(program: &Program) -> FactSet {
     let mut facts = FactSet::default();
     collect_type_capability_facts(&program, &mut facts);
     collect_field_declaration_facts(&program, &mut facts);
+    collect_method_declaration_effect_facts(&program, &mut facts);
     facts
+}
+
+fn collect_method_declaration_effect_facts(program: &Program, facts: &mut FactSet) {
+    for ty in &program.types {
+        collect_type_method_declaration_effect_facts(ty, facts);
+    }
+}
+
+fn collect_type_method_declaration_effect_facts(ty: &TypeDecl, facts: &mut FactSet) {
+    for member in &ty.members {
+        match member {
+            Member::Method(method) => {
+                let return_nullability = source_summary_method_return_nullability(method);
+                if return_nullability != NullabilityState::Unknown || !method.throws.is_empty() {
+                    facts.method_effect_facts.push(MethodEffectFact {
+                        method: MethodKey {
+                            type_name: ty.name.clone(),
+                            method_name: method.name.clone(),
+                        },
+                        receiver_mutability: ReceiverMutabilityFact::Unknown,
+                        return_nullability,
+                        thrown: method.throws.clone(),
+                        provenance: FactProvenance::ParsedSource,
+                    });
+                }
+            }
+            Member::Type(nested) => collect_type_method_declaration_effect_facts(nested, facts),
+            _ => {}
+        }
+    }
+}
+
+fn source_summary_method_return_nullability(method: &MethodDecl) -> NullabilityState {
+    crate::signature::source_method_return_nullability_constraints(method)
+        .into_iter()
+        .find_map(|constraint| match constraint {
+            crate::signature::SignatureConstraint::RequiredStorageNullability(state) => Some(state),
+            _ => None,
+        })
+        .unwrap_or_else(|| crate::semantic_analysis::method_return_nullability_effect(method))
 }
 
 fn qualify_nested_type_names(program: &mut Program) {
@@ -319,7 +361,7 @@ fn qualify_nested_stmt_types(stmt: &mut Stmt, direct_nested: &HashMap<String, St
                 qualify_nested_block_types(else_block, direct_nested);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             qualify_nested_expr_types(condition, direct_nested);
             qualify_nested_block_types(body, direct_nested);
         }
@@ -782,6 +824,9 @@ struct ProgramSymbols {
     methods_by_type: HashMap<String, Vec<MethodSymbol>>,
     constructors_by_type: HashMap<String, Vec<ConstructorSymbol>>,
     fields_by_type: HashMap<String, Vec<FieldSymbol>>,
+    hierarchy_methods_by_type: HashMap<String, Vec<MethodSymbol>>,
+    hierarchy_fields_by_type: HashMap<String, Vec<FieldSymbol>>,
+    source_hierarchy_walk_by_type: Arc<Mutex<HashMap<String, Vec<(String, u32)>>>>,
     extends_by_type: HashMap<String, String>,
     extends_type_by_type: HashMap<String, JavaType>,
     implements_by_type: HashMap<String, Vec<String>>,
@@ -794,7 +839,6 @@ struct ProgramSymbols {
     type_param_bounds_by_type: HashMap<String, Vec<Option<JavaType>>>,
     functional_interfaces: HashSet<String>,
     functional_interface_methods: HashMap<String, MethodSymbol>,
-    external_facts: FactSet,
 }
 
 impl ProgramSymbols {
@@ -803,13 +847,28 @@ impl ProgramSymbols {
         for ty in &program.types {
             symbols.collect_type(ty, None);
         }
+        symbols.rebuild_hierarchy_indexes();
         symbols
     }
 
-    fn with_external_facts(&self, external_facts: &FactSet) -> Self {
-        let mut symbols = self.clone();
-        symbols.external_facts = external_facts.clone();
-        symbols
+    fn rebuild_hierarchy_indexes(&mut self) {
+        self.hierarchy_methods_by_type.clear();
+        self.hierarchy_fields_by_type.clear();
+        let type_names = self
+            .canonical_type_names
+            .values()
+            .cloned()
+            .collect::<HashSet<_>>();
+        for type_name in type_names {
+            self.hierarchy_methods_by_type.insert(
+                type_name.clone(),
+                self.compute_methods_for_hierarchy(&type_name),
+            );
+            self.hierarchy_fields_by_type.insert(
+                type_name.clone(),
+                self.compute_fields_for_hierarchy(&type_name),
+            );
+        }
     }
 
     fn collect_type(&mut self, ty: &TypeDecl, outer: Option<&TypeDecl>) {
@@ -936,7 +995,7 @@ impl ProgramSymbols {
                     self.collect_local_types_from_block(else_block, enclosing_type);
                 }
             }
-            Stmt::While { condition, body } => {
+            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
                 self.collect_local_types_from_expr(condition, enclosing_type);
                 self.collect_local_types_from_block(body, enclosing_type);
             }
@@ -1096,6 +1155,14 @@ impl ProgramSymbols {
     }
 
     fn methods_for_hierarchy(&self, type_name: &str) -> Vec<MethodSymbol> {
+        let source_name = self.source_type_name(type_name);
+        if let Some(methods) = self.hierarchy_methods_by_type.get(source_name) {
+            return methods.clone();
+        }
+        self.compute_methods_for_hierarchy(source_name)
+    }
+
+    fn compute_methods_for_hierarchy(&self, type_name: &str) -> Vec<MethodSymbol> {
         let mut out = Vec::new();
         let mut seen_signatures = HashSet::new();
         let mut visited = HashSet::new();
@@ -1373,6 +1440,14 @@ impl ProgramSymbols {
     }
 
     fn fields_for_hierarchy(&self, type_name: &str) -> Vec<FieldSymbol> {
+        let source_name = self.source_type_name(type_name);
+        if let Some(fields) = self.hierarchy_fields_by_type.get(source_name) {
+            return fields.clone();
+        }
+        self.compute_fields_for_hierarchy(source_name)
+    }
+
+    fn compute_fields_for_hierarchy(&self, type_name: &str) -> Vec<FieldSymbol> {
         let mut out = Vec::new();
         let mut seen_fields = HashSet::new();
         let mut current = Some(self.source_type_name(type_name).to_string());
@@ -1443,40 +1518,68 @@ impl ProgramSymbols {
         self.functional_interface_methods.get(source_name)
     }
 
-    fn source_subtype_distance(&self, actual: &str, target: &str) -> Option<u32> {
+    fn source_subtype_distance(
+        &self,
+        actual: &str,
+        target: &str,
+        external_facts: &FactSet,
+    ) -> Option<u32> {
         let target = self.source_type_name(target);
-        let mut pending = vec![(self.source_type_name(actual).to_string(), 0_u32)];
-        let mut visited = HashSet::new();
-
-        while let Some((type_name, distance)) = pending.pop() {
+        for (type_name, distance) in self.source_hierarchy_walk(actual) {
             let type_name = self.source_type_name(&type_name);
-            if !visited.insert(type_name.to_string()) {
-                continue;
-            }
             if type_name == target {
                 return Some(distance);
             }
-            if self.fact_subtype_reaches(type_name, target) {
+            if self.fact_subtype_reaches(type_name, target, external_facts) {
                 return Some(distance + 2);
             }
             if crate::stdlib::is_known_java_subtype(type_name, target) {
                 return Some(distance + 5);
-            }
-
-            if let Some(super_type) = self.extends_by_type.get(type_name) {
-                pending.push((self.source_type_name(super_type).to_string(), distance + 1));
-            }
-            if let Some(interfaces) = self.implements_by_type.get(type_name) {
-                for interface in interfaces {
-                    pending.push((self.source_type_name(interface).to_string(), distance + 1));
-                }
             }
         }
 
         None
     }
 
-    fn fact_subtype_reaches(&self, actual: &str, target: &str) -> bool {
+    fn source_hierarchy_walk(&self, actual: &str) -> Vec<(String, u32)> {
+        let actual = self.source_type_name(actual).to_string();
+        if let Some(walk) = self
+            .source_hierarchy_walk_by_type
+            .lock()
+            .expect("source hierarchy walk cache mutex poisoned")
+            .get(&actual)
+            .cloned()
+        {
+            return walk;
+        }
+
+        let mut walk = Vec::new();
+        let mut pending = vec![(actual.clone(), 0_u32)];
+        let mut visited = HashSet::new();
+        while let Some((type_name, distance)) = pending.pop() {
+            let type_name = self.source_type_name(&type_name).to_string();
+            if !visited.insert(type_name.clone()) {
+                continue;
+            }
+            walk.push((type_name.clone(), distance));
+            if let Some(super_type) = self.extends_by_type.get(&type_name) {
+                pending.push((self.source_type_name(super_type).to_string(), distance + 1));
+            }
+            if let Some(interfaces) = self.implements_by_type.get(&type_name) {
+                for interface in interfaces {
+                    pending.push((self.source_type_name(interface).to_string(), distance + 1));
+                }
+            }
+        }
+
+        self.source_hierarchy_walk_by_type
+            .lock()
+            .expect("source hierarchy walk cache mutex poisoned")
+            .insert(actual, walk.clone());
+        walk
+    }
+
+    fn fact_subtype_reaches(&self, actual: &str, target: &str, external_facts: &FactSet) -> bool {
         let actual_ty = JavaType::Named {
             name: self.source_type_name(actual).to_string(),
             args: Vec::new(),
@@ -1485,7 +1588,7 @@ impl ProgramSymbols {
             name: self.source_type_name(target).to_string(),
             args: Vec::new(),
         };
-        self.external_facts
+        external_facts
             .hierarchy_subtype_policy(&actual_ty, &target_ty)
             .reaches
     }
@@ -1787,7 +1890,7 @@ fn resolve_stmt_calls(
                 external_facts,
                 enclosing_member,
             );
-            apply_target_type_to_constructor_expr(expr, ty, symbols);
+            apply_target_type_to_constructor_expr(expr, ty, symbols, external_facts);
         }
         Stmt::VarDecl { .. } => {}
         Stmt::Assign { target, value } => {
@@ -1879,7 +1982,7 @@ fn resolve_stmt_calls(
                 );
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             resolve_expr_calls(
                 condition,
                 current_type,
@@ -2151,7 +2254,12 @@ fn resolve_stmt_calls(
                         )
                     })
                     .collect::<Vec<_>>();
-                match resolve_same_class_constructor(&arg_types, constructors, symbols) {
+                match resolve_same_class_constructor(
+                    &arg_types,
+                    constructors,
+                    symbols,
+                    external_facts,
+                ) {
                     Ok(Some(constructor)) => *resolved = Some(constructor),
                     Ok(None) => facts.unresolved_target_facts.push(UnresolvedTargetFact {
                         enclosing_type: current_type.to_string(),
@@ -2193,6 +2301,7 @@ fn apply_target_type_to_constructor_expr(
     expr: &mut Expr,
     target_ty: &JavaType,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) {
     let Expr::New {
         ty,
@@ -2203,19 +2312,25 @@ fn apply_target_type_to_constructor_expr(
     else {
         return;
     };
-    resolved.constructed_type =
-        inferred_constructed_type(ty, Some(target_ty), &resolved.declaring_type, symbols);
+    resolved.constructed_type = inferred_constructed_type(
+        ty,
+        Some(target_ty),
+        &resolved.declaring_type,
+        symbols,
+        external_facts,
+    );
     resolved.params = constructor_params_for_constructed_type(resolved, symbols);
-    apply_constructor_param_targets(args, resolved, symbols);
+    apply_constructor_param_targets(args, resolved, symbols, external_facts);
 }
 
 fn apply_constructor_param_targets(
     args: &mut [Expr],
     constructor: &ResolvedConstructor,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) {
     for (arg, param) in args.iter_mut().zip(&constructor.params) {
-        apply_target_type_to_constructor_expr(arg, &param.ty, symbols);
+        apply_target_type_to_constructor_expr(arg, &param.ty, symbols, external_facts);
     }
 }
 
@@ -2250,6 +2365,7 @@ fn inferred_constructed_type(
     target_ty: Option<&JavaType>,
     declaring_type: &str,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> JavaType {
     let JavaType::Named { name, args } = parsed_ty else {
         return parsed_ty.clone();
@@ -2278,7 +2394,7 @@ fn inferred_constructed_type(
     if source_name == source_target
         || crate::stdlib::is_known_java_subtype(source_name, source_target)
         || symbols
-            .source_subtype_distance(source_name, source_target)
+            .source_subtype_distance(source_name, source_target, external_facts)
             .is_some()
     {
         return JavaType::Named {
@@ -2508,8 +2624,14 @@ fn resolve_expr_calls(
                 } else {
                     methods.to_vec()
                 };
-                match resolve_same_class_call(name, &arg_types, &unqualified_methods, symbols, None)
-                {
+                match resolve_same_class_call(
+                    name,
+                    &arg_types,
+                    &unqualified_methods,
+                    symbols,
+                    external_facts,
+                    None,
+                ) {
                     Ok(Some(selection)) => {
                         resolve_target_typed_lambda_args(
                             args,
@@ -2559,6 +2681,7 @@ fn resolve_expr_calls(
                     &arg_types,
                     &receiver_methods,
                     symbols,
+                    external_facts,
                     Some(&receiver_actual_ty),
                 ) {
                     Ok(Some(selection)) => {
@@ -2646,9 +2769,15 @@ fn resolve_expr_calls(
                         &arg_types,
                         &constructor_candidates,
                         symbols,
+                        external_facts,
                     )
                 } else {
-                    resolve_same_class_constructor(&arg_types, &constructor_candidates, symbols)
+                    resolve_same_class_constructor(
+                        &arg_types,
+                        &constructor_candidates,
+                        symbols,
+                        external_facts,
+                    )
                 };
                 match selection {
                     Ok(Some(mut constructor)) => {
@@ -2657,8 +2786,14 @@ fn resolve_expr_calls(
                             None,
                             &constructor.declaring_type,
                             symbols,
+                            external_facts,
                         );
-                        apply_constructor_param_targets(args, &constructor, symbols);
+                        apply_constructor_param_targets(
+                            args,
+                            &constructor,
+                            symbols,
+                            external_facts,
+                        );
                         *resolved = Some(constructor);
                     }
                     Ok(None) => facts.unresolved_target_facts.push(UnresolvedTargetFact {
@@ -3291,6 +3426,7 @@ fn infer_resolver_expr_type_with_facts(
                 current_type,
                 symbols,
                 env,
+                external_facts,
             ) {
                 return java_ty;
             }
@@ -3301,6 +3437,7 @@ fn infer_resolver_expr_type_with_facts(
                 current_type,
                 symbols,
                 env,
+                external_facts,
             ) {
                 return java_ty;
             }
@@ -3311,6 +3448,7 @@ fn infer_resolver_expr_type_with_facts(
                 current_type,
                 symbols,
                 env,
+                external_facts,
             ) {
                 return java_ty;
             }
@@ -3354,9 +3492,14 @@ fn infer_resolver_expr_type_with_facts(
                 } else {
                     symbols.methods_for_hierarchy(current_type)
                 };
-                if let Ok(Some(selection)) =
-                    resolve_same_class_call(name, &arg_types, &methods, symbols, None)
-                {
+                if let Ok(Some(selection)) = resolve_same_class_call(
+                    name,
+                    &arg_types,
+                    &methods,
+                    symbols,
+                    external_facts,
+                    None,
+                ) {
                     return selection.call.return_type;
                 }
             }
@@ -3370,6 +3513,7 @@ fn infer_resolver_expr_type_with_facts(
                     &arg_types,
                     &receiver_methods,
                     symbols,
+                    external_facts,
                     Some(&receiver_actual_ty),
                 ) {
                     return selection.call.return_type;
@@ -3465,6 +3609,7 @@ fn infer_resolver_expr_type_with_facts(
                 external_facts,
             ),
             symbols,
+            external_facts,
         ),
         Expr::New {
             resolved: Some(resolved),
@@ -3560,6 +3705,7 @@ fn infer_stream_map_return_type(
     current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
+    external_facts: &FactSet,
 ) -> Option<JavaType> {
     if !is_stream_lambda_mapper_name(name) || args.len() != 1 {
         return None;
@@ -3582,9 +3728,13 @@ fn infer_stream_map_return_type(
     }
 
     let mapped = match body {
-        LambdaBody::Expr(expr) => {
-            infer_resolver_expr_type(expr, current_type, symbols, &lambda_env)
-        }
+        LambdaBody::Expr(expr) => infer_resolver_expr_type_with_facts(
+            expr,
+            current_type,
+            symbols,
+            &lambda_env,
+            external_facts,
+        ),
         LambdaBody::Block(_) => JavaType::Unknown("lambda".to_string()),
     };
 
@@ -3637,6 +3787,7 @@ fn infer_stream_method_reference_map_return_type(
     current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
+    external_facts: &FactSet,
 ) -> Option<JavaType> {
     if name != "map" || args.len() != 1 {
         return None;
@@ -3656,6 +3807,7 @@ fn infer_stream_method_reference_map_return_type(
         current_type,
         symbols,
         env,
+        external_facts,
     )?;
     Some(JavaType::Named {
         name: "Stream".to_string(),
@@ -3670,6 +3822,7 @@ fn infer_stream_lambda_flat_map_return_type(
     current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
+    external_facts: &FactSet,
 ) -> Option<JavaType> {
     if name != "flatMap" || args.len() != 1 {
         return None;
@@ -3697,7 +3850,13 @@ fn infer_stream_lambda_flat_map_return_type(
     let JavaType::Named {
         name: body_name,
         args: body_args,
-    } = infer_resolver_expr_type(expr, current_type, symbols, &lambda_env)
+    } = infer_resolver_expr_type_with_facts(
+        expr,
+        current_type,
+        symbols,
+        &lambda_env,
+        external_facts,
+    )
     else {
         return None;
     };
@@ -3767,6 +3926,7 @@ fn infer_method_reference_return_type(
     current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
+    external_facts: &FactSet,
 ) -> Option<JavaType> {
     if target == "String" && method == "valueOf" {
         return Some(JavaType::String);
@@ -3779,6 +3939,7 @@ fn infer_method_reference_return_type(
             std::slice::from_ref(stream_element),
             &methods,
             symbols,
+            external_facts,
             None,
         )
         .ok()
@@ -3792,6 +3953,7 @@ fn infer_method_reference_return_type(
                         std::slice::from_ref(stream_element),
                         &methods,
                         symbols,
+                        external_facts,
                         None,
                     )
                     .ok()
@@ -3819,6 +3981,7 @@ fn infer_method_reference_return_type(
             arg_types,
             &receiver_methods,
             symbols,
+            external_facts,
             Some(&receiver_type),
         ) {
             return Some(selection.call.return_type);
@@ -3868,7 +4031,12 @@ fn method_reference_target_type(target: &str, env: &TypeEnv) -> Option<JavaType>
         .cloned()
 }
 
-fn resolver_common_type(left: &JavaType, right: &JavaType, symbols: &ProgramSymbols) -> JavaType {
+fn resolver_common_type(
+    left: &JavaType,
+    right: &JavaType,
+    symbols: &ProgramSymbols,
+    external_facts: &FactSet,
+) -> JavaType {
     if left == right {
         return left.clone();
     }
@@ -3878,13 +4046,13 @@ fn resolver_common_type(left: &JavaType, right: &JavaType, symbols: &ProgramSymb
     if is_null_type(right) && !matches!(left, JavaType::Primitive(_)) {
         return left.clone();
     }
-    if java_type_assignable(left, right, symbols) {
+    if java_type_assignable(left, right, symbols, external_facts) {
         return right.clone();
     }
-    if java_type_assignable(right, left, symbols) {
+    if java_type_assignable(right, left, symbols, external_facts) {
         return left.clone();
     }
-    if let Some(common) = known_family_common_type(left, right, symbols) {
+    if let Some(common) = known_family_common_type(left, right, symbols, external_facts) {
         return common;
     }
     JavaType::Unknown("common_type".to_string())
@@ -3898,11 +4066,12 @@ fn known_family_common_type(
     left: &JavaType,
     right: &JavaType,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<JavaType> {
     let common_families = ["List", "Set", "Collection", "Iterable", "Map", "Object"];
     common_families
         .iter()
-        .find_map(|family| common_family_type(left, right, family, symbols))
+        .find_map(|family| common_family_type(left, right, family, symbols, external_facts))
 }
 
 fn common_family_type(
@@ -3910,14 +4079,17 @@ fn common_family_type(
     right: &JavaType,
     family: &str,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<JavaType> {
     let target = JavaType::Named {
         name: family.to_string(),
-        args: common_family_args(left, right, family, symbols)?,
+        args: common_family_args(left, right, family, symbols, external_facts)?,
     };
-    java_type_assignable(left, &target, symbols)
+    java_type_assignable(left, &target, symbols, external_facts)
         .then_some(())
-        .and_then(|_| java_type_assignable(right, &target, symbols).then_some(target))
+        .and_then(|_| {
+            java_type_assignable(right, &target, symbols, external_facts).then_some(target)
+        })
 }
 
 fn common_family_args(
@@ -3925,6 +4097,7 @@ fn common_family_args(
     right: &JavaType,
     family: &str,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<Vec<JavaType>> {
     match family {
         "List" | "Set" | "Collection" | "Iterable" => {
@@ -3934,14 +4107,15 @@ fn common_family_args(
                 left_element,
                 right_element,
                 symbols,
+                external_facts,
             )])
         }
         "Map" => {
             let (left_key, left_value) = two_generic_args(left)?;
             let (right_key, right_value) = two_generic_args(right)?;
             Some(vec![
-                resolver_common_type(left_key, right_key, symbols),
-                resolver_common_type(left_value, right_value, symbols),
+                resolver_common_type(left_key, right_key, symbols, external_facts),
+                resolver_common_type(left_value, right_value, symbols, external_facts),
             ])
         }
         "Object" => Some(Vec::new()),
@@ -4101,6 +4275,7 @@ fn resolve_same_class_call(
     arg_types: &[JavaType],
     methods: &[MethodSymbol],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
     receiver_actual_ty: Option<&JavaType>,
 ) -> Result<Option<MethodResolution>, String> {
     let candidates = methods
@@ -4128,11 +4303,23 @@ fn resolve_same_class_call(
         .copied()
         .filter(|method| {
             let substitutions = receiver_type_substitutions(method, receiver_actual_ty, symbols);
-            callable_assignable_score(&method.params, arg_types, symbols, Some(&substitutions))
-                .is_some()
+            callable_assignable_score(
+                &method.params,
+                arg_types,
+                symbols,
+                external_facts,
+                Some(&substitutions),
+            )
+            .is_some()
         })
         .collect::<Vec<_>>();
-    let best_assignable = best_method_match(&candidates, arg_types, symbols, receiver_actual_ty);
+    let best_assignable = best_method_match(
+        &candidates,
+        arg_types,
+        symbols,
+        external_facts,
+        receiver_actual_ty,
+    );
 
     let selected = if let [one] = exact.as_slice() {
         *one
@@ -4178,8 +4365,13 @@ fn resolve_same_class_call(
         .iter()
         .map(|param| param.ty.clone())
         .collect::<Vec<_>>();
-    let arg_coercions =
-        java_coercion_evidence_for_params(&selected.params, &param_types, arg_types, symbols);
+    let arg_coercions = java_coercion_evidence_for_params(
+        &selected.params,
+        &param_types,
+        arg_types,
+        symbols,
+        external_facts,
+    );
     Ok(Some(MethodResolution {
         call: ResolvedCall {
             declaring_type: selected.declaring_type.clone(),
@@ -4359,6 +4551,7 @@ fn resolve_same_class_constructor(
     arg_types: &[JavaType],
     constructors: &[ConstructorSymbol],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Result<Option<ResolvedConstructor>, String> {
     let mut seen_candidate_signatures = HashSet::new();
     let candidates = constructors
@@ -4389,12 +4582,13 @@ fn resolve_same_class_constructor(
                 &constructor.params,
                 arg_types,
                 symbols,
+                external_facts,
                 Some(&substitutions),
             )
             .is_some()
         })
         .collect::<Vec<_>>();
-    let best_assignable = best_constructor_match(&candidates, arg_types, symbols);
+    let best_assignable = best_constructor_match(&candidates, arg_types, symbols, external_facts);
 
     let selected = if let [one] = exact.as_slice() {
         *one
@@ -4435,8 +4629,13 @@ fn resolve_same_class_constructor(
         .iter()
         .map(|param| param.ty.clone())
         .collect::<Vec<_>>();
-    let arg_coercions =
-        java_coercion_evidence_for_params(&selected.params, &param_types, arg_types, symbols);
+    let arg_coercions = java_coercion_evidence_for_params(
+        &selected.params,
+        &param_types,
+        arg_types,
+        symbols,
+        external_facts,
+    );
 
     Ok(Some(ResolvedConstructor {
         declaring_type: selected.declaring_type.clone(),
@@ -4455,6 +4654,7 @@ fn resolve_anonymous_class_constructor(
     arg_types: &[JavaType],
     constructors: &[ConstructorSymbol],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Result<Option<ResolvedConstructor>, String> {
     match symbols.source_type_kind(target_name) {
         Some(TypeKind::Interface) if arg_types.is_empty() => Ok(Some(ResolvedConstructor {
@@ -4468,7 +4668,7 @@ fn resolve_anonymous_class_constructor(
             arg_coercions: Vec::new(),
         })),
         Some(TypeKind::Class | TypeKind::Record) => {
-            resolve_same_class_constructor(arg_types, constructors, symbols)
+            resolve_same_class_constructor(arg_types, constructors, symbols, external_facts)
         }
         Some(TypeKind::Enum) | None => Ok(None),
         Some(TypeKind::Interface) => Ok(None),
@@ -4504,6 +4704,7 @@ fn best_method_match<'a>(
     candidates: &[&'a MethodSymbol],
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
     receiver_actual_ty: Option<&JavaType>,
 ) -> Option<&'a MethodSymbol> {
     let mut scored = candidates
@@ -4515,8 +4716,14 @@ fn best_method_match<'a>(
                 .iter()
                 .map(|param| substitute_method_type_variables(&param.ty, &substitutions))
                 .collect::<Vec<_>>();
-            callable_match_score(&method.params, &param_types, arg_types, symbols)
-                .map(|score| (*method, score))
+            callable_match_score(
+                &method.params,
+                &param_types,
+                arg_types,
+                symbols,
+                external_facts,
+            )
+            .map(|score| (*method, score))
         })
         .collect::<Vec<_>>();
     scored.sort_by_key(|(_, score)| *score);
@@ -4531,6 +4738,7 @@ fn best_constructor_match<'a>(
     candidates: &[&'a ConstructorSymbol],
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<&'a ConstructorSymbol> {
     let mut scored = candidates
         .iter()
@@ -4540,6 +4748,7 @@ fn best_constructor_match<'a>(
                 &constructor.params,
                 arg_types,
                 symbols,
+                external_facts,
                 Some(&substitutions),
             )
             .map(|score| (*constructor, score))
@@ -4576,6 +4785,7 @@ fn callable_assignable_score(
     params: &[Param],
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
     substitutions: Option<&HashMap<String, JavaType>>,
 ) -> Option<u32> {
     let param_types = params
@@ -4586,7 +4796,7 @@ fn callable_assignable_score(
                 .unwrap_or_else(|| param.ty.clone())
         })
         .collect::<Vec<_>>();
-    callable_match_score(params, &param_types, arg_types, symbols)
+    callable_match_score(params, &param_types, arg_types, symbols, external_facts)
 }
 
 fn callable_match_score(
@@ -4594,9 +4804,15 @@ fn callable_match_score(
     param_types: &[JavaType],
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<u32> {
     if !params.last().is_some_and(|param| param.is_varargs) {
-        return overload_match_score(&param_types.iter().collect::<Vec<_>>(), arg_types, symbols);
+        return overload_match_score(
+            &param_types.iter().collect::<Vec<_>>(),
+            arg_types,
+            symbols,
+            external_facts,
+        );
     }
 
     if arg_types.len() < params.len().saturating_sub(1) {
@@ -4604,8 +4820,12 @@ fn callable_match_score(
     }
 
     if params.len() == arg_types.len() {
-        let fixed_score =
-            overload_match_score(&param_types.iter().collect::<Vec<_>>(), arg_types, symbols);
+        let fixed_score = overload_match_score(
+            &param_types.iter().collect::<Vec<_>>(),
+            arg_types,
+            symbols,
+            external_facts,
+        );
         if fixed_score.is_some() {
             return fixed_score;
         }
@@ -4616,13 +4836,14 @@ fn callable_match_score(
         &param_types[..fixed_count].iter().collect::<Vec<_>>(),
         &arg_types[..fixed_count],
         symbols,
+        external_facts,
     )?;
     let JavaType::Array(vararg_element) = &param_types[fixed_count] else {
         return None;
     };
     let expanded_score = arg_types[fixed_count..]
         .iter()
-        .map(|arg_ty| java_type_match_score(arg_ty, vararg_element, symbols))
+        .map(|arg_ty| java_type_match_score(arg_ty, vararg_element, symbols, external_facts))
         .sum::<Option<u32>>()?;
 
     Some(fixed_score + expanded_score + 5)
@@ -4633,11 +4854,18 @@ pub fn overload_applicability_report(
     arg_types: &[JavaType],
     source_symbols: &SourceSymbols,
 ) -> OverloadApplicabilityReport {
+    let external_facts = FactSet::default();
     let param_types = params
         .iter()
         .map(|param| param.ty.clone())
         .collect::<Vec<_>>();
-    callable_applicability_report(params, &param_types, arg_types, &source_symbols.symbols)
+    callable_applicability_report(
+        params,
+        &param_types,
+        arg_types,
+        &source_symbols.symbols,
+        &external_facts,
+    )
 }
 
 fn callable_applicability_report(
@@ -4645,9 +4873,10 @@ fn callable_applicability_report(
     param_types: &[JavaType],
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> OverloadApplicabilityReport {
     if !params.last().is_some_and(|param| param.is_varargs) {
-        return fixed_arity_applicability_report(param_types, arg_types, symbols);
+        return fixed_arity_applicability_report(param_types, arg_types, symbols, external_facts);
     }
 
     if arg_types.len() < params.len().saturating_sub(1) {
@@ -4664,7 +4893,8 @@ fn callable_applicability_report(
     }
 
     if params.len() == arg_types.len() {
-        let fixed = fixed_arity_applicability_report(param_types, arg_types, symbols);
+        let fixed =
+            fixed_arity_applicability_report(param_types, arg_types, symbols, external_facts);
         if fixed.is_applicable() {
             return fixed;
         }
@@ -4683,6 +4913,7 @@ fn callable_applicability_report(
         &param_types[..fixed_count],
         &arg_types[..fixed_count],
         symbols,
+        external_facts,
         OverloadApplicabilityMode::VariableArity,
     );
     if !report.rejections.is_empty() {
@@ -4690,7 +4921,14 @@ fn callable_applicability_report(
     }
     for (offset, arg_ty) in arg_types[fixed_count..].iter().enumerate() {
         let arg_index = fixed_count + offset;
-        push_argument_applicability(&mut report, arg_index, arg_ty, vararg_element, symbols);
+        push_argument_applicability(
+            &mut report,
+            arg_index,
+            arg_ty,
+            vararg_element,
+            symbols,
+            external_facts,
+        );
     }
     if report.rejections.is_empty() {
         let total = report.arguments.iter().map(|arg| arg.score).sum::<u32>() + 5;
@@ -4705,8 +4943,9 @@ fn java_coercion_evidence_for_params(
     param_types: &[JavaType],
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Vec<JavaCoercionEvidence> {
-    callable_applicability_report(params, param_types, arg_types, symbols)
+    callable_applicability_report(params, param_types, arg_types, symbols, external_facts)
         .arguments
         .into_iter()
         .map(|argument| JavaCoercionEvidence {
@@ -4744,6 +4983,7 @@ fn overload_match_score(
     params: &[&JavaType],
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<u32> {
     if params.len() != arg_types.len() {
         return None;
@@ -4751,7 +4991,7 @@ fn overload_match_score(
     params
         .iter()
         .zip(arg_types)
-        .map(|(param, arg_ty)| java_type_match_score(arg_ty, param, symbols))
+        .map(|(param, arg_ty)| java_type_match_score(arg_ty, param, symbols, external_facts))
         .sum()
 }
 
@@ -4759,6 +4999,7 @@ fn java_type_applicability(
     actual: &JavaType,
     target: &JavaType,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Result<(OverloadArgumentConversion, u32), OverloadRejectionReason> {
     let actual_java = actual.clone();
     let target_java = target.clone();
@@ -4858,9 +5099,16 @@ fn java_type_applicability(
                 name: target,
                 args: target_args,
             },
-        ) => named_reference_match_score(actual, actual_args, target, target_args, symbols)
-            .map(|score| (OverloadArgumentConversion::ReferenceWidening, score))
-            .ok_or_else(|| argument_type_mismatch(&actual_java, &target_java)),
+        ) => named_reference_match_score(
+            actual,
+            actual_args,
+            target,
+            target_args,
+            symbols,
+            external_facts,
+        )
+        .map(|score| (OverloadArgumentConversion::ReferenceWidening, score))
+        .ok_or_else(|| argument_type_mismatch(&actual_java, &target_java)),
         (JavaType::Unknown(name), _) if name == "null" => {
             if matches!(target, JavaType::Primitive(_)) {
                 Err(OverloadRejectionReason::NullToPrimitive {
@@ -4926,11 +5174,13 @@ fn fixed_arity_applicability_report(
     param_types: &[JavaType],
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> OverloadApplicabilityReport {
     fixed_arity_prefix_applicability_report(
         param_types,
         arg_types,
         symbols,
+        external_facts,
         OverloadApplicabilityMode::FixedArity,
     )
 }
@@ -4939,6 +5189,7 @@ fn fixed_arity_prefix_applicability_report(
     param_types: &[JavaType],
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
     mode: OverloadApplicabilityMode,
 ) -> OverloadApplicabilityReport {
     if param_types.len() != arg_types.len() {
@@ -4960,7 +5211,14 @@ fn fixed_arity_prefix_applicability_report(
         rejections: Vec::new(),
     };
     for (arg_index, (target, actual)) in param_types.iter().zip(arg_types).enumerate() {
-        push_argument_applicability(&mut report, arg_index, actual, target, symbols);
+        push_argument_applicability(
+            &mut report,
+            arg_index,
+            actual,
+            target,
+            symbols,
+            external_facts,
+        );
     }
     if report.rejections.is_empty() {
         report.score = Some(report.arguments.iter().map(|arg| arg.score).sum());
@@ -4974,8 +5232,9 @@ fn push_argument_applicability(
     actual: &JavaType,
     target: &JavaType,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) {
-    match java_type_applicability(actual, target, symbols) {
+    match java_type_applicability(actual, target, symbols, external_facts) {
         Ok((conversion, score)) => report.arguments.push(OverloadArgumentApplicability {
             arg_index,
             actual: actual.clone(),
@@ -5018,6 +5277,7 @@ fn java_type_match_score(
     actual: &JavaType,
     target: &JavaType,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<u32> {
     if actual == target {
         return Some(0);
@@ -5079,7 +5339,14 @@ fn java_type_match_score(
                 name: target,
                 args: target_args,
             },
-        ) => named_reference_match_score(actual, actual_args, target, target_args, symbols),
+        ) => named_reference_match_score(
+            actual,
+            actual_args,
+            target,
+            target_args,
+            symbols,
+            external_facts,
+        ),
         (JavaType::Unknown(name), _) if name == "null" => {
             (!matches!(target, JavaType::Primitive(_))).then_some(30)
         }
@@ -5112,8 +5379,13 @@ fn unknown_collection_factory_matches_target(name: &str, target: &str) -> bool {
     )
 }
 
-fn java_type_assignable(actual: &JavaType, target: &JavaType, symbols: &ProgramSymbols) -> bool {
-    java_type_match_score(actual, target, symbols).is_some()
+fn java_type_assignable(
+    actual: &JavaType,
+    target: &JavaType,
+    symbols: &ProgramSymbols,
+    external_facts: &FactSet,
+) -> bool {
+    java_type_match_score(actual, target, symbols, external_facts).is_some()
 }
 
 fn named_reference_match_score(
@@ -5122,35 +5394,40 @@ fn named_reference_match_score(
     target: &str,
     target_args: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<u32> {
     if actual == target {
-        return generic_arguments_match_score(actual_args, target_args, symbols);
+        return generic_arguments_match_score(actual_args, target_args, symbols, external_facts);
     }
 
     if target == "Enum" && symbols.is_source_enum_type(actual) {
-        return generic_arguments_match_score(actual_args, target_args, symbols)
+        return generic_arguments_match_score(actual_args, target_args, symbols, external_facts)
             .or_else(|| target_args.iter().all(is_unbounded_wildcard).then_some(12));
     }
 
     if crate::stdlib::is_known_single_arg_generic_supertype(actual, target) {
-        return generic_supertype_match_score(actual_args, target_args, symbols)
+        return generic_supertype_match_score(actual_args, target_args, symbols, external_facts)
             .map(|score| 10 + score);
     }
 
-    if let Some(distance) = symbols.source_subtype_distance(actual, target) {
+    if let Some(distance) = symbols.source_subtype_distance(actual, target, external_facts) {
         return Some(
-            10 + distance + generic_arguments_match_score(actual_args, target_args, symbols)?,
+            10 + distance
+                + generic_arguments_match_score(actual_args, target_args, symbols, external_facts)?,
         );
     }
 
-    crate::stdlib::is_known_java_subtype(actual, target)
-        .then(|| generic_arguments_match_score(actual_args, target_args, symbols).unwrap_or(10))
+    crate::stdlib::is_known_java_subtype(actual, target).then(|| {
+        generic_arguments_match_score(actual_args, target_args, symbols, external_facts)
+            .unwrap_or(10)
+    })
 }
 
 fn generic_supertype_match_score(
     actual_args: &[JavaType],
     target_args: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<u32> {
     if target_args.is_empty() {
         return Some(0);
@@ -5158,13 +5435,14 @@ fn generic_supertype_match_score(
     if actual_args.is_empty() {
         return Some(50);
     }
-    generic_arguments_match_score(actual_args, target_args, symbols)
+    generic_arguments_match_score(actual_args, target_args, symbols, external_facts)
 }
 
 fn generic_arguments_match_score(
     actual_args: &[JavaType],
     target_args: &[JavaType],
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<u32> {
     match (actual_args, target_args) {
         (_, []) => Some(0),
@@ -5173,7 +5451,9 @@ fn generic_arguments_match_score(
         (actuals, targets) if actuals.len() == targets.len() => actuals
             .iter()
             .zip(targets)
-            .map(|(actual, target)| generic_argument_match_score(actual, target, symbols))
+            .map(|(actual, target)| {
+                generic_argument_match_score(actual, target, symbols, external_facts)
+            })
             .sum(),
         _ => None,
     }
@@ -5183,6 +5463,7 @@ fn generic_argument_match_score(
     actual: &JavaType,
     target: &JavaType,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Option<u32> {
     if actual == target {
         return Some(0);
@@ -5206,7 +5487,8 @@ fn generic_argument_match_score(
             })
         }
         (JavaType::Array(actual_inner), JavaType::Array(target_inner)) => {
-            generic_argument_match_score(actual_inner, target_inner, symbols).map(|score| score + 1)
+            generic_argument_match_score(actual_inner, target_inner, symbols, external_facts)
+                .map(|score| score + 1)
         }
         (
             JavaType::Named {
@@ -5218,7 +5500,8 @@ fn generic_argument_match_score(
                 args: target_args,
             },
         ) if actual_name == target_name => {
-            generic_arguments_match_score(actual_args, target_args, symbols).map(|score| score + 1)
+            generic_arguments_match_score(actual_args, target_args, symbols, external_facts)
+                .map(|score| score + 1)
         }
         (_, JavaType::Named { name, args })
             if args.is_empty() && is_method_type_variable(name, None) =>
@@ -5231,10 +5514,10 @@ fn generic_argument_match_score(
         }
         (_, JavaType::Wildcard(None)) => Some(5),
         (_, JavaType::Wildcard(Some(WildcardBound::Extends(bound)))) => {
-            java_type_match_score(actual, bound, symbols).map(|score| 5 + score)
+            java_type_match_score(actual, bound, symbols, external_facts).map(|score| 5 + score)
         }
         (_, JavaType::Wildcard(Some(WildcardBound::Super(bound)))) => {
-            java_type_match_score(bound, actual, symbols).map(|score| 5 + score)
+            java_type_match_score(bound, actual, symbols, external_facts).map(|score| 5 + score)
         }
         _ => None,
     }
@@ -5810,7 +6093,7 @@ impl CaptureAnalyzer {
                     self.analyze_block(block, &mut ctx.clone(), None);
                 }
             }
-            Stmt::While { condition, body } => {
+            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
                 self.analyze_expr(condition, ctx);
                 self.analyze_block(body, &mut ctx.clone(), None);
             }
@@ -6338,7 +6621,7 @@ fn collect_mutated_names_stmt(stmt: &Stmt, out: &mut HashSet<String>) {
                 }
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_mutated_names_expr(condition, out);
             for stmt in &body.statements {
                 collect_mutated_names_stmt(stmt, out);

@@ -155,6 +155,10 @@ pub enum Stmt {
         condition: Expr,
         body: Block,
     },
+    DoWhile {
+        body: Block,
+        condition: Expr,
+    },
     For {
         init: Vec<Stmt>,
         condition: Option<Expr>,

@@ -863,7 +863,7 @@ fn collect_anonymous_constructor_target_names_for_stmt(
                 collect_anonymous_constructor_target_names_for_block(else_block, target_names);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_anonymous_constructor_target_names_for_expr(condition, target_names);
             collect_anonymous_constructor_target_names_for_block(body, target_names);
         }
@@ -3512,7 +3512,7 @@ fn collect_stmt_source_dependency_resolution_counts(
                 );
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_expr_source_dependency_resolution_counts(
                 condition,
                 current_mode,
@@ -4388,7 +4388,7 @@ fn collect_stmt_resolved_external_pack_field_access_counts(
                 );
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_expr_resolved_external_pack_field_access_counts(
                 condition,
                 semantic_facts,
@@ -6501,7 +6501,7 @@ fn collect_source_stmt_type_names(stmt: &Stmt, names: &mut HashSet<String>) {
                 collect_source_block_type_names(else_block, names);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_source_expr_type_names(condition, names);
             collect_source_block_type_names(body, names);
         }

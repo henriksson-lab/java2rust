@@ -1,11 +1,13 @@
 use crate::coercion::LoweredExpr;
 use crate::expr_shape::ShapeEnv;
-use crate::facts::{FactSet, ReceiverMutabilityFact};
+use crate::facts::{ExternalFactLookupIndex, FactSet, ReceiverMutabilityFact};
 use crate::java_ir::{BinaryOp, CallKind, Expr, JavaType, Literal, Stmt, UnaryOp};
 use crate::literal_lowering::literal_to_rust;
 use crate::operator_lowering::{binary_op_to_rust, stream_unary_prefix};
 use crate::rust_ir::RustExpr;
 use crate::shape_projection::{shape_is_borrowed_string_content, shape_is_owned};
+use crate::signature::SignaturePlan;
+use crate::slot_render::rust_type_for_slot_with_facts;
 use crate::slot_shape::RustSlotShape;
 use crate::stream::{
     FilterPlan, FlatMapPlan, LambdaPlan, StreamLambdaBody, StreamOp, StreamPlan, StreamSource,
@@ -24,6 +26,10 @@ pub enum StreamLambdaValue {
 pub struct StreamRenderContext<'a> {
     env: Option<&'a ShapeEnv>,
     facts: Option<&'a FactSet>,
+    external_index: Option<&'a ExternalFactLookupIndex<'a>>,
+    signatures: Option<&'a SignaturePlan>,
+    current_type: Option<&'a str>,
+    self_receiver_available: bool,
 }
 
 impl<'a> StreamRenderContext<'a> {
@@ -31,6 +37,10 @@ impl<'a> StreamRenderContext<'a> {
         Self {
             env: Some(env),
             facts: None,
+            external_index: None,
+            signatures: None,
+            current_type: None,
+            self_receiver_available: false,
         }
     }
 
@@ -38,6 +48,28 @@ impl<'a> StreamRenderContext<'a> {
         Self {
             env: Some(env),
             facts: Some(facts),
+            external_index: None,
+            signatures: None,
+            current_type: None,
+            self_receiver_available: false,
+        }
+    }
+
+    pub fn new_with_facts_and_self_receiver(
+        env: &'a ShapeEnv,
+        facts: &'a FactSet,
+        signatures: &'a SignaturePlan,
+        external_index: &'a ExternalFactLookupIndex<'a>,
+        current_type: Option<&'a str>,
+        self_receiver_available: bool,
+    ) -> Self {
+        Self {
+            env: Some(env),
+            facts: Some(facts),
+            external_index: Some(external_index),
+            signatures: Some(signatures),
+            current_type,
+            self_receiver_available,
         }
     }
 
@@ -45,6 +77,10 @@ impl<'a> StreamRenderContext<'a> {
         Self {
             env: None,
             facts: None,
+            external_index: None,
+            signatures: None,
+            current_type: None,
+            self_receiver_available: false,
         }
     }
 
@@ -109,14 +145,26 @@ fn emit_stream_lambda_shared_native_call(
     } else {
         &typed_lambda_env
     };
-    let target = crate::call_plan::plan_call_target_with_facts_and_arity(
-        Some(receiver),
-        name,
-        args.len(),
-        resolved,
-        facts,
-        type_env,
-    );
+    let target = if let Some(external_index) = ctx.external_index {
+        crate::call_plan::plan_call_target_with_external_index_and_arity(
+            Some(receiver),
+            name,
+            args.len(),
+            resolved,
+            facts,
+            external_index,
+            type_env,
+        )
+    } else {
+        crate::call_plan::plan_call_target_with_facts_and_arity(
+            Some(receiver),
+            name,
+            args.len(),
+            resolved,
+            facts,
+            type_env,
+        )
+    };
     let precedence = match target {
         crate::call_plan::CallTargetPlan::NativeJavaStatic {
             method: crate::call_plan::NativeJavaStaticMethod::MathToIntExact,
@@ -425,24 +473,56 @@ fn emit_stream_lambda_body_with_locals_prec(
             args,
             resolved,
         } => {
-            let args =
-                emit_stream_lambda_args_with_locals(args, param, value, locals, ctx, param_shape)?
-                    .join(", ");
-            let method = resolved
-                .as_ref()
-                .map(|resolved| resolved.rust_name.as_str())
-                .unwrap_or(name);
+            let rendered_args = emit_stream_lambda_call_args_for_resolved(
+                name,
+                args,
+                resolved.as_ref(),
+                param,
+                value,
+                locals,
+                ctx,
+                param_shape,
+            )?
+            .join(", ");
+            let method_name =
+                stream_receiverless_call_rust_name(name, args.len(), args, param, param_shape, ctx)
+                    .or_else(|| resolved.as_ref().map(|resolved| resolved.rust_name.clone()))
+                    .unwrap_or_else(|| name.clone());
+            let method = method_name.as_str();
             match resolved.as_ref().map(|resolved| resolved.kind) {
                 Some(CallKind::Instance) => (
-                    format!("self.{}({args})", crate::parser::to_snake_case(method)),
+                    format!(
+                        "self.{}({rendered_args})",
+                        crate::parser::to_snake_case(method)
+                    ),
                     11,
                 ),
                 Some(CallKind::Static) => (
-                    format!("Self::{}({args})", crate::parser::to_snake_case(method)),
+                    format!(
+                        "Self::{}({rendered_args})",
+                        crate::parser::to_snake_case(method)
+                    ),
                     11,
                 ),
+                None if ctx.self_receiver_available
+                    && ctx.env.is_none_or(|env| {
+                        env.type_env().static_member_import_owner(name).is_none()
+                            && env
+                                .type_env()
+                                .static_member_import_owner(&crate::parser::to_snake_case(name))
+                                .is_none()
+                    }) =>
+                {
+                    (
+                        format!(
+                            "self.{}({rendered_args})",
+                            crate::parser::to_snake_case(method)
+                        ),
+                        11,
+                    )
+                }
                 None => (
-                    format!("{}({args})", crate::parser::to_snake_case(method)),
+                    format!("{}({rendered_args})", crate::parser::to_snake_case(method)),
                     11,
                 ),
             }
@@ -602,10 +682,11 @@ fn render_stream_ops_with_options(
                 } else {
                     StreamLambdaValue::OwnedItem
                 };
+                let param_shape = effective_stream_item_shape(&item_shape, item_is_borrowed);
+                let param = render_stream_lambda_param(&lambda.param_name, &param_shape, ctx);
                 out.push_str(&format!(
-                    ".map(|{}| {})",
-                    lambda.param_name,
-                    emit_stream_lambda_closure_body(lambda, value, ctx, Some(&item_shape))?
+                    ".map(|{param}| {})",
+                    emit_stream_lambda_closure_body(lambda, value, ctx, Some(&param_shape))?
                 ));
                 item_is_borrowed = false;
                 item_shape = output_shape.clone();
@@ -661,6 +742,83 @@ fn render_stream_ops_with_options(
     Some((item_is_borrowed, item_shape))
 }
 
+fn effective_stream_item_shape(shape: &RustSlotShape, item_is_borrowed: bool) -> RustSlotShape {
+    let mut shape = shape.clone();
+    shape.ownership = if item_is_borrowed {
+        crate::slot_shape::OwnershipShape::SharedBorrow
+    } else {
+        crate::slot_shape::conservative_ownership(&shape.java_ty)
+    };
+    shape
+}
+
+fn render_stream_lambda_param(
+    name: &str,
+    item_shape: &RustSlotShape,
+    ctx: StreamRenderContext<'_>,
+) -> String {
+    if stream_lambda_param_type_is_useful(item_shape) {
+        let ty = render_stream_lambda_param_type(item_shape, ctx);
+        format!("{name}: {ty}")
+    } else {
+        name.to_string()
+    }
+}
+
+fn render_stream_lambda_param_type(
+    item_shape: &RustSlotShape,
+    ctx: StreamRenderContext<'_>,
+) -> String {
+    if let Some(ty) = render_tuple_like_stream_lambda_param_type(&item_shape.java_ty, ctx.facts) {
+        return ty;
+    }
+    ctx.facts
+        .map(|facts| crate::emit::emit_type(&rust_type_for_slot_with_facts(item_shape, facts)))
+        .unwrap_or_else(|| {
+            crate::emit::emit_type(&crate::slot_render::rust_type_for_slot(item_shape))
+        })
+}
+
+fn render_tuple_like_stream_lambda_param_type(
+    java_ty: &JavaType,
+    facts: Option<&FactSet>,
+) -> Option<String> {
+    let JavaType::Named { name, args } = java_ty else {
+        return None;
+    };
+    let simple = crate::stdlib::canonical_external_receiver_type_key(name);
+    let simple = simple.rsplit('.').next().unwrap_or(&simple);
+    if !simple.starts_with("Tuple") || args.is_empty() {
+        return None;
+    }
+    let rendered_args = args
+        .iter()
+        .map(|arg| {
+            facts
+                .map(|facts| {
+                    crate::emit::emit_type(&crate::slot_render::rust_type_for_java_type_with_facts(
+                        arg, facts,
+                    ))
+                })
+                .unwrap_or_else(|| {
+                    crate::emit::emit_type(&crate::slot_render::rust_type_for_java_type(arg))
+                })
+        })
+        .collect::<Vec<_>>();
+    Some(format!(
+        "{}<{}>",
+        crate::slot_render::rust_name_for_java_named_type(simple),
+        rendered_args.join(", ")
+    ))
+}
+
+fn stream_lambda_param_type_is_useful(item_shape: &RustSlotShape) -> bool {
+    !matches!(
+        item_shape.java_ty,
+        JavaType::Primitive(_) | JavaType::Unknown(_)
+    )
+}
+
 fn render_stream_sub_pipeline(
     pipeline: &StreamSubPipeline<'_>,
     lambda: &LambdaPlan<'_>,
@@ -709,6 +867,28 @@ fn render_stream_terminal(
 ) -> Option<()> {
     match &plan.terminal {
         StreamTerminal::Sum => out.push_str(".sum::<i32>()"),
+        StreamTerminal::Reduce(reduce) => {
+            let identity = emit_stream_lambda_body_with_locals(
+                reduce.identity,
+                "__java_unused_reduce_item",
+                StreamLambdaValue::OwnedItem,
+                &[],
+                ctx,
+                None,
+            )?;
+            let left = reduce.accumulator.left_param_name.as_str();
+            let right = reduce.accumulator.right_param_name.as_str();
+            let locals = [left, right];
+            let body = emit_stream_lambda_body_with_locals(
+                reduce.accumulator.body.return_expr()?,
+                left,
+                StreamLambdaValue::OwnedItem,
+                &locals,
+                ctx,
+                Some(item_shape),
+            )?;
+            out.push_str(&format!(".fold({identity}, |{left}, {right}| {body})"));
+        }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::List) => {
             out.push_str(".collect::<Vec<_>>()");
         }
@@ -717,20 +897,25 @@ fn render_stream_terminal(
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Map) => return None,
         StreamTerminal::CollectToMap { key, value } => {
+            let lambda_value = if item_is_borrowed {
+                StreamLambdaValue::BorrowedItem
+            } else {
+                StreamLambdaValue::OwnedItem
+            };
             out.push_str(&format!(
                 ".map(|{}| ({}, {})).collect::<std::collections::HashMap<_, _>>()",
                 key.param_name,
                 emit_stream_collect_to_map_lambda_body(
                     key,
                     plan,
-                    StreamLambdaValue::BorrowedItem,
+                    lambda_value,
                     ctx,
                     Some(&plan.source_element.shape),
                 )?,
                 emit_stream_collect_to_map_lambda_body(
                     value,
                     plan,
-                    StreamLambdaValue::BorrowedItem,
+                    lambda_value,
                     ctx,
                     Some(&plan.source_element.shape),
                 )?
@@ -798,6 +983,9 @@ fn emit_stream_collect_to_map_lambda_body(
 ) -> Option<String> {
     let return_expr = lambda.body.return_expr()?;
     if matches!(return_expr, Expr::Var(name) if name == &lambda.param_name) {
+        if matches!(value, StreamLambdaValue::OwnedItem) {
+            return Some(lambda.param_name.to_string());
+        }
         return Some(crate::stream::stream_identity_value_expr(
             &lambda.param_name,
             &plan.source_element.shape,
@@ -1021,7 +1209,9 @@ fn emit_stream_lambda_stmt(
 ) -> Option<String> {
     match stmt {
         Stmt::VarDecl {
-            name, initializer, ..
+            ty,
+            name,
+            initializer,
         } => {
             let rust_name = crate::parser::to_snake_case(name);
             let mutability = if mutated.contains(name) || mutated.contains(&rust_name) {
@@ -1033,16 +1223,14 @@ fn emit_stream_lambda_stmt(
                 "let {mutability}{rust_name} = {};",
                 initializer
                     .as_ref()
-                    .and_then(|expr| {
-                        emit_stream_lambda_body_with_locals(
-                            expr,
-                            param,
-                            StreamLambdaValue::BorrowedItem,
-                            locals,
-                            ctx,
-                            param_shape,
-                        )
-                    })
+                    .and_then(|expr| emit_stream_lambda_local_initializer(
+                        ty,
+                        expr,
+                        param,
+                        locals,
+                        ctx,
+                        param_shape,
+                    ))
                     .unwrap_or_else(|| "Default::default()".to_string())
             ))
         }
@@ -1077,6 +1265,29 @@ fn emit_stream_lambda_stmt(
             )?
         )),
         _ => None,
+    }
+}
+
+fn emit_stream_lambda_local_initializer(
+    ty: &JavaType,
+    expr: &Expr,
+    param: &str,
+    locals: &[&str],
+    ctx: StreamRenderContext<'_>,
+    param_shape: Option<&RustSlotShape>,
+) -> Option<String> {
+    let rendered = emit_stream_lambda_body_with_locals(
+        expr,
+        param,
+        StreamLambdaValue::BorrowedItem,
+        locals,
+        ctx,
+        param_shape,
+    )?;
+    if matches!(ty, JavaType::String) && matches!(expr, Expr::ArrayAccess(_, _)) {
+        Some(format!("{rendered}.clone()"))
+    } else {
+        Some(rendered)
     }
 }
 
@@ -1124,7 +1335,7 @@ fn collect_stream_stmt_mutated_locals(
                 }
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_stream_expr_mutated_locals(condition, mutated, ctx);
             for stmt in &body.statements {
                 collect_stream_stmt_mutated_locals(stmt, mutated, ctx);
@@ -1387,6 +1598,114 @@ fn emit_stream_lambda_call_args_for_receiver(
     )
 }
 
+fn emit_stream_lambda_call_args_for_resolved(
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&crate::java_ir::ResolvedCall>,
+    param: &str,
+    value: StreamLambdaValue,
+    locals: &[&str],
+    ctx: StreamRenderContext<'_>,
+    param_shape: Option<&RustSlotShape>,
+) -> Option<Vec<String>> {
+    let default_args =
+        emit_stream_lambda_args_with_locals(args, param, value, locals, ctx, param_shape)?;
+    let source_signature =
+        stream_receiverless_call_signature(name, args.len(), args, param, param_shape, ctx);
+    Some(
+        args.iter()
+            .enumerate()
+            .zip(default_args)
+            .map(|((index, arg), rendered)| {
+                resolved
+                    .and_then(|resolved| {
+                        resolved
+                            .arg_coercions
+                            .iter()
+                            .find(|coercion| coercion.arg_index == index)
+                    })
+                    .map(|coercion| {
+                        let slot = RustSlotShape::for_storage(coercion.target.clone());
+                        adapt_stream_lambda_arg_for_slot(
+                            arg,
+                            rendered.clone(),
+                            &slot,
+                            param,
+                            locals,
+                            ctx,
+                        )
+                    })
+                    .or_else(|| {
+                        source_signature
+                            .as_ref()
+                            .and_then(|(_, signature)| signature.params.get(index))
+                            .map(|param_plan| {
+                                adapt_stream_lambda_arg_for_slot(
+                                    arg,
+                                    rendered.clone(),
+                                    &param_plan.shape,
+                                    param,
+                                    locals,
+                                    ctx,
+                                )
+                            })
+                    })
+                    .unwrap_or_else(|| {
+                        if matches!(arg, Expr::Var(name) if name == param)
+                            && rendered == format!("*{param}")
+                        {
+                            format!("{param}.clone()")
+                        } else {
+                            rendered
+                        }
+                    })
+            })
+            .collect(),
+    )
+}
+
+fn stream_receiverless_call_rust_name(
+    name: &str,
+    arg_count: usize,
+    args: &[Expr],
+    param: &str,
+    param_shape: Option<&RustSlotShape>,
+    ctx: StreamRenderContext<'_>,
+) -> Option<String> {
+    stream_receiverless_call_signature(name, arg_count, args, param, param_shape, ctx)
+        .map(|(rust_name, _)| rust_name)
+}
+
+fn stream_receiverless_call_signature<'a>(
+    name: &str,
+    arg_count: usize,
+    args: &[Expr],
+    param: &str,
+    param_shape: Option<&RustSlotShape>,
+    ctx: StreamRenderContext<'a>,
+) -> Option<(String, &'a crate::signature::MethodSignaturePlan)> {
+    let current_type = ctx.current_type?;
+    let signatures = ctx.signatures?;
+    let env = ctx.env?;
+    let arg_types = args
+        .iter()
+        .map(|arg| {
+            if matches!(arg, Expr::Var(arg_name) if arg_name == param)
+                && let Some(param_shape) = param_shape
+            {
+                param_shape.java_ty.clone()
+            } else {
+                crate::types::infer_expr_type(arg, env.type_env())
+            }
+        })
+        .collect::<Vec<_>>();
+    signatures
+        .method_signature_by_base_name_and_arg_types(current_type, name, &arg_types)
+        .or_else(|| {
+            signatures.method_signature_by_base_name_and_arity(current_type, name, arg_count)
+        })
+}
+
 fn adapt_stream_lambda_arg_for_slot(
     arg: &Expr,
     rendered: String,
@@ -1399,7 +1718,7 @@ fn adapt_stream_lambda_arg_for_slot(
         return render_stream_lambda_borrowed_str_arg(arg, rendered, param, locals, ctx);
     }
     if shape_is_owned(slot) {
-        return render_stream_lambda_owned_arg(arg, rendered, param);
+        return render_stream_lambda_owned_arg(arg, rendered, param, locals);
     }
     rendered
 }
@@ -1451,9 +1770,17 @@ fn render_stream_lambda_borrowed_str_arg(
     }
 }
 
-fn render_stream_lambda_owned_arg(arg: &Expr, rendered: String, param: &str) -> String {
+fn render_stream_lambda_owned_arg(
+    arg: &Expr,
+    rendered: String,
+    param: &str,
+    locals: &[&str],
+) -> String {
     match arg {
         Expr::Var(name) if name == param => format!("{param}.clone()"),
+        Expr::Var(name) if locals.iter().all(|local| *local != name) => {
+            format!("{rendered}.clone()")
+        }
         Expr::FieldAccess(receiver, _) if matches!(receiver.as_ref(), Expr::This) => {
             format!("{rendered}.clone()")
         }
@@ -1538,6 +1865,12 @@ fn stream_static_owner_expr_segment(
                 .is_some_and(|env| env.local_type(name).is_some() || env.field_type(name).is_some())
             {
                 return None;
+            }
+            if let Some(owner) = ctx
+                .env
+                .and_then(|env| env.type_env().static_type_alias(name))
+            {
+                return Some(stream_static_owner_type_name_with_context(owner, ctx));
             }
             if !is_static_owner_name(name) {
                 return None;

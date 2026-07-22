@@ -15,18 +15,27 @@ Options:
   --builtin-external-pack <name>      Add a built-in external pack to resolver preflight and translation.
   --no-builtin-external-packs         Disable built-in external packs in resolver preflight.
   --skip-resolver-bench               Do not run resolver-bench before translation.
-  --jobs <n>                          Translate files in parallel with n workers. Default: nproc or 4.
+  --jobs <n>                          Parallelism for batch emission or legacy per-file workers. Default: 10.
+  --no-batch-translate                Use legacy per-file worker translation.
+  --translate-timeout-sec <n>         Mark a single Java file translation failed after n seconds.
+  --verbose-cargo                     Run cargo check without --quiet.
+  --offline-cargo                     Run cargo check with --offline.
   --help                              Show this help.
 
 Output:
   <out-dir>/generated-crate/Cargo.toml
   <out-dir>/generated-crate/src/generated/*.rs
   <out-dir>/status.tsv
+  <out-dir>/batch-manifest.tsv
   <out-dir>/compile.log
   <out-dir>/invalid-patterns.tsv
   <out-dir>/idiom-sweep.md
   <out-dir>/idiom-sweep.tsv
   <out-dir>/top-compile-errors.tsv
+  <out-dir>/slowest-phases.tsv
+  <out-dir>/slowest-workers.tsv
+  <out-dir>/phase-events.tsv
+  <out-dir>/worker-events.tsv
   <out-dir>/resolver-bench.txt, when resolver preflight runs
 USAGE
 }
@@ -40,7 +49,11 @@ manifest_paths=()
 builtin_packs=()
 enable_builtin_packs=1
 run_resolver_bench=1
-jobs="${JOBS:-}"
+jobs="${JOBS:-10}"
+translate_timeout_sec="${TRANSLATE_TIMEOUT_SEC:-}"
+verbose_cargo=0
+offline_cargo=0
+batch_translate="${BATCH_TRANSLATE:-1}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -92,6 +105,23 @@ while [[ $# -gt 0 ]]; do
       jobs="$2"
       shift 2
       ;;
+    --no-batch-translate)
+      batch_translate=0
+      shift
+      ;;
+    --translate-timeout-sec)
+      [[ $# -ge 2 ]] || { echo "missing value for --translate-timeout-sec" >&2; exit 2; }
+      translate_timeout_sec="$2"
+      shift 2
+      ;;
+    --verbose-cargo)
+      verbose_cargo=1
+      shift
+      ;;
+    --offline-cargo)
+      offline_cargo=1
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -114,14 +144,6 @@ if [[ ! -d "$primary" ]]; then
   exit 1
 fi
 
-if [[ -z "$jobs" ]]; then
-  if command -v nproc >/dev/null 2>&1; then
-    jobs="$(nproc)"
-  else
-    jobs=4
-  fi
-fi
-
 case "$jobs" in
   ''|*[!0-9]*)
     echo "--jobs must be a positive integer: $jobs" >&2
@@ -132,12 +154,43 @@ if [[ "$jobs" -lt 1 ]]; then
   echo "--jobs must be at least 1" >&2
   exit 2
 fi
+case "$translate_timeout_sec" in
+  ''|*[!0-9]*)
+    if [[ -n "$translate_timeout_sec" ]]; then
+      echo "--translate-timeout-sec must be a positive integer: $translate_timeout_sec" >&2
+      exit 2
+    fi
+    ;;
+esac
+if [[ -n "$translate_timeout_sec" && "$translate_timeout_sec" -lt 1 ]]; then
+  echo "--translate-timeout-sec must be at least 1" >&2
+  exit 2
+fi
+
+now_ms() {
+  date +%s%3N
+}
+
+elapsed_ms_since() {
+  local start_ms="$1"
+  local end_ms
+  end_ms="$(now_ms)"
+  printf '%s' "$((end_ms - start_ms))"
+}
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-binary="$repo_root/target/debug/new-java2rust"
+if [[ -n "${NEW_JAVA2RUST_BIN:-}" ]]; then
+  binary="$NEW_JAVA2RUST_BIN"
+  build_profile_args=()
+else
+  binary="$repo_root/target/release/new-java2rust"
+  build_profile_args=("--release")
+fi
 crate_dir="$out_dir/generated-crate"
 generated_dir="$crate_dir/src/generated"
 status_path="$out_dir/status.tsv"
+batch_manifest_path="$out_dir/batch-manifest.tsv"
+analysis_profile_path="$out_dir/analysis-profile.tsv"
 compile_log="$out_dir/compile.log"
 invalid_patterns_path="$out_dir/invalid-patterns.tsv"
 top_compile_errors="$out_dir/top-compile-errors.tsv"
@@ -145,13 +198,24 @@ resolver_log="$out_dir/resolver-bench.txt"
 translate_log_dir="$out_dir/translation-logs"
 idiom_sweep_tsv="$out_dir/idiom-sweep.tsv"
 idiom_sweep_md="$out_dir/idiom-sweep.md"
+phase_events_path="$out_dir/phase-events.tsv"
+worker_events_path="$out_dir/worker-events.tsv"
+slowest_phases_path="$out_dir/slowest-phases.tsv"
+slowest_workers_path="$out_dir/slowest-workers.tsv"
+script_start_ms="$(now_ms)"
 
 mkdir -p "$generated_dir" "$translate_log_dir"
-rm -f "$status_path" "$compile_log" "$invalid_patterns_path" "$top_compile_errors" "$resolver_log" "$idiom_sweep_tsv" "$idiom_sweep_md"
+rm -f "$status_path" "$batch_manifest_path" "$analysis_profile_path" "$compile_log" "$invalid_patterns_path" "$top_compile_errors" "$resolver_log" "$idiom_sweep_tsv" "$idiom_sweep_md" "$phase_events_path" "$worker_events_path" "$slowest_phases_path" "$slowest_workers_path"
 find "$generated_dir" -type f -name '*.rs' -delete
+printf "phase\tstatus\telapsed_ms\tdetail\n" > "$phase_events_path"
+printf "event\tpid\tindex\tsource\telapsed_ms\tstatus\trust_path\n" > "$worker_events_path"
 
 if [[ ! -x "$binary" ]]; then
-  cargo build --quiet --bin new-java2rust
+  if [[ -n "${NEW_JAVA2RUST_BIN:-}" ]]; then
+    echo "NEW_JAVA2RUST_BIN is not executable: $binary" >&2
+    exit 1
+  fi
+  cargo build --quiet "${build_profile_args[@]}" --bin new-java2rust
 fi
 
 external_dependency_lines=""
@@ -214,13 +278,17 @@ done
 resolver_args+=("$primary")
 
 resolver_status="skipped"
+resolver_elapsed_ms=0
 if [[ "$run_resolver_bench" -eq 1 ]]; then
+  resolver_start_ms="$(now_ms)"
   if "$binary" "${resolver_args[@]}" > "$resolver_log" 2>&1; then
     resolver_status="ok"
   else
     resolver_status="failed"
   fi
+  resolver_elapsed_ms="$(elapsed_ms_since "$resolver_start_ms")"
 fi
+printf "resolver_bench\t%s\t%s\t%s\n" "$resolver_status" "$resolver_elapsed_ms" "$resolver_log" >> "$phase_events_path"
 
 printf "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\n" > "$status_path"
 mapfile -t java_files < <(find "$primary" -type f -name '*.java' | sort)
@@ -258,7 +326,9 @@ translate_one() {
   local out_dir="$4"
   local generated_dir="$5"
   local log_dir="$6"
-  shift 6
+  local event_path="$7"
+  local timeout_sec="$8"
+  shift 8
   local translate_args=("$@")
   local stem
   stem="$(printf '%05d_%s' "$index" "$(basename "${java_file%.java}")")"
@@ -267,12 +337,27 @@ translate_one() {
   local log_path="$log_dir/$stem.stderr"
   local tmp_path="$out_dir/$stem.rs.tmp"
   local status="ok"
-  if "$binary" "${translate_args[@]}" "$java_file" > "$tmp_path" 2> "$log_path"; then
+  local start_ms elapsed_ms exit_code
+  start_ms="$(now_ms)"
+  printf "translate_start\t%s\t%s\t%s\t0\trunning\t%s\n" "$BASHPID" "$index" "$java_file" "$rust_path" >> "$event_path"
+  if [[ -n "$timeout_sec" ]]; then
+    timeout "$timeout_sec" "$binary" "${translate_args[@]}" "$java_file" > "$tmp_path" 2> "$log_path"
+    exit_code="$?"
+  else
+    "$binary" "${translate_args[@]}" "$java_file" > "$tmp_path" 2> "$log_path"
+    exit_code="$?"
+  fi
+  if [[ "$exit_code" -eq 0 ]]; then
     mv "$tmp_path" "$rust_path"
   else
     status="failed"
+    if [[ "$exit_code" -eq 124 ]]; then
+      status="timeout"
+    fi
     mv "$tmp_path" "$rust_path" 2>/dev/null || touch "$rust_path"
   fi
+  elapsed_ms="$(elapsed_ms_since "$start_ms")"
+  printf "translate_end\t%s\t%s\t%s\t%s\t%s\t%s\n" "$BASHPID" "$index" "$java_file" "$elapsed_ms" "$status" "$rust_path" >> "$event_path"
   local diagnostics invalid_patterns
   diagnostics="$(wc -l < "$log_path" | tr -d ' ')"
   invalid_patterns="$(
@@ -286,12 +371,15 @@ translate_one() {
 }
 
 export -f translate_one
+export -f now_ms
+export -f elapsed_ms_since
 
 translate_args=()
 if [[ "$enable_builtin_packs" -eq 0 ]]; then
   translate_args+=("--no-builtin-external-packs")
 fi
 translate_args+=("--context-dir" "$primary")
+translate_args+=("--context-dir-emitted")
 for source_root in "${source_roots[@]}"; do
   case "$source_root" in
     source-summary:*|source_summary:*|summary:*)
@@ -320,28 +408,71 @@ mkdir -p "$status_fragments_dir"
 find "$status_fragments_dir" -type f -name '*.tsv' -delete
 
 active_jobs=0
-for i in "${!java_files[@]}"; do
-  index="$((i + 1))"
-  fragment_path="$status_fragments_dir/$(printf '%05d' "$index").tsv"
-  (
-    translate_one "$index" "${java_files[$i]}" "$binary" "$out_dir" "$generated_dir" "$translate_log_dir" "${translate_args[@]}" > "$fragment_path"
-  ) &
-  active_jobs="$((active_jobs + 1))"
-  if [[ "$active_jobs" -ge "$jobs" ]]; then
+translation_start_ms="$(now_ms)"
+if [[ "$batch_translate" -eq 1 ]]; then
+  batch_args=("translate-batch" "--primary" "$primary" "--out-dir" "$out_dir" "--generated-dir" "$generated_dir" "--jobs" "$jobs" "--phase-events" "$phase_events_path" "--worker-events" "$worker_events_path" "--context-dir-emitted")
+  if [[ "$enable_builtin_packs" -eq 0 ]]; then
+    batch_args+=("--no-builtin-external-packs")
+  fi
+  for source_root in "${source_roots[@]}"; do
+    case "$source_root" in
+      source-summary:*|source_summary:*|summary:*)
+        batch_args+=("--context-source-summary-dir" "${source_root#*:}")
+        ;;
+    esac
+  done
+  for source_root_package in "${source_root_packages[@]}"; do
+    rest="${source_root_package#*:}"
+    context_path="${rest%:*}"
+    context_package="${rest##*:}"
+    batch_args+=("--context-dir-package" "$context_path:$context_package")
+  done
+  for facts_path in "${facts_paths[@]}"; do
+    batch_args+=("--facts" "$facts_path")
+  done
+  for manifest_path in "${manifest_paths[@]}"; do
+    batch_args+=("--external-pack-manifest" "$manifest_path")
+  done
+  for pack_name in "${builtin_packs[@]}"; do
+    batch_args+=("--builtin-external-pack" "$pack_name")
+  done
+  batch_stdout="$translate_log_dir/batch.stdout"
+  batch_stderr="$translate_log_dir/batch.stderr"
+  printf "batch_translate_start\t%s\t0\t%s\t0\trunning\t%s\n" "$BASHPID" "$primary" "$generated_dir" >> "$worker_events_path"
+  if "$binary" "${batch_args[@]}" > "$batch_stdout" 2> "$batch_stderr"; then
+    printf "batch_translate_end\t%s\t0\t%s\t%s\tok\t%s\n" "$BASHPID" "$primary" "$(elapsed_ms_since "$translation_start_ms")" "$generated_dir" >> "$worker_events_path"
+  else
+    printf "batch_translate_end\t%s\t0\t%s\t%s\tfailed\t%s\n" "$BASHPID" "$primary" "$(elapsed_ms_since "$translation_start_ms")" "$generated_dir" >> "$worker_events_path"
+    cat "$batch_stderr" >&2
+    exit 1
+  fi
+else
+  for ((i = 0; i < ${#java_files[@]}; i++)); do
+    index="$((i + 1))"
+    fragment_path="$status_fragments_dir/$(printf '%05d' "$index").tsv"
+    (
+      translate_one "$index" "${java_files[$i]}" "$binary" "$out_dir" "$generated_dir" "$translate_log_dir" "$worker_events_path" "$translate_timeout_sec" "${translate_args[@]}" > "$fragment_path"
+    ) &
+    active_jobs="$((active_jobs + 1))"
+    if [[ "$active_jobs" -ge "$jobs" ]]; then
+      wait -n
+      active_jobs="$((active_jobs - 1))"
+    fi
+  done
+
+  while [[ "$active_jobs" -gt 0 ]]; do
     wait -n
     active_jobs="$((active_jobs - 1))"
-  fi
-done
+  done
 
-while [[ "$active_jobs" -gt 0 ]]; do
-  wait -n
-  active_jobs="$((active_jobs - 1))"
-done
+  for fragment_path in "$status_fragments_dir"/*.tsv; do
+    cat "$fragment_path" >> "$status_path"
+  done
+fi
+translation_elapsed_ms="$(elapsed_ms_since "$translation_start_ms")"
+printf "translation\tok\t%s\t%s files\n" "$translation_elapsed_ms" "${#java_files[@]}" >> "$phase_events_path"
 
-for fragment_path in "$status_fragments_dir"/*.tsv; do
-  cat "$fragment_path" >> "$status_path"
-done
-
+assembly_start_ms="$(now_ms)"
 module_types_path="$out_dir/generated-module-types.tsv"
 type_counts_path="$out_dir/generated-type-counts.tsv"
 unique_types_path="$out_dir/generated-unique-types.tsv"
@@ -352,8 +483,22 @@ rm -f "$module_types_path" "$type_counts_path" "$unique_types_path" "$shared_sup
 
 strip_shared_support_items() {
   local rust_path="$1"
-  awk '
-    BEGIN { in_prelude = 1; pending = ""; skip_depth = 0 }
+  local shared_types_path="${2:-/dev/null}"
+  local source_type
+  source_type="$(basename "${rust_path%.rs}")"
+  source_type="${source_type#*_}"
+  awk -v shared_types_path="$shared_types_path" -v source_type="$source_type" '
+    FILENAME == shared_types_path {
+      shared[$1] = 1
+      next
+    }
+    BEGIN { in_prelude = 1; pending = ""; skip_depth = 0; copy_depth = 0 }
+    copy_depth > 0 {
+      print
+      copy_depth += gsub(/\{/, "{")
+      copy_depth -= gsub(/\}/, "}")
+      next
+    }
     skip_depth > 0 {
       skip_depth += gsub(/\{/, "{")
       skip_depth -= gsub(/\}/, "}")
@@ -369,6 +514,34 @@ strip_shared_support_items() {
         }
         next
       }
+      if ($0 ~ /^impl([[:space:]]*<[^>]+>)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\{/) {
+        impl_name = $0
+        sub(/^impl([[:space:]]*<[^>]+>)?[[:space:]]+/, "", impl_name)
+        sub(/[[:space:]]*\{.*/, "", impl_name)
+        if (impl_name == "JavaException" || impl_name == "JavaClass" || impl_name == "FileSystem" || impl_name == "Path" || impl_name == "URI" || impl_name == "File" || impl_name == "IOUtils" || shared[impl_name]) {
+          skip_depth = 0
+          skip_depth += gsub(/\{/, "{")
+          skip_depth -= gsub(/\}/, "}")
+          if (skip_depth < 1) {
+            skip_depth = 1
+          }
+          next
+        }
+      }
+      if ($0 ~ /^impl([[:space:]]*<[^>]+>)?[[:space:]]+.*[[:space:]]+for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*(<.*>)?[[:space:]]*\{/) {
+        impl_target = $0
+        sub(/^.*[[:space:]]for[[:space:]]+/, "", impl_target)
+        sub(/(<.*>)?[[:space:]]*\{.*/, "", impl_target)
+        if (impl_target == "JavaException" || impl_target == "JavaClass" || impl_target == "FileSystem" || impl_target == "Path" || impl_target == "URI" || impl_target == "File" || impl_target == "IOUtils" || shared[impl_target]) {
+          skip_depth = 0
+          skip_depth += gsub(/\{/, "{")
+          skip_depth -= gsub(/\}/, "}")
+          if (skip_depth < 1) {
+            skip_depth = 1
+          }
+          next
+        }
+      }
       if ($0 ~ /^#\[derive/) {
         pending = pending $0 "\n"
         next
@@ -376,20 +549,33 @@ strip_shared_support_items() {
       if ($0 ~ /^pub[[:space:]]+(struct|enum)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) {
         name = $3
         sub(/[;{(<].*/, "", name)
-        if (name == "JavaException" || name == "JavaClass" || name == "Path" || name == "URI" || name == "File" || name == "IOUtils") {
+        if (name == "JavaException" || name == "JavaClass" || name == "FileSystem" || name == "Path" || name == "URI" || name == "File" || name == "IOUtils" || shared[name]) {
           pending = ""
+          skip_depth = 0
+          skip_depth += gsub(/\{/, "{")
+          skip_depth -= gsub(/\}/, "}")
+          if (skip_depth > 0) {
+            next
+          }
+          skip_depth = 0
           next
         }
         printf "%s", pending
         pending = ""
         print
-        in_prelude = 0
+        copy_depth = 0
+        copy_depth += gsub(/\{/, "{")
+        copy_depth -= gsub(/\}/, "}")
+        if (shared_types_path == "/dev/null" || name == source_type) {
+          in_prelude = 0
+          copy_depth = 0
+        }
         next
       }
       next
     }
     { print }
-  ' "$rust_path" > "$rust_path.stripped"
+  ' "$shared_types_path" "$rust_path" > "$rust_path.stripped"
   mv "$rust_path.stripped" "$rust_path"
 }
 
@@ -450,7 +636,7 @@ RUST
   printf "JavaException\n" >> "$shared_support_types_path"
 fi
 
-if grep -R -q '^pub struct JavaClass' "$generated_dir"; then
+if grep -R -q -E '^pub struct JavaClass|JavaClass(::|<)' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaClass<T> {
@@ -487,6 +673,15 @@ fi
 if grep -R -q '^pub struct Path' "$generated_dir" || grep -R -q '^pub struct URI' "$generated_dir" || grep -R -q '^pub struct File' "$generated_dir" || grep -R -q '^pub struct IOUtils' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct FileSystem {}
+
+impl FileSystem {
+    pub fn delete<T0>(&self, _path: T0, _recursive: bool) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct Path {
     value: String,
 }
@@ -514,6 +709,10 @@ impl Path {
 
     pub fn get_file_name(&self) -> String {
         self.value.rsplit('/').next().unwrap_or(&self.value).to_string()
+    }
+
+    pub fn get_file_system<T0>(&self, _arg0: T0) -> FileSystem {
+        FileSystem {}
     }
 }
 
@@ -549,6 +748,14 @@ pub struct URI {
 impl URI {
     pub fn new<P: JavaPathArg>(value: P) -> URI {
         URI { value: value.into_path_value() }
+    }
+
+    pub fn parse<P: JavaPathArg>(value: P) -> Result<URI, JavaException> {
+        Ok(URI::new(value))
+    }
+
+    pub fn get_path(&self) -> String {
+        self.value.clone()
     }
 
     pub fn to_string(&self) -> String {
@@ -728,11 +935,27 @@ pub mod logger {
 }
 
 RUST
-  printf "Path\nURI\nFile\nIOUtils\nlogger\n" >> "$shared_support_types_path"
+  printf "FileSystem\nPath\nURI\nFile\nIOUtils\nlogger\n" >> "$shared_support_types_path"
 fi
 
-if grep -R -q 'java_string_split' "$generated_dir"; then
+if grep -R -q -E 'java_string_(split|substring|hash_code)' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
+pub fn java_string_substring(value: &str, begin: i32, end: i32) -> String {
+    let begin = begin.max(0) as usize;
+    let end = end.max(begin as i32) as usize;
+    value
+        .chars()
+        .skip(begin)
+        .take(end.saturating_sub(begin))
+        .collect()
+}
+
+pub fn java_string_hash_code(value: &str) -> i32 {
+    value
+        .encode_utf16()
+        .fold(0i32, |hash, unit| hash.wrapping_mul(31).wrapping_add(unit as i32))
+}
+
 pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Vec<String> {
     let regex = regex.as_ref();
     let delimiter = match regex {
@@ -760,7 +983,7 @@ pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Ve
 }
 
 RUST
-  printf "java_string_split\n" >> "$shared_support_types_path"
+  printf "java_string_substring\njava_string_hash_code\njava_string_split\n" >> "$shared_support_types_path"
 fi
 
 if grep -R -q 'java_string_format' "$generated_dir"; then
@@ -801,6 +1024,24 @@ RUST
   printf "java_string_format\n" >> "$shared_support_types_path"
 fi
 
+if grep -R -q 'FlatMapFunction' "$generated_dir"; then
+  cat >> "$shared_support_path" <<'RUST'
+#[derive(Clone, Debug, Default)]
+pub struct FlatMapFunction;
+
+RUST
+  printf "FlatMapFunction\n" >> "$shared_support_types_path"
+fi
+
+if grep -R -q 'OrgBroadinstituteHellbenderUtilsReadReadUtils\|OrgBroadinstituteHellbenderUtilsReadSAMRecordToGATKReadAdapter' "$generated_dir"; then
+  cat >> "$shared_support_path" <<'RUST'
+pub type OrgBroadinstituteHellbenderUtilsReadReadUtils = ReadUtils;
+pub type OrgBroadinstituteHellbenderUtilsReadSAMRecordToGATKReadAdapter = SAMRecordToGATKReadAdapter;
+
+RUST
+  printf "OrgBroadinstituteHellbenderUtilsReadReadUtils\nOrgBroadinstituteHellbenderUtilsReadSAMRecordToGATKReadAdapter\n" >> "$shared_support_types_path"
+fi
+
 if [[ -s "$shared_support_path" ]]; then
   for rust_path in "$generated_dir"/*.rs; do
     strip_shared_support_items "$rust_path"
@@ -815,13 +1056,19 @@ python3 "$repo_root/scripts/merge-shared-support-facades.py" \
   --shared-types "$shared_support_types_path" \
   --conflicts "$shared_support_conflicts_path"
 
+if grep -R -q 'ndarray::' "$generated_dir" "$shared_support_path"; then
+  if ! grep -q '^ndarray[[:space:]]*=' "$crate_dir/Cargo.toml"; then
+    printf 'ndarray = "0.15"\n' >> "$crate_dir/Cargo.toml"
+  fi
+fi
+
 for i in "${!java_files[@]}"; do
   index="$((i + 1))"
   stem="$(printf '%05d_%s' "$index" "$(basename "${java_files[$i]%.java}")")"
   stem="$(printf '%s' "$stem" | tr -c 'A-Za-z0-9_' '_')"
   rust_path="$generated_dir/$stem.rs"
   awk -v module="generated_$stem" '
-    /^pub[[:space:]]+(struct|enum|type)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
+    /^pub[[:space:]]+(struct|enum|type|trait)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
       name = $3
       sub(/[=;{(<].*/, "", name)
       if (name != "JavaException" &&
@@ -853,10 +1100,28 @@ for i in "${!java_files[@]}"; do
   module="generated_$stem"
   rust_path="$generated_dir/$stem.rs"
   import_list="$(
-    {
-      awk '{ print }' "$shared_support_types_path"
-      awk -F '\t' -v module="$module" '$1 != module { print $2 }' "$unique_types_path"
-    } | sort -u | paste -sd, -
+    awk -F '\t' -v module="$module" '
+      FILENAME == ARGV[1] {
+        if ($1 == module) {
+          local[$2] = 1
+        }
+        next
+      }
+      FILENAME == ARGV[2] {
+        if (!local[$1]) {
+          print $1
+        }
+        next
+      }
+      FILENAME == ARGV[3] {
+        if ($1 != module && !local[$2]) {
+          print $2
+        }
+        next
+      }
+    ' "$module_types_path" "$shared_support_types_path" "$unique_types_path" \
+      | sort -u \
+      | paste -sd, -
   )"
   if [[ -n "$import_list" ]]; then
     tmp_import_path="$rust_path.imports"
@@ -885,19 +1150,43 @@ done
     done < "$unique_types_path"
   fi
 } > "$crate_dir/src/lib.rs"
+assembly_elapsed_ms="$(elapsed_ms_since "$assembly_start_ms")"
+printf "crate_assembly\tok\t%s\t%s\n" "$assembly_elapsed_ms" "$crate_dir" >> "$phase_events_path"
 
 compile_status="ok"
-if (cd "$crate_dir" && cargo check --quiet) > "$compile_log" 2>&1; then
+cargo_start_ms="$(now_ms)"
+if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+  export CARGO_TARGET_DIR="$repo_root/.tmp/focused-cargo-target"
+fi
+cargo_args=("check")
+if [[ "$verbose_cargo" -eq 0 ]]; then
+  cargo_args+=("--quiet")
+fi
+if [[ "$offline_cargo" -eq 1 ]]; then
+  cargo_args+=("--offline")
+fi
+if (cd "$crate_dir" && cargo "${cargo_args[@]}") > "$compile_log" 2>&1; then
   compile_status="ok"
 else
   compile_status="failed"
 fi
+cargo_elapsed_ms="$(elapsed_ms_since "$cargo_start_ms")"
+printf "cargo_check\t%s\t%s\t%s\n" "$compile_status" "$cargo_elapsed_ms" "$compile_log" >> "$phase_events_path"
 
 total_files="${#java_files[@]}"
 translated_failed="$(awk -F '\t' 'NR > 1 && $3 != "ok" { count++ } END { print count + 0 }' "$status_path")"
 diagnostic_files="$(awk -F '\t' 'NR > 1 && $4 > 0 { count++ } END { print count + 0 }' "$status_path")"
 invalid_pattern_files="$(awk -F '\t' 'NR > 1 && $5 > 0 { count++ } END { print count + 0 }' "$status_path")"
 compile_error_count="$(grep -E 'error(\[[A-Z0-9]+\])?:' "$compile_log" | wc -l | tr -d ' ')"
+cargo_failure_kind="none"
+if [[ "$compile_status" != "ok" ]]; then
+  if grep -E -q 'failed to get .* as a dependency|failed to download|no matching package named|download of .* failed|Unable to update registry|could not resolve|offline mode|attempting to make an HTTP request' "$compile_log"; then
+    cargo_failure_kind="dependency_cache"
+  else
+    cargo_failure_kind="generated_rust"
+  fi
+fi
+invalid_scan_start_ms="$(now_ms)"
 {
   printf "pattern\tcount\tfiles\n"
   for spec in \
@@ -922,6 +1211,8 @@ compile_error_count="$(grep -E 'error(\[[A-Z0-9]+\])?:' "$compile_log" | wc -l |
     printf "%s\t%s\t%s\n" "$name" "$count" "$files"
   done
 } > "$invalid_patterns_path"
+invalid_scan_elapsed_ms="$(elapsed_ms_since "$invalid_scan_start_ms")"
+printf "invalid_pattern_scan\tok\t%s\t%s\n" "$invalid_scan_elapsed_ms" "$invalid_patterns_path" >> "$phase_events_path"
 {
   printf "count\terror\n"
   grep -E '^error(\[[A-Z0-9]+\])?:' "$compile_log" \
@@ -932,27 +1223,67 @@ compile_error_count="$(grep -E 'error(\[[A-Z0-9]+\])?:' "$compile_log" | wc -l |
     | awk '{ count = $1; $1 = ""; sub(/^ /, ""); gsub(/\t/, " "); printf "%s\t%s\n", count, $0 }'
 } > "$top_compile_errors"
 
+idiom_sweep_start_ms="$(now_ms)"
 python3 "$repo_root/scripts/sweep-generated-idioms.py" \
   --generated-root "$generated_dir" \
   --status "$status_path" \
   --out-tsv "$idiom_sweep_tsv" \
   --out-md "$idiom_sweep_md"
+idiom_sweep_elapsed_ms="$(elapsed_ms_since "$idiom_sweep_start_ms")"
+printf "idiom_sweep\tok\t%s\t%s\n" "$idiom_sweep_elapsed_ms" "$idiom_sweep_md" >> "$phase_events_path"
+total_elapsed_ms="$(elapsed_ms_since "$script_start_ms")"
+printf "total\tok\t%s\t%s\n" "$total_elapsed_ms" "$out_dir" >> "$phase_events_path"
+
+{
+  printf "elapsed_ms\tphase\tstatus\tdetail\n"
+  awk -F '\t' 'NR > 1 { gsub(/\t/, " ", $4); printf "%s\t%s\t%s\t%s\n", $3, $1, $2, $4 }' "$phase_events_path" \
+    | sort -nr \
+    | head -20
+} > "$slowest_phases_path"
+
+{
+  printf "elapsed_ms\tevent\tstatus\tindex\tsource\trust_path\n"
+  awk -F '\t' 'NR > 1 && $5 > 0 { gsub(/\t/, " ", $4); gsub(/\t/, " ", $7); printf "%s\t%s\t%s\t%s\t%s\t%s\n", $5, $1, $6, $3, $4, $7 }' "$worker_events_path" \
+    | sort -nr \
+    | head -20
+} > "$slowest_workers_path"
 
 {
   printf "primary\t%s\n" "$primary"
   printf "out_dir\t%s\n" "$out_dir"
   printf "generated_crate\t%s\n" "$crate_dir"
+  printf "translator_binary\t%s\n" "$binary"
+  printf "cargo_target_dir\t%s\n" "${CARGO_TARGET_DIR:-}"
   printf "files\t%s\n" "$total_files"
   printf "resolver_bench\t%s\n" "$resolver_status"
+  printf "resolver_elapsed_ms\t%s\n" "$resolver_elapsed_ms"
+  printf "translation_elapsed_ms\t%s\n" "$translation_elapsed_ms"
+  printf "crate_assembly_elapsed_ms\t%s\n" "$assembly_elapsed_ms"
+  printf "cargo_check_elapsed_ms\t%s\n" "$cargo_elapsed_ms"
+  printf "invalid_scan_elapsed_ms\t%s\n" "$invalid_scan_elapsed_ms"
+  printf "idiom_sweep_elapsed_ms\t%s\n" "$idiom_sweep_elapsed_ms"
+  printf "total_elapsed_ms\t%s\n" "$total_elapsed_ms"
   printf "translate_failed_files\t%s\n" "$translated_failed"
   printf "diagnostic_files\t%s\n" "$diagnostic_files"
   printf "invalid_pattern_files\t%s\n" "$invalid_pattern_files"
   printf "invalid_patterns\t%s\n" "$invalid_patterns_path"
+  if [[ -f "$batch_manifest_path" ]]; then
+    printf "batch_manifest\t%s\n" "$batch_manifest_path"
+  fi
+  if [[ -f "$analysis_profile_path" ]]; then
+    printf "analysis_profile\t%s\n" "$analysis_profile_path"
+  fi
   printf "idiom_sweep\t%s\n" "$idiom_sweep_md"
   printf "idiom_sweep_tsv\t%s\n" "$idiom_sweep_tsv"
   printf "cargo_check\t%s\n" "$compile_status"
   printf "cargo_check_errors\t%s\n" "$compile_error_count"
+  printf "cargo_failure_kind\t%s\n" "$cargo_failure_kind"
+  printf "cargo_offline\t%s\n" "$offline_cargo"
   printf "top_compile_errors\t%s\n" "$top_compile_errors"
+  printf "slowest_phases\t%s\n" "$slowest_phases_path"
+  printf "slowest_workers\t%s\n" "$slowest_workers_path"
+  printf "phase_events\t%s\n" "$phase_events_path"
+  printf "worker_events\t%s\n" "$worker_events_path"
 } > "$out_dir/summary.tsv"
 
 cat "$out_dir/summary.tsv"

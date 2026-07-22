@@ -7,6 +7,9 @@ pub fn render_method_reference(plan: &MethodReferencePlan) -> RustExpr {
             RustExpr::Raw(format!("{type_name}::new"))
         }
         MethodReferencePlan::AssociatedFunction { owner, method } => {
+            if owner == "Objects" && method == "non_null" {
+                return RustExpr::Raw("|value| Objects::non_null(value)".to_string());
+            }
             RustExpr::Raw(format!("{owner}::{method}"))
         }
         MethodReferencePlan::UnboundAccessor { method } => {

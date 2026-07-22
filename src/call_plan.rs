@@ -4,9 +4,10 @@ use crate::conversion_plan::LoweredType;
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::{
     AccessorInlinePolicy, CallableKey, ExternalApiArgumentEffectFact, ExternalApiRole,
-    ExternalArgumentAliasPolicy, ExternalLibraryMode, FacadeAbiFact, FacadeSlot, FactProvenance,
-    FactSet, HierarchyStrategy, NullabilityState, ReceiverAbi, ReceiverMutabilityFact, ResultAbi,
-    Staticness, TrivialAccessorKind, external_parameter_nullability_policy,
+    ExternalArgumentAliasPolicy, ExternalFactLookupIndex, ExternalLibraryMode, FacadeAbiFact,
+    FacadeSlot, FactProvenance, FactSet, HierarchyStrategy, NullabilityState, ReceiverAbi,
+    ReceiverMutabilityFact, ResultAbi, Staticness, TrivialAccessorKind,
+    external_parameter_nullability_policy,
 };
 use crate::java_ir::{
     CallKind, Expr, JavaType, LambdaBody, PrimitiveType, ResolvedCall, ResolvedConstructor,
@@ -170,12 +171,15 @@ pub enum NativeJavaInstanceMethod {
     StringStartsWith,
     StringEndsWith,
     StringSplit,
+    StringSubstring,
+    StringHashCode,
     Equals,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeJavaStaticMethod {
     MathMax,
+    MathMin,
     MathToIntExact,
     IntegerParseInt,
     DoubleParseDouble,
@@ -222,14 +226,51 @@ pub fn external_call_lowered_type(
     types: &TypeEnv,
     current_type: Option<&str>,
 ) -> Option<LoweredType> {
-    let receiver_key =
-        external_call_receiver_type_key(receiver, name, arg_count, facts, types, current_type)?;
-    let effect = facts.external_api_effect_for_receiver_with_arity(
-        receiver_key.as_deref(),
+    let external_index = facts.external_lookup_index();
+    external_call_lowered_type_with_external_index(
+        receiver,
         name,
-        Some(arg_count),
+        arg_count,
+        facts,
+        &external_index,
+        types,
+        current_type,
+    )
+}
+
+pub fn external_call_lowered_type_with_external_index(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> Option<LoweredType> {
+    let receiver_ty = receiver.map(|receiver| infer_expr_type(receiver, types));
+    let receiver_key = external_call_receiver_type_key_with_index(
+        receiver,
+        name,
+        arg_count,
+        facts,
+        external_index,
+        types,
+        current_type,
     )?;
-    let return_ty = effect.return_type.clone()?;
+    let effect = external_index
+        .external_api_effect_for_receiver_with_arity(receiver_key.as_deref(), name, Some(arg_count))
+        .cloned()
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                receiver_key.as_deref(),
+                name,
+                Some(arg_count),
+            )
+        })?;
+    let return_ty = crate::types::receiver_generic_return_type(
+        receiver_ty.as_ref(),
+        effect.return_type.clone()?,
+    );
     if let Some(facade_lowered) = facade_abi_external_call_lowered_type(
         receiver_key.as_deref(),
         name,
@@ -267,7 +308,7 @@ pub fn external_call_lowered_type(
         && rust_return_type
             .is_none_or(|fact| rust_return_type_is_unsigned_byte_array(&fact.rust_type_name))
         && receiver_key.as_deref().is_some_and(|receiver_key| {
-            facts
+            external_index
                 .external_library_pack_for_type(receiver_key)
                 .is_some_and(|pack| pack.mode == ExternalLibraryMode::RustCrateMapping)
                 || crate::external_packs::external_library_pack_for_type(receiver_key)
@@ -437,9 +478,36 @@ pub fn external_call_returns_rust_result(
     types: &TypeEnv,
     current_type: Option<&str>,
 ) -> bool {
-    let Some(receiver_key) =
-        external_call_receiver_type_key(receiver, name, arg_count, facts, types, current_type)
-    else {
+    let external_index = facts.external_lookup_index();
+    external_call_returns_rust_result_with_external_index(
+        receiver,
+        name,
+        arg_count,
+        facts,
+        &external_index,
+        types,
+        current_type,
+    )
+}
+
+pub fn external_call_returns_rust_result_with_external_index(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> bool {
+    let Some(receiver_key) = external_call_receiver_type_key_with_index(
+        receiver,
+        name,
+        arg_count,
+        facts,
+        external_index,
+        types,
+        current_type,
+    ) else {
         return false;
     };
     if let Some(receiver_key) = receiver_key.as_deref() {
@@ -458,9 +526,9 @@ pub fn external_call_returns_rust_result(
     {
         return fallibility.returns_result;
     }
-    facts
+    external_index
         .external_api_effect_for_receiver_with_arity(receiver_key.as_deref(), name, Some(arg_count))
-        .is_some_and(|effect| !effect.thrown.is_empty())
+        .is_some_and(|effect| facts.thrown_types_include_checked_exception(&effect.thrown))
 }
 
 pub fn external_call_has_thrown_effect_for_receiver(
@@ -469,9 +537,10 @@ pub fn external_call_has_thrown_effect_for_receiver(
     name: &str,
     arg_count: usize,
 ) -> bool {
-    facts
+    let external_index = facts.external_lookup_index();
+    external_index
         .external_api_effect_for_receiver_with_arity(Some(receiver_name), name, Some(arg_count))
-        .is_some_and(|effect| !effect.thrown.is_empty())
+        .is_some_and(|effect| facts.thrown_types_include_checked_exception(&effect.thrown))
 }
 
 pub fn external_call_throws(
@@ -482,7 +551,16 @@ pub fn external_call_throws(
     types: &TypeEnv,
     current_type: Option<&str>,
 ) -> bool {
-    external_call_returns_rust_result(receiver, name, arg_count, facts, types, current_type)
+    let external_index = facts.external_lookup_index();
+    external_call_returns_rust_result_with_external_index(
+        receiver,
+        name,
+        arg_count,
+        facts,
+        &external_index,
+        types,
+        current_type,
+    )
 }
 
 pub fn external_constructor_returns_rust_result(
@@ -577,6 +655,10 @@ pub enum CallStatementPlan<'a> {
     NativeArraysSort {
         target: &'a Expr,
     },
+    NativeArraysFill {
+        target: &'a Expr,
+        value: &'a Expr,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -627,6 +709,29 @@ pub fn plan_call_exception_propagation(
     types: &TypeEnv,
     current_type: Option<&str>,
 ) -> CallExceptionPropagationPlan {
+    let external_index = facts.external_lookup_index();
+    plan_call_exception_propagation_with_external_index(
+        receiver,
+        name,
+        args,
+        resolved,
+        facts,
+        &external_index,
+        types,
+        current_type,
+    )
+}
+
+pub fn plan_call_exception_propagation_with_external_index(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&ResolvedCall>,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> CallExceptionPropagationPlan {
     if let Some(resolved) = resolved
         && facts.method_has_thrown_exceptions(&resolved.declaring_type, &resolved.rust_name)
     {
@@ -651,8 +756,15 @@ pub fn plan_call_exception_propagation(
         return CallExceptionPropagationPlan::PropagateResult;
     }
 
-    if let Some(effect) = external_call_effect(receiver, name, args, facts, types, current_type)
-        && !effect.thrown.is_empty()
+    if let Some(effect) = external_call_effect_with_external_index(
+        receiver,
+        name,
+        args,
+        facts,
+        external_index,
+        types,
+        current_type,
+    ) && facts.thrown_types_include_checked_exception(&effect.thrown)
     {
         return CallExceptionPropagationPlan::PropagateResult;
     }
@@ -660,9 +772,17 @@ pub fn plan_call_exception_propagation(
     CallExceptionPropagationPlan::NoPropagation
 }
 
-fn receiver_source_type_name<'a>(receiver: &Expr, types: &'a TypeEnv) -> Option<&'a str> {
+fn receiver_source_type_name<'a>(receiver: &'a Expr, types: &'a TypeEnv) -> Option<&'a str> {
     match receiver {
-        Expr::Var(name) => java_type_name(types.local_type(name)?),
+        Expr::Var(name) => {
+            if let Some(local_type) = types.local_type(name) {
+                return java_type_name(local_type);
+            }
+            if types.field_type(name).is_some() {
+                return None;
+            }
+            types.static_type_alias(name).or(Some(name.as_str()))
+        }
         Expr::FieldAccess(_, field) => java_type_name(types.field_type(field)?),
         _ => None,
     }
@@ -676,6 +796,27 @@ pub fn plan_call_expr<'a>(
     facts: &FactSet,
     types: &TypeEnv,
 ) -> CallExprPlan<'a> {
+    let external_index = facts.external_lookup_index();
+    plan_call_expr_with_external_index(
+        receiver,
+        name,
+        args,
+        resolved,
+        facts,
+        &external_index,
+        types,
+    )
+}
+
+pub fn plan_call_expr_with_external_index<'a>(
+    receiver: Option<&'a Expr>,
+    name: &'a str,
+    args: &'a [Expr],
+    resolved: Option<&'a ResolvedCall>,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+) -> CallExprPlan<'a> {
     if let Some(TrivialAccessorCallPlan::Getter {
         receiver,
         field_name,
@@ -687,12 +828,13 @@ pub fn plan_call_expr<'a>(
         };
     }
 
-    CallExprPlan::Target(plan_call_target_with_facts_and_arity(
+    CallExprPlan::Target(plan_call_target_with_external_index_and_arity(
         receiver,
         name,
         args.len(),
         resolved,
         facts,
+        external_index,
         types,
     ))
 }
@@ -718,6 +860,12 @@ pub fn apply_fallback_self_rust_name<'a>(
     fallback_rust_name: Option<String>,
 ) -> CallExprPlan<'a> {
     match (plan, fallback_rust_name) {
+        (CallExprPlan::Target(CallTargetPlan::StaticSelf { .. }), Some(rust_name)) => {
+            CallExprPlan::Target(CallTargetPlan::StaticOwner {
+                owner: "Self".to_string(),
+                rust_name,
+            })
+        }
         (CallExprPlan::Target(CallTargetPlan::FallbackFree { .. }), Some(rust_name)) => {
             CallExprPlan::Target(CallTargetPlan::FallbackSelf { rust_name })
         }
@@ -725,17 +873,25 @@ pub fn apply_fallback_self_rust_name<'a>(
     }
 }
 
-fn external_call_effect<'a>(
+fn external_call_effect_with_external_index<'a>(
     receiver: Option<&Expr>,
     name: &str,
     args: &[Expr],
     facts: &'a FactSet,
+    external_index: &ExternalFactLookupIndex<'a>,
     types: &TypeEnv,
     current_type: Option<&str>,
 ) -> Option<&'a crate::facts::ExternalApiEffectFact> {
-    let receiver_key =
-        external_call_receiver_type_key(receiver, name, args.len(), facts, types, current_type)?;
-    facts.external_api_effect_for_receiver_with_arity(
+    let receiver_key = external_call_receiver_type_key_with_index(
+        receiver,
+        name,
+        args.len(),
+        facts,
+        external_index,
+        types,
+        current_type,
+    )?;
+    external_index.external_api_effect_for_receiver_with_arity(
         receiver_key.as_deref(),
         name,
         Some(args.len()),
@@ -750,49 +906,78 @@ pub fn external_call_receiver_type_key(
     types: &TypeEnv,
     current_type: Option<&str>,
 ) -> Option<Option<String>> {
+    let external_index = facts.external_lookup_index();
+    external_call_receiver_type_key_with_index(
+        receiver,
+        name,
+        arg_count,
+        facts,
+        &external_index,
+        types,
+        current_type,
+    )
+}
+
+fn external_call_receiver_type_key_with_index(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+    current_type: Option<&str>,
+) -> Option<Option<String>> {
     match receiver {
         None if crate::stdlib::is_known_receiverless_static_utility_method(name, arg_count) => {
             Some(None)
         }
         None => current_type.map(|type_name| Some(type_name.to_string())),
         Some(Expr::This | Expr::Super) => current_type.map(|type_name| Some(type_name.to_string())),
-        Some(receiver) => external_receiver_expr_type_key(receiver, facts, types).map(Some),
+        Some(receiver) => imported_static_owner_for_call(receiver, types)
+            .map(crate::stdlib::canonical_external_receiver_type_key)
+            .or_else(|| {
+                external_receiver_expr_type_key_with_index(receiver, facts, external_index, types)
+            })
+            .map(Some),
     }
 }
 
-fn external_receiver_expr_type_key(
+fn external_receiver_expr_type_key_with_index(
     receiver: &Expr,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> Option<String> {
     let inferred = infer_expr_type(receiver, types);
     if weak_unknown_field_access_receiver(receiver, &inferred) {
-        return infer_external_field_access_type(receiver, facts, types)
+        return infer_external_field_access_type_with_index(receiver, facts, external_index, types)
             .and_then(|external_field_ty| external_receiver_type_key(&external_field_ty, types));
     }
     external_receiver_type_key(&inferred, types)
 }
 
-fn infer_external_field_access_type(
+fn infer_external_field_access_type_with_index(
     expr: &Expr,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> Option<JavaType> {
     let Expr::FieldAccess(receiver, field) = expr else {
         return None;
     };
-    let receiver_ty = infer_external_field_access_type(receiver, facts, types)
-        .unwrap_or_else(|| infer_expr_type(receiver, types));
-    external_pack_or_fact_field_type(&receiver_ty, field, facts)
+    let receiver_ty =
+        infer_external_field_access_type_with_index(receiver, facts, external_index, types)
+            .unwrap_or_else(|| infer_expr_type(receiver, types));
+    external_pack_or_fact_field_type_with_index(&receiver_ty, field, external_index)
 }
 
-fn external_pack_or_fact_field_type(
+fn external_pack_or_fact_field_type_with_index(
     receiver_ty: &JavaType,
     field: &str,
-    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
 ) -> Option<JavaType> {
     let receiver_name = external_field_receiver_name(receiver_ty)?;
-    if let Some(field_fact) = facts.external_field_for(&receiver_name, field)
+    if let Some(field_fact) = external_index.external_field_for(&receiver_name, field)
         && let Some(field_type) = &field_fact.field_type
     {
         return Some(field_type.clone());
@@ -863,7 +1048,7 @@ pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallSt
     if let Some(plan) = plan_iterable_for_each_statement(receiver.as_deref(), name, args) {
         return Some(plan);
     }
-    if let Some(plan) = plan_native_arrays_sort_statement(receiver.as_deref(), name, args) {
+    if let Some(plan) = plan_native_arrays_statement(receiver.as_deref(), name, args) {
         return Some(plan);
     }
     match plan_trivial_accessor_call(receiver.as_deref(), name, args, resolved.as_ref(), facts) {
@@ -880,7 +1065,7 @@ pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallSt
     }
 }
 
-fn plan_native_arrays_sort_statement<'a>(
+fn plan_native_arrays_statement<'a>(
     receiver: Option<&'a Expr>,
     name: &str,
     args: &'a [Expr],
@@ -888,13 +1073,14 @@ fn plan_native_arrays_sort_statement<'a>(
     let Some(Expr::Var(receiver_name)) = receiver else {
         return None;
     };
-    if crate::stdlib::canonical_external_receiver_type_key(receiver_name) != "Arrays"
-        || name != "sort"
-        || args.len() != 1
-    {
+    if crate::stdlib::canonical_external_receiver_type_key(receiver_name) != "Arrays" {
         return None;
     }
-    Some(CallStatementPlan::NativeArraysSort { target: &args[0] })
+    match (name, args) {
+        ("sort", [target]) => Some(CallStatementPlan::NativeArraysSort { target }),
+        ("fill", [target, value]) => Some(CallStatementPlan::NativeArraysFill { target, value }),
+        _ => None,
+    }
 }
 
 fn plan_iterable_for_each_statement<'a>(
@@ -955,6 +1141,27 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
     facts: &FactSet,
     types: &TypeEnv,
 ) -> CallTargetPlan<'a> {
+    let external_index = facts.external_lookup_index();
+    plan_call_target_with_external_index_and_arity(
+        receiver,
+        name,
+        arg_count,
+        resolved,
+        facts,
+        &external_index,
+        types,
+    )
+}
+
+pub fn plan_call_target_with_external_index_and_arity<'a>(
+    receiver: Option<&'a Expr>,
+    name: &'a str,
+    arg_count: usize,
+    resolved: Option<&'a ResolvedCall>,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+) -> CallTargetPlan<'a> {
     if matches!(receiver, Some(Expr::Super))
         && let Some(call) = resolved
         && matches!(call.kind, CallKind::Instance)
@@ -979,7 +1186,7 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
 
     if let Some(receiver) = receiver
         && let Some(target) =
-            plan_external_crate_static_call(receiver, name, arg_count, facts, types)
+            plan_external_crate_static_call(receiver, name, arg_count, facts, external_index, types)
     {
         return target;
     }
@@ -989,15 +1196,40 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
     }
 
     if let Some(receiver) = receiver
-        && let Some(target) =
-            plan_external_facade_receiver_call(receiver, name, arg_count, facts, types)
+        && let Some(target) = plan_external_facade_receiver_call(
+            receiver,
+            name,
+            arg_count,
+            facts,
+            external_index,
+            types,
+        )
     {
         return target;
     }
 
     if let Some(receiver) = receiver
-        && let Some(target) =
-            plan_external_crate_receiver_call(receiver, name, arg_count, facts, types)
+        && let Some(target) = plan_external_crate_receiver_call(
+            receiver,
+            name,
+            arg_count,
+            facts,
+            external_index,
+            types,
+        )
+    {
+        return target;
+    }
+
+    if let Some(receiver) = receiver
+        && let Some(target) = plan_native_collection_receiver_call(receiver, name, types)
+    {
+        return target;
+    }
+
+    if name != "equals"
+        && let Some(receiver) = receiver
+        && let Some(target) = plan_native_java_receiver_call(receiver, name, arg_count, types)
     {
         return target;
     }
@@ -1012,13 +1244,7 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
     }
 
     if let Some(receiver) = receiver
-        && let Some(target) = plan_native_collection_receiver_call(receiver, name, types)
-    {
-        return target;
-    }
-
-    if let Some(receiver) = receiver
-        && let Some(target) = plan_native_java_receiver_call(receiver, name, types)
+        && let Some(target) = plan_native_java_receiver_call(receiver, name, arg_count, types)
     {
         return target;
     }
@@ -1027,17 +1253,24 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
         return target;
     }
 
+    if let Some(target) = plan_resolved_static_call(receiver, name, arg_count, resolved, facts) {
+        return target;
+    }
+
     if let Some(receiver) = receiver
-        && let Some(owner) = static_utility_owner_expr_type_name(receiver, name, facts, types)
+        && let Some(owner) = static_utility_owner_expr_type_name(
+            receiver,
+            name,
+            arg_count,
+            facts,
+            external_index,
+            types,
+        )
     {
         return CallTargetPlan::StaticOwner {
             owner,
             rust_name: crate::parser::to_snake_case(name),
         };
-    }
-
-    if let Some(target) = plan_resolved_static_call(receiver, resolved, facts) {
-        return target;
     }
 
     if let Some(call) = resolved {
@@ -1054,7 +1287,9 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
     }
 
     if let Some(receiver) = receiver {
-        if let Some(owner) = qualified_static_owner_expr_type_name(receiver, types, facts) {
+        if let Some(owner) =
+            qualified_static_owner_expr_type_name(receiver, name, arg_count, types, facts)
+        {
             return CallTargetPlan::StaticOwner {
                 owner,
                 rust_name: crate::parser::to_snake_case(name),
@@ -1063,7 +1298,12 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
         CallTargetPlan::FallbackReceiver {
             receiver,
             rust_name: external_method_rust_name_for_receiver(
-                receiver, name, arg_count, facts, types,
+                receiver,
+                name,
+                arg_count,
+                facts,
+                external_index,
+                types,
             )
             .unwrap_or_else(|| crate::parser::to_snake_case(name)),
         }
@@ -1089,6 +1329,8 @@ pub fn plan_call_target_with_facts_and_arity<'a>(
 
 fn plan_resolved_static_call<'a>(
     receiver: Option<&'a Expr>,
+    name: &str,
+    arg_count: usize,
     resolved: Option<&'a ResolvedCall>,
     facts: &FactSet,
 ) -> Option<CallTargetPlan<'a>> {
@@ -1098,7 +1340,7 @@ fn plan_resolved_static_call<'a>(
     }
     Some(match receiver {
         Some(_) => CallTargetPlan::StaticOwner {
-            owner: rust_static_owner_type_name_with_facts(&call.declaring_type, facts),
+            owner: resolved_static_owner_type_name(&call.declaring_type, name, arg_count, facts),
             rust_name: call.rust_name.clone(),
         },
         None => CallTargetPlan::StaticSelf {
@@ -1107,14 +1349,32 @@ fn plan_resolved_static_call<'a>(
     })
 }
 
+fn resolved_static_owner_type_name(
+    owner: &str,
+    method: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> String {
+    if let Some(alias) = crate::javalibs::preferred_static_owner_alias(owner, method, arg_count) {
+        return rust_static_owner_type_name_with_facts(alias, facts);
+    }
+    let rendered = rust_static_owner_type_name_with_facts(owner, facts);
+    if owner.contains('.') || rendered != owner {
+        return rendered;
+    }
+    upper_camel_from_snake_or_preserved(owner)
+}
+
 fn plan_external_facade_receiver_call<'a>(
     receiver: &'a Expr,
     name: &str,
     arg_count: usize,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> Option<CallTargetPlan<'a>> {
-    let receiver_name = external_receiver_expr_type_key(receiver, facts, types)?;
+    let receiver_name =
+        external_receiver_expr_type_key_with_index(receiver, facts, external_index, types)?;
     let key = CallableKey::method(
         receiver_name,
         name.to_string(),
@@ -1152,7 +1412,9 @@ fn plan_java_logging_facade_call<'a>(receiver: &'a Expr, name: &str) -> Option<C
 fn static_utility_owner_expr_type_name(
     receiver: &Expr,
     name: &str,
+    arg_count: usize,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> Option<String> {
     let Expr::Var(receiver_name) = receiver else {
@@ -1164,15 +1426,36 @@ fn static_utility_owner_expr_type_name(
     if let Some(owner) = types.static_type_alias(receiver_name) {
         return Some(rust_static_owner_type_name_with_facts(owner, facts));
     }
-    let owner = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
-    if facts
-        .external_api_effect_for_receiver(Some(&owner), name)
-        .is_some()
-        || crate::external_packs::external_api_effect_for_receiver(Some(&owner), name).is_some()
-        || crate::stdlib::external_api_method_role(Some(&owner), name, 0)
-            != ExternalApiRole::Unknown
+    let query_owner = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    let effect = external_index
+        .external_api_effect_for_receiver_with_arity(Some(&query_owner), name, Some(arg_count))
+        .cloned()
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                Some(&query_owner),
+                name,
+                Some(arg_count),
+            )
+        })
+        .or_else(|| {
+            external_index
+                .external_api_effect_for_receiver(Some(&query_owner), name)
+                .cloned()
+        })
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver(Some(&query_owner), name)
+        });
+    if let Some(effect) = effect {
+        let owner = effect.receiver_type.as_deref().unwrap_or(&query_owner);
+        if let Some(alias) = crate::javalibs::preferred_static_owner_alias(owner, name, arg_count) {
+            return Some(rust_static_owner_type_name_with_facts(alias, facts));
+        }
+        return Some(rust_static_owner_type_name_with_facts(owner, facts));
+    }
+    if crate::stdlib::external_api_method_role(Some(&query_owner), name, arg_count)
+        != ExternalApiRole::Unknown
     {
-        Some(rust_static_owner_type_name_with_facts(&owner, facts))
+        Some(rust_static_owner_type_name_with_facts(&query_owner, facts))
     } else {
         None
     }
@@ -1183,6 +1466,21 @@ pub fn rust_static_owner_type_name(owner: &str) -> String {
 }
 
 pub fn rust_static_owner_type_name_with_facts(owner: &str, facts: &FactSet) -> String {
+    match crate::stdlib::canonical_external_receiver_type_key(owner).as_str() {
+        "OrgDisqBioDisqTabixIndexWriteOption" => {
+            return "TabixIndexWriteOption".to_string();
+        }
+        "OrgBroadinstituteHellbenderUtilsReadReadUtils" => {
+            return "ReadUtils".to_string();
+        }
+        "OrgBroadinstituteHellbenderUtilsReadSAMRecordToGATKReadAdapter" => {
+            return "SAMRecordToGATKReadAdapter".to_string();
+        }
+        "OrgBroadinstituteHellbenderUtilsVariantVariantContextVariantAdapter" => {
+            return "VariantContextVariantAdapter".to_string();
+        }
+        _ => {}
+    }
     if let Some(mapped_owner) = external_crate_static_owner_type_name(owner, facts) {
         return mapped_owner;
     }
@@ -1242,13 +1540,19 @@ fn external_crate_static_owner_type_name_from_pack(
 
 fn qualified_static_owner_expr_type_name(
     receiver: &Expr,
+    method: &str,
+    arg_count: usize,
     types: &TypeEnv,
     facts: &FactSet,
 ) -> Option<String> {
     let Expr::FieldAccess(_, _) = receiver else {
         return None;
     };
-    static_owner_expr_type_name(receiver, types, facts)
+    let owner = static_owner_expr_type_name(receiver, types, facts)?;
+    if let Some(alias) = crate::javalibs::preferred_static_owner_alias(&owner, method, arg_count) {
+        return Some(rust_static_owner_type_name_with_facts(alias, facts));
+    }
+    Some(owner)
 }
 
 fn static_owner_expr_type_name(
@@ -1378,6 +1682,7 @@ fn plan_native_collection_receiver_call<'a>(
 fn plan_native_java_receiver_call<'a>(
     receiver: &'a Expr,
     name: &str,
+    arg_count: usize,
     types: &TypeEnv,
 ) -> Option<CallTargetPlan<'a>> {
     let receiver_ty = infer_expr_type(receiver, types);
@@ -1393,6 +1698,12 @@ fn plan_native_java_receiver_call<'a>(
         (JavaType::String, "startsWith") => NativeJavaInstanceMethod::StringStartsWith,
         (JavaType::String, "endsWith") => NativeJavaInstanceMethod::StringEndsWith,
         (JavaType::String, "split") => NativeJavaInstanceMethod::StringSplit,
+        (JavaType::String, "substring") if matches!(arg_count, 1 | 2) => {
+            NativeJavaInstanceMethod::StringSubstring
+        }
+        (JavaType::String, "hashCode" | "hash_code") if arg_count == 0 => {
+            NativeJavaInstanceMethod::StringHashCode
+        }
         (_, "equals") => NativeJavaInstanceMethod::Equals,
         _ => return None,
     };
@@ -1409,6 +1720,7 @@ fn plan_native_java_static_call<'a>(
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
     let method = match (receiver_key.as_str(), name) {
         ("Math", "max") => NativeJavaStaticMethod::MathMax,
+        ("Math", "min") => NativeJavaStaticMethod::MathMin,
         ("Math", "toIntExact") => NativeJavaStaticMethod::MathToIntExact,
         ("Integer", "parseInt") => NativeJavaStaticMethod::IntegerParseInt,
         ("Double", "parseDouble") => NativeJavaStaticMethod::DoubleParseDouble,
@@ -1442,10 +1754,12 @@ fn plan_external_crate_receiver_call<'a>(
     name: &str,
     arg_count: usize,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> Option<CallTargetPlan<'a>> {
-    let receiver_name = external_receiver_expr_type_key(receiver, facts, types)?;
-    let effect = facts
+    let receiver_name =
+        external_receiver_expr_type_key_with_index(receiver, facts, external_index, types)?;
+    let effect = external_index
         .external_api_effect_for_receiver_with_arity(Some(&receiver_name), name, Some(arg_count))
         .cloned()
         .or_else(|| {
@@ -1456,7 +1770,7 @@ fn plan_external_crate_receiver_call<'a>(
             )
         })
         .or_else(|| {
-            facts
+            external_index
                 .external_api_effect_for_receiver(Some(&receiver_name), name)
                 .cloned()
         })
@@ -1469,7 +1783,7 @@ fn plan_external_crate_receiver_call<'a>(
     {
         return None;
     }
-    let pack = facts
+    let pack = external_index
         .external_library_pack_for_type(&receiver_name)
         .cloned()
         .or_else(|| crate::external_packs::external_library_pack_for_type(&receiver_name))?;
@@ -1510,6 +1824,7 @@ fn plan_external_crate_static_call(
     name: &str,
     arg_count: usize,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> Option<CallTargetPlan<'static>> {
     let Expr::Var(receiver_name) = receiver else {
@@ -1522,7 +1837,7 @@ fn plan_external_crate_static_call(
         .static_type_alias(receiver_name)
         .map(crate::stdlib::canonical_external_receiver_type_key)
         .unwrap_or_else(|| crate::stdlib::canonical_external_receiver_type_key(receiver_name));
-    let effect = facts
+    let effect = external_index
         .external_api_effect_for_receiver_with_arity(Some(&receiver_key), name, Some(arg_count))
         .cloned()
         .or_else(|| {
@@ -1533,7 +1848,7 @@ fn plan_external_crate_static_call(
             )
         })
         .or_else(|| {
-            facts
+            external_index
                 .external_api_effect_for_receiver(Some(&receiver_key), name)
                 .cloned()
         })
@@ -1543,7 +1858,7 @@ fn plan_external_crate_static_call(
     if effect.provenance != FactProvenance::ExternalLibraryPack {
         return None;
     }
-    let pack = facts
+    let pack = external_index
         .external_library_pack_for_type(&receiver_key)
         .cloned()
         .or_else(|| crate::external_packs::external_library_pack_for_type(&receiver_key))?;
@@ -1627,6 +1942,17 @@ fn constructor_rust_name(
     arg_count: usize,
 ) -> String {
     if let Some(resolved) = resolved {
+        if resolved.rust_name == "new"
+            && java_type_name(&resolved.constructed_type)
+                .is_some_and(|type_name| external_constructor_needs_arity_name(type_name, facts))
+        {
+            return format!("new_{arg_count}");
+        }
+        if resolved.rust_name == "new"
+            && external_constructor_needs_arity_name(&resolved.declaring_type, facts)
+        {
+            return format!("new_{arg_count}");
+        }
         return resolved.rust_name.clone();
     }
     let Some(type_name) = java_type_name(owner_ty) else {
@@ -1666,9 +1992,11 @@ fn external_method_rust_name_for_receiver(
     method_name: &str,
     arg_count: usize,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
 ) -> Option<String> {
-    let receiver_type = external_receiver_expr_type_key(receiver, facts, types)?;
+    let receiver_type =
+        external_receiver_expr_type_key_with_index(receiver, facts, external_index, types)?;
     Some(external_method_rust_name(
         &receiver_type,
         method_name,
@@ -1737,13 +2065,21 @@ fn external_method_name_matches(fact_method_name: &str, query_method_name: &str)
 }
 
 fn external_constructor_needs_arity_name(type_name: &str, facts: &FactSet) -> bool {
-    let arities = facts
+    let mut arities = external_constructor_arities_for(facts, type_name);
+    arities.extend(external_constructor_arities_for(
+        &crate::external_packs::builtin_external_library_packs(),
+        type_name,
+    ));
+    arities.len() > 1
+}
+
+fn external_constructor_arities_for(facts: &FactSet, type_name: &str) -> BTreeSet<usize> {
+    facts
         .external_constructor_facts
         .iter()
         .filter(|fact| external_constructor_type_matches(&fact.type_name, type_name))
         .map(|fact| fact.arg_types.len())
-        .collect::<std::collections::BTreeSet<_>>();
-    arities.len() > 1
+        .collect()
 }
 
 fn external_constructor_type_matches(fact_type_name: &str, query_type_name: &str) -> bool {
@@ -2365,24 +2701,28 @@ fn argument_shape_from_external_metadata(
         return shape;
     }
 
-    match alias_policy {
-        ExternalArgumentAliasPolicy::Borrowed if shape.java_ty == JavaType::String => {
-            apply_borrowed_string_content_projection(&mut shape);
-        }
-        ExternalArgumentAliasPolicy::Borrowed if matches!(shape.java_ty, JavaType::Array(_)) => {
-            apply_borrowed_sequence_content_projection(&mut shape);
-        }
-        ExternalArgumentAliasPolicy::Borrowed
-            if !matches!(shape.java_ty, JavaType::Primitive(_)) =>
-        {
-            shape.ownership = OwnershipShape::SharedBorrow;
-        }
-        ExternalArgumentAliasPolicy::NoAlias | ExternalArgumentAliasPolicy::Escapes => {
-            if !matches!(shape.java_ty, JavaType::Primitive(_)) {
-                shape.ownership = OwnershipShape::Owned;
+    if crate::types::optional_element_type(&shape.java_ty).is_none() {
+        match alias_policy {
+            ExternalArgumentAliasPolicy::Borrowed if shape.java_ty == JavaType::String => {
+                apply_borrowed_string_content_projection(&mut shape);
             }
+            ExternalArgumentAliasPolicy::Borrowed
+                if matches!(shape.java_ty, JavaType::Array(_)) =>
+            {
+                apply_borrowed_sequence_content_projection(&mut shape);
+            }
+            ExternalArgumentAliasPolicy::Borrowed
+                if !matches!(shape.java_ty, JavaType::Primitive(_)) =>
+            {
+                shape.ownership = OwnershipShape::SharedBorrow;
+            }
+            ExternalArgumentAliasPolicy::NoAlias | ExternalArgumentAliasPolicy::Escapes => {
+                if !matches!(shape.java_ty, JavaType::Primitive(_)) {
+                    shape.ownership = OwnershipShape::Owned;
+                }
+            }
+            ExternalArgumentAliasPolicy::Unknown | ExternalArgumentAliasPolicy::Borrowed => {}
         }
-        ExternalArgumentAliasPolicy::Unknown | ExternalArgumentAliasPolicy::Borrowed => {}
     }
 
     if argument_mutability == ReceiverMutabilityFact::MutatesReceiver

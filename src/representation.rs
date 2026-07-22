@@ -184,10 +184,11 @@ impl RepresentationPlan {
             return None;
         };
         let variant = crate::object_model::rust_enum_variant_name_from_parsed_constant(label_name);
+        let rust_enum_name = crate::slot_render::rust_name_for_java_named_type(enum_name);
         variants
             .iter()
             .any(|known| known == &variant)
-            .then(|| format!("{enum_name}::{variant}"))
+            .then(|| format!("{rust_enum_name}::{variant}"))
     }
 
     pub fn diagnostics_for_program(&self, program: &Program) -> Vec<RepresentationDiagnostic> {
@@ -280,7 +281,7 @@ pub fn representation_dispatch_policy(
         },
         ObjectRepresentation::JavaEnum { enum_name, .. }
         | ObjectRepresentation::ClosedEnum { enum_name, .. } => DispatchShape::ClosedEnum {
-            enum_name: enum_name.clone(),
+            enum_name: crate::slot_render::rust_name_for_java_named_type(enum_name),
         },
         ObjectRepresentation::ErasedObject => DispatchShape::ErasedObject,
     };
@@ -494,7 +495,7 @@ fn collect_anonymous_class_diagnostics_for_stmt(
                 collect_anonymous_class_diagnostics_for_block(else_block, plan, diagnostics);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_anonymous_class_diagnostics_for_expr(condition, plan, diagnostics);
             collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
         }
@@ -776,7 +777,7 @@ fn collect_anonymous_erased_boundary_type_names_for_stmt(
                 );
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_anonymous_erased_boundary_type_names_for_expr(condition, facts, type_names);
             collect_anonymous_erased_boundary_type_names_for_block(body, facts, type_names);
         }

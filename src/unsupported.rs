@@ -90,6 +90,7 @@ pub fn plan_unsupported_statement(stmt: &Stmt) -> Option<UnsupportedStatementLow
                 crate::exception_plan::TryStmtPlan::CatchOnly { .. }
                     | crate::exception_plan::TryStmtPlan::WithResources { .. }
                     | crate::exception_plan::TryStmtPlan::FinallyOnly { .. }
+                    | crate::exception_plan::TryStmtPlan::CatchFinally { .. }
             ) {
                 None
             } else {

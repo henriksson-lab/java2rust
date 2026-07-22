@@ -9,27 +9,27 @@ use new_java2rust::external_packs::{
     apache_commons_math_pack_facts, apache_commons_math_stats_pack_facts, apache_http_pack_facts,
     audit_external_pack_fact_boundaries, audit_external_pack_manifest_coverage, avro_pack_facts,
     barclay_argparser_pack_facts, barclay_help_pack_facts, barclay_utils_pack_facts,
-    broad_http_pack_facts, builtin_external_library_packs, builtin_external_pack_facts,
-    builtin_external_pack_manifest, builtin_external_pack_manifest_for_provider_name,
-    builtin_external_pack_manifests, bwa_pack_facts, disq_write_pack_facts,
-    external_api_effect_for_receiver_with_arity, external_constructor_for,
-    external_crate_api_mapping_for_receiver, external_crate_constructor_mapping_for,
-    external_field_for, external_library_pack_for_type, fastutil_pack_facts, genomicsdb_pack_facts,
-    google_bigquery_pack_facts, google_bigquery_storage_pack_facts, google_cloud_nio_pack_facts,
-    google_storage_pack_facts, guava_concurrent_pack_facts, guava_immutable_collect_pack_facts,
-    hadoop_conf_pack_facts, hdf5_pack_facts, hipparchus_distribution_pack_facts,
-    htsjdk_bcf_pack_facts, htsjdk_nested_helper_pack_facts, htsjdk_sam_bam_pack_facts,
-    htsjdk_sam_cram_pack_facts, htsjdk_sam_header_pack_facts, htsjdk_sam_metrics_pack_facts,
-    htsjdk_sam_reader_pack_facts, htsjdk_sam_record_pack_facts, htsjdk_sam_reference_pack_facts,
-    htsjdk_sam_writer_pack_facts, htsjdk_samtools_util_pack_facts,
-    htsjdk_tribble_feature_pack_facts, htsjdk_tribble_index_pack_facts,
-    htsjdk_variantcontext_pack_facts, htsjdk_vcf_pack_facts, intel_gkl_pack_facts,
-    jackson_databind_pack_facts, jama_pack_facts, java_sql_pack_facts, jgrapht_pack_facts,
-    kryo_pack_facts, kryo_serializers_pack_facts, opencsv_pack_facts, org_json_pack_facts,
-    parse_external_pack_manifest, picard_markduplicates_pack_facts, picard_metrics_pack_facts,
-    picard_programgroups_pack_facts, picard_vcf_pack_facts, reflections_pack_facts,
-    representation_facts_for_type, scala_tuple_pack_facts, spark_pack_facts, sqlite_pack_facts,
-    unsupported_external_api_for_receiver,
+    broad_hellbender_utils_pack_facts, broad_http_pack_facts, builtin_external_library_packs,
+    builtin_external_pack_facts, builtin_external_pack_manifest,
+    builtin_external_pack_manifest_for_provider_name, builtin_external_pack_manifests,
+    bwa_pack_facts, disq_write_pack_facts, external_api_effect_for_receiver_with_arity,
+    external_constructor_for, external_crate_api_mapping_for_receiver,
+    external_crate_constructor_mapping_for, external_field_for, external_library_pack_for_type,
+    fastutil_pack_facts, genomicsdb_pack_facts, google_bigquery_pack_facts,
+    google_bigquery_storage_pack_facts, google_cloud_nio_pack_facts, google_storage_pack_facts,
+    guava_concurrent_pack_facts, guava_immutable_collect_pack_facts, hadoop_conf_pack_facts,
+    hdf5_pack_facts, hipparchus_distribution_pack_facts, htsjdk_bcf_pack_facts,
+    htsjdk_nested_helper_pack_facts, htsjdk_sam_bam_pack_facts, htsjdk_sam_cram_pack_facts,
+    htsjdk_sam_header_pack_facts, htsjdk_sam_metrics_pack_facts, htsjdk_sam_reader_pack_facts,
+    htsjdk_sam_record_pack_facts, htsjdk_sam_reference_pack_facts, htsjdk_sam_writer_pack_facts,
+    htsjdk_samtools_util_pack_facts, htsjdk_tribble_feature_pack_facts,
+    htsjdk_tribble_index_pack_facts, htsjdk_variantcontext_pack_facts, htsjdk_vcf_pack_facts,
+    intel_gkl_pack_facts, jackson_databind_pack_facts, jama_pack_facts, java_sql_pack_facts,
+    jgrapht_pack_facts, kryo_pack_facts, kryo_serializers_pack_facts, opencsv_pack_facts,
+    org_json_pack_facts, parse_external_pack_manifest, picard_markduplicates_pack_facts,
+    picard_metrics_pack_facts, picard_programgroups_pack_facts, picard_vcf_pack_facts,
+    reflections_pack_facts, representation_facts_for_type, scala_tuple_pack_facts,
+    spark_pack_facts, sqlite_pack_facts, unsupported_external_api_for_receiver,
 };
 use new_java2rust::facts::{
     CallableKey, CallableKind, ClosedHierarchyFact, ExceptionFact, ExceptionKind,
@@ -4239,6 +4239,32 @@ fn broad_ioutils_semantics_are_not_hardcoded_in_stdlib() {
 }
 
 #[test]
+fn broad_hellbender_pack_models_feature_input_path_boundary() {
+    let facts = broad_hellbender_utils_pack_facts();
+
+    let pack = facts
+        .external_library_pack_for_type("org.broadinstitute.hellbender.engine.FeatureInput")
+        .expect("FeatureInput should be owned by the Broad Hellbender external pack");
+    assert_eq!(pack.provenance, FactProvenance::ExternalLibraryPack);
+
+    let to_path = facts
+        .external_api_effect_for_receiver(Some("FeatureInput"), "toPath")
+        .expect("FeatureInput.toPath should be pack-owned");
+    assert_eq!(to_path.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(
+        to_path.return_type,
+        Some(JavaType::Named {
+            name: "Path".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        to_path.return_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+}
+
+#[test]
 fn htsjdk_variantcontext_pack_models_sequence_like_genotypes_context() {
     let facts = htsjdk_variantcontext_pack_facts();
     let element = facts
@@ -6901,6 +6927,38 @@ fn hadoop_conf_pack_declares_configuration_boundary() {
 }
 
 #[test]
+fn java_platform_concurrent_static_factory_declares_precise_return_type() {
+    for receiver in [
+        "Executors",
+        "java.util.concurrent.Executors",
+        "JavaUtilConcurrentExecutors",
+    ] {
+        let effect = external_api_effect_for_receiver_with_arity(
+            Some(receiver),
+            "newFixedThreadPool",
+            Some(2),
+        )
+        .unwrap_or_else(|| panic!("{receiver}.newFixedThreadPool/2 should be platform-modeled"));
+        assert_eq!(effect.provenance, FactProvenance::BuiltinExternalModel);
+        assert_eq!(
+            effect.return_type,
+            Some(JavaType::Named {
+                name: "ExecutorService".to_string(),
+                args: Vec::new(),
+            })
+        );
+
+        let snake_effect = external_api_effect_for_receiver_with_arity(
+            Some(receiver),
+            "new_fixed_thread_pool",
+            Some(2),
+        )
+        .unwrap_or_else(|| panic!("{receiver}.new_fixed_thread_pool/2 should be platform-modeled"));
+        assert_eq!(snake_effect.return_type, effect.return_type);
+    }
+}
+
+#[test]
 fn semantic_analysis_uses_hadoop_conf_pack_for_gatk_shaped_configuration_io() {
     let semantic = analyze(
         r#"
@@ -7149,7 +7207,10 @@ fn spark_pack_declares_runtime_boundary() {
         parallelize.return_type,
         Some(JavaType::Named {
             name: "JavaRDD".to_string(),
-            args: Vec::new(),
+            args: vec![JavaType::Named {
+                name: "SAMRecord".to_string(),
+                args: Vec::new(),
+            }],
         })
     );
 
@@ -7279,6 +7340,17 @@ fn spark_pack_declares_runtime_boundary() {
         .expect("JavaRDD.zipPartitions/2 should be pack-modeled");
     assert_eq!(
         zip_partitions.return_type,
+        Some(JavaType::Named {
+            name: "JavaRDD".to_string(),
+            args: Vec::new(),
+        })
+    );
+
+    let union = facts
+        .external_api_effect_for_receiver_with_arity(Some("JavaRDD"), "union", Some(1))
+        .expect("JavaRDD.union/1 should be pack-modeled");
+    assert_eq!(
+        union.return_type,
         Some(JavaType::Named {
             name: "JavaRDD".to_string(),
             args: Vec::new(),
@@ -7437,7 +7509,7 @@ fn spark_pack_declares_runtime_boundary() {
         assert_eq!(
             effect.return_type,
             Some(JavaType::Named {
-                name: "Object".to_string(),
+                name: "T0".to_string(),
                 args: Vec::new(),
             })
         );
@@ -7517,6 +7589,7 @@ class SparkRuntimeUse {
         JavaRDD pairMapped = partitionedCombinedPairs.map(pair -> null);
         JavaRDD keys = pairPartitions.keys();
         JavaRDD zipped = indexedPartitions.zipPartitions(filtered, (left, right) -> left);
+        JavaRDD unioned = zipped.union(filtered);
         JavaRDD repartitioned = filtered.repartition(partitions);
         JavaRDD partitioned = repartitioned.partitionBy(new HashPartitioner(partitions));
         JavaSparkContext owner = partitioned.context();
@@ -8195,6 +8268,63 @@ fn disq_write_pack_declares_temp_parts_option_boundary() {
         let dispatched = new_java2rust::external_packs::external_field_for(type_name, field_name)
             .unwrap_or_else(|| panic!("{type_name}.{field_name} should dispatch to DISQ pack"));
         assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
+    }
+
+    let write_option_ty = JavaType::Named {
+        name: "WriteOption".to_string(),
+        args: Vec::new(),
+    };
+    for type_name in [
+        "ReadsFormatWriteOption",
+        "FileCardinalityWriteOption",
+        "TempPartsDirectoryWriteOption",
+        "BaiWriteOption",
+        "SbiWriteOption",
+        "TabixIndexWriteOption",
+    ] {
+        let concrete_ty = JavaType::Named {
+            name: type_name.to_string(),
+            args: Vec::new(),
+        };
+        assert!(
+            facts
+                .hierarchy_subtype_policy(&concrete_ty, &write_option_ty)
+                .reaches,
+            "{type_name} should implement WriteOption through DISQ pack facts"
+        );
+        let conversion = facts
+            .external_conversion_adapter_for(type_name, "WriteOption")
+            .unwrap_or_else(|| panic!("{type_name} should convert into WriteOption"));
+        assert_eq!(conversion.provenance, FactProvenance::ExternalLibraryPack);
+    }
+
+    for receiver in [
+        "org.disq_bio.disq.HtsjdkReadsRddStorage",
+        "HtsjdkReadsRddStorage",
+    ] {
+        for arity in [1, 2] {
+            let read = facts
+                .external_api_effect_for_receiver_with_arity(Some(receiver), "read", Some(arity))
+                .unwrap_or_else(|| panic!("{receiver}.read/{arity} should be pack-owned"));
+            assert_eq!(read.provenance, FactProvenance::ExternalLibraryPack);
+            assert_eq!(
+                read.return_type,
+                Some(JavaType::Named {
+                    name: "HtsjdkReadsRdd".to_string(),
+                    args: Vec::new(),
+                })
+            );
+        }
+
+        let argument = facts
+            .external_api_argument_effect_for_receiver(Some(receiver), "referenceSourcePath", 0)
+            .unwrap_or_else(|| panic!("{receiver}.referenceSourcePath arg 0 should be modeled"));
+        assert_eq!(argument.parameter_type, Some(JavaType::String));
+        assert_eq!(argument.parameter_nullability, NullabilityState::MaybeNull);
+        assert_eq!(
+            argument.argument_mutability,
+            ReceiverMutabilityFact::ReadOnly
+        );
     }
 }
 
@@ -11716,6 +11846,24 @@ fn htsjdk_sam_reader_pack_declares_factory_option_nested_enum() {
             );
         }
     }
+
+    for receiver in ["htsjdk.samtools.SamReaderFactory", "SamReaderFactory"] {
+        let argument = facts
+            .external_api_argument_effect_for_receiver(Some(receiver), "referenceSequence", 0)
+            .unwrap_or_else(|| panic!("{receiver}.referenceSequence arg 0 should be modeled"));
+        assert_eq!(
+            argument.parameter_type,
+            Some(JavaType::Named {
+                name: "Path".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(argument.parameter_nullability, NullabilityState::MaybeNull);
+        assert_eq!(
+            argument.argument_mutability,
+            ReceiverMutabilityFact::ReadOnly
+        );
+    }
 }
 
 #[test]
@@ -13156,44 +13304,97 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
         ExternalArgumentAliasPolicy::Escapes
     );
 
-    for (type_name, field_name, expected_type) in [
-        ("Coordinates", "GenomicsDBColumn", "GenomicsDBColumn"),
-        ("Coordinates", "ContigPosition", "ContigPosition"),
+    for (type_name, field_name, expected_type, expected_kind) in [
+        (
+            "org.genomicsdb.Constants",
+            "CHROMOSOME_FOLDER_DELIMITER_SYMBOL_REGEX",
+            JavaType::String,
+            ExternalFieldKind::StaticFinal,
+        ),
+        (
+            "Coordinates",
+            "GenomicsDBColumn",
+            JavaType::Named {
+                name: "GenomicsDBColumn".to_string(),
+                args: Vec::new(),
+            },
+            ExternalFieldKind::NestedType,
+        ),
+        (
+            "Coordinates",
+            "ContigPosition",
+            JavaType::Named {
+                name: "ContigPosition".to_string(),
+                args: Vec::new(),
+            },
+            ExternalFieldKind::NestedType,
+        ),
         (
             "GenomicsDBExportConfiguration",
             "ExportConfiguration",
-            "ExportConfiguration",
+            JavaType::Named {
+                name: "ExportConfiguration".to_string(),
+                args: Vec::new(),
+            },
+            ExternalFieldKind::NestedType,
         ),
         (
             "GenomicsDBImportConfiguration",
             "ImportConfiguration",
-            "ImportConfiguration",
+            JavaType::Named {
+                name: "ImportConfiguration".to_string(),
+                args: Vec::new(),
+            },
+            ExternalFieldKind::NestedType,
         ),
-        ("GenomicsDBImportConfiguration", "Partition", "Partition"),
-        ("GenomicsDBVidMapProto", "VidMappingPB", "VidMappingPB"),
+        (
+            "GenomicsDBImportConfiguration",
+            "Partition",
+            JavaType::Named {
+                name: "Partition".to_string(),
+                args: Vec::new(),
+            },
+            ExternalFieldKind::NestedType,
+        ),
+        (
+            "GenomicsDBVidMapProto",
+            "VidMappingPB",
+            JavaType::Named {
+                name: "VidMappingPB".to_string(),
+                args: Vec::new(),
+            },
+            ExternalFieldKind::NestedType,
+        ),
         (
             "GenomicsDBVidMapProto",
             "FieldLengthDescriptorComponentPB",
-            "FieldLengthDescriptorComponentPB",
+            JavaType::Named {
+                name: "FieldLengthDescriptorComponentPB".to_string(),
+                args: Vec::new(),
+            },
+            ExternalFieldKind::NestedType,
         ),
-        ("ReadSession", "TableReadOptions", "TableReadOptions"),
+        (
+            "ReadSession",
+            "TableReadOptions",
+            JavaType::Named {
+                name: "TableReadOptions".to_string(),
+                args: Vec::new(),
+            },
+            ExternalFieldKind::NestedType,
+        ),
     ] {
         let field = facts
             .external_field_for(type_name, field_name)
             .unwrap_or_else(|| panic!("{type_name}.{field_name} should be pack-owned"));
         assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
-        assert_eq!(
-            field.field_type,
-            Some(JavaType::Named {
-                name: expected_type.to_string(),
-                args: Vec::new(),
-            })
-        );
+        assert_eq!(field.field_type, Some(expected_type));
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance(type_name, field_name),
             FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the GenomicsDB pack, not stdlib"
         );
+        assert_eq!(field.field_kind, expected_kind);
     }
 
     for (receiver, method_name, expected_type) in [
@@ -13323,6 +13524,13 @@ fn genomicsdb_pack_declares_constructors_and_nested_builder_qualifiers() {
             }],
         })
     );
+    let flattened_contigs = facts
+        .external_api_effect_for_receiver(
+            Some("GenomicsDBVidMapProtoVidMappingPB"),
+            "getContigsList",
+        )
+        .expect("flattened VidMappingPB alias getContigsList should be pack-owned");
+    assert_eq!(flattened_contigs.return_type, contigs.return_type);
 
     assert!(
         facts

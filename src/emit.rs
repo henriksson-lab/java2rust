@@ -20,7 +20,11 @@ fn emit_item(item: &RustItem) -> String {
 }
 
 fn emit_struct(strukt: &RustStruct) -> String {
-    let mut out = format!("pub struct {} {{\n", strukt.name);
+    let mut out = String::new();
+    if !strukt.derives.is_empty() {
+        out.push_str(&format!("#[derive({})]\n", strukt.derives.join(", ")));
+    }
+    out.push_str(&format!("pub struct {} {{\n", strukt.name));
     for field in &strukt.fields {
         let vis = if field.is_pub { "pub " } else { "" };
         out.push_str(&format!(

@@ -310,6 +310,14 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                 facts
                     .methods_by_rust_name
                     .insert(rust_key, method_facts.clone());
+                let rust_key = UsageMethodKey {
+                    type_name: ty.name.clone(),
+                    method_name: method
+                        .rust_name
+                        .clone()
+                        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
+                };
+                facts.methods.insert(rust_key, method_facts.clone());
                 facts.methods.insert(java_key, method_facts);
             }
             Member::Constructor(ctor) => {
@@ -494,7 +502,7 @@ fn collect_call_graph_edges_from_stmt(
                 collect_call_graph_edges_from_block(else_block, graph, context);
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             collect_call_graph_edges_from_expr(condition, graph, context);
             collect_call_graph_edges_from_block(body, graph, context);
         }
@@ -1033,7 +1041,7 @@ fn analyze_stmt(
                 }
             }
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             analyze_expr(
                 condition,
                 facts,

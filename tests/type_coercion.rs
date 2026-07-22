@@ -57,8 +57,8 @@ use new_java2rust::effective_facts::{
 use new_java2rust::expr_shape::{ExprShapeContext, ShapeEnv, infer_expr_shape};
 use new_java2rust::external_packs::{hdf5_pack_facts, parse_external_pack_manifest};
 use new_java2rust::facts::{
-    FactProvenance, FactSet, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
-    TypeCapabilityOverride,
+    ExternalConversionAdapterFact, ExternalConversionAdapterKind, FactProvenance, FactSet,
+    OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, TypeCapabilityOverride,
 };
 use new_java2rust::java_ir::{JavaCoercionEvidence, JavaCoercionKind, JavaType, PrimitiveType};
 use new_java2rust::lowering_diagnostics::lowering_diagnostic_from_conversion_diagnostic;
@@ -1862,6 +1862,26 @@ fn optional_shape_coercion_policy_records_structural_element_coercions() {
 }
 
 #[test]
+fn external_into_adapter_matches_unresolved_external_type_names() {
+    let mut facts = FactSet::default();
+    facts
+        .external_conversion_adapter_facts
+        .push(ExternalConversionAdapterFact {
+            from_type: "ReadsFormatWriteOption".to_string(),
+            to_type: "WriteOption".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    let actual =
+        RustSlotShape::conservative(JavaType::Unknown("ReadsFormatWriteOption".to_string()));
+    let target = RustSlotShape::conservative(JavaType::Unknown("WriteOption".to_string()));
+
+    let plan = dispatch_coercion_policy_with_facts(&actual, &target, &facts);
+
+    assert!(matches!(plan, DispatchCoercionPolicy::ExternalInto { .. }));
+}
+
+#[test]
 fn optional_shape_coercion_wraps_after_erased_element_conversion() {
     let actual = RustSlotShape::conservative(JavaType::Named {
         name: "VidMappingPB".to_string(),
@@ -3113,6 +3133,23 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
             &Slot::Argument(borrowed_dyn_target)
         ),
         RustExpr::Raw("animal.as_ref() as &dyn Animal".to_string())
+    );
+    assert_eq!(
+        apply_coercions(
+            RustExpr::Var("writer".to_string()),
+            &[
+                Coercion::BoxDynTrait {
+                    trait_name: "Animal".to_string(),
+                },
+                Coercion::CloneRecovery {
+                    policy: CloneRecoveryPolicy::AuditRequired,
+                },
+            ],
+        ),
+        RustExpr::Raw(
+            "(Box::new(writer) as Box<dyn Animal>).clone()/* TODO(translation): validate added clone */"
+                .to_string()
+        )
     );
 
     let mut borrowed_dyn_actual = RustSlotShape::conservative(JavaType::Named {

@@ -1752,6 +1752,25 @@ fn slot_render_owns_default_expressions_for_planned_views() {
         )
     );
 
+    let mut optional_boxed_shape = boxed_shape.clone();
+    optional_boxed_shape.java_ty = JavaType::Named {
+        name: "Optional".to_string(),
+        args: vec![JavaType::Named {
+            name: "Animal".to_string(),
+            args: Vec::new(),
+        }],
+    };
+    assert_eq!(
+        slot_default_policy(&optional_boxed_shape, &FactSet::default()),
+        SlotDefaultPolicy::Value {
+            policy: SlotDefaultValuePolicy::DefaultTrait,
+        }
+    );
+    assert_eq!(
+        default_expr_for_slot(&optional_boxed_shape),
+        RustExpr::Raw("Default::default()".to_string())
+    );
+
     let mut erased_shape = RustSlotShape::conservative(JavaType::Unknown("Object".to_string()));
     erased_shape.dispatch = DispatchShape::ErasedObject;
     assert_eq!(
@@ -4507,7 +4526,7 @@ class Holder {
     assert_eq!(
         type_emission_for(&enum_representations, enum_ty, &enum_signatures),
         RepresentationTypeEmission::RawRustItem(
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum Type {\n    SNP,\n    INDEL,\n}".to_string()
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum Type {\n    SNP,\n    INDEL,\n}\n\nimpl std::fmt::Display for Type {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"{:?}\", self)\n    }\n}".to_string()
         )
     );
 }
@@ -8103,6 +8122,24 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             rust_name
         } if owner == "Owner" && rust_name == "make"
     ));
+    let resolved_snake_static = new_java2rust::java_ir::ResolvedCall {
+        declaring_type: "g_a_t_k_genomics_d_b_utils".to_string(),
+        rust_name: "get_protobuf_vid_mapping_from_json_file".to_string(),
+        return_type: JavaType::Unknown("GenomicsDBVidMapProto.VidMappingPB".to_string()),
+        kind: new_java2rust::java_ir::CallKind::Static,
+        arg_coercions: Vec::new(),
+    };
+    assert!(matches!(
+        plan_call_target(
+            Some(&Expr::Var("g_a_t_k_genomics_d_b_utils".to_string())),
+            "getProtobufVidMappingFromJsonFile",
+            Some(&resolved_snake_static),
+        ),
+        CallTargetPlan::StaticOwner {
+            owner,
+            rust_name
+        } if owner == "GATKGenomicsDBUtils" && rust_name == "get_protobuf_vid_mapping_from_json_file"
+    ));
     assert!(matches!(
         plan_call_target_with_facts(
             Some(&Expr::FieldAccess(
@@ -10282,6 +10319,282 @@ class ExternalConstructorCaller {
     );
     assert!(
         !translation.rust.contains("ExternalBox::new(label"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn builtin_external_constructor_calls_use_arity_names_for_overloaded_facades() {
+    let translation = translate_source(
+        r#"
+import org.broadinstitute.hellbender.utils.SimpleInterval;
+
+class BuiltinExternalConstructorCaller {
+    SimpleInterval copy(SimpleInterval interval) {
+        return new SimpleInterval(interval);
+    }
+
+    SimpleInterval range(String contig, int start, int end) {
+        return new SimpleInterval(contig, start, end);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("SimpleInterval::new_1(interval)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("SimpleInterval::new_3(contig, start, end)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("SimpleInterval::new(interval"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn builtin_htsjdk_interval_facade_support_matches_overloaded_constructor_calls() {
+    let translation = translate_source(
+        r#"
+import htsjdk.samtools.util.Interval;
+import htsjdk.samtools.util.IntervalList;
+import htsjdk.samtools.SAMFileHeader;
+import htsjdk.samtools.util.Locatable;
+
+class BuiltinHtsjdkIntervalCaller {
+    void copy(SAMFileHeader header, Locatable locatable) {
+        IntervalList output = new IntervalList(header);
+        output.add(new Interval(locatable));
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("Interval::new_1(locatable)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new_1<T0>(_arg0: T0) -> Self"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("output.add(Interval::new_1"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("impl IntervalList {\n    pub fn add<T0>(&self, _arg0: T0) -> ()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_inherited_instance_fields_lower_as_self_fields() {
+    let translation = translate_source(
+        r#"
+import org.broadinstitute.hellbender.engine.GATKTool;
+import java.util.Set;
+
+class GenomicsLikeTool extends GATKTool {
+    Set<VCFHeaderLine> lines;
+
+    int buffers() {
+        progressMeter.setRecordsBetweenTimeChecks(1L);
+        lines.addAll(getDefaultToolVCFHeaderLines());
+        if (intervalArgumentCollection.intervalsSpecified()) {
+            return cloudPrefetchBuffer + cloudIndexPrefetchBuffer;
+        }
+        return 0;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("progress_meter: ProgressMeter"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("interval_argument_collection: IntervalArgumentCollection"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("self.progress_meter.set_records_between_time_checks(1i64)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "let __java2rust_add_all_source = self.get_default_tool_v_c_f_header_lines();"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("self.lines.as_mut().unwrap().extend(__java2rust_add_all_source)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn get_default_tool_v_c_f_header_lines(&self) -> std::collections::HashSet<VCFHeaderLine>"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("self.interval_argument_collection.intervals_specified()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("self.cloud_prefetch_buffer + self.cloud_index_prefetch_buffer"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn static_nested_class_with_fields_emits_struct_before_impl() {
+    let translation = translate_source(
+        r#"
+class OuterWithNestedClass {
+    static class Wrapper {
+        String name;
+
+        Wrapper(String name) {
+            this.name = name;
+        }
+
+        String getName() {
+            return name;
+        }
+    }
+
+    Object make(String name) {
+        return new Wrapper(name);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub struct OuterWithNestedClassWrapper"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("impl OuterWithNestedClassWrapper"),
+        "{}",
+        translation.rust
+    );
+    let struct_pos = translation
+        .rust
+        .find("pub struct OuterWithNestedClassWrapper")
+        .unwrap();
+    let impl_pos = translation
+        .rust
+        .find("impl OuterWithNestedClassWrapper")
+        .unwrap();
+    assert!(struct_pos < impl_pos, "{}", translation.rust);
+}
+
+#[test]
+fn static_nested_class_implementing_external_interface_keeps_concrete_struct() {
+    let translation = translate_source(
+        r#"
+import htsjdk.tribble.FeatureReader;
+import htsjdk.variant.variantcontext.VariantContext;
+
+class OuterWithExternalNestedClass {
+    static class Wrapper implements FeatureReader<VariantContext> {
+        String name;
+
+        Wrapper(String name) {
+            this.name = name;
+        }
+
+        String getName() {
+            return name;
+        }
+    }
+
+    Object make(String name) {
+        return new Wrapper(name);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub struct OuterWithExternalNestedClassWrapper"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("impl OuterWithExternalNestedClassWrapper"),
         "{}",
         translation.rust
     );
@@ -14027,6 +14340,56 @@ class Dog implements Animal {}
     );
     assert_eq!(concrete_cast_plan.target.dispatch, DispatchShape::Concrete);
 
+    let mut list_env = ShapeEnv::new();
+    let typed_list_ty = JavaType::Named {
+        name: "List".to_string(),
+        args: vec![JavaType::String],
+    };
+    let mut typed_list_shape = RustSlotShape::conservative(typed_list_ty.clone());
+    typed_list_shape.dispatch = DispatchShape::Concrete;
+    typed_list_shape.view = ViewShape::Native;
+    list_env.insert_local_shape("lines", typed_list_shape);
+    let raw_list_cast_plan = plan_cast_conversion(
+        &parse_expr("lines"),
+        &JavaType::Named {
+            name: "List".to_string(),
+            args: Vec::new(),
+        },
+        &list_env,
+        ExprShapeContext {
+            signatures: None,
+            representations: Some(&erased_representations),
+            facts: Some(&erased_facts),
+        },
+    );
+    assert_eq!(
+        raw_list_cast_plan.semantics,
+        JavaCastSemanticsPolicy::Identity
+    );
+    assert_eq!(raw_list_cast_plan.target.java_ty, typed_list_ty);
+    assert_eq!(
+        apply_cast_conversion(RustExpr::Var("lines".to_string()), &raw_list_cast_plan),
+        RustExpr::Var("lines".to_string())
+    );
+    let raw_list_expr = Expr::Cast {
+        ty: JavaType::Named {
+            name: "List".to_string(),
+            args: Vec::new(),
+        },
+        expr: Box::new(parse_expr("lines")),
+    };
+    let raw_list_actual = actual_shape_for_slot_expr_with_slot(
+        &raw_list_expr,
+        &list_env,
+        ExprShapeContext {
+            signatures: None,
+            representations: Some(&erased_representations),
+            facts: Some(&erased_facts),
+        },
+        &new_java2rust::conversion_plan::assignment_slot(raw_list_cast_plan.target.clone()),
+    );
+    assert_eq!(raw_list_actual.java_ty, typed_list_ty);
+
     let dog_ty = JavaType::Named {
         name: "Dog".to_string(),
         args: Vec::new(),
@@ -16636,6 +16999,92 @@ class ListUse {
             .unwrap();
     assert_eq!(list_return_shape.ownership, OwnershipShape::SharedBorrow);
     assert_eq!(list_return_shape.view, ViewShape::Slice);
+}
+
+#[test]
+fn internal_readonly_object_helper_params_and_alias_return_can_borrow() {
+    let parsed = parse_java_source(
+        r#"
+class InternalAliasHelper {
+    static Handle check(Context ctx, Handle file, Handle reference) {
+        file.isCram();
+        if (reference == null) {
+            return null;
+        }
+        if (Util.exists(ctx, reference.uri())) {
+            return reference;
+        }
+        return reference;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "isCram".to_string(),
+        receiver_type: Some("Handle".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Primitive(PrimitiveType::Boolean)),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "uri".to_string(),
+        receiver_type: Some("Handle".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Unknown("URI".to_string())),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "exists".to_string(),
+        receiver_type: Some("Util".to_string()),
+        arg_count: Some(2),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Primitive(PrimitiveType::Boolean)),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let signatures = solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "check" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let params = signatures.method_param_plans(ty, method).unwrap();
+
+    assert_eq!(params[0].shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(params[1].shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(params[2].shape.ownership, OwnershipShape::SharedBorrow);
+    let return_shape = signatures.method_return_shape(ty, method).unwrap();
+    assert_eq!(return_shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(
+        return_shape.optional_element_type(),
+        Some(JavaType::Named {
+            name: "Handle".to_string(),
+            args: Vec::new(),
+        })
+    );
 }
 
 #[test]
@@ -22119,9 +22568,9 @@ class BuiltinPrimitiveConstant {
 "#,
     );
     assert!(
-        builtin_translation
-            .rust
-            .contains("pub struct GenotypeLikelihoods"),
+        builtin_translation.rust.contains(
+            "pub type GenotypeLikelihoods = HtsjdkVariantVariantcontextGenotypeLikelihoods;"
+        ),
         "{}",
         builtin_translation.rust
     );
@@ -22415,6 +22864,64 @@ class UseExternalStringConstants {
 }
 
 #[test]
+fn genomicsdb_imported_constants_and_nested_type_fields_use_pack_facts() {
+    let source = r#"
+import org.genomicsdb.Constants;
+import com.intel.genomicsdb.model.Coordinates;
+
+class UseGenomicsDbPackFields {
+    String delimiterRegex() {
+        return Constants.CHROMOSOME_FOLDER_DELIMITER_SYMBOL_REGEX;
+    }
+
+    Object positionBuilder() {
+        return Coordinates.ContigPosition.newBuilder();
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub struct OrgGenomicsdbConstants;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub type Constants = OrgGenomicsdbConstants;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Constants::CHROMOSOME_FOLDER_DELIMITER_SYMBOL_REGEX"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("ContigPosition::new_builder()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub const ContigPosition: ContigPosition = ContigPosition;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_support_struct_fields_are_generated_from_field_facts() {
     let source = r#"
 class UseExternalRecord {
@@ -22495,6 +23002,10 @@ class UseExternalBuilder {
             result.put(product.getFields(i).getName(), i);
         }
         return result;
+    }
+
+    Object fieldBuilder(ExternalFactory.Product.Builder builder) {
+        return builder.getFieldsBuilder(0);
     }
 }
 "#;
@@ -22652,6 +23163,34 @@ class UseExternalBuilder {
         thrown: Vec::new(),
         provenance: FactProvenance::ExternalLibraryPack,
     });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getFieldsBuilder".to_string(),
+        receiver_type: Some("ExternalFactory.Product.Builder".to_string()),
+        arg_count: Some(1),
+        role: ExternalApiRole::IndexedGetter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "ExternalFactory.FieldInfo.Builder".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getFieldsBuilder".to_string(),
+        receiver_type: Some("Product.Builder".to_string()),
+        arg_count: Some(1),
+        role: ExternalApiRole::IndexedGetter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "ExternalFactory.FieldInfo.Builder".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
 
     let translation = translate_source_with_facts(source, &facts);
     assert!(
@@ -22748,6 +23287,41 @@ class UseExternalBuilder {
         translation
             .rust
             .contains("product.get_fields(i).get_name()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("impl Product {\n    pub fn get_fields"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_fields_count(&self) -> i32"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn to_builder(&self) -> ProductBuilder"),
+        "{}",
+        translation.rust
+    );
+    let product_builder_impl = translation
+        .rust
+        .split("impl ProductBuilder {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .unwrap_or("");
+    assert_eq!(
+        product_builder_impl
+            .matches("pub fn get_fields_builder")
+            .count(),
+        1,
         "{}",
         translation.rust
     );
@@ -23778,10 +24352,23 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
                 function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
                 args: vec![
                     RustExpr::Literal("\"IllegalArgumentException\"".to_string()),
-                    RustExpr::Literal("\"bad\".to_string()".to_string()),
+                    RustExpr::Raw("\"bad\".to_string().to_string()".to_string()),
                 ],
             }],
         }))
+    );
+    assert_eq!(
+        new_java2rust::exception_lowering::throw_stmt_with_result_policy(
+            new_exception_expr(
+                "IllegalArgumentException",
+                RustExpr::Literal("\"bad\".to_string()".to_string()),
+            ),
+            false,
+        ),
+        RustStmt::Raw(
+            "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"IllegalArgumentException\", \"bad\".to_string().to_string()));"
+                .to_string(),
+        )
     );
     assert_eq!(
         fallback_exception_expr(RustExpr::Var("err".to_string())),
@@ -23806,7 +24393,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
             args: vec![
                 RustExpr::Literal("\"IllegalStateException\"".to_string()),
-                RustExpr::Raw("String::new()".to_string()),
+                RustExpr::Raw("String::new().to_string()".to_string()),
             ],
         }
     );
@@ -23822,7 +24409,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
             args: vec![
                 RustExpr::Literal("\"IllegalStateException\"".to_string()),
-                RustExpr::Raw("format!(\"{}: {}\", message, ignored)".to_string()),
+                RustExpr::Raw("format!(\"{}: {}\", message, ignored).to_string()".to_string()),
             ],
         }
     );
@@ -23839,7 +24426,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             function: Box::new(RustExpr::Raw("JavaException::with_cause".to_string())),
             args: vec![
                 RustExpr::Literal("\"IllegalStateException\"".to_string()),
-                RustExpr::Var("message".to_string()),
+                RustExpr::Raw("message.to_string()".to_string()),
                 RustExpr::Var("cause".to_string()),
             ],
         }
@@ -23857,7 +24444,9 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
             args: vec![
                 RustExpr::Literal("\"MissingArgument\"".to_string()),
-                RustExpr::Raw("format!(\"{}: {}\", argument_name, message)".to_string()),
+                RustExpr::Raw(
+                    "format!(\"{}: {}\", argument_name, message).to_string()".to_string()
+                ),
             ],
         }
     );
@@ -23871,7 +24460,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
             function: Box::new(RustExpr::Raw("JavaException::with_cause".to_string())),
             args: vec![
                 RustExpr::Literal("\"UserProblem\"".to_string()),
-                RustExpr::Literal("\"copy failed\".to_string()".to_string()),
+                RustExpr::Raw("\"copy failed\".to_string().to_string()".to_string()),
                 RustExpr::Var("ex".to_string()),
             ],
         }
@@ -25988,6 +26577,38 @@ class SpecificProblem extends BaseProblem {}
 }
 
 #[test]
+fn slot_lowering_does_not_double_propagate_throwing_call_results() {
+    let translation = translate_source(
+        r#"
+class SlotThrowingCallPropagation {
+    String read() throws IOException {
+        return "x";
+    }
+
+    String run() throws IOException {
+        String value = read();
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(!translation.rust.contains("??"), "{}", translation.rust);
+    assert!(
+        translation
+            .rust
+            .contains("let value: String = self.read()?;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn semantic_diagnostics_are_plumbed_through_translation_boundary() {
     let lib_source = include_str!("../src/lib.rs");
     let semantic_source = include_str!("../src/semantic_analysis.rs");
@@ -26223,6 +26844,7 @@ fn stream_lambda_emission_uses_shape_env_for_bare_fields_and_static_fields() {
         "ARRAY_COLUMN_BOUNDS_START",
         RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
     );
+    env.insert_static_type_alias("genomics_d_b_utils", "org.genomicsdb.GenomicsDBUtils");
     env.insert_local_shape(
         "vid_map_p_b",
         RustSlotShape::for_storage(JavaType::Unknown("VidMapPB".to_string())),
@@ -26257,7 +26879,17 @@ fn stream_lambda_emission_uses_shape_env_for_bare_fields_and_static_fields() {
             ctx,
         )
         .unwrap(),
-        "GenomicsDBUtils::get_array_column_bounds(self.workspace, *partition)"
+        "OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace, *partition)"
+    );
+    assert_eq!(
+        emit_stream_lambda_body_with_context(
+            &parse_expr("genomics_d_b_utils.getArrayColumnBounds(workspace, partition)"),
+            "partition",
+            StreamLambdaValue::BorrowedItem,
+            ctx,
+        )
+        .unwrap(),
+        "OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace, *partition)"
     );
     assert_eq!(
         emit_stream_lambda_body_with_context(
@@ -26505,12 +27137,14 @@ class Use {
             label_condition: "!__java_switch_matched".to_string(),
             statements: vec![RustStmt::Break(Some(SWITCH_LABEL.to_string()))],
         }],
+        false,
     );
     assert!(rendered.contains("let __java_switch_value = value;"));
     assert!(rendered.contains("let mut __java_switch_matched = false;"));
     assert!(rendered.contains("'java_switch: loop"));
     assert!(rendered.contains("if !__java_switch_matched"));
-    assert!(rendered.contains("break 'java_switch;"));
+    assert!(rendered.contains("break 'java_switch ();"));
+    assert!(rendered.ends_with("};"));
 
     let simple = parse_java_source(
         r#"
@@ -28153,6 +28787,7 @@ fn stream_plan_lowers_flat_map_block_temporary_collection_as_owned_subpipeline()
         "workspace",
         RustSlotShape::conservative(optional_java_type(JavaType::String)),
     );
+    shape_env.insert_static_type_alias("genomics_d_b_utils", "org.genomicsdb.GenomicsDBUtils");
     let lowered = render_stream_plan_with_context(
         &plan,
         RustExpr::Var("partitions".to_string()),
@@ -28163,9 +28798,41 @@ fn stream_plan_lowers_flat_map_block_temporary_collection_as_owned_subpipeline()
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "partitions.iter().flat_map(|partition| { let bounds = GenomicsDBUtils::get_array_column_bounds(self.workspace.as_deref().expect(\"Java null receiver\"), partition.as_str()); let names = Default::default(); names.into_iter().filter(move |name| (name.len() as i32) >= bounds[0 as usize]).map(|name| name.trim()) }).collect::<Vec<_>>()"
+            "partitions.iter().flat_map(|partition| { let bounds = OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace.as_deref().expect(\"Java null receiver\"), partition.as_str()); let names = Default::default(); names.into_iter().filter(move |name| (name.len() as i32) >= bounds[0 as usize]).map(|name| name.trim()) }).collect::<Vec<_>>()"
                 .to_string()
         )
+    );
+}
+
+#[test]
+fn translation_emits_external_surfaces_for_stream_lambda_element_calls() {
+    let translation = translate_source(
+        r#"
+import com.intel.genomicsdb.model.GenomicsDBVidMapProto.Chromosome;
+import java.util.List;
+import java.util.stream.Collectors;
+
+class StreamExternalElementCalls {
+    List<Long> offsets(List<Chromosome> contigs) {
+        return contigs.stream()
+                .map(contig -> contig.getTiledbColumnOffset())
+                .collect(Collectors.toList());
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_tiledb_column_offset(&self) -> i64"),
+        "{}",
+        translation.rust
     );
 }
 
@@ -28372,6 +29039,62 @@ fn stream_plan_lowers_collectors_to_map_terminal() {
             args: vec![JavaType::String, JavaType::Primitive(PrimitiveType::Int)],
         }
     );
+}
+
+#[test]
+fn stream_plan_lowers_collectors_to_map_owned_source_identity_without_deref_clone() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+class OwnedToMapSource {
+    Map<Item, Integer> index() {
+        return items().stream().collect(Collectors.toMap(item -> item, item -> item.getLength()));
+    }
+
+    List<Item> items() {
+        return null;
+    }
+}
+
+class Item {
+    int getLength() {
+        return 0;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "index" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Some(Stmt::Return(Some(expr))) = method.body.as_ref().unwrap().statements.first() else {
+        panic!("expected stream return");
+    };
+    let env = TypeEnv::new();
+
+    let plan = build_stream_plan(expr, &env, &resolved.facts).unwrap();
+    let lowered = render_stream_plan(&plan, RustExpr::Raw("self.items()".to_string())).unwrap();
+
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw(
+            "self.items().into_iter().map(|item| (item, item.get_length())).collect::<std::collections::HashMap<_, _>>()"
+                .to_string()
+        )
+    );
+    let RustExpr::Raw(raw) = &lowered.expr else {
+        panic!("expected raw stream expression: {:?}", lowered.expr);
+    };
+    assert!(!raw.contains("(*item).clone()"), "{raw}");
 }
 
 #[test]

@@ -6,7 +6,7 @@ use crate::java_ir::{Member, MethodDecl, Modifier, Program, TypeDecl, TypeKind};
 use crate::representation::{ObjectRepresentation, RepresentationPlan};
 use crate::rust_ir::RustType;
 use crate::signature::{ReceiverPlan, SignaturePlan};
-use crate::slot_render::rust_type_for_slot_with_facts;
+use crate::slot_render::{rust_name_for_java_named_type, rust_type_for_slot_with_facts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepresentationTypeEmission {
@@ -86,13 +86,14 @@ pub fn type_emission_for_with_facts_and_exceptions(
             enum_name,
             variants,
         } => {
+            let rust_enum_name = rust_name_for_java_named_type(enum_name);
             let variants = variants
                 .iter()
                 .map(|variant| format!("    {variant},"))
                 .collect::<Vec<_>>()
                 .join("\n");
             RepresentationTypeEmission::RawRustItem(format!(
-                "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum {enum_name} {{\n{variants}\n}}"
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum {rust_enum_name} {{\n{variants}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{:?}}\", self)\n    }}\n}}"
             ))
         }
         ObjectRepresentation::ClosedEnum {
@@ -303,7 +304,7 @@ fn trait_item_for_type_with_program(
                 method,
                 signatures,
                 facts,
-                exceptions.method_plan(ty, method),
+                trait_method_exception_plan(ty, method, program, exceptions),
                 trait_method_receiver_plan(ty, method, program, signatures),
             )),
             _ => None,
@@ -336,7 +337,7 @@ fn trait_impl_for_type(
                 trait_method_receiver_plan(interface, interface_method, program, signatures),
                 signatures,
                 facts,
-                exceptions.method_plan(interface, interface_method),
+                trait_method_exception_plan(interface, interface_method, program, exceptions),
             )),
             _ => None,
         })
@@ -371,6 +372,9 @@ fn trait_impl_method(
     );
     let candidates = implementing_method_candidates(ty, interface_method);
     if candidates.is_empty() {
+        if let Some(body) = external_template_method_trait_impl_body(ty, interface_method) {
+            return format!("{} {{ {body} }}", signature.trim_end_matches(';'));
+        }
         return trait_impl_method_message_policy(
             ty,
             interface_method,
@@ -414,16 +418,57 @@ fn trait_impl_method(
         format!("self, {args}")
     };
     let call = format!("{}::{}({})", ty.name, rust_name, receiver_arg);
-    let body = if signatures
-        .required_method_signature(interface, interface_method)
-        .return_shape
-        .is_some()
+    let body = if interface_exceptions.wrap_returns_in_result
+        || signatures
+            .required_method_signature(interface, interface_method)
+            .return_shape
+            .is_some()
     {
         call
     } else {
         format!("{call};")
     };
     format!("{} {{ {body} }}", signature.trim_end_matches(';'))
+}
+
+fn external_template_method_trait_impl_body(
+    ty: &TypeDecl,
+    interface_method: &MethodDecl,
+) -> Option<String> {
+    let super_type = ty.extends.as_deref()?;
+    let hook = crate::external_packs::external_template_method_hook_for_super_method(
+        super_type,
+        &interface_method.name,
+        interface_method.params.len(),
+    )?;
+    let hook_method = ty.members.iter().find_map(|member| match member {
+        Member::Method(method)
+            if method
+                .rust_name
+                .as_deref()
+                .unwrap_or_else(|| method.name.as_str())
+                == hook.hook_method
+                || crate::parser::to_snake_case(&method.name) == hook.hook_method =>
+        {
+            Some(method)
+        }
+        _ => None,
+    })?;
+    if hook_method.params.len() != interface_method.params.len() {
+        return None;
+    }
+    let args = interface_method
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let call_args = if args.is_empty() {
+        "self".to_string()
+    } else {
+        format!("self, {args}")
+    };
+    Some(format!("{}::{}({call_args});", ty.name, hook.hook_method))
 }
 
 fn trait_impl_method_compatibility_error(
@@ -562,6 +607,35 @@ fn trait_method_receiver_plan(
         }
     }
     Some(receiver)
+}
+
+fn trait_method_exception_plan(
+    interface: &TypeDecl,
+    interface_method: &MethodDecl,
+    program: &Program,
+    exceptions: &ProgramExceptionPlan,
+) -> MethodExceptionPlan {
+    let mut plan = exceptions.method_plan(interface, interface_method);
+    for implementor in program.types.iter().filter(|ty| {
+        ty.kind == TypeKind::Class
+            && ty
+                .implements
+                .iter()
+                .any(|implemented| implemented == &interface.name)
+    }) {
+        let Some(implementation) = implementing_method_candidates(implementor, interface_method)
+            .into_iter()
+            .find(|candidate| {
+                trait_impl_method_compatibility_error(interface_method, candidate).is_none()
+            })
+        else {
+            continue;
+        };
+        plan.wrap_returns_in_result |= exceptions
+            .method_plan(implementor, implementation)
+            .wrap_returns_in_result;
+    }
+    plan
 }
 
 fn trait_method_return_type_with_exception_plan(

@@ -181,6 +181,16 @@ pub fn return_stmt(value: Option<RustExpr>, wrap_in_ok: bool) -> RustStmt {
 }
 
 pub fn throw_stmt(exception: RustExpr) -> RustStmt {
+    throw_stmt_with_result_policy(exception, true)
+}
+
+pub fn throw_stmt_with_result_policy(exception: RustExpr, wrap_in_result: bool) -> RustStmt {
+    if !wrap_in_result {
+        return RustStmt::Raw(format!(
+            "panic!(\"uncaught Java exception: {{:?}}\", {});",
+            crate::emit::emit_expr(&exception)
+        ));
+    }
     RustStmt::Return(Some(RustExpr::Call {
         function: Box::new(RustExpr::Raw("Err".to_string())),
         args: vec![exception],
@@ -218,7 +228,14 @@ pub fn try_catch_stmt(
             "    Err({}) if {}.is_instance(&[{}]) => {{\n",
             catch.variable_name, catch.variable_name, classes
         ));
-        out.push_str(&crate::emit::emit_statements(&catch.body, 2));
+        if outer_returns_result {
+            out.push_str(&crate::emit::emit_statements(&catch.body, 2));
+        } else {
+            out.push_str(&crate::emit::emit_statements(
+                &plain_return_catch_body(catch.body),
+                2,
+            ));
+        }
         out.push_str("    }\n");
     }
     if outer_returns_result {
@@ -228,6 +245,24 @@ pub fn try_catch_stmt(
     }
     out.push('}');
     RustStmt::Raw(out)
+}
+
+fn plain_return_catch_body(body: Vec<RustStmt>) -> Vec<RustStmt> {
+    body.into_iter()
+        .map(|stmt| match stmt {
+            RustStmt::Return(Some(RustExpr::Call { function, mut args }))
+                if matches!(&*function, RustExpr::Raw(name) if name == "Err")
+                    && args.len() == 1 =>
+            {
+                let exception = args.remove(0);
+                RustStmt::Raw(format!(
+                    "panic!(\"uncaught Java exception: {{:?}}\", {});",
+                    crate::emit::emit_expr(&exception)
+                ))
+            }
+            other => other,
+        })
+        .collect()
 }
 
 pub fn try_with_resources_scope_stmt(
@@ -299,10 +334,79 @@ pub fn try_finally_scope_stmt(
     ))
 }
 
+pub fn try_catch_finally_scope_stmt(
+    ok_type: RustType,
+    try_body: Vec<RustStmt>,
+    catches: Vec<CatchRenderArm>,
+    finally_body: Vec<RustStmt>,
+    body_terminates_with_value: bool,
+    outer_returns_result: bool,
+    ok_falls_through: bool,
+) -> RustStmt {
+    let result_type = exception_result_type(ok_type);
+    let rendered_result_type = crate::emit::emit_type(&result_type);
+    let mut body_with_ok = try_body;
+    if !body_terminates_with_value {
+        body_with_ok.push(return_stmt(None, true));
+    }
+
+    let mut out = String::new();
+    out.push_str("{\n");
+    out.push_str("    let __java_try_result = match (|| -> ");
+    out.push_str(&rendered_result_type);
+    out.push_str(" {\n");
+    out.push_str(&crate::emit::emit_statements(&body_with_ok, 2));
+    out.push_str("    })() {\n");
+    if ok_falls_through {
+        out.push_str("        Ok(()) => Ok(()),\n");
+    } else {
+        out.push_str("        Ok(value) => Ok(value),\n");
+    }
+    for catch in catches {
+        let classes = catch
+            .class_names
+            .iter()
+            .map(|name| format!("{name:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut catch_body = catch.body;
+        if ok_falls_through {
+            catch_body.push(return_stmt(None, true));
+        }
+        out.push_str(&format!(
+            "        Err({}) if {}.is_instance(&[{}]) => (|| -> {} {{\n",
+            catch.variable_name, catch.variable_name, classes, rendered_result_type
+        ));
+        out.push_str(&crate::emit::emit_statements(&catch_body, 3));
+        out.push_str("        })(),\n");
+    }
+    out.push_str("        Err(ex) => Err(ex),\n");
+    out.push_str("    };\n");
+    out.push_str(&crate::emit::emit_statements(&finally_body, 1));
+    if body_terminates_with_value {
+        if outer_returns_result {
+            out.push_str("    return __java_try_result;\n");
+        } else {
+            out.push_str("    return __java_try_result.unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));\n");
+        }
+    } else if outer_returns_result {
+        out.push_str("    __java_try_result?;\n");
+    } else {
+        out.push_str(
+            "    if let Err(ex) = __java_try_result { panic!(\"uncaught Java exception: {:?}\", ex); }\n",
+        );
+    }
+    out.push('}');
+    RustStmt::Raw(out)
+}
+
 pub fn new_exception_expr(class_name: &str, message: RustExpr) -> RustExpr {
     RustExpr::Call {
         function: Box::new(RustExpr::Raw("JavaException::new".to_string())),
-        args: vec![RustExpr::Literal(format!("{class_name:?}")), message],
+        args: vec![
+            RustExpr::Literal(format!("{class_name:?}")),
+            exception_message_expr(message),
+        ],
     }
 }
 
@@ -313,8 +417,16 @@ pub fn new_exception_expr_with_cause(
 ) -> RustExpr {
     RustExpr::Call {
         function: Box::new(RustExpr::Raw("JavaException::with_cause".to_string())),
-        args: vec![RustExpr::Literal(format!("{class_name:?}")), message, cause],
+        args: vec![
+            RustExpr::Literal(format!("{class_name:?}")),
+            exception_message_expr(message),
+            cause,
+        ],
     }
+}
+
+fn exception_message_expr(message: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!("{}.to_string()", crate::emit::emit_expr(&message)))
 }
 
 pub fn fallback_exception_expr(value: RustExpr) -> RustExpr {
@@ -397,4 +509,41 @@ fn ok_expr(value: RustExpr) -> RustExpr {
 
 fn unit_expr() -> RustExpr {
     RustExpr::Raw("()".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_return_catch_rewrites_returned_err_to_panic() {
+        let rendered = try_catch_stmt(
+            RustType::Raw("i32".to_string()),
+            vec![RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::Raw("Ok".to_string())),
+                args: vec![RustExpr::Raw("1".to_string())],
+            }))],
+            vec![CatchRenderArm {
+                variable_name: "e".to_string(),
+                class_names: vec!["IOException".to_string()],
+                body: vec![RustStmt::Return(Some(RustExpr::Call {
+                    function: Box::new(RustExpr::Raw("Err".to_string())),
+                    args: vec![RustExpr::Raw(
+                        "JavaException::new(\"RuntimeException\", e.to_string())".to_string(),
+                    )],
+                }))],
+            }],
+            false,
+            false,
+        );
+        let RustStmt::Raw(rendered) = rendered else {
+            panic!("expected raw try/catch rendering");
+        };
+        assert!(
+            rendered.contains(
+                "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"RuntimeException\", e.to_string()));"
+            ) && !rendered.contains("return Err(JavaException::new(\"RuntimeException\""),
+            "{rendered}"
+        );
+    }
 }

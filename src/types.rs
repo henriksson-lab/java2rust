@@ -211,7 +211,42 @@ fn external_pack_method_return_type(
         name,
         Some(arg_count),
     )
-    .and_then(|fact| fact.return_type)
+    .and_then(|fact| {
+        fact.return_type
+            .map(|return_ty| receiver_generic_return_type(receiver_type, return_ty))
+    })
+}
+
+pub fn receiver_generic_return_type(
+    receiver_type: Option<&JavaType>,
+    return_ty: JavaType,
+) -> JavaType {
+    let Some(index) = receiver_generic_placeholder_index(&return_ty) else {
+        return return_ty;
+    };
+    let Some(receiver_type) = receiver_type else {
+        return return_ty;
+    };
+    let receiver_type =
+        optional_element_type(receiver_type).unwrap_or_else(|| receiver_type.clone());
+    let JavaType::Named { args, .. } = receiver_type else {
+        return return_ty;
+    };
+    args.get(index).cloned().unwrap_or(return_ty)
+}
+
+fn receiver_generic_placeholder_index(return_ty: &JavaType) -> Option<usize> {
+    let JavaType::Named { name, args } = return_ty else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    if name == "T" {
+        return Some(0);
+    }
+    let index = name.strip_prefix('T')?.parse::<usize>().ok()?;
+    Some(index)
 }
 
 pub fn class_literal_type(ty: &JavaType) -> JavaType {
@@ -244,6 +279,7 @@ pub fn sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
         {
             Some(args[0].clone())
         }
+        JavaType::Named { .. } => crate::javalibs::facade_sequence_element_type(java_ty),
         _ => None,
     }
 }

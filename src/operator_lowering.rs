@@ -97,11 +97,12 @@ pub fn lower_numeric_binary_expr(
     right: RustExpr,
     plan: NumericBinaryPromotionPlan,
 ) -> RustExpr {
-    crate::expr_render::binary_expr(
+    let expr = crate::expr_render::binary_expr(
         op,
         apply_coercions(left, &plan.left),
         apply_coercions(right, &plan.right),
-    )
+    );
+    RustExpr::Raw(format!("({})", crate::emit::emit_expr(&expr)))
 }
 
 fn promoted_numeric_primitive(
@@ -236,11 +237,11 @@ pub fn lower_equality_comparison_expr_for_op(
         _ => "==",
     };
     match plan {
-        EqualityComparisonPlan::Direct => RustExpr::Binary {
-            op: op.to_string(),
-            left: Box::new(left),
-            right: Box::new(right),
-        },
+        EqualityComparisonPlan::Direct => RustExpr::Raw(format!(
+            "({} {op} {})",
+            crate::emit::emit_expr(&left),
+            crate::emit::emit_expr(&right)
+        )),
         EqualityComparisonPlan::BothOptionalByRef => RustExpr::Binary {
             op: op.to_string(),
             left: Box::new(option_as_ref(left)),
@@ -258,13 +259,13 @@ pub fn lower_equality_comparison_expr_for_op(
         )),
         EqualityComparisonPlan::LeftOptionalStringView => RustExpr::Raw(format!(
             "{} {op} Some({})",
-            crate::emit::emit_expr(&option_as_deref(left)),
+            crate::emit::emit_expr(&option_as_string_view(left)),
             crate::emit::emit_expr(&right)
         )),
         EqualityComparisonPlan::RightOptionalStringView => RustExpr::Raw(format!(
             "Some({}) {op} {}",
             crate::emit::emit_expr(&left),
-            crate::emit::emit_expr(&option_as_deref(right))
+            crate::emit::emit_expr(&option_as_string_view(right))
         )),
         EqualityComparisonPlan::BothOptionalCustomEquals { method_name } => {
             let true_expr = matches!(op, "==");
@@ -286,12 +287,11 @@ fn option_as_ref(expr: RustExpr) -> RustExpr {
     }
 }
 
-fn option_as_deref(expr: RustExpr) -> RustExpr {
-    RustExpr::MethodCall {
-        receiver: Box::new(expr),
-        method: "as_deref".to_string(),
-        args: Vec::new(),
-    }
+fn option_as_string_view(expr: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{}.as_ref().map(|value| value.as_str())",
+        crate::emit::emit_expr(&expr)
+    ))
 }
 
 pub fn lower_unary_expr(op: UnaryOp, operand: RustExpr) -> RustExpr {

@@ -59,6 +59,7 @@ pub enum FilterPlan<'a> {
 
 pub enum StreamTerminal<'a> {
     Sum,
+    Reduce(ReducePlan<'a>),
     Collect(JavaCollectionKind),
     CollectToMap {
         key: LambdaPlan<'a>,
@@ -73,9 +74,20 @@ pub enum StreamTerminal<'a> {
     AllMatch(LambdaPlan<'a>),
 }
 
+pub struct ReducePlan<'a> {
+    pub identity: &'a Expr,
+    pub accumulator: ReduceLambdaPlan<'a>,
+}
+
 #[derive(Clone)]
 pub struct LambdaPlan<'a> {
     pub param_name: String,
+    pub body: StreamLambdaBody<'a>,
+}
+
+pub struct ReduceLambdaPlan<'a> {
+    pub left_param_name: String,
+    pub right_param_name: String,
     pub body: StreamLambdaBody<'a>,
 }
 
@@ -161,6 +173,10 @@ pub fn build_stream_plan<'a>(
 
     let terminal = match name.as_str() {
         "sum" if args.is_empty() => StreamTerminal::Sum,
+        "reduce" if args.len() == 2 => StreamTerminal::Reduce(ReducePlan {
+            identity: &args[0],
+            accumulator: reduce_lambda_plan(&args[1])?,
+        }),
         "collect" if args.len() == 1 => stream_collect_terminal(&args[0])?,
         "toArray" | "to_array" if args.is_empty() => StreamTerminal::ToArray,
         "findFirst" if args.is_empty() => StreamTerminal::FindFirst,
@@ -297,7 +313,7 @@ fn collect_stream_chain_source(expr: &Expr) -> Option<&Expr> {
     };
 
     match name.as_str() {
-        "stream" if args.is_empty() => receiver.as_deref(),
+        "stream" | "parallelStream" | "parallel_stream" if args.is_empty() => receiver.as_deref(),
         "stream"
             if args.len() == 1
                 && matches!(receiver.as_deref(), Some(Expr::Var(owner))
@@ -318,6 +334,7 @@ fn collect_stream_chain_source(expr: &Expr) -> Option<&Expr> {
         {
             collect_stream_chain_source(receiver.as_deref()?)
         }
+        "reduce" if args.len() == 2 => collect_stream_chain_source(receiver.as_deref()?),
         _ => None,
     }
 }
@@ -339,7 +356,7 @@ fn collect_stream_chain<'a>(
     };
 
     match name.as_str() {
-        "stream" if args.is_empty() => receiver
+        "stream" | "parallelStream" | "parallel_stream" if args.is_empty() => receiver
             .as_deref()
             .map(|source| (source, Vec::new(), input_shape)),
         "stream"
@@ -472,6 +489,26 @@ fn lambda_plan(lambda: &Expr) -> Option<LambdaPlan<'_>> {
             param_name: "value".to_string(),
             body: StreamLambdaBody::MethodReference { target, method },
         }),
+        _ => None,
+    }
+}
+
+fn reduce_lambda_plan(lambda: &Expr) -> Option<ReduceLambdaPlan<'_>> {
+    match lambda {
+        Expr::Lambda { params, body } if params.len() == 2 => {
+            let body = match body {
+                LambdaBody::Expr(body) => StreamLambdaBody::Expr(body),
+                LambdaBody::Block(block) if block_returns_value(block) => {
+                    StreamLambdaBody::Block(block)
+                }
+                LambdaBody::Block(_) => return None,
+            };
+            Some(ReduceLambdaPlan {
+                left_param_name: params[0].name.clone(),
+                right_param_name: params[1].name.clone(),
+                body,
+            })
+        }
         _ => None,
     }
 }
@@ -717,6 +754,9 @@ pub fn stream_terminal_actual(
 ) -> LoweredType {
     match terminal {
         StreamTerminal::Sum => LoweredType::from_java(JavaType::Primitive(PrimitiveType::Int)),
+        StreamTerminal::Reduce(reduce) => {
+            LoweredType::from_java(crate::types::infer_expr_type(reduce.identity, env))
+        }
         StreamTerminal::Collect(JavaCollectionKind::List) => stream_collect_actual(element_shape),
         StreamTerminal::Collect(JavaCollectionKind::Set) => {
             LoweredType::collected_set_from_element_shape(element_shape)

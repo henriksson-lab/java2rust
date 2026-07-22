@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::facts::FactSet;
@@ -22,6 +22,7 @@ pub struct ShapeEnv {
     local_shapes: HashMap<String, RustSlotShape>,
     field_shapes: HashMap<String, RustSlotShape>,
     static_field_names: HashMap<String, String>,
+    instance_field_names: HashSet<String>,
     local_plan_occurrences: Rc<RefCell<HashMap<(String, String), usize>>>,
 }
 
@@ -45,7 +46,9 @@ impl ShapeEnv {
         let name = name.into();
         self.field_shapes
             .insert(name.clone(), RustSlotShape::for_storage(ty.clone()));
-        self.types.insert_field(name, ty);
+        self.types.insert_field(name.clone(), ty);
+        self.instance_field_names
+            .insert(crate::parser::to_snake_case(&name));
     }
 
     pub fn insert_local_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
@@ -75,9 +78,12 @@ impl ShapeEnv {
         let alias = crate::parser::to_snake_case(&name);
         self.types.insert_field(name.clone(), shape.java_ty.clone());
         self.field_shapes.insert(name.clone(), shape.clone());
+        self.instance_field_names.insert(name.clone());
         self.types
             .insert_field(alias.clone(), shape.java_ty.clone());
         self.field_shapes.insert(alias, shape);
+        self.instance_field_names
+            .insert(crate::parser::to_snake_case(&name));
     }
 
     pub fn insert_type_field_shape(
@@ -127,7 +133,10 @@ impl ShapeEnv {
     }
 
     pub fn field_type(&self, name: &str) -> Option<&JavaType> {
-        self.types.field_type(name)
+        self.types.field_type(name).or_else(|| {
+            name.strip_prefix("this.")
+                .and_then(|name| self.types.field_type(name))
+        })
     }
 
     pub fn local_shape(&self, name: &str) -> Option<&RustSlotShape> {
@@ -176,16 +185,27 @@ impl ShapeEnv {
     }
 
     pub fn field_shape(&self, name: &str) -> Option<&RustSlotShape> {
-        self.field_shapes.get(name)
+        self.field_shapes.get(name).or_else(|| {
+            name.strip_prefix("this.")
+                .and_then(|name| self.field_shapes.get(name))
+        })
     }
 
     pub fn is_static_field(&self, name: &str) -> bool {
         self.static_field_names.contains_key(name)
     }
 
+    pub fn is_instance_field(&self, name: &str) -> bool {
+        self.instance_field_names.contains(name)
+    }
+
     pub fn static_field_access_name(&self, name: &str) -> Option<&str> {
         self.static_field_names.get(name).map(String::as_str)
     }
+}
+
+fn is_this_expr(expr: &Expr) -> bool {
+    matches!(expr, Expr::This) || matches!(expr, Expr::Var(name) if name == "this")
 }
 
 fn java_type_occurrence_key(ty: &JavaType) -> String {
@@ -242,7 +262,7 @@ pub fn infer_assignment_target_shape_with_context(
             .local_shape(name)
             .cloned()
             .or_else(|| env.field_shape(name).cloned()),
-        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+        Expr::FieldAccess(receiver, field) if is_this_expr(receiver) => {
             env.field_shape(field).cloned()
         }
         Expr::FieldAccess(receiver, field) => infer_field_access_shape(receiver, field, env, ctx),
@@ -263,7 +283,7 @@ pub fn infer_expr_shape_with_context(
             .cloned()
             .or_else(|| env.field_shape(name).cloned())
             .unwrap_or_else(|| RustSlotShape::conservative(JavaType::Unknown(name.clone()))),
-        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => env
+        Expr::FieldAccess(receiver, field) if is_this_expr(receiver) => env
             .field_shape(field)
             .cloned()
             .unwrap_or_else(|| RustSlotShape::conservative(infer_expr_type(expr, env.type_env()))),
@@ -323,7 +343,13 @@ fn borrowed_string_view_call_shape(
     if !crate::stdlib::is_borrowed_string_view_method(name, args.len()) {
         return None;
     }
-    let receiver_ty = receiver.map(|receiver| infer_expr_type(receiver, env.type_env()))?;
+    let receiver = receiver?;
+    let receiver_shape = infer_expr_shape(receiver, env);
+    let receiver_ty = if matches!(receiver_shape.java_ty, JavaType::String) {
+        receiver_shape.java_ty
+    } else {
+        infer_expr_type(receiver, env.type_env())
+    };
     let effective_receiver_ty =
         crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
     if !matches!(effective_receiver_ty, JavaType::String) {

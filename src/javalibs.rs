@@ -1,5 +1,25 @@
 use crate::java_ir::{Expr, JavaType, Member, Program, Stmt, TypeDecl, WildcardBound};
 
+pub fn facade_sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
+    let JavaType::Named { name, args } = java_ty else {
+        return None;
+    };
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+    let simple = canonical.rsplit('.').next().unwrap_or(&canonical);
+    match simple {
+        "JavaRDD" if args.len() == 1 => Some(args[0].clone()),
+        "JavaPairRDD" if args.len() == 2 => Some(JavaType::Named {
+            name: "Tuple2".to_string(),
+            args: args.to_vec(),
+        }),
+        "JavaPairRDD" if args.is_empty() => Some(JavaType::Named {
+            name: "Tuple2".to_string(),
+            args: Vec::new(),
+        }),
+        _ => None,
+    }
+}
+
 pub fn broad_ioutils_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"pub struct IOUtils;
@@ -44,6 +64,110 @@ pub fn program_uses_broad_ioutils_facade(program: &Program) -> bool {
 
 pub fn is_builtin_external_facade_type(name: &str) -> bool {
     crate::stdlib::canonical_external_receiver_type_key(name) == "IOUtils"
+}
+
+pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
+    let actual = crate::stdlib::canonical_external_receiver_type_key(actual);
+    let target = crate::stdlib::canonical_external_receiver_type_key(target);
+    if actual == target {
+        return true;
+    }
+    matches!(
+        (actual.as_str(), target.as_str()),
+        ("SimpleInterval", "Locatable")
+            | (
+                "org.broadinstitute.hellbender.utils.SimpleInterval",
+                "Locatable"
+            )
+            | (
+                "org.broadinstitute.hellbender.utils.SimpleInterval",
+                "htsjdk.samtools.util.Locatable"
+            )
+    )
+}
+
+pub fn needs_conversion_constructor_for_facade(name: &str) -> bool {
+    matches!(
+        crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+        "Locatable" | "htsjdk.samtools.util.Locatable"
+    )
+}
+
+pub fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usize) -> bool {
+    let receiver = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
+    matches!(
+        (receiver.as_str(), method, arg_count),
+        ("HtsjdkReadsRddStorage", "makeDefault", 1)
+            | ("org.disq_bio.disq.HtsjdkReadsRddStorage", "makeDefault", 1)
+            | ("HtsjdkVariantsRddStorage", "makeDefault", 1)
+            | (
+                "org.disq_bio.disq.HtsjdkVariantsRddStorage",
+                "makeDefault",
+                1
+            )
+            | ("BaiWriteOption", "fromBoolean", 1)
+            | ("org.disq_bio.disq.BaiWriteOption", "fromBoolean", 1)
+            | ("SbiWriteOption", "fromBoolean", 1)
+            | ("org.disq_bio.disq.SbiWriteOption", "fromBoolean", 1)
+            | ("TabixIndexWriteOption", "fromBoolean", 1)
+            | ("org.disq_bio.disq.TabixIndexWriteOption", "fromBoolean", 1)
+    )
+}
+
+pub fn preferred_static_owner_alias(
+    owner: &str,
+    method: &str,
+    arg_count: usize,
+) -> Option<&'static str> {
+    let owner = crate::stdlib::canonical_external_receiver_type_key(owner);
+    match (owner.as_str(), method, arg_count) {
+        (
+            "org.disq_bio.disq.TabixIndexWriteOption" | "OrgDisqBioDisqTabixIndexWriteOption",
+            "from_boolean" | "fromBoolean",
+            1,
+        ) => Some("TabixIndexWriteOption"),
+        (
+            "org.broadinstitute.hellbender.utils.read.ReadUtils"
+            | "OrgBroadinstituteHellbenderUtilsReadReadUtils",
+            "is_read_name_grouped_bam" | "isReadNameGroupedBam",
+            1,
+        ) => Some("ReadUtils"),
+        (
+            "org.broadinstitute.hellbender.utils.read.SAMRecordToGATKReadAdapter"
+            | "OrgBroadinstituteHellbenderUtilsReadSAMRecordToGATKReadAdapter",
+            "headerless_read_adapter" | "headerlessReadAdapter",
+            1,
+        ) => Some("SAMRecordToGATKReadAdapter"),
+        (
+            "org.broadinstitute.hellbender.utils.variant.VariantContextVariantAdapter"
+            | "OrgBroadinstituteHellbenderUtilsVariantVariantContextVariantAdapter",
+            "spark_variant_adapter" | "sparkVariantAdapter",
+            1,
+        ) => Some("VariantContextVariantAdapter"),
+        _ => None,
+    }
+}
+
+pub fn wildcard_import_static_type_aliases(
+    package: &str,
+) -> &'static [(&'static str, &'static str)] {
+    match package {
+        "org.broadinstitute.hellbender.utils.read" => &[
+            (
+                "ReadUtils",
+                "org.broadinstitute.hellbender.utils.read.ReadUtils",
+            ),
+            (
+                "SAMRecordToGATKReadAdapter",
+                "org.broadinstitute.hellbender.utils.read.SAMRecordToGATKReadAdapter",
+            ),
+        ],
+        "org.broadinstitute.hellbender.utils.variant" => &[(
+            "VariantContextVariantAdapter",
+            "org.broadinstitute.hellbender.utils.variant.VariantContextVariantAdapter",
+        )],
+        _ => &[],
+    }
 }
 
 pub fn broad_utils_dynamic_return_type(
@@ -251,7 +375,7 @@ fn stmt_uses_broad_ioutils_facade(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_uses_broad_ioutils_facade)
         }
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
             expr_uses_broad_ioutils_facade(condition) || block_uses_broad_ioutils_facade(body)
         }
         Stmt::For {

@@ -4,9 +4,10 @@ use std::path::Path;
 
 use new_java2rust::facts::{
     ControlFlowFactKind, DispatchRequirementKind, ExceptionKind, ExternalApiArgumentEffectFact,
-    ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy, FactProvenance, FactSet,
-    NullabilityState, ReceiverMutabilityFact, RecursionKind, TrivialAccessorKind,
-    UnresolvedTargetFact, UnresolvedTargetKind,
+    ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
+    ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode, ExternalLibraryPackFact,
+    FactProvenance, FactSet, FieldKey, NullabilityState, ReceiverMutabilityFact, RecursionKind,
+    TrivialAccessorKind, TypeCapabilityOverride, UnresolvedTargetFact, UnresolvedTargetKind,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::object_model::plan_object_model;
@@ -37,6 +38,161 @@ fn java_fixture(path: &str) -> String {
     fs::read_to_string(Path::new("examples/java").join(path)).unwrap()
 }
 
+#[test]
+fn source_summary_declaration_facts_preserve_nullable_method_return() {
+    let parsed = parse_java_source(
+        r#"
+class Lookup {
+    Path find(String sample) {
+        return sample == null ? null : new Path();
+    }
+}
+
+class Path {
+}
+"#,
+    );
+    let facts = resolve::declaration_facts_from_program(&parsed.program);
+    let effect = facts
+        .method_effect_for("Lookup", "find")
+        .expect("summary declaration facts should include method effect");
+    assert_eq!(effect.return_nullability, NullabilityState::MaybeNull);
+}
+
+#[test]
+fn source_summary_declaration_facts_survive_stripped_summary_semantic_analysis() {
+    let parsed = parse_java_source(
+        r#"
+class UsesNullableSourceSummaryReturn {
+    Lookup lookup;
+
+    Path run(String sample) {
+        Path path = lookup.find(sample);
+        return path;
+    }
+}
+"#,
+    );
+    let summary = parse_java_source(
+        r#"
+class Lookup {
+    Path find(String sample) {
+        return sample == null ? null : new Path();
+    }
+}
+
+class Path {
+}
+"#,
+    );
+    let mut source_program = parsed.program.clone();
+    let mut summary_declarations = summary.program.clone();
+    for ty in &mut summary_declarations.types {
+        for member in &mut ty.members {
+            if let new_java2rust::java_ir::Member::Method(method) = member {
+                method.body = None;
+            }
+        }
+    }
+    source_program.types.extend(summary_declarations.types);
+    let summary_facts = resolve::declaration_facts_from_program(&summary.program);
+    let resolved = resolve::resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &source_program,
+        &summary_facts,
+    );
+    let semantic_program = resolve::resolve_program_with_source_program_and_facts(
+        &source_program,
+        new_java2rust::diagnostics::DiagnosticBag::new(),
+        &source_program,
+        &summary_facts,
+    )
+    .program;
+    let semantic =
+        semantic_analysis::analyze_program(&semantic_program, &resolved.facts, &summary_facts);
+    let find_effects = semantic
+        .facts
+        .method_effect_facts
+        .iter()
+        .filter(|fact| fact.method.method_name == "find")
+        .collect::<Vec<_>>();
+    let effect = semantic
+        .facts
+        .method_effect_for("Lookup", "find")
+        .expect("summary declaration facts should remain visible after semantic analysis");
+    assert_eq!(
+        effect.return_nullability,
+        NullabilityState::MaybeNull,
+        "{find_effects:#?}"
+    );
+}
+
+#[test]
+fn indexed_hierarchy_reachability_matches_legacy_worklist() {
+    let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "pkg.Concrete".to_string(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: vec![JavaType::Named {
+                name: "pkg.Marker".to_string(),
+                args: Vec::new(),
+            }],
+            extends: Some(JavaType::Named {
+                name: "pkg.Middle".to_string(),
+                args: Vec::new(),
+            }),
+            final_type: None,
+            object_safe_trait: None,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "pkg.Middle".to_string(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: Some(JavaType::Named {
+                name: "pkg.Base".to_string(),
+                args: Vec::new(),
+            }),
+            final_type: None,
+            object_safe_trait: None,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    let concrete_ty = JavaType::Named {
+        name: "pkg.Concrete".to_string(),
+        args: Vec::new(),
+    };
+    let base_ty = JavaType::Named {
+        name: "pkg.Base".to_string(),
+        args: Vec::new(),
+    };
+    let indexed = facts.hierarchy_lookup_index();
+
+    assert_eq!(
+        indexed.reachable_hierarchy_edges_for_type_with_stats(&facts, &concrete_ty),
+        facts.reachable_hierarchy_edges_for_type_with_stats(&concrete_ty)
+    );
+    assert_eq!(
+        indexed.hierarchy_subtype_policy(&facts, &concrete_ty, &base_ty),
+        facts.hierarchy_subtype_policy(&concrete_ty, &base_ty)
+    );
+    assert!(
+        indexed
+            .hierarchy_subtype_policy(&facts, &concrete_ty, &base_ty)
+            .reaches
+    );
+}
+
 fn analyze(source: &str) -> semantic_analysis::SemanticFacts {
     let parsed = parser::parse_java_source(source);
     let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
@@ -45,6 +201,46 @@ fn analyze(source: &str) -> semantic_analysis::SemanticFacts {
         &resolved.facts,
         &new_java2rust::facts::FactSet::default(),
     )
+}
+
+#[test]
+fn known_unchecked_exception_fact_beats_parsed_unknown_exception_fact() {
+    let semantic = analyze(
+        r#"
+import htsjdk.samtools.SAMException;
+
+class SamOnly {
+    static String encode() {
+        return write();
+    }
+
+    static String write() {
+        throw new SAMException("x");
+    }
+}
+"#,
+    );
+
+    assert_eq!(
+        semantic.facts.exception_kind_for("SAMException"),
+        Some(ExceptionKind::Unchecked)
+    );
+    assert_eq!(
+        semantic
+            .facts
+            .exception_kind_for("htsjdk.samtools.SAMException"),
+        Some(ExceptionKind::Unchecked)
+    );
+    assert!(
+        !semantic
+            .facts
+            .method_has_thrown_exceptions("SamOnly", "write")
+            && !semantic
+                .facts
+                .method_has_thrown_exceptions("SamOnly", "encode"),
+        "{:?}",
+        semantic.facts.method_effect_facts
+    );
 }
 
 #[test]
@@ -1086,6 +1282,157 @@ fn external_api_effect_receiver_lookup_matches_simple_owner_for_fqn_facts() {
         effect.return_type,
         Some(JavaType::Primitive(PrimitiveType::Boolean))
     );
+}
+
+#[test]
+fn indexed_external_api_lookup_preserves_override_and_arity_precedence() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "readValue".to_string(),
+        receiver_type: Some("dep.NativeHandle".to_string()),
+        arg_count: Some(1),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "readValue".to_string(),
+        receiver_type: None,
+        arg_count: Some(1),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::MaybeNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+
+    let indexed = facts.external_lookup_index();
+    let legacy = facts
+        .external_api_effect_for_receiver_with_arity(Some("NativeHandle"), "read_value", Some(1))
+        .unwrap();
+    let indexed_effect = indexed
+        .external_api_effect_for_receiver_with_arity(Some("NativeHandle"), "read_value", Some(1))
+        .unwrap();
+
+    assert_eq!(indexed_effect, legacy);
+    assert_eq!(indexed_effect.provenance, FactProvenance::UserOverride);
+    assert_eq!(indexed_effect.return_type, Some(JavaType::String));
+}
+
+#[test]
+fn indexed_external_api_lookup_preserves_global_reverse_order_across_alias_buckets() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "readValue".to_string(),
+        receiver_type: Some("NativeHandle".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "read_value".to_string(),
+        receiver_type: Some("NativeHandle".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let indexed = facts.external_lookup_index();
+    let legacy = facts
+        .external_api_effect_for_receiver_with_arity(Some("NativeHandle"), "readValue", Some(0))
+        .unwrap();
+    let indexed_effect = indexed
+        .external_api_effect_for_receiver_with_arity(Some("NativeHandle"), "readValue", Some(0))
+        .unwrap();
+
+    assert_eq!(indexed_effect, legacy);
+    assert_eq!(
+        indexed_effect.return_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+}
+
+#[test]
+fn indexed_external_field_lookup_preserves_direct_then_alias_precedence() {
+    let mut facts = FactSet::default();
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FieldKey {
+            type_name: "dep.Constants".to_string(),
+            field_name: "MAX_COUNT".to_string(),
+        },
+        field_type: Some(JavaType::Primitive(PrimitiveType::Long)),
+        field_kind: ExternalFieldKind::StaticFinal,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FieldKey {
+            type_name: "Constants".to_string(),
+            field_name: "MAX_COUNT".to_string(),
+        },
+        field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+        field_kind: ExternalFieldKind::StaticFinal,
+        provenance: FactProvenance::UserOverride,
+    });
+
+    let indexed = facts.external_lookup_index();
+    let legacy = facts.external_field_for("Constants", "MAX_COUNT").unwrap();
+    let indexed_field = indexed
+        .external_field_for("Constants", "MAX_COUNT")
+        .unwrap();
+
+    assert_eq!(indexed_field, legacy);
+    assert_eq!(indexed_field.provenance, FactProvenance::UserOverride);
+    assert_eq!(
+        indexed_field.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+}
+
+#[test]
+fn indexed_external_pack_lookup_preserves_member_alias_fallback() {
+    let mut facts = FactSet::default();
+    facts.external_library_packs.push(ExternalLibraryPackFact {
+        pack_name: "dep".to_string(),
+        package_prefix: "dep".to_string(),
+        mode: ExternalLibraryMode::RustCrateMapping,
+        coverage: ExternalApiCoverage::Mapped,
+        rust_target: Some("dep_facade".to_string()),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "read".to_string(),
+        receiver_type: Some("dep.NativeHandle".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let indexed = facts.external_lookup_index();
+    let legacy = facts
+        .external_library_pack_for_type("other.NativeHandle")
+        .unwrap();
+    let indexed_pack = indexed
+        .external_library_pack_for_type("other.NativeHandle")
+        .unwrap();
+
+    assert_eq!(indexed_pack, legacy);
+    assert_eq!(indexed_pack.pack_name, "dep");
 }
 
 #[test]

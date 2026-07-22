@@ -154,6 +154,9 @@ fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) ->
 }
 
 pub fn propagate_result_expr(expr: RustExpr) -> RustExpr {
+    if matches!(&expr, RustExpr::Raw(raw) if raw.trim_end().ends_with('?')) {
+        return expr;
+    }
     RustExpr::Raw(format!("{}?", crate::emit::emit_expr(&expr)))
 }
 
@@ -203,6 +206,11 @@ fn apply_native_java_instance_method(
             args,
         },
         NativeJavaInstanceMethod::StringSplit => apply_string_split(receiver, args),
+        NativeJavaInstanceMethod::StringSubstring => apply_string_substring(receiver, args),
+        NativeJavaInstanceMethod::StringHashCode => RustExpr::Raw(format!(
+            "java_string_hash_code({}.as_str())",
+            emit::emit_expr(&receiver)
+        )),
         NativeJavaInstanceMethod::Equals => {
             let Some(other) = args.into_iter().next() else {
                 return RustExpr::Raw(
@@ -215,6 +223,27 @@ fn apply_native_java_instance_method(
                 right: Box::new(other),
             }
         }
+    }
+}
+
+fn apply_string_substring(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
+    if args.is_empty() || args.len() > 2 {
+        return RustExpr::Raw(
+            "compile_error!(\"Java String.substring requires one or two arguments\")".to_string(),
+        );
+    }
+    let mut args = args.into_iter();
+    let begin = args.next().unwrap();
+    let end = args
+        .next()
+        .unwrap_or_else(|| RustExpr::Raw(format!("{}.len() as i32", emit::emit_expr(&receiver))));
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw("java_string_substring".to_string())),
+        args: vec![
+            RustExpr::Raw(format!("{}.as_str()", emit::emit_expr(&receiver))),
+            begin,
+            end,
+        ],
     }
 }
 
@@ -257,6 +286,23 @@ fn apply_native_java_static_method(
             };
             RustExpr::Call {
                 function: Box::new(RustExpr::Raw("std::cmp::max".to_string())),
+                args: vec![left, right],
+            }
+        }
+        NativeJavaStaticMethod::MathMin => {
+            let mut args = args.into_iter();
+            let Some(left) = args.next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"Math.min requires two arguments\")".to_string(),
+                );
+            };
+            let Some(right) = args.next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"Math.min requires two arguments\")".to_string(),
+                );
+            };
+            RustExpr::Call {
+                function: Box::new(RustExpr::Raw("std::cmp::min".to_string())),
                 args: vec![left, right],
             }
         }

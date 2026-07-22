@@ -76,7 +76,12 @@ pub fn value_shape_for_java_type(
     java_ty: JavaType,
 ) -> RustSlotShape {
     let mut shape = RustSlotShape::conservative(java_ty.clone());
-    apply_dispatch_projection(&mut shape, representations.dispatch_for(&java_ty));
+    let dispatch = if java_type_is_erased_object_boundary(&java_ty) {
+        DispatchShape::ErasedObject
+    } else {
+        representations.dispatch_for(&java_ty)
+    };
+    apply_dispatch_projection(&mut shape, dispatch);
     shape
 }
 
@@ -88,14 +93,20 @@ pub fn project_java_value_shape(
         return value_shape_for_java_type(representations, java_ty);
     }
     let mut shape = RustSlotShape::conservative(java_ty);
-    if matches!(
-        &shape.java_ty,
-        JavaType::Named { name, .. } if name == "Object"
-    ) || matches!(shape.java_ty, JavaType::Unknown(_) | JavaType::Wildcard(_))
+    if java_type_is_erased_object_boundary(&shape.java_ty)
+        || matches!(shape.java_ty, JavaType::Unknown(_) | JavaType::Wildcard(_))
     {
         apply_dispatch_projection(&mut shape, DispatchShape::ErasedObject);
     }
     shape
+}
+
+fn java_type_is_erased_object_boundary(java_ty: &JavaType) -> bool {
+    matches!(
+        java_ty,
+        JavaType::Named { name, .. } | JavaType::Unknown(name)
+            if name == "Object" || name == "java.lang.Object"
+    ) || matches!(java_ty, JavaType::Wildcard(_))
 }
 
 pub fn borrowed_string_content_shape() -> RustSlotShape {
@@ -221,9 +232,14 @@ pub fn storage_shape_for_java_type(
     java_ty: JavaType,
 ) -> RustSlotShape {
     let mut shape = RustSlotShape::for_storage(java_ty.clone());
+    let dispatch = if java_type_is_erased_object_boundary(&java_ty) {
+        DispatchShape::ErasedObject
+    } else {
+        representations.dispatch_for(&java_ty)
+    };
     apply_dispatch_projection(
         &mut shape,
-        escaping_role_dispatch_policy(representations.dispatch_for(&java_ty)).projected_dispatch,
+        escaping_role_dispatch_policy(dispatch).projected_dispatch,
     );
     shape
 }
@@ -249,9 +265,14 @@ pub fn return_shape_for_java_type(
         None
     } else {
         let mut shape = RustSlotShape::conservative(java_ty.clone());
+        let dispatch = if java_type_is_erased_object_boundary(java_ty) {
+            DispatchShape::ErasedObject
+        } else {
+            representations.dispatch_for(java_ty)
+        };
         apply_dispatch_projection(
             &mut shape,
-            escaping_role_dispatch_policy(representations.dispatch_for(java_ty)).projected_dispatch,
+            escaping_role_dispatch_policy(dispatch).projected_dispatch,
         );
         Some(shape)
     }

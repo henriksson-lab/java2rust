@@ -44,6 +44,7 @@ pub fn render_switch(
     plan: &SwitchPlan<'_>,
     selector: RustExpr,
     cases: Vec<SwitchRenderCase>,
+    append_unreachable: bool,
 ) -> String {
     let mut out = String::new();
     out.push_str("{\n");
@@ -62,9 +63,12 @@ pub fn render_switch(
         out.push_str(&crate::emit::emit_statements(&case.statements, 3));
         out.push_str("        }\n");
     }
-    out.push_str(&format!("        break '{};\n", plan.break_label));
+    out.push_str(&format!("        break '{} ();\n", plan.break_label));
     out.push_str("    }\n");
-    out.push('}');
+    out.push_str("};");
+    if append_unreachable {
+        out.push_str("\n    unreachable!(\"Java switch completed without returning\");");
+    }
     out
 }
 
