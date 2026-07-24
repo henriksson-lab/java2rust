@@ -113,6 +113,7 @@ pub enum SyntaxSlotCoercionPolicy {
     Identity,
     IndexToUsize,
     ToStringForConcat,
+    ErasedObjectToJavaDisplayString,
     OptionalToJavaDisplayString,
     OptionalToJavaDisplayValue,
 }
@@ -123,6 +124,7 @@ pub enum ViewCoercionPolicy {
     BorrowStringView,
     OwnStringFromView,
     BorrowSequenceSliceView,
+    BorrowSequenceMutSliceView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +147,12 @@ pub enum OwnershipCoercionPolicy {
     BorrowOwnedValue,
     BorrowOwnedMutably,
     RecoverOwnedCopyValue,
+    RecoverErasedObjectClone {
+        sequence: bool,
+    },
+    RecoverOwnedSequenceWithToVec {
+        policy: CloneRecoveryPolicy,
+    },
     RecoverOwnedWithClone {
         policy: CloneRecoveryPolicy,
     },
@@ -541,6 +549,9 @@ pub enum DispatchCoercionPolicy {
     BoxDynTrait {
         trait_name: String,
     },
+    CloneBoxDynTrait {
+        trait_name: String,
+    },
     EraseObject,
     DowncastClosedEnum {
         enum_name: String,
@@ -582,6 +593,57 @@ pub enum OptionalShapeCoercionPolicy {
         element_plan: Box<ShapeCoercionPlan>,
     },
     NoChange,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionalSlotConstructionPlan {
+    pub target: RustSlotShape,
+    pub element_shape: RustSlotShape,
+    pub element_plan: ShapeCoercionPlan,
+    pub wrapper_ownership: OwnershipShape,
+}
+
+pub fn optional_slot_construction_plan(
+    target: &RustSlotShape,
+    element_ty: JavaType,
+) -> OptionalSlotConstructionPlan {
+    optional_slot_construction_plan_with_facts(target, element_ty, &FactSet::default())
+}
+
+pub fn optional_slot_construction_plan_with_facts(
+    target: &RustSlotShape,
+    element_ty: JavaType,
+    facts: &FactSet,
+) -> OptionalSlotConstructionPlan {
+    let mut element_shape = target.clone();
+    element_shape.java_ty = element_ty;
+    optional_slot_construction_plan_with_actual_element(&element_shape, target, facts)
+        .expect("target must be an optional slot")
+}
+
+pub fn optional_slot_construction_plan_with_actual_element(
+    actual_element_shape: &RustSlotShape,
+    target: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<OptionalSlotConstructionPlan> {
+    let target_element_ty = target.optional_element_type()?;
+    let target_element = optional_element_slot_shape(target, target_element_ty);
+    let element_plan = shape_coercion_plan_with_facts(actual_element_shape, &target_element, facts);
+    Some(OptionalSlotConstructionPlan {
+        target: target.clone(),
+        element_shape: actual_element_shape.clone(),
+        element_plan,
+        wrapper_ownership: OwnershipShape::Owned,
+    })
+}
+
+pub fn optional_slot_construction_plan_for_actual(
+    actual_element_shape: &RustSlotShape,
+    target: &RustSlotShape,
+    facts: &FactSet,
+) -> OptionalSlotConstructionPlan {
+    optional_slot_construction_plan_with_actual_element(actual_element_shape, target, facts)
+        .expect("target must be an optional slot")
 }
 
 impl OptionalShapeCoercionPolicy {
@@ -801,6 +863,31 @@ impl LoweredType {
             LoweredType::OptionalElementBorrow { option_shape, .. } => Some(&option_shape.java_ty),
             LoweredType::VecElementBorrow { vec_shape, .. } => Some(&vec_shape.java_ty),
             LoweredType::SetElementBorrow { set_shape, .. } => Some(&set_shape.java_ty),
+        }
+    }
+
+    pub fn into_slot_shape(self) -> RustSlotShape {
+        match self {
+            LoweredType::Slot(shape)
+            | LoweredType::RustScalar {
+                java_shape: shape, ..
+            }
+            | LoweredType::RustBorrowed {
+                java_shape: shape, ..
+            }
+            | LoweredType::RustUnsignedByteArray {
+                java_shape: shape, ..
+            }
+            | LoweredType::OptionalElementBorrow {
+                option_shape: shape,
+                ..
+            }
+            | LoweredType::VecElementBorrow {
+                vec_shape: shape, ..
+            }
+            | LoweredType::SetElementBorrow {
+                set_shape: shape, ..
+            } => *shape,
         }
     }
 }
@@ -1062,6 +1149,15 @@ pub fn view_coercion_policy_with_effective_facts(
     {
         return ViewCoercionPolicy::BorrowSequenceSliceView;
     }
+    if actual.ownership == OwnershipShape::Owned
+        && actual.view == ViewShape::Native
+        && target.ownership == OwnershipShape::MutableBorrow
+        && target.view == ViewShape::Slice
+        && crate::types::two_dimensional_array_element_type(&actual.java_ty).is_none()
+        && sequence_view_element_types_match(&actual.java_ty, &target.java_ty)
+    {
+        return ViewCoercionPolicy::BorrowSequenceMutSliceView;
+    }
     if !coercion_shape_content_policy_with_effective_facts(actual, facts).string_content
         || !coercion_shape_content_policy_with_effective_facts(target, facts).string_content
     {
@@ -1164,18 +1260,43 @@ pub fn ownership_coercion_policy_with_effective_facts(
     }
     if actual.java_ty == target.java_ty
         && actual.dispatch == target.dispatch
+        && actual.ownership == OwnershipShape::SharedBorrow
+        && actual.view == ViewShape::Slice
+        && target.ownership == OwnershipShape::Owned
+        && target.view == ViewShape::Native
+        && crate::types::sequence_element_type(&actual.java_ty).is_some()
+    {
+        let capability =
+            coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
+        return OwnershipCoercionPolicy::RecoverOwnedSequenceWithToVec {
+            policy: clone_recovery_policy_from_capability(capability.recovery),
+        };
+    }
+    if actual.java_ty == target.java_ty
+        && actual.dispatch == target.dispatch
         && actual.view == target.view
         && actual.ownership == OwnershipShape::SharedBorrow
         && target.ownership == OwnershipShape::Owned
     {
+        if let Some(sequence) = erased_object_clone_recovery_sequence(actual, target) {
+            return OwnershipCoercionPolicy::RecoverErasedObjectClone { sequence };
+        }
         let capability =
             coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
+        if crate::types::sequence_element_type(&actual.java_ty).is_some() {
+            return OwnershipCoercionPolicy::RecoverOwnedSequenceWithToVec {
+                policy: clone_recovery_policy_from_capability(capability.recovery),
+            };
+        }
         ownership_recovery_policy_from_capability(capability.recovery, actual, target)
     } else if actual.ownership == OwnershipShape::SharedBorrow
         && target.ownership == OwnershipShape::Owned
         && matches!(target.dispatch, DispatchShape::ErasedObject)
         && !matches!(actual.java_ty, JavaType::Primitive(_) | JavaType::Void)
     {
+        if let Some(sequence) = erased_object_clone_recovery_sequence(actual, target) {
+            return OwnershipCoercionPolicy::RecoverErasedObjectClone { sequence };
+        }
         let capability =
             coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
         ownership_recovery_policy_from_capability(capability.recovery, actual, target)
@@ -1319,7 +1440,15 @@ pub(crate) fn optional_element_slot_shape(
     element_ty: JavaType,
 ) -> RustSlotShape {
     let mut element_shape = option_shape.clone();
-    element_shape.java_ty = element_ty;
+    if java_type_is_erased_object_like(&element_ty) {
+        let projected = project_java_value_shape(None, element_ty);
+        element_shape.java_ty = projected.java_ty;
+        element_shape.dispatch = projected.dispatch;
+        element_shape.view = projected.view;
+        element_shape.type_identity = projected.type_identity;
+    } else {
+        element_shape.java_ty = element_ty;
+    }
     element_shape
 }
 
@@ -1510,23 +1639,39 @@ pub fn borrowed_element_slot_adapter_policy(
         && target.optional_element_type().is_none()
         && borrowed_element_target_matches_element(target, element_shape, facts);
     let matches = carrier_matches || element_matches;
-    let adapter = matches.then(|| {
-        if element_matches && target.ownership == OwnershipShape::SharedBorrow {
-            BorrowedElementAdapterPolicy {
-                carrier,
-                element_shape: element_shape.clone(),
-                recovery: BorrowedElementRecoveryPolicy::BorrowElement,
-                unwrap_carrier: true,
-            }
-        } else {
-            borrowed_element_adapter_policy_with_unwrap(
-                carrier,
-                element_shape,
-                facts,
-                element_matches,
-            )
-        }
-    });
+    let exact_optional_element_match = matches!(carrier, BorrowedElementCarrier::Option)
+        && target.optional_element_type().is_some_and(|element_ty| {
+            optional_element_slot_shape_matches(target, element_ty, element_shape)
+        });
+    let optional_element_view_projection =
+        optional_element_borrow_target_projection(carrier, target, element_shape, facts);
+    let adapter = if matches && !exact_optional_element_match {
+        Some(
+            if optional_element_view_projection
+                || (element_matches
+                    && matches!(
+                        target.ownership,
+                        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+                    ))
+            {
+                BorrowedElementAdapterPolicy {
+                    carrier,
+                    element_shape: element_shape.clone(),
+                    recovery: BorrowedElementRecoveryPolicy::BorrowElement,
+                    unwrap_carrier: element_matches,
+                }
+            } else {
+                borrowed_element_adapter_policy_with_unwrap(
+                    carrier,
+                    element_shape,
+                    facts,
+                    element_matches,
+                )
+            },
+        )
+    } else {
+        None
+    };
     BorrowedElementSlotAdapterPolicy {
         target: target.clone(),
         carrier_shape: carrier_shape.clone(),
@@ -1535,6 +1680,40 @@ pub fn borrowed_element_slot_adapter_policy(
         matches,
         adapter,
     }
+}
+
+fn optional_element_borrow_target_projection(
+    carrier: BorrowedElementCarrier,
+    target: &RustSlotShape,
+    element_shape: &RustSlotShape,
+    facts: &FactSet,
+) -> bool {
+    if !matches!(carrier, BorrowedElementCarrier::Option) {
+        return false;
+    }
+    let Some(target_element_ty) = target.optional_element_type() else {
+        return false;
+    };
+    let target_element = optional_element_slot_shape(target, target_element_ty);
+    matches!(
+        target_element.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) && borrowed_element_target_matches_element(&target_element, element_shape, facts)
+        && (target_element.ownership != element_shape.ownership
+            || target_element.view != element_shape.view
+            || target_element.dispatch != element_shape.dispatch)
+}
+
+fn optional_element_slot_shape_matches(
+    option_shape: &RustSlotShape,
+    element_ty: JavaType,
+    actual_element_shape: &RustSlotShape,
+) -> bool {
+    let target_element = optional_element_slot_shape(option_shape, element_ty);
+    target_element.java_ty == actual_element_shape.java_ty
+        && target_element.ownership == actual_element_shape.ownership
+        && target_element.view == actual_element_shape.view
+        && target_element.dispatch == actual_element_shape.dispatch
 }
 
 fn borrowed_element_target_matches_element(
@@ -1596,6 +1775,11 @@ pub fn dispatch_coercion_policy_with_facts(
     if matches!(actual.java_ty, JavaType::Unknown(_)) && target.optional_element_type().is_some() {
         return DispatchCoercionPolicy::NoDispatchChange;
     }
+    if matches!(actual.dispatch, DispatchShape::ErasedObject)
+        && java_type_is_erased_object_like(&target.java_ty)
+    {
+        return DispatchCoercionPolicy::NoDispatchChange;
+    }
     match (&actual.dispatch, &target.dispatch) {
         (DispatchShape::Concrete, DispatchShape::Concrete) => {
             if let Some(adapter) = external_conversion_adapter_policy(actual, target, facts) {
@@ -1631,6 +1815,19 @@ pub fn dispatch_coercion_policy_with_facts(
                 trait_name: trait_name.clone(),
             }
         }
+        (DispatchShape::ClosedEnum { .. }, DispatchShape::DynTrait { trait_name }) => {
+            if actual.java_ty != target.java_ty
+                && facts
+                    .hierarchy_subtype_policy(&actual.java_ty, &target.java_ty)
+                    .reaches
+            {
+                DispatchCoercionPolicy::BorrowDynTrait {
+                    trait_name: trait_name.clone(),
+                }
+            } else {
+                unsupported_dispatch_coercion_policy(actual, target)
+            }
+        }
         (
             DispatchShape::BoxedDynTrait {
                 trait_name: actual_trait,
@@ -1656,14 +1853,8 @@ pub fn dispatch_coercion_policy_with_facts(
             DispatchShape::BoxedDynTrait {
                 trait_name: target_trait,
             },
-        ) if actual_trait == target_trait => DispatchCoercionPolicy::Unsupported {
-            actual_dispatch: actual.dispatch.clone(),
-            target_dispatch: target.dispatch.clone(),
-            policy: borrowed_dyn_to_owned_boxed_dyn_fallback_policy(
-                target_trait.clone(),
-                &actual.java_ty,
-                facts,
-            ),
+        ) if actual_trait == target_trait => DispatchCoercionPolicy::CloneBoxDynTrait {
+            trait_name: target_trait.clone(),
         },
         (DispatchShape::Concrete, DispatchShape::ErasedObject) => {
             DispatchCoercionPolicy::EraseObject
@@ -1799,52 +1990,6 @@ fn external_conversion_adapter_type_name(java_ty: &JavaType) -> Option<&str> {
         JavaType::Named { name, .. } => Some(name),
         JavaType::Unknown(name) => Some(name),
         _ => None,
-    }
-}
-
-fn borrowed_dyn_to_owned_boxed_dyn_fallback_policy(
-    trait_name: String,
-    java_ty: &JavaType,
-    facts: &FactSet,
-) -> DispatchCoercionFallbackPolicy {
-    let effective_facts = EffectiveFacts::new(facts);
-    borrowed_dyn_to_owned_boxed_dyn_fallback_policy_with_effective_facts(
-        trait_name,
-        java_ty,
-        &effective_facts,
-    )
-}
-
-fn borrowed_dyn_to_owned_boxed_dyn_fallback_policy_with_effective_facts(
-    trait_name: String,
-    java_ty: &JavaType,
-    facts: &EffectiveFacts,
-) -> DispatchCoercionFallbackPolicy {
-    let capability = coercion_owned_recovery_capability_policy_with_effective_facts(java_ty, facts);
-    let recovery = match capability.recovery {
-        OwnedRecoveryCapability::ExplicitClone { java_ty }
-        | OwnedRecoveryCapability::CloneBoxAdapter { java_ty }
-        | OwnedRecoveryCapability::FactoryCopy { java_ty } => {
-            BorrowedDynToOwnedBoxedDynRecoveryPolicy::CloneBoxAdapterRequired {
-                policy: CloneRecoveryPolicy::ProvenCloneCapability { java_ty },
-            }
-        }
-        OwnedRecoveryCapability::ConservativeClone => {
-            BorrowedDynToOwnedBoxedDynRecoveryPolicy::CloneBoxAdapterRequired {
-                policy: CloneRecoveryPolicy::AuditRequired,
-            }
-        }
-        OwnedRecoveryCapability::Copy
-        | OwnedRecoveryCapability::ImmutableSharedHandle { .. }
-        | OwnedRecoveryCapability::FacadeOwnedExternalHandle { .. }
-        | OwnedRecoveryCapability::FfiOwnedHandle { .. }
-        | OwnedRecoveryCapability::NonCloneable => {
-            BorrowedDynToOwnedBoxedDynRecoveryPolicy::NoOwnershipProof
-        }
-    };
-    DispatchCoercionFallbackPolicy::BorrowedDynToOwnedBoxedDyn {
-        trait_name,
-        recovery,
     }
 }
 
@@ -2077,7 +2222,7 @@ pub fn syntax_coercion_plan_with_facts(
     facts: &FactSet,
 ) -> SyntaxCoercionPlan {
     let content = coercion_content_policy(actual, facts);
-    let policy = syntax_slot_coercion_policy_from_content(slot, &content);
+    let policy = syntax_slot_coercion_policy_from_content(actual, slot, &content);
     SyntaxCoercionPlan {
         actual: actual.clone(),
         slot: slot.clone(),
@@ -2092,15 +2237,26 @@ pub fn syntax_slot_coercion_policy(
     facts: &FactSet,
 ) -> SyntaxSlotCoercionPolicy {
     let content = coercion_content_policy(actual, facts);
-    syntax_slot_coercion_policy_from_content(slot, &content)
+    syntax_slot_coercion_policy_from_content(actual, slot, &content)
 }
 
 fn syntax_slot_coercion_policy_from_content(
+    actual: &JavaType,
     slot: &Slot,
     content: &CoercionContentPolicy,
 ) -> SyntaxSlotCoercionPolicy {
     match slot {
         Slot::Index => SyntaxSlotCoercionPolicy::IndexToUsize,
+        Slot::StringConcatSegment | Slot::DisplaySegment
+            if java_type_is_erased_object_display_like(actual) =>
+        {
+            SyntaxSlotCoercionPolicy::ErasedObjectToJavaDisplayString
+        }
+        Slot::StringConcatSegment | Slot::DisplaySegment
+            if java_type_needs_java_object_display_fallback(actual, content) =>
+        {
+            SyntaxSlotCoercionPolicy::ErasedObjectToJavaDisplayString
+        }
         Slot::StringConcatSegment if !content.string_content => {
             SyntaxSlotCoercionPolicy::ToStringForConcat
         }
@@ -2110,6 +2266,7 @@ fn syntax_slot_coercion_policy_from_content(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstanceOfCheck {
+    JavaSerializableMarker,
     ClosedEnumVariant {
         enum_name: String,
         variant_name: String,
@@ -2240,6 +2397,9 @@ pub fn plan_instanceof_check_with_facts(
     target: &RustSlotShape,
     facts: &FactSet,
 ) -> InstanceOfCheck {
+    if is_java_serializable_marker_type(&target.java_ty) {
+        return InstanceOfCheck::JavaSerializableMarker;
+    }
     match instanceof_target_policy(target, facts) {
         InstanceOfTargetPolicy::PrimitiveTarget { java_ty } => {
             return unsupported_instanceof_check(
@@ -2356,6 +2516,15 @@ pub fn plan_instanceof_check_with_facts(
     unsupported_instanceof_check(actual, target, InstanceOfFallbackPolicy::CompileError)
 }
 
+fn is_java_serializable_marker_type(ty: &JavaType) -> bool {
+    matches!(
+        ty,
+        JavaType::Named { name, args }
+            if args.is_empty()
+                && crate::stdlib::canonical_external_receiver_type_key(name) == "Serializable"
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HierarchyInstanceOfPolicy {
     pub actual: JavaType,
@@ -2399,6 +2568,7 @@ fn closed_enum_name(shape: &RustSlotShape) -> &str {
 pub enum SlotConversionPlan {
     Shape(ShapeCoercionPlan),
     Syntax(SyntaxCoercionPlan),
+    OptionalConstruction(OptionalSlotConstructionPlan),
     BorrowedElement(BorrowedElementSlotAdapterPolicy),
     RustScalarCast(RustScalarSlotCastPolicy),
     RustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy),
@@ -2410,6 +2580,9 @@ impl SlotConversionPlan {
     pub fn unsupported_diagnostics(&self) -> Vec<ConversionDiagnostic> {
         match self {
             SlotConversionPlan::Shape(plan) => plan.unsupported_diagnostics(),
+            SlotConversionPlan::OptionalConstruction(plan) => {
+                plan.element_plan.unsupported_diagnostics()
+            }
             SlotConversionPlan::BorrowedElement(policy) => policy.unsupported_diagnostics(),
             SlotConversionPlan::Syntax(_)
             | SlotConversionPlan::RustScalarCast(_)
@@ -2489,6 +2662,11 @@ pub fn plan_cast_conversion_from_actual(
     ctx: ExprShapeContext<'_>,
 ) -> CastConversionPlan {
     let mut target = project_java_value_shape(ctx.representations, target_ty.clone());
+    if java_type_is_erased_object_like(target_ty)
+        && matches!(actual.dispatch, DispatchShape::ErasedObject)
+    {
+        target = actual.clone();
+    }
     if same_java_type_cast_should_preserve_actual_shape(&actual, &target) {
         target = actual.clone();
     }
@@ -2873,6 +3051,72 @@ fn target_expects_java_byte_array_or_option(target: &RustSlotShape) -> bool {
             .is_some_and(|element_ty| java_type_is_byte_array(&element_ty))
 }
 
+fn erased_object_clone_recovery_sequence(
+    actual: &RustSlotShape,
+    target: &RustSlotShape,
+) -> Option<bool> {
+    if !matches!(
+        (actual.ownership, target.ownership),
+        (OwnershipShape::SharedBorrow, OwnershipShape::Owned)
+    ) {
+        return None;
+    }
+    if java_type_is_erased_object_sequence_like(&actual.java_ty)
+        || java_type_is_erased_object_sequence_like(&target.java_ty)
+    {
+        return Some(true);
+    }
+    if java_type_is_erased_object_like(&actual.java_ty)
+        || java_type_is_erased_object_like(&target.java_ty)
+    {
+        return Some(false);
+    }
+    None
+}
+
+fn java_type_is_erased_object_display_like(java_ty: &JavaType) -> bool {
+    java_type_is_erased_object_like(java_ty) || java_type_is_erased_object_sequence_like(java_ty)
+}
+
+fn java_type_needs_java_object_display_fallback(
+    java_ty: &JavaType,
+    content: &CoercionContentPolicy,
+) -> bool {
+    if content.string_content {
+        return false;
+    }
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            let receiver_key = crate::stdlib::canonical_external_receiver_type_key(name);
+            let receiver_simple = receiver_key.rsplit('.').next().unwrap_or(&receiver_key);
+            !matches!(
+                receiver_simple,
+                "String"
+                    | "StringBuilder"
+                    | "StringBuffer"
+                    | "CharSequence"
+                    | "Appendable"
+                    | "Class"
+                    | "Path"
+                    | "File"
+                    | "URI"
+            ) && !crate::stdlib::is_java_platform_facade_type_name(&receiver_key)
+        }
+        JavaType::String
+        | JavaType::Primitive(_)
+        | JavaType::Void
+        | JavaType::Array(_)
+        | JavaType::Wildcard(_) => false,
+    }
+}
+
+fn java_type_is_erased_object_sequence_like(java_ty: &JavaType) -> bool {
+    crate::types::sequence_element_type(java_ty).is_some_and(|element_ty| {
+        java_type_is_erased_object_like(&element_ty)
+            || java_type_is_erased_object_sequence_like(&element_ty)
+    })
+}
+
 fn java_type_is_byte_array(java_ty: &JavaType) -> bool {
     matches!(
         java_ty,
@@ -2894,5 +3138,6 @@ fn slot_or_optional_element_targets_erased_object(target: &RustSlotShape) -> boo
 }
 
 fn java_type_is_erased_object_like(java_ty: &JavaType) -> bool {
-    matches!(java_ty, JavaType::Unknown(name) | JavaType::Named { name, .. } if name == "Object" || name == "java.lang.Object")
+    matches!(java_ty, JavaType::Unknown(name) | JavaType::Named { name, .. }
+        if name.eq_ignore_ascii_case("Object") || name.eq_ignore_ascii_case("java.lang.Object"))
 }

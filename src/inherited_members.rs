@@ -39,6 +39,13 @@ pub struct InheritedInstanceFieldRef<'a> {
     pub field: &'a FieldDecl,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InheritedInstanceMethodRef<'a> {
+    pub declaring_type: &'a str,
+    pub declaring_ty: &'a TypeDecl,
+    pub method: &'a crate::java_ir::MethodDecl,
+}
+
 pub fn inherited_instance_fields_for_type(
     ty: &TypeDecl,
     support_program: &Program,
@@ -50,6 +57,47 @@ pub fn inherited_instance_fields_for_type(
             field: inherited.field.clone(),
         })
         .collect()
+}
+
+pub fn inherited_instance_method_refs_for_type<'a>(
+    ty: &TypeDecl,
+    support_program: &'a Program,
+) -> Vec<InheritedInstanceMethodRef<'a>> {
+    let mut methods = Vec::new();
+    let mut seen_methods = direct_instance_method_signatures(ty);
+    let mut current = ty.extends.as_deref();
+    let mut visited_types = HashSet::new();
+
+    while let Some(type_name) = current {
+        let Some(super_ty) = find_type_decl(support_program, type_name) else {
+            break;
+        };
+        if !visited_types.insert(super_ty.name.clone()) {
+            break;
+        }
+
+        for member in &super_ty.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if !is_inheritable_instance_method(method) {
+                continue;
+            }
+            let rust_name = crate::parser::to_snake_case(&method.name);
+            let signature = (rust_name, method.params.len());
+            if seen_methods.insert(signature) {
+                methods.push(InheritedInstanceMethodRef {
+                    declaring_type: &super_ty.name,
+                    declaring_ty: super_ty,
+                    method,
+                });
+            }
+        }
+
+        current = super_ty.extends.as_deref();
+    }
+
+    methods
 }
 
 pub fn external_inherited_instance_fields_for_type(
@@ -68,7 +116,11 @@ pub fn external_inherited_instance_fields_for_type(
             if fact.field_kind != ExternalFieldKind::Unknown {
                 continue;
             }
-            if !type_name_matches(&fact.field.type_name, &super_name) {
+            if !external_field_fact_matches_super_type(
+                &fact.field.type_name,
+                &super_name,
+                fact.provenance,
+            ) {
                 continue;
             }
             let rust_name = rust_field_name(&fact.field.field_name);
@@ -105,7 +157,11 @@ pub fn external_inherited_static_final_fields_for_type(
             if fact.field_kind != ExternalFieldKind::StaticFinal {
                 continue;
             }
-            if !type_name_matches(&fact.field.type_name, &super_name) {
+            if !external_field_fact_matches_super_type(
+                &fact.field.type_name,
+                &super_name,
+                fact.provenance,
+            ) {
                 continue;
             }
             if !seen_fields.insert(fact.field.field_name.clone()) {
@@ -225,6 +281,19 @@ fn direct_instance_field_names(ty: &TypeDecl) -> HashSet<String> {
         .collect()
 }
 
+fn direct_instance_method_signatures(ty: &TypeDecl) -> HashSet<(String, usize)> {
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) if !is_static_method(method) => Some((
+                crate::parser::to_snake_case(&method.name),
+                method.params.len(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 fn direct_static_final_field_names(ty: &TypeDecl) -> HashSet<String> {
     ty.members
         .iter()
@@ -269,6 +338,20 @@ fn type_name_matches(candidate: &str, query: &str) -> bool {
         .any(|candidate| query_aliases.iter().any(|query| query == candidate))
 }
 
+fn external_field_fact_matches_super_type(
+    fact_type_name: &str,
+    super_name: &str,
+    provenance: crate::facts::FactProvenance,
+) -> bool {
+    if provenance == crate::facts::FactProvenance::BuiltinExternalModel
+        && fact_type_name.contains('.')
+        && !super_name.contains('.')
+    {
+        return false;
+    }
+    type_name_matches(fact_type_name, super_name)
+}
+
 fn type_name_aliases(type_name: &str) -> Vec<String> {
     let without_args = type_name.split('<').next().unwrap_or(type_name).trim();
     let simple = without_args
@@ -290,4 +373,14 @@ fn type_name_aliases(type_name: &str) -> Vec<String> {
 
 fn is_static_field(field: &FieldDecl) -> bool {
     field.modifiers.contains(&Modifier::Static)
+}
+
+fn is_static_method(method: &crate::java_ir::MethodDecl) -> bool {
+    method.modifiers.contains(&Modifier::Static)
+}
+
+fn is_inheritable_instance_method(method: &crate::java_ir::MethodDecl) -> bool {
+    !is_static_method(method)
+        && !method.modifiers.contains(&Modifier::Private)
+        && !method.modifiers.contains(&Modifier::Abstract)
 }

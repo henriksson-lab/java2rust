@@ -87,7 +87,15 @@ pub fn analyze_program_with_config(
     facts.extend_from(external_facts.clone());
     let mut diagnostics = Vec::new();
 
+    collect_builtin_external_representation_facts(&mut facts, config.enable_builtin_external_packs);
     collect_trivial_accessor_facts(program, &mut facts);
+    if config.enable_external_api_guesses {
+        collect_java_platform_api_argument_effect_facts(&mut facts);
+        collect_builtin_external_api_argument_effect_facts(
+            &mut facts,
+            config.enable_builtin_external_packs,
+        );
+    }
     let usage = usage::analyze_usage_with_facts(program, &facts);
     let field_nullability_iterations =
         collect_field_nullability_facts(program, &mut facts, &mut diagnostics);
@@ -138,6 +146,44 @@ pub fn analyze_program_with_config(
             external_api_effects: usize::from(config.enable_external_api_guesses),
             control_flow: usize::from(config.enable_control_flow_facts),
         },
+    }
+}
+
+fn collect_builtin_external_representation_facts(facts: &mut FactSet, enabled: bool) {
+    if !enabled {
+        return;
+    }
+
+    let builtin = crate::external_packs::builtin_external_library_packs();
+    for fact in builtin.hierarchy_overrides {
+        if !facts.hierarchy_overrides.contains(&fact) {
+            facts.hierarchy_overrides.push(fact);
+        }
+    }
+    for fact in builtin.closed_hierarchy_facts {
+        if !facts.closed_hierarchy_facts.contains(&fact) {
+            facts.closed_hierarchy_facts.push(fact);
+        }
+    }
+    for fact in builtin.object_safety_facts {
+        if !facts.object_safety_facts.contains(&fact) {
+            facts.object_safety_facts.push(fact);
+        }
+    }
+    for fact in builtin.type_capability_overrides {
+        if !facts.type_capability_overrides.contains(&fact) {
+            facts.type_capability_overrides.push(fact);
+        }
+    }
+    for fact in builtin.owned_recovery_capability_facts {
+        if !facts.owned_recovery_capability_facts.contains(&fact) {
+            facts.owned_recovery_capability_facts.push(fact);
+        }
+    }
+    for fact in builtin.external_conversion_adapter_facts {
+        if !facts.external_conversion_adapter_facts.contains(&fact) {
+            facts.external_conversion_adapter_facts.push(fact);
+        }
     }
 }
 
@@ -2152,11 +2198,24 @@ fn push_method_thrown_effects(
     method_name: &str,
     thrown: &[JavaType],
 ) -> bool {
-    let Some(index) = facts
+    let index = facts
         .method_effect_facts
         .iter()
         .position(|fact| source_method_effect_key_matches(&fact.method, type_name, method_name))
-    else {
+        .unwrap_or_else(|| {
+            facts.method_effect_facts.push(MethodEffectFact {
+                method: MethodKey {
+                    type_name: type_name.to_string(),
+                    method_name: method_name.to_string(),
+                },
+                receiver_mutability: ReceiverMutabilityFact::Unknown,
+                return_nullability: NullabilityState::Unknown,
+                thrown: Vec::new(),
+                provenance: FactProvenance::ParsedSource,
+            });
+            facts.method_effect_facts.len() - 1
+        });
+    if facts.method_effect_facts[index].provenance == FactProvenance::UserOverride {
         return false;
     };
     let effect = &mut facts.method_effect_facts[index];
@@ -2170,7 +2229,8 @@ fn push_method_thrown_effects(
 fn source_method_effect_key_matches(key: &MethodKey, type_name: &str, method_name: &str) -> bool {
     key.type_name == type_name
         && (key.method_name == method_name
-            || crate::parser::to_snake_case(&key.method_name) == method_name)
+            || crate::parser::to_snake_case(&key.method_name) == method_name
+            || key.method_name == crate::parser::to_snake_case(method_name))
 }
 
 fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &mut FactSet) {
@@ -2193,16 +2253,25 @@ fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &m
                     || return_nullability != NullabilityState::Unknown
                     || !thrown.is_empty()
                 {
-                    facts.method_effect_facts.push(MethodEffectFact {
+                    let effect = MethodEffectFact {
                         method: MethodKey {
                             type_name: ty.name.clone(),
                             method_name: method.name.clone(),
                         },
                         receiver_mutability,
                         return_nullability,
-                        thrown,
+                        thrown: thrown.clone(),
                         provenance: FactProvenance::ParsedSource,
-                    });
+                    };
+                    facts.method_effect_facts.push(effect.clone());
+                    if let Some(rust_name) = method.rust_name.as_deref()
+                        && rust_name != method.name
+                        && rust_name != crate::parser::to_snake_case(&method.name)
+                    {
+                        let mut rust_name_effect = effect;
+                        rust_name_effect.method.method_name = rust_name.to_string();
+                        facts.method_effect_facts.push(rust_name_effect);
+                    }
                 }
             }
             Member::Type(nested) => collect_type_method_effect_facts(nested, usage, facts),
@@ -4369,6 +4438,11 @@ fn field_nullability_fact(
         (
             field_state_from_assignment_nullability(method_assignment),
             FieldNullabilityProvenance::MethodAssignment,
+        )
+    } else if field.modifiers.contains(&Modifier::Static) && initializer_non_null {
+        (
+            NullabilityState::DefinitelyNonNull,
+            FieldNullabilityProvenance::FieldInitializer,
         )
     } else if all_constructors_assign_non_null {
         (

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
 
 use new_java2rust::access_lowering::{
     lower_bare_name, lower_field_access, lower_field_access_with_facts,
@@ -30,7 +31,7 @@ use new_java2rust::conversion_lowering::{apply_cast_conversion, apply_instanceof
 use new_java2rust::conversion_plan::{
     AssignmentStatementPlan, CastAndInstanceOfPlanningBoundary, InstanceOfCheck,
     JavaCastSemanticsPolicy, LoweredType, actual_shape_for_slot_expr_with_slot, argument_slot,
-    assignment_statement_plan_for_target, cast_and_instanceof_planning_boundary,
+    assignment_statement_plan_for_target, cast_and_instanceof_planning_boundary, index_slot,
     plan_cast_conversion, plan_instanceof,
 };
 use new_java2rust::dependency_mode::DependencyMode;
@@ -95,6 +96,7 @@ use new_java2rust::lower::{lower_program_with_facts, lower_program_with_plans};
 use new_java2rust::lowering_diagnostics::collect_lowering_diagnostic_plans;
 use new_java2rust::method_reference_lowering::render_method_reference;
 use new_java2rust::method_reference_plan::{MethodReferencePlan, plan_method_reference};
+use new_java2rust::method_reference_shape::infer_single_input_method_reference_output_shape;
 use new_java2rust::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
 use new_java2rust::object_model::rust_enum_variant_name_from_parsed_constant;
 use new_java2rust::operator_lowering::{
@@ -265,9 +267,10 @@ use new_java2rust::unsupported::{
     UnsupportedConstructorLowering, UnsupportedDiagnosticPolicy, UnsupportedExpressionLowering,
     UnsupportedLoweringMessagePolicy, UnsupportedMemberLowering, UnsupportedStatementLowering,
     plan_unsupported_expression, plan_unsupported_member, plan_unsupported_statement,
-    unsupported_constructor_message_policy, unsupported_expression_expr,
-    unsupported_expression_message_policy, unsupported_member_diagnostic_policy,
-    unsupported_statement_message_policy, unsupported_statement_stmt,
+    unsupported_constructor_body, unsupported_constructor_message_policy,
+    unsupported_expression_expr, unsupported_expression_message_policy,
+    unsupported_member_diagnostic_policy, unsupported_statement_message_policy,
+    unsupported_statement_stmt,
 };
 use new_java2rust::usage::{
     BindingUse, BindingUseFacts, CallArgumentBoundary, CallArgumentBoundaryPolicy,
@@ -1651,6 +1654,24 @@ fn slot_render_owns_default_expressions_for_planned_views() {
         ),
         SlotDefaultPolicy::Value {
             policy: SlotDefaultValuePolicy::PrimitiveNumericZero,
+        }
+    );
+    assert_eq!(
+        slot_default_policy(
+            &RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Float)),
+            &FactSet::default()
+        ),
+        SlotDefaultPolicy::Value {
+            policy: SlotDefaultValuePolicy::PrimitiveFloatZero,
+        }
+    );
+    assert_eq!(
+        slot_default_policy(
+            &RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Double)),
+            &FactSet::default()
+        ),
+        SlotDefaultPolicy::Value {
+            policy: SlotDefaultValuePolicy::PrimitiveDoubleZero,
         }
     );
     assert_eq!(
@@ -3864,6 +3885,19 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
         }
     );
     assert_eq!(
+        unsupported_constructor_body(UnsupportedConstructorLowering::SuperRequiresInheritanceLowering),
+        vec![
+            RustStmt::Raw(
+                "compile_error!(\"unsupported Java constructor: super(...) requires inheritance lowering\");"
+                    .to_string()
+            ),
+            RustStmt::Return(Some(RustExpr::Raw(
+                "panic!(\"unsupported Java constructor: super(...) requires inheritance lowering\")"
+                    .to_string()
+            ))),
+        ]
+    );
+    assert_eq!(
         unsupported_expression_message_policy(UnsupportedExpressionLowering::MethodReference),
         UnsupportedLoweringMessagePolicy {
             message: "unsupported Java expression: method reference".to_string(),
@@ -4060,6 +4094,11 @@ class PlatformBoundaryUse {
     assert!(support.contains("pub struct Path"));
     assert!(support.contains("pub struct URI"));
     assert!(support.contains("pub struct File"));
+    assert!(support.contains("pub fn new_1<P: JavaPathArg>(value: P) -> File"));
+    assert!(
+        support
+            .contains("pub fn new_2<P: JavaPathArg, C: JavaPathArg>(parent: P, child: C) -> File")
+    );
     assert!(support.contains("pub mod logger"));
     assert!(support.contains("pub fn to_uri(&self) -> URI"));
     assert!(support.contains("pub fn to_path(&self) -> Path"));
@@ -4532,6 +4571,15 @@ class Holder {
 }
 
 #[test]
+fn parsed_java_enum_constant_names_preserve_rust_valid_uppercase_constants() {
+    assert_eq!(rust_enum_variant_name_from_parsed_constant("s_n_p"), "SNP");
+    assert_eq!(
+        rust_enum_variant_name_from_parsed_constant("MAX_COUNT_EXCEEDED"),
+        "MAX_COUNT_EXCEEDED"
+    );
+}
+
+#[test]
 fn representation_lowering_emits_dyn_trait_method_signatures_from_signature_plan() {
     let parsed = parse_java_source(
         r#"
@@ -4642,6 +4690,43 @@ class Dog implements Named {
         vec![
             "impl Named for Dog {\n    fn name(&self) -> String { Dog::name(self) }\n}".to_string()
         ]
+    );
+}
+
+#[test]
+fn representation_lowering_skips_incomplete_trait_impls_for_abstract_classes() {
+    let parsed = parse_java_source(
+        r#"
+interface Module {
+    void reset();
+    String name();
+}
+
+abstract class AbstractModule implements Module {
+    public void helper() {}
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let usage = analyze_usage(&resolved.program);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &resolved.facts);
+    let abstract_ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "AbstractModule")
+        .unwrap();
+
+    assert_eq!(
+        trait_impl_emissions_for_type(
+            &representations,
+            &resolved.program,
+            abstract_ty,
+            &signatures
+        ),
+        Vec::<String>::new()
     );
 }
 
@@ -4767,14 +4852,14 @@ class BrokenNamed implements Named {
     );
     assert_eq!(
         message_policy.compile_error_body("fn name(&self) -> String;"),
-        "fn name(&self) -> String { compile_error!(\"incompatible Java interface method implementation: BrokenNamed.name return type does not match interface\"); }"
+        "fn name(&self) -> String { panic!(\"incompatible Java interface method implementation: BrokenNamed.name return type does not match interface\"); }"
     );
 
     assert_eq!(impls.len(), 1);
     assert!(impls[0].contains("impl Named for BrokenNamed"));
     assert!(
         impls[0].contains(
-            "compile_error!(\"incompatible Java interface method implementation: BrokenNamed.name return type does not match interface\")"
+            "panic!(\"incompatible Java interface method implementation: BrokenNamed.name return type does not match interface\")"
         ),
         "{}",
         impls[0]
@@ -9663,6 +9748,43 @@ class Uses {
         OwnershipShape::SharedBorrow
     );
     assert_eq!(sqlite_bind_shapes[1].view, ViewShape::Str);
+
+    let mut stream_types = TypeEnv::new();
+    stream_types.insert_local(
+        "in",
+        JavaType::Named {
+            name: "Optional".to_string(),
+            args: vec![JavaType::Named {
+                name: "InputStream".to_string(),
+                args: Vec::new(),
+            }],
+        },
+    );
+    let mut stream_facts = FactSet::default();
+    for fact in new_java2rust::external_packs::java_platform_api_argument_effect_facts() {
+        stream_facts.external_api_argument_effect_facts.push(fact);
+    }
+    let stream_read_plan = plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("in".to_string())),
+        "read",
+        None,
+        &[Expr::Var("buffer".to_string())],
+        &signatures,
+        &stream_facts,
+        &stream_types,
+    );
+    let ArgumentLoweringPlan::Shaped(stream_read_shapes) = stream_read_plan else {
+        panic!("nullable InputStream receiver should use platform argument-effect facts");
+    };
+    assert_eq!(
+        stream_read_shapes[0].java_ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)))
+    );
+    assert_eq!(
+        stream_read_shapes[0].ownership,
+        OwnershipShape::MutableBorrow
+    );
+
     assert_eq!(
         plan_call_arguments_with_facts(
             Some(&Expr::Var("statement".to_string())),
@@ -9707,6 +9829,201 @@ class Uses {
     assert!(lower_source.contains(".receiver_expr()"));
     assert!(lower_source.contains("fn lower_enhanced_for_stmt"));
     assert!(lower_source.contains("loop_env.insert_local_shape"));
+}
+
+#[test]
+fn nullable_receiver_external_argument_facts_shape_borrowed_stream_read_args() {
+    let signatures = SignaturePlan::default();
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "in",
+        JavaType::Named {
+            name: "Optional".to_string(),
+            args: vec![JavaType::Named {
+                name: "InputStream".to_string(),
+                args: Vec::new(),
+            }],
+        },
+    );
+    let mut facts = FactSet::default();
+    for fact in new_java2rust::external_packs::java_platform_api_argument_effect_facts() {
+        facts.external_api_argument_effect_facts.push(fact);
+    }
+
+    let plan = plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("in".to_string())),
+        "read",
+        None,
+        &[Expr::Var("buffer".to_string())],
+        &signatures,
+        &facts,
+        &types,
+    );
+
+    let ArgumentLoweringPlan::Shaped(shapes) = plan else {
+        panic!("nullable InputStream receiver should use platform argument-effect facts");
+    };
+    assert_eq!(
+        shapes[0].java_ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)))
+    );
+    assert_eq!(shapes[0].ownership, OwnershipShape::MutableBorrow);
+}
+
+#[test]
+fn facade_abi_mut_slice_slot_shapes_array_argument_as_mutable_borrow() {
+    let signatures = SignaturePlan::default();
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "buffer",
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+    );
+    let mut facts = FactSet::default();
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("BufferFacade", "fill", Staticness::Unknown, 1),
+        rust_path: "buffer_facade::fill".to_string(),
+        receiver: ReceiverAbi::AssociatedFunction,
+        args: vec![FacadeSlot::Slice(Box::new(FacadeSlot::MutBorrowed))],
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        provenance: FactProvenance::UserOverride,
+    });
+
+    let plan = plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("BufferFacade".to_string())),
+        "fill",
+        None,
+        &[Expr::Var("buffer".to_string())],
+        &signatures,
+        &facts,
+        &types,
+    );
+
+    let ArgumentLoweringPlan::Shaped(shapes) = plan else {
+        panic!("FacadeSlot::Slice(MutBorrowed) should produce a shaped argument plan");
+    };
+    assert_eq!(
+        shapes[0].java_ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)))
+    );
+    assert_eq!(shapes[0].ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(shapes[0].mutability, MutabilityShape::Mutable);
+}
+
+#[test]
+fn platform_mutable_external_argument_marks_local_binding_mutable() {
+    let parsed = parse_java_source(
+        r#"
+import java.io.InputStream;
+
+class PlatformMutableExternalArgument {
+    int run(InputStream in) throws Exception {
+        byte[] buffer = new byte[4];
+        return in.read(buffer);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = new_java2rust::semantic_analysis::analyze_program(
+        &resolved.program,
+        &resolved.facts,
+        &FactSet::default(),
+    );
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let signatures = new_java2rust::signature::solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let locals = signatures.method_local_shapes_or_empty(ty, method);
+
+    assert_eq!(
+        signatures.local_binding_mutability(locals, "buffer"),
+        Some(true),
+        "{:#?}",
+        semantic
+            .usage
+            .methods_by_rust_name
+            .get(&new_java2rust::usage::UsageMethodKey {
+                type_name: ty.name.clone(),
+                method_name: method
+                    .rust_name
+                    .clone()
+                    .unwrap_or_else(|| method.name.clone()),
+            })
+            .and_then(|usage| usage.bindings.get("buffer"))
+    );
+}
+
+#[test]
+fn internal_mutable_array_argument_marks_local_binding_mutable() {
+    let parsed = parse_java_source(
+        r#"
+class InternalMutableArrayArgument {
+    static void fill(double out[]) {
+        out[0] = 1.0;
+    }
+
+    static int run() {
+        double[] values = new double[2];
+        fill(values);
+        return values.length;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = new_java2rust::semantic_analysis::analyze_program(
+        &resolved.program,
+        &resolved.facts,
+        &FactSet::default(),
+    );
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let signatures = new_java2rust::signature::solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let locals = signatures.method_local_shapes_or_empty(ty, method);
+
+    assert_eq!(
+        signatures.local_binding_mutability(locals, "values"),
+        Some(true),
+        "{:#?}",
+        semantic
+            .usage
+            .methods_by_rust_name
+            .get(&new_java2rust::usage::UsageMethodKey {
+                type_name: ty.name.clone(),
+                method_name: method
+                    .rust_name
+                    .clone()
+                    .unwrap_or_else(|| method.name.clone()),
+            })
+            .and_then(|usage| usage.bindings.get("values"))
+    );
 }
 
 #[test]
@@ -10953,9 +11270,10 @@ class ExternalFacadeDisplayEquality {
 fn call_plan_recovers_normalized_static_utility_owner_receivers() {
     let facts = new_java2rust::external_packs::broad_hellbender_utils_pack_facts();
     assert!(matches!(
-        plan_call_target_with_facts(
+        plan_call_target_with_facts_and_arity(
             Some(&Expr::Var("i_o_utils".to_string())),
             "getPath",
+            1,
             None,
             &facts,
             &new_java2rust::types::TypeEnv::default(),
@@ -10969,12 +11287,67 @@ fn call_plan_recovers_normalized_static_utility_owner_receivers() {
     let mut shadowed_types = TypeEnv::new();
     shadowed_types.insert_local("i_o_utils", JavaType::Unknown("LocalIOUtils".to_string()));
     assert!(matches!(
-        plan_call_target_with_facts(
+        plan_call_target_with_facts_and_arity(
             Some(&Expr::Var("i_o_utils".to_string())),
             "getPath",
+            1,
             None,
             &facts,
             &shadowed_types,
+        ),
+        CallTargetPlan::FallbackReceiver { .. }
+    ));
+
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("math".to_string())),
+            "pow",
+            2,
+            None,
+            &FactSet::default(),
+            &TypeEnv::default(),
+        ),
+        CallTargetPlan::StaticOwner {
+            owner,
+            rust_name
+        } if owner == "Math" && rust_name == "pow"
+    ));
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("double".to_string())),
+            "isInfinite",
+            1,
+            None,
+            &FactSet::default(),
+            &TypeEnv::default(),
+        ),
+        CallTargetPlan::StaticOwner {
+            owner,
+            rust_name
+        } if owner == "Double" && rust_name == "is_infinite"
+    ));
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("system".to_string())),
+            "arraycopy",
+            5,
+            None,
+            &FactSet::default(),
+            &TypeEnv::default(),
+        ),
+        CallTargetPlan::StaticOwner {
+            owner,
+            rust_name
+        } if owner == "System" && rust_name == "arraycopy"
+    ));
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("foo".to_string())),
+            "toString",
+            0,
+            None,
+            &FactSet::default(),
+            &TypeEnv::default(),
         ),
         CallTargetPlan::FallbackReceiver { .. }
     ));
@@ -10992,7 +11365,7 @@ fn call_plan_recovers_normalized_static_utility_owner_receivers() {
         CallTargetPlan::StaticOwner {
             owner,
             rust_name
-        } if owner == "ExternalUtility" && rust_name == "read_value"
+        } if owner == "ExternalLibExternalUtility" && rust_name == "read_value"
     ));
 
     imported_types.insert_local(
@@ -11023,7 +11396,7 @@ fn call_plan_recovers_normalized_static_utility_owner_receivers() {
         CallTargetPlan::StaticOwner {
             owner,
             rust_name
-        } if owner == "StaticUtility" && rust_name == "read_value"
+        } if owner == "ExternalLibStaticUtility" && rust_name == "read_value"
     ));
     assert!(matches!(
         plan_call_target_with_facts(
@@ -11356,6 +11729,24 @@ fn java_string_join_static_call_renders_collection_join() {
             method: "join".to_string(),
             args: vec![RustExpr::Literal("\" and \"".to_string())],
         }
+    );
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::NativeJavaStatic {
+                method: NativeJavaStaticMethod::StringJoin,
+            },
+            None,
+            vec![
+                RustExpr::Literal("\"|\".to_string()".to_string()),
+                RustExpr::Literal("\"bin\".to_string()".to_string()),
+                RustExpr::Var("root".to_string()),
+                RustExpr::Raw("format!(\"{}-classes\", name)".to_string()),
+            ],
+        ),
+        RustExpr::Raw(
+            "vec![\"bin\".to_string(), (root).to_string(), (format!(\"{}-classes\", name)).to_string()].join(\"|\")"
+                .to_string()
+        )
     );
 }
 
@@ -11797,6 +12188,39 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
             target: Expr::Var(name),
         }) if name == "values"
     ));
+    assert!(matches!(
+        plan_call_statement(
+            &Expr::Call {
+                receiver: Some(Box::new(Expr::Var("Collections".to_string()))),
+                name: "sort".to_string(),
+                args: vec![Expr::Var("values".to_string())],
+                resolved: None,
+            },
+            &facts,
+        ),
+        Some(CallStatementPlan::NativeCollectionsSort {
+            target: Expr::Var(name),
+            comparator: None,
+        }) if name == "values"
+    ));
+    assert!(matches!(
+        plan_call_statement(
+            &Expr::Call {
+                receiver: Some(Box::new(Expr::Var("Collections".to_string()))),
+                name: "sort".to_string(),
+                args: vec![
+                    Expr::Var("values".to_string()),
+                    Expr::Var("comparator".to_string())
+                ],
+                resolved: None,
+            },
+            &facts,
+        ),
+        Some(CallStatementPlan::NativeCollectionsSort {
+            target: Expr::Var(name),
+            comparator: Some(Expr::Var(comparator)),
+        }) if name == "values" && comparator == "comparator"
+    ));
 
     let mut preserve_api_facts = facts.clone();
     preserve_api_facts.trivial_accessor_facts[0].inline_policy = AccessorInlinePolicy::PreserveApi;
@@ -11851,6 +12275,164 @@ class ArraysSortUse {
     );
     assert!(
         !translation.rust.contains("Arrays::sort"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn collections_sort_statement_lowers_to_mutating_rust_sort() {
+    let source = r#"
+import java.util.ArrayList;
+import java.util.Collections;
+
+class CollectionsSortUse {
+    void sortValues(ArrayList<String> values) {
+        Collections.sort(values);
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("values.sort();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("let mut values = values;")
+            || translation
+                .rust
+                .contains("mut values: std::collections::VecDeque")
+            || translation.rust.contains("mut values: Vec<String>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("JavaUtilCollections::sort"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn collections_sort_comparator_statement_lowers_to_sort_by() {
+    let source = r#"
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+
+class CollectionsSortComparatorUse {
+    void sortValues(ArrayList<String> values, Comparator<String> comparator) {
+        Collections.sort(values, comparator);
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("values.sort_by(|a, b|")
+            && translation
+                .rust
+                .contains("__java_comparator.compare(a.clone(), b.clone()).cmp(&0)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("let mut values = values;")
+            || translation.rust.contains("mut values: Vec<String>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("JavaUtilCollections::sort"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn collections_sort_comparator_marks_local_vec_mutable() {
+    let source = r#"
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+
+class CollectionsSortLocalUse {
+    ArrayList<String> sortValues(boolean sort, Comparator<String> comparator) {
+        ArrayList<String> values = new ArrayList<String>();
+        values.add("b");
+        if (sort) {
+            Collections.sort(values, comparator);
+        }
+        return values;
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("let mut values: Vec<String>")
+            && translation.rust.contains("values.sort_by(|a, b|"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("JavaUtilCollections::sort"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn collections_sort_comparator_marks_interface_declared_local_vec_mutable() {
+    let source = r#"
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+
+class CollectionsSortInterfaceLocalUse {
+    List<String> sortValues(boolean sort, Comparator<String> comparator) {
+        List<String> values = new ArrayList<String>();
+        values.add("b");
+        if (sort) {
+            Collections.sort(values, comparator);
+        }
+        return values;
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("let mut values: Vec<String>")
+            && translation.rust.contains("values.sort_by(|a, b|"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("JavaUtilCollections::sort"),
         "{}",
         translation.rust
     );
@@ -12978,10 +13560,29 @@ class Holder {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains("return self.workspace.clone();")
+        translation
+            .rust
+            .contains("return self.workspace.as_ref().cloned();")
             && !translation.rust.contains("return self.workspace;"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn optional_self_field_borrowed_option_recovery_uses_slot_plan() {
+    let source = fs::read_to_string("src/lower.rs").unwrap();
+
+    assert!(
+        source.contains("fn lower_optional_self_field_borrowed_option_recovery")
+            && source.contains(
+                "plan_slot_conversion(actual.clone(), Slot::Return(target.clone()), ctx.facts)"
+            )
+            && source.contains("fn apply_optional_field_borrowed_carrier_to_slot")
+            && source.contains("LoweredType::OptionalElementBorrow")
+            && source.contains("plan_lowered_slot_conversion(&actual, slot, ctx.facts)")
+            && !source.contains("format!(\n        \"{}.as_ref()\""),
+        "{source}"
     );
 }
 
@@ -13002,12 +13603,58 @@ class Holder {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "let tmp: Cursor = self.query.as_ref().expect(\"Java null receiver\").clone()"
-        ) && translation.rust.contains("self.query.take();")
+        translation
+            .rust
+            .contains("let tmp: Option<Cursor> = self.query.as_ref().cloned()")
+            && translation.rust.contains("self.query.take();")
+            && translation.rust.contains(
+                "return tmp.as_ref().unwrap().clone()/* TODO(translation): validate added clone */;"
+            )
+            && !translation.rust.contains(
+                "self.query.as_ref().cloned()/* TODO(translation): validate added clone */.clone()"
+            )
             && !translation
                 .rust
                 .contains("let tmp: Cursor = self.query.unwrap();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn optional_receiver_field_element_recovery_uses_borrowed_carrier_plan() {
+    let source = r#"
+class Holder {
+    Node node;
+
+    String consume(String value) {
+        return value;
+    }
+
+    String run() {
+        return consume(node.name);
+    }
+}
+
+class Node {
+    String name;
+
+    Node(String name) {
+        if (name != null && !name.isEmpty()) {
+            this.name = name;
+        } else {
+            this.name = null;
+        }
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "self.consume(self.node.as_ref().expect(\"Java null receiver\").name.as_ref().cloned().expect(\"Java null receiver\"))"
+        ) && !translation.rust.contains(".name.as_ref().expect(\"Java null receiver\").clone()"),
         "{}",
         translation.rust
     );
@@ -17226,8 +17873,10 @@ fn usage_call_result_boundary_policy_names_result_boundaries() {
         call_result_boundary_policy(&parse_expr("localFetch()"), &internal_methods, &empty_usage),
         Some(CallResultBoundaryPolicy {
             name: "localFetch".to_string(),
+            arg_count: 0,
             receiver_type: None,
             boundary: CallArgumentBoundary::Unknown,
+            resolved: None,
         })
     );
     assert_eq!(
@@ -17238,8 +17887,10 @@ fn usage_call_result_boundary_policy_names_result_boundaries() {
         ),
         Some(CallResultBoundaryPolicy {
             name: "local_fetch".to_string(),
+            arg_count: 0,
             receiver_type: None,
             boundary: CallArgumentBoundary::InternalSameType,
+            resolved: None,
         })
     );
     assert_eq!(
@@ -17250,8 +17901,10 @@ fn usage_call_result_boundary_policy_names_result_boundaries() {
         ),
         Some(CallResultBoundaryPolicy {
             name: "fetch".to_string(),
+            arg_count: 0,
             receiver_type: None,
             boundary: CallArgumentBoundary::Unknown,
+            resolved: None,
         })
     );
     assert_eq!(
@@ -17262,8 +17915,10 @@ fn usage_call_result_boundary_policy_names_result_boundaries() {
         ),
         Some(CallResultBoundaryPolicy {
             name: "new".to_string(),
+            arg_count: 0,
             receiver_type: None,
             boundary: CallArgumentBoundary::Unknown,
+            resolved: None,
         })
     );
 
@@ -17283,11 +17938,13 @@ fn usage_call_result_boundary_policy_names_result_boundaries() {
         call_result_boundary_policy(&parse_expr("helper.fetch()"), &internal_methods, &usage),
         Some(CallResultBoundaryPolicy {
             name: "fetch".to_string(),
+            arg_count: 0,
             receiver_type: Some(JavaType::Named {
                 name: "Helper".to_string(),
                 args: Vec::new(),
             }),
             boundary: CallArgumentBoundary::Unknown,
+            resolved: None,
         })
     );
 }
@@ -22864,6 +23521,45 @@ class UseExternalStringConstants {
 }
 
 #[test]
+fn conventional_external_version_constant_append_does_not_downcast() {
+    let source = r#"
+class ExternalVersionAppend {
+    StringBuilder data = new StringBuilder();
+
+    void run() {
+        data.append(FastQCApplication.VERSION);
+    }
+}
+"#;
+
+    let translation = translate_source(source);
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("pub struct FastQCApplication"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub const VERSION: &'static str = \"VERSION\";"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("FastQCApplication::VERSION")
+            && !translation.rust.contains("downcast::<String>()")
+            && !translation.rust.contains("invalid Java cast"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn genomicsdb_imported_constants_and_nested_type_fields_use_pack_facts() {
     let source = r#"
 import org.genomicsdb.Constants;
@@ -23714,14 +24410,20 @@ class StringReturnFlow {
         translation.diagnostics
     );
     assert!(
-        translation.rust.contains("pub fn id(value: &str) -> &str"),
+        translation.rust.contains("pub fn id(value: &str) -> &str")
+            || translation
+                .rust
+                .contains("pub fn id<'a>(value: &'a str) -> &'a str"),
         "{}",
         translation.rust
     );
     assert!(
         translation
             .rust
-            .contains("return Self::id(value.as_str()).to_string();"),
+            .contains("return Self::id(value.as_str()).to_string();")
+            || translation
+                .rust
+                .contains("return Self::id(value).to_string();"),
         "{}",
         translation.rust
     );
@@ -23800,14 +24502,20 @@ class StringReturnFlow {
         translation.diagnostics
     );
     assert!(
-        translation.rust.contains("pub fn id(value: &str) -> &str"),
+        translation.rust.contains("pub fn id(value: &str) -> &str")
+            || translation
+                .rust
+                .contains("pub fn id<'a>(value: &'a str) -> &'a str"),
         "{}",
         translation.rust
     );
     assert!(
         translation
             .rust
-            .contains("pub fn wrapper(value: &str) -> &str"),
+            .contains("pub fn wrapper(value: &str) -> &str")
+            || translation
+                .rust
+                .contains("pub fn wrapper<'a>(value: &'a str) -> &'a str"),
         "{}",
         translation.rust
     );
@@ -24331,7 +25039,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
         java_exception_support_item(),
         new_java2rust::rust_ir::RustItem::Raw(item)
             if item.contains("pub struct JavaException")
-                && item.contains("pub fn get_message(&self) -> String")
+                && item.contains("pub fn get_message(&self) -> Option<String>")
                 && item.contains("impl std::fmt::Display for JavaException")
     ));
     assert_eq!(
@@ -26789,8 +27497,79 @@ fn shape_projection_owns_borrowed_string_content_shape() {
 
 #[test]
 fn stdlib_owns_known_jdk_content_method_facts() {
+    let expr_shape_source = include_str!("../src/expr_shape.rs");
+    let lower_source = include_str!("../src/lower.rs");
     let stream_shape_source = include_str!("../src/stream_shape.rs");
     let usage_source = include_str!("../src/usage.rs");
+    let stdlib_signature_facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let contains_key = CallableKey::method("String", "contains", Staticness::Unknown, 1);
+    let trim_key = CallableKey::method("String", "trim", Staticness::Unknown, 0);
+    let char_at_key = CallableKey::method("String", "charAt", Staticness::Unknown, 1);
+    let index_of_key = CallableKey::method("String", "indexOf", Staticness::Unknown, 1);
+    let index_of_from_key = CallableKey::method("String", "indexOf", Staticness::Unknown, 2);
+    let get_bytes_key = CallableKey::method("String", "getBytes", Staticness::Unknown, 1);
+    let split_key = CallableKey::method("String", "split", Staticness::Unknown, 2);
+    let matches_key = CallableKey::method("String", "matches", Staticness::Unknown, 1);
+    let parse_int_key = CallableKey::method("Integer", "parseInt", Staticness::Unknown, 1);
+    let parse_float_key = CallableKey::method("Float", "parseFloat", Staticness::Unknown, 1);
+    let parse_double_key = CallableKey::method("Double", "parseDouble", Staticness::Unknown, 1);
+    let math_log_key = CallableKey::method("Math", "log", Staticness::Unknown, 1);
+    let math_exp_key = CallableKey::method("Math", "exp", Staticness::Unknown, 1);
+    let math_to_int_exact_key = CallableKey::method("Math", "toIntExact", Staticness::Unknown, 1);
+    let double_is_nan_key = CallableKey::method("Double", "isNaN", Staticness::Unknown, 1);
+    let float_is_nan_key = CallableKey::method("Float", "isNaN", Staticness::Unknown, 1);
+    let objects_non_null_key = CallableKey::method("Objects", "nonNull", Staticness::Unknown, 1);
+    let objects_is_null_key =
+        CallableKey::method("java.util.Objects", "isNull", Staticness::Unknown, 1);
+    let system_gc_key = CallableKey::method("java.lang.System", "gc", Staticness::Unknown, 0);
+    let file_exists_key = CallableKey::method("java.io.File", "exists", Staticness::Unknown, 0);
+    let file_list_key = CallableKey::method("java.io.File", "list", Staticness::Unknown, 0);
+    let file_is_file_key = CallableKey::method("java.io.File", "isFile", Staticness::Unknown, 0);
+    let file_can_read_key = CallableKey::method("java.io.File", "canRead", Staticness::Unknown, 0);
+    let files_exists_key =
+        CallableKey::method("java.nio.file.Files", "exists", Staticness::Unknown, 1);
+    let files_new_input_stream_key = CallableKey::method(
+        "java.nio.file.Files",
+        "new_input_stream",
+        Staticness::Unknown,
+        1,
+    );
+    let files_new_output_stream_key = CallableKey::method(
+        "java.nio.file.Files",
+        "new_output_stream",
+        Staticness::Unknown,
+        1,
+    );
+    let files_new_buffered_reader_key = CallableKey::method(
+        "java.nio.file.Files",
+        "new_buffered_reader",
+        Staticness::Unknown,
+        1,
+    );
+    let files_read_all_lines_key = CallableKey::method(
+        "java.nio.file.Files",
+        "read_all_lines",
+        Staticness::Unknown,
+        1,
+    );
+    let input_stream_read_key =
+        CallableKey::method("java.io.InputStream", "read", Staticness::Unknown, 3);
+    let input_stream_read_3_key =
+        CallableKey::method("InputStream", "read_3", Staticness::Unknown, 3);
+    let output_stream_write_key =
+        CallableKey::method("java.io.OutputStream", "write", Staticness::Unknown, 3);
+    let output_stream_write_3_key =
+        CallableKey::method("BufferedOutputStream", "write_3", Staticness::Unknown, 3);
+    let string_tokenizer_has_more_tokens_key = CallableKey::method(
+        "java.util.StringTokenizer",
+        "hasMoreTokens",
+        Staticness::Unknown,
+        0,
+    );
+    let string_tokenizer_next_token_key =
+        CallableKey::method("StringTokenizer", "nextToken", Staticness::Unknown, 0);
+    let string_tokenizer_count_tokens_key =
+        CallableKey::method("StringTokenizer", "countTokens", Staticness::Unknown, 0);
 
     assert!(is_content_read_method("length"));
     assert!(is_content_read_method("isEmpty"));
@@ -26802,7 +27581,1287 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert!(!is_owned_string_result_method("toLowerCase", 1));
     assert!(!stream_shape_source.contains("name == \"trim\""));
     assert!(!stream_shape_source.contains("toLowerCase"));
+    assert!(!stream_shape_source.contains("IntegerParseInt"));
+    assert!(!stream_shape_source.contains("DoubleParseDouble"));
+    assert!(!stream_shape_source.contains("MathToIntExact"));
+    assert!(!stream_shape_source.contains("StringTrim"));
+    assert!(!stream_shape_source.contains("StringToLowercase"));
+    assert!(!stream_shape_source.contains("StringSplit"));
+    assert!(stream_shape_source.contains("native_java_call_lowered_type"));
+    assert!(expr_shape_source.contains("native_java_call_expr_shape"));
+    assert!(expr_shape_source.contains("native_java_call_lowered_type"));
+    assert!(!lower_source.contains("fn lower_string_pattern_args"));
+    assert!(lower_source.contains("fn string_pattern_compat_argument_plan"));
     assert!(!usage_source.contains("\"length\" | \"isEmpty\" | \"trim\""));
+
+    let contains_abi = stdlib_signature_facts
+        .facade_abi_for_key(&contains_key)
+        .expect("String.contains ABI should come from selected Rust stdlib facts");
+    assert_eq!(contains_abi.args, vec![FacadeSlot::Borrowed]);
+    assert_eq!(contains_abi.return_slot, FacadeSlot::Owned);
+
+    let trim_abi = stdlib_signature_facts
+        .facade_abi_for_key(&trim_key)
+        .expect("String.trim ABI should come from selected Rust stdlib facts");
+    assert_eq!(trim_abi.return_slot, FacadeSlot::Borrowed);
+
+    let char_at_abi = stdlib_signature_facts
+        .facade_abi_for_key(&char_at_key)
+        .expect("String.charAt ABI should come from selected Rust stdlib facts");
+    assert_eq!(char_at_abi.args, vec![FacadeSlot::Index]);
+
+    let index_of_abi = stdlib_signature_facts
+        .facade_abi_for_key(&index_of_key)
+        .expect("String.indexOf ABI should come from selected Rust stdlib facts");
+    assert_eq!(index_of_abi.args, vec![FacadeSlot::Borrowed]);
+
+    let index_of_from_abi = stdlib_signature_facts
+        .facade_abi_for_key(&index_of_from_key)
+        .expect("String.indexOf(from) ABI should come from selected Rust stdlib facts");
+    assert_eq!(
+        index_of_from_abi.args,
+        vec![FacadeSlot::Borrowed, FacadeSlot::Owned]
+    );
+
+    let get_bytes_abi = stdlib_signature_facts
+        .facade_abi_for_key(&get_bytes_key)
+        .expect("String.getBytes(charset) ABI should come from selected Rust stdlib facts");
+    assert_eq!(get_bytes_abi.args, vec![FacadeSlot::Borrowed]);
+    assert_eq!(get_bytes_abi.return_slot, FacadeSlot::Owned);
+
+    let split_abi = stdlib_signature_facts
+        .facade_abi_for_key(&split_key)
+        .expect("String.split ABI should come from selected Rust stdlib facts");
+    assert_eq!(
+        split_abi.args,
+        vec![FacadeSlot::Borrowed, FacadeSlot::Owned]
+    );
+
+    let has_more_tokens_abi = stdlib_signature_facts
+        .facade_abi_for_key(&string_tokenizer_has_more_tokens_key)
+        .expect("StringTokenizer.hasMoreTokens ABI should come from selected JDK facade facts");
+    assert_eq!(has_more_tokens_abi.receiver, ReceiverAbi::BorrowedSelf);
+    assert_eq!(has_more_tokens_abi.return_slot, FacadeSlot::Owned);
+
+    let next_token_abi = stdlib_signature_facts
+        .facade_abi_for_key(&string_tokenizer_next_token_key)
+        .expect("StringTokenizer.nextToken ABI should come from selected JDK facade facts");
+    assert_eq!(next_token_abi.receiver, ReceiverAbi::MutBorrowedSelf);
+    assert_eq!(next_token_abi.return_slot, FacadeSlot::Owned);
+
+    let count_tokens_abi = stdlib_signature_facts
+        .facade_abi_for_key(&string_tokenizer_count_tokens_key)
+        .expect("StringTokenizer.countTokens ABI should come from selected JDK facade facts");
+    assert_eq!(count_tokens_abi.receiver, ReceiverAbi::BorrowedSelf);
+    assert_eq!(count_tokens_abi.return_slot, FacadeSlot::Owned);
+
+    let matches_abi = stdlib_signature_facts
+        .facade_abi_for_key(&matches_key)
+        .expect("String.matches ABI should come from selected Rust stdlib facts");
+    assert_eq!(matches_abi.args, vec![FacadeSlot::Borrowed]);
+
+    let parse_int_abi = stdlib_signature_facts
+        .facade_abi_for_key(&parse_int_key)
+        .expect("Integer.parseInt ABI should come from selected Rust stdlib facts");
+    assert_eq!(parse_int_abi.args, vec![FacadeSlot::Borrowed]);
+    assert_eq!(parse_int_abi.receiver, ReceiverAbi::AssociatedFunction);
+
+    let parse_float_abi = stdlib_signature_facts
+        .facade_abi_for_key(&parse_float_key)
+        .expect("Float.parseFloat ABI should come from selected Rust stdlib facts");
+    assert_eq!(parse_float_abi.args, vec![FacadeSlot::Borrowed]);
+    assert_eq!(parse_float_abi.receiver, ReceiverAbi::AssociatedFunction);
+
+    let parse_double_abi = stdlib_signature_facts
+        .facade_abi_for_key(&parse_double_key)
+        .expect("Double.parseDouble ABI should come from selected Rust stdlib facts");
+    assert_eq!(parse_double_abi.args, vec![FacadeSlot::Borrowed]);
+    assert_eq!(parse_double_abi.receiver, ReceiverAbi::AssociatedFunction);
+
+    for (key, label) in [
+        (&math_log_key, "Math.log"),
+        (&math_exp_key, "Math.exp"),
+        (&math_to_int_exact_key, "Math.toIntExact"),
+        (&double_is_nan_key, "Double.isNaN"),
+        (&float_is_nan_key, "Float.isNaN"),
+    ] {
+        let abi = stdlib_signature_facts
+            .facade_abi_for_key(key)
+            .unwrap_or_else(|| panic!("{label} ABI should come from selected Rust stdlib facts"));
+        assert_eq!(abi.args, vec![FacadeSlot::Owned]);
+        assert_eq!(abi.receiver, ReceiverAbi::AssociatedFunction);
+        assert_eq!(abi.return_slot, FacadeSlot::Owned);
+    }
+
+    let non_null_abi = stdlib_signature_facts
+        .facade_abi_for_key(&objects_non_null_key)
+        .expect("Objects.nonNull ABI should come from selected Rust stdlib facts");
+    assert_eq!(non_null_abi.receiver, ReceiverAbi::AssociatedFunction);
+    assert_eq!(
+        non_null_abi.args,
+        vec![FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed))]
+    );
+    assert_eq!(non_null_abi.return_slot, FacadeSlot::Owned);
+
+    let is_null_abi = stdlib_signature_facts
+        .facade_abi_for_key(&objects_is_null_key)
+        .expect("java.util.Objects.isNull ABI should come from selected Rust stdlib facts");
+    assert_eq!(is_null_abi.receiver, ReceiverAbi::AssociatedFunction);
+    assert_eq!(
+        is_null_abi.args,
+        vec![FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed))]
+    );
+    assert_eq!(is_null_abi.return_slot, FacadeSlot::Owned);
+
+    let system_gc_abi = stdlib_signature_facts
+        .facade_abi_for_key(&system_gc_key)
+        .expect("System.gc ABI should come from selected Rust stdlib facts");
+    assert_eq!(system_gc_abi.receiver, ReceiverAbi::AssociatedFunction);
+    assert_eq!(system_gc_abi.args, Vec::<FacadeSlot>::new());
+    assert_eq!(system_gc_abi.return_slot, FacadeSlot::Owned);
+
+    let file_exists_abi = stdlib_signature_facts
+        .facade_abi_for_key(&file_exists_key)
+        .expect("java.io.File.exists ABI should come from selected Rust stdlib facts");
+    assert_eq!(file_exists_abi.receiver, ReceiverAbi::BorrowedSelf);
+    assert_eq!(file_exists_abi.args, Vec::<FacadeSlot>::new());
+    assert_eq!(file_exists_abi.return_slot, FacadeSlot::Owned);
+
+    for (key, label) in [
+        (&file_list_key, "java.io.File.list"),
+        (&file_is_file_key, "java.io.File.isFile"),
+        (&file_can_read_key, "java.io.File.canRead"),
+    ] {
+        let abi = stdlib_signature_facts
+            .facade_abi_for_key(key)
+            .unwrap_or_else(|| panic!("{label} ABI should come from selected Rust stdlib facts"));
+        assert_eq!(abi.receiver, ReceiverAbi::BorrowedSelf);
+        assert_eq!(abi.args, Vec::<FacadeSlot>::new());
+        assert_eq!(abi.return_slot, FacadeSlot::Owned);
+    }
+
+    let files_exists_abi = stdlib_signature_facts
+        .facade_abi_for_key(&files_exists_key)
+        .expect("java.nio.file.Files.exists ABI should come from selected Rust stdlib facts");
+    assert_eq!(files_exists_abi.receiver, ReceiverAbi::AssociatedFunction);
+    assert_eq!(files_exists_abi.args, vec![FacadeSlot::Borrowed]);
+    assert_eq!(files_exists_abi.return_slot, FacadeSlot::Owned);
+
+    for (key, label) in [
+        (&files_new_input_stream_key, "Files.newInputStream"),
+        (&files_new_output_stream_key, "Files.newOutputStream"),
+        (&files_new_buffered_reader_key, "Files.newBufferedReader"),
+        (&files_read_all_lines_key, "Files.readAllLines"),
+    ] {
+        let abi = stdlib_signature_facts
+            .facade_abi_for_key(key)
+            .unwrap_or_else(|| panic!("{label} ABI should come from selected JDK facade facts"));
+        assert_eq!(abi.receiver, ReceiverAbi::AssociatedFunction);
+        assert_eq!(abi.args, vec![FacadeSlot::Borrowed]);
+        assert_eq!(abi.return_slot, FacadeSlot::Owned);
+        assert_eq!(abi.result, ResultAbi::ResultWrapped);
+    }
+
+    for (key, label) in [
+        (&input_stream_read_key, "InputStream.read"),
+        (&input_stream_read_3_key, "InputStream.read_3"),
+    ] {
+        let abi = stdlib_signature_facts
+            .facade_abi_for_key(key)
+            .unwrap_or_else(|| panic!("{label} ABI should come from selected JDK facade facts"));
+        assert_eq!(
+            abi.args,
+            vec![
+                FacadeSlot::Slice(Box::new(FacadeSlot::MutBorrowed)),
+                FacadeSlot::Owned,
+                FacadeSlot::Owned
+            ]
+        );
+        assert_eq!(abi.return_slot, FacadeSlot::Owned);
+        assert_eq!(abi.result, ResultAbi::ResultWrapped);
+    }
+
+    for (key, label) in [
+        (&output_stream_write_key, "OutputStream.write"),
+        (&output_stream_write_3_key, "BufferedOutputStream.write_3"),
+    ] {
+        let abi = stdlib_signature_facts
+            .facade_abi_for_key(key)
+            .unwrap_or_else(|| panic!("{label} ABI should come from selected JDK facade facts"));
+        assert_eq!(
+            abi.args,
+            vec![
+                FacadeSlot::Slice(Box::new(FacadeSlot::Borrowed)),
+                FacadeSlot::Owned,
+                FacadeSlot::Owned
+            ]
+        );
+        assert_eq!(abi.return_slot, FacadeSlot::Owned);
+        assert_eq!(abi.result, ResultAbi::ResultWrapped);
+    }
+}
+
+#[test]
+fn stdlib_signature_facts_drive_string_pattern_argument_shape() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let source = "class UseStringAbi { boolean has(String haystack, String needle) { return haystack.contains(needle); } }";
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "UseStringAbi")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "has" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Return(Some(Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved: _,
+    })) = &method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected return haystack.contains(needle)");
+    };
+    let mut type_env = TypeEnv::new();
+    type_env.insert_local("haystack", JavaType::String);
+    type_env.insert_local("needle", JavaType::String);
+    let shapes = match plan_call_arguments_with_facts_and_args(
+        receiver.as_deref(),
+        name,
+        None,
+        args,
+        &SignaturePlan::default(),
+        &facts,
+        &type_env,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("expected shaped plan from stdlib ABI facts, got {plan:?}"),
+    };
+
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(shapes[0].java_ty, JavaType::String);
+    assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(shapes[0].view, ViewShape::Str);
+}
+
+#[test]
+fn stdlib_signature_facts_drive_string_index_argument_slot() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let source =
+        "class UseStringAbi { char at(String value, int index) { return value.charAt(index); } }";
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "UseStringAbi")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "at" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Return(Some(Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved: _,
+    })) = &method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected return value.charAt(index)");
+    };
+    let mut type_env = TypeEnv::new();
+    type_env.insert_local("value", JavaType::String);
+    type_env.insert_local("index", JavaType::Primitive(PrimitiveType::Int));
+
+    let slots = match plan_call_arguments_with_facts_and_args(
+        receiver.as_deref(),
+        name,
+        None,
+        args,
+        &SignaturePlan::default(),
+        &facts,
+        &type_env,
+    ) {
+        ArgumentLoweringPlan::Slotted(slots) => slots,
+        plan => panic!("expected explicit slot plan from stdlib ABI facts, got {plan:?}"),
+    };
+
+    assert_eq!(slots, vec![index_slot()]);
+}
+
+#[test]
+fn stdlib_signature_facts_drive_string_regex_argument_shape() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let source = "class UseStringAbi { String[] parts(String value, String regex) { return value.split(regex, -1); } }";
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "UseStringAbi")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "parts" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Return(Some(Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved: _,
+    })) = &method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected return value.split(regex, -1)");
+    };
+    let mut type_env = TypeEnv::new();
+    type_env.insert_local("value", JavaType::String);
+    type_env.insert_local("regex", JavaType::String);
+
+    let shapes = match plan_call_arguments_with_facts_and_args(
+        receiver.as_deref(),
+        name,
+        None,
+        args,
+        &SignaturePlan::default(),
+        &facts,
+        &type_env,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("expected shaped plan from stdlib ABI facts, got {plan:?}"),
+    };
+
+    assert_eq!(shapes.len(), 2);
+    assert_eq!(shapes[0].java_ty, JavaType::String);
+    assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(shapes[0].view, ViewShape::Str);
+    assert_eq!(shapes[1].java_ty, JavaType::Primitive(PrimitiveType::Int));
+    assert_eq!(shapes[1].ownership, OwnershipShape::CopyValue);
+}
+
+#[test]
+fn stdlib_signature_facts_drive_string_index_of_argument_shape() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let source = "class UseStringAbi { int find(String value, String needle, int from) { return value.indexOf(needle, from); } }";
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "UseStringAbi")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "find" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Return(Some(Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved: _,
+    })) = &method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected return value.indexOf(needle, from)");
+    };
+    let mut type_env = TypeEnv::new();
+    type_env.insert_local("value", JavaType::String);
+    type_env.insert_local("needle", JavaType::String);
+    type_env.insert_local("from", JavaType::Primitive(PrimitiveType::Int));
+
+    let shapes = match plan_call_arguments_with_facts_and_args(
+        receiver.as_deref(),
+        name,
+        None,
+        args,
+        &SignaturePlan::default(),
+        &facts,
+        &type_env,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("expected shaped plan from stdlib ABI facts, got {plan:?}"),
+    };
+
+    assert_eq!(shapes.len(), 2);
+    assert_eq!(shapes[0].java_ty, JavaType::String);
+    assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(shapes[0].view, ViewShape::Str);
+    assert_eq!(shapes[1].java_ty, JavaType::Primitive(PrimitiveType::Int));
+    assert_eq!(shapes[1].ownership, OwnershipShape::CopyValue);
+}
+
+#[test]
+fn stdlib_signature_facts_drive_numeric_parse_argument_shape() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let source = "class UseParseAbi { int count(String value) { return Integer.parseInt(value); } double ratio(String value) { return Double.parseDouble(value); } }";
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "UseParseAbi")
+        .unwrap();
+
+    for (method_name, expected_receiver, expected_name) in [
+        ("count", "Integer", "parseInt"),
+        ("ratio", "Double", "parseDouble"),
+    ] {
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == method_name => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let Stmt::Return(Some(Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved: _,
+        })) = &method.body.as_ref().unwrap().statements[0]
+        else {
+            panic!("expected return {expected_receiver}.{expected_name}(value)");
+        };
+        assert_eq!(name, expected_name);
+        let Some(Expr::Var(owner)) = receiver.as_deref() else {
+            panic!("expected static owner receiver for {expected_receiver}.{expected_name}");
+        };
+        assert_eq!(
+            new_java2rust::stdlib::canonical_external_receiver_type_key(owner),
+            expected_receiver
+        );
+        let mut type_env = TypeEnv::new();
+        type_env.insert_local("value", JavaType::String);
+
+        let shapes = match plan_call_arguments_with_facts_and_args(
+            receiver.as_deref(),
+            name,
+            None,
+            args,
+            &SignaturePlan::default(),
+            &facts,
+            &type_env,
+        ) {
+            ArgumentLoweringPlan::Shaped(shapes) => shapes,
+            plan => panic!("expected shaped plan from stdlib ABI facts, got {plan:?}"),
+        };
+
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].java_ty, JavaType::String);
+        assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
+        assert_eq!(shapes[0].view, ViewShape::Str);
+    }
+}
+
+#[test]
+fn stdlib_signature_facts_drive_static_math_argument_shapes() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let source = "class UseMathAbi { double log(double value) { return Math.log(value); } double exp(double value) { return Math.exp(value); } int exact(long value) { return Math.toIntExact(value); } boolean bad(double value) { return Double.isNaN(value); } }";
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "UseMathAbi")
+        .unwrap();
+
+    for (method_name, expected_receiver, expected_name, expected_ty) in [
+        (
+            "log",
+            "Math",
+            "log",
+            JavaType::Primitive(PrimitiveType::Double),
+        ),
+        (
+            "exp",
+            "Math",
+            "exp",
+            JavaType::Primitive(PrimitiveType::Double),
+        ),
+        (
+            "exact",
+            "Math",
+            "toIntExact",
+            JavaType::Primitive(PrimitiveType::Long),
+        ),
+        (
+            "bad",
+            "Double",
+            "isNaN",
+            JavaType::Primitive(PrimitiveType::Double),
+        ),
+    ] {
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == method_name => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let Stmt::Return(Some(Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved: _,
+        })) = &method.body.as_ref().unwrap().statements[0]
+        else {
+            panic!("expected return {expected_receiver}.{expected_name}(value)");
+        };
+        assert_eq!(name, expected_name);
+        let Some(Expr::Var(owner)) = receiver.as_deref() else {
+            panic!("expected static owner receiver for {expected_receiver}.{expected_name}");
+        };
+        assert_eq!(
+            new_java2rust::stdlib::canonical_external_receiver_type_key(owner),
+            expected_receiver
+        );
+        let mut type_env = TypeEnv::new();
+        type_env.insert_local("value", expected_ty.clone());
+
+        let shapes = match plan_call_arguments_with_facts_and_args(
+            receiver.as_deref(),
+            name,
+            None,
+            args,
+            &SignaturePlan::default(),
+            &facts,
+            &type_env,
+        ) {
+            ArgumentLoweringPlan::Shaped(shapes) => shapes,
+            plan => panic!("expected shaped plan from stdlib ABI facts, got {plan:?}"),
+        };
+
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].java_ty, expected_ty);
+        assert_eq!(shapes[0].ownership, OwnershipShape::CopyValue);
+    }
+}
+
+#[test]
+fn stdlib_signature_facts_drive_objects_null_predicate_argument_shapes() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let source = "import java.util.Objects; class UseObjectsAbi { boolean keep(String value) { return Objects.nonNull(value); } boolean drop(String value) { return Objects.isNull(value); } }";
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "UseObjectsAbi")
+        .unwrap();
+
+    for (method_name, expected_name) in [("keep", "nonNull"), ("drop", "isNull")] {
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == method_name => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let Stmt::Return(Some(Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved: _,
+        })) = &method.body.as_ref().unwrap().statements[0]
+        else {
+            panic!("expected return Objects.{expected_name}(value)");
+        };
+        assert_eq!(name, expected_name);
+        let mut type_env = TypeEnv::new();
+        type_env.insert_local("value", optional_java_type(JavaType::String));
+
+        let shapes = match plan_call_arguments_with_facts_and_args(
+            receiver.as_deref(),
+            name,
+            None,
+            args,
+            &SignaturePlan::default(),
+            &facts,
+            &type_env,
+        ) {
+            ArgumentLoweringPlan::Shaped(shapes) => shapes,
+            plan => panic!("Objects.{expected_name} should use stdlib ABI facts, got {plan:?}"),
+        };
+
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].java_ty, optional_java_type(JavaType::String));
+        assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
+    }
+}
+
+#[test]
+fn stdlib_signature_facts_drive_jdk_file_exists_zero_arg_shape() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let signatures = SignaturePlan::default();
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "file",
+        JavaType::Named {
+            name: "java.io.File".to_string(),
+            args: Vec::new(),
+        },
+    );
+
+    let shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("file".to_string())),
+        "exists",
+        None,
+        &[],
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("File.exists should use a zero-arg stdlib ABI fact, got {plan:?}"),
+    };
+
+    assert!(shapes.is_empty());
+
+    let receiver = Expr::Var("file".to_string());
+    let target =
+        plan_call_target_with_facts_and_arity(Some(&receiver), "exists", 0, None, &facts, &types);
+    assert!(
+        matches!(
+            target,
+            CallTargetPlan::NativeJavaInstance {
+                method: NativeJavaInstanceMethod::FileExists,
+                ..
+            }
+        ),
+        "File.exists ABI fact should not bypass native Java File path semantics: {target:?}"
+    );
+}
+
+#[test]
+fn stdlib_signature_facts_drive_jdk_files_exists_borrowed_path_shape() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let source = "import java.nio.file.Files; import java.nio.file.Path; class UseFilesAbi { boolean exists(Path path) { return Files.exists(path); } }";
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "UseFilesAbi")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "exists" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Return(Some(Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved: _,
+    })) = &method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected return Files.exists(path)");
+    };
+    let mut types = TypeEnv::new();
+    types.insert_static_type_alias("Files", "java.nio.file.Files");
+    types.insert_static_type_alias("files", "java.nio.file.Files");
+    types.insert_local(
+        "path",
+        JavaType::Named {
+            name: "Path".to_string(),
+            args: Vec::new(),
+        },
+    );
+
+    let shapes = match plan_call_arguments_with_facts_and_args(
+        receiver.as_deref(),
+        name,
+        None,
+        args,
+        &SignaturePlan::default(),
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("Files.exists should use a borrowed path ABI fact, got {plan:?}"),
+    };
+
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(shapes[0].java_ty, types.local_type("path").unwrap().clone());
+    assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
+
+    let target = plan_call_target_with_facts_and_arity(
+        receiver.as_deref(),
+        name,
+        args.len(),
+        None,
+        &facts,
+        &types,
+    );
+    assert!(
+        matches!(
+            target,
+            CallTargetPlan::StaticOwner {
+                ref owner,
+                ref rust_name
+            } if owner == "JavaNioFileFiles" && rust_name == "exists"
+        ),
+        "Files.exists ABI fact should shape arguments without bypassing Java facade target: {target:?}"
+    );
+}
+
+#[test]
+fn stdlib_signature_facts_drive_jdk_files_read_all_lines_borrowed_path_shape() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let source = "import java.nio.file.Files; import java.nio.file.Path; import java.util.List; class UseFilesReadAbi { List<String> read(Path path) throws java.io.IOException { return Files.readAllLines(path); } }";
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "UseFilesReadAbi")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "read" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Return(Some(Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved: _,
+    })) = &method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected return Files.readAllLines(path)");
+    };
+    let mut types = TypeEnv::new();
+    types.insert_static_type_alias("Files", "java.nio.file.Files");
+    types.insert_static_type_alias("files", "java.nio.file.Files");
+    types.insert_local(
+        "path",
+        JavaType::Named {
+            name: "Path".to_string(),
+            args: Vec::new(),
+        },
+    );
+
+    let shapes = match plan_call_arguments_with_facts_and_args(
+        receiver.as_deref(),
+        name,
+        None,
+        args,
+        &SignaturePlan::default(),
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("Files.readAllLines should use a borrowed path ABI fact, got {plan:?}"),
+    };
+
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(shapes[0].java_ty, types.local_type("path").unwrap().clone());
+    assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
+
+    assert!(external_call_returns_rust_result(
+        receiver.as_deref(),
+        name,
+        args.len(),
+        &facts,
+        &types,
+        Some("UseFilesReadAbi")
+    ));
+
+    let target = plan_call_target_with_facts_and_arity(
+        receiver.as_deref(),
+        name,
+        args.len(),
+        None,
+        &facts,
+        &types,
+    );
+    assert!(
+        matches!(
+            target,
+            CallTargetPlan::StaticOwner {
+                ref owner,
+                ref rust_name
+            } if owner == "JavaNioFileFiles" && rust_name == "read_all_lines"
+        ),
+        "Files.readAllLines ABI fact should shape arguments without bypassing Java facade target: {target:?}"
+    );
+}
+
+#[test]
+fn stdlib_signature_facts_drive_jdk_io_byte_buffer_slice_shapes() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let signatures = SignaturePlan::default();
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "input",
+        JavaType::Named {
+            name: "InputStream".to_string(),
+            args: Vec::new(),
+        },
+    );
+    types.insert_local(
+        "output",
+        JavaType::Named {
+            name: "BufferedOutputStream".to_string(),
+            args: Vec::new(),
+        },
+    );
+    types.insert_local(
+        "buffer",
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+    );
+    types.insert_local("offset", JavaType::Primitive(PrimitiveType::Int));
+    types.insert_local("size", JavaType::Primitive(PrimitiveType::Int));
+
+    let read_args = vec![
+        Expr::Var("buffer".to_string()),
+        Expr::Var("offset".to_string()),
+        Expr::Var("size".to_string()),
+    ];
+    let read_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("input".to_string())),
+        "read",
+        None,
+        &read_args,
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("InputStream.read should use mutable byte-slice ABI facts, got {plan:?}"),
+    };
+    assert_eq!(read_shapes.len(), 3);
+    assert_eq!(read_shapes[0].ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(read_shapes[0].mutability, MutabilityShape::Mutable);
+    assert_eq!(read_shapes[0].view, ViewShape::Slice);
+    assert_eq!(
+        read_shapes[0].java_ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)))
+    );
+    assert!(external_call_returns_rust_result(
+        Some(&Expr::Var("input".to_string())),
+        "read",
+        read_args.len(),
+        &facts,
+        &types,
+        None
+    ));
+
+    let write_args = vec![
+        Expr::Var("buffer".to_string()),
+        Expr::Var("offset".to_string()),
+        Expr::Var("size".to_string()),
+    ];
+    let write_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("output".to_string())),
+        "write",
+        None,
+        &write_args,
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("OutputStream.write should use shared byte-slice ABI facts, got {plan:?}"),
+    };
+    assert_eq!(write_shapes.len(), 3);
+    assert_eq!(write_shapes[0].ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(write_shapes[0].view, ViewShape::Slice);
+    assert_eq!(
+        write_shapes[0].java_ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)))
+    );
+    assert!(external_call_returns_rust_result(
+        Some(&Expr::Var("output".to_string())),
+        "write",
+        write_args.len(),
+        &facts,
+        &types,
+        None
+    ));
+}
+
+#[test]
+fn stdlib_signature_facts_include_java_optional_rust_abi_slots() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let is_present_key = CallableKey::method("Optional", "isPresent", Staticness::Unknown, 0);
+    let get_key = CallableKey::method("java.util.Optional", "get", Staticness::Unknown, 0);
+    let or_else_key = CallableKey::method("Optional", "orElse", Staticness::Unknown, 1);
+
+    let is_present = facts
+        .facade_abi_for_key(&is_present_key)
+        .expect("Optional.isPresent should have an Option::is_some ABI fact");
+    assert_eq!(is_present.args, Vec::<FacadeSlot>::new());
+    assert_eq!(is_present.return_slot, FacadeSlot::Owned);
+
+    let get = facts
+        .facade_abi_for_key(&get_key)
+        .expect("java.util.Optional.get should have an Option::as_ref ABI fact");
+    assert_eq!(get.args, Vec::<FacadeSlot>::new());
+    assert_eq!(get.return_slot, FacadeSlot::Borrowed);
+
+    let or_else = facts
+        .facade_abi_for_key(&or_else_key)
+        .expect("Optional.orElse should have an Option::unwrap_or ABI fact");
+    assert_eq!(or_else.args, vec![FacadeSlot::Owned]);
+    assert_eq!(or_else.return_slot, FacadeSlot::Owned);
+}
+
+#[test]
+fn stdlib_optional_signature_facts_drive_argument_shapes() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let signatures = SignaturePlan::default();
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "value",
+        JavaType::Named {
+            name: "Optional".to_string(),
+            args: vec![JavaType::String],
+        },
+    );
+    types.insert_local("fallback", JavaType::String);
+
+    let is_present_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("value".to_string())),
+        "isPresent",
+        None,
+        &[],
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("Optional.isPresent should use a zero-arg ABI fact, got {plan:?}"),
+    };
+    assert!(is_present_shapes.is_empty());
+
+    let get_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("value".to_string())),
+        "get",
+        None,
+        &[],
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("Optional.get should use a zero-arg ABI fact, got {plan:?}"),
+    };
+    assert!(get_shapes.is_empty());
+
+    let or_else_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("value".to_string())),
+        "orElse",
+        None,
+        &[Expr::Var("fallback".to_string())],
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("Optional.orElse should use an owned fallback ABI fact, got {plan:?}"),
+    };
+    assert_eq!(or_else_shapes.len(), 1);
+    assert_eq!(or_else_shapes[0].java_ty, JavaType::String);
+    assert_eq!(or_else_shapes[0].ownership, OwnershipShape::Owned);
+}
+
+#[test]
+fn stdlib_signature_facts_include_jdk_collection_rust_abi_slots() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let list_get_key = CallableKey::method("ArrayList", "get", Staticness::Unknown, 1);
+    let list_size_key = CallableKey::method("ArrayList", "size", Staticness::Unknown, 0);
+    let list_is_empty_key = CallableKey::method("LinkedList", "isEmpty", Staticness::Unknown, 0);
+    let list_add_all_key = CallableKey::method("List", "addAll", Staticness::Unknown, 1);
+    let list_to_array_key =
+        CallableKey::method("java.util.List", "toArray", Staticness::Unknown, 0);
+    let map_get_key = CallableKey::method("HashMap", "get", Staticness::Unknown, 1);
+    let map_put_key = CallableKey::method("LinkedHashMap", "put", Staticness::Unknown, 2);
+    let map_key_set_key = CallableKey::method("Map", "keySet", Staticness::Unknown, 0);
+    let map_entry_set_key =
+        CallableKey::method("java.util.Map", "entrySet", Staticness::Unknown, 0);
+    let set_size_key = CallableKey::method("HashSet", "size", Staticness::Unknown, 0);
+    let set_add_key = CallableKey::method("HashSet", "add", Staticness::Unknown, 1);
+
+    let list_size = facts
+        .facade_abi_for_key(&list_size_key)
+        .expect("ArrayList.size should have a Rust Vec::len ABI fact");
+    assert_eq!(list_size.args, Vec::<FacadeSlot>::new());
+    assert_eq!(list_size.return_slot, FacadeSlot::Owned);
+
+    let list_is_empty = facts
+        .facade_abi_for_key(&list_is_empty_key)
+        .expect("LinkedList.isEmpty should have a Rust Vec::is_empty ABI fact");
+    assert_eq!(list_is_empty.args, Vec::<FacadeSlot>::new());
+    assert_eq!(list_is_empty.return_slot, FacadeSlot::Owned);
+
+    let list_get = facts
+        .facade_abi_for_key(&list_get_key)
+        .expect("ArrayList.get should have a Rust slice index ABI fact");
+    assert_eq!(list_get.args, vec![FacadeSlot::Index]);
+    assert_eq!(list_get.return_slot, FacadeSlot::Borrowed);
+
+    let list_add_all = facts
+        .facade_abi_for_key(&list_add_all_key)
+        .expect("List.addAll should have a Rust slice-source ABI fact");
+    assert_eq!(
+        list_add_all.args,
+        vec![FacadeSlot::Slice(Box::new(FacadeSlot::Borrowed))]
+    );
+
+    let list_to_array = facts
+        .facade_abi_for_key(&list_to_array_key)
+        .expect("java.util.List.toArray should have a Rust slice clone ABI fact");
+    assert_eq!(list_to_array.args, Vec::<FacadeSlot>::new());
+    assert_eq!(list_to_array.return_slot, FacadeSlot::Owned);
+
+    let map_get = facts
+        .facade_abi_for_key(&map_get_key)
+        .expect("HashMap.get should have a borrowed key ABI fact");
+    assert_eq!(map_get.args, vec![FacadeSlot::Borrowed]);
+    assert_eq!(map_get.return_slot, FacadeSlot::Borrowed);
+
+    let map_put = facts
+        .facade_abi_for_key(&map_put_key)
+        .expect("LinkedHashMap.put should have owned insert ABI facts");
+    assert_eq!(map_put.args, vec![FacadeSlot::Owned, FacadeSlot::Owned]);
+
+    let map_key_set = facts
+        .facade_abi_for_key(&map_key_set_key)
+        .expect("Map.keySet should have a Rust HashMap::keys ABI fact");
+    assert_eq!(map_key_set.args, Vec::<FacadeSlot>::new());
+    assert_eq!(map_key_set.return_slot, FacadeSlot::Owned);
+
+    let map_entry_set = facts
+        .facade_abi_for_key(&map_entry_set_key)
+        .expect("java.util.Map.entrySet should have a Rust HashMap::iter ABI fact");
+    assert_eq!(map_entry_set.args, Vec::<FacadeSlot>::new());
+    assert_eq!(map_entry_set.return_slot, FacadeSlot::Borrowed);
+
+    let set_size = facts
+        .facade_abi_for_key(&set_size_key)
+        .expect("HashSet.size should have a Rust HashSet::len ABI fact");
+    assert_eq!(set_size.args, Vec::<FacadeSlot>::new());
+    assert_eq!(set_size.return_slot, FacadeSlot::Owned);
+
+    let set_add = facts
+        .facade_abi_for_key(&set_add_key)
+        .expect("HashSet.add should have an owned insert ABI fact");
+    assert_eq!(set_add.args, vec![FacadeSlot::Owned]);
+}
+
+#[test]
+fn stdlib_collection_signature_facts_precede_native_collection_arg_fallbacks() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let signatures = SignaturePlan::default();
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "values",
+        JavaType::Named {
+            name: "ArrayList".to_string(),
+            args: vec![JavaType::String],
+        },
+    );
+    types.insert_local(
+        "other",
+        JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::String],
+        },
+    );
+    types.insert_local(
+        "counts",
+        JavaType::Named {
+            name: "HashMap".to_string(),
+            args: vec![JavaType::String, JavaType::Primitive(PrimitiveType::Int)],
+        },
+    );
+    types.insert_local("index", JavaType::Primitive(PrimitiveType::Int));
+    types.insert_local("name", JavaType::String);
+    types.insert_local("count", JavaType::Primitive(PrimitiveType::Int));
+
+    let list_size_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("values".to_string())),
+        "size",
+        None,
+        &[],
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("ArrayList.size should use a zero-arg facade ABI fact, got {plan:?}"),
+    };
+    assert!(list_size_shapes.is_empty());
+
+    let map_key_set_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("counts".to_string())),
+        "keySet",
+        None,
+        &[],
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("HashMap.keySet should use a zero-arg facade ABI fact, got {plan:?}"),
+    };
+    assert!(map_key_set_shapes.is_empty());
+
+    let list_get_plan = plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("values".to_string())),
+        "get",
+        None,
+        &[Expr::Var("index".to_string())],
+        &signatures,
+        &facts,
+        &types,
+    );
+    assert_eq!(
+        list_get_plan,
+        ArgumentLoweringPlan::Slotted(vec![index_slot()])
+    );
+
+    let list_add_all_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("values".to_string())),
+        "addAll",
+        None,
+        &[Expr::Var("other".to_string())],
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("List.addAll should use facade ABI slice shaping, got {plan:?}"),
+    };
+    assert_eq!(
+        list_add_all_shapes[0].java_ty,
+        types.local_type("other").unwrap().clone()
+    );
+    assert_eq!(
+        list_add_all_shapes[0].ownership,
+        OwnershipShape::SharedBorrow
+    );
+    assert_eq!(list_add_all_shapes[0].view, ViewShape::Slice);
+
+    let map_get_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("counts".to_string())),
+        "get",
+        None,
+        &[Expr::Var("name".to_string())],
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("HashMap.get should use facade ABI borrowed-key shaping, got {plan:?}"),
+    };
+    assert_eq!(map_get_shapes[0].java_ty, JavaType::String);
+    assert_eq!(map_get_shapes[0].ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(map_get_shapes[0].view, ViewShape::Str);
+
+    let map_put_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("counts".to_string())),
+        "put",
+        None,
+        &[
+            Expr::Var("name".to_string()),
+            Expr::Var("count".to_string()),
+        ],
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("HashMap.put should use facade ABI owned insert shaping, got {plan:?}"),
+    };
+    assert_eq!(map_put_shapes[0].java_ty, JavaType::String);
+    assert_eq!(map_put_shapes[0].ownership, OwnershipShape::Owned);
+    assert_eq!(
+        map_put_shapes[1].java_ty,
+        JavaType::Primitive(PrimitiveType::Int)
+    );
+    assert_eq!(map_put_shapes[1].ownership, OwnershipShape::CopyValue);
 }
 
 #[test]
@@ -27420,6 +29479,10 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
             body: _
         } if matches!(value, Expr::Call { name, .. } if name == "next")
     ));
+    assert_eq!(
+        plan_while_stmt(&parse_expr("true"), &then_block),
+        WhileStmtPlan::Infinite { body: &then_block }
+    );
     let null_assignment_condition = parse_expr("(row = cursor.next()) == null");
     let null_assignment_plan = plan_while_stmt(&null_assignment_condition, &no_break_block);
     assert_eq!(
@@ -27596,6 +29659,57 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         RustExpr::Raw("|value| self.emit(value)".to_string())
     );
     assert_eq!(
+        new_java2rust::method_reference_lowering::render_single_input_method_reference_body(
+            &plan_method_reference("Integer", "intValue"),
+            "(*value)",
+            "*value",
+        ),
+        "*value"
+    );
+    assert_eq!(
+        new_java2rust::method_reference_lowering::render_single_input_method_reference_body(
+            &plan_method_reference("Object", "toString"),
+            "(*value)",
+            "*value",
+        ),
+        "(*value).to_string()"
+    );
+    assert_eq!(
+        new_java2rust::method_reference_lowering::render_single_input_method_reference_body(
+            &plan_method_reference("NameHolder", "getName"),
+            "(*value)",
+            "*value",
+        ),
+        "(*value).get_name()"
+    );
+    assert_eq!(
+        infer_single_input_method_reference_output_shape(
+            "Integer",
+            "intValue",
+            &RustSlotShape::for_storage(JavaType::String),
+        ),
+        Some(RustSlotShape::for_storage(JavaType::Primitive(
+            PrimitiveType::Int,
+        )))
+    );
+    assert_eq!(
+        infer_single_input_method_reference_output_shape(
+            "Object",
+            "toString",
+            &RustSlotShape::for_storage(JavaType::String),
+        ),
+        Some(new_java2rust::shape_projection::owned_string_value_shape())
+    );
+    assert_eq!(
+        infer_single_input_method_reference_output_shape(
+            "NameHolder",
+            "getName",
+            &RustSlotShape::for_storage(JavaType::Unknown("NameHolder".to_string())),
+        )
+        .map(|shape| shape.java_ty),
+        Some(JavaType::Unknown("get_name".to_string()))
+    );
+    assert_eq!(
         render_method_reference(&MethodReferencePlan::CurrentReceiverMethod {
             method: "emit".to_string(),
             arity: Some(3),
@@ -27606,11 +29720,23 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     let lower_source = include_str!("../src/lower.rs");
     let plan_source = include_str!("../src/method_reference_plan.rs");
     let lowering_source = include_str!("../src/method_reference_lowering.rs");
+    let shape_source = include_str!("../src/method_reference_shape.rs");
+    let stream_source = include_str!("../src/stream.rs");
+    let stream_lowering_source = include_str!("../src/stream_lowering.rs");
     assert!(lower_source.contains("plan_method_reference"));
     assert!(lower_source.contains("render_method_reference"));
     assert!(plan_source.contains("pub enum MethodReferencePlan"));
     assert!(!plan_source.contains("RustExpr"));
     assert!(lowering_source.contains("pub fn render_method_reference"));
+    assert!(lowering_source.contains("pub fn render_single_input_method_reference_body"));
+    assert!(shape_source.contains("pub fn infer_single_input_method_reference_output_shape"));
+    assert!(shape_source.contains("infer_method_reference_output_shape_for_plan"));
+    assert!(stream_source.contains("infer_single_input_method_reference_output_shape"));
+    assert!(!stream_source.contains("fn infer_stream_method_reference_output_shape"));
+    assert!(stream_lowering_source.contains("render_single_input_method_reference_body"));
+    assert!(!stream_lowering_source.contains("\"Integer\", \"intValue\""));
+    assert!(!stream_lowering_source.contains("\"Object\", \"toString\""));
+    assert!(!stream_lowering_source.contains("fn is_scala_tuple_accessor"));
 }
 
 #[test]
@@ -27780,7 +29906,7 @@ class ExternalConstructorSetUse {
 
     assert!(
         translation.rust.contains(
-            "ExternalConfig::new(self.lines.as_ref().expect(\"Java null receiver\").clone()"
+            "ExternalConfig::new(self.lines.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
         ) && !translation.rust.contains("self.lines.unwrap()"),
         "typed external constructor set parameter should recover owned value without moving self field:\n{}",
         translation.rust
@@ -28497,7 +30623,8 @@ fn stream_plan_lowers_method_references_in_map_and_map_to_int() {
     assert_eq!(
         names_lowered.expr,
         RustExpr::Raw(
-            "names.iter().map(|value| (*value).to_string()).collect::<Vec<_>>()".to_string()
+            "names.iter().map(|value: &String| (*value).to_string()).collect::<Vec<_>>()"
+                .to_string()
         )
     );
 }
@@ -28982,7 +31109,7 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value| { let pieces = java_string_split(value.as_str(), \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
+            "values.iter().map(|value: &String| { let pieces = java_string_split(value.as_str(), \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
                 .to_string()
         )
     );
@@ -29010,6 +31137,44 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
             StreamLambdaValue::BorrowedItem,
         ),
         Some("Constants::DELIMITER".to_string())
+    );
+}
+
+#[test]
+fn stream_lambda_string_char_at_uses_signature_index_slot() {
+    let mut env = TypeEnv::new();
+    env.insert_local("values", list_java_type(JavaType::String));
+    env.insert_local("index", JavaType::Primitive(PrimitiveType::Int));
+    let expr = parse_expr(
+        "values.stream().map(value -> value.charAt(index)).collect(Collectors.toList())",
+    );
+
+    let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
+    let mut shape_env = ShapeEnv::new();
+    shape_env.insert_local("value", JavaType::String);
+    shape_env.insert_local("index", JavaType::Primitive(PrimitiveType::Int));
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    assert!(matches!(
+        new_java2rust::call_plan::plan_call_arguments_with_facts_and_args(
+            Some(&parse_expr("value")),
+            "char_at",
+            None,
+            &[parse_expr("index")],
+            &new_java2rust::signature::SignaturePlan::default(),
+            &facts,
+            shape_env.type_env(),
+        ),
+        new_java2rust::call_plan::ArgumentLoweringPlan::Slotted(slots)
+            if slots == vec![new_java2rust::conversion_plan::Slot::Index]
+    ));
+    let lowered = render_stream_plan(&plan, RustExpr::Var("values".to_string())).unwrap();
+
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw(
+            "values.iter().map(|value: &String| value.chars().nth((index) as usize).expect(\"Java string index out of bounds\")).collect::<Vec<_>>()"
+                .to_string()
+        )
     );
 }
 

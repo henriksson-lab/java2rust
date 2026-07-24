@@ -4,6 +4,15 @@
 
 Stdlib mappings must be exact-owner or positive-carrier gated. Do not rewrite a method just because a simple name matches a JDK class.
 
+Rust stdlib/core/alloc are too large to mirror with tailored rules. For
+mechanical Rust ABI choices such as receiver borrowing, argument borrowing,
+`&mut`, slices, `usize` indices, owned versus borrowed returns, `Option`, and
+`Result`, prefer a Rust signature/ABI fact whenever it gives the same emitted
+Rust shape as a hand-written rule. Keep tailored rules for Java semantics that a
+Rust signature cannot encode, such as null behavior, Java string/runtime
+semantics, overload selection, class tokens, synthetic array length, and
+control-flow rewrites.
+
 Each stdlib mapping is a transformation rule and must follow
 `docs/transformation-rule-contract.md`: document the **Ideal Rust Target**
 before the **Implementation Rule**. For example, a stream, collection, string,

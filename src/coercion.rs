@@ -14,6 +14,7 @@ use crate::emit;
 use crate::facts::FactSet;
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::rust_ir::RustExpr;
+use crate::slot_shape::ViewShape;
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,12 +50,12 @@ impl UnsupportedCoercionMessagePolicy {
     }
 
     pub fn compile_error_expr(&self) -> RustExpr {
-        RustExpr::Raw(format!("compile_error!(\"{}\")", self.message))
+        RustExpr::Raw(format!("compile_error!({:?})", self.message))
     }
 
     pub fn compile_error_expr_consuming(&self, expr: &RustExpr) -> RustExpr {
         RustExpr::Raw(format!(
-            "{{ let _ = {}; compile_error!(\"{}\") }}",
+            "{{ let _ = {}; compile_error!({:?}) }}",
             emit::emit_expr(expr),
             self.message
         ))
@@ -70,11 +71,13 @@ pub enum Coercion {
     },
     IndexToUsize,
     ToStringForConcat,
+    ErasedObjectToJavaDisplayString,
     OptionalToJavaDisplayString,
     OptionalToJavaDisplayValue,
     AsStr,
     ToOwnedString,
     AsSlice,
+    AsMutSlice,
     BorrowMut,
     WrapClosedEnum {
         enum_name: String,
@@ -94,6 +97,9 @@ pub enum Coercion {
         to_type: JavaType,
     },
     BoxDynTrait {
+        trait_name: String,
+    },
+    CloneBoxDynTrait {
         trait_name: String,
     },
     EraseObject,
@@ -124,6 +130,12 @@ pub enum Coercion {
     UnwrapOptionBorrowed,
     Borrow,
     CopyBorrowedValue,
+    CloneErasedObject {
+        sequence: bool,
+    },
+    ToOwnedSequence {
+        policy: CloneRecoveryPolicy,
+    },
     CloneRecovery {
         policy: CloneRecoveryPolicy,
     },
@@ -154,6 +166,9 @@ impl SyntaxSlotCoercionPolicy {
             SyntaxSlotCoercionPolicy::Identity => vec![Coercion::Identity],
             SyntaxSlotCoercionPolicy::IndexToUsize => vec![Coercion::IndexToUsize],
             SyntaxSlotCoercionPolicy::ToStringForConcat => vec![Coercion::ToStringForConcat],
+            SyntaxSlotCoercionPolicy::ErasedObjectToJavaDisplayString => {
+                vec![Coercion::ErasedObjectToJavaDisplayString]
+            }
             SyntaxSlotCoercionPolicy::OptionalToJavaDisplayString => {
                 vec![Coercion::OptionalToJavaDisplayString]
             }
@@ -194,7 +209,12 @@ impl ShapeCoercionPlan {
             plan.extend(view_coercions);
             return plan;
         }
-        plan.extend(self.ownership.coercions());
+        if !matches!(
+            self.dispatch,
+            DispatchCoercionPolicy::CloneBoxDynTrait { .. }
+        ) {
+            plan.extend(self.ownership.coercions());
+        }
         if let Some(policy) = self.primitive_widening {
             plan.push(Coercion::WidenPrimitive {
                 from: policy.from,
@@ -253,6 +273,7 @@ impl ViewCoercionPolicy {
             ViewCoercionPolicy::BorrowStringView => vec![Coercion::AsStr],
             ViewCoercionPolicy::OwnStringFromView => vec![Coercion::ToOwnedString],
             ViewCoercionPolicy::BorrowSequenceSliceView => vec![Coercion::AsSlice],
+            ViewCoercionPolicy::BorrowSequenceMutSliceView => vec![Coercion::AsMutSlice],
         }
     }
 }
@@ -264,6 +285,16 @@ impl OwnershipCoercionPolicy {
             OwnershipCoercionPolicy::BorrowOwnedValue => vec![Coercion::Borrow],
             OwnershipCoercionPolicy::BorrowOwnedMutably => vec![Coercion::BorrowMut],
             OwnershipCoercionPolicy::RecoverOwnedCopyValue => vec![Coercion::CopyBorrowedValue],
+            OwnershipCoercionPolicy::RecoverErasedObjectClone { sequence } => {
+                vec![Coercion::CloneErasedObject {
+                    sequence: *sequence,
+                }]
+            }
+            OwnershipCoercionPolicy::RecoverOwnedSequenceWithToVec { policy } => {
+                vec![Coercion::ToOwnedSequence {
+                    policy: policy.clone(),
+                }]
+            }
             OwnershipCoercionPolicy::RecoverOwnedWithClone { policy } => {
                 vec![Coercion::CloneRecovery {
                     policy: policy.clone(),
@@ -283,7 +314,8 @@ impl OwnershipCoercionPolicy {
 
     pub fn diagnostics(&self) -> Vec<CoercionDiagnostic> {
         match self {
-            OwnershipCoercionPolicy::RecoverOwnedWithClone { policy } => {
+            OwnershipCoercionPolicy::RecoverOwnedWithClone { policy }
+            | OwnershipCoercionPolicy::RecoverOwnedSequenceWithToVec { policy } => {
                 clone_recovery_diagnostics(policy)
             }
             OwnershipCoercionPolicy::UnsupportedRecovery {
@@ -396,6 +428,11 @@ impl DispatchCoercionPolicy {
             DispatchCoercionPolicy::BoxDynTrait { trait_name } => vec![Coercion::BoxDynTrait {
                 trait_name: trait_name.clone(),
             }],
+            DispatchCoercionPolicy::CloneBoxDynTrait { trait_name } => {
+                vec![Coercion::CloneBoxDynTrait {
+                    trait_name: trait_name.clone(),
+                }]
+            }
             DispatchCoercionPolicy::EraseObject => vec![Coercion::EraseObject],
             DispatchCoercionPolicy::DowncastClosedEnum {
                 enum_name,
@@ -592,6 +629,12 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
                     emit::emit_expr(&expr)
                 ));
             }
+            if emit::emit_expr(&mapped_value) == "value.as_slice()" {
+                return RustExpr::Raw(format!("{}.as_deref()", emit::emit_expr(&expr)));
+            }
+            if emit::emit_expr(&mapped_value) == "value.as_mut_slice()" {
+                return RustExpr::Raw(format!("{}.as_deref_mut()", emit::emit_expr(&expr)));
+            }
             return RustExpr::Raw(format!(
                 "{}.map(|value| {})",
                 emit::emit_expr(&expr),
@@ -611,6 +654,9 @@ pub fn apply_slot_conversion_plan(expr: RustExpr, plan: &SlotConversionPlan) -> 
     match plan {
         SlotConversionPlan::Shape(plan) => apply_shape_coercion_plan(expr, plan),
         SlotConversionPlan::Syntax(plan) => apply_syntax_coercion_plan(expr, plan),
+        SlotConversionPlan::OptionalConstruction(plan) => {
+            apply_optional_slot_construction(expr, plan)
+        }
         SlotConversionPlan::BorrowedElement(policy) => {
             apply_borrowed_element_slot_adapter(expr, policy)
         }
@@ -623,6 +669,31 @@ pub fn apply_slot_conversion_plan(expr: RustExpr, plan: &SlotConversionPlan) -> 
         }
         SlotConversionPlan::Identity { .. } => expr,
     }
+}
+
+fn apply_optional_slot_construction(
+    expr: RustExpr,
+    plan: &crate::conversion_plan::OptionalSlotConstructionPlan,
+) -> RustExpr {
+    let expr = normalize_optional_constructed_element_expr(apply_shape_coercion_plan(
+        expr,
+        &plan.element_plan,
+    ));
+    RustExpr::Call {
+        function: Box::new(RustExpr::Var("Some".to_string())),
+        args: vec![expr],
+    }
+}
+
+fn normalize_optional_constructed_element_expr(expr: RustExpr) -> RustExpr {
+    let rendered = emit::emit_expr(&expr);
+    if let Some(inner) = rendered
+        .strip_prefix('&')
+        .and_then(|value| value.strip_suffix(".as_str()"))
+    {
+        return RustExpr::Raw(format!("{inner}.as_str()"));
+    }
+    expr
 }
 
 fn apply_rust_unsigned_byte_array_return(
@@ -673,6 +744,19 @@ fn apply_rust_scalar_slot_cast(expr: RustExpr, policy: &RustScalarSlotCastPolicy
         == Some(policy.rust_type_name.as_str())
     {
         return expr;
+    }
+    if policy.target_primitive == PrimitiveType::Char {
+        return RustExpr::Raw(format!(
+            "char::from_u32((({}) as u32) & 0xffff).unwrap_or('\\0')",
+            emit::emit_expr(&expr)
+        ));
+    }
+    if policy.rust_type_name == "char" {
+        return RustExpr::Raw(format!(
+            "(({}) as u32) as {}",
+            emit::emit_expr(&expr),
+            rust_primitive_type_name_policy(policy.target_primitive).rust_name
+        ));
     }
     if rust_scalar_is_integral(&policy.rust_type_name)
         && java_primitive_is_integral(policy.target_primitive)
@@ -754,6 +838,9 @@ pub fn apply_instanceof_check(
 
 pub fn render_instanceof_check(expr: RustExpr, check: &InstanceOfCheck) -> RustExpr {
     match check {
+        InstanceOfCheck::JavaSerializableMarker => {
+            RustExpr::Raw(format!("java_is_serializable(&{})", emit::emit_expr(&expr)))
+        }
         InstanceOfCheck::ClosedEnumVariant {
             enum_name,
             variant_name,
@@ -871,17 +958,47 @@ fn apply_borrowed_element_slot_adapter(
     policy: &BorrowedElementSlotAdapterPolicy,
 ) -> RustExpr {
     if let Some(adapter) = &policy.adapter {
-        let adapted = apply_borrowed_element_adapter(expr, adapter);
         if matches!(
             adapter.recovery,
             BorrowedElementRecoveryPolicy::BorrowElement
         ) {
-            apply_borrowed_element_target_view(adapted, policy)
-        } else {
-            adapted
+            let adapted = apply_borrowed_element_borrow_adapter(expr, adapter, policy);
+            return apply_borrowed_element_target_view(adapted, policy);
         }
+        let adapted = apply_borrowed_element_adapter(expr, adapter);
+        adapted
     } else {
         expr
+    }
+}
+
+fn apply_borrowed_element_borrow_adapter(
+    expr: RustExpr,
+    adapter: &BorrowedElementAdapterPolicy,
+    policy: &BorrowedElementSlotAdapterPolicy,
+) -> RustExpr {
+    if !adapter.unwrap_carrier {
+        return expr;
+    }
+    let rendered = emit::emit_expr(&expr);
+    match (adapter.carrier, policy.target.ownership) {
+        (BorrowedElementCarrier::Option, OwnershipShape::SharedBorrow)
+            if adapter.element_shape.ownership == OwnershipShape::SharedBorrow =>
+        {
+            RustExpr::Raw(format!("{rendered}.expect(\"Java null receiver\")"))
+        }
+        (BorrowedElementCarrier::Option, OwnershipShape::MutableBorrow)
+            if adapter.element_shape.ownership == OwnershipShape::MutableBorrow =>
+        {
+            RustExpr::Raw(format!("{rendered}.expect(\"Java null receiver\")"))
+        }
+        (BorrowedElementCarrier::Option, OwnershipShape::SharedBorrow) => RustExpr::Raw(format!(
+            "{rendered}.as_ref().expect(\"Java null receiver\")"
+        )),
+        (BorrowedElementCarrier::Option, OwnershipShape::MutableBorrow) => RustExpr::Raw(format!(
+            "{rendered}.as_mut().expect(\"Java null receiver\")"
+        )),
+        _ => RustExpr::Raw(format!("{rendered}.expect(\"Java null receiver\")")),
     }
 }
 
@@ -957,6 +1074,12 @@ fn apply_borrowed_element_target_view(
     expr: RustExpr,
     policy: &BorrowedElementSlotAdapterPolicy,
 ) -> RustExpr {
+    if let Some(projected) = apply_optional_borrowed_element_target_view(&expr, policy) {
+        return projected;
+    }
+    if let Some(projected) = apply_required_borrowed_element_target_view(&expr, policy) {
+        return projected;
+    }
     match &policy.target.dispatch {
         DispatchShape::DynTrait { trait_name } => {
             RustExpr::Raw(format!("{} as &dyn {trait_name}", emit::emit_expr(&expr)))
@@ -973,6 +1096,75 @@ fn apply_borrowed_element_target_view(
             }
         }
         _ => expr,
+    }
+}
+
+fn apply_optional_borrowed_element_target_view(
+    expr: &RustExpr,
+    policy: &BorrowedElementSlotAdapterPolicy,
+) -> Option<RustExpr> {
+    if !matches!(policy.carrier, BorrowedElementCarrier::Option) {
+        return None;
+    }
+    let target_element_ty = policy.target.optional_element_type()?;
+    let target_element =
+        crate::conversion_plan::optional_element_slot_shape(&policy.target, target_element_ty);
+    let rendered = emit::emit_expr(expr);
+    match (target_element.ownership, &target_element.view) {
+        (OwnershipShape::SharedBorrow, ViewShape::Slice)
+            if matches!(target_element.java_ty, crate::java_ir::JavaType::Array(_)) =>
+        {
+            (!rendered.ends_with(".as_deref()"))
+                .then(|| RustExpr::Raw(format!("{rendered}.as_deref()")))
+        }
+        (OwnershipShape::MutableBorrow, ViewShape::Slice)
+            if matches!(target_element.java_ty, crate::java_ir::JavaType::Array(_)) =>
+        {
+            (!rendered.ends_with(".as_deref_mut()"))
+                .then(|| RustExpr::Raw(format!("{rendered}.as_deref_mut()")))
+        }
+        (OwnershipShape::SharedBorrow, ViewShape::Str)
+            if target_element.java_ty == crate::java_ir::JavaType::String =>
+        {
+            (!rendered.ends_with(".as_deref()"))
+                .then(|| RustExpr::Raw(format!("{rendered}.as_deref()")))
+        }
+        (OwnershipShape::SharedBorrow, ViewShape::Native) => (!rendered.ends_with(".as_ref()"))
+            .then(|| RustExpr::Raw(format!("{rendered}.as_ref()"))),
+        (OwnershipShape::MutableBorrow, ViewShape::Native) => (!rendered.ends_with(".as_mut()"))
+            .then(|| RustExpr::Raw(format!("{rendered}.as_mut()"))),
+        _ => None,
+    }
+}
+
+fn apply_required_borrowed_element_target_view(
+    expr: &RustExpr,
+    policy: &BorrowedElementSlotAdapterPolicy,
+) -> Option<RustExpr> {
+    if policy.target.optional_element_type().is_some() {
+        return None;
+    }
+    let rendered = emit::emit_expr(expr);
+    match (policy.target.ownership, &policy.target.view) {
+        (OwnershipShape::SharedBorrow, ViewShape::Slice)
+            if matches!(policy.target.java_ty, crate::java_ir::JavaType::Array(_)) =>
+        {
+            (!rendered.ends_with(".as_slice()"))
+                .then(|| RustExpr::Raw(format!("{rendered}.as_slice()")))
+        }
+        (OwnershipShape::MutableBorrow, ViewShape::Slice)
+            if matches!(policy.target.java_ty, crate::java_ir::JavaType::Array(_)) =>
+        {
+            (!rendered.ends_with(".as_mut_slice()"))
+                .then(|| RustExpr::Raw(format!("{rendered}.as_mut_slice()")))
+        }
+        (OwnershipShape::SharedBorrow, ViewShape::Str)
+            if policy.target.java_ty == crate::java_ir::JavaType::String =>
+        {
+            (!rendered.ends_with(".as_str()"))
+                .then(|| RustExpr::Raw(format!("{rendered}.as_str()")))
+        }
+        _ => None,
     }
 }
 
@@ -1077,10 +1269,17 @@ fn render_borrowed_element_recovery_fallback_policy(
 fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
     match coercion {
         Coercion::Identity => expr,
-        Coercion::IndexToUsize => RustExpr::Raw(format!("{} as usize", emit::emit_expr(&expr))),
+        Coercion::IndexToUsize => RustExpr::Raw(format!(
+            "{} as usize",
+            parenthesize_compound_cast_operand(&emit::emit_expr(&expr))
+        )),
         Coercion::ToStringForConcat => {
             RustExpr::Raw(format!("({}).to_string()", emit::emit_expr(&expr)))
         }
+        Coercion::ErasedObjectToJavaDisplayString => RustExpr::Raw(format!(
+            "java_erased_object_to_string(&{})",
+            emit::emit_expr(&expr)
+        )),
         Coercion::OptionalToJavaDisplayString => RustExpr::Raw(format!(
             "{}.as_deref().unwrap_or(\"null\")",
             emit::emit_expr(&expr)
@@ -1098,7 +1297,15 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
                 RustExpr::Raw(format!("{rendered}.to_string()"))
             }
         }
-        Coercion::AsSlice => RustExpr::Raw(format!("{}.as_slice()", emit::emit_expr(&expr))),
+        Coercion::AsSlice => {
+            let rendered = emit::emit_expr(&expr);
+            if rendered.contains("::") && !rendered.contains('(') {
+                RustExpr::Raw(rendered)
+            } else {
+                RustExpr::Raw(format!("{rendered}.as_slice()"))
+            }
+        }
+        Coercion::AsMutSlice => RustExpr::Raw(format!("{}.as_mut_slice()", emit::emit_expr(&expr))),
         Coercion::WrapClosedEnum {
             enum_name,
             variant_name,
@@ -1124,6 +1331,14 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             "Box::new({}) as Box<dyn {trait_name}>",
             emit::emit_expr(&expr)
         )),
+        Coercion::CloneBoxDynTrait { .. } => {
+            let rendered = emit::emit_expr(&expr);
+            if rendered.starts_with("<dyn ") && rendered.contains(">::anonymous()") {
+                RustExpr::Raw(rendered)
+            } else {
+                RustExpr::Raw(format!("{rendered}.clone_box()"))
+            }
+        }
         Coercion::EraseObject => RustExpr::Raw(format!(
             "Box::new({}) as Box<dyn std::any::Any>",
             emit::emit_expr(&expr)
@@ -1154,10 +1369,24 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             target_dispatch,
             policy,
         } => apply_unsupported_dispatch_coercion(expr, actual_dispatch, target_dispatch, policy),
-        Coercion::WidenPrimitive { to, .. } => RustExpr::Cast {
-            expr: Box::new(expr),
-            ty: rust_primitive_type_name_policy(*to).rust_name.to_string(),
-        },
+        Coercion::WidenPrimitive { from, to } => {
+            let rendered = parenthesize_compound_cast_operand(&emit::emit_expr(&expr));
+            if *to == PrimitiveType::Char {
+                return RustExpr::Raw(format!(
+                    "char::from_u32(({rendered} as u32) & 0xffff).unwrap_or('\\0')"
+                ));
+            }
+            if *from == PrimitiveType::Char {
+                return RustExpr::Raw(format!(
+                    "({rendered} as u32) as {}",
+                    rust_primitive_type_name_policy(*to).rust_name
+                ));
+            }
+            RustExpr::Raw(format!(
+                "{rendered} as {}",
+                rust_primitive_type_name_policy(*to).rust_name
+            ))
+        }
         Coercion::WrapOption => RustExpr::Raw(format!("Some({})", emit::emit_expr(&expr))),
         Coercion::UnwrapOption => RustExpr::Raw(format!("{}.unwrap()", emit::emit_expr(&expr))),
         Coercion::UnwrapOptionBorrowed => RustExpr::Raw(format!(
@@ -1167,6 +1396,15 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         Coercion::Borrow => RustExpr::Raw(format!("&{}", emit::emit_expr(&expr))),
         Coercion::BorrowMut => RustExpr::Raw(format!("&mut {}", emit::emit_expr(&expr))),
         Coercion::CopyBorrowedValue => RustExpr::Raw(format!("*{}", emit::emit_expr(&expr))),
+        Coercion::CloneErasedObject { sequence } => {
+            let helper = if *sequence {
+                "java_clone_erased_object_vec_ref"
+            } else {
+                "java_clone_erased_object_ref"
+            };
+            RustExpr::Raw(format!("{helper}(&{})", emit::emit_expr(&expr)))
+        }
+        Coercion::ToOwnedSequence { policy } => apply_to_owned_sequence(expr, policy),
         Coercion::CloneRecovery { policy } => apply_clone_recovery(expr, policy),
         Coercion::UnsupportedOwnership {
             actual_ownership,
@@ -1176,6 +1414,72 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             apply_unsupported_ownership_coercion(expr, *actual_ownership, *target_ownership, policy)
         }
     }
+}
+
+fn parenthesize_compound_cast_operand(rendered: &str) -> String {
+    let trimmed = rendered.trim();
+    if balanced_outer_parentheses_wrap_all(trimmed) {
+        return trimmed.to_string();
+    }
+    if trimmed.contains(" + ")
+        || trimmed.contains(" - ")
+        || trimmed.contains(" * ")
+        || trimmed.contains(" / ")
+        || trimmed.contains(" % ")
+        || trimmed.contains(" & ")
+        || trimmed.contains(" | ")
+        || trimmed.contains(" ^ ")
+        || trimmed.contains(" << ")
+        || trimmed.contains(" >> ")
+        || trimmed.contains(" && ")
+        || trimmed.contains(" || ")
+    {
+        format!("({trimmed})")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn balanced_outer_parentheses_wrap_all(raw: &str) -> bool {
+    if !raw.starts_with('(') || !raw.ends_with(')') {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    for (index, ch) in raw.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string || in_char {
+            if ch == '\\' {
+                escaped = true;
+            } else if in_string && ch == '"' {
+                in_string = false;
+            } else if in_char && ch == '\'' {
+                in_char = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '\'' => in_char = true,
+            '(' => depth += 1,
+            ')' => {
+                let Some(next_depth) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next_depth;
+                if depth == 0 && index != raw.len() - 1 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 fn apply_unsupported_dispatch_coercion(
@@ -1243,9 +1547,26 @@ fn plausible_rust_nominal_type_name(target_type: &str) -> bool {
         .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
 }
 
+fn apply_to_owned_sequence(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
+    let rendered = emit::emit_expr(&expr);
+    if rendered.ends_with(".to_vec()") {
+        return expr;
+    }
+    let receiver = if rust_method_receiver_needs_parentheses(&rendered) {
+        format!("({rendered})")
+    } else {
+        rendered
+    };
+    RustExpr::Raw(format!(
+        "{receiver}.to_vec(){}",
+        render_clone_recovery_policy(policy)
+    ))
+}
+
 fn apply_clone_recovery(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
     let rendered = emit::emit_expr(&expr);
     if rendered.ends_with(".clone()")
+        || rendered.ends_with(".clone_box()")
         || rendered.ends_with(".clone()/* TODO(translation): validate added clone */")
     {
         return expr;

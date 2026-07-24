@@ -23,7 +23,10 @@ pub fn java_exception_support_item() -> RustItem {
 
 pub fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
     let conversions = external_exception_conversions(facts);
-    let mut item = r#"#[derive(Debug, Clone, PartialEq, Eq)]
+    let mut item = r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct InputStream;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaException {
     pub class_name: &'static str,
     pub message: String,
@@ -59,8 +62,35 @@ impl JavaException {
         }
     }
 
-    pub fn get_message(&self) -> String {
-        self.message.clone()
+    pub fn get_message(&self) -> Option<String> {
+        Some(self.message.clone())
+    }
+
+    pub fn get_localized_message(&self) -> Option<String> {
+        self.get_message()
+    }
+}
+
+impl InputStream {
+    pub fn read_0(&self) -> Result<i32, JavaException> {
+        Ok(0)
+    }
+
+    pub fn read<T0: ?Sized>(&self, _arg0: &T0) -> Result<i32, JavaException> {
+        Ok(0)
+    }
+
+    pub fn read_3<T0: ?Sized>(
+        &self,
+        _arg0: &T0,
+        _arg1: i32,
+        _arg2: i32,
+    ) -> Result<i32, JavaException> {
+        Ok(0)
+    }
+
+    pub fn close(&self) -> Result<(), JavaException> {
+        Ok(())
     }
 }
 
@@ -110,7 +140,10 @@ pub fn external_exception_conversions(facts: &FactSet) -> Vec<ExternalExceptionC
 
 pub fn legacy_java_exception_support_item() -> RustItem {
     RustItem::Raw(
-        r#"#[derive(Debug, Clone, PartialEq, Eq)]
+        r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct InputStream;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaException {
     pub class_name: &'static str,
     pub message: String,
@@ -142,8 +175,35 @@ impl JavaException {
         }
     }
 
-    pub fn get_message(&self) -> String {
-        self.message.clone()
+    pub fn get_message(&self) -> Option<String> {
+        Some(self.message.clone())
+    }
+
+    pub fn get_localized_message(&self) -> Option<String> {
+        self.get_message()
+    }
+}
+
+impl InputStream {
+    pub fn read_0(&self) -> Result<i32, JavaException> {
+        Ok(0)
+    }
+
+    pub fn read<T0: ?Sized>(&self, _arg0: &T0) -> Result<i32, JavaException> {
+        Ok(0)
+    }
+
+    pub fn read_3<T0: ?Sized>(
+        &self,
+        _arg0: &T0,
+        _arg1: i32,
+        _arg2: i32,
+    ) -> Result<i32, JavaException> {
+        Ok(0)
+    }
+
+    pub fn close(&self) -> Result<(), JavaException> {
+        Ok(())
     }
 }
 
@@ -245,6 +305,90 @@ pub fn try_catch_stmt(
     }
     out.push('}');
     RustStmt::Raw(out)
+}
+
+pub fn try_catch_value_fallthrough_stmt(
+    ok_type: RustType,
+    try_body: Vec<RustStmt>,
+    catches: Vec<CatchRenderArm>,
+    outer_returns_result: bool,
+) -> RustStmt {
+    let option_ok_type = RustType::Option(Box::new(ok_type));
+    let rendered_result_type = crate::emit::emit_type(&exception_result_type(option_ok_type));
+    let mut body_with_fallthrough = wrap_ok_returns_in_some(try_body);
+    body_with_fallthrough.push(RustStmt::Return(Some(RustExpr::Raw(
+        "Ok(None)".to_string(),
+    ))));
+
+    let mut out = String::new();
+    out.push_str("match (|| -> ");
+    out.push_str(&rendered_result_type);
+    out.push_str(" {\n");
+    out.push_str(&crate::emit::emit_statements(&body_with_fallthrough, 1));
+    out.push_str("})() {\n");
+    if outer_returns_result {
+        out.push_str("    Ok(Some(value)) => return Ok(value),\n");
+    } else {
+        out.push_str("    Ok(Some(value)) => return value,\n");
+    }
+    out.push_str("    Ok(None) => {}\n");
+    for catch in catches {
+        let classes = catch
+            .class_names
+            .iter()
+            .map(|name| format!("{name:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "    Err({}) if {}.is_instance(&[{}]) => {{\n",
+            catch.variable_name, catch.variable_name, classes
+        ));
+        out.push_str(&crate::emit::emit_statements(&catch.body, 2));
+        out.push_str("    }\n");
+    }
+    if outer_returns_result {
+        out.push_str("    Err(ex) => return Err(ex),\n");
+    } else {
+        out.push_str("    Err(ex) => panic!(\"uncaught Java exception: {:?}\", ex),\n");
+    }
+    out.push('}');
+    RustStmt::Raw(out)
+}
+
+fn wrap_ok_returns_in_some(stmts: Vec<RustStmt>) -> Vec<RustStmt> {
+    stmts.into_iter().map(wrap_ok_return_in_some).collect()
+}
+
+fn wrap_ok_return_in_some(stmt: RustStmt) -> RustStmt {
+    match stmt {
+        RustStmt::Return(Some(RustExpr::Call { function, mut args }))
+            if matches!(&*function, RustExpr::Raw(name) if name == "Ok") && args.len() == 1 =>
+        {
+            let value = args.remove(0);
+            RustStmt::Return(Some(RustExpr::Raw(format!(
+                "Ok(Some({}))",
+                crate::emit::emit_expr(&value)
+            ))))
+        }
+        RustStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => RustStmt::If {
+            condition,
+            then_body: wrap_ok_returns_in_some(then_body),
+            else_body: wrap_ok_returns_in_some(else_body),
+        },
+        RustStmt::While { condition, body } => RustStmt::While {
+            condition,
+            body: wrap_ok_returns_in_some(body),
+        },
+        RustStmt::Loop { label, body } => RustStmt::Loop {
+            label,
+            body: wrap_ok_returns_in_some(body),
+        },
+        other => other,
+    }
 }
 
 fn plain_return_catch_body(body: Vec<RustStmt>) -> Vec<RustStmt> {

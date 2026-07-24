@@ -97,7 +97,47 @@ pub fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usi
     let receiver = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
     matches!(
         (receiver.as_str(), method, arg_count),
-        ("HtsjdkReadsRddStorage", "makeDefault", 1)
+        ("IOUtils", "getPath", 1)
+            | (
+                "org.broadinstitute.hellbender.utils.io.IOUtils",
+                "getPath",
+                1
+            )
+            | ("IOUtils", "appendPathToDir", 2)
+            | (
+                "org.broadinstitute.hellbender.utils.io.IOUtils",
+                "appendPathToDir",
+                2
+            )
+            | ("IOUtils", "assertFileIsReadable", 1)
+            | (
+                "org.broadinstitute.hellbender.utils.io.IOUtils",
+                "assertFileIsReadable",
+                1
+            )
+            | ("IOUtils", "assertPathsAreReadable", 1)
+            | (
+                "org.broadinstitute.hellbender.utils.io.IOUtils",
+                "assertPathsAreReadable",
+                1
+            )
+            | ("IOUtils", "createTempFile", 2)
+            | (
+                "org.broadinstitute.hellbender.utils.io.IOUtils",
+                "createTempFile",
+                2
+            )
+            | (
+                "ClassLoader",
+                "getSystemResource" | "get_system_resource",
+                1
+            )
+            | (
+                "java.lang.ClassLoader",
+                "getSystemResource" | "get_system_resource",
+                1
+            )
+            | ("HtsjdkReadsRddStorage", "makeDefault", 1)
             | ("org.disq_bio.disq.HtsjdkReadsRddStorage", "makeDefault", 1)
             | ("HtsjdkVariantsRddStorage", "makeDefault", 1)
             | (
@@ -111,6 +151,26 @@ pub fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usi
             | ("org.disq_bio.disq.SbiWriteOption", "fromBoolean", 1)
             | ("TabixIndexWriteOption", "fromBoolean", 1)
             | ("org.disq_bio.disq.TabixIndexWriteOption", "fromBoolean", 1)
+            | (
+                "JavaxSwingRepaintManager",
+                "currentManager" | "current_manager",
+                1
+            )
+            | ("RepaintManager", "currentManager" | "current_manager", 1)
+            | (
+                "javax.swing.RepaintManager",
+                "currentManager" | "current_manager",
+                1
+            )
+            | ("Base64", "getEncoder" | "get_encoder", 0)
+            | ("JavaUtilBase64", "getEncoder" | "get_encoder", 0)
+            | ("java.util.Base64", "getEncoder" | "get_encoder", 0)
+            | ("JavaxImageioImageIO", "read", 1)
+            | ("ImageIO", "read", 1)
+            | ("javax.imageio.ImageIO", "read", 1)
+            | ("JavaxImageioImageIO", "write", 3)
+            | ("ImageIO", "write", 3)
+            | ("javax.imageio.ImageIO", "write", 3)
     )
 }
 
@@ -121,6 +181,11 @@ pub fn preferred_static_owner_alias(
 ) -> Option<&'static str> {
     let owner = crate::stdlib::canonical_external_receiver_type_key(owner);
     match (owner.as_str(), method, arg_count) {
+        (
+            "class_loader" | "ClassLoader" | "java.lang.ClassLoader",
+            "get_system_resource" | "getSystemResource",
+            1,
+        ) => Some("ClassLoader"),
         (
             "org.disq_bio.disq.TabixIndexWriteOption" | "OrgDisqBioDisqTabixIndexWriteOption",
             "from_boolean" | "fromBoolean",

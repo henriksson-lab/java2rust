@@ -24,6 +24,7 @@ pub struct RustField {
     pub name: String,
     pub ty: RustType,
     pub is_pub: bool,
+    pub is_pub_crate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

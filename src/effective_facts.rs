@@ -283,6 +283,27 @@ impl<'a> EffectiveFacts<'a> {
         if let Some(fact) = self.owned_recovery_capability_fact_for(java_ty) {
             return fact.capability.clone();
         }
+        if let Some(element_ty) = crate::types::optional_element_type(java_ty) {
+            return match self.owned_recovery_capability_for(&element_ty) {
+                OwnedRecoveryCapability::Copy
+                | OwnedRecoveryCapability::ImmutableSharedHandle { .. }
+                | OwnedRecoveryCapability::ExplicitClone { .. }
+                | OwnedRecoveryCapability::CloneBoxAdapter { .. }
+                | OwnedRecoveryCapability::FactoryCopy { .. } => {
+                    OwnedRecoveryCapability::ExplicitClone {
+                        java_ty: java_ty.clone(),
+                    }
+                }
+                OwnedRecoveryCapability::ConservativeClone => {
+                    OwnedRecoveryCapability::ConservativeClone
+                }
+                OwnedRecoveryCapability::NonCloneable
+                | OwnedRecoveryCapability::FacadeOwnedExternalHandle { .. }
+                | OwnedRecoveryCapability::FfiOwnedHandle { .. } => {
+                    OwnedRecoveryCapability::NonCloneable
+                }
+            };
+        }
         if self.is_copy_type(java_ty) {
             return OwnedRecoveryCapability::Copy;
         }

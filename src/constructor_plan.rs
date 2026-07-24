@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::facts::FactSet;
-use crate::item_assembly::{is_static_field, is_static_final_non_const_field};
+use crate::item_assembly::is_static_field;
 use crate::java_ir::{
     Block, CallKind, ConstructorInvocationKind, Expr, Member, ResolvedCall, ResolvedConstructor,
     Stmt, TypeDecl,
@@ -33,6 +33,11 @@ pub enum ConstructorDelegationPlan<'a> {
         args: &'a [Expr],
         superclass: String,
     },
+    ExternalExceptionSuperclassWithTrailing {
+        args: &'a [Expr],
+        superclass: String,
+        trailing: Vec<DelegatedConstructorTrailingStmt<'a>>,
+    },
     Unsupported(UnsupportedConstructorLowering),
 }
 
@@ -41,6 +46,9 @@ pub enum DelegatedConstructorTrailingStmt<'a> {
     FieldAssignment {
         field_name: String,
         value: &'a Expr,
+    },
+    ExprStatement {
+        expr: &'a Expr,
     },
     InstanceCall {
         resolved: &'a ResolvedCall,
@@ -118,22 +126,37 @@ pub fn plan_constructor_delegation_for_type<'a>(
                     superclass,
                     args.len(),
                 )
-                && let Some(trailing) = delegated_constructor_trailing_stmts(&body.statements[1..])
             {
-                return Some(
-                    ConstructorDelegationPlan::ModeledExternalSuperclassWithTrailing {
-                        superclass: superclass.to_string(),
-                        trailing,
-                    },
-                );
+                if let Some(trailing) = delegated_constructor_trailing_stmts(&body.statements[1..])
+                {
+                    return Some(
+                        ConstructorDelegationPlan::ModeledExternalSuperclassWithTrailing {
+                            superclass: superclass.to_string(),
+                            trailing,
+                        },
+                    );
+                }
+                return Some(ConstructorDelegationPlan::Unsupported(
+                    UnsupportedConstructorLowering::SuperWithUnsupportedTrailingStatements,
+                ));
             }
-            if body.statements.len() == 1
-                && let Some(superclass) = ty.and_then(external_exception_superclass)
-            {
-                return Some(ConstructorDelegationPlan::ExternalExceptionSuperclass {
-                    args,
-                    superclass,
-                });
+            if let Some(superclass) = ty.and_then(external_exception_superclass) {
+                if body.statements.len() == 1 {
+                    return Some(ConstructorDelegationPlan::ExternalExceptionSuperclass {
+                        args,
+                        superclass,
+                    });
+                }
+                if let Some(trailing) = delegated_constructor_trailing_stmts(&body.statements[1..])
+                {
+                    return Some(
+                        ConstructorDelegationPlan::ExternalExceptionSuperclassWithTrailing {
+                            args,
+                            superclass,
+                            trailing,
+                        },
+                    );
+                }
             }
             Some(ConstructorDelegationPlan::Unsupported(
                 UnsupportedConstructorLowering::SuperRequiresInheritanceLowering,
@@ -184,12 +207,17 @@ fn external_exception_superclass(ty: &TypeDecl) -> Option<String> {
         .unwrap_or(superclass.as_str());
     matches!(
         simple,
-        "Exception" | "RuntimeException" | "UserException" | "GATKException"
+        "Exception"
+            | "RuntimeException"
+            | "IllegalArgumentException"
+            | "IllegalStateException"
+            | "UserException"
+            | "GATKException"
     )
     .then(|| simple.to_string())
 }
 
-fn delegated_constructor_trailing_stmts(
+pub(crate) fn delegated_constructor_trailing_stmts_for_lowering(
     stmts: &[Stmt],
 ) -> Option<Vec<DelegatedConstructorTrailingStmt<'_>>> {
     stmts
@@ -198,10 +226,14 @@ fn delegated_constructor_trailing_stmts(
             Stmt::Assign { target, value } => match target {
                 Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
                     Some(DelegatedConstructorTrailingStmt::FieldAssignment {
-                        field_name: field.clone(),
+                        field_name: crate::parser::to_snake_case(field),
                         value,
                     })
                 }
+                Expr::Var(field) => Some(DelegatedConstructorTrailingStmt::FieldAssignment {
+                    field_name: crate::parser::to_snake_case(field),
+                    value,
+                }),
                 _ => None,
             },
             Stmt::Expr(Expr::Call {
@@ -212,9 +244,22 @@ fn delegated_constructor_trailing_stmts(
             }) if resolved.kind == CallKind::Instance => {
                 Some(DelegatedConstructorTrailingStmt::InstanceCall { resolved, args })
             }
+            Stmt::Expr(expr) if constructor_trailing_expr_stmt_is_supported(expr) => {
+                Some(DelegatedConstructorTrailingStmt::ExprStatement { expr })
+            }
             _ => None,
         })
         .collect()
+}
+
+fn delegated_constructor_trailing_stmts(
+    stmts: &[Stmt],
+) -> Option<Vec<DelegatedConstructorTrailingStmt<'_>>> {
+    delegated_constructor_trailing_stmts_for_lowering(stmts)
+}
+
+fn constructor_trailing_expr_stmt_is_supported(expr: &Expr) -> bool {
+    matches!(expr, Expr::Call { .. })
 }
 
 pub fn plan_constructor_field_values<'a>(
@@ -284,18 +329,9 @@ fn plan_constructor_field_values_with_inherited_field_decls<'a>(
         .members
         .iter()
         .filter_map(|member| match member {
-            Member::Field(field)
-                if !is_static_field(field) || is_static_final_non_const_field(field) =>
-            {
+            Member::Field(field) if !is_static_field(field) => {
                 let shape = signatures.required_field_shape(&ty.name, &field.name);
-                if is_static_final_non_const_field(field) {
-                    Some(ConstructorFieldValuePlan::Default {
-                        field_name: field.name.clone(),
-                        shape,
-                    })
-                } else {
-                    Some(plan_constructor_field_value(field, shape, &assigned))
-                }
+                Some(plan_constructor_field_value(field, shape, &assigned))
             }
             _ => None,
         })
@@ -326,7 +362,7 @@ impl<'a> ConstructorFieldValuePlan<'a> {
 fn plan_constructor_field_value<'a>(
     field: &'a FieldDecl,
     shape: RustSlotShape,
-    assigned: &[(&'a str, &'a Expr)],
+    assigned: &[(String, &'a Expr)],
 ) -> ConstructorFieldValuePlan<'a> {
     if let Some(value) = assigned
         .iter()
@@ -352,7 +388,7 @@ fn plan_constructor_field_value<'a>(
     }
 }
 
-fn constructor_field_assignments(body: Option<&Block>) -> Vec<(&str, &Expr)> {
+fn constructor_field_assignments(body: Option<&Block>) -> Vec<(String, &Expr)> {
     body.map(|body| {
         body.statements
             .iter()
@@ -361,8 +397,9 @@ fn constructor_field_assignments(body: Option<&Block>) -> Vec<(&str, &Expr)> {
                     Expr::FieldAccess(receiver, field)
                         if matches!(receiver.as_ref(), Expr::This) =>
                     {
-                        Some((field.as_str(), value))
+                        Some((crate::parser::to_snake_case(field), value))
                     }
+                    Expr::Var(field) => Some((crate::parser::to_snake_case(field), value)),
                     _ => None,
                 },
                 _ => None,

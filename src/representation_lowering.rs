@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::emit::emit_type;
 use crate::exception_lowering::exception_result_type;
 use crate::exception_plan::{MethodExceptionPlan, ProgramExceptionPlan};
@@ -7,6 +9,7 @@ use crate::representation::{ObjectRepresentation, RepresentationPlan};
 use crate::rust_ir::RustType;
 use crate::signature::{ReceiverPlan, SignaturePlan};
 use crate::slot_render::{rust_name_for_java_named_type, rust_type_for_slot_with_facts};
+use crate::slot_shape::{OwnershipShape, RustSlotShape, ViewShape};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepresentationTypeEmission {
@@ -37,7 +40,7 @@ pub struct TraitImplMethodMessagePolicy {
 impl TraitImplMethodMessagePolicy {
     pub fn compile_error_body(&self, signature: &str) -> String {
         format!(
-            "{} {{ compile_error!(\"{}\"); }}",
+            "{} {{ panic!({:?}); }}",
             signature.trim_end_matches(';'),
             self.message
         )
@@ -238,15 +241,15 @@ pub fn trait_impl_emissions_for_type_with_facts_and_exceptions(
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
 ) -> Vec<String> {
-    if ty.kind != TypeKind::Class {
+    if !matches!(ty.kind, TypeKind::Class | TypeKind::Enum) {
         return Vec::new();
     }
-    ty.implements
-        .iter()
+    implemented_interfaces_for_type(program, ty)
+        .into_iter()
         .filter_map(|interface_name| {
-            let trait_name = dyn_trait_name_for(representations, interface_name)?;
-            let interface = find_type_decl(program, interface_name)?;
-            Some(trait_impl_for_type(
+            let trait_name = dyn_trait_name_for(representations, &interface_name)?;
+            let interface = find_type_decl(program, &interface_name)?;
+            trait_impl_for_type(
                 ty,
                 interface,
                 program,
@@ -254,9 +257,47 @@ pub fn trait_impl_emissions_for_type_with_facts_and_exceptions(
                 signatures,
                 facts,
                 exceptions,
-            ))
+            )
         })
         .collect()
+}
+
+fn implemented_interfaces_for_type(program: &Program, ty: &TypeDecl) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    collect_implemented_interfaces_for_type(program, ty, &mut seen, &mut out);
+    out
+}
+
+fn collect_implemented_interfaces_for_type(
+    program: &Program,
+    ty: &TypeDecl,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    for interface_name in &ty.implements {
+        collect_implemented_interface_name(program, interface_name, seen, out);
+    }
+    if let Some(super_name) = ty.extends.as_deref()
+        && let Some(super_ty) = find_type_decl(program, super_name)
+    {
+        collect_implemented_interfaces_for_type(program, super_ty, seen, out);
+    }
+}
+
+fn collect_implemented_interface_name(
+    program: &Program,
+    interface_name: &str,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    if !seen.insert(interface_name.to_string()) {
+        return;
+    }
+    out.push(interface_name.to_string());
+    if let Some(interface) = find_type_decl(program, interface_name) {
+        collect_implemented_interfaces_for_type(program, interface, seen, out);
+    }
 }
 
 fn trait_item_for_type(
@@ -266,7 +307,8 @@ fn trait_item_for_type(
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
 ) -> String {
-    let methods = ty
+    let trait_name = rust_name_for_java_named_type(trait_name);
+    let mut methods = ty
         .members
         .iter()
         .filter_map(|member| match member {
@@ -280,11 +322,13 @@ fn trait_item_for_type(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if methods.is_empty() {
-        format!("pub trait {trait_name} {{}}")
-    } else {
-        format!("pub trait {trait_name} {{\n{}\n}}", methods.join("\n"))
-    }
+    methods.extend(trait_object_support_method_signatures(&trait_name));
+    format!(
+        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}",
+        methods.join("\n"),
+        dyn_trait_anonymous_impl(&trait_name),
+        boxed_dyn_trait_clone_impl(&trait_name)
+    )
 }
 
 fn trait_item_for_type_with_program(
@@ -295,7 +339,8 @@ fn trait_item_for_type_with_program(
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
 ) -> String {
-    let methods = ty
+    let trait_name = rust_name_for_java_named_type(trait_name);
+    let mut methods = ty
         .members
         .iter()
         .filter_map(|member| match member {
@@ -310,11 +355,13 @@ fn trait_item_for_type_with_program(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if methods.is_empty() {
-        format!("pub trait {trait_name} {{}}")
-    } else {
-        format!("pub trait {trait_name} {{\n{}\n}}", methods.join("\n"))
-    }
+    methods.extend(trait_object_support_method_signatures(&trait_name));
+    format!(
+        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}",
+        methods.join("\n"),
+        dyn_trait_anonymous_impl(&trait_name),
+        boxed_dyn_trait_clone_impl(&trait_name)
+    )
 }
 
 fn trait_impl_for_type(
@@ -325,7 +372,15 @@ fn trait_impl_for_type(
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
-) -> String {
+) -> Option<String> {
+    if ty.modifiers.contains(&Modifier::Abstract)
+        && !abstract_type_has_complete_trait_impl(ty, interface, program)
+        && !type_body_uses_current_self(ty)
+    {
+        return None;
+    }
+    let trait_name = rust_name_for_java_named_type(trait_name);
+    let impl_type_name = rust_name_for_java_named_type(&ty.name);
     let methods = interface
         .members
         .iter()
@@ -334,6 +389,7 @@ fn trait_impl_for_type(
                 ty,
                 interface,
                 interface_method,
+                program,
                 trait_method_receiver_plan(interface, interface_method, program, signatures),
                 signatures,
                 facts,
@@ -342,21 +398,214 @@ fn trait_impl_for_type(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if methods.is_empty() {
-        format!("impl {trait_name} for {} {{}}", ty.name)
-    } else {
-        format!(
-            "impl {trait_name} for {} {{\n{}\n}}",
-            ty.name,
-            methods.join("\n")
-        )
+    let mut methods = methods;
+    methods.extend(trait_object_support_impl_methods(&trait_name));
+    Some(format!(
+        "impl {trait_name} for {impl_type_name} {{\n{}\n}}",
+        methods.join("\n")
+    ))
+}
+
+fn abstract_type_has_complete_trait_impl(
+    ty: &TypeDecl,
+    interface: &TypeDecl,
+    program: &Program,
+) -> bool {
+    interface.members.iter().all(|member| {
+        let Member::Method(interface_method) = member else {
+            return true;
+        };
+        implementing_method_candidates_in_hierarchy(ty, interface_method, program)
+            .into_iter()
+            .any(|(_, candidate)| {
+                candidate.body.is_some()
+                    && trait_impl_method_compatibility_error(interface_method, candidate).is_none()
+            })
+    })
+}
+
+fn type_body_uses_current_self(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(member_uses_current_self)
+}
+
+fn member_uses_current_self(member: &Member) -> bool {
+    match member {
+        Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(expr_uses_current_self),
+        Member::Method(method) => method.body.as_ref().is_some_and(block_uses_current_self),
+        Member::Constructor(ctor) => ctor.body.as_ref().is_some_and(block_uses_current_self),
+        Member::Type(nested) => type_body_uses_current_self(nested),
+        _ => false,
     }
+}
+
+fn block_uses_current_self(block: &crate::java_ir::Block) -> bool {
+    block.statements.iter().any(stmt_uses_current_self)
+}
+
+fn stmt_uses_current_self(stmt: &crate::java_ir::Stmt) -> bool {
+    match stmt {
+        crate::java_ir::Stmt::Expr(expr) => expr_uses_current_self(expr),
+        crate::java_ir::Stmt::Return(expr) => expr.as_ref().is_some_and(expr_uses_current_self),
+        crate::java_ir::Stmt::VarDecl { initializer, .. } => {
+            initializer.as_ref().is_some_and(expr_uses_current_self)
+        }
+        crate::java_ir::Stmt::Assign { target, value } => {
+            expr_uses_current_self(target) || expr_uses_current_self(value)
+        }
+        crate::java_ir::Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_uses_current_self(condition)
+                || block_uses_current_self(then_block)
+                || else_block.as_ref().is_some_and(block_uses_current_self)
+        }
+        crate::java_ir::Stmt::While { condition, body } => {
+            expr_uses_current_self(condition) || block_uses_current_self(body)
+        }
+        crate::java_ir::Stmt::DoWhile { body, condition } => {
+            block_uses_current_self(body) || expr_uses_current_self(condition)
+        }
+        crate::java_ir::Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_uses_current_self)
+                || condition.as_ref().is_some_and(expr_uses_current_self)
+                || update.iter().any(expr_uses_current_self)
+                || block_uses_current_self(body)
+        }
+        crate::java_ir::Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_uses_current_self(iterable) || block_uses_current_self(body)
+        }
+        crate::java_ir::Stmt::Block(body) => block_uses_current_self(body),
+        crate::java_ir::Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(stmt_uses_current_self)
+                || block_uses_current_self(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_uses_current_self(&catch.body))
+                || finally_block.as_ref().is_some_and(block_uses_current_self)
+        }
+        crate::java_ir::Stmt::Switch { selector, cases } => {
+            expr_uses_current_self(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        crate::java_ir::SwitchLabel::Expr(expr) => expr_uses_current_self(expr),
+                        crate::java_ir::SwitchLabel::Default => false,
+                    }) || case.statements.iter().any(stmt_uses_current_self)
+                })
+        }
+        crate::java_ir::Stmt::LocalType(ty) => type_body_uses_current_self(ty),
+        crate::java_ir::Stmt::ConstructorInvocation { args, .. } => {
+            args.iter().any(expr_uses_current_self)
+        }
+        crate::java_ir::Stmt::Throw(expr) => expr_uses_current_self(expr),
+        crate::java_ir::Stmt::Break(_)
+        | crate::java_ir::Stmt::Continue(_)
+        | crate::java_ir::Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_uses_current_self(expr: &crate::java_ir::Expr) -> bool {
+    use crate::java_ir::Expr;
+    match expr {
+        Expr::This => true,
+        Expr::FieldAccess(receiver, _) => expr_uses_current_self(receiver),
+        Expr::Call { receiver, args, .. } => {
+            receiver.as_deref().is_some_and(expr_uses_current_self)
+                || args.iter().any(expr_uses_current_self)
+        }
+        Expr::New { args, body, .. } => {
+            args.iter().any(expr_uses_current_self)
+                || body
+                    .as_ref()
+                    .is_some_and(|members| members.iter().any(member_uses_current_self))
+        }
+        Expr::ArrayAccess(array, index) => {
+            expr_uses_current_self(array) || expr_uses_current_self(index)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(expr_uses_current_self)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|values| values.iter().any(expr_uses_current_self))
+        }
+        Expr::ArrayInitializer(values) => values.iter().any(expr_uses_current_self),
+        Expr::Binary { left, right, .. } => {
+            expr_uses_current_self(left) || expr_uses_current_self(right)
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => expr_uses_current_self(expr),
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_uses_current_self(condition)
+                || expr_uses_current_self(then_expr)
+                || expr_uses_current_self(else_expr)
+        }
+        Expr::InstanceOf { expr, .. } => expr_uses_current_self(expr),
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => expr_uses_current_self(expr),
+            crate::java_ir::LambdaBody::Block(body) => block_uses_current_self(body),
+        },
+        Expr::MethodReference { .. } => false,
+        Expr::ClassLiteral(_) | Expr::Var(_) | Expr::Super | Expr::Literal(_) | Expr::Raw(_) => {
+            false
+        }
+    }
+}
+
+fn trait_object_support_method_signatures(trait_name: &str) -> Vec<String> {
+    vec![
+        "    fn as_any(&self) -> &dyn std::any::Any;".to_string(),
+        format!("    fn clone_box(&self) -> Box<dyn {trait_name}>;"),
+    ]
+}
+
+fn trait_object_support_impl_methods(trait_name: &str) -> Vec<String> {
+    vec![
+        "    fn as_any(&self) -> &dyn std::any::Any { self }".to_string(),
+        format!(
+            "    fn clone_box(&self) -> Box<dyn {trait_name}> {{ panic!(\"java2rust: clone_box for {trait_name} requires a cloneable Java object carrier\") }}"
+        ),
+    ]
+}
+
+fn boxed_dyn_trait_clone_impl(trait_name: &str) -> String {
+    format!(
+        "impl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ self.clone_box() }}\n}}"
+    )
+}
+
+fn dyn_trait_anonymous_impl(trait_name: &str) -> String {
+    format!(
+        "impl dyn {trait_name} {{\n    pub fn anonymous() -> Box<dyn {trait_name}> {{ panic!(\"java2rust: anonymous class body for {trait_name} requires object lowering\") }}\n}}"
+    )
 }
 
 fn trait_impl_method(
     ty: &TypeDecl,
     interface: &TypeDecl,
     interface_method: &MethodDecl,
+    program: &Program,
     trait_receiver: Option<ReceiverPlan>,
     signatures: &SignaturePlan,
     facts: &FactSet,
@@ -370,7 +619,7 @@ fn trait_impl_method(
         interface_exceptions,
         trait_receiver,
     );
-    let candidates = implementing_method_candidates(ty, interface_method);
+    let candidates = implementing_method_candidates_in_hierarchy(ty, interface_method, program);
     if candidates.is_empty() {
         if let Some(body) = external_template_method_trait_impl_body(ty, interface_method) {
             return format!("{} {{ {body} }}", signature.trim_end_matches(';'));
@@ -382,10 +631,10 @@ fn trait_impl_method(
         )
         .compile_error_body(&signature);
     };
-    let implementing_method = candidates
+    let (implementing_owner, implementing_method) = candidates
         .iter()
         .copied()
-        .find(|candidate| {
+        .find(|(_, candidate)| {
             trait_impl_method_compatibility_error(interface_method, candidate).is_none()
         })
         .unwrap_or(candidates[0]);
@@ -399,25 +648,43 @@ fn trait_impl_method(
         )
         .compile_error_body(&signature);
     }
+    if let Some(body) = enum_trait_impl_method_body(ty, interface_method) {
+        return format!("{} {{ {body} }}", signature.trim_end_matches(';'));
+    }
     let rust_name = implementing_method
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&implementing_method.name));
-    let args = signatures
-        .required_method_signature(interface, interface_method)
+    let interface_signature = signatures.required_method_signature(interface, interface_method);
+    let implementation_signature =
+        signatures.required_method_signature(implementing_owner, implementing_method);
+    let args = interface_signature
         .params
         .iter()
-        .map(|param| param.name.as_str())
+        .enumerate()
+        .map(|(index, param)| {
+            let implementation_shape = implementation_signature
+                .params
+                .get(index)
+                .map(|param| &param.shape);
+            trait_impl_forwarded_arg(param.name.as_str(), &param.shape, implementation_shape)
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let receiver_arg = if interface_method.modifiers.contains(&Modifier::Static) {
         String::new()
     } else if args.is_empty() {
-        "self".to_string()
+        trait_impl_forwarding_receiver_arg(ty, implementing_owner, trait_receiver)
     } else {
-        format!("self, {args}")
+        format!(
+            "{}, {args}",
+            trait_impl_forwarding_receiver_arg(ty, implementing_owner, trait_receiver)
+        )
     };
-    let call = format!("{}::{}({})", ty.name, rust_name, receiver_arg);
+    let call = format!(
+        "{}::{}({})",
+        implementing_owner.name, rust_name, receiver_arg
+    );
     let body = if interface_exceptions.wrap_returns_in_result
         || signatures
             .required_method_signature(interface, interface_method)
@@ -429,6 +696,54 @@ fn trait_impl_method(
         format!("{call};")
     };
     format!("{} {{ {body} }}", signature.trim_end_matches(';'))
+}
+
+fn trait_impl_forwarding_receiver_arg(
+    ty: &TypeDecl,
+    implementing_owner: &TypeDecl,
+    trait_receiver: Option<ReceiverPlan>,
+) -> String {
+    if implementing_owner.name == ty.name {
+        return "self".to_string();
+    }
+    let owner_name = rust_name_for_java_named_type(&implementing_owner.name);
+    match trait_receiver.unwrap_or(ReceiverPlan::Shared) {
+        ReceiverPlan::Mutable => {
+            format!(
+                "&mut {{ let mut __java_super: {owner_name} = self.clone().into(); __java_super }}"
+            )
+        }
+        ReceiverPlan::Shared | ReceiverPlan::None => {
+            format!("&{{ let __java_super: {owner_name} = self.clone().into(); __java_super }}")
+        }
+    }
+}
+
+fn trait_impl_forwarded_arg(
+    arg_name: &str,
+    trait_shape: &RustSlotShape,
+    implementation_shape: Option<&RustSlotShape>,
+) -> String {
+    if implementation_shape.is_some_and(|shape| {
+        trait_shape.ownership == OwnershipShape::SharedBorrow
+            && trait_shape.view == ViewShape::Slice
+            && shape.ownership == OwnershipShape::Owned
+            && shape.view == ViewShape::Native
+            && shape.java_ty == trait_shape.java_ty
+    }) {
+        return format!("{arg_name}.to_vec()");
+    }
+    arg_name.to_string()
+}
+
+fn enum_trait_impl_method_body(ty: &TypeDecl, interface_method: &MethodDecl) -> Option<String> {
+    if ty.kind != TypeKind::Enum
+        || !interface_method.params.is_empty()
+        || interface_method.return_type != crate::java_ir::JavaType::String
+    {
+        return None;
+    }
+    Some("self.to_string()".to_string())
 }
 
 fn external_template_method_trait_impl_body(
@@ -681,6 +996,30 @@ fn implementing_method_candidates<'a>(
             _ => None,
         })
         .collect()
+}
+
+fn implementing_method_candidates_in_hierarchy<'a>(
+    ty: &'a TypeDecl,
+    interface_method: &MethodDecl,
+    program: &'a Program,
+) -> Vec<(&'a TypeDecl, &'a MethodDecl)> {
+    let mut out = implementing_method_candidates(ty, interface_method)
+        .into_iter()
+        .map(|method| (ty, method))
+        .collect::<Vec<_>>();
+    if !out.is_empty() {
+        return out;
+    }
+    if let Some(super_name) = ty.extends.as_deref()
+        && let Some(super_ty) = find_type_decl(program, super_name)
+    {
+        out.extend(implementing_method_candidates_in_hierarchy(
+            super_ty,
+            interface_method,
+            program,
+        ));
+    }
+    out
 }
 
 fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {

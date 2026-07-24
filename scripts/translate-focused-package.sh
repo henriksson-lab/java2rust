@@ -178,6 +178,172 @@ elapsed_ms_since() {
   printf '%s' "$((end_ms - start_ms))"
 }
 
+write_ndarray_shim() {
+  local shim_dir="$1"
+  mkdir -p "$shim_dir/src"
+  cat > "$shim_dir/Cargo.toml" <<'TOML'
+[package]
+name = "ndarray"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+TOML
+  cat > "$shim_dir/src/lib.rs" <<'RUST'
+use std::ops::{Index, IndexMut};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Array2<T> {
+    rows: usize,
+    cols: usize,
+    data: Vec<T>,
+}
+
+impl<T: Clone> Array2<T> {
+    pub fn from_elem(shape: (usize, usize), value: T) -> Self {
+        let (rows, cols) = shape;
+        Self {
+            rows,
+            cols,
+            data: vec![value; rows * cols],
+        }
+    }
+
+    pub fn from_rows(rows: &[&[T]]) -> Self {
+        let row_count = rows.len();
+        let cols = rows.first().map_or(0, |row| row.len());
+        let mut data = Vec::with_capacity(row_count * cols);
+        for row in rows {
+            data.extend_from_slice(row);
+        }
+        Self {
+            rows: row_count,
+            cols,
+            data,
+        }
+    }
+}
+
+impl<T> Array2<T> {
+    pub fn nrows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn ncols(&self) -> usize {
+        self.cols
+    }
+
+    pub fn row(&self, row: usize) -> ArrayView1<'_, T> {
+        let start = row * self.cols;
+        ArrayView1 {
+            data: &self.data[start..start + self.cols],
+        }
+    }
+
+    pub fn row_mut(&mut self, row: usize) -> RowMut<'_, T> {
+        let start = row * self.cols;
+        RowMut {
+            data: &mut self.data[start..start + self.cols],
+        }
+    }
+
+    pub fn iter(&self) -> Rows<'_, T> {
+        Rows {
+            matrix: self,
+            row: 0,
+        }
+    }
+}
+
+impl<T> Index<[usize; 2]> for Array2<T> {
+    type Output = T;
+
+    fn index(&self, index: [usize; 2]) -> &Self::Output {
+        &self.data[index[0] * self.cols + index[1]]
+    }
+}
+
+impl<T> IndexMut<[usize; 2]> for Array2<T> {
+    fn index_mut(&mut self, index: [usize; 2]) -> &mut Self::Output {
+        &mut self.data[index[0] * self.cols + index[1]]
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ArrayView1<'a, T> {
+    data: &'a [T],
+}
+
+impl<'a, T> ArrayView1<'a, T> {
+    pub fn from(data: &'a [T]) -> Self {
+        Self { data }
+    }
+
+    pub fn to_vec(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.data.to_vec()
+    }
+}
+
+impl<'a, T> From<&'a Vec<T>> for ArrayView1<'a, T> {
+    fn from(data: &'a Vec<T>) -> Self {
+        Self {
+            data: data.as_slice(),
+        }
+    }
+}
+
+impl<'a, T> From<&'a [T]> for ArrayView1<'a, T> {
+    fn from(data: &'a [T]) -> Self {
+        Self { data }
+    }
+}
+
+pub struct RowMut<'a, T> {
+    data: &'a mut [T],
+}
+
+impl<'a, T: Clone> RowMut<'a, T> {
+    pub fn assign(&mut self, source: &ArrayView1<'_, T>) {
+        self.data.clone_from_slice(source.data);
+    }
+}
+
+pub struct Rows<'a, T> {
+    matrix: &'a Array2<T>,
+    row: usize,
+}
+
+impl<'a, T> Iterator for Rows<'a, T> {
+    type Item = &'a [T];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.row >= self.matrix.rows {
+            return None;
+        }
+        let start = self.row * self.matrix.cols;
+        self.row += 1;
+        Some(&self.matrix.data[start..start + self.matrix.cols])
+    }
+}
+
+pub fn arr2<T: Clone, const R: usize, const C: usize>(rows: &[[T; C]; R]) -> Array2<T> {
+    let mut data = Vec::with_capacity(R * C);
+    for row in rows {
+        data.extend_from_slice(row);
+    }
+    Array2 {
+        rows: R,
+        cols: C,
+        data,
+    }
+}
+RUST
+}
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -n "${NEW_JAVA2RUST_BIN:-}" ]]; then
   binary="$NEW_JAVA2RUST_BIN"
@@ -301,7 +467,7 @@ fi
 count_concrete_none_assignments() {
   local path="$1"
   grep -R -E '= None;' "$path" \
-    | grep -v -E 'let mut [A-Za-z_][A-Za-z0-9_]*: Option<.*> = None;' \
+    | grep -v -E 'let mut (r#)?[A-Za-z_][A-Za-z0-9_]*: Option<.*> = None;' \
     | wc -l \
     | tr -d ' '
 }
@@ -311,7 +477,7 @@ count_concrete_none_assignment_files() {
   grep -R -l -E '= None;' "$path" \
     | while IFS= read -r candidate; do
         if grep -E '= None;' "$candidate" \
-          | grep -q -v -E 'let mut [A-Za-z_][A-Za-z0-9_]*: Option<.*> = None;'; then
+          | grep -q -v -E 'let mut (r#)?[A-Za-z_][A-Za-z0-9_]*: Option<.*> = None;'; then
           printf '%s\n' "$candidate"
         fi
       done \
@@ -476,10 +642,17 @@ assembly_start_ms="$(now_ms)"
 module_types_path="$out_dir/generated-module-types.tsv"
 type_counts_path="$out_dir/generated-type-counts.tsv"
 unique_types_path="$out_dir/generated-unique-types.tsv"
+source_types_path="$out_dir/generated-source-types.tsv"
 shared_support_path="$out_dir/generated-shared-support.rs"
 shared_support_types_path="$out_dir/generated-shared-support-types.tsv"
 shared_support_conflicts_path="$out_dir/generated-shared-support-conflicts.tsv"
-rm -f "$module_types_path" "$type_counts_path" "$unique_types_path" "$shared_support_path" "$shared_support_types_path" "$shared_support_conflicts_path"
+rm -f "$module_types_path" "$type_counts_path" "$unique_types_path" "$source_types_path" "$shared_support_path" "$shared_support_types_path" "$shared_support_conflicts_path"
+
+for i in "${!java_files[@]}"; do
+  stem="$(basename "${java_files[$i]%.java}")"
+  stem="$(printf '%s' "$stem" | tr -c 'A-Za-z0-9_' '_')"
+  printf "%s\n" "$stem" >> "$source_types_path"
+done
 
 strip_shared_support_items() {
   local rust_path="$1"
@@ -514,11 +687,11 @@ strip_shared_support_items() {
         }
         next
       }
-      if ($0 ~ /^impl([[:space:]]*<[^>]+>)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\{/) {
+      if ($0 ~ /^impl([[:space:]]*<[^>]+>)?[[:space:]]+(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\{/) {
         impl_name = $0
-        sub(/^impl([[:space:]]*<[^>]+>)?[[:space:]]+/, "", impl_name)
+        sub(/^impl([[:space:]]*<[^>]+>)?[[:space:]]+(dyn[[:space:]]+)?/, "", impl_name)
         sub(/[[:space:]]*\{.*/, "", impl_name)
-        if (impl_name == "JavaException" || impl_name == "JavaClass" || impl_name == "FileSystem" || impl_name == "Path" || impl_name == "URI" || impl_name == "File" || impl_name == "IOUtils" || shared[impl_name]) {
+        if (impl_name == "JavaException" || impl_name == "JavaClass" || impl_name == "FileSystem" || impl_name == "Path" || impl_name == "URI" || impl_name == "File" || impl_name == "URL" || impl_name == "URLConnection" || impl_name == "JarURLConnection" || impl_name == "JarFile" || impl_name == "JarEntry" || impl_name == "Manifest" || impl_name == "Attributes" || impl_name == "AttributesName" || impl_name == "Enumeration" || impl_name == "JavaIterator" || impl_name == "IOUtils" || (shared[impl_name] && impl_name != source_type)) {
           skip_depth = 0
           skip_depth += gsub(/\{/, "{")
           skip_depth -= gsub(/\}/, "}")
@@ -527,12 +700,21 @@ strip_shared_support_items() {
           }
           next
         }
+        print
+        copy_depth = 0
+        copy_depth += gsub(/\{/, "{")
+        copy_depth -= gsub(/\}/, "}")
+        next
       }
       if ($0 ~ /^impl([[:space:]]*<[^>]+>)?[[:space:]]+.*[[:space:]]+for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*(<.*>)?[[:space:]]*\{/) {
+        impl_trait = $0
+        sub(/^impl([[:space:]]*<[^>]+>)?[[:space:]]+/, "", impl_trait)
+        sub(/[[:space:]]+for[[:space:]].*/, "", impl_trait)
+        sub(/<.*>/, "", impl_trait)
         impl_target = $0
         sub(/^.*[[:space:]]for[[:space:]]+/, "", impl_target)
         sub(/(<.*>)?[[:space:]]*\{.*/, "", impl_target)
-        if (impl_target == "JavaException" || impl_target == "JavaClass" || impl_target == "FileSystem" || impl_target == "Path" || impl_target == "URI" || impl_target == "File" || impl_target == "IOUtils" || shared[impl_target]) {
+        if (impl_target == "JavaException" || impl_target == "JavaClass" || impl_target == "FileSystem" || impl_target == "Path" || impl_target == "URI" || impl_target == "File" || impl_target == "URL" || impl_target == "URLConnection" || impl_target == "JarURLConnection" || impl_target == "JarFile" || impl_target == "JarEntry" || impl_target == "Manifest" || impl_target == "Attributes" || impl_target == "AttributesName" || impl_target == "Enumeration" || impl_target == "JavaIterator" || impl_target == "IOUtils" || (shared[impl_target] && impl_target != source_type) || shared[impl_trait]) {
           skip_depth = 0
           skip_depth += gsub(/\{/, "{")
           skip_depth -= gsub(/\}/, "}")
@@ -541,15 +723,20 @@ strip_shared_support_items() {
           }
           next
         }
+        print
+        copy_depth = 0
+        copy_depth += gsub(/\{/, "{")
+        copy_depth -= gsub(/\}/, "}")
+        next
       }
       if ($0 ~ /^#\[derive/) {
         pending = pending $0 "\n"
         next
       }
-      if ($0 ~ /^pub[[:space:]]+(struct|enum)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) {
+      if ($0 ~ /^pub[[:space:]]+(struct|enum|trait|type)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) {
         name = $3
-        sub(/[;{(<].*/, "", name)
-        if (name == "JavaException" || name == "JavaClass" || name == "FileSystem" || name == "Path" || name == "URI" || name == "File" || name == "IOUtils" || shared[name]) {
+        sub(/[=;{(<:].*/, "", name)
+        if (name == "JavaException" || name == "JavaClass" || name == "FileSystem" || name == "Path" || name == "URI" || name == "File" || name == "URL" || name == "URLConnection" || name == "JarURLConnection" || name == "JarFile" || name == "JarEntry" || name == "Manifest" || name == "Attributes" || name == "AttributesName" || name == "Enumeration" || name == "JavaIterator" || name == "IOUtils" || (shared[name] && name != source_type)) {
           pending = ""
           skip_depth = 0
           skip_depth += gsub(/\{/, "{")
@@ -579,8 +766,169 @@ strip_shared_support_items() {
   mv "$rust_path.stripped" "$rust_path"
 }
 
+strip_source_type_facade_stubs() {
+  local rust_path="$1"
+  local source_types_path="$2"
+  python3 - "$rust_path" "$source_types_path" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+rust_path = Path(sys.argv[1])
+source_types_path = Path(sys.argv[2])
+
+stem = rust_path.stem
+current_source = re.sub(r"^\d+_", "", stem)
+source_types = {
+    line.strip()
+    for line in source_types_path.read_text().splitlines()
+    if line.strip()
+}
+source_types.discard(current_source)
+
+lines = rust_path.read_text().splitlines(keepends=True)
+decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
+inherent_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)")
+trait_impl_re = re.compile(
+    r"^impl(?:\s*<[^>{}]*>)?\s+.+?\s+for\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)"
+)
+derive_re = re.compile(r"^#\[derive")
+
+
+def brace_delta(line: str) -> int:
+    delta = 0
+    index = 0
+    state = "code"
+    while index < len(line):
+        ch = line[index]
+        nxt = line[index + 1] if index + 1 < len(line) else ""
+        if state == "code":
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "/" and nxt == "*":
+                state = "block_comment"
+                index += 2
+                continue
+            if ch == '"':
+                state = "string"
+                index += 1
+                continue
+            is_char_literal = False
+            if ch == "'":
+                next_index = index + 1
+                if next_index < len(line):
+                    if line[next_index] == "\\":
+                        is_char_literal = index + 3 < len(line) and line[index + 3] == "'"
+                    else:
+                        is_char_literal = index + 2 < len(line) and line[index + 2] == "'"
+            if ch == "'" and is_char_literal:
+                state = "char"
+                index += 1
+                continue
+            if ch == "{":
+                delta += 1
+            elif ch == "}":
+                delta -= 1
+            index += 1
+            continue
+        if state == "string":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == '"':
+                state = "code"
+            index += 1
+            continue
+        if state == "char":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == "'":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                state = "code"
+                index += 2
+                continue
+            index += 1
+    return delta
+
+
+def item_end(start: int) -> int:
+    if "{" not in lines[start]:
+        return start + 1
+    depth = 0
+    for index in range(start, len(lines)):
+        depth += brace_delta(lines[index])
+        if depth <= 0:
+            return index + 1
+    return len(lines)
+
+
+def attached_start(start: int) -> int:
+    index = start
+    while index > 0 and derive_re.match(lines[index - 1]):
+        index -= 1
+    return index
+
+
+remove = [False] * len(lines)
+current_source_decl_positions = [
+    index
+    for index, line in enumerate(lines)
+    if (match := decl_re.match(line)) and match.group(2) == current_source
+]
+depth = 0
+index = 0
+while index < len(lines):
+    line = lines[index]
+    if depth == 0:
+        decl = decl_re.match(line)
+        if decl and decl.group(2) == current_source:
+            if any(position > index for position in current_source_decl_positions):
+                start = attached_start(index)
+                end = item_end(index)
+                for remove_index in range(start, end):
+                    remove[remove_index] = True
+                index = end
+                depth = 0
+                continue
+            break
+
+        target = None
+        if decl:
+            target = decl.group(2)
+        else:
+            inherent = inherent_impl_re.match(line)
+            if inherent:
+                target = inherent.group(1)
+            else:
+                trait_impl = trait_impl_re.match(line)
+                if trait_impl:
+                    target = trait_impl.group(1)
+
+        if target in source_types:
+            start = attached_start(index) if decl else index
+            end = item_end(index)
+            for remove_index in range(start, end):
+                remove[remove_index] = True
+            index = end
+            depth = 0
+            continue
+    depth += brace_delta(line)
+    index += 1
+
+rust_path.write_text("".join(line for index, line in enumerate(lines) if not remove[index]))
+PY
+}
+
 if grep -R -q '^pub struct JavaException' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct InputStream;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaException {
     pub class_name: &'static str,
@@ -617,8 +965,35 @@ impl JavaException {
         }
     }
 
-    pub fn get_message(&self) -> String {
-        self.message.clone()
+    pub fn get_message(&self) -> Option<String> {
+        Some(self.message.clone())
+    }
+
+    pub fn get_localized_message(&self) -> Option<String> {
+        self.get_message()
+    }
+}
+
+impl InputStream {
+    pub fn read_0(&self) -> Result<i32, JavaException> {
+        Ok(0)
+    }
+
+    pub fn read<T0: ?Sized>(&self, _arg0: &T0) -> Result<i32, JavaException> {
+        Ok(0)
+    }
+
+    pub fn read_3<T0: ?Sized>(
+        &self,
+        _arg0: &T0,
+        _arg1: i32,
+        _arg2: i32,
+    ) -> Result<i32, JavaException> {
+        Ok(0)
+    }
+
+    pub fn close(&self) -> Result<(), JavaException> {
+        Ok(())
     }
 }
 
@@ -633,6 +1008,7 @@ RUST
     printf '%s\n' "$external_exception_conversion_impls" >> "$shared_support_path"
     printf '\n' >> "$shared_support_path"
   fi
+  printf "InputStream\n" >> "$shared_support_types_path"
   printf "JavaException\n" >> "$shared_support_types_path"
 fi
 
@@ -661,6 +1037,14 @@ impl<T> JavaClass<T> {
         self.name.rsplit('.').next().unwrap_or(&self.name).to_string()
     }
 
+    pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
+        Some(InputStream)
+    }
+
+    pub fn get_class_loader(&self) -> ClassLoader {
+        ClassLoader
+    }
+
     pub fn equals<U>(&self, other: JavaClass<U>) -> bool {
         self.name == other.name
     }
@@ -670,7 +1054,7 @@ RUST
   printf "JavaClass\n" >> "$shared_support_types_path"
 fi
 
-if grep -R -q '^pub struct Path' "$generated_dir" || grep -R -q '^pub struct URI' "$generated_dir" || grep -R -q '^pub struct File' "$generated_dir" || grep -R -q '^pub struct IOUtils' "$generated_dir"; then
+if grep -R -q '^pub struct Path' "$generated_dir" || grep -R -q '^pub struct URI' "$generated_dir" || grep -R -q '^pub struct File' "$generated_dir" || grep -R -q '^pub struct URL' "$generated_dir" || grep -R -q '^pub struct JarURLConnection' "$generated_dir" || grep -R -q '^pub struct JarFile' "$generated_dir" || grep -R -q '^pub struct JarEntry' "$generated_dir" || grep -R -q '^pub struct Manifest' "$generated_dir" || grep -R -q '^pub struct Attributes' "$generated_dir" || grep -R -q '^pub struct AttributesName' "$generated_dir" || grep -R -q '^pub struct Enumeration' "$generated_dir" || grep -R -q 'JavaIterator' "$generated_dir" || grep -R -q '^pub struct IOUtils' "$generated_dir" || grep -R -q '^pub struct BufferedImage' "$generated_dir" || grep -R -q '^pub struct Graphics' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct FileSystem {}
@@ -678,6 +1062,44 @@ pub struct FileSystem {}
 impl FileSystem {
     pub fn delete<T0>(&self, _path: T0, _recursive: bool) -> bool {
         true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Graphics;
+
+impl Graphics {
+    pub fn dispose(&self) {}
+    pub fn draw_image<T0, T1, T2, T3>(&self, _image: T0, _x: T1, _y: T2, _observer: T3) -> bool {
+        true
+    }
+    pub fn get_clip<R: Default>(&self) -> R {
+        Default::default()
+    }
+    pub fn get_clip_bounds<R: Default>(&self) -> R {
+        Default::default()
+    }
+    pub fn get_font_metrics<R: Default, T0>(&self, _font: T0) -> R {
+        Default::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct BufferedImage;
+
+impl BufferedImage {
+    pub const TYPE_INT_RGB: i32 = 1;
+
+    pub fn new<T0, T1, T2>(_width: T0, _height: T1, _image_type: T2) -> Self {
+        Self
+    }
+
+    pub fn get_graphics(&self) -> Graphics {
+        Graphics
+    }
+
+    pub fn create_graphics(&self) -> Graphics {
+        Graphics
     }
 }
 
@@ -770,6 +1192,127 @@ impl std::fmt::Display for URI {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct URL {
+    value: String,
+}
+
+impl URL {
+    pub fn new<S: Into<String>>(value: S) -> URL {
+        URL { value: value.into() }
+    }
+
+    pub fn get_file(&self) -> String {
+        self.value.clone()
+    }
+
+    pub fn open_connection<T: Default>(&self) -> Result<T, JavaException> {
+        Ok(T::default())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct URLConnection;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct JarURLConnection;
+
+impl JarURLConnection {
+    pub fn get_jar_file(&self) -> Result<JarFile, JavaException> {
+        Ok(JarFile)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct JarFile;
+
+impl JarFile {
+    pub fn entries(&self) -> Result<Enumeration, JavaException> {
+        Ok(Enumeration)
+    }
+
+    pub fn get_manifest(&self) -> Result<Manifest, JavaException> {
+        Ok(Manifest)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct JarEntry;
+
+impl JarEntry {
+    pub fn is_directory(&self) -> bool {
+        false
+    }
+
+    pub fn get_name(&self) -> String {
+        String::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Manifest;
+
+impl Manifest {
+    pub fn get_main_attributes(&self) -> Attributes {
+        Attributes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Attributes;
+
+impl Attributes {
+    pub fn get_value<T>(&self, _name: T) -> String {
+        String::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct AttributesName {
+    value: String,
+}
+
+impl AttributesName {
+    pub fn new<S: Into<String>>(value: S) -> AttributesName {
+        AttributesName { value: value.into() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct Enumeration;
+
+impl Enumeration {
+    pub fn has_more_elements(&self) -> Result<bool, JavaException> {
+        Ok(false)
+    }
+
+    pub fn next_element<T: Default>(&self) -> Result<T, JavaException> {
+        Ok(T::default())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct JavaIterator<T> {
+    items: Vec<T>,
+    index: usize,
+}
+
+impl<T: Clone> JavaIterator<T> {
+    pub fn new<I: IntoIterator<Item = T>>(items: I) -> JavaIterator<T> {
+        JavaIterator { items: items.into_iter().collect(), index: 0 }
+    }
+
+    pub fn has_next(&self) -> bool {
+        self.index < self.items.len()
+    }
+
+    pub fn next(&mut self) -> T {
+        let value = self.items.get(self.index).expect("Java iterator exhausted").clone();
+        self.index += 1;
+        value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct File {
     value: String,
 }
@@ -789,6 +1332,55 @@ impl File {
 
     pub fn get_absolute_path(&self) -> String {
         self.value.clone()
+    }
+
+    pub fn get_name(&self) -> String {
+        self.value
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.value)
+            .to_string()
+    }
+
+    pub fn get_parent(&self) -> String {
+        self.value
+            .rsplit_once('/')
+            .map(|(parent, _)| parent.to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn get_absolute_file(&self) -> File {
+        self.clone()
+    }
+
+    pub fn is_directory(&self) -> bool {
+        std::path::Path::new(&self.value).is_dir()
+    }
+
+    pub fn is_file(&self) -> bool {
+        std::path::Path::new(&self.value).is_file()
+    }
+
+    pub fn can_read(&self) -> bool {
+        std::fs::File::open(std::path::Path::new(&self.value)).is_ok()
+    }
+
+    pub fn list(&self) -> Vec<String> {
+        std::fs::read_dir(std::path::Path::new(&self.value))
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| {
+                        entry
+                            .ok()
+                            .and_then(|entry| entry.file_name().into_string().ok())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn mkdir(&self) -> bool {
+        std::fs::create_dir(std::path::Path::new(&self.value)).is_ok()
     }
 }
 
@@ -935,12 +1527,13 @@ pub mod logger {
 }
 
 RUST
-  printf "FileSystem\nPath\nURI\nFile\nIOUtils\nlogger\n" >> "$shared_support_types_path"
+  printf "FileSystem\nGraphics\nBufferedImage\nPath\nURI\nFile\nURL\nURLConnection\nJarURLConnection\nJarFile\nJarEntry\nManifest\nAttributes\nAttributesName\nEnumeration\nJavaIterator\nJavaPathArg\nIOUtils\nlogger\n" >> "$shared_support_types_path"
 fi
 
-if grep -R -q -E 'java_string_(split|substring|hash_code)' "$generated_dir"; then
+if grep -R -q -E 'java_string_(split|substring|hash_code|index_of|index_of_from|from_byte_range|matches|replace_first|replace_all|compare_to|compare_to_ignore_case|equals_ignore_case)|java_primitive_compare_to|java_parse_(i8|i16|i32|i64|f32|f64)' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
-pub fn java_string_substring(value: &str, begin: i32, end: i32) -> String {
+pub fn java_string_substring<V: AsRef<str>>(value: V, begin: i32, end: i32) -> String {
+    let value = value.as_ref();
     let begin = begin.max(0) as usize;
     let end = end.max(begin as i32) as usize;
     value
@@ -956,8 +1549,97 @@ pub fn java_string_hash_code(value: &str) -> i32 {
         .fold(0i32, |hash, unit| hash.wrapping_mul(31).wrapping_add(unit as i32))
 }
 
+pub fn java_string_index_of<V: AsRef<str>, N: AsRef<str>>(value: V, needle: N) -> i32 {
+    value
+        .as_ref()
+        .find(needle.as_ref())
+        .map(|index| index as i32)
+        .unwrap_or(-1)
+}
+
+pub fn java_string_index_of_from<V: AsRef<str>, N: AsRef<str>>(
+    value: V,
+    needle: N,
+    from_index: i32,
+) -> i32 {
+    let value = value.as_ref();
+    let needle = needle.as_ref();
+    let from_index = from_index.max(0) as usize;
+    if from_index >= value.len() {
+        return if needle.is_empty() { value.len() as i32 } else { -1 };
+    }
+    value[from_index..]
+        .find(needle)
+        .map(|index| (from_index + index) as i32)
+        .unwrap_or(-1)
+}
+
+pub fn java_string_compare_to<L: AsRef<str>, R: AsRef<str>>(left: L, right: R) -> i32 {
+    match left.as_ref().cmp(right.as_ref()) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+pub fn java_string_compare_to_ignore_case<L: AsRef<str>, R: AsRef<str>>(
+    left: L,
+    right: R,
+) -> i32 {
+    java_string_compare_to(left.as_ref().to_lowercase(), right.as_ref().to_lowercase())
+}
+
+pub fn java_string_equals_ignore_case<L: AsRef<str>, R: AsRef<str>>(left: L, right: R) -> bool {
+    left.as_ref().eq_ignore_ascii_case(right.as_ref())
+}
+
+pub fn java_primitive_compare_to<T: PartialOrd>(left: T, right: T) -> i32 {
+    if left < right {
+        -1
+    } else if left > right {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn java_parse_i8<V: AsRef<str>>(value: V) -> i8 {
+    value.as_ref().parse::<i8>().expect("Java number format")
+}
+
+pub fn java_parse_i16<V: AsRef<str>>(value: V) -> i16 {
+    value.as_ref().parse::<i16>().expect("Java number format")
+}
+
+pub fn java_parse_i32<V: AsRef<str>>(value: V) -> i32 {
+    value.as_ref().parse::<i32>().expect("Java number format")
+}
+
+pub fn java_parse_i64<V: AsRef<str>>(value: V) -> i64 {
+    value.as_ref().parse::<i64>().expect("Java number format")
+}
+
+pub fn java_parse_f32<V: AsRef<str>>(value: V) -> f32 {
+    value.as_ref().parse::<f32>().expect("Java number format")
+}
+
+pub fn java_parse_f64<V: AsRef<str>>(value: V) -> f64 {
+    value.as_ref().parse::<f64>().expect("Java number format")
+}
+
+pub fn java_string_from_byte_range(bytes: &[i8], offset: i32, len: i32) -> String {
+    let start = offset.max(0) as usize;
+    let end = start.saturating_add(len.max(0) as usize).min(bytes.len());
+    let bytes = bytes[start..end]
+        .iter()
+        .map(|byte| *byte as u8)
+        .collect::<Vec<_>>();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Vec<String> {
     let regex = regex.as_ref();
+    let split_whitespace = regex == "\\s+";
     let delimiter = match regex {
         "\\t" | "\\\\t" => "\t",
         "\\n" | "\\\\n" => "\n",
@@ -965,7 +1647,7 @@ pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Ve
         "\\s+" => " ",
         other => other,
     };
-    let mut parts = if delimiter == "\\s+" {
+    let mut parts = if split_whitespace {
         value.split_whitespace().map(|part| part.to_string()).collect::<Vec<_>>()
     } else {
         value.split(delimiter).map(|part| part.to_string()).collect::<Vec<_>>()
@@ -982,8 +1664,89 @@ pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Ve
     parts
 }
 
+pub fn java_string_matches<R: AsRef<str>>(value: &str, regex: R) -> bool {
+    match regex.as_ref() {
+        "[0-9]" => value.chars().count() == 1 && value.chars().all(|ch| ch.is_ascii_digit()),
+        "\\d+" | "[0-9]+" => !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()),
+        "\\s+" => !value.is_empty() && value.chars().all(|ch| ch.is_whitespace()),
+        regex => value == regex,
+    }
+}
+
+pub fn java_string_replace_first<R: AsRef<str>, T: AsRef<str>>(
+    value: &str,
+    regex: R,
+    replacement: T,
+) -> String {
+    let regex = regex.as_ref();
+    let replacement = replacement.as_ref();
+    value.replacen(java_simple_regex_literal(regex), replacement, 1)
+}
+
+pub fn java_string_replace_all<R: AsRef<str>, T: AsRef<str>>(
+    value: &str,
+    regex: R,
+    replacement: T,
+) -> String {
+    let regex = regex.as_ref();
+    let replacement = replacement.as_ref();
+    match regex {
+        "[^0-9]" => value
+            .chars()
+            .fold(String::new(), |mut out, ch| {
+                if ch.is_ascii_digit() {
+                    out.push(ch);
+                } else {
+                    out.push_str(replacement);
+                }
+                out
+            }),
+        "\\s+" => value.split_whitespace().collect::<Vec<_>>().join(replacement),
+        regex => value.replace(java_simple_regex_literal(regex), replacement),
+    }
+}
+
+fn java_simple_regex_literal(regex: &str) -> &str {
+    match regex {
+        "\\t" | "\\\\t" => "\t",
+        "\\n" | "\\\\n" => "\n",
+        "\\r" | "\\\\r" => "\r",
+        other => other,
+    }
+}
+
 RUST
-  printf "java_string_substring\njava_string_hash_code\njava_string_split\n" >> "$shared_support_types_path"
+  printf "java_string_substring\njava_string_hash_code\njava_string_index_of\njava_string_index_of_from\njava_string_compare_to\njava_string_compare_to_ignore_case\njava_string_equals_ignore_case\njava_primitive_compare_to\njava_parse_i8\njava_parse_i16\njava_parse_i32\njava_parse_i64\njava_parse_f32\njava_parse_f64\njava_string_from_byte_range\njava_string_split\njava_string_matches\njava_string_replace_first\njava_string_replace_all\n" >> "$shared_support_types_path"
+fi
+
+if grep -R -q 'java_is_serializable' "$generated_dir"; then
+  cat >> "$shared_support_path" <<'RUST'
+pub fn java_is_serializable<T: ?Sized>(_value: &T) -> bool {
+    true
+}
+
+RUST
+  printf "java_is_serializable\n" >> "$shared_support_types_path"
+fi
+
+if grep -R -q -E 'java_(clone_erased_object|erased_object_to_string)' "$generated_dir"; then
+  cat >> "$shared_support_path" <<'RUST'
+pub fn java_clone_erased_object_ref(_value: &Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
+    Box::new(())
+}
+
+pub fn java_clone_erased_object_vec_ref(
+    _value: &Vec<Box<dyn std::any::Any>>,
+) -> Vec<Box<dyn std::any::Any>> {
+    Vec::new()
+}
+
+pub fn java_erased_object_to_string<T: ?Sized>(_value: &T) -> String {
+    Default::default()
+}
+
+RUST
+  printf "java_clone_erased_object_ref\njava_clone_erased_object_vec_ref\njava_erased_object_to_string\n" >> "$shared_support_types_path"
 fi
 
 if grep -R -q 'java_string_format' "$generated_dir"; then
@@ -1044,7 +1807,8 @@ fi
 
 if [[ -s "$shared_support_path" ]]; then
   for rust_path in "$generated_dir"/*.rs; do
-    strip_shared_support_items "$rust_path"
+    strip_shared_support_items "$rust_path" "$shared_support_types_path"
+    strip_source_type_facade_stubs "$rust_path" "$source_types_path"
   done
 else
   touch "$shared_support_path" "$shared_support_types_path"
@@ -1058,7 +1822,8 @@ python3 "$repo_root/scripts/merge-shared-support-facades.py" \
 
 if grep -R -q 'ndarray::' "$generated_dir" "$shared_support_path"; then
   if ! grep -q '^ndarray[[:space:]]*=' "$crate_dir/Cargo.toml"; then
-    printf 'ndarray = "0.15"\n' >> "$crate_dir/Cargo.toml"
+    write_ndarray_shim "$crate_dir/ndarray-shim"
+    printf 'ndarray = { path = "ndarray-shim" }\n' >> "$crate_dir/Cargo.toml"
   fi
 fi
 
@@ -1070,7 +1835,7 @@ for i in "${!java_files[@]}"; do
   awk -v module="generated_$stem" '
     /^pub[[:space:]]+(struct|enum|type|trait)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
       name = $3
-      sub(/[=;{(<].*/, "", name)
+      sub(/[=;{(<:].*/, "", name)
       if (name != "JavaException" &&
           name != "Box" &&
           name != "String" &&

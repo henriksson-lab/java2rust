@@ -6,6 +6,7 @@ pub enum UnsupportedConstructorLowering {
     ThisWithTrailingStatements,
     UnresolvedDelegation,
     SuperRequiresInheritanceLowering,
+    SuperWithUnsupportedTrailingStatements,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +51,14 @@ impl UnsupportedLoweringMessagePolicy {
 
 pub fn unsupported_constructor_stmt(kind: UnsupportedConstructorLowering) -> RustStmt {
     unsupported_constructor_message_policy(kind).compile_error_stmt()
+}
+
+pub fn unsupported_constructor_body(kind: UnsupportedConstructorLowering) -> Vec<RustStmt> {
+    let policy = unsupported_constructor_message_policy(kind);
+    vec![
+        policy.compile_error_stmt(),
+        RustStmt::Return(Some(RustExpr::Raw(format!("panic!({:?})", policy.message)))),
+    ]
 }
 
 pub fn unsupported_statement_stmt(kind: UnsupportedStatementLowering) -> RustStmt {
@@ -160,6 +169,10 @@ fn constructor_message(kind: UnsupportedConstructorLowering) -> String {
         }
         UnsupportedConstructorLowering::SuperRequiresInheritanceLowering => {
             "unsupported Java constructor: super(...) requires inheritance lowering".to_string()
+        }
+        UnsupportedConstructorLowering::SuperWithUnsupportedTrailingStatements => {
+            "unsupported Java constructor: super(...) followed by unsupported object graph mutation"
+                .to_string()
         }
     }
 }

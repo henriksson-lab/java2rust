@@ -23,7 +23,7 @@ pub fn render_array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> R
                 return RustExpr::Raw(format!(
                     "vec![{}; {} as usize]",
                     default,
-                    emit_expr(&children[0])
+                    array_dimension_len_expr(&children[0])
                 ));
             }
             let dims = children
@@ -49,7 +49,7 @@ pub fn borrowed_array2_temporary_for_slot(
     lowered: &RustExpr,
     target: &RustSlotShape,
 ) -> Option<RustExpr> {
-    if crate::types::two_dimensional_array_element_type(&target.java_ty).is_none() {
+    if crate::types::ndarray_array2_element_type(&target.java_ty).is_none() {
         return None;
     }
     match target.ownership {
@@ -61,7 +61,49 @@ pub fn borrowed_array2_temporary_for_slot(
     }
 }
 
+fn array_dimension_len_expr(expr: &RustExpr) -> String {
+    let rendered = emit_expr(expr);
+    if rendered_needs_grouping_before_cast(&rendered) {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
+}
+
+fn rendered_needs_grouping_before_cast(rendered: &str) -> bool {
+    let mut depth = 0usize;
+    let mut prev_non_ws = None;
+    let mut chars = rendered.char_indices().peekable();
+    while let Some((_, ch)) = chars.next() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            '+' | '*' | '/' | '%' if depth == 0 => return true,
+            '-' if depth == 0 && prev_non_ws.is_some() => return true,
+            '<' | '>' if depth == 0 => {
+                if chars.peek().is_some_and(|(_, next)| *next == ch) {
+                    return true;
+                }
+            }
+            '&' | '|' if depth == 0 => {
+                if chars.peek().is_some_and(|(_, next)| *next == ch) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        if !ch.is_whitespace() {
+            prev_non_ws = Some(ch);
+        }
+    }
+    false
+}
+
 fn render_array_initializer(children: Vec<RustExpr>) -> RustExpr {
+    let children = children
+        .into_iter()
+        .filter(|child| !is_comment_only_expr(child))
+        .collect::<Vec<_>>();
     RustExpr::Raw(format!(
         "vec![{}]",
         children
@@ -73,6 +115,10 @@ fn render_array_initializer(children: Vec<RustExpr>) -> RustExpr {
 }
 
 fn render_array2_initializer(children: &[RustExpr]) -> Option<RustExpr> {
+    let children = children
+        .iter()
+        .filter(|child| !is_comment_only_expr(child))
+        .collect::<Vec<_>>();
     if children.is_empty() {
         return None;
     }
@@ -94,6 +140,10 @@ fn render_array2_initializer(children: &[RustExpr]) -> Option<RustExpr> {
         .collect::<Vec<_>>()
         .join(", ");
     Some(RustExpr::Raw(format!("ndarray::arr2(&[{rows}])")))
+}
+
+fn is_comment_only_expr(expr: &RustExpr) -> bool {
+    emit_expr(expr).trim_start().starts_with("//")
 }
 
 fn vec_macro_body(rendered: &str) -> Option<String> {

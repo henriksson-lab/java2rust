@@ -861,6 +861,7 @@ pub enum FacadeSlot {
     Owned,
     Borrowed,
     MutBorrowed,
+    Index,
     Optional(Box<FacadeSlot>),
     Slice(Box<FacadeSlot>),
     DynTrait(String),
@@ -1286,6 +1287,32 @@ pub struct CaptureFacts {
     pub owners: Vec<CaptureOwner>,
 }
 
+impl CaptureFacts {
+    pub fn outer_this_capture_for_type(&self, type_name: &str) -> Option<&Capture> {
+        self.owners
+            .iter()
+            .filter(|owner| owner.kind == CaptureOwnerKind::InnerClass)
+            .filter(|owner| {
+                owner.name.as_deref().is_some_and(|name| {
+                    crate::stdlib::canonical_external_receiver_type_key(name)
+                        == crate::stdlib::canonical_external_receiver_type_key(type_name)
+                }) || owner.target_type.as_ref().is_some_and(|target| {
+                    java_type_name(target).is_some_and(|target_name| {
+                        crate::stdlib::canonical_external_receiver_type_key(target_name)
+                            == crate::stdlib::canonical_external_receiver_type_key(type_name)
+                    })
+                })
+            })
+            .flat_map(|owner| owner.captures.iter())
+            .find(|capture| capture.source == CaptureSource::OuterThis)
+    }
+
+    pub fn outer_this_type_for_type(&self, type_name: &str) -> Option<&str> {
+        let capture = self.outer_this_capture_for_type(type_name)?;
+        java_type_name(&capture.ty)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureOwner {
     pub id: NodeId,
@@ -1632,7 +1659,7 @@ impl FactSet {
             .iter()
             .rev()
             .find(|fact| {
-                fact.method_name == method_name
+                external_method_name_matches(&fact.method_name, method_name)
                     && external_optional_type_name_matches(
                         fact.receiver_type.as_deref(),
                         receiver_type,
@@ -1645,7 +1672,7 @@ impl FactSet {
                     .iter()
                     .rev()
                     .find(|fact| {
-                        fact.method_name == method_name
+                        external_method_name_matches(&fact.method_name, method_name)
                             && fact.receiver_type.is_none()
                             && fact.parameter_index == parameter_index
                             && fact.provenance == FactProvenance::UserOverride
@@ -1656,7 +1683,7 @@ impl FactSet {
                     .iter()
                     .rev()
                     .find(|fact| {
-                        fact.method_name == method_name
+                        external_method_name_matches(&fact.method_name, method_name)
                             && external_optional_type_name_matches(
                                 fact.receiver_type.as_deref(),
                                 receiver_type,
@@ -1669,7 +1696,7 @@ impl FactSet {
                     .iter()
                     .rev()
                     .find(|fact| {
-                        fact.method_name == method_name
+                        external_method_name_matches(&fact.method_name, method_name)
                             && fact.receiver_type.is_none()
                             && fact.parameter_index == parameter_index
                     })

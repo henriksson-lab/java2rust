@@ -24,12 +24,13 @@ use new_java2rust::external_packs::{
     htsjdk_sam_record_pack_facts, htsjdk_sam_reference_pack_facts, htsjdk_sam_writer_pack_facts,
     htsjdk_samtools_util_pack_facts, htsjdk_tribble_feature_pack_facts,
     htsjdk_tribble_index_pack_facts, htsjdk_variantcontext_pack_facts, htsjdk_vcf_pack_facts,
-    intel_gkl_pack_facts, jackson_databind_pack_facts, jama_pack_facts, java_sql_pack_facts,
-    jgrapht_pack_facts, kryo_pack_facts, kryo_serializers_pack_facts, opencsv_pack_facts,
-    org_json_pack_facts, parse_external_pack_manifest, picard_markduplicates_pack_facts,
-    picard_metrics_pack_facts, picard_programgroups_pack_facts, picard_vcf_pack_facts,
-    reflections_pack_facts, representation_facts_for_type, scala_tuple_pack_facts,
-    spark_pack_facts, sqlite_pack_facts, unsupported_external_api_for_receiver,
+    iharder_base64_pack_facts, intel_gkl_pack_facts, jackson_databind_pack_facts, jama_pack_facts,
+    java_sql_pack_facts, jgrapht_pack_facts, kryo_pack_facts, kryo_serializers_pack_facts,
+    opencsv_pack_facts, org_json_pack_facts, parse_external_pack_manifest,
+    picard_markduplicates_pack_facts, picard_metrics_pack_facts, picard_programgroups_pack_facts,
+    picard_vcf_pack_facts, reflections_pack_facts, representation_facts_for_type,
+    scala_tuple_pack_facts, spark_pack_facts, sqlite_pack_facts,
+    unsupported_external_api_for_receiver,
 };
 use new_java2rust::facts::{
     CallableKey, CallableKind, ClosedHierarchyFact, ExceptionFact, ExceptionKind,
@@ -867,6 +868,55 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
             name: "VCFHeaderLineType".to_string(),
             args: Vec::new()
         })
+    );
+
+    let localized_overflow = external_field_for("LocalizedFormats", "OVERFLOW")
+        .expect("LocalizedFormats.OVERFLOW should resolve through Commons Math field facts");
+    assert_eq!(
+        localized_overflow.field_type,
+        Some(JavaType::Named {
+            name: "LocalizedFormats".to_string(),
+            args: Vec::new()
+        })
+    );
+    assert_eq!(
+        localized_overflow.field_kind,
+        ExternalFieldKind::EnumVariant
+    );
+}
+
+#[test]
+fn commons_math_localized_formats_implements_localizable_pack_trait() {
+    let facts = builtin_external_library_packs();
+    let localizable = JavaType::Named {
+        name: "Localizable".to_string(),
+        args: Vec::new(),
+    };
+    let localized_formats = JavaType::Named {
+        name: "LocalizedFormats".to_string(),
+        args: Vec::new(),
+    };
+
+    let localizable_strategy = facts
+        .hierarchy_overrides
+        .iter()
+        .find(|fact| fact.type_name == "Localizable")
+        .expect("Commons Math Localizable should have a pack object strategy");
+    assert_eq!(
+        localizable_strategy.strategy,
+        HierarchyStrategy::DynTrait {
+            trait_name: "Localizable".to_string()
+        }
+    );
+    assert_eq!(
+        facts.object_safe_trait_fact_for_name("Localizable"),
+        Some(true)
+    );
+    assert!(
+        facts
+            .hierarchy_subtype_policy(&localized_formats, &localizable)
+            .reaches,
+        "LocalizedFormats should implement Localizable through Commons Math pack facts"
     );
 }
 
@@ -2592,6 +2642,26 @@ fn facade_abi_lookup_uses_callable_key_and_prefers_user_override() {
         .expect("facade ABI should be addressable by callable key");
     assert_eq!(selected.rust_path, "override_facade::read");
     assert_eq!(selected.receiver, ReceiverAbi::FreeFunction);
+}
+
+#[test]
+fn external_pack_rust_usize_return_declares_index_facade_slot() {
+    let parsed = parse_external_pack_manifest(
+        r#"
+        external-pack dep.index dep.index external-fact-model semantic
+        external-pack-api dep.index dep.index.Reader position semantic getter read-only definitely-non-null args=0 return=int rust-return=usize
+        "#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let fact = parsed
+        .facts
+        .external_rust_return_type_facts
+        .iter()
+        .find(|fact| fact.receiver_type.as_deref() == Some("dep.index.Reader"))
+        .expect("rust-return metadata should emit a return type fact");
+    assert_eq!(fact.rust_type_name, "usize");
+    assert_eq!(fact.return_slot, FacadeSlot::Index);
 }
 
 #[test]
@@ -12656,6 +12726,77 @@ fn apache_commons_codec_pack_declares_digest_algorithm_constants() {
         new_java2rust::stdlib::external_field_provenance("MessageDigestAlgorithms", "SHA_256"),
         FactProvenance::ExternalLibraryPack,
         "MessageDigestAlgorithms.SHA_256 precision should come from the Apache Commons Codec pack, not stdlib"
+    );
+}
+
+#[test]
+fn apache_commons_codec_pack_declares_base64_output_stream_conversion() {
+    let facts = apache_commons_codec_pack_facts();
+
+    let pack = facts
+        .external_library_pack_for_type("org.apache.commons.codec.binary.Base64OutputStream")
+        .expect("Base64OutputStream should be owned by the Apache Commons Codec pack");
+    assert_eq!(pack.pack_name, "org.apache.commons.codec");
+    assert_eq!(pack.mode, ExternalLibraryMode::ExternalFactModel);
+
+    for from_type in [
+        "org.apache.commons.codec.binary.Base64OutputStream",
+        "Base64OutputStream",
+    ] {
+        let adapter = facts
+            .external_conversion_adapter_facts
+            .iter()
+            .find(|fact| fact.from_type == from_type && fact.to_type == "OutputStream")
+            .unwrap_or_else(|| {
+                panic!("Commons Codec conversion fact should include {from_type} -> OutputStream")
+            });
+        assert_eq!(adapter.provenance, FactProvenance::ExternalLibraryPack);
+    }
+
+    assert!(
+        facts
+            .external_constructor_for(
+                "org.apache.commons.codec.binary.Base64OutputStream",
+                &[JavaType::Unknown("_".to_string())]
+            )
+            .is_some(),
+        "Commons Codec pack should model Base64OutputStream(OutputStream)"
+    );
+}
+
+#[test]
+fn iharder_base64_pack_declares_nested_output_stream_conversion() {
+    let facts = iharder_base64_pack_facts();
+
+    let pack = facts
+        .external_library_pack_for_type("net.sourceforge.iharder.base64.Base64.OutputStream")
+        .expect("iHarder Base64.OutputStream should be owned by the iHarder Base64 pack");
+    assert_eq!(pack.pack_name, "net.sourceforge.iharder.base64");
+    assert_eq!(pack.mode, ExternalLibraryMode::ExternalFactModel);
+
+    for from_type in [
+        "net.sourceforge.iharder.base64.Base64.OutputStream",
+        "Base64.OutputStream",
+        "Base64OutputStream",
+    ] {
+        let adapter = facts
+            .external_conversion_adapter_facts
+            .iter()
+            .find(|fact| fact.from_type == from_type && fact.to_type == "OutputStream")
+            .unwrap_or_else(|| {
+                panic!("iHarder conversion fact should include {from_type} -> OutputStream")
+            });
+        assert_eq!(adapter.provenance, FactProvenance::ExternalLibraryPack);
+    }
+
+    assert!(
+        facts
+            .external_constructor_for(
+                "net.sourceforge.iharder.base64.Base64.OutputStream",
+                &[JavaType::Unknown("_".to_string())]
+            )
+            .is_some(),
+        "iHarder Base64 pack should model Base64.OutputStream(OutputStream)"
     );
 }
 

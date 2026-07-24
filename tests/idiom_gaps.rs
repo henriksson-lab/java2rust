@@ -60,7 +60,7 @@ fn cargo_check_generated_modules(crate_name: &str, modules: Vec<GeneratedCrateMo
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let crate_dir = Path::new("/tmp").join(format!("new_java2rust_{crate_name}_{unique}"));
+    let crate_dir = std::env::temp_dir().join(format!("new_java2rust_{crate_name}_{unique}"));
     let src_dir = crate_dir.join("src");
     fs::create_dir_all(&src_dir).unwrap();
     fs::write(
@@ -111,6 +111,261 @@ fn documents_gatk_acronym_identifier_splitting_gap() {
 }
 
 #[test]
+fn rust_keyword_local_names_render_as_raw_identifiers() {
+    let translation = translate_source(
+        r#"
+class RustKeywordLocalNames {
+    int echo(int in) {
+        int match = in + 1;
+        return match;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("r#in: i32")
+            && translation.rust.contains("let match_: i32 = r#in + 1;")
+            && translation.rust.contains("return match_;")
+            && !translation.rust.contains("let match:")
+            && !translation.rust.contains("let in:"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "rust_keyword_local_names",
+        vec![GeneratedCrateModule {
+            name: "keyword_local_names",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn external_facade_keyword_method_names_render_as_raw_identifiers() {
+    let translation = translate_source(
+        r#"
+import java.util.concurrent.CountDownLatch;
+
+class ExternalFacadeKeywordMethodNames {
+    void waitFor(CountDownLatch latch) throws InterruptedException {
+        latch.await();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn r#await(&self)")
+            && translation.rust.contains("latch.r#await()")
+            && !translation.rust.contains("pub fn await(")
+            && !translation.rust.contains("latch.await()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "external_facade_keyword_method_names",
+        vec![GeneratedCrateModule {
+            name: "external_facade_keyword_method_names",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_static_mutable_fields_use_generated_storage_accessors() {
+    let translation = translate_source(
+        r#"
+class SourceStaticMutableFields {
+    private static int count = 1;
+
+    static int increment() {
+        count = count + 1;
+        return count;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("std::thread_local!")
+            && translation
+                .rust
+                .contains("static SOURCE_STATIC_MUTABLE_FIELDS_COUNT")
+            && translation.rust.contains("fn __static_count() -> i32")
+            && translation.rust.contains("fn __set_static_count(")
+            && translation
+                .rust
+                .contains("Self::__set_static_count(Self::__static_count() + 1);")
+            && translation.rust.contains("return Self::__static_count();")
+            && !translation.rust.contains("count = count + 1;")
+            && !translation.rust.contains("let count"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "source_static_mutable_fields",
+        vec![GeneratedCrateModule {
+            name: "source_static_mutable_fields",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn lowercase_static_owner_field_write_uses_static_storage_setter() {
+    let translation = translate_source(
+        r#"
+class LowercaseStaticOwnerFieldWrite {
+    private static LowercaseStaticOwnerFieldWrite holder = new LowercaseStaticOwnerFieldWrite();
+    private static boolean enabled = false;
+
+    static void setEnabled(boolean value) {
+        holder.enabled = value;
+    }
+
+    static boolean isEnabled() {
+        return enabled;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Self::__set_static_enabled(value);")
+            && translation
+                .rust
+                .contains("return Self::__static_enabled();")
+            && !translation.rust.contains("holder.enabled = value")
+            && !translation.rust.contains("holder:"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "lowercase_static_owner_field_write",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn public_readonly_string_param_uses_str_view_for_static_string_constants() {
+    let translation = translate_source(
+        r#"
+class PublicReadonlyStringParamStaticConstant {
+    private static final String RESOURCE = "example/resource.txt";
+
+    public static int score(String path) {
+        return path.isEmpty() ? 0 : path.length();
+    }
+
+    public static int call() {
+        return score(RESOURCE);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn score(path: &str) -> i32")
+            && translation
+                .rust
+                .contains("return Self::score(Self::RESOURCE);")
+            && !translation.rust.contains("path: &String")
+            && !translation.rust.contains("Self::RESOURCE.to_string()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "public_readonly_string_param_static_constant",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_util_logging_level_import_uses_shared_level_facade() {
+    let translation = translate_source(
+        r#"
+import java.util.logging.Level;
+
+class LoggingLevelImport {
+    static Level warning() {
+        return Level.WARNING;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("-> Level")
+            && translation.rust.contains("return Level::WARNING;")
+            && !translation.rust.contains("JavaUtilLoggingLevel"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "logging_level_import",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_list_iterator_cursor_uses_platform_facade() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+
+class JavaIteratorCursorOverList {
+    static List<String> copy(List<String> input) {
+        List<String> out = new ArrayList<String>();
+        for (Iterator<String> i = input.iterator(); i.hasNext();) {
+            out.add(i.next());
+        }
+        return out;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let mut i: JavaIterator<String> = JavaIterator::new(input.iter().cloned());"
+        ) && translation.rust.contains("while i.has_next()")
+            && translation.rust.contains("out.push(i.next());")
+            && !translation.rust.contains("let mut i: Iterator")
+            && !translation.rust.contains(".iterator()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "java_list_iterator_cursor",
+        vec![GeneratedCrateModule {
+            name: "java_list_iterator_cursor",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn documents_java_string_method_spelling_gap() {
     let translation = translate_source(&idiom_gap("JavaStringMethods.java"));
 
@@ -122,7 +377,7 @@ fn documents_java_string_method_spelling_gap() {
     assert!(
         translation
             .rust
-            .contains("left.to_lowercase() == right.to_lowercase()"),
+            .contains("left.to_lowercase().as_str() == right.to_lowercase().as_str()"),
         "{}",
         translation.rust
     );
@@ -140,6 +395,1245 @@ fn documents_java_string_method_spelling_gap() {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_string_uppercase_char_array_and_replace_use_rust_string_apis() {
+    let translation = translate_source(
+        r#"
+class JavaStringUppercaseCharArrayReplace {
+    String normalize(String value) {
+        return value.toUpperCase().replace("X", "23");
+    }
+
+    int count(String value) {
+        char[] chars = value.toCharArray();
+        return chars.length;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("value.to_uppercase().replace(\"X\", \"23\")")
+            && translation
+                .rust
+                .contains("let chars: Vec<char> = value.chars().collect::<Vec<char>>();")
+            && !translation.rust.contains(".to_upper_case(")
+            && !translation.rust.contains(".to_char_array(")
+            && !translation.rust.contains(".replace(\"X\".to_string()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_string_uppercase_char_array_replace",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_string_char_at_lowers_to_rust_chars_nth() {
+    let translation = translate_source(
+        r#"
+class JavaStringCharAtUse {
+    char first(String value) {
+        return value.charAt(0);
+    }
+
+    char at(String value, int index) {
+        return value.charAt(index);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("value.chars().nth(0 as usize).expect(\"Java string index out of bounds\")")
+            && translation.rust.contains(
+                "value.chars().nth(index as usize).expect(\"Java string index out of bounds\")"
+            )
+            && !translation.rust.contains(".char_at("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_string_char_at",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_string_tokenizer_uses_facade_signature_facts() {
+    let translation = translate_source(
+        r#"
+import java.util.StringTokenizer;
+
+class JavaStringTokenizerUse {
+    static int count(String text) {
+        StringTokenizer tokenizer = new StringTokenizer(text, "|");
+        int total = tokenizer.countTokens();
+        while (tokenizer.hasMoreTokens()) {
+            char first = tokenizer.nextToken().charAt(0);
+            if (first == 'x') {
+                total++;
+            }
+        }
+        return total;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut tokenizer: StringTokenizer = StringTokenizer::new")
+            && translation
+                .rust
+                .contains("let mut total: i32 = tokenizer.count_tokens();")
+            && translation
+                .rust
+                .contains("while tokenizer.has_more_tokens()")
+            && translation
+                .rust
+                .contains("let first: char = tokenizer.next_token().chars().nth(0 as usize)")
+            && !translation.rust.contains("has_more_tokens() { ()")
+            && !translation.rust.contains("next_token() -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_string_tokenizer_facade_signature",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_string_join_varargs_lowers_to_vec_join() {
+    let translation = translate_source(
+        r#"
+class JavaStringJoinVarargs {
+    static String classpath(String sep, String extra) {
+        return String.join(sep, "bin", ".", extra, "htsjdk.jar");
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "return vec![\"bin\".to_string(), \".\".to_string(), (extra).to_string(), \"htsjdk.jar\".to_string()].join(sep.as_str());"
+        ) && !translation
+            .rust
+            .contains("String.join varargs are not supported yet"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_string_join_varargs",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn joins_varargs() {
+        let sep = ":".to_string();
+        let extra = "classes".to_string();
+        assert_eq!(
+            JavaStringJoinVarargs::classpath(&sep, &extra),
+            "bin:.:classes:htsjdk.jar".to_string()
+        );
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn jdk_numeric_and_decimal_format_facades_keep_precise_return_shapes() {
+    let translation = translate_source(
+        r#"
+import java.text.DecimalFormat;
+
+class JdkNumericAndFormatFacades {
+    static double log2(double value) {
+        return Math.log(value) / Math.log(2);
+    }
+
+    static double exponent(double value) {
+        return Math.exp(value);
+    }
+
+    static boolean missing(double value) {
+        return Double.isNaN(value);
+    }
+
+    static boolean missingFloat(float value) {
+        return Float.isNaN(value);
+    }
+
+    static float parseFloat(String value) {
+        return Float.parseFloat(value);
+    }
+
+    static int exact(long value) {
+        return Math.toIntExact(value);
+    }
+
+    static void collect() {
+        System.gc();
+    }
+
+    static String render(double value) {
+        DecimalFormat df = new DecimalFormat("0.0");
+        return "v=" + df.format(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("(value as f64).ln()")
+            && translation.rust.contains("(2 as f64).ln()")
+            && translation.rust.contains("(value as f64).exp()")
+            && translation.rust.contains("value.is_nan()")
+            && translation
+                .rust
+                .contains("value.as_str().parse::<f32>().unwrap()")
+            && translation.rust.contains("return value as i32;")
+            && translation.rust.contains("pub fn collect() {\n    }")
+            && translation.rust.contains("value.to_string()")
+            && !translation.rust.contains("Math::log")
+            && !translation.rust.contains("Math::exp")
+            && !translation.rust.contains("Math::to_int_exact")
+            && !translation.rust.contains("Double::is_na_n")
+            && !translation.rust.contains("Float::is_na_n")
+            && !translation.rust.contains("float.parse_float")
+            && !translation.rust.contains("system.gc")
+            && !translation.rust.contains("fn log(")
+            && !translation.rust.contains("fn exp("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_numeric_and_decimal_format_facades",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_facades_typecheck_and_run() {
+        assert!((JdkNumericAndFormatFacades::log2(8.0) - 3.0).abs() < 1e-9);
+        assert!((JdkNumericAndFormatFacades::exponent(1.0) - std::f64::consts::E).abs() < 1e-9);
+        assert!(JdkNumericAndFormatFacades::missing(f64::NAN));
+        assert!(JdkNumericAndFormatFacades::render(1.25).starts_with("v="));
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn jdk_decimal_and_integer_constants_are_typed_facade_facts() {
+    let translation = translate_source(
+        r#"
+import java.math.BigDecimal;
+import java.math.BigInteger;
+
+class JdkDecimalAndIntegerConstants {
+    static double rounded(double value, int scale) {
+        return new BigDecimal(Double.toString(value))
+            .setScale(scale, BigDecimal.ROUND_HALF_UP)
+            .doubleValue();
+    }
+
+    static int roundingFlag(boolean up) {
+        return up ? BigDecimal.ROUND_UP : BigDecimal.ROUND_DOWN;
+    }
+
+    static BigInteger one() {
+        return BigInteger.ONE;
+    }
+
+    static boolean nonNegative(BigInteger value) {
+        return value.compareTo(BigInteger.ZERO) >= 0;
+    }
+
+    static BigInteger squared(BigInteger value) {
+        return value.multiply(value);
+    }
+
+    static BigInteger shifted(BigInteger value) {
+        return value.shiftRight(1);
+    }
+
+    static BigInteger exponent(BigInteger value, int power) {
+        return value.pow(power);
+    }
+
+    static boolean lowestBit(BigInteger value) {
+        return value.testBit(0);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub const ROUND_HALF_UP: i32 = 4;")
+            && translation.rust.contains("pub const ROUND_UP: i32 = 0;")
+            && translation.rust.contains("pub const ROUND_DOWN: i32 = 1;")
+            && translation
+                .rust
+                .contains("pub const ONE: BigInteger = BigInteger;")
+            && translation
+                .rust
+                .contains("pub const ZERO: BigInteger = BigInteger;")
+            && translation
+                .rust
+                .contains(".set_scale(scale, BigDecimal::ROUND_HALF_UP)")
+            && translation.rust.contains(".double_value()")
+            && translation.rust.contains(".multiply(")
+            && translation.rust.contains(".shift_right(1)")
+            && translation.rust.contains(".pow(power)")
+            && translation.rust.contains(".test_bit(0)")
+            && !translation.rust.contains(".downcast::<BigInteger>()")
+            && !translation
+                .rust
+                .contains("set_scale<T0, T1>(&self, _arg0: T0, _arg1: T1) -> ()")
+            && !translation
+                .rust
+                .contains("multiply<T0>(&self, _arg0: T0) -> ()")
+            && !translation
+                .rust
+                .contains("shift_right<T0>(&self, _arg0: T0) -> ()")
+            && !translation.rust.contains("pow<T0>(&self, _arg0: T0) -> ()")
+            && !translation
+                .rust
+                .contains("test_bit<T0>(&self, _arg0: T0) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_decimal_and_integer_constants",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn boxed_primitive_constructors_lower_to_values() {
+    let translation = translate_source(
+        r#"
+class BoxedPrimitiveConstructorsLowerToValues {
+    static float keepFloat(float value) {
+        return new Float(value).floatValue();
+    }
+
+    static double keepDouble(double value) {
+        return new Double(value).doubleValue();
+    }
+
+    static int hashFloat(float value) {
+        return new Float(value).hashCode();
+    }
+
+    static int hashDouble(double value) {
+        return new Double(value).hashCode();
+    }
+
+    static int compareInts(int left, int right) {
+        return new Integer(left).compareTo(new Integer(right));
+    }
+
+    static int compareParsedInts(String left, String right) {
+        return new Integer(left).compareTo(new Integer(right));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return value as f32;")
+            && translation.rust.contains("return value as f64;")
+            && !translation.rust.contains("f32::new")
+            && !translation.rust.contains("f64::new")
+            && !translation.rust.contains("Float::new")
+            && !translation.rust.contains("Double::new")
+            && translation
+                .rust
+                .contains("java_primitive_compare_to(left, right)")
+            && translation.rust.contains(
+                "java_primitive_compare_to(java_parse_i32(&left), java_parse_i32(&right))"
+            )
+            && !translation.rust.contains(".hash_code()")
+            && !translation.rust.contains(".compare_to(")
+            && !translation.rust.contains("Integer::new"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "boxed_primitive_constructors_lower_to_values",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn explicit_primitive_casts_survive_numeric_binary_lowering() {
+    let translation = translate_source(
+        r#"
+class ExplicitPrimitiveCastNumericBinary {
+    float scale(double ratio, float value) {
+        float adjusted = (float) ratio * (float) value;
+        return adjusted;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let adjusted: f32 = (ratio as f32) * value;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "explicit_primitive_casts_survive_numeric_binary_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn explicit_primitive_cast_applies_to_whole_shift_and_bitwise_expression() {
+    let translation = translate_source(
+        r#"
+class ExplicitPrimitiveCastWholeShift {
+    int exponent(long bits) {
+        return (int)(bits >> 52) - 1023;
+    }
+
+    int masked(long bits) {
+        return (int)((bits >> 52) & 2047L);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return ((bits >> 52) as i32) - 1023;")
+            && translation
+                .rust
+                .contains("return (bits >> 52 & 2047i64) as i32;")
+            && !translation.rust.contains("bits >> 52 as i32"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "explicit_primitive_cast_whole_shift",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_numeric_char_casts_use_valid_rust_char_conversions() {
+    let translation = translate_source(
+        r#"
+class JavaNumericCharCasts {
+    char fromInt(int value) {
+        return (char) value;
+    }
+
+    double charDistance(int value, int offset) {
+        return (double) ((char) (value - offset));
+    }
+
+    double inferredCharDistance(int value, int offset) {
+        return (char) (value - offset);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("char::from_u32(((value) as u32) & 0xffff).unwrap_or('\\0')")
+            && translation.rust.contains(
+                "((char::from_u32(((value - offset) as u32) & 0xffff).unwrap_or('\\0')) as u32) as f64"
+            )
+            && !translation.rust.contains("as char")
+            && !translation.rust.contains("unwrap_or('\\0') as f64"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_numeric_char_casts_use_valid_rust_char_conversions",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_numeric_char_literals_adapt_to_char_slots_and_switch_labels() {
+    let translation = translate_source(
+        r#"
+class NumericCharLiteralSlots {
+    void clear(char[] values, int index) {
+        values[index] = 0;
+    }
+
+    boolean whitespace(char value) {
+        switch (value) {
+            case 9:
+            case 10:
+            case 13:
+            case 32:
+                return true;
+            default:
+                return false;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("values[index as usize] = '\\0';")
+            && translation.rust.contains("'\\t' | '\\n' | '\\r' | ' ' =>")
+            && !translation.rust.contains("9 | 10 | 13 | 32 =>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_numeric_char_literals_adapt_to_char_slots_and_switch_labels",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn decimal_format_argument_keeps_numeric_expression_before_string_concat() {
+    let translation = translate_source(
+        r#"
+import java.text.DecimalFormat;
+
+class DecimalFormatNumericExpressionConcat {
+    String percent(double value) {
+        DecimalFormat df = new DecimalFormat("0.0");
+        return df.format(value * 100) + "%";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("format!(\"{}%\", value * (100 as f64))")
+            && !translation
+                .rust
+                .contains("value * (100 as f64).to_string()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "decimal_format_argument_keeps_numeric_expression_before_string_concat",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn jdk_file_reader_and_system_facades_keep_control_flow_shapes() {
+    let translation = translate_source(
+        r#"
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+
+class JdkFileReaderAndSystemFacades {
+    static boolean filePresent(String path) {
+        File file = new File(path);
+        return file.exists();
+    }
+
+    static boolean readerReady(BufferedReader reader) throws IOException {
+        return reader.ready();
+    }
+
+    static void stopIf(boolean stop) {
+        if (stop) {
+            System.exit(10);
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("std::path::Path::new(file.get_path().as_str()).exists()")
+            && translation.rust.contains("return Ok(true);")
+            && translation.rust.contains("std::process::exit(10 as i32)")
+            && !translation.rust.contains("file.exists()")
+            && !translation.rust.contains("reader.ready()")
+            && !translation.rust.contains("System::exit(10"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_file_reader_and_system_facades",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn jdk_file_constructor_clones_borrowed_string_array_element() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+
+class JdkFileConstructorIndexedArg {
+    static boolean present(String[] args) {
+        File file = new File(args[1]);
+        return file.exists();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("File::new((args[1 as usize]).clone())")
+            && !translation.rust.contains("File::new(args[1 as usize]);")
+            && !translation.rust.contains("File::new((args[1 as usize]));"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_file_constructor_indexed_arg",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn jdk_file_constructor_overload_facade_supports_resolved_arity_names() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+
+class JdkFileConstructorOverloads {
+    static File single(String path) {
+        return new File(path);
+    }
+
+    static File child(String parent, String name) {
+        return new File(parent, name);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new_1<P: JavaPathArg>(value: P) -> File")
+            && translation.rust.contains(
+                "pub fn new_2<P: JavaPathArg, C: JavaPathArg>(parent: P, child: C) -> File"
+            )
+            && (translation.rust.contains("File::new(path)")
+                || translation.rust.contains("File::new_1(path)"))
+            && translation.rust.contains("File::new_2(parent, name)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_file_constructor_overload_facade",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn jdk_file_common_instance_facades_compile() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+
+class JdkFileCommonInstanceFacades {
+    String describe(File file) {
+        String parent = file.getParent();
+        return file.getName() + ":" + parent + ":" + file.getAbsoluteFile().getPath();
+    }
+
+    boolean prepare(File file) {
+        if (!file.isDirectory()) {
+            return file.mkdir();
+        }
+        return true;
+    }
+
+    int readableChildren(File file) {
+        int count = 0;
+        String[] names = file.list();
+        for (int i = 0; i < names.length; i++) {
+            File child = new File(file.getPath() + "/" + names[i]);
+            if (child.isFile() && child.canRead()) {
+                count++;
+            }
+        }
+        return count;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("file.get_name()")
+            && translation.rust.contains("file.get_parent()")
+            && translation
+                .rust
+                .contains("file.get_absolute_file().get_path()")
+            && translation.rust.contains("file.is_directory()")
+            && translation.rust.contains("file.mkdir()")
+            && translation
+                .rust
+                .contains("let names: Vec<String> = file.list();")
+            && translation
+                .rust
+                .contains("child.is_file() && child.can_read()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_file_common_instance_facades",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn jdk_bitset_get_keeps_boolean_shape() {
+    let translation = translate_source(
+        r#"
+import java.util.BitSet;
+
+class JdkBitSetBooleanFacade {
+    static boolean missing(BitSet bits, int index) {
+        return !bits.get(index);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return !false;") && !translation.rust.contains(".get(index)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_bitset_boolean_facade",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_string_regex_helpers_use_runtime_surfaces() {
+    let translation = translate_source(
+        r#"
+class JavaStringRegexHelpers {
+    boolean digit(String value) {
+        return value.matches("[0-9]");
+    }
+
+    String stripPrefix(String value) {
+        return value.replaceFirst("-", "");
+    }
+
+    String digits(String value) {
+        return value.replaceAll("[^0-9]", "");
+    }
+
+    String[] parts(String value) {
+        return value.replaceAll(".fast5$", "").split("_");
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn java_string_matches")
+            && translation
+                .rust
+                .contains("java_string_matches(value.as_str(), \"[0-9]\")")
+            && translation
+                .rust
+                .contains("java_string_replace_first(value.as_str(), \"-\", \"\")")
+            && translation
+                .rust
+                .contains("java_string_replace_all(value.as_str(), \"[^0-9]\", \"\")")
+            && translation.rust.contains(
+                "java_string_split(java_string_replace_all(value.as_str(), \".fast5$\", \"\").as_str(), \"_\", 0)"
+            )
+            && !translation.rust.contains(".replace_first(")
+            && !translation.rust.contains(".replace_all(")
+            && !translation.rust.contains(".matches(\"[0-9]\".to_string())")
+            && !translation.rust.contains(".split(\"_\".to_string())"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_string_regex_helpers",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn covers_simple_regex_helpers() {
+        let fixture = JavaStringRegexHelpers {};
+        assert!(fixture.digit("7".to_string()));
+        assert!(!fixture.digit("77".to_string()));
+        assert_eq!(fixture.strip_prefix("-abc".to_string()), "abc".to_string());
+        assert_eq!(fixture.digits("a1-b2".to_string()), "12".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn java_string_get_bytes_and_index_of_use_native_helpers() {
+    let translation = translate_source(
+        r#"
+class JavaStringBytesAndIndex {
+    static byte[] bytes(String value) {
+        return value.getBytes();
+    }
+
+    static byte[] bytesUtf8(String value) throws Exception {
+        return value.getBytes("UTF-8");
+    }
+
+    static boolean hasAmpersand(String value) {
+        return value.indexOf("&") >= 0;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("value.as_bytes().iter().map(|byte| *byte as i8).collect::<Vec<i8>>()")
+            && translation
+                .rust
+                .contains("java_string_index_of(&value, &\"&\")")
+            && !translation.rust.contains(".get_bytes_1(")
+            && !translation.rust.contains(".get_bytes()")
+            && !translation.rust.contains(".index_of("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_string_bytes_and_index",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_string_comparison_methods_use_signature_helpers() {
+    let translation = translate_source(
+        r#"
+class JavaStringComparisonMethods {
+    int compare(String left, String right) {
+        return left.compareTo(right);
+    }
+
+    int compareIgnoreCase(String left, String right) {
+        return left.compareToIgnoreCase(right);
+    }
+
+    boolean equalsIgnoreCase(String left, String right) {
+        return left.equalsIgnoreCase(right);
+    }
+
+    String shorten(String value) {
+        return value.substring(0, 2);
+    }
+
+    int compareTail(String left, String right, int index) {
+        return left.substring(index, left.length()).compareTo(right.substring(index, right.length()));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_string_compare_to(&left, right.as_str())")
+            && translation
+                .rust
+                .contains("java_string_compare_to_ignore_case(&left, right.as_str())")
+            && translation
+                .rust
+                .contains("java_string_equals_ignore_case(&left, right.as_str())")
+            && translation
+                .rust
+                .contains("java_string_substring(&value, 0, 2)")
+            && translation.rust.contains(
+                "java_string_compare_to(&(java_string_substring(&left, index, left.len() as i32)), java_string_substring(&right, index, right.len() as i32).as_str())"
+            )
+            && !translation.rust.contains(".compare_to(")
+            && !translation.rust.contains(".compare_to_ignore_case(")
+            && !translation.rust.contains(".equals_ignore_case("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_string_comparison_methods",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn string_pattern_methods_use_signature_borrowed_argument_slots() {
+    let translation = translate_source(
+        r#"
+class StringPatternSignatureArgs {
+    boolean has(String value, String needle) {
+        return value.contains(needle);
+    }
+
+    boolean hasPrefix(String value) {
+        return value.startsWith("chr");
+    }
+
+    boolean hasSuffix(String value, String suffix) {
+        return value.endsWith(suffix);
+    }
+
+    String rewrite(String value, String replacement) {
+        return value.replace("x", replacement);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return value.contains(needle.as_str());")
+            && translation
+                .rust
+                .contains("return value.starts_with(\"chr\");")
+            && translation
+                .rust
+                .contains("return value.ends_with(suffix.as_str());")
+            && translation
+                .rust
+                .contains("return value.replace(\"x\", replacement.as_str());")
+            && !translation.rust.contains("\"chr\".to_string().as_str()")
+            && !translation.rust.contains("\"x\".to_string().as_str()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_pattern_signature_args",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn numeric_parse_static_calls_use_signature_borrowed_string_args() {
+    let translation = translate_source(
+        r#"
+class NumericParseStaticCalls {
+    int count(String value) {
+        return Integer.parseInt(value);
+    }
+
+    double ratio(String value) {
+        return Double.parseDouble(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return value.as_str().parse::<i32>().unwrap();")
+            && translation
+                .rust
+                .contains("return value.as_str().parse::<f64>().unwrap();")
+            && !translation.rust.contains("value.parse::<i32>()")
+            && !translation.rust.contains("value.parse::<f64>()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "numeric_parse_static_calls",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn numeric_wrapper_static_to_string_keeps_primitive_argument_signature() {
+    let translation = translate_source(
+        r#"
+class NumericWrapperStaticToString {
+    int width(int value) {
+        return Integer.toString(value).length();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Integer::to_string(value).len() as i32")
+            && translation
+                .rust
+                .contains("pub fn to_string(_arg0: impl std::fmt::Display) -> String")
+            && translation.rust.contains("_arg0.to_string()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn java_string_equality_normalizes_owned_and_borrowed_slots() {
+    let translation = translate_source(
+        r#"
+class StringEqualitySlots {
+    static boolean firstIs(String[] values, String expected) {
+        return values[0] == expected;
+    }
+
+    static boolean literalIs(String value) {
+        return value == "Chrom";
+    }
+
+    static boolean sortedSame(String[] sorted, String[] unsorted) {
+        return sorted[0] == unsorted[0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("values[0 as usize].as_str() == expected")
+            && translation
+                .rust
+                .contains("value == \"Chrom\".to_string().as_str()")
+            && translation
+                .rust
+                .contains("sorted[0 as usize].as_str() == unsorted[0 as usize].as_str()")
+            && !translation
+                .rust
+                .contains("return values[0 as usize] == expected;")
+            && !translation
+                .rust
+                .contains("return value == \"Chrom\".to_string();"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "java_string_equality_slots",
+        vec![GeneratedCrateModule {
+            name: "string_equality_slots",
+            rust: translation.rust,
+            tests: r#"
+#[test]
+fn compares_string_slots() {
+    let values = vec!["Chrom".to_string(), "Other".to_string()];
+    assert!(StringEqualitySlots::first_is(&values, "Chrom"));
+    assert!(StringEqualitySlots::literal_is("Chrom"));
+    assert!(StringEqualitySlots::sorted_same(&values, &values));
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn constructed_string_return_stays_owned_not_borrowed_alias() {
+    let translation = translate_source(
+        r#"
+class ConstructedStringReturn {
+    private static String render(String chrom, int start, int stop, boolean report) {
+        String line = chrom + "\t" + start + "\t" + stop;
+        if (report) {
+            return line;
+        }
+        return "";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn render(chrom: &str, start: i32, stop: i32, report: bool) -> String")
+            && translation.rust.contains("let line: String = format!")
+            && translation.rust.contains("return line;")
+            && translation.rust.contains("return \"\".to_string();")
+            && !translation.rust.contains("-> &str")
+            && !translation.rust.contains(".to_string().as_str()")
+            && !translation
+                .rust
+                .contains("format!(\"{}\\t{}\\t{}\", chrom, start, stop).as_str()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "constructed_string_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn returns_owned_constructed_strings() {
+        assert_eq!(
+            ConstructedStringReturn::render("chr1", 10, 20, true),
+            "chr1\t10\t20".to_string()
+        );
+        assert_eq!(
+            ConstructedStringReturn::render("chr1", 10, 20, false),
+            "".to_string()
+        );
+    }
+}
+"#,
         }],
     );
 }
@@ -164,9 +1658,12 @@ class JavaStringSubstringAndHashCode {
     );
 
     assert!(
-        translation
+        (translation
             .rust
             .contains("java_string_substring(header.as_str(), 1, header.len() as i32)")
+            || translation
+                .rust
+                .contains("java_string_substring(&header, 1, header.len() as i32)"))
             && translation
                 .rust
                 .contains("java_string_hash_code(left.as_ref().unwrap().as_str())")
@@ -210,9 +1707,12 @@ class BareFinalInstanceFieldRead {
         translation
             .rust
             .contains("pub fn get_quality_header(&self) -> Option<String>")
-            && translation
+            && (translation
                 .rust
-                .contains("return self.quality_header.clone()")
+                .contains("return self.quality_header.as_ref().cloned()")
+                || translation
+                    .rust
+                    .contains("return self.quality_header.clone()"))
             && translation
                 .rust
                 .contains("java_string_hash_code(self.quality_header.as_ref().unwrap().as_str())")
@@ -303,17 +1803,40 @@ class NumericRelationalPromotion {
     boolean beforeLimit(int end, long limit) {
         return end < limit;
     }
+
+    boolean zeroDouble(double x) {
+        return x == 0;
+    }
+
+    boolean notZeroDouble(double x) {
+        return x != 0;
+    }
+
+    boolean doubleLong(double y, long yi) {
+        return y == yi;
+    }
+
+    boolean floatDouble(float f, double direction) {
+        return f == direction;
+    }
 }
 "#,
     );
 
     assert!(
-        translation.rust.contains("return (end as i64) < limit;"),
+        translation.rust.contains("return (end as i64) < limit;")
+            && translation.rust.contains("return x == (0 as f64);")
+            && translation.rust.contains("return x != (0 as f64);")
+            && translation.rust.contains("return y == (yi as f64);")
+            && translation.rust.contains("return (f as f64) == direction;"),
         "{}",
         translation.rust
     );
     assert!(
-        !translation.rust.contains("return (end < limit);"),
+        !translation.rust.contains("return (end < limit);")
+            && !translation.rust.contains("return x == 0;")
+            && !translation.rust.contains("return y == yi;")
+            && !translation.rust.contains("return f == direction;"),
         "{}",
         translation.rust
     );
@@ -357,6 +1880,77 @@ fn reused_map_argument_uses_owned_recovery_fact_for_clone() {
         translation.rust.contains(
             "self.patch(values.clone()/* TODO(translation): validate added clone */, key)"
         ),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn reused_string_parameters_clone_in_multiple_vec_initializers() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class ReusedStringParametersInVecs {
+    boolean sorted(String input1, String input2) {
+        String chrom1 = input1.trim();
+        String chrom2 = input2.trim();
+        String[] unsorted = new String[]{chrom1, chrom2};
+        String[] sorted = new String[]{chrom1, chrom2};
+        Arrays.sort(sorted);
+        return sorted[0].equals(unsorted[0]);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("vec![chrom1.clone()/* TODO(translation): validate added clone */, chrom2.clone()/* TODO(translation): validate added clone */]")
+            && translation.rust.contains("let mut sorted: Vec<String> = vec![chrom1, chrom2];"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn reused_string_source_clones_for_multiple_owned_local_assignments() {
+    let translation = translate_source(
+        r#"
+class ReusedStringSourceAssignments {
+    String trio(String input, boolean replace) {
+        String refBase = input.trim();
+        String father = refBase;
+        String mother = refBase;
+        String child = refBase;
+        if (replace) {
+            father = refBase;
+            mother = refBase;
+            child = refBase;
+        }
+        return father + mother + child + refBase;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let mut father: String = ref_base.clone()/* TODO(translation): validate added clone */;"
+        ) && translation.rust.contains(
+            "let mut mother: String = ref_base.clone()/* TODO(translation): validate added clone */;"
+        ) && translation.rust.contains(
+            "let mut child: String = ref_base.clone()/* TODO(translation): validate added clone */;"
+        ) && translation
+            .rust
+            .contains("father = ref_base.clone()/* TODO(translation): validate added clone */;")
+            && translation.rust.contains(
+                "mother = ref_base.clone()/* TODO(translation): validate added clone */;"
+            )
+            && translation
+                .rust
+                .contains("child = ref_base.clone()/* TODO(translation): validate added clone */;"),
         "{}",
         translation.rust
     );
@@ -488,6 +2082,52 @@ class SourceValueStructDerives {
 
     cargo_check_generated_modules(
         "source_value_struct_derives",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_struct_with_dyn_trait_vec_field_derives_clone_when_adapter_exists() {
+    let translation = translate_source(
+        r#"
+interface CloneableModule {
+    String name();
+}
+
+class DynTraitVecCloneHolder {
+    private CloneableModule[] modules;
+
+    DynTraitVecCloneHolder(CloneableModule[] modules) {
+        this.modules = modules;
+    }
+
+    DynTraitVecCloneHolder choose(DynTraitVecCloneHolder value) {
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("#[derive(Clone)]\npub struct DynTraitVecCloneHolder")
+            && translation
+                .rust
+                .contains("modules: Vec<Box<dyn CloneableModule>>")
+            && translation
+                .rust
+                .contains("impl Clone for Box<dyn CloneableModule>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_dyn_trait_vec_clone_holder",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -648,7 +2288,7 @@ fn java_string_split_with_limit_uses_runtime_helper() {
         translation.rust.contains("pub fn java_string_split")
             && translation
                 .rust
-                .contains("java_string_split(line.as_str(), \"\\\\\\\\t\".to_string(), -1)")
+                .contains("java_string_split(line.as_str(), \"\\\\\\\\t\", -1)")
             && !translation
                 .rust
                 .contains(".split(\"\\\\t\".to_string(), (-1))"),
@@ -718,6 +2358,80 @@ class IndexedStringArrayOptionalBorrowedStringArg {
 }
 
 #[test]
+fn nested_indexed_string_array_append_borrows_inner_vec_element() {
+    let translation = translate_source(
+        r#"
+class NestedIndexedStringArrayAppend {
+    String flush(String[][] group) {
+        StringBuilder sb = new StringBuilder();
+        for (String[] seg : group) {
+            sb.append(seg[0]).append(",").append(seg[1]);
+        }
+        return sb.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("sb.append(&seg[0 as usize])")
+            && translation.rust.contains(".append(&seg[1 as usize])")
+            && !translation.rust.contains("sb.append(seg[0 as usize])")
+            && !translation.rust.contains(".append(seg[1 as usize])"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_indexed_string_array_append",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_null_ternary_into_optional_borrowed_arg_wraps_planned_borrow() {
+    let translation = translate_source(
+        r#"
+class NonNullTernaryOptionalBorrowedArg {
+    boolean legal(String value) {
+        return value != null && value.trim().equals(value);
+    }
+
+    boolean check(boolean chooseLeft, String line) {
+        String[] parts = line.split("\\t", -1);
+        return legal(chooseLeft ? parts[0] : parts[1]);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.legal(if choose_left { Some(&parts[0 as usize]) } else { Some(&parts[1 as usize]) })")
+            && !translation
+                .rust
+                .contains("if choose_left { parts[0 as usize] } else { parts[1 as usize] }")
+            && !translation.rust.contains("self.legal(&Some("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "non-null-ternary-optional-borrowed-arg",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn stream_block_lambda_string_array_local_clones_owned_index() {
     let translation = translate_source(
         r#"
@@ -775,7 +2489,8 @@ class ParallelStreamSharedLowering {
 
     assert!(
         translation.rust.contains("names.iter().map")
-            && translation.rust.contains("to_lowercase()")
+            && (translation.rust.contains("to_lowercase()")
+                || translation.rust.contains("to_lower_case()"))
             && !translation.rust.contains("parallel_stream"),
         "{}",
         translation.rust
@@ -846,6 +2561,47 @@ class OptionalSequenceGetConcreteSlot {
             .contains("(self.names.as_ref().expect(\"Java null receiver\").get(0 as usize).expect(\"Java index out of bounds\")).clone()"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn collection_get_result_unwraps_before_array_indexing() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+
+class CollectionGetArrayIndexing {
+    static int second(ArrayList<int[]> group) {
+        if (group.isEmpty()) {
+            return -1;
+        }
+        return group.get(0)[1];
+    }
+}
+"#,
+    );
+
+    assert!(
+        (translation
+            .rust
+            .contains("group.get(0 as usize).expect(\"Java index out of bounds\")[1 as usize]")
+            || translation.rust.contains(
+                "group.get(0 as usize).as_ref().expect(\"Java index out of bounds\")[1 as usize]"
+            ))
+            && !translation
+                .rust
+                .contains("group.get(0 as usize)[1 as usize]"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collection_get_array_indexing",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -1004,7 +2760,7 @@ class Format {}
     assert!(
         translation
             .rust
-            .contains("self.formats.get(id).expect(\"Java null receiver\").clone()")
+            .contains("self.formats.get(id.as_str()).expect(\"Java null receiver\").clone()")
             && !translation.rust.contains("downcast::<Format>")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
@@ -1036,11 +2792,34 @@ class CastedFactoryResultIntoConcreteOptionalSlot {
     assert!(
         translation
             .rust
-            .contains("connection = Some(url.open_connection());")
+            .contains("connection = Some(url.open_connection()?);")
+            && translation
+                .rust
+                .contains("pub fn open_connection<T: Default>(&self) -> Result<T, JavaException>")
             && !translation.rust.contains("downcast::<JarURLConnection>")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "casted_factory_result_into_concrete_optional_slot",
+        vec![GeneratedCrateModule {
+            name: "casted_factory_result_into_concrete_optional_slot",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn typechecks_canonical_url_open_connection_shape() {
+        let fixture = CastedFactoryResultIntoConcreteOptionalSlot {};
+        let _ = fixture.open(&URL::new("jar:file:///tmp/example.jar!/")).unwrap();
+    }
+}
+"#,
+        }],
     );
 }
 
@@ -1251,12 +3030,11 @@ class Path {
     );
 
     assert!(
-        translation
+        translation.rust.contains(
+            "let path: Option<Path> = self.lookup.as_ref().unwrap().find(Some(sample.as_str()));"
+        ) && !translation
             .rust
-            .contains("let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample);")
-            && !translation
-                .rust
-                .contains("let path: Option<Path> = Some(self.lookup.as_ref().unwrap().find"),
+            .contains("let path: Option<Path> = Some(self.lookup.as_ref().unwrap().find"),
         "{}",
         translation.rust
     );
@@ -1457,11 +3235,157 @@ fn throwing_call_chain_promotes_caller_result_shells() {
 }
 
 #[test]
-fn documents_to_array_empty_string_array_gap() {
-    let translation = translate_source(&idiom_gap("ToArrayEmptyStringArray.java"));
+fn inferred_source_throwing_call_creates_caller_exception_fact() {
+    let translation = translate_source(
+        r#"
+class InferredSourceThrowingCall {
+    void caller() {
+        callee();
+    }
+
+    void callee() {
+        throw new CheckedProblem();
+    }
+}
+
+class CheckedProblem extends Exception {}
+"#,
+    );
 
     assert!(
-        translation.rust.contains("names.to_array(vec![])"),
+        translation
+            .rust
+            .contains("pub fn caller(&self) -> Result<(), JavaException>")
+            && translation
+                .rust
+                .contains("pub fn callee(&self) -> Result<(), JavaException>")
+            && translation.rust.contains("self.callee()?;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "inferred_source_throwing_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn overloaded_static_throwing_call_creates_caller_exception_fact() {
+    let translation = translate_source(
+        r#"
+class OverloadedStaticThrowingCall {
+    static void caller(int value) {
+        check(value);
+    }
+
+    static void check(int value) throws CheckedProblem {
+        throw new CheckedProblem();
+    }
+
+    static void check(String value) {
+    }
+}
+
+class CheckedProblem extends Exception {}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn caller(value: i32) -> Result<(), JavaException>")
+            && translation
+                .rust
+                .contains("pub fn check_int(value: i32) -> Result<(), JavaException>")
+            && translation.rust.contains("Self::check_int(value)?;")
+            && !translation.rust.contains("pub fn caller(value: i32) {"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "overloaded_static_throwing_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn overloaded_static_caller_gets_exception_fact_on_emitted_rust_name() {
+    let translation = translate_source(
+        r#"
+class OverloadedStaticCallerThrowingHelper {
+    static void print(String name, int expected, double[] values) {
+        checkLen(expected, values.length);
+    }
+
+    static void print(String name, int expected, double[][] values) {
+        checkLen(expected, values.length);
+    }
+
+    static void checkLen(int expected, int actual) throws CheckedProblem {
+        if (expected != actual) {
+            throw new CheckedProblem();
+        }
+    }
+}
+
+class CheckedProblem extends Exception {}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn print_string_int_double_array(name: String, expected: i32, values: &[f64]) -> Result<(), JavaException>"
+        ) && translation.rust.contains(
+            "pub fn print_string_int_double_array_array(name: String, expected: i32, values: &ndarray::Array2<f64>) -> Result<(), JavaException>"
+        ) && translation.rust.contains("Self::check_len(expected, values.len() as i32)?;")
+            && translation
+                .rust
+                .contains("Self::check_len(expected, values.nrows() as i32)?;")
+            && !translation
+                .rust
+                .contains("pub fn print_string_int_double_array(name: String, expected: i32, values: &[f64]) {"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn collection_to_array_empty_string_array_lowers_to_owned_vec() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+import java.util.Map;
+
+public class ToArrayEmptyStringArray {
+    public String[] copy(List<String> names) {
+        return names.toArray(new String[]{});
+    }
+
+    public String[] keys(Map<String, String> values) {
+        return values.keySet().toArray(new String[0]);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("names.iter().cloned().collect::<Vec<_>>()")
+            && translation.rust.contains(
+                "values.keys().cloned().collect::<Vec<_>>().iter().cloned().collect::<Vec<_>>()"
+            )
+            && !translation.rust.contains(".to_array("),
         "{}",
         translation.rust
     );
@@ -1469,6 +3393,126 @@ fn documents_to_array_empty_string_array_gap() {
         !translation.rust.contains("Java array creation"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collection_to_array_empty_string_array",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_int_arithmetic_array_index_casts_whole_expression_to_usize() {
+    let translation = translate_source(
+        r#"
+class JavaIntArithmeticArrayIndex {
+    double get(double[] values, int left, int right) {
+        return values[left + right];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("values[(left + right) as usize]")
+            && !translation.rust.contains("values[left + right as usize]"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_int_arithmetic_array_index",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_shift_expression_casts_as_whole_expression_when_promoted() {
+    let translation = translate_source(
+        r#"
+class JavaShiftPromotion {
+    static final double SCALE = 4503599627370496.0;
+
+    double scaled(long value) {
+        return (value >> 12) / SCALE;
+    }
+
+    double mixed(long high, long low) {
+        return (((high & 4095L) << 40) + (low >> 24)) / SCALE / SCALE;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("((value >> 12) as f64) / Self::SCALE")
+            && !translation.rust.contains("value >> 12 as f64"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("((((high & 4095i64) << 40) + (low >> 24)) as f64) / Self::SCALE")
+            && !translation.rust.contains("+ (low >> 24) as f64"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_shift_promotion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_array_element_participates_in_numeric_promotion() {
+    let translation = translate_source(
+        r#"
+class OptionalArrayNumericPromotion {
+    static final long SCALE = 1073741824L;
+
+    double scale(boolean present) {
+        double values[] = present ? new double[2] : null;
+        if (values != null) {
+            final double tmp = values[0] * SCALE;
+            return tmp;
+        }
+        return 0.0;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "values.as_ref().expect(\"Java null receiver\")[0 as usize] * (Self::SCALE as f64)"
+        ) && !translation.rust.contains("* Self::SCALE) as f64"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_array_numeric_promotion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -1489,7 +3533,7 @@ fn external_get_name_getter_no_longer_requires_runtime_downcast() {
     assert!(
         translation
             .rust
-            .contains("let name: String = box.get_name();"),
+            .contains("let name: String = r#box.get_name();"),
         "{}",
         translation.rust
     );
@@ -1767,7 +3811,12 @@ fn documents_proven_non_null_member_field_gap() {
     let translation = translate_source(&idiom_gap("NonNullFieldFromConstructors.java"));
 
     assert!(
-        translation.rust.contains("name: String") && !translation.rust.contains("Option<String>"),
+        translation
+            .rust
+            .contains("pub struct NonNullFieldFromConstructors {\n    name: String,")
+            && !translation
+                .rust
+                .contains("pub struct NonNullFieldFromConstructors {\n    name: Option<String>,"),
         "{}",
         translation.rust
     );
@@ -1807,6 +3856,61 @@ fn map_size_return_int_uses_java_int_width() {
 }
 
 #[test]
+fn map_key_set_size_lowers_through_native_len() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapKeySetSize {
+    int count(HashMap<String, Object> values) {
+        return values.keySet().size();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("values.keys().cloned().collect::<Vec<_>>().len() as i32")
+            && !translation.rust.contains(".size()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn map_key_set_returning_set_collects_hashset_for_set_slot() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Set;
+
+class MapKeySetReturnSet {
+    Set<String> keys(HashMap<String, Object> values) {
+        return values.keySet();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn keys(&self, values:")
+            && translation
+                .rust
+                .contains(") -> std::collections::HashSet<String>")
+            && translation.rust.contains(
+                "return values.keys().cloned().collect::<std::collections::HashSet<_>>();"
+            )
+            && !translation
+                .rust
+                .contains("return values.keys().cloned().collect::<Vec<_>>();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn array_arguments_use_borrowed_slice_views() {
     let translation = translate_source(&idiom_gap("ArrayArgumentSliceView.java"));
 
@@ -1820,6 +3924,30 @@ fn array_arguments_use_borrowed_slice_views() {
                 .rust
                 .contains("length_of_first(self.values.unwrap())")
             && !translation.rust.contains("length_of_first(local)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_array_setter_arguments_follow_owned_storage_signature() {
+    let translation = translate_source(&idiom_gap("ArraySetterOwnedStorage.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn set_letters(&mut self, letters: Vec<char>)")
+            && translation
+                .rust
+                .contains("let mut out: ArraySetterOwnedStorage = ArraySetterOwnedStorage::new();")
+            && translation
+                .rust
+                .contains("out.set_letters(format!(\"{}{}\", left, right).chars().collect::<Vec<char>>())")
+            && translation
+                .rust
+                .contains("out.set_letters(source.letters.as_ref().expect(\"Java null receiver\").clone()/* TODO(translation): validate added clone */)")
+            && !translation.rust.contains(".set_letters(format!(\"{}{}\", left, right).chars().collect::<Vec<char>>().as_slice())")
+            && !translation.rust.contains(".set_letters(source.letters.as_ref().expect(\"Java null receiver\").as_slice())"),
         "{}",
         translation.rust
     );
@@ -1938,6 +4066,603 @@ fn documents_external_byte_array_getter_dispatch_coercion_gap() {
                 .rust
                 .contains("unsupported Java dispatch coercion")
             && !translation.rust.contains("downcast::<"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn closed_enum_variant_borrows_as_dyn_trait_parameter() {
+    let translation = translate_source(
+        r#"
+interface Localizable {
+    String getSourceString();
+}
+
+enum LocalizedFormats implements Localizable {
+    CONVERGENCE_FAILED("convergence failed");
+
+    private final String source;
+
+    LocalizedFormats(String source) {
+        this.source = source;
+    }
+
+    public String getSourceString() {
+        return source;
+    }
+}
+
+class UseLocalized {
+    String message() {
+        return format(LocalizedFormats.CONVERGENCE_FAILED);
+    }
+
+    String format(Localizable pattern) {
+        return pattern.getSourceString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("&LocalizedFormats::CONVERGENCE_FAILED")
+            && translation.rust.contains("as &dyn Localizable")
+            && translation
+                .rust
+                .contains("impl Localizable for LocalizedFormats")
+            && translation.rust.contains("self.to_string()")
+            && !translation
+                .rust
+                .contains("unsupported Java dispatch coercion")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn closed_enum_variant_constructor_delegation_supplies_empty_varargs_without_optional_as_ref() {
+    let translation = translate_source(
+        r#"
+interface Localizable {
+    String getSourceString();
+}
+
+enum LocalizedFormats implements Localizable {
+    ILLEGAL_STATE("illegal state");
+
+    private final String source;
+
+    LocalizedFormats(String source) {
+        this.source = source;
+    }
+
+    public String getSourceString() {
+        return source;
+    }
+}
+
+class LocalizedException {
+    LocalizedException(Localizable pattern, Object... args) {
+    }
+
+    LocalizedException() {
+        this(LocalizedFormats.ILLEGAL_STATE);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("&LocalizedFormats::ILLEGAL_STATE as &dyn Localizable")
+            && translation.rust.contains("Vec::new()")
+            && !translation.rust.contains("ILLEGAL_STATE.as_ref()")
+            && !translation.rust.contains("Java null receiver"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_interface_collection_elements_use_boxed_dyn_trait() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+interface Localizable {
+    String getSourceString();
+}
+
+class LocalizableStore {
+    private List<Localizable> patterns;
+
+    LocalizableStore() {
+        patterns = new ArrayList<Localizable>();
+    }
+
+    void add(Localizable pattern) {
+        patterns.add(pattern);
+    }
+
+    Localizable first(int index) {
+        return patterns.get(index);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("patterns: Vec<Box<dyn Localizable>>")
+            && translation
+                .rust
+                .contains("self.patterns.push(pattern.clone_box());")
+            && translation
+                .rust
+                .contains("return (self.patterns.get(index as usize).expect(\"Java index out of bounds\")).clone()")
+            && !translation.rust.contains("Box::new(self.patterns.get")
+            && !translation.rust.contains("patterns: Vec<Localizable>")
+            && !translation.rust.contains("patterns: Vec<dyn Localizable>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn this_argument_can_borrow_inherited_interface_as_dyn_trait() {
+    let translation = translate_source(
+        r#"
+interface Distribution {
+    double value();
+}
+
+abstract class AbstractDistribution implements Distribution {
+}
+
+class RandomSampler {
+    double sample(Distribution distribution) {
+        return distribution.value();
+    }
+}
+
+class ConcreteDistribution extends AbstractDistribution {
+    private RandomSampler sampler = new RandomSampler();
+
+    public double value() {
+        return 1.0;
+    }
+
+    double sample() {
+        return sampler.sample(this);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl Distribution for ConcreteDistribution")
+            && translation.rust.contains("sampler.sample(self)")
+            && !translation.rust.contains(
+                "unsupported Java erased object to borrowed dyn trait recovery for Distribution"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "this_argument_inherited_interface_dyn_trait",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_interface_object_getter_returns_borrowed_field() {
+    let translation = translate_source(
+        r#"
+interface ContextProvider {
+    Context getContext();
+}
+
+class Context {
+    Object value;
+}
+
+class HasContext implements ContextProvider {
+    private final Context context;
+
+    HasContext(Context context) {
+        this.context = context;
+    }
+
+    public Context getContext() {
+        return context;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("fn get_context(&self) -> &Context;")
+            && translation
+                .rust
+                .contains("pub fn get_context(&self) -> &Context")
+            && translation.rust.contains("return &self.context;")
+            && translation
+                .rust
+                .contains("fn get_context(&self) -> &Context { HasContext::get_context(self) }")
+            && !translation.rust.contains("return self.context.clone();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn nested_interface_type_names_are_valid_rust_identifiers() {
+    let translation = translate_source(
+        r#"
+class Incrementor {
+    interface MaxCountExceededCallback {
+        void trigger(int maximalCount);
+    }
+
+    private final int maximalCount;
+    private MaxCountExceededCallback callback;
+
+    Incrementor(int maximalCount) {
+        this.maximalCount = maximalCount;
+    }
+
+    Incrementor(int maximalCount, MaxCountExceededCallback callback) {
+        this.maximalCount = maximalCount;
+        this.callback = callback;
+    }
+}
+
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub trait IncrementorMaxCountExceededCallback")
+            && translation
+                .rust
+                .contains("Box<dyn IncrementorMaxCountExceededCallback>")
+            && translation
+                .rust
+                .contains("new_int_incrementor_max_count_exceeded_callback")
+            && !translation.rust.contains(
+                "pub type MaxCountExceededCallback = IncrementorMaxCountExceededCallback;"
+            )
+            && !translation
+                .rust
+                .contains("Incrementor.MaxCountExceededCallback")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn anonymous_nested_interface_constructor_lowers_to_boxed_dyn_handoff() {
+    let translation = translate_source(
+        r#"
+class Incrementor {
+    interface MaxCountExceededCallback {
+        void trigger(int maximalCount);
+    }
+
+    private MaxCountExceededCallback callback;
+
+    Incrementor(int maximalCount) {
+        this(maximalCount, new MaxCountExceededCallback() {
+            public void trigger(int max) {
+            }
+        });
+    }
+
+    Incrementor(int maximalCount, MaxCountExceededCallback callback) {
+        this.callback = callback;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub type MaxCountExceededCallback = dyn IncrementorMaxCountExceededCallback;"
+        ) && translation
+            .rust
+            .contains("impl dyn IncrementorMaxCountExceededCallback")
+            && translation
+                .rust
+                .contains("<dyn IncrementorMaxCountExceededCallback>::anonymous()")
+            && !translation
+                .rust
+                .contains("&dyn IncrementorMaxCountExceededCallback::anonymous")
+            && !translation.rust.contains("anonymous().clone_box()")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn lowercase_keyword_receiver_is_not_guessed_as_static_owner() {
+    let translation = translate_source(
+        r#"
+class FilterInputStream {
+}
+
+class KeywordReceiverStream extends FilterInputStream {
+    int read() {
+        return in.read();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("r#in.read()")
+            && !translation.rust.contains("in::read")
+            && !translation.rust.contains("return in.read()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn receiverless_overloaded_static_same_class_call_uses_self_and_arg_types() {
+    let translation = translate_source(
+        r#"
+class ReceiverlessOverloadedStaticCall {
+    static double round(double x, int scale) {
+        return round(x, scale, 1);
+    }
+
+    static double round(double x, int scale, int mode) {
+        return x + scale + mode;
+    }
+
+    static float round(float x, int scale) {
+        return round(x, scale, 1);
+    }
+
+    static float round(float x, int scale, int mode) {
+        return x + scale + mode;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return Self::round_double_int_int(x, scale, 1);")
+            && translation
+                .rust
+                .contains("return Self::round_float_int_int(x, scale, 1);")
+            && !translation.rust.contains("return round(x, scale, 1);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "receiverless_overloaded_static_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn lowercase_jdk_static_owner_aliases_recover_canonical_static_calls() {
+    let translation = translate_source(
+        r#"
+class LowercaseJdkStaticOwners {
+    double normalize(double x, double y) {
+        if (Double.isInfinite(x)) {
+            return Math.sqrt(y);
+        }
+        return Math.pow(x, 2.0);
+    }
+
+    double remainder(double x, double y) {
+        return StrictMath.IEEEremainder(x, y);
+    }
+
+    void copy(byte[] from, byte[] to, int n) {
+        System.arraycopy(from, 0, to, 0, n);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Double::is_infinite")
+            && translation.rust.contains("Math::sqrt")
+            && translation.rust.contains("Math::pow")
+            && translation.rust.contains("StrictMath::i_e_e_eremainder")
+            && translation.rust.contains("System::arraycopy")
+            && translation.rust.contains("pub struct Math")
+            && translation.rust.contains("pub fn pow")
+            && translation.rust.contains("pub struct StrictMath")
+            && translation.rust.contains("pub fn i_e_e_eremainder")
+            && translation.rust.contains("pub struct Double")
+            && translation.rust.contains("pub fn is_infinite")
+            && translation.rust.contains("pub struct System")
+            && translation.rust.contains("pub fn arraycopy")
+            && !translation.rust.contains("double.is_infinite")
+            && !translation.rust.contains("math.sqrt")
+            && !translation.rust.contains("math.pow")
+            && !translation.rust.contains("strict_math.i_e_e_eremainder")
+            && !translation.rust.contains("system.arraycopy"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "lowercase_jdk_static_owners",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn array_element_assignment_to_bare_field_requires_mutable_self() {
+    let translation = translate_source(
+        r#"
+class ArrayElementAssignmentToBareField {
+    private double[] values;
+
+    double replace(double value) {
+        double old = values[0];
+        values[0] = value;
+        return old;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn replace(&mut self, value: f64) -> f64")
+            && translation.rust.contains(
+                "self.values.as_mut().expect(\"Java null receiver\")[0 as usize] = value;"
+            )
+            && !translation.rust.contains("pub fn replace(&self"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn system_arraycopy_uses_signature_fact_slice_slots_for_optional_array_fields() {
+    let translation = translate_source(
+        r#"
+class SystemArraycopyOptionalArrayFields {
+    private double[] source;
+    private double[] dest;
+
+    void copy(int n) {
+        System.arraycopy(source, 0, dest, 0, n);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn copy(&mut self, n: i32)")
+            && translation.rust.contains(
+                "System::arraycopy(self.source.as_ref().expect(\"Java null receiver\").as_slice(), 0"
+            )
+            && translation.rust.contains(
+                "self.dest.as_mut().expect(\"Java null receiver\").as_mut_slice(), 0"
+            )
+            && !translation.rust.contains("System::arraycopy(self.source, 0, self.dest,"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn system_arraycopy_uses_signature_fact_slice_slots_for_parameter_fields() {
+    let translation = translate_source(
+        r#"
+class SystemArraycopyParameterFields {
+    double[] values;
+
+    static void copy(SystemArraycopyParameterFields source,
+                     SystemArraycopyParameterFields dest) {
+        dest.values = new double[source.values.length];
+        System.arraycopy(source.values, 0, dest.values, 0, dest.values.length);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn copy(source: &SystemArraycopyParameterFields, dest: &mut SystemArraycopyParameterFields)"
+        ) && translation.rust.contains(
+            "System::arraycopy(source.values.as_ref().expect(\"Java null receiver\").as_slice(), 0"
+        ) && translation.rust.contains(
+            "dest.values.as_mut().expect(\"Java null receiver\").as_mut_slice(), 0"
+        ) && !translation.rust.contains("System::arraycopy(source.values, 0, dest.values,"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn raw_cast_left_operand_is_parenthesized_before_ordered_comparison() {
+    let translation = translate_source(
+        r#"
+class CastComparison {
+    boolean shorter(String value, int limit) {
+        return value.length() < limit;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("(value.len() as i32) < limit")
+            && !translation.rust.contains("value.len() as i32 < limit"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn java_numeric_literal_suffixes_are_removed_or_rust_typed() {
+    let translation = translate_source(
+        r#"
+class NumericSuffixes {
+    float f() {
+        return 2.5f;
+    }
+
+    double d() {
+        return 10.0D;
+    }
+
+    long mask() {
+        return 0x7ff0000000000000L;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return 2.5f32;")
+            && translation.rust.contains("return 10f64;")
+            && translation.rust.contains("9218868437227405312i64")
+            && !translation.rust.contains("2.5f;")
+            && !translation.rust.contains("10.0D")
+            && !translation.rust.contains("0000L"),
         "{}",
         translation.rust
     );
@@ -2430,13 +5155,54 @@ fn documents_static_owner_and_utility_call_gap() {
 }
 
 #[test]
+fn same_package_uppercase_utility_receiver_lowers_as_static_owner() {
+    let translation = translate_source(
+        r#"
+class SamePackageUtilityCaller {
+    Object[] flatten(Object[] values) {
+        return ArgUtils.flatten(values);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("ArgUtils::flatten")
+            && translation.rust.contains("pub struct ArgUtils")
+            && !translation.rust.contains("arg_utils.flatten"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn uppercase_utility_receiver_shadowed_by_local_stays_instance_receiver() {
+    let translation = translate_source(
+        r#"
+class ShadowedUppercaseUtilityCaller {
+    String flatten(Object ArgUtils) {
+        return ArgUtils.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("arg_utils.to_string()")
+            && !translation.rust.contains("ArgUtils::to_string"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn documents_primitive_array_allocation_gap() {
     let translation = translate_source(&idiom_gap("PrimitiveArrayWithComputedLength.java"));
 
     assert!(
         translation
             .rust
-            .contains("let values: Vec<i8> = vec![0; len as usize];"),
+            .contains("let mut values: Vec<i8> = vec![0; len as usize];"),
         "{}",
         translation.rust
     );
@@ -2446,9 +5212,43 @@ fn documents_primitive_array_allocation_gap() {
         translation.rust
     );
     assert!(
-        translation.rust.contains("values.fill(1);"),
+        translation.rust.contains("values.fill(1 as i8);"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn primitive_array_allocation_casts_compound_length_as_whole_expression() {
+    let translation = translate_source(
+        r#"
+class PrimitiveArrayAllocationCompoundLength {
+    float[] trim(long[] data, int offset) {
+        float[] values = new float[data.length - offset];
+        return values;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let values: Vec<f32> = vec![0.0; ((data.len() as i32) - offset) as usize];")
+            && !translation
+                .rust
+                .contains("(data.len() as i32) - offset as usize"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "primitive_array_allocation_compound_length",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -2461,7 +5261,9 @@ fn documents_string_array_literal_argument_gap() {
             .rust
             .contains("writer.write_next(vec![format!(\"{}{}\", prefix, comment)], false);")
             && !translation.rust.contains("Java array creation")
-            && !translation.rust.contains("Vec::new()"),
+            && !translation
+                .rust
+                .contains("writer.write_next(Vec::new(), false);"),
         "{}",
         translation.rust
     );
@@ -2480,9 +5282,196 @@ fn documents_map_put_get_java_api_gap() {
             )
             && translation
                 .rust
-                .contains("values.get(&key).expect(\"Java null receiver\").clone()")
+                .contains("values.get(key.as_str()).expect(\"Java null receiver\").clone()")
             && !translation.rust.contains(".put(")
             && !translation.rust.contains("&mut Map"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn object_map_put_keeps_erased_object_value_without_downcast() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class ObjectMapPut {
+    private HashMap<String, Object> context = new HashMap<String, Object>();
+
+    void setValue(String key, Object value) {
+        context.put(key, value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.context.insert(key, value);")
+            && !translation.rust.contains("downcast::<Object>")
+            && !translation.rust.contains("invalid Java cast"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn hashtable_put_lowers_to_native_map_insert() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+import java.util.Hashtable;
+import java.util.Vector;
+
+class HashtablePutUse {
+    static Hashtable<String, Vector<File>> groups(File[] files) {
+        Hashtable<String, Vector<File>> fileBases = new Hashtable<String, Vector<File>>();
+        Vector<File> group = new Vector<File>();
+        group.add(files[0]);
+        fileBases.put(files[0].getName(), group);
+        return fileBases;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("file_bases.insert(")
+            && !translation.rust.contains("file_bases.put(")
+            && !translation.rust.contains("let mut file_bases: Hashtable"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn map_get_collection_mutation_uses_mutable_lookup() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+import java.util.Hashtable;
+import java.util.Vector;
+
+class MapGetCollectionMutation {
+    static Hashtable<String, Vector<File>> groups(File[] files) {
+        Hashtable<String, Vector<File>> fileBases = new Hashtable<String, Vector<File>>();
+        String baseName = files[0].getName();
+        if (!fileBases.containsKey(baseName)) {
+            fileBases.put(baseName, new Vector<File>());
+        }
+        fileBases.get(baseName).add(files[0]);
+        return fileBases;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("file_bases.get_mut(&base_name).expect(\"Java null receiver\").push(")
+            && !translation
+                .rust
+                .contains("file_bases.get(&base_name).push(")
+            && !translation.rust.contains("Option<T>"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "map_get_collection_mutation",
+        vec![GeneratedCrateModule {
+            name: "map_get_collection_mutation",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_map_field_put_lowers_through_mutable_optional_receiver() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class OptionalMapFieldPut {
+    private HashMap<String, Kmer> kmers;
+
+    void reset() {
+        kmers = new HashMap<String, Kmer>();
+    }
+
+    void add(String kmer, int index) {
+        if (!kmers.containsKey(kmer)) {
+            kmers.put(new String(kmer), new Kmer(kmer, index));
+        }
+    }
+}
+
+class Kmer {
+    Kmer(String value, int index) {
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.kmers.as_mut().unwrap().insert(")
+            && !translation
+                .rust
+                .contains("self.kmers.as_ref().unwrap().put(")
+            && !translation.rust.contains(".put("),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn queue_put_lowers_to_native_push_for_vec_backed_queue() {
+    let translation = translate_source(
+        r#"
+import java.util.concurrent.ArrayBlockingQueue;
+
+class QueuePutUse {
+    static void send(ArrayBlockingQueue<String> queue, String value) throws InterruptedException {
+        queue.put(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("queue.push(value);") && !translation.rust.contains(".put("),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn byte_and_char_buffer_put_are_modeled_statement_facade_calls() {
+    let translation = translate_source(
+        r#"
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+
+class BufferPutUse {
+    static void encode(ByteBuffer bytes, CharBuffer chars, byte[] encoded) {
+        bytes.put(encoded);
+        chars.put((char)(encoded[0] & 0xFF));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("{ let _ = encoded")
+            && translation
+                .rust
+                .contains("{ let _ = char::from_u32(((encoded[0 as usize] as i32 & 255) as u32) & 0xffff).unwrap_or('\\0'); };")
+            && !translation.rust.contains(".put("),
         "{}",
         translation.rust
     );
@@ -2499,6 +5488,75 @@ fn field_map_put_reused_key_clones_at_owned_boundary() {
             && translation.rust.contains("format!(\"duplicate {}\", sample)")
             && !translation.rust.contains("self.paths.insert(sample, URI::")
             && !translation.rust.contains(".clone()/* TODO(translation): validate added clone */.clone()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn map_put_else_branch_reused_key_clones_before_later_block_read() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapPutElseBranchKeyReuse {
+    static int count(HashMap<String, Integer> counts, HashMap<String, Integer> plus, String key) {
+        if (counts.containsKey(key)) {
+            counts.put(key, counts.get(key) + 1);
+        } else {
+            counts.put(key, 1);
+        }
+        if (plus.containsKey(key)) {
+            return plus.get(key);
+        }
+        return 0;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "counts.insert(key.clone()/* TODO(translation): validate added clone */, 1);"
+        ) && translation.rust.contains("plus.contains_key(key.as_str())"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn map_put_else_branch_reassigned_key_clones_before_later_block_read() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapPutElseBranchReassignedKeyReuse {
+    static int count(HashMap<String, Integer> counts, HashMap<String, Integer> plus, String raw) {
+        String key = "";
+        key = raw.toUpperCase();
+        if (counts.containsKey(key)) {
+            counts.put(key, counts.get(key) + 1);
+        } else {
+            counts.put(key, 1);
+        }
+        if (plus.containsKey(key)) {
+            plus.put(key, plus.get(key) + 1);
+        } else {
+            plus.put(key, 1);
+        }
+        return counts.get(key);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "counts.insert(key.clone()/* TODO(translation): validate added clone */, 1);"
+        ) && translation
+            .rust
+            .contains("plus.insert(key.clone()/* TODO(translation): validate added clone */, 1);")
+            && translation.rust.contains("counts.get(key.as_str())"),
         "{}",
         translation.rust
     );
@@ -2540,14 +5598,56 @@ fn optional_argument_wrap_reused_value_clones_before_some() {
 }
 
 #[test]
+fn map_get_into_optional_borrowed_arg_uses_optional_carrier_plan() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapGetOptionalBorrowedArg {
+    boolean valid(String value) {
+        return value != null && value.trim().equals(value);
+    }
+
+    boolean check(HashMap<String, String> values, String key) {
+        return valid(values.get(key));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.valid(values.get(key.as_str()))")
+            && !translation.rust.contains("self.valid(Some(")
+            && !translation
+                .rust
+                .contains(".get(key.as_str()).expect(\"Java null receiver\")"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map-get-optional-borrowed-arg",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn map_get_optional_receiver_to_string_uses_java_null_receiver_policy() {
     let translation = translate_source(&idiom_gap("MapGetOptionalReceiverToString.java"));
 
     assert!(
         translation
             .rust
-            .contains("paths.get(sample).expect(\"Java null receiver\").to_string()")
-            && !translation.rust.contains("paths.get(sample).to_string()")
+            .contains("paths.get(sample.as_str()).expect(\"Java null receiver\").to_string()")
+            && !translation
+                .rust
+                .contains("paths.get(sample.as_str()).to_string()")
             && !translation
                 .rust
                 .contains("unwrap_or_else(|| \"null\".to_string())"),
@@ -2563,10 +5663,155 @@ fn map_get_in_ternary_primitive_slot_unwraps_and_copies_value() {
     assert!(
         translation
             .rust
-            .contains("indexes.get(name).copied().expect(\"Java null receiver\")")
-            && !translation.rust.contains("indexes.get(name) } else"),
+            .contains("indexes.get(name.as_str()).copied().expect(\"Java null receiver\")")
+            && !translation
+                .rust
+                .contains("indexes.get(name.as_str()) } else"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn map_get_primitive_value_in_arithmetic_unboxes_optional_borrow() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapGetPrimitiveArithmetic {
+    int average(HashMap<String, Integer> totals, String key, int count) {
+        return totals.get(key) / count;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("totals.get(key.as_str()).copied().expect(\"Java null receiver\") / count")
+            && !translation
+                .rust
+                .contains("totals.get(key.as_str()) / count"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_get_primitive_arithmetic",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn compound_assignment_expression_argument_returns_assigned_value() {
+    let translation = translate_source(
+        r#"
+class CompoundAssignmentArgument {
+    int combine(int a, int b) {
+        return take(a += 1, b -= 1);
+    }
+
+    int take(int a, int b) {
+        return a + b;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let mut a = a;")
+            && translation.rust.contains("let mut b = b;")
+            && translation
+                .rust
+                .contains("self.take({ a = a + 1; a }, { b = b - 1; b })")
+            && !translation.rust.contains("self.take(a += 1, b -= 1)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "compound_assignment_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn chained_array_assignment_expression_returns_assigned_value() {
+    let translation = translate_source(
+        r#"
+class ChainedArrayAssignmentExpression {
+    static double reset(double values[]) {
+        values[0] = values[1] = 0.0;
+        return values[0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("values[0 as usize] = { values[1 as usize] = 0f64; values[1 as usize] };")
+            && !translation
+                .rust
+                .contains("values[0 as usize] = values[1 as usize] = 0f64;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "chained_array_assignment_expression",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn prefix_update_expression_argument_returns_updated_value() {
+    let translation = translate_source(
+        r#"
+class PrefixUpdateArgument {
+    int combine(int a, int b) {
+        return take(++a, --b);
+    }
+
+    int take(int a, int b) {
+        return a + b;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let mut a = a;")
+            && translation.rust.contains("let mut b = b;")
+            && translation
+                .rust
+                .contains("self.take({ a += 1; a }, { b -= 1; b })")
+            && !translation.rust.contains("self.take(a += 1, b -= 1)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "prefix_update_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -2951,6 +6196,79 @@ class Path {
 }
 
 #[test]
+fn source_summary_object_to_string_in_print_uses_java_object_stringification() {
+    let caller = r#"
+class UsesSummaryObjectToStringInPrint {
+    void report(Alignment alignment) {
+        System.err.println(alignment.toString());
+    }
+}
+"#;
+    let summary = r#"
+class Alignment {
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        caller,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&alignment)")
+            && !translation.rust.contains("alignment.to_string()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_summary_object_to_string_print",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn emitted_context_object_to_string_in_print_uses_java_object_stringification_without_declared_method()
+ {
+    let caller = r#"
+class UsesEmittedContextObjectToStringInPrint {
+    void report(Alignment alignment) {
+        System.err.println(alignment.toString());
+    }
+}
+"#;
+    let context = r#"
+class Alignment {
+    String getSummary() {
+        return "summary";
+    }
+}
+"#;
+    let translation = translate_source_with_context_sources_and_summary_sources(
+        caller,
+        &[context.to_string()],
+        &[],
+        true,
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&alignment)")
+            && !translation.rust.contains("alignment.to_string()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn source_summary_method_surface_can_be_added_after_external_return_selects_type() {
     let caller = r#"
 class LateSummarySurfaceUse {
@@ -3024,7 +6342,7 @@ class Dictionary {
                 .contains("pub fn iterator(&self) -> Option<CloseableIterator>")
             && translation
                 .rust
-                .contains("return self.reader.as_ref().unwrap().header().sam_header();")
+                .contains("return self.reader.as_ref().unwrap().header().sam_header().unwrap();")
             && !translation.rust.contains("pub fn dictionary(&self) -> ()"),
         "{}",
         translation.rust
@@ -3044,7 +6362,7 @@ mod generated_tests {
     fn typechecks_late_source_summary_surface() {
         let fixture = LateSummarySurfaceUse { reader: Some(Reader) };
         let _: Dictionary = fixture.read();
-        let _: Option<SAMFileHeader> = fixture.read_header();
+        let _: SAMFileHeader = fixture.read_header();
         fixture.touch_iterator();
     }
 }
@@ -3240,6 +6558,7 @@ class NullableDisqFluentArgument {
             && translation.rust.contains(
                 "storage.reference_source_path(if missing { None } else { Some(reference.get_raw_input_string()) })"
             )
+            && !translation.rust.contains("Some(reference.get_raw_input_string().as_str())")
             && !translation.rust.contains("Some(&reference.get_raw_input_string())"),
         "{}",
         translation.rust
@@ -3289,7 +6608,9 @@ class NullableSamReaderReferenceSequenceArgument {
             && translation.rust.contains(
                 "factory.reference_sequence(if missing { None } else { Some(reference.clone()/* TODO(translation): validate added clone */) })"
             )
-            && !translation.rust.contains("Some(&reference"),
+            && !translation
+                .rust
+                .contains("factory.reference_sequence(if missing { None } else { Some(&reference) })"),
         "{}",
         translation.rust
     );
@@ -3591,6 +6912,62 @@ class ReusedOptionalDisplaySegment {
             && !translation
             .rust
             .contains("(reference_path_specifier.unwrap()).to_string()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn map_get_string_display_segment_unwraps_optional_borrow() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapGetStringDisplaySegment {
+    String append(HashMap<String, String> values, String key, String suffix) {
+        if (values.containsKey(key)) {
+            return values.get(key) + suffix;
+        }
+        return suffix;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "values.get(key.as_str()).map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
+        ) && translation.rust.contains("format!(\"{}{}\"")
+            && !translation
+                .rust
+                .contains("format!(\"{}{}\", values.get(&key), suffix)")
+            && !translation.rust.contains("values.get(&key.as_str())"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn map_get_keyset_loop_does_not_double_borrow_key() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapGetKeySetLoop {
+    Object first(HashMap<String, Object> context) {
+        for (String key : context.keySet()) {
+            return context.get(key);
+        }
+        return null;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("context.get(key.as_str())")
+            && !translation.rust.contains("context.get(&key)")
+            && !translation.rust.contains("context.get(&key.as_str())"),
         "{}",
         translation.rust
     );
@@ -3930,6 +7307,308 @@ mod generated_tests {
 }
 
 #[test]
+fn constructor_initialized_local_receiver_does_not_get_optional_adapter() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+import java.io.InputStream;
+import java.util.Enumeration;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
+class ConstructorInitializedLocalReceiver {
+    ZipFile zipFile;
+
+    void use(File file) throws Exception {
+        ZipFile zipFile = new ZipFile(file);
+        Enumeration entries = zipFile.entries();
+        InputStream stream = zipFile.getInputStream(new ZipEntry());
+        zipFile.close();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let zip_file: ZipFile = ZipFile::new(file")
+            && translation
+                .rust
+                .contains("let entries: Enumeration = zip_file.entries()?;")
+            && translation
+                .rust
+                .contains("let stream: InputStream = zip_file.get_input_stream(ZipEntry::new())?;")
+            && translation.rust.contains("zip_file.close()?;")
+            && translation
+                .rust
+                .contains("pub fn entries(&self) -> Result<Enumeration, JavaException>")
+            && translation
+                .rust
+                .contains("pub fn get_input_stream<T0>(&self, _arg0: T0) -> Result<InputStream, JavaException>")
+            && !translation.rust.contains("zip_file.as_ref().unwrap()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "constructor_initialized_local_receiver",
+        vec![GeneratedCrateModule {
+            name: "constructor_initialized_local_receiver",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn typechecks_constructor_initialized_local_receiver() {
+        let fixture = ConstructorInitializedLocalReceiver { zip_file: Some(ZipFile) };
+        fixture.r#use(File::new("archive.zip")).unwrap();
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn jdk_facade_signature_facts_type_io_zip_xml_awt_and_base64_calls() {
+    let translation = translate_source(
+        r#"
+import java.awt.Image;
+import java.awt.image.ImageObserver;
+import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.util.Base64;
+import java.util.Enumeration;
+import java.util.zip.ZipEntry;
+import javax.swing.JComponent;
+import javax.swing.RepaintManager;
+import javax.xml.stream.XMLOutputFactory;
+import javax.xml.stream.XMLStreamWriter;
+
+class JdkFacadeSignatureUse {
+    XMLStreamWriter writer(XMLOutputFactory factory, Object out) throws Exception {
+        return factory.createXMLStreamWriter(out);
+    }
+
+    int copy(InputStream raw) throws Exception {
+        BufferedInputStream in = new BufferedInputStream(raw);
+        byte[] buffer = new byte[16];
+        return in.read(buffer, 0, buffer.length);
+    }
+
+    String zip(Enumeration entries) {
+        if (!entries.hasMoreElements()) {
+            return "";
+        }
+        ZipEntry entry = (ZipEntry) entries.nextElement();
+        return entry.isDirectory() ? entry.getName() : entry.getName();
+    }
+
+    int imageSize(Image image, ImageObserver observer) {
+        return image.getWidth(observer) + image.getHeight(observer);
+    }
+
+    boolean repaint(JComponent component) {
+        RepaintManager manager = RepaintManager.currentManager(component);
+        return manager.isDoubleBufferingEnabled();
+    }
+
+    String encoded(byte[] bytes, ByteArrayOutputStream out) throws Exception {
+        return Base64.getEncoder().encodeToString(bytes) + out.toString("UTF-8");
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn create_x_m_l_stream_writer<T0>(&self, _arg0: T0) -> XMLStreamWriter")
+            && (translation
+                .rust
+                .contains("pub fn read_3(&self, _arg0: &[i8], _arg1: i32, _arg2: i32) -> Result<i32, JavaException>")
+                || translation
+                    .rust
+                    .contains("pub fn read_3<T0: ?Sized>(\n        &self,\n        _arg0: &T0,\n        _arg1: i32,\n        _arg2: i32,\n    ) -> Result<i32, JavaException>"))
+            && translation
+                .rust
+                .contains("pub fn has_more_elements(&self) -> Result<bool, JavaException>")
+            && translation
+                .rust
+                .contains("pub fn next_element<T: Default>(&self) -> Result<T, JavaException>")
+            && translation
+                .rust
+                .contains("pub fn is_directory(&self) -> Result<bool, JavaException>")
+            && translation
+                .rust
+                .contains("pub fn get_name(&self) -> Result<String, JavaException>")
+            && translation
+                .rust
+                .contains("pub fn get_width<T0>(&self, _arg0: T0) -> i32")
+            && translation
+                .rust
+                .contains("pub fn current_manager<T0>(_arg0: T0) -> RepaintManager")
+            && translation
+                .rust
+                .contains("pub fn get_encoder() -> Base64Encoder")
+            && translation
+                .rust
+                .contains("pub fn encode_to_string<T0>(&self, _arg0: T0) -> String")
+            && (translation
+                .rust
+                .contains("pub fn to_string<T0>(&self, _arg0: T0) -> Result<String, JavaException>")
+                || translation
+                    .rust
+                    .contains("pub fn to_string_1<T0>(&self, _arg0: T0) -> Result<String, JavaException>"))
+            && !translation.rust.contains("has_more_elements(&self) -> ()")
+            && !translation.rust.contains("current_manager<R: Default"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_facade_signature_facts",
+        vec![GeneratedCrateModule {
+            name: "jdk_facade_signature_facts",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn jdk_mutable_buffer_and_random_numeric_methods_have_typed_facades() {
+    let translation = translate_source(
+        r#"
+import java.util.Random;
+
+class JdkMutableBufferAndRandomNumericMethods {
+    int width(String value) {
+        StringBuffer buffer = new StringBuffer();
+        buffer.append(value);
+        return buffer.length();
+    }
+
+    int random(Random random, int bound) {
+        return random.nextInt(bound);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return buffer.length();")
+            && translation.rust.contains("pub fn length(&self) -> i32")
+            && translation.rust.contains("return random.next_int(bound);")
+            && translation
+                .rust
+                .contains("pub fn next_int<T0>(&self, _arg0: T0) -> i32")
+            && !translation.rust.contains("length(&self) -> ()")
+            && !translation
+                .rust
+                .contains("next_int<T0>(&self, _arg0: T0) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_mutable_buffer_and_random_numeric_methods",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn omitted_context_receiver_method_used_in_display_sink_gets_string_stub() {
+    let translation = translate_source(
+        r#"
+class OmittedContextReceiverMethodDisplaySink {
+    private SequenceFile sequenceFile;
+
+    void write(StringBuffer summaryText) {
+        summaryText.append(sequenceFile.name());
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl SequenceFile {\n    pub fn name(&self) -> String")
+            && !translation
+                .rust
+                .contains("impl SequenceFile {\n    pub fn name(&self) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "omitted_context_display_sink",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn omitted_context_name_getter_feeds_typed_constructor_argument() {
+    let translation = translate_source(
+        r#"
+class OmittedContextNameGetterConstructorArg {
+    Matrix load(NamedInputStream nis) {
+        return new Matrix(nis.getName());
+    }
+}
+
+class Matrix {
+    Matrix(String name) {
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("impl NamedInputStream {\n    pub fn get_name(&self) -> String")
+            && translation
+                .rust
+                .contains("return Matrix::new(nis.get_name())"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub fn get_name(&self) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "omitted_context_name_getter_constructor_arg",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn nullable_method_result_in_callback_local_stays_optional_for_optional_arg_slot() {
     let translation = translate_source(
         r#"
@@ -4150,6 +7829,11 @@ class SummarySuperCaller extends SummaryBase {
         super.startup();
     }
 
+    boolean checkReady() throws IOException {
+        super.ready();
+        return true;
+    }
+
     String inheritedLabel() {
         return super.label();
     }
@@ -4162,6 +7846,10 @@ class SummaryBase {
 
     String label() {
         return "base";
+    }
+
+    boolean ready() throws IOException {
+        return false;
     }
 }
 
@@ -4176,8 +7864,13 @@ class IOException extends Exception {
 
     assert!(!translation.rust.contains("super."), "{}", translation.rust);
     assert!(
-        translation.rust.contains("Ok(())?;")
+        translation.rust.contains("Ok::<(), JavaException>(())?;")
             && translation.rust.contains("return Default::default();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("Default::default()?"),
         "{}",
         translation.rust
     );
@@ -4195,6 +7888,7 @@ mod generated_tests {
     #[test]
     fn typechecks_source_summary_super_boundary() {
         let fixture = SummarySuperCaller {};
+        let _: Result<bool, JavaException> = fixture.check_ready();
         let _: String = fixture.inherited_label();
     }
 }
@@ -4450,6 +8144,28 @@ fn documents_instanceof_guard_narrowing_gap() {
 }
 
 #[test]
+fn unsupported_instanceof_placeholder_escapes_debug_type_quotes() {
+    let translation = translate_source(
+        r#"
+class UnsupportedInstanceofPlaceholderEscapesDebugTypeQuotes {
+    boolean isObjectArray(Object value) {
+        return value instanceof Object[];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains(r#"compile_error!("unsupported Java instanceof check: target type Array(Named { name: \"Object\", args: [] }) has no concrete runtime type")"#)
+            && !translation.rust.contains(r#"name: "Object""#),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn documents_super_constructor_state_gap() {
     let translation = translate_source(&idiom_gap("SuperConstructorState.java"));
 
@@ -4457,6 +8173,724 @@ fn documents_super_constructor_state_gap() {
         translation
             .rust
             .contains("super(...) requires inheritance lowering"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_super_constructor_with_args_initializes_flattened_inherited_fields() {
+    let subclass = r#"
+class ChildWriter extends ParentWriter {
+    private final State state;
+
+    ChildWriter(Writer writer, String sampleName, State state) {
+        super(writer, sampleName);
+        this.state = state;
+    }
+}
+"#;
+    let superclass = r#"
+class ParentWriter {
+    private final Writer writer;
+    private final String sampleName;
+
+    ParentWriter(Writer writer, String sampleName) {
+        this.writer = writer;
+        this.sampleName = sampleName;
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("writer: Writer")
+            && translation.rust.contains("sample_name: Option<String>")
+            && translation.rust.contains("state: State")
+            && translation.rust.contains("writer: writer")
+            && translation.rust.contains("sample_name: Some(sample_name")
+            && translation.rust.contains("state: state")
+            && !translation.rust.contains("__java_self.state = state;")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn generic_source_super_constructor_initializes_flattened_inherited_fields() {
+    let subclass = r#"
+interface Function {}
+
+abstract class ChildSolver extends BaseSolver<Function> {
+    ChildSolver(double absoluteAccuracy) {
+        super(absoluteAccuracy);
+    }
+
+    ChildSolver(double relativeAccuracy, double absoluteAccuracy) {
+        super(relativeAccuracy, absoluteAccuracy);
+    }
+
+    ChildSolver(double relativeAccuracy, double absoluteAccuracy, double valueAccuracy) {
+        super(relativeAccuracy, absoluteAccuracy, valueAccuracy);
+    }
+}
+"#;
+    let superclass = r#"
+interface Function {}
+
+abstract class BaseSolver<FUNC extends Function> {
+    private static final double DEFAULT_RELATIVE_ACCURACY = 1e-14;
+    private static final double DEFAULT_VALUE_ACCURACY = 1e-15;
+    private final double valueAccuracy;
+    private final double absoluteAccuracy;
+    private final double relativeAccuracy;
+
+    BaseSolver(double absoluteAccuracy) {
+        this(DEFAULT_RELATIVE_ACCURACY, absoluteAccuracy, DEFAULT_VALUE_ACCURACY);
+    }
+
+    BaseSolver(double relativeAccuracy, double absoluteAccuracy) {
+        this(relativeAccuracy, absoluteAccuracy, DEFAULT_VALUE_ACCURACY);
+    }
+
+    BaseSolver(double relativeAccuracy, double absoluteAccuracy, double valueAccuracy) {
+        this.absoluteAccuracy = absoluteAccuracy;
+        this.relativeAccuracy = relativeAccuracy;
+        this.valueAccuracy = valueAccuracy;
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("pub struct ChildSolver")
+            && translation.rust.contains("value_accuracy: f64")
+            && translation.rust.contains("absolute_accuracy: f64")
+            && translation.rust.contains("relative_accuracy: f64")
+            && translation
+                .rust
+                .contains("absolute_accuracy: absolute_accuracy")
+            && translation
+                .rust
+                .contains("relative_accuracy: relative_accuracy")
+            && translation.rust.contains("value_accuracy: value_accuracy")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_super_constructor_preserves_trailing_method_result_call() {
+    let subclass = r#"
+class TooManyMini extends MaxExceededMini {
+    TooManyMini(Number max) {
+        super(max);
+        getContext().addMessage("evaluations");
+    }
+}
+"#;
+    let superclass = r#"
+class MaxExceededMini extends MathIllegalStateMini {
+    private final Number max;
+
+    MaxExceededMini(Number max) {
+        this.max = max;
+        this.context = new ExceptionContext();
+    }
+
+    Number getMax() {
+        return max;
+    }
+}
+
+class MathIllegalStateMini {
+    protected ExceptionContext context;
+
+    ExceptionContext getContext() {
+        return context;
+    }
+}
+
+class ExceptionContext {
+    ExceptionContext() {
+    }
+
+    void addMessage(Object pattern, Object... args) {
+    }
+}
+
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("pub struct TooManyMini")
+            && translation.rust.contains("max: Number")
+            && translation
+                .rust
+                .contains("context: Option<ExceptionContext>")
+            && translation
+                .rust
+                .contains("let mut __java_self = TooManyMini")
+            && translation.rust.contains("max: max")
+            && translation.rust.contains("__java_self.context")
+            && translation.rust.contains(".add_message")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_super_constructor_matches_varargs_super_arity() {
+    let subclass = r#"
+class NumberProblem extends BaseProblem {
+    private final Number argument;
+
+    NumberProblem(String pattern, Number wrong, Object[] arguments) {
+        super(pattern, wrong, arguments);
+        argument = wrong;
+    }
+}
+"#;
+    let superclass = r#"
+class BaseProblem {
+    private final ExceptionContext context;
+
+    BaseProblem(String pattern, Object... args) {
+        context = new ExceptionContext();
+    }
+}
+
+class ExceptionContext {
+    ExceptionContext() {
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("pub struct NumberProblem")
+            && translation.rust.contains("argument: Option<Number>")
+            && translation.rust.contains("context: ExceptionContext")
+            && translation
+                .rust
+                .contains("let mut __java_self = NumberProblem")
+            && translation.rust.contains("argument: Some(wrong.clone()")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn implicit_source_super_constructor_initializes_inherited_fields() {
+    let subclass = r#"
+class ChildProblem extends BaseProblem {
+    private final Number max;
+
+    ChildProblem(Number max) {
+        getContext().addMessage("child");
+        this.max = max;
+    }
+}
+"#;
+    let superclass = r#"
+class BaseProblem {
+    protected ExceptionContext context;
+
+    BaseProblem() {
+        context = new ExceptionContext();
+    }
+
+    ExceptionContext getContext() {
+        return context;
+    }
+}
+
+class ExceptionContext {
+    ExceptionContext() {
+    }
+
+    void addMessage(Object pattern, Object... args) {
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("pub struct ChildProblem")
+            && translation.rust.contains("context: ExceptionContext")
+            && translation
+                .rust
+                .contains("let mut __java_self = ChildProblem")
+            && !translation.rust.contains("context: Default::default()")
+            && translation
+                .rust
+                .contains("context: ExceptionContext::new()")
+            && translation.rust.contains("__java_self.context")
+            && !translation.rust.contains("__java_self.get_context()")
+            && translation.rust.contains(".add_message")
+            && translation.rust.contains("max: max")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_object_varargs_forward_and_append_erased_arguments() {
+    let translation = translate_source(
+        r#"
+class ObjectVarargsCaller {
+    private ExceptionContext context;
+
+    void run(Object pattern, Number max, Object... args) {
+        context.addMessage(pattern, args);
+        context.addMessage(pattern, max, args);
+    }
+}
+
+class ExceptionContext {
+    private Object[][] stored;
+
+    ExceptionContext() {
+    }
+
+    public void addMessage(Object pattern, Object... arguments) {
+        stored[0] = arguments;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains(".add_message(pattern, args.clone()")
+            && translation
+                .rust
+                .contains("let mut __java_varargs = vec![Box::new(max")
+            && translation.rust.contains("__java_varargs.extend(args)")
+            && !translation.rust.contains("args.as_slice()")
+            && !translation.rust.contains("vec![max, args]")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan() {
+    let subclass = r#"
+class ChildProblem extends BaseProblem {
+    private final Number max;
+
+    ChildProblem(Number max, Object... args) {
+        getContext().addMessage("max", max, args);
+        this.max = max;
+    }
+}
+"#;
+    let superclass = r#"
+class BaseProblem {
+    protected ExceptionContext context;
+
+    BaseProblem() {
+        context = new ExceptionContext();
+    }
+
+    ExceptionContext getContext() {
+        return context;
+    }
+}
+
+class ExceptionContext {
+    private Object[][] stored;
+
+    ExceptionContext() {
+    }
+
+    public void addMessage(Object pattern, Object... arguments) {
+        stored[0] = arguments;
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("__java_self.context.add_message")
+            && translation.rust.contains("max: max")
+            && translation
+                .rust
+                .contains("let mut __java_varargs = vec![Box::new(max.clone()")
+            && translation.rust.contains("__java_varargs.extend(args)")
+            && !translation.rust.contains("__java_self.get_context()")
+            && !translation.rust.contains("vec![max, args]")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_standard_exception_super_with_trailing_body_lowers_subclass_state() {
+    let translation = translate_source(
+        r#"
+class CauseStateException extends IllegalStateException {
+    private final ExceptionContext context;
+
+    CauseStateException(Throwable cause, String message) {
+        super(cause);
+        context = new ExceptionContext(this);
+        getContext().addMessage(message);
+    }
+
+    ExceptionContext getContext() {
+        return context;
+    }
+}
+
+class ExceptionContext {
+    ExceptionContext(CauseStateException owner) {
+    }
+
+    void addMessage(String message) {
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub struct CauseStateException")
+            && translation.rust.contains("context: ExceptionContext")
+            && translation
+                .rust
+                .contains("let mut __java_self = CauseStateException")
+            && translation
+                .rust
+                .contains("__java_self.context = ExceptionContext::new(__java_self.clone()")
+            && translation.rust.contains(".add_message(message")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn exception_self_as_throwable_context_argument_uses_facade_boundary() {
+    let translation = translate_source(
+        r#"
+class FacadeContextException extends IllegalArgumentException {
+    private final ExceptionContext context;
+
+    FacadeContextException(String message) {
+        context = new ExceptionContext(this);
+    }
+}
+
+class ExceptionContext {
+    ExceptionContext(Throwable owner) {
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("context: ExceptionContext")
+            && !translation
+                .rust
+                .contains("context: Default::default()")
+            && translation.rust.contains(
+                "ExceptionContext::new(Default::default()/* TODO(translation): Java exception self-as-supertype facade boundary */)"
+            )
+            && !translation.rust.contains("downcast::<Throwable>")
+            && !translation.rust.contains("invalid Java cast"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn jdk_file_reader_super_constructor_is_no_state_facade() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+import java.io.FileReader;
+
+class MiniSmartFileReader extends FileReader {
+    MiniSmartFileReader(File file) {
+        super(file);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub struct MiniSmartFileReader")
+            && translation
+                .rust
+                .contains("pub fn new(file: File) -> MiniSmartFileReader")
+            && translation
+                .rust
+                .contains("return MiniSmartFileReader {  };")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn jdk_stream_wrapper_super_constructors_are_no_state_facades() {
+    let translation = translate_source(
+        r#"
+import java.io.FilterInputStream;
+import java.io.FilterOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.zip.GZIPInputStream;
+
+class MiniGzipStream extends GZIPInputStream {
+    private final int size;
+
+    MiniGzipStream(InputStream input, int size) {
+        super(input, size);
+        this.size = size;
+    }
+}
+
+class MiniFilterInput extends FilterInputStream {
+    private final boolean enabled;
+
+    MiniFilterInput(InputStream input) {
+        super(input);
+        this.enabled = true;
+    }
+}
+
+class MiniFilterOutput extends FilterOutputStream {
+    private final boolean enabled;
+
+    MiniFilterOutput(OutputStream output) {
+        super(output);
+        this.enabled = true;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub struct MiniGzipStream")
+            && translation.rust.contains("size: i32")
+            && translation.rust.contains("return MiniGzipStream {")
+            && translation.rust.contains("size: size")
+            && translation.rust.contains("return MiniFilterInput {")
+            && translation.rust.contains("enabled: true")
+            && translation.rust.contains("return MiniFilterOutput {")
+            && translation.rust.contains("enabled: true")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn jdk_stream_wrapper_inherits_typed_protected_stream_fields() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+import java.io.IOException;
+import java.util.zip.GZIPInputStream;
+
+class MiniGzipState extends GZIPInputStream {
+    MiniGzipState(InputStream input) {
+        super(input);
+    }
+
+    int copiedLen() {
+        return len;
+    }
+
+    byte[] buffer() {
+        return buf;
+    }
+
+    int remaining() {
+        return inf.getRemaining();
+    }
+
+    int probe() throws IOException {
+        byte[] b = new byte[1];
+        int ret = in.read(b, 0, 1);
+        return ret;
+    }
+
+    int superProbe(byte[] b) throws IOException {
+        return super.read(b, 0, 1);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("r#in: InputStream")
+            && !translation.rust.contains("pub in: InputStream")
+            && translation.rust.contains("inf: Inflater")
+            && translation.rust.contains("buf: Vec<i8>")
+            && translation.rust.contains("len: i32")
+            && translation.rust.contains("return self.len;")
+            && translation.rust.contains("return self.buf.clone();")
+            && translation
+                .rust
+                .contains("return self.inf.get_remaining();")
+            && translation
+                .rust
+                .contains("let mut b: Vec<i8> = vec![0; 1 as usize];")
+            && translation
+                .rust
+                .contains("let ret: i32 = self.r#in.read_3(b.as_mut_slice(), 0, 1)?;")
+            && translation
+                .rust
+                .contains("pub fn super_probe(&self, b: &mut [i8]) -> Result<i32, JavaException>")
+            && translation
+                .rust
+                .contains("return Ok(self.r#in.read_3(b, 0, 1)?);")
+            && !translation.rust.contains("Default::default()?"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_stream_wrapper_typed_protected_stream_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_self_referential_instance_fields_use_boxed_optional_storage() {
+    let translation = translate_source(
+        r#"
+class SelfLinkedNode {
+    private SelfLinkedNode parent;
+    private SelfLinkedNode child;
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("parent: Option<Box<SelfLinkedNode>>")
+            && translation
+                .rust
+                .contains("child: Option<Box<SelfLinkedNode>>")
+            && !translation.rust.contains("parent: Option<SelfLinkedNode>")
+            && !translation.rust.contains("child: Option<SelfLinkedNode>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn jdk_stream_wrapper_super_with_self_linking_trailing_mutation_is_precise_gap() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+import java.util.zip.GZIPInputStream;
+
+class ParentLinkedGzipStream extends GZIPInputStream {
+    private ParentLinkedGzipStream parent;
+    private ParentLinkedGzipStream child;
+    private int size;
+
+    ParentLinkedGzipStream(InputStream input) {
+        super(input);
+        this.size = -1;
+    }
+
+    private ParentLinkedGzipStream(ParentLinkedGzipStream parent) {
+        super(parent.in);
+        this.size = -1;
+        this.parent = parent.parent == null ? parent : parent.parent;
+        this.parent.child = this;
+    }
+
+    ParentLinkedGzipStream next() {
+        return new ParentLinkedGzipStream(this);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "unsupported Java constructor: super(...) followed by unsupported object graph mutation"
+        ) && !translation
+            .rust
+            .contains("unsupported Java constructor: super(...) requires inheritance lowering")
+            && translation
+                .rust
+                .contains("constructor call targets unsupported Java object graph mutation")
+            && !translation.rust.contains("self.clone()"),
         "{}",
         translation.rust
     );
@@ -4533,6 +8967,114 @@ class BaseFormat {
                 .rust
                 .contains("super(...) requires inheritance lowering")
             && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "no_arg_super_constructor_with_inherited_setter_trailing_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_subclass_constructor_flows_to_flattened_superclass_slot() {
+    let translation = translate_source(
+        r#"
+class BaseOutputFormat {
+    private String id = null;
+
+    void setId(String id) {
+        this.id = id;
+    }
+}
+
+class PairOutputFormat extends BaseOutputFormat {
+    PairOutputFormat() {
+        super();
+        setId("PAIR");
+    }
+}
+
+class UsesOutputFormat {
+    BaseOutputFormat create() {
+        BaseOutputFormat format = new PairOutputFormat();
+        return format;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let format: BaseOutputFormat = PairOutputFormat::new().into();")
+            && translation
+                .rust
+                .contains("impl From<PairOutputFormat> for BaseOutputFormat")
+            && !translation
+                .rust
+                .contains("let format: BaseOutputFormat = PairOutputFormat::new();"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "source_subclass_constructor_flows_to_flattened_superclass_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn emitted_context_source_subclass_constructor_flows_to_superclass_slot() {
+    let caller = r#"
+class PairOutputFormat extends BaseOutputFormat {
+    PairOutputFormat() {
+        super();
+        setId("PAIR");
+    }
+}
+
+class UsesOutputFormat {
+    BaseOutputFormat create() {
+        BaseOutputFormat format = new PairOutputFormat();
+        return format;
+    }
+}
+"#;
+    let base = r#"
+class BaseOutputFormat {
+    private String id = null;
+
+    void setId(String id) {
+        this.id = id;
+    }
+}
+"#;
+    let translation = translate_source_with_context_sources_and_summary_sources(
+        caller,
+        &[base.to_string()],
+        &[],
+        true,
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let format: BaseOutputFormat = PairOutputFormat::new().into();")
+            && translation
+                .rust
+                .contains("impl From<PairOutputFormat> for BaseOutputFormat")
+            && !translation
+                .rust
+                .contains("let format: BaseOutputFormat = PairOutputFormat::new();"),
         "{}",
         translation.rust
     );
@@ -4843,10 +9385,8 @@ class ObjectsNonNullCallback {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("values.filter(|value| Objects::non_null(value))")
-            && !translation.rust.contains("filter(Objects::non_null"),
+        translation.rust.contains("values.filter(|_value| true)")
+            && !translation.rust.contains("Objects::non_null"),
         "{}",
         translation.rust
     );
@@ -4887,9 +9427,7 @@ class DisqReadsMapLambdaShape {
         translation.rust
     );
     assert!(
-        translation
-            .rust
-            .contains(".filter(|value: GATKRead| JavaUtilObjects::non_null(value))"),
+        translation.rust.contains(".filter(|value: GATKRead| true)"),
         "{}",
         translation.rust
     );
@@ -4936,12 +9474,7 @@ class DisqReadsMethodReferenceFilterShape {
     );
 
     assert!(
-        translation
-            .rust
-            .contains(".filter(|value: GATKRead| JavaUtilObjects::non_null(value))")
-            || translation
-                .rust
-                .contains(".filter(|value: GATKRead| Objects::non_null(value))"),
+        translation.rust.contains(".filter(|value: GATKRead| true)"),
         "{}",
         translation.rust
     );
@@ -5310,6 +9843,9 @@ class InterfaceWriterFactory {
             .contains("pub fn new_writer(&self, async_: bool) -> Box<dyn Writer>")
             || translation
                 .rust
+                .contains("pub fn new_writer(&self, r#async: bool) -> Box<dyn Writer>")
+            || translation
+                .rust
                 .contains("pub fn new_writer(&self, async: bool) -> Box<dyn Writer>"))
             && translation.rust.contains(
                 "let writer: Box<dyn Writer> = Box::new(BasicWriter::new()) as Box<dyn Writer>;"
@@ -5382,6 +9918,141 @@ class MiniAsyncWriter extends AbstractAsyncWriter<MiniRecord> implements MiniWri
                 .contains("missing Java interface method implementation"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn abstract_class_gets_inherent_stubs_for_unimplemented_interface_methods() {
+    let translation = translate_source(
+        r#"
+interface Module {
+    Panel getPanel();
+    String name();
+}
+
+class Panel {
+}
+
+abstract class AbstractModule implements Module {
+    public Panel helper() {
+        return getPanel();
+    }
+
+    public String name() {
+        return "abstract";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_panel(&self) -> &Panel")
+            && translation.rust.contains(
+                "panic!(\"abstract interface method Module.getPanel has no implementation\")"
+            )
+            && translation.rust.contains("return self.get_panel().clone()")
+            && translation.rust.contains("impl Module for AbstractModule")
+            && translation.rust.contains(
+                "panic!(\"missing Java interface method implementation: AbstractModule.getPanel\")"
+            )
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "abstract_interface_method_stub",
+        vec![GeneratedCrateModule {
+            name: "abstract_interface_method_stub",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn abstract_class_methods_with_nonvoid_returns_emit_diverging_placeholders() {
+    let translation = translate_source(
+        r#"
+abstract class ContinuedFractionTemplate {
+    protected abstract double getA(int n, double x);
+
+    protected abstract double getB(int n, double x);
+
+    double sum(int n, double x) {
+        return getA(n, x) + getB(n, x);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_a(&self, n: i32, x: f64) -> f64")
+            && translation.rust.contains(
+                "panic!(\"abstract method ContinuedFractionTemplate.getA has no implementation\")"
+            )
+            && translation
+                .rust
+                .contains("pub fn get_b(&self, n: i32, x: f64) -> f64")
+            && translation.rust.contains(
+                "panic!(\"abstract method ContinuedFractionTemplate.getB has no implementation\")"
+            ),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "abstract_class_nonvoid_method_placeholders",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn swing_panel_converts_to_component_facade_slots() {
+    let translation = translate_source(
+        r#"
+import java.awt.Component;
+import java.io.OutputStream;
+import javax.swing.JPanel;
+
+class SVGImageSaver {
+    static String saveImage(Component component, OutputStream out) {
+        return "";
+    }
+}
+
+class PanelImageWriter {
+    String write(JPanel panel, OutputStream out) {
+        return SVGImageSaver.saveImage(panel, out);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("SVGImageSaver::save_image(panel.into(), out)")
+            && translation.rust.contains("impl From<JPanel> for Component"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "swing_panel_component_conversion",
+        vec![GeneratedCrateModule {
+            name: "swing_panel_component_conversion",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5546,6 +10217,373 @@ class AppendableFluentChain {
 }
 
 #[test]
+fn direct_string_builder_append_is_modeled_as_fluent_jdk_call() {
+    let translation = translate_source(
+        r#"
+class DirectStringBuilderAppend {
+    String build(String value) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(value);
+        sb.append("!");
+        return sb.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut sb: StringBuilder = StringBuilder::new();")
+            && translation.rust.contains("sb.append(value);")
+            && translation.rust.contains("sb.append(&\"!\".to_string());")
+            && !translation.rust.contains("sb.append(Some(")
+            && !translation
+                .rust
+                .contains("fn append<T0>(&self, _arg0: T0) -> ()")
+            && !translation
+                .rust
+                .contains("pub fn append<T0>(&self, _arg0: T0) -> ()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn non_static_inner_class_outer_fields_lower_through_outer_capture_handle() {
+    let translation = translate_source(
+        r#"
+class InnerOuterFieldCapture {
+    StringBuilder sb = new StringBuilder();
+    int limit = 10;
+
+    class Inner {
+        int clamp(int value) {
+            if (value > limit) {
+                value = limit;
+            }
+            sb.append(value);
+            return value;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("__outer: std::rc::Rc<std::cell::RefCell<InnerOuterFieldCapture>>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("self.__outer.borrow().limit")
+            && translation.rust.contains("self.__outer.borrow().sb")
+            && translation
+                .rust
+                .contains("pub fn append<T0>(&self, _arg0: T0) -> Self")
+            && !translation.rust.contains("if value > limit")
+            && !translation.rust.contains("value = limit;")
+            && !translation.rust.contains("\n        sb.append"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "inner_outer_field_capture",
+        vec![GeneratedCrateModule {
+            name: "inner_outer_field_capture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn string_buffer_append_reused_object_argument_is_borrowed() {
+    let translation = translate_source(
+        r#"
+class StringBufferAppendReusableObject {
+    String build() {
+        StringBuffer out = new StringBuffer();
+        StringBuffer prefix = new StringBuffer();
+        out.append(prefix);
+        out.append(prefix);
+        return out.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("out.append(&prefix);\n        out.append(&prefix);")
+            && !translation.rust.contains("out.append(prefix);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_buffer_append_reused_object_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn string_buffer_append_ternary_argument_stays_owned_value() {
+    let translation = translate_source(
+        r#"
+class StringBufferAppendTernaryValue {
+    String build(String[] names, int i) {
+        StringBuffer out = new StringBuffer();
+        out.append(names[i].length() > 2 ? names[i].substring(0, 2) : names[i]);
+        return out.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("out.append(if (names[i as usize].len() as i32) > 2")
+            && !translation.rust.contains("{ &java_string_substring")
+            && !translation.rust.contains("} else { names[i as usize] })"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_buffer_append_ternary_value",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn string_buffer_append_support_accepts_char_arrays_and_object_values() {
+    let translation = translate_source(
+        r#"
+class AppendWideJavaValues {
+    String build(char[] letters, Object other) {
+        StringBuffer buffer = new StringBuffer();
+        buffer.append(letters);
+        buffer.append(other);
+        return buffer.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn append<T0>(&self, _arg0: T0) -> Self")
+            && translation.rust.contains("buffer.append(letters")
+            && translation
+                .rust
+                .contains("buffer.append(java_erased_object_to_string(&other))")
+            && !translation
+                .rust
+                .contains("pub fn append(&self, _arg0: impl std::fmt::Display) -> Self"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_buffer_append_wide_java_values",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_object_to_string_uses_java_object_stringification_fallback() {
+    let translation = translate_source(
+        r#"
+class SourceObjectToStringFallback {
+    String describe(SourceObjectToStringFallback other) {
+        return other.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return java_erased_object_to_string(&other);")
+            && !translation.rust.contains("return other.to_string();")
+            && !translation
+                .rust
+                .contains("impl std::fmt::Display for SourceObjectToStringFallback"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_object_to_string_fallback",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_object_to_string_fallback_applies_across_source_classes() {
+    let translation = translate_source(
+        r#"
+class SourceObjectToStringCallee {
+}
+
+class SourceObjectToStringCaller {
+    String describe(SourceObjectToStringCallee other) {
+        return other.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return java_erased_object_to_string(&other);")
+            && !translation.rust.contains("return other.to_string();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_object_to_string_cross_source",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn string_buffer_to_string_stays_jdk_facade_method() {
+    let translation = translate_source(
+        r#"
+class StringBufferToStringFacade {
+    String build() {
+        StringBuffer buffer = new StringBuffer();
+        buffer.append("ok");
+        return buffer.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return buffer.to_string();")
+            && !translation
+                .rust
+                .contains("return java_erased_object_to_string(&buffer);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_buffer_to_string_facade",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_object_string_concat_uses_java_object_stringification_fallback() {
+    let translation = translate_source(
+        r#"
+class SourceObjectStringConcatFallback {
+    String describe(SourceObjectStringConcatFallback other) {
+        return "value=" + other;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&other)")
+            && !translation.rust.contains("format!(\"value={}\", other)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_object_string_concat_fallback",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn explicit_source_to_string_method_wins_over_object_fallback() {
+    let translation = translate_source(
+        r#"
+class ExplicitSourceToString {
+    public String toString() {
+        return "explicit";
+    }
+
+    String describe(ExplicitSourceToString other) {
+        return other.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn to_string(&self) -> String")
+            && translation.rust.contains("return other.to_string();")
+            && !translation
+                .rust
+                .contains("return java_erased_object_to_string(&other);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "explicit_source_to_string_method",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn appendable_field_conversion_clones_before_into() {
     let translation = translate_source(
         r#"
@@ -5624,15 +10662,295 @@ class PrintStreamOutputStreamConstructorUse {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("pub fn new(_arg0: OutputStream) -> Self")
+        translation.rust.contains("pub struct OutputStream;")
+            && translation
+                .rust
+                .contains("pub fn new(_arg0: OutputStream) -> Self")
             && translation.rust.contains("return PrintStream::new(out);")
             && !translation
                 .rust
                 .contains("pub fn new<T0>(_arg0: T0) -> Self"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn file_output_stream_constructor_selects_file_and_string_overload_slots() {
+    let translation = translate_source(
+        r#"
+	import java.io.File;
+	import java.io.FileOutputStream;
+
+	class FileOutputStreamOverloadSlot {
+	    private File file = null;
+
+	    FileOutputStreamOverloadSlot(File input) {
+	        this.file = input;
+	    }
+
+	    FileOutputStream fromFileField() throws Exception {
+	        return new FileOutputStream(file);
+	    }
+
+	    FileOutputStream fromStringPath(String path) throws Exception {
+	        return new FileOutputStream(path);
+	    }
+	}
+	"#,
+    );
+
+    assert!(
+        (translation.rust.contains(
+            "return Ok(FileOutputStream::new(self.file.as_ref().expect(\"Java null receiver\").clone()"
+            ) || translation.rust.contains(
+            "return Ok(FileOutputStream::new(self.file.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
+            )) && !translation.rust.contains("FileOutputStream::new(self.file.clone()")
+            && translation
+                .rust
+                .contains("return Ok(FileOutputStream::new(path)")
+            && !translation.rust.contains("FileOutputStream::new(File::new(path"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "file_output_stream_overload_slots",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn zip_output_stream_converts_to_output_stream_slot() {
+    let translation = translate_source(
+        r#"
+	import java.io.FileOutputStream;
+	import java.io.OutputStream;
+	import java.util.zip.ZipOutputStream;
+
+	class ZipOutputStreamSlot {
+	    static String save(OutputStream out) {
+	        return "ok";
+	    }
+
+	    static String write(FileOutputStream fileOut) {
+	        ZipOutputStream zip = new ZipOutputStream(fileOut);
+	        return save(zip);
+	    }
+	}
+	"#,
+    );
+
+    assert!(
+        translation.rust.contains("return Self::save(zip.into());")
+            && translation
+                .rust
+                .contains("impl From<ZipOutputStream> for OutputStream"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "zip_output_stream_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn base64_output_stream_converts_to_output_stream_slot() {
+    let translation = translate_source(
+        r#"
+	import java.io.ByteArrayOutputStream;
+	import java.io.OutputStream;
+	import org.apache.commons.codec.binary.Base64OutputStream;
+	import net.sourceforge.iharder.base64.Base64;
+
+	class Base64OutputStreamSlot {
+	    static OutputStream encode(ByteArrayOutputStream out) {
+	        OutputStream stream = new Base64OutputStream(out);
+	        return stream;
+	    }
+
+	    static String encodeAndReuse(ByteArrayOutputStream out) {
+	        OutputStream stream = new Base64OutputStream(out);
+	        return out.toString() + stream.toString();
+	    }
+
+	    static String wrapOutput(OutputStream out) {
+	        OutputStream stream = new Base64OutputStream(out);
+	        return out.toString() + stream.toString();
+	    }
+
+	    static String wrapIHarder(ByteArrayOutputStream out) {
+	        OutputStream stream = new Base64.OutputStream(out);
+	        return out.toString() + stream.toString();
+	    }
+	}
+	"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let stream: OutputStream = Base64OutputStream::new(out).into();")
+            && translation.rust.contains(
+                "let stream: OutputStream = Base64OutputStream::new(out.clone()/* TODO(translation): validate added clone */).into();"
+            )
+            && translation.rust.contains(
+                "let stream: OutputStream = Base64OutputStream::new(out.clone()/* TODO(translation): validate added clone */).into();"
+            )
+            && translation
+                .rust
+                .contains("impl From<Base64OutputStream> for OutputStream"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("invalid Java cast"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "base64_output_stream_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn system_in_static_field_and_thread_sleep_use_jdk_facades() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStreamReader;
+
+class SystemInAndThreadSleepUse {
+    InputStreamReader open() throws Exception {
+        Thread.sleep(1000);
+        return new InputStreamReader(System.in);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("std::thread::sleep(std::time::Duration::from_millis(1000 as u64));")
+            && translation
+                .rust
+                .contains("return Ok(InputStreamReader::new(System::r#in));")
+            && translation.rust.contains("pub struct InputStream;")
+            && translation
+                .rust
+                .contains("pub const r#in: InputStream = InputStream;")
+            && !translation.rust.contains("\n        thread::sleep")
+            && !translation.rust.contains("system.r#in"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "system_in_and_thread_sleep_use_jdk_facades",
+        vec![GeneratedCrateModule {
+            name: "system_in_and_thread_sleep_use_jdk_facades",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn system_out_and_err_print_stream_statements_lower_to_rust_macros() {
+    let translation = translate_source(
+        r#"
+class SystemPrintStreamStatements {
+    void report(String value) {
+        System.out.println(value);
+        System.err.print("warn:");
+        System.err.println(value);
+        System.out.println();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("println!(\"{}\", value);")
+            && translation
+                .rust
+                .contains("eprint!(\"{}\", \"warn:\".to_string());")
+            && translation.rust.contains("eprintln!(\"{}\", value);")
+            && translation.rust.contains("println!();")
+            && !translation.rust.contains("Out::")
+            && !translation.rust.contains("Err::"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "system_print_stream_statements",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_exception_logging_surface_compiles_without_system_err_value() {
+    let translation = translate_source(
+        r#"
+class JavaExceptionLoggingSurface {
+    void run(boolean fail) {
+        try {
+            if (fail) {
+                throw new RuntimeException("boom");
+            }
+        } catch (Exception e) {
+            System.err.println(e.getLocalizedMessage());
+            e.printStackTrace(System.err);
+            e.printStackTrace();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_localized_message(&self) -> Option<String>")
+            && translation.rust.contains(
+                "eprintln!(\"{}\", e.get_localized_message().as_deref().unwrap_or(\"null\"));"
+            )
+            && translation
+                .rust
+                .contains("Java printStackTrace omitted by translation runtime")
+            && !translation.rust.contains("System::err")
+            && !translation.rust.contains(".print_stack_trace("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_exception_logging_surface",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -5736,6 +11054,178 @@ class SourceVarargsWriteOptions {
         translation
             .rust
             .contains("vec![format.into(), cardinality.into()]"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn erased_object_sequence_push_moves_when_no_later_read() {
+    let translation = translate_source(
+        r#"
+class ErasedObjectSequencePush {
+    private Object[][] stored;
+
+    void remember(Object... args) {
+        stored[0] = args;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.stored.as_mut().expect(\"Java null receiver\")[0 as usize] = args;")
+            && !translation
+                .rust
+                .contains("args.clone()/* TODO(translation): validate added clone */"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn erased_object_sequence_list_push_moves_when_no_later_read() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class ErasedObjectSequenceListPush {
+    private List<Object[]> stored;
+
+    void remember(Object... args) {
+        stored.add(args);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".push(args);")
+            && !translation
+                .rust
+                .contains("args.clone()/* TODO(translation): validate added clone */"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn erased_object_sequence_list_push_inside_loop_moves_block_local() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class ErasedObjectSequenceListPushInsideLoop {
+    private List<Object[]> stored;
+
+    void remember(int len) {
+        stored = new java.util.ArrayList<Object[]>(len);
+        int i = 0;
+        while (i < len) {
+            int aLen = 1;
+            final Object[] args = new Object[aLen];
+            int j = 0;
+            while (j < aLen) {
+                args[j] = Integer.valueOf(j);
+                j++;
+            }
+            stored.add(args);
+            i++;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".push(args);")
+            && !translation
+                .rust
+                .contains("args.clone()/* TODO(translation): validate added clone */"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn object_stream_erased_object_sequence_list_push_moves_block_local() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectInputStream;
+import java.util.List;
+
+class ObjectStreamErasedObjectSequenceListPush {
+    private List<Object[]> msgArguments;
+
+    void read(ObjectInputStream in) throws Exception {
+        int len = in.readInt();
+        msgArguments = new java.util.ArrayList<Object[]>(len);
+        int i = 0;
+        while (i < len) {
+            int aLen = in.readInt();
+            final Object[] args = new Object[aLen];
+            int j = 0;
+            while (j < aLen) {
+                args[j] = in.readObject();
+                j++;
+            }
+            msgArguments.add(args);
+            i++;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".push(args);")
+            && translation
+                .rust
+                .contains("args[j as usize] = r#in.read_object()?;")
+            && !translation
+                .rust
+                .contains("args.clone()/* TODO(translation): validate added clone */"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn object_stream_erased_object_sequence_for_loop_field_push_moves_block_local() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectInputStream;
+import java.util.List;
+
+class ObjectStreamErasedObjectSequenceForLoopFieldPush {
+    private List<Object[]> msgArguments;
+
+    void read(ObjectInputStream in) throws Exception {
+        final int len = in.readInt();
+        msgArguments = new java.util.ArrayList<Object[]>(len);
+        for (int i = 0; i < len; i++) {
+            final int aLen = in.readInt();
+            final Object[] args = new Object[aLen];
+            for (int j = 0; j < aLen; j++) {
+                args[j] = in.readObject();
+            }
+            msgArguments.add(args);
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".push(args);")
+            && translation
+                .rust
+                .contains("args[j as usize] = r#in.read_object()?;")
+            && !translation
+                .rust
+                .contains("args.clone()/* TODO(translation): validate added clone */"),
         "{}",
         translation.rust
     );
@@ -6186,7 +11676,8 @@ class SourceNullableFieldGetter {
         translation
             .rust
             .contains("pub fn get_quality_header(&self) -> Option<String>")
-            && translation.rust.contains("return self.quality_header.clone()")
+            && (translation.rust.contains("return self.quality_header.as_ref().cloned()")
+                || translation.rust.contains("return self.quality_header.clone()"))
             && (translation.rust.contains(
                 "format!(\"quality {}\", self.get_quality_header().as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string()))"
             ) || translation
@@ -6200,7 +11691,10 @@ class SourceNullableFieldGetter {
                 .contains("let value: Option<String> = self.get_quality_header();")
                 || translation
                     .rust
-                    .contains("let value: Option<String> = self.quality_header.clone();"))
+                    .contains("let value: Option<String> = self.quality_header.clone();")
+                || translation
+                    .rust
+                    .contains("let value: Option<String> = self.quality_header.as_ref().cloned();"))
             && !translation
                 .rust
                 .contains("let value: Option<String> = Some(self.get_quality_header())")
@@ -6210,6 +11704,152 @@ class SourceNullableFieldGetter {
             && !translation.rust.contains("return self.quality_header;"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn public_source_instance_fields_remain_public_in_generated_struct() {
+    let translation = translate_source(
+        r#"
+class PublicSourceFieldConsumer {
+    boolean enabled(Config config) {
+        return config.svgOutput;
+    }
+
+    String separator(Config config) {
+        return config.lineSeparator;
+    }
+}
+
+class Config {
+    public boolean svgOutput = true;
+    public String lineSeparator = "\n";
+    private String privateValue = "hidden";
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub svg_output: bool")
+            && translation.rust.contains("pub line_separator: String")
+            && translation.rust.contains("private_value: String")
+            && !translation.rust.contains("pub private_value: String")
+            && translation.rust.contains("return config.svg_output;")
+            && translation
+                .rust
+                .contains("return config.line_separator.clone()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "public_source_instance_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn private_static_singleton_getter_lowers_to_owned_source_value() {
+    let translation = translate_source(
+        r#"
+class StaticSingletonGetterUse {
+    boolean enabled() {
+        return Config.getInstance().svgOutput;
+    }
+}
+
+class Config {
+    private static Config instance = new Config();
+    public boolean svgOutput = true;
+
+    private Config() {
+        svgOutput = true;
+    }
+
+    public static Config getInstance() {
+        return instance;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn get_instance() -> Config")
+            && translation.rust.contains("return Config::new();")
+            && translation
+                .rust
+                .contains("return Config::get_instance().svg_output;")
+            && !translation.rust.contains("return Some(&instance);")
+            && !translation.rust.contains("Option<&Config>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "private_static_singleton_getter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn private_static_singleton_with_hashmap_field_derives_clone_when_value_is_cloneable() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class StaticSingletonHashMapGetterUse {
+    Format get(String id) {
+        return Factory.getInstance().getFormat(id);
+    }
+}
+
+class Factory {
+    private static Factory instance = null;
+    private HashMap<String, Format> formats = new HashMap<String, Format>();
+
+    static Factory getInstance() {
+        if (instance == null) {
+            instance = new Factory();
+        }
+        return instance;
+    }
+
+    Format getFormat(String id) {
+        return (Format) formats.get(id);
+    }
+}
+
+class Format {}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("#[derive(Clone")
+            && translation.rust.contains(
+                "pub struct Factory {\n    formats: std::collections::HashMap<String, Format>"
+            )
+            && translation.rust.contains("cell.borrow().clone()")
+            && !translation.rust.contains("downcast::<Format>")
+            && !translation.rust.contains("invalid Java cast"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "private_static_singleton_hashmap_getter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6304,7 +11944,8 @@ public class FastqConstants {
         translation
             .rust
             .contains("pub fn get_base_quality_header(&self) -> Option<String>")
-            && translation.rust.contains("return self.quality_header.clone()")
+            && (translation.rust.contains("return self.quality_header.as_ref().cloned()")
+                || translation.rust.contains("return self.quality_header.clone()"))
             && translation
                 .rust
                 .contains("if self.quality_header.is_none() { 0 } else { java_string_hash_code(self.quality_header.as_ref().unwrap().as_str()) }")
@@ -6312,6 +11953,39 @@ public class FastqConstants {
             && !translation
                 .rust
                 .contains("if false { 0 } else { self.quality_header.hash_code()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_fastq_constants_owner_is_not_erased_by_builtin_external_pack() {
+    let constants = r#"
+package htsjdk.samtools.fastq;
+
+public class FastqConstants {
+    public static final String SEQUENCE_HEADER = "@";
+    public static final String QUALITY_HEADER = "+";
+}
+"#;
+    let translation = translate_source_with_context_sources_and_summary_sources(
+        constants,
+        &[constants.to_string()],
+        &[],
+        true,
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub const SEQUENCE_HEADER: &'static str = \"@\";")
+            && translation
+                .rust
+                .contains("pub const QUALITY_HEADER: &'static str = \"+\";")
+            && !translation
+                .rust
+                .contains("pub type FastqConstants = Box<dyn std::any::Any>;"),
         "{}",
         translation.rust
     );
@@ -6388,6 +12062,40 @@ class StaticExternalNullableCallToOptionalField {
                 .contains("self.dictionary = Some(ExampleDictionaryReader::read_dictionary"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn static_external_nullable_constructor_field_initializer_does_not_double_wrap() {
+    let translation = translate_source(
+        r#"
+class StaticExternalNullableConstructorFieldInitializer {
+    String lineSeparator;
+
+    StaticExternalNullableConstructorFieldInitializer() {
+        lineSeparator = System.getProperty("line.separator");
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("line_separator: System::get_property(\"line.separator\".to_string())")
+            && !translation
+                .rust
+                .contains("line_separator: Some(System::get_property"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "static_external_nullable_constructor_field_initializer",
+        vec![GeneratedCrateModule {
+            name: "static_external_nullable_constructor_field_initializer",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6658,9 +12366,95 @@ fn documents_optional_get_is_present_java_api_gap() {
     let translation = translate_source(&idiom_gap("OptionalGetIsPresent.java"));
 
     assert!(
-        translation.rust.contains(".is_present()") && translation.rust.contains(".get()"),
+        translation.rust.contains("value.is_some()")
+            && translation.rust.contains(
+                "value.as_ref().map(|value| (*value).clone()).expect(\"Java null receiver\")"
+            )
+            && !translation.rust.contains(".is_present()")
+            && !translation.rust.contains(".get()"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn java_optional_or_else_lowers_to_rust_option_unwrap_or() {
+    let translation = translate_source(
+        r#"
+import java.util.Optional;
+
+class JavaOptionalOrElseLowering {
+    String fallback(Optional<String> value, String fallback) {
+        return value.orElse(fallback);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("value.as_ref().map(|value| (*value).clone()).unwrap_or(fallback)")
+            && !translation.rust.contains(".or_else(")
+            && !translation.rust.contains(".or_else_"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_optional_or_else_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_objects_null_predicates_lower_from_rust_option_shape() {
+    let translation = translate_source(
+        r#"
+import java.util.Objects;
+
+class JavaObjectsNullPredicateLowering {
+    boolean keep() {
+        String value = null;
+        return Objects.nonNull(value);
+    }
+
+    boolean drop() {
+        String value = null;
+        return Objects.isNull(value);
+    }
+
+    boolean concrete(String value) {
+        return Objects.nonNull(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("value.is_some()")
+            && translation.rust.contains("value.is_none()")
+            && translation
+                .rust
+                .contains("pub fn concrete(&self, value: &String) -> bool")
+            && translation.rust.contains("return true;")
+            && !translation.rust.contains("Objects::non_null(")
+            && !translation.rust.contains("JavaUtilObjects::non_null("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_objects_null_predicate_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6673,7 +12467,7 @@ fn documents_try_with_resources_copy_gap() {
             && translation.rust.contains("new_input_stream")
             && translation.rust.contains("input.read(")
             && translation.rust.contains(")?;")
-            && translation.rust.contains("output.write(")
+            && translation.rust.contains("output.write_3(")
             && translation.rust.contains("output.close()?;")
             && translation.rust.contains("input.close()?;")
             && !translation
@@ -6727,14 +12521,222 @@ class BufferedReaderReadLineOptional {
     assert!(
         translation
             .rust
-            .contains("line = Some(self.reader.as_ref().unwrap().read_line()?);")
+            .contains("line = self.reader.as_ref().unwrap().read_line()?;")
             && translation.rust.contains("return Ok(line);")
             && !translation.rust.contains("read_line() -> ()")
             && !translation
                 .rust
-                .contains("line = Some(self.reader.read_line());"),
+                .contains("line = Some(self.reader.as_ref().unwrap().read_line()?);"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn buffered_reader_read_line_assignment_to_initialized_optional_wraps_result_value() {
+    let translation = translate_source(
+        r#"
+import java.io.BufferedReader;
+import java.io.IOException;
+
+class BufferedReaderReadLineInitializedOptional {
+    String load(BufferedReader reader) throws IOException {
+        String line = "";
+        while (true) {
+            line = reader.readLine();
+            if (line == null) {
+                break;
+            }
+        }
+        return line;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("line = reader.read_line()?;")
+            && !translation
+                .rust
+                .contains("line = Some(reader.read_line()?);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "buffered_reader_read_line_initialized_optional",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn buffered_reader_read_line_initializer_is_optional_when_rechecked_for_null() {
+    let translation = translate_source(
+        r#"
+import java.io.BufferedReader;
+import java.io.IOException;
+
+class BufferedReaderReadLineInitializerOptional {
+    String load(BufferedReader reader) throws IOException {
+        String line = reader.readLine();
+        while (true) {
+            line = reader.readLine();
+            if (line == null) {
+                break;
+            }
+            line.trim();
+        }
+        return line;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut line: Option<String> = reader.read_line()?;")
+            && translation.rust.contains("line = reader.read_line()?;")
+            && translation.rust.contains("if line.is_none()")
+            && !translation
+                .rust
+                .contains("let mut line: String = reader.read_line()?;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "buffered_reader_read_line_initializer_optional",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn buffered_reader_read_line_assignment_condition_wraps_result_value() {
+    let translation = translate_source(
+        r#"
+import java.io.BufferedReader;
+import java.io.IOException;
+
+class BufferedReaderReadLineAssignmentCondition {
+    int count(BufferedReader reader) throws IOException {
+        String line = "";
+        int count = 0;
+        while ((line = reader.readLine()) != null) {
+            count++;
+        }
+        return count;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("line = reader.read_line()?;")
+            && !translation
+                .rust
+                .contains("line = Some(reader.read_line()?);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "buffered_reader_read_line_assignment_condition",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn buffered_reader_read_line_assignment_condition_with_and_does_not_move_optional() {
+    let translation = translate_source(
+        r#"
+import java.io.BufferedReader;
+import java.io.IOException;
+
+class BufferedReaderReadLineAssignmentConditionAnd {
+    int count(BufferedReader reader) throws IOException {
+        String line = "";
+        int count = 0;
+        while ((line = reader.readLine()) != null && line.trim().length() > 0) {
+            count++;
+        }
+        return count;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("{ line = reader.read_line()?; line.is_some() }")
+            && !translation
+                .rust
+                .contains("{ line = reader.read_line()?; line }.is_some()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "buffered_reader_read_line_assignment_condition_and",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn while_true_loop_lowers_to_loop_for_definite_assignment() {
+    let translation = translate_source(
+        r#"
+class WhileTrueDefiniteAssignment {
+    double run(double x) {
+        double remA;
+        double remB;
+        int k = 1;
+        while (true) {
+            remA = x + k;
+            remB = remA - x;
+            if (remA > 10.0) {
+                break;
+            }
+            k++;
+        }
+        return remA + remB;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("loop {")
+            && !translation.rust.contains("while true")
+            && translation.rust.contains("return rem_a + rem_b;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "while_true_definite_assignment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -6787,9 +12789,7 @@ fn translates_jaligner_fallthrough_try_catch_result_without_placeholder() {
         translation
             .rust
             .contains("match (|| -> Result<(), JavaException>")
-            && translation
-                .rust
-                .contains("line = Some(reader.read_line()?);")
+            && translation.rust.contains("line = reader.read_line()?;")
             && translation.rust.contains("return Ok(line);")
             && !translation
                 .rust
@@ -6845,6 +12845,132 @@ class Manifest {
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn plain_fallthrough_try_with_value_returns_uses_optional_result_carrier() {
+    let translation = translate_source(
+        r#"
+class PlainFallthroughTryWithValueReturns {
+    String describe(boolean first, boolean second) {
+        try {
+            if (first) {
+                return "first";
+            } else if (second) {
+                return "second";
+            }
+        } catch (Exception e) {
+            System.err.println(e.getMessage());
+        }
+        return "";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("match (|| -> Result<Option<String>, JavaException>")
+            && translation
+                .rust
+                .contains("return Ok(Some(\"first\".to_string()));")
+            && translation
+                .rust
+                .contains("return Ok(Some(\"second\".to_string()));")
+            && translation.rust.contains("return Ok(None);")
+            && translation
+                .rust
+                .contains("Ok(Some(value)) => return value,")
+            && translation.rust.contains("Ok(None) => {}")
+            && translation.rust.contains("return \"\".to_string();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "plain_fallthrough_try_with_value_returns_uses_optional_result_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn caught_exception_message_display_uses_nullable_facade_signature() {
+    let translation = translate_source(
+        r#"
+class CaughtExceptionMessageDisplay {
+    String run() {
+        try {
+            throw new RuntimeException("bad");
+        } catch (Exception e) {
+            return "Failed: " + e.getMessage();
+        }
+        return "";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_message(&self) -> Option<String>")
+            && translation
+                .rust
+                .contains("e.get_message().as_deref().unwrap_or(\"null\")")
+            && !translation
+                .rust
+                .contains("pub fn get_message(&self) -> String"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "caught_exception_message_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn input_stream_no_arg_read_uses_result_facade_overload() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+
+class InputStreamNoArgReadFacade {
+    int first(InputStream input) throws Exception {
+        return input.read();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn read_0(&self) -> Result<i32, JavaException>")
+            && translation.rust.contains("return Ok(input.read_0()?);")
+            && !translation.rust.contains("return input.read_0();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "input_stream_no_arg_read_facade",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7210,6 +13336,55 @@ fn documents_diamond_nested_unknowns_gap() {
 }
 
 #[test]
+fn raw_map_return_refines_to_consistent_returned_local_generic_type() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class Params {
+    static void run(String[] args) {
+        HashMap<String, String> params = getParams(args);
+        sink(params);
+    }
+
+    static HashMap getParams(String[] args) {
+        HashMap<String, String> params = new HashMap<String, String>();
+        params.put("enabled", "true");
+        if (args.length > 0) {
+            params.put("first", args[0]);
+        }
+        return params;
+    }
+
+    static void sink(HashMap<String, String> params) {
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn get_params(args: &[String]) -> std::collections::HashMap<String, String>"
+        ) && translation.rust.contains(
+            "let params: std::collections::HashMap<String, String> = Self::get_params(args);"
+        ) && !translation
+            .rust
+            .contains("HashMap<String, Box<dyn std::any::Any>>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "raw_map_return_refinement",
+        vec![GeneratedCrateModule {
+            name: "raw_map_return_refinement",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn final_sorted_map_receiver_mutation_declares_rust_local_mutable() {
     let translation = translate_source(&idiom_gap("FinalSortedMapReceiverMutation.java"));
 
@@ -7221,6 +13396,50 @@ fn final_sorted_map_receiver_mutation_declares_rust_local_mutable() {
             && !translation.rust.contains("let out: std::collections::HashMap"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn reassigned_string_enhanced_for_variable_iterates_owned_mutable_values() {
+    let translation = translate_source(
+        r#"
+class ReassignedStringEnhancedFor {
+    static String shorten(String value) {
+        return value.substring(1);
+    }
+
+    static String join(String[] alleles) {
+        String out = "";
+        for (String allele : alleles) {
+            if (allele.startsWith("+")) {
+                allele = shorten(allele);
+            }
+            out = out + allele + allele;
+        }
+        return out;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("for mut allele in alleles.iter().cloned()")
+            && translation.rust.contains("allele = Self::shorten(")
+            && !translation.rust.contains("allele = &Self::shorten")
+            && !translation.rust.contains("for allele in alleles.iter()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "reassigned_string_enhanced_for",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7258,15 +13477,23 @@ class ReusedOwnedOptionalSourceArgument {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("Self::valid(value.clone()/* TODO(translation): validate added clone */)")
+        translation.rust.contains("Self::valid(value.as_ref())")
             && translation
                 .rust
                 .contains("format!(\"bad {}\", value.as_ref()")
-            && translation.rust.contains("return value;"),
+            && translation.rust.contains("return value;")
+            && !translation.rust.contains("Self::valid(value.clone()"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "reused_owned_optional_source_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7367,6 +13594,1184 @@ class CurrentGetClassVsErasedObjectGetClass {
 }
 
 #[test]
+fn erased_object_get_class_name_has_typed_facade_return() {
+    let translation = translate_source(
+        r#"
+class ErasedObjectGetClassName {
+    String className(Object obj) {
+        if (obj == null) {
+            return "";
+        }
+        return obj.getClass().getName();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("fn get_class(&self) -> JavaClass<()>")
+            && translation
+                .rust
+                .contains("fn get_class(&self) -> JavaClass<()> { JavaClass::<()>::for_name(\"java.lang.Object\") }")
+            && translation.rust.contains(".get_class().get_name()")
+            && !translation.rust.contains("fn get_class(&self) -> ()")
+            && !translation.rust.contains("get_name() found for unit"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_object_get_class_name",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_object_get_class_name_uses_inherent_java_class_fallback() {
+    let translation = translate_source(
+        r#"
+class SourceObjectGetClassNameFallback {
+    private String id = null;
+
+    String name() {
+        return id == null ? this.getClass().getName() : id;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_class(&self) -> JavaClass<SourceObjectGetClassNameFallback>")
+            && translation.rust.contains(
+                "JavaClass::<SourceObjectGetClassNameFallback>::literal(\"SourceObjectGetClassNameFallback\")"
+            )
+            && translation.rust.contains("self.get_class().get_name()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_object_get_class_name_fallback",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn receiverless_get_class_resource_stream_uses_current_receiver() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+
+class ReceiverlessGetClassResourceStream {
+    boolean present() {
+        InputStream in = getClass().getResourceAsStream("/Templates/header_template.html");
+        return in != null;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("JavaClass::<ReceiverlessGetClassResourceStream>::for_name(\"ReceiverlessGetClassResourceStream\").get_resource_as_stream")
+            && !translation.rust.contains("Some(get_class()")
+            && !translation.rust.contains(" get_class()."),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "receiverless_get_class_resource_stream",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn class_loader_static_resource_call_uses_platform_facade() {
+    let translation = translate_source(
+        r#"
+import java.awt.image.BufferedImage;
+import javax.imageio.ImageIO;
+
+class ClassLoaderStaticResourceImage {
+    BufferedImage image(String path) throws Exception {
+        return ImageIO.read(ClassLoader.getSystemResource("Templates/" + path));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("JavaxImageioImageIO::read(ClassLoader::get_system_resource(format!(\"Templates/{}\", path)))")
+            && translation.rust.contains("pub struct ClassLoader")
+            && translation.rust.contains("pub struct URL")
+            && !translation.rust.contains("class_loader.get_system_resource"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "class_loader_static_resource_image",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn inherited_context_method_body_sees_declaring_static_imports() {
+    let source = r#"
+class AdapterContent extends AbstractQCModule {
+}
+"#;
+    let context = r#"
+import java.awt.image.BufferedImage;
+import java.io.OutputStream;
+import javax.imageio.ImageIO;
+
+class AbstractQCModule {
+    void writeDefaultImage(OutputStream out, int width, int height) throws Exception {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        ImageIO.write(image, "PNG", out);
+    }
+}
+"#;
+    let translation = translate_source_with_context_sources_and_summary_sources(
+        source,
+        &[context.to_string()],
+        &[],
+        true,
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("JavaxImageioImageIO::write")
+            && !translation.rust.contains("image_i_o::write"),
+        "{}",
+        translation.rust
+    );
+
+    // The minimal fixture does not assemble context-only support types into a
+    // crate; the regression here is the inherited body's static-owner spelling.
+}
+
+#[test]
+fn class_literal_get_class_loader_uses_platform_facade() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+import java.net.URL;
+
+class ClassLiteralGetClassLoaderFacade {
+    InputStream stream(String path) {
+        return ClassLiteralGetClassLoaderFacade.class.getClassLoader().getResourceAsStream(path);
+    }
+
+    URL resource(String path) {
+        return ClassLiteralGetClassLoaderFacade.class.getClassLoader().getResource(path);
+    }
+}
+"#,
+    );
+
+    assert!(
+        (translation
+            .rust
+            .contains("JavaClass::<ClassLiteralGetClassLoaderFacade>::literal(\"ClassLiteralGetClassLoaderFacade\").get_class_loader().get_resource_as_stream(path).expect(\"Java null receiver\")")
+            || translation
+                .rust
+                .contains("JavaClass::<ClassLiteralGetClassLoaderFacade>::literal(\"ClassLiteralGetClassLoaderFacade\").get_class_loader().get_resource_as_stream(path.to_string()).expect(\"Java null receiver\")"))
+            && (translation
+                .rust
+                .contains("JavaClass::<ClassLiteralGetClassLoaderFacade>::literal(\"ClassLiteralGetClassLoaderFacade\").get_class_loader().get_resource(path)")
+                || translation
+                    .rust
+                    .contains("JavaClass::<ClassLiteralGetClassLoaderFacade>::literal(\"ClassLiteralGetClassLoaderFacade\").get_class_loader().get_resource(path.to_string())"))
+            && translation.rust.contains("pub fn get_class_loader(&self) -> ClassLoader")
+            && translation.rust.contains("pub fn get_resource_as_stream")
+            && translation.rust.contains("pub fn get_resource")
+            && !translation.rust.contains("impl Class {")
+            && !translation.rust.contains("method `get_class_loader` not found"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "class_literal_get_class_loader_facade",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_class_loader_resource_stream_assignment_keeps_optional_return_shape() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+
+class OptionalClassLoaderResourceStreamAssignment {
+    InputStream stream(String path) {
+        InputStream in = null;
+        in = OptionalClassLoaderResourceStreamAssignment.class.getClassLoader().getResourceAsStream(path);
+        return in;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut r#in: Option<InputStream> = None;")
+            && (translation.rust.contains(
+                "r#in = JavaClass::<OptionalClassLoaderResourceStreamAssignment>::literal(\"OptionalClassLoaderResourceStreamAssignment\").get_class_loader().get_resource_as_stream(path);"
+            ) || translation.rust.contains(
+                "r#in = JavaClass::<OptionalClassLoaderResourceStreamAssignment>::literal(\"OptionalClassLoaderResourceStreamAssignment\").get_class_loader().get_resource_as_stream(path.to_string());"
+            ))
+            && !translation.rust.contains("r#in = Some(JavaClass")
+            && !translation.rust.contains("Some(Some("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_class_loader_resource_stream_assignment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_platform_input_stream_upcast_support_emits_from_impl() {
+    assert!(
+        new_java2rust::external_packs::external_conversion_adapters()
+            .iter()
+            .any(|fact| fact.from_type == "FileInputStream" && fact.to_type == "InputStream"),
+        "java platform conversion adapters should publish FileInputStream -> InputStream"
+    );
+    let items = new_java2rust::stdlib::external_api_facade_support_items(
+        &new_java2rust::java_ir::Program::default(),
+        &FactSet::default(),
+    );
+    let rendered = items
+        .iter()
+        .map(|item| format!("{item:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        rendered.contains("impl From<FileInputStream> for InputStream"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn file_input_stream_constructor_upcasts_into_optional_input_stream_slot() {
+    let translation = translate_source(
+        r#"
+import java.io.FileInputStream;
+import java.io.InputStream;
+
+class FileInputStreamOptionalInputSlot {
+    InputStream open(String path) throws Exception {
+        InputStream in = null;
+        in = new FileInputStream(path);
+        return in;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut r#in: Option<InputStream> = None;")
+            && translation
+                .rust
+                .contains("r#in = Some(FileInputStream::new(path).into());")
+            && translation
+                .rust
+                .contains("impl From<FileInputStream> for InputStream"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "file_input_stream_optional_input_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn resource_input_stream_read_and_close_have_typed_facade_support() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+
+class ResourceInputStreamReadClose {
+    int readAll() throws Exception {
+        InputStream in = getClass().getResourceAsStream("/Templates/header_template.html");
+        if (in == null) {
+            return 0;
+        }
+        byte[] buffer = new byte[128];
+        int total = 0;
+        int len;
+        while ((len = in.read(buffer)) != -1) {
+            total += len;
+        }
+        in.close();
+        return total;
+    }
+}
+"#,
+    );
+
+    assert!(
+        (translation.rust.contains(".read(&buffer)")
+            || translation.rust.contains(".read(&mut buffer)")
+            || translation.rust.contains(".read(buffer.as_slice())")
+            || translation.rust.contains(".read(buffer.as_mut_slice())"))
+            && translation.rust.contains(".close()")
+            && translation.rust.contains("pub fn read")
+            && translation.rust.contains("pub fn close")
+            && !translation.rust.contains("no method named `read`")
+            && !translation.rust.contains("no method named `close`"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "resource_input_stream_read_close",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn byte_array_local_with_spaced_dimensions_feeds_string_range_constructor() {
+    let translation = translate_source(
+        r#"
+class ByteArrayStringRangeConstructor {
+    String allBytes() {
+        byte [] array = new byte[128];
+        return new String(array);
+    }
+
+    String allBytesUtf8() throws Exception {
+        byte [] array = new byte[128];
+        return new String(array, "UTF-8");
+    }
+
+    String read(int n) {
+        byte [] array = new byte[128];
+        return new String(array, 0, n);
+    }
+
+    String readUtf8(int n) throws Exception {
+        byte [] array = new byte[128];
+        return new String(array, 0, n, "UTF-8");
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let array: Vec<i8> = vec![0; 128 as usize];")
+            && translation.rust.contains("java_string_from_bytes(&array)")
+            && translation
+                .rust
+                .contains("java_string_from_byte_range(&array, 0, n)")
+            && !translation.rust.contains("String::new(array)")
+            && !translation.rust.contains("String::new(array, \"UTF-8\")")
+            && !translation.rust.contains("String::new(array, 0, n)")
+            && !translation
+                .rust
+                .contains("String::new(array, 0, n, \"UTF-8\")"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "byte_array_string_range_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn char_array_feeds_java_string_constructor() {
+    let translation = translate_source(
+        r#"
+class CharArrayStringConstructor {
+    private char[] letters;
+
+    char[] getLetters() {
+        return letters;
+    }
+
+    String fromLocal(String value) {
+        char[] chars = value.toCharArray();
+        return new String(chars);
+    }
+
+    String fromField() {
+        return new String(letters);
+    }
+
+    String fromGetter() {
+        return new String(getLetters());
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return chars.as_slice().iter().collect::<String>();")
+            && translation.rust.contains(
+                "return self.letters.as_ref().expect(\"Java null receiver\").as_slice().iter().collect::<String>();"
+            )
+            && translation
+                .rust
+                .matches("return self.letters.as_ref().expect(\"Java null receiver\").as_slice().iter().collect::<String>();")
+                .count()
+                >= 2
+            && !translation.rust.contains("String::new(chars)")
+            && !translation.rust.contains("String::new(self.letters"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "char_array_string_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn output_stream_write_byte_range_borrows_reused_buffer() {
+    let translation = translate_source(
+        r#"
+import java.io.BufferedOutputStream;
+import java.io.InputStream;
+
+class OutputStreamWriteByteRangeBorrow {
+    int copy(InputStream input, BufferedOutputStream output) throws Exception {
+        byte[] buffer = new byte[128];
+        int size = input.read(buffer, 0, buffer.length);
+        output.write(buffer, 0, size);
+        return buffer.length;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let __java_arg2 = buffer.len() as i32; input.read_3(buffer.as_mut_slice(), 0, __java_arg2) }?;")
+            && translation
+                .rust
+                .contains("output.write_3(buffer.as_slice(), 0, size)?;")
+            && (translation.rust.contains("return buffer.len() as i32;")
+                || translation.rust.contains("return Ok(buffer.len() as i32);"))
+            && !translation.rust.contains("output.write(buffer, 0, size)?;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "output_stream_write_byte_range_borrow",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn buffered_image_graphics_facades_are_typed() {
+    let translation = translate_source(
+        r#"
+import java.awt.Graphics;
+import java.awt.image.BufferedImage;
+
+class BufferedImageGraphicsFacades {
+    void draw(int width, int height) {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        Graphics graphics = image.createGraphics();
+        graphics.dispose();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("BufferedImage::TYPE_INT_RGB")
+            && (translation
+                .rust
+                .contains("let graphics: Graphics = image.create_graphics();")
+                || translation
+                    .rust
+                    .contains("let mut graphics: Graphics = image.create_graphics();")
+                || translation
+                    .rust
+                    .contains("let graphics: Graphics = image.create_graphics().into();")
+                || translation
+                    .rust
+                    .contains("let mut graphics: Graphics = image.create_graphics().into();"))
+            && translation.rust.contains("graphics.dispose();")
+            && !translation
+                .rust
+                .contains("let graphics: Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("let mut graphics: Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("create_graphics(&self) -> Box<dyn std::any::Any>")
+            && !translation.rust.contains("create_graphics(&self) -> ()")
+            && !translation
+                .rust
+                .contains("impl Graphics {\n    pub fn dispose(&self) -> ()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "buffered_image_graphics_facades",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn buffered_image_create_graphics_returns_graphics2d_without_downcast() {
+    let translation = translate_source(
+        r#"
+import java.awt.Graphics2D;
+import java.awt.image.BufferedImage;
+
+class BufferedImageGraphics2DCreate {
+    void draw(int width, int height) {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D graphics = image.createGraphics();
+        graphics.dispose();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("BufferedImage::TYPE_INT_ARGB")
+            && (translation
+                .rust
+                .contains("let graphics: Graphics2D = image.create_graphics();")
+                || translation
+                    .rust
+                    .contains("let mut graphics: Graphics2D = image.create_graphics();"))
+            && translation.rust.contains("graphics.dispose();")
+            && !translation.rust.contains("downcast::<Graphics2D>")
+            && !translation
+                .rust
+                .contains("let graphics: Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("create_graphics(&self) -> Graphics {"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "buffered_image_graphics2d_create",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn buffered_image_graphics_passed_to_jpanel_print_stays_typed() {
+    let translation = translate_source(
+        r#"
+import java.awt.Graphics;
+import java.awt.image.BufferedImage;
+import javax.swing.JPanel;
+
+class BufferedImageGraphicsPanelPrint {
+    void draw(JPanel panel, int width, int height) {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        Graphics graphics = image.createGraphics();
+        panel.print(graphics);
+        graphics.dispose();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("panel.print")
+            && (translation
+                .rust
+                .contains("let graphics: Graphics = image.create_graphics();")
+                || translation
+                    .rust
+                    .contains("let mut graphics: Graphics = image.create_graphics();")
+                || translation
+                    .rust
+                    .contains("let graphics: Graphics = image.create_graphics().into();")
+                || translation
+                    .rust
+                    .contains("let mut graphics: Graphics = image.create_graphics().into();"))
+            && translation.rust.contains("graphics.dispose();")
+            && !translation
+                .rust
+                .contains("let graphics: Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("let mut graphics: Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "buffered_image_graphics_panel_print",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn buffered_image_graphics_from_source_panel_getter_stays_typed() {
+    let translation = translate_source(
+        r#"
+import java.awt.Graphics;
+import java.awt.image.BufferedImage;
+import javax.swing.JPanel;
+
+class BufferedImageGraphicsSourcePanelGetter {
+    private JPanel panel;
+
+    BufferedImageGraphicsSourcePanelGetter(JPanel panel) {
+        this.panel = panel;
+    }
+
+    JPanel getPanel() {
+        return panel;
+    }
+
+    void draw(int width, int height) {
+        JPanel panel = getPanel();
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        Graphics graphics = image.createGraphics();
+        panel.print(graphics);
+        graphics.dispose();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut graphics: Graphics = image.create_graphics();")
+            || translation
+                .rust
+                .contains("let graphics: Graphics = image.create_graphics();")
+            || translation
+                .rust
+                .contains("let mut graphics: Graphics = image.create_graphics().into();")
+            || translation
+                .rust
+                .contains("let graphics: Graphics = image.create_graphics().into();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("panel.print(&graphics")
+            || translation.rust.contains("panel.print(graphics"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("graphics.downcast::<Graphics>")
+            && !translation
+                .rust
+                .contains("let mut graphics: Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("let graphics: Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "buffered_image_graphics_source_panel_getter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn buffered_image_graphics_in_fallible_panel_workflow_stays_typed() {
+    let translation = translate_source(
+        r#"
+import java.awt.Graphics;
+import java.awt.image.BufferedImage;
+import javax.swing.JPanel;
+
+class BufferedImageGraphicsFalliblePanelWorkflow {
+    private JPanel panel;
+
+    BufferedImageGraphicsFalliblePanelWorkflow(JPanel panel) {
+        this.panel = panel;
+    }
+
+    JPanel getPanel() {
+        return panel;
+    }
+
+    void draw(int width, int height) throws Exception {
+        JPanel resultsPanel = getPanel();
+        resultsPanel.setSize(width, height);
+        resultsPanel.validate();
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        Graphics graphics = image.createGraphics();
+        resultsPanel.setDoubleBuffered(false);
+        resultsPanel.addNotify();
+        resultsPanel.validate();
+        resultsPanel.print(graphics);
+        graphics.dispose();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut graphics: Graphics = image.create_graphics();")
+            || translation
+                .rust
+                .contains("let graphics: Graphics = image.create_graphics();")
+            || translation
+                .rust
+                .contains("let mut graphics: Graphics = image.create_graphics().into();")
+            || translation
+                .rust
+                .contains("let graphics: Graphics = image.create_graphics().into();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("graphics.downcast::<Graphics>")
+            && !translation
+                .rust
+                .contains("let mut graphics: Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("let graphics: Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "buffered_image_graphics_fallible_panel_workflow",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_outer_graphics_field_call_uses_concrete_optional_facade_receiver() {
+    let translation = translate_source(
+        r#"
+import java.awt.Component;
+import java.awt.Graphics;
+import java.awt.Shape;
+
+class NullableOuterGraphicsFieldCall {
+    private Graphics graphics;
+
+    NullableOuterGraphicsFieldCall(Component component) {
+        graphics = component.getGraphics();
+    }
+
+    class Inner {
+        Shape clip() {
+            return graphics.getClip();
+        }
+
+        void close() {
+            graphics.dispose();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("graphics: Option<Graphics>")
+            && translation
+                .rust
+                .contains("graphics: component.get_graphics()")
+            && translation
+                .rust
+                .contains("self.__outer.borrow().graphics.as_ref().unwrap().get_clip()")
+            && translation
+                .rust
+                .contains("self.__outer.borrow().graphics.as_ref().unwrap().dispose()")
+            && !translation
+                .rust
+                .contains("graphics: Option<Box<dyn std::any::Any>>")
+            && !translation.rust.contains("graphics.get_clip()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_outer_graphics_field_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn constructor_field_assignment_from_local_keeps_local_and_typed_field() {
+    let translation = translate_source(
+        r#"
+import java.awt.Graphics;
+import java.awt.image.BufferedImage;
+
+class ConstructorFieldAssignmentFromLocalGraphics {
+    private Graphics graphics;
+
+    ConstructorFieldAssignmentFromLocalGraphics(int width, int height) {
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        graphics = image.getGraphics();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("graphics: Option<Graphics>")
+            && translation
+                .rust
+                .contains("let image: BufferedImage = BufferedImage::new")
+            && translation
+                .rust
+                .contains("__java_self.graphics = Some(image.get_graphics());")
+            && !translation.rust.contains("graphics: image.get_graphics()")
+            && !translation
+                .rust
+                .contains("graphics: Some(image.get_graphics())")
+            && !translation
+                .rust
+                .contains("graphics: Option<Box<dyn std::any::Any>>")
+            && !translation.rust.contains("cannot find value `image`"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "constructor_field_assignment_from_local_graphics",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn constructor_assigned_field_read_defers_until_self_temporary_exists() {
+    let translation = translate_source(
+        r#"
+class ConstructorAssignedFieldRead {
+    private int seed;
+    private int doubled;
+
+    ConstructorAssignedFieldRead(int input) {
+        this.seed = input;
+        doubled = seed + 1;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut __java_self = ConstructorAssignedFieldRead")
+            && translation.rust.contains("seed: input")
+            && translation
+                .rust
+                .contains("__java_self.doubled = __java_self.seed + 1;")
+            && !translation.rust.contains("doubled: self.seed + 1")
+            && !translation
+                .rust
+                .contains("expected value, found module `self`"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "constructor_assigned_field_read",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn constructor_nested_arg_reads_assigned_field_without_cloning_self() {
+    let translation = translate_source(
+        r#"
+class ConstructorNestedArgFieldRead {
+    private Payload payload = null;
+    private Wrapper wrapper = null;
+
+    ConstructorNestedArgFieldRead(Payload input) {
+        this.payload = input;
+        wrapper = new Wrapper(new Holder(payload));
+    }
+}
+
+class Payload {
+}
+
+class Holder {
+    Holder(Payload payload) {
+    }
+}
+
+class Wrapper {
+    Wrapper(Holder holder) {
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut __java_self = ConstructorNestedArgFieldRead")
+            && (translation.rust.contains(
+                "__java_self.wrapper = Some(Wrapper::new(Holder::new(__java_self.payload.as_ref().expect(\"Java null receiver\").clone()"
+            ) || translation.rust.contains(
+                "__java_self.wrapper = Some(Wrapper::new(Holder::new(__java_self.payload.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
+            ))
+            && !translation.rust.contains("__java_self.clone().payload"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "constructor_nested_arg_field_read",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn static_owner_name_does_not_collapse_to_same_named_instance_field() {
+    let translation = translate_source(
+        r#"
+import java.awt.Color;
+import java.awt.Font;
+
+class StaticOwnerFieldNameCollision {
+    private Color color = Color.BLACK;
+    private Font font = new Font("Default", Font.PLAIN, 12);
+
+    StaticOwnerFieldNameCollision() {
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("color: Some(Color::BLACK")
+            && translation.rust.contains("Font::PLAIN")
+            && !translation.rust.contains("self.color")
+            && !translation.rust.contains("self.font"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "static_owner_field_name_collision",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn platform_gui_facade_getters_have_precise_return_shapes() {
+    let translation = translate_source(
+        r#"
+import java.awt.Color;
+import java.awt.Component;
+import java.awt.Font;
+import javax.swing.table.TableModel;
+
+class PlatformGuiFacadeGetterShapes {
+    int componentWidth(Component component) {
+        return component.getWidth();
+    }
+
+    int red(Color color) {
+        return color.getRed();
+    }
+
+    int fontSize(Font font) {
+        return font.getSize();
+    }
+
+    boolean bold(Font font) {
+        return font.isBold();
+    }
+
+    int columns(TableModel table) {
+        return table.getColumnCount();
+    }
+
+    String columnName(TableModel table, int column) {
+        return table.getColumnName(column);
+    }
+
+    Object value(TableModel table, int row, int column) {
+        return table.getValueAt(row, column);
+    }
+
+    String stringValue(TableModel table, int row, int column) {
+        return String.valueOf(table.getValueAt(row, column));
+    }
+
+    void appendValue(StringBuffer buffer, TableModel table, int row, int column) {
+        buffer.append(table.getValueAt(row, column));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn get_width(&self) -> i32")
+            && translation.rust.contains("pub fn get_red(&self) -> i32")
+            && translation.rust.contains("pub fn get_size(&self) -> i32")
+            && translation.rust.contains("pub fn is_bold(&self) -> bool")
+            && translation
+                .rust
+                .contains("pub fn get_column_count(&self) -> i32")
+            && translation
+                .rust
+                .contains("pub fn get_column_name<T0>(&self, _arg0: T0) -> String")
+            && translation.rust.contains(
+                "pub fn get_value_at<T0, T1>(&self, _arg0: T0, _arg1: T1) -> Box<dyn std::any::Any>"
+            )
+            && !translation.rust.contains("get_width(&self) -> ()")
+            && !translation.rust.contains("get_red(&self) -> ()")
+            && !translation.rust.contains("get_size(&self) -> ()")
+            && !translation.rust.contains("is_bold(&self) -> ()")
+            && !translation.rust.contains("get_column_count(&self) -> ()")
+            && !translation
+                .rust
+                .contains("get_column_name<T0>(&self, _arg0: T0) -> ()")
+            && !translation
+                .rust
+                .contains("get_value_at<T0, T1>(&self, _arg0: T0, _arg1: T1) -> ()")
+            && translation
+                .rust
+                .contains("java_erased_object_to_string(&table.get_value_at(row, column))")
+            && !translation.rust.contains("downcast::<String>()")
+            && !translation.rust.contains("invalid Java cast"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "platform_gui_facade_getter_shapes",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn exact_class_guard_casts_erased_object_to_borrowed_view() {
     let translation = translate_source(
         r#"
@@ -7419,11 +14824,86 @@ class ExactClassGuardCastsErasedObject {
 }
 
 #[test]
+fn rejected_instanceof_guard_casts_erased_object_to_borrowed_view() {
+    let translation = translate_source(
+        r#"
+class RejectedInstanceofGuardCastsErasedObject {
+    private int id;
+
+    boolean same(Object obj) {
+        if (obj instanceof RejectedInstanceofGuardCastsErasedObject == false) {
+            return false;
+        }
+        RejectedInstanceofGuardCastsErasedObject other =
+            (RejectedInstanceofGuardCastsErasedObject) obj;
+        return other.id == id;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let other: &RejectedInstanceofGuardCastsErasedObject = obj.downcast_ref::<RejectedInstanceofGuardCastsErasedObject>().expect(\"invalid Java cast\");"
+        ) && !translation
+            .rust
+            .contains("*obj.downcast::<RejectedInstanceofGuardCastsErasedObject>")
+            && !translation.rust.contains("obj.downcast::<RejectedInstanceofGuardCastsErasedObject>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "rejected_instanceof_guard_casts_erased_object",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_arrays_equals_lowers_as_static_platform_equality() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysEqualsUse {
+    boolean same(double[] left, double[] right) {
+        return Arrays.equals(left, right);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return left == right;")
+            && !translation.rust.contains("arrays ==")
+            && !translation.rust.contains("Arrays::equals")
+            && !translation.rust.contains("arrays.equals"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_arrays_equals_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn documents_equals_and_objects_gap() {
     let translation = translate_source(&idiom_gap("EqualsAndObjects.java"));
 
     assert!(
-        translation.rust.contains("return left == right;")
+        translation
+            .rust
+            .contains("return left.as_str() == right.as_str();")
             && !translation.rust.contains(".equals(")
             && !translation.rust.contains("objects.equals("),
         "{}",
@@ -7616,6 +15096,457 @@ fn documents_serializable_value_object_gap() {
 }
 
 #[test]
+fn object_input_stream_read_methods_have_typed_facade_returns() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectInputStream;
+
+class ObjectInputStreamReadShapes {
+    int readCount(ObjectInputStream in) {
+        return in.readInt();
+    }
+
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn read_int(&self) -> Result<i32, JavaException>")
+            && translation.rust.contains("return Ok(r#in.read_int()?);")
+            && !translation.rust.contains("downcast::<Object>")
+            && !translation.rust.contains("pub fn read_int(&self) -> ()")
+            && !translation
+                .rust
+                .contains("pub fn read_object(&self) -> Result<Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn object_stream_object_methods_have_typed_handoff_facades() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+
+class ObjectStreamObjectShapes {
+    Object readValue(ObjectInputStream in) throws Exception {
+        return in.readObject();
+    }
+
+    void writeValue(ObjectOutputStream out, Object value) throws Exception {
+        out.writeInt(1);
+        out.writeObject(value);
+    }
+
+    Object[] readValues(ObjectInputStream in, int len) throws Exception {
+        Object[] values = new Object[len];
+        for (int i = 0; i < len; i++) {
+            values[i] = in.readObject();
+        }
+        return values;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn read_object(&self) -> Result<Box<dyn std::any::Any>, JavaException>")
+            && translation
+                .rust
+                .contains("pub fn write_int<T0>(&self, _arg0: T0) -> Result<(), JavaException>")
+            && translation.rust.contains(
+                "pub fn write_object<T0>(&self, _arg0: Option<T0>) -> Result<(), JavaException>"
+            )
+            && translation.rust.contains("return Ok(r#in.read_object()?);")
+            && translation.rust.contains("out.write_int(1)?;")
+            && translation.rust.contains("out.write_object(value)?;")
+            && translation
+                .rust
+                .contains("values[i as usize] = r#in.read_object()?;")
+            && !translation.rust.contains("pub fn read_object(&self) -> ()")
+            && !translation
+                .rust
+                .contains("pub fn write_object<T0>(&self, _arg0: T0) -> ()")
+            && !translation.rust.contains("downcast::<Object>()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn object_input_stream_read_object_recovers_string_target_slot() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectInputStream;
+
+class ObjectInputStreamStringRecovery {
+    String readKey(ObjectInputStream in) throws Exception {
+        String key = in.readObject();
+        return key;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("downcast::<String>()")
+            && translation
+                .rust
+                .contains("Java deserialization type mismatch")
+            && !translation.rust.contains("expect(\"invalid Java cast\")")
+            && translation.rust.contains("let key: String =")
+            && !translation
+                .rust
+                .contains("let key: String = r#in.read_object()?;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn object_input_stream_read_object_cast_recovers_string_target_slot() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectInputStream;
+
+class ObjectInputStreamStringCastRecovery {
+    String readKey(ObjectInputStream in) throws Exception {
+        String key = (String) in.readObject();
+        return key;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("downcast::<String>()")
+            && translation
+                .rust
+                .contains("Java deserialization type mismatch")
+            && !translation.rust.contains("expect(\"invalid Java cast\")")
+            && translation.rust.contains("let key: String =")
+            && !translation
+                .rust
+                .contains("let key: String = r#in.read_object()?;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn object_input_stream_read_object_cast_recovers_throwable_field_slot() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectInputStream;
+
+class ObjectInputStreamThrowableCastRecovery {
+    private Throwable throwable;
+
+    void read(ObjectInputStream in) throws Exception {
+        throwable = (Throwable) in.readObject();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("downcast::<Throwable>()")
+            && translation
+                .rust
+                .contains("Java deserialization type mismatch")
+            && !translation.rust.contains("expect(\"invalid Java cast\")")
+            && translation.rust.contains("self.throwable =")
+            && !translation
+                .rust
+                .contains("self.throwable = r#in.read_object()?;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn object_input_stream_read_object_cast_to_source_interface_is_explicit_handoff() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectInputStream;
+
+interface Localizable {
+    String getSourceString();
+}
+
+class ObjectInputStreamInterfaceCastRecovery {
+    Localizable readPattern(ObjectInputStream in) throws Exception {
+        Localizable pattern = (Localizable) in.readObject();
+        return pattern;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let _java_deserialized = r#in.read_object()?;")
+            && translation
+                .rust
+                .contains("unsupported Java deserialization cast to Localizable")
+            && !translation
+                .rust
+                .contains("Box::new(r#in.read_object()?) as Box<dyn Localizable>")
+            && !translation.rust.contains("Box<Box<dyn std::any::Any>>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn object_output_stream_write_object_accepts_source_interface_object_handoff() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectOutputStream;
+
+interface Localizable {
+    String getSourceString();
+}
+
+class ObjectOutputStreamInterfaceHandoff {
+    void write(ObjectOutputStream out, Localizable pattern) throws Exception {
+        out.writeObject(pattern);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("out.write_object(pattern)")
+            && !translation.rust.contains("downcast_ref::<Object>")
+            && !translation.rust.contains("invalid Java cast")
+            && !translation
+                .rust
+                .contains("unsupported Java dispatch coercion"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn object_output_stream_write_object_clones_indexed_erased_object_handoff() {
+    let translation = translate_source(
+        r#"
+import java.io.ObjectOutputStream;
+
+class ObjectOutputStreamIndexedObjectHandoff {
+    void write(ObjectOutputStream out, Object[] args, int j) throws Exception {
+        out.writeObject(args[j]);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("out.write_object(Some(java_clone_erased_object_ref(&args[j as usize])))")
+            && !translation
+                .rust
+                .contains("out.write_object(Some(args[j as usize]))"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn constructor_stores_object_parameter_as_owned_field() {
+    let translation = translate_source(
+        r#"
+class ConstructorStoresObjectParameterAsOwnedField {
+    private Number argument;
+
+    ConstructorStoresObjectParameterAsOwnedField(Number wrong) {
+        this.argument = wrong;
+    }
+
+    Number getArgument() {
+        return argument;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("argument: Number")
+            && translation.rust.contains("argument: wrong")
+            && !translation.rust.contains("argument: Option<&Number>")
+            && !translation.rust.contains("argument: Some(&wrong)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn optional_owned_field_getter_returns_borrowed_option_view() {
+    let translation = translate_source(
+        r#"
+class OptionalOwnedFieldGetterReturnsBorrowedOptionView {
+    private Number argument = null;
+
+    OptionalOwnedFieldGetterReturnsBorrowedOptionView(Number wrong) {
+        this.argument = wrong;
+    }
+
+    Number getArgument() {
+        return argument;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("argument: Option<Number>")
+            && translation
+                .rust
+                .contains("pub fn get_argument(&self) -> Option<&Number>")
+            && translation.rust.contains("return self.argument.as_ref();")
+            && !translation.rust.contains("Some(&self.argument.clone()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_borrowed_getter_initializers_recover_owned_locals() {
+    let translation = translate_source(
+        r#"
+class SourceBorrowedGetterInitializers {
+    void use(Archive report) {
+        Writer xhtml = report.xhtmlStream();
+        Buffer data = report.dataDocument();
+        Zip zip = report.zipFile();
+        xhtml.write("x");
+        data.append("y");
+        zip.close();
+    }
+}
+
+class Archive {
+    private Writer xhtml = null;
+    private Buffer data = null;
+    private Zip zip = new Zip();
+
+    Writer xhtmlStream() {
+        return xhtml;
+    }
+
+    Buffer dataDocument() {
+        return data;
+    }
+
+    Zip zipFile() {
+        return zip;
+    }
+}
+
+class Writer {
+    void write(String value) {}
+}
+
+class Buffer {
+    void append(String value) {}
+}
+
+class Zip {
+    void close() {}
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let xhtml: Option<Writer> = report.xhtml_stream().cloned()")
+            && translation
+                .rust
+                .contains("let data: Option<Buffer> = report.data_document().cloned()")
+            && translation
+                .rust
+                .contains("let zip: Zip = report.zip_file().clone()")
+            && !translation.rust.contains("Some(report.xhtml_stream())")
+            && !translation.rust.contains("Some(report.data_document())")
+            && !translation
+                .rust
+                .contains("let zip: Zip = report.zip_file();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn erased_object_array_clone_and_format_use_explicit_helpers() {
+    let translation = translate_source(
+        r#"
+import java.text.MessageFormat;
+import java.util.ArrayList;
+import java.util.List;
+
+class ErasedObjectArrayCloneAndFormat {
+    private List<Object[]> rows = new ArrayList<Object[]>();
+
+    void add(Object[] values) {
+        rows.add(values);
+    }
+
+    Object[] first() {
+        Object[] values = rows.get(0);
+        return values;
+    }
+
+    String format(MessageFormat fmt) {
+        Object[] values = rows.get(0);
+        return fmt.format(values);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_clone_erased_object_vec_ref(")
+            && translation
+                .rust
+                .contains("pub fn format<T0>(&self, _arg0: T0) -> String")
+            && translation.rust.contains("return fmt.format(values);")
+            && !translation.rust.contains("values.to_string()")
+            && !translation
+                .rust
+                .contains(".clone()/* TODO(translation): validate added clone */"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn serializable_instanceof_erased_object_uses_runtime_marker_helper() {
+    let translation = translate_source(&idiom_gap("SerializableInstanceofObject.java"));
+
+    assert!(
+        translation.rust.contains("java_is_serializable(&value")
+            && translation.rust.contains("java_is_serializable(&values[")
+            && !translation
+                .rust
+                .contains("unsupported Java instanceof shape"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn documents_comparator_interface_gap() {
     let translation = translate_source(&idiom_gap("ComparatorInterface.java"));
 
@@ -7744,7 +15675,7 @@ fn documents_while_assignment_null_variants_gap() {
             && translation.rust.contains("if row.is_some()")
             && translation
                 .rust
-                .contains("pub fn first_missing(&self, cursor: &mut Cursor) -> Option<&Row>")
+                .contains("pub fn first_missing(&self, cursor: &mut Cursor) -> Option<Row>")
             && translation.rust.contains("return row;")
             && !translation.rust.contains("(row = cursor.read())")
             && !translation.rust.contains("control_flow_rewrite_pending"),
@@ -7786,14 +15717,24 @@ class DoWhileAssignedReturn {
             && translation.rust.contains("if line.is_none()")
             && translation
                 .rust
-                .contains("if !(skip_blank_lines && self.blank(line.clone()")
+                .contains("if !(skip_blank_lines && self.blank(line.as_ref()))")
             && translation.rust.contains("break;")
             && translation.rust.contains("return line;")
+            && !translation.rust.contains("self.blank(line.clone()")
             && !translation
                 .rust
                 .contains("let line: String;\n        return line;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "do_while_assigned_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -7915,9 +15856,50 @@ class ExceptionConstructorMessageArgument {
     assert!(
         translation
             .rust
-            .contains("JavaException::new(\"RuntimeException\", e.to_string())"),
+            .contains("JavaException::new(\"RuntimeException\", e.to_string())")
+            || translation.rust.contains(
+                "JavaException::new(\"RuntimeException\", java_erased_object_to_string(&e).to_string())"
+            ),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn exception_constructor_erased_object_varargs_use_java_display_helper() {
+    let translation = translate_source(
+        r#"
+class ErasedObjectVarargsExceptionMessage {
+    static void check(Object value, Object pattern, Object... args) throws RuntimeException {
+        if (value == null) {
+            throw new RuntimeException(pattern, args);
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_erased_object_to_string(&pattern)")
+            && translation
+                .rust
+                .contains("java_erased_object_to_string(&args)")
+            && !translation
+                .rust
+                .contains("format!(\"{}: {}\", pattern, args)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "exception_constructor_erased_object_varargs",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8061,10 +16043,50 @@ class SamRecordStaticByteArrayConstants {
                 .contains("pub const NULL_QUALS: Vec<i8> = Vec::new();")
             && translation
                 .rust
-                .contains("return SAMRecord::NULL_SEQUENCE;")
-            && translation.rust.contains("return SAMRecord::NULL_QUALS;"),
+                .contains("return SAMRecord::NULL_SEQUENCE.to_vec();")
+            && translation
+                .rust
+                .contains("return SAMRecord::NULL_QUALS.to_vec();"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn sam_tag_enum_variant_constants_emit_typed_facade_surfaces() {
+    let translation = translate_source(
+        r#"
+import htsjdk.samtools.SAMRecord;
+import htsjdk.samtools.SAMTag;
+
+class SamTagEnumVariantConstants {
+    String comment(SAMRecord record) {
+        return record.getStringAttribute(SAMTag.CO);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("impl HtsjdkSamtoolsSAMTag")
+            && translation
+                .rust
+                .contains("pub const CO: HtsjdkSamtoolsSAMTag = HtsjdkSamtoolsSAMTag;")
+            && translation
+                .rust
+                .contains("record.get_string_attribute(SAMTag::CO)")
+            && !translation.rust.contains("associated item `CO`"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "sam_tag_enum_variant_constants",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8139,6 +16161,135 @@ fn external_field_throwing_call_in_try_uses_external_field_facts() {
 }
 
 #[test]
+fn commons_math_localized_formats_constants_are_pack_enum_fields() {
+    let translation = translate_source(
+        r#"
+import org.apache.commons.math3.exception.util.LocalizedFormats;
+
+class CommonsMathLocalizedFormatUse {
+    String message() {
+        return LocalizedFormats.OVERFLOW.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("LocalizedFormats::OVERFLOW.to_string()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub const OVERFLOW: LocalizedFormats = LocalizedFormats;"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "commons_math_localized_formats_pack_fields",
+        vec![GeneratedCrateModule {
+            name: "commons_math_localized_format_use",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn commons_math_localized_formats_constants_borrow_as_localizable_pack_trait() {
+    let translation = translate_source(
+        r#"
+import org.apache.commons.math3.exception.util.Localizable;
+import org.apache.commons.math3.exception.util.LocalizedFormats;
+
+class CommonsMathLocalizedFormatPatternUse {
+    long checked(long a, long b) throws Exception {
+        return add(a, b, LocalizedFormats.OVERFLOW_IN_ADDITION);
+    }
+
+    long add(long a, long b, Localizable pattern) throws Exception {
+        return a + b;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("&LocalizedFormats::OVERFLOW_IN_ADDITION as &dyn Localizable"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub trait Localizable")
+            && translation
+                .rust
+                .contains("impl Localizable for LocalizedFormats"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("impl Localizable {\n"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "commons_math_localized_formats_pack_trait_slot",
+        vec![GeneratedCrateModule {
+            name: "commons_math_localized_format_pattern_use",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn commons_math_localizable_pack_trait_can_be_formatted() {
+    let translation = translate_source(
+        r#"
+import org.apache.commons.math3.exception.util.Localizable;
+import org.apache.commons.math3.exception.util.LocalizedFormats;
+
+class CommonsMathLocalizablePatternDisplay {
+    String message() {
+        return format(LocalizedFormats.OVERFLOW);
+    }
+
+    String format(Localizable pattern) {
+        return "pattern=" + pattern;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub trait Localizable")
+            && translation.rust.contains("std::fmt::Display"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("&LocalizedFormats::OVERFLOW as &dyn Localizable"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "commons_math_localizable_pack_trait_display",
+        vec![GeneratedCrateModule {
+            name: "commons_math_localizable_pattern_display",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn external_nullable_getter_assignment_uses_option_carrier_recovery() {
     let mut facts = FactSet::default();
     facts.external_api_effect_facts.push(ExternalApiEffectFact {
@@ -8173,6 +16324,137 @@ class ExternalNullableGetterUse {
             && !translation.rust.contains("Some(record.get_name())"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn source_nullable_getter_local_initializer_stays_optional() {
+    let translation = translate_source(
+        r#"
+class SourceNullableGetterLocalInitializer {
+    String write(FastqRecord record) {
+        String readName = record.getReadName();
+        return readName == null ? "" : readName;
+    }
+}
+
+class FastqRecord {
+    private final String readName;
+
+    FastqRecord(String readName) {
+        this.readName = readName;
+    }
+
+    String getReadName() {
+        return readName;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let read_name: Option<String> = record.get_read_name();")
+            && !translation
+                .rust
+                .contains("let read_name: Option<String> = Some(record.get_read_name())"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn guarded_nullable_copy_constructor_reads_source_fields_after_unwrap() {
+    let translation = translate_source(
+        r#"
+class GuardedNullableCopyConstructor {
+    private final String name;
+    private final String bases;
+
+    GuardedNullableCopyConstructor(GuardedNullableCopyConstructor other) {
+        if (other == null) {
+            throw new IllegalArgumentException("copy null");
+        }
+        this.name = other.name;
+        this.bases = other.bases;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("other.as_ref().expect(\"Java null receiver\").name")
+            && translation
+                .rust
+                .contains("other.as_ref().expect(\"Java null receiver\").bases.clone()")
+            && !translation
+                .rust
+                .contains("Some(other.as_ref().expect(\"Java null receiver\").name.clone()")
+            && !translation
+                .rust
+                .contains("Some(other.as_ref().expect(\"Java null receiver\").bases.clone()")
+            && !translation.rust.contains("other.name")
+            && !translation.rust.contains("other.bases"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn guarded_nullable_copy_constructor_preserves_optional_source_fields() {
+    let translation = translate_source(
+        r#"
+class NullableCopyConstructorPreservesOptions {
+    private final String readName;
+    private final String readString;
+
+    NullableCopyConstructorPreservesOptions(String readName, String readString) {
+        if (readName != null && !readName.isEmpty()) {
+            this.readName = readName;
+        } else {
+            this.readName = null;
+        }
+        this.readString = readString;
+    }
+
+    NullableCopyConstructorPreservesOptions(NullableCopyConstructorPreservesOptions other) {
+        if (other == null) {
+            throw new IllegalArgumentException("copy null");
+        }
+        this.readName = other.readName;
+        this.readString = other.readString;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("read_name: other.as_ref().expect(\"Java null receiver\").read_name.clone()")
+            && translation.rust.contains(
+                "read_string: other.as_ref().expect(\"Java null receiver\").read_string.clone()"
+            )
+            && !translation.rust.contains(
+                "read_name: Some(other.as_ref().expect(\"Java null receiver\").read_name.clone()"
+            )
+            && !translation.rust.contains(
+                "read_string: Some(other.as_ref().expect(\"Java null receiver\").read_string.clone()"
+            ),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_copy_constructor_preserves_options",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8590,6 +16872,308 @@ public class UsesOwnConstants {
 }
 
 #[test]
+fn source_static_final_primitive_expression_fields_emit_associated_constants() {
+    let translation = translate_source(
+        r#"
+public class UsesExpressionConstants {
+    static final int MAX = 750;
+    static final int LEN = MAX * 2;
+    private static final long MASK = -1L - (0x40000000L - 1L);
+    private static final double HALF = 1d / 2d;
+
+    public static double value(double x) {
+        return x * HALF + LEN + MASK;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("const MAX: i32 = 750;")
+            && translation.rust.contains("const LEN: i32 = Self::MAX * 2;")
+            && translation
+                .rust
+                .contains("const MASK: i64 = -1i64 - (1073741824i64 - 1i64);")
+            && translation.rust.contains("const HALF: f64 = 1f64 / 2f64;")
+            && translation
+                .rust
+                .contains("return ((x * Self::HALF) + (Self::LEN as f64)) + (Self::MASK as f64);")
+            && !translation.rust.contains("HALF: f64,"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_static_final_primitive_expression_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_static_final_byte_constants_preserve_declared_slot_type() {
+    let translation = translate_source(
+        r#"
+public class ByteConstantOwner {
+    public static final byte STOP = 0;
+    public static final byte LEFT = 1;
+
+    public static byte[] fill(byte value) {
+        byte[] values = new byte[2];
+        values[0] = STOP;
+        switch (value) {
+            case LEFT:
+                values[1] = LEFT;
+                break;
+            default:
+                values[1] = STOP;
+        }
+        return values;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub const STOP: i8 = 0;")
+            && translation.rust.contains("pub const LEFT: i8 = 1;")
+            && translation
+                .rust
+                .contains("values[0 as usize] = Self::STOP;")
+            && translation
+                .rust
+                .contains("__java_switch_value == Self::LEFT")
+            && !translation.rust.contains("pub const STOP: i32")
+            && !translation.rust.contains("pub const LEFT: i32"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn empty_constructor_uses_typed_float_defaults_for_primitive_fields() {
+    let translation = translate_source(
+        r#"
+public class FloatDefaultFields {
+    private float open;
+    private float extend;
+    private double score;
+    private int count;
+
+    public FloatDefaultFields() {
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("open: 0f32")
+            && translation.rust.contains("extend: 0f32")
+            && translation.rust.contains("score: 0f64")
+            && translation.rust.contains("count: 0")
+            && !translation.rust.contains("open: 0,")
+            && !translation.rust.contains("score: 0,"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "empty_constructor_typed_float_defaults",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_static_final_constants_can_reference_other_source_constants_and_hex_sign_bits() {
+    let translation = translate_source(
+        r#"
+class SourceConstantOwner {
+    public static final double PI = 105414357.0 / 33554432.0 + 1.984187159361080883e-9;
+}
+
+public class SourceConstantUser {
+    public static final double TWO_PI = 2 * SourceConstantOwner.PI;
+    private static final int SIGN_MASK = 0x80000000;
+
+    public static double normalize(double value) {
+        return value + TWO_PI + SIGN_MASK;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub const TWO_PI: f64 = 2f64 * SourceConstantOwner::PI;")
+            && translation
+                .rust
+                .contains("const SIGN_MASK: i32 = -2147483648;")
+            && translation
+                .rust
+                .contains("return (value + Self::TWO_PI) + (Self::SIGN_MASK as f64);")
+            && !translation.rust.contains("TWO_PI: f64,")
+            && !translation.rust.contains("SIGN_MASK: i32,"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_static_final_cross_owner_constants",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_static_final_primitive_array_fields_emit_associated_slice_constants() {
+    let translation = translate_source(
+        r#"
+public class UsesArrayConstants {
+    private static final long RECIP[] = new long[] { 1L, 2L };
+    private static final double WEIGHTS[] = { 0, 0.5, 1d / 3d };
+    private static final double COEF[][] = { { 1, 2 }, { 3, 4 } };
+
+    public static double value(int i) {
+        return RECIP[i] + WEIGHTS[i] + COEF[i][0];
+    }
+
+    private static double first(double values[]) {
+        return values[0];
+    }
+
+    public static double firstWeight() {
+        return first(WEIGHTS);
+    }
+
+    public static int rows() {
+        return COEF.length;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("const RECIP: &'static [i64] = &[1i64, 2i64];")
+            && translation
+                .rust
+                .contains("const WEIGHTS: &'static [f64] = &[0f64, 0.5f64, 1f64 / 3f64];")
+            && translation
+                .rust
+                .contains("const COEF: &'static [&'static [f64]] = &[&[1f64, 2f64], &[3f64, 4f64]];")
+            && translation
+                .rust
+                .contains("return ((Self::RECIP[i as usize] as f64) + Self::WEIGHTS[i as usize]) + Self::COEF[i as usize][0 as usize];")
+            && translation.rust.contains("Self::first(Self::WEIGHTS)")
+            && translation.rust.contains("return Self::COEF.len() as i32;")
+            && !translation.rust.contains("Self::WEIGHTS.as_slice()")
+            && !translation.rust.contains("Self::COEF.nrows()")
+            && !translation.rust.contains("RECIP: Vec<i64>")
+            && !translation.rust.contains("WEIGHTS: Vec<f64>")
+            && !translation.rust.contains("COEF: Vec<Vec<f64>>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_static_final_primitive_array_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_static_final_array_length_can_initialize_static_final_constant() {
+    let translation = translate_source(
+        r#"
+public class ArrayLengthConstantOwner {
+    private static final char[] CHARS = { 'A', 'C', 'G', 'T' };
+    private static final int NUMBER_OF_CHARS = CHARS.length;
+
+    public static int count() {
+        return NUMBER_OF_CHARS;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("const CHARS: &'static [char] = &['A', 'C', 'G', 'T'];")
+            && translation.rust.contains("const NUMBER_OF_CHARS: i32 = 4;")
+            && translation.rust.contains("return Self::NUMBER_OF_CHARS;")
+            && !translation.rust.contains("CHARS::length"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_static_final_array_length_constant",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_static_final_facade_fields_emit_associated_defaults_not_storage() {
+    let translation = translate_source(
+        r#"
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class UsesStaticFinalPattern {
+    private static final Pattern LINE_PATTERN = Pattern.compile("<line/>");
+
+    public static boolean matchesLine(String line) {
+        Matcher m = LINE_PATTERN.matcher(line.trim());
+        return m.matches();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("const LINE_PATTERN: Pattern = Pattern;")
+            && translation
+                .rust
+                .contains("let m: Matcher = Self::LINE_PATTERN.matcher(line.trim());")
+            && !translation.rust.contains("LINE_PATTERN: Pattern,"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_static_final_pattern",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn context_translation_emits_sibling_static_final_constant_definition() {
     let target = r#"
 public class UsesConstants {
@@ -8688,6 +17272,30 @@ class UsesInheritedExternalStaticConstant {
             && translation
                 .rust
                 .contains("return ChildWriter::DEFAULT_QUEUE_SIZE;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn jdk_locale_us_static_constant_emits_typed_surface() {
+    let translation = translate_source(
+        r#"
+import java.util.Locale;
+
+class UsesLocaleUs {
+    Locale locale() {
+        return Locale.US;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl Locale {\n    pub const US: Locale = Locale;")
+            && translation.rust.contains("return Locale::US;"),
         "{}",
         translation.rust
     );
@@ -8877,6 +17485,22 @@ class NdarrayMatrixLowering {
         values[row][col] = value;
     }
 
+    void writeParsed(float[][] scores, int row, int col, String value) {
+        scores[row][col] = Float.parseFloat(value);
+    }
+
+    float[][] createAndWriteParsed(int rows, int cols, int row, int col, String value) {
+        float[][] scores = new float[rows][cols];
+        scores[row][col] = Float.parseFloat(value);
+        return scores;
+    }
+
+    float[][] createAndWriteParsedToken(int rows, int cols, int row, int col, java.util.StringTokenizer tokenizer) {
+        float[][] scores = new float[rows][cols];
+        scores[row][col] = Float.parseFloat(tokenizer.nextToken());
+        return scores;
+    }
+
     int rows(double[][] values) {
         return values.length;
     }
@@ -8931,6 +17555,31 @@ class NdarrayMatrixLowering {
         translation.rust
     );
     assert!(
+        translation.rust.contains(
+            "scores[[row as usize, col as usize]] = value.as_str().parse::<f32>().unwrap();"
+        ) && !translation.rust.contains(
+            "scores[[row as usize, col as usize]] = &value.as_str().parse::<f32>().unwrap();"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let mut scores: ndarray::Array2<f32> = ndarray::Array2::from_elem((rows as usize, cols as usize), 0.0);")
+            && !translation.rust.contains("scores[[row as usize, col as usize]] = &value.as_str().parse::<f32>().unwrap();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("scores[[row as usize, col as usize]] = tokenizer.next_token().parse::<f32>().unwrap();")
+            && !translation.rust.contains("scores[[row as usize, col as usize]] = &tokenizer.next_token().parse::<f32>().unwrap();"),
+        "{}",
+        translation.rust
+    );
+    assert!(
         translation.rust.contains("return values.nrows() as i32;"),
         "{}",
         translation.rust
@@ -8957,12 +17606,1109 @@ class NdarrayMatrixLowering {
 }
 
 #[test]
+fn resolved_source_constructor_name_beats_external_simple_name_arity_fact() {
+    let translation = translate_source(
+        r#"
+class Matrix {
+    private String id;
+    private float[] scores;
+
+    Matrix(String id, float[] scores) {
+        this.id = id;
+        this.scores = scores;
+    }
+}
+
+class SourceMatrixFactory {
+    static Matrix make(String id, int rows) {
+        float[] scores = new float[rows];
+        return new Matrix(id, scores);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new(id: String, scores: Vec<f32>) -> Matrix")
+            && translation.rust.contains("return Matrix::new(")
+            && !translation.rust.contains("Matrix::new_2("),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "resolved_source_constructor_name_beats_external_simple_name_arity_fact",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn same_class_static_calls_borrow_ndarray_arguments_from_signature_slots() {
+    let translation = translate_source(
+        r#"
+class SameClassStaticNdarrayBorrowCall {
+    static Cell run(Matrix matrix) {
+        float[][] scores = matrix.getScores();
+        byte[][] pointers = new byte[2][2];
+        return construct(scores, pointers);
+    }
+
+    static Cell construct(float[][] matrix, byte[][] pointers) {
+        float value = matrix[0][0];
+        pointers[0][0] = (byte) value;
+        return new Cell();
+    }
+}
+
+class Matrix {
+    float[][] getScores() {
+        return new float[2][2];
+    }
+}
+
+class Cell {
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn construct(matrix: &ndarray::Array2<f32>, pointers: &mut ndarray::Array2<i8>)"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Self::construct(&scores, &mut pointers)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn static_final_two_dimensional_numeric_tables_can_feed_readonly_slice_helpers() {
+    let translation = translate_source(
+        r#"
+class StaticFinalMatrixSliceUse {
+    static final double[][] COEF = new double[][] {{1.0, 2.0}, {3.0, 4.0}};
+
+    static double sum(double[] row) {
+        if (row != null) {
+            return row[0] + row[1];
+        }
+        return 0.0;
+    }
+
+    static int rows(double[][] values) {
+        return values.length;
+    }
+
+    static double at(double[][] values, int row, int col) {
+        return values[row][col];
+    }
+
+    static double ownedRow() {
+        double row[] = COEF[1];
+        return row[0];
+    }
+
+    static double[][] load() {
+        return COEF.clone();
+    }
+
+    static double run() {
+        return sum(COEF[0]) + rows(COEF) + at(COEF, 1, 1) + ownedRow();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("const COEF: &'static [&'static [f64]]"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub fn sum(row: Option<&[f64]>)")
+            && translation
+                .rust
+                .contains("pub fn rows(values: &ndarray::Array2<f64>) -> i32")
+            && translation
+                .rust
+                .contains("pub fn at(values: &ndarray::Array2<f64>, row: i32, col: i32) -> f64"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Self::sum(Some(Self::COEF[0 as usize]))")
+            && translation
+                .rust
+                .contains("Self::rows(&ndarray::Array2::from_rows(Self::COEF))")
+            && translation
+                .rust
+                .contains("Self::at(&ndarray::Array2::from_rows(Self::COEF), 1, 1)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("return values.nrows() as i32;")
+            && translation
+                .rust
+                .contains("return values[[row as usize, col as usize]];")
+            && translation
+                .rust
+                .contains("let row: Vec<f64> = (Self::COEF[1 as usize]).to_vec()")
+            && translation
+                .rust
+                .contains("pub fn load() -> ndarray::Array2<f64>")
+            && translation
+                .rust
+                .contains("return ndarray::Array2::from_rows(Self::COEF);")
+            && !translation.rust.contains("Vec<Vec<f64>>"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn parameter_array_dimensions_after_name_lower_as_slice_slots() {
+    let translation = translate_source(
+        r#"
+class ParameterArrayDimensionSlots {
+    static void split(final double d, final double result[]) {
+        result[0] = d;
+        result[1] = d - result[0];
+    }
+
+    static void add(final double a[], final double b[], final double ans[]) {
+        ans[0] = a[0] + b[0];
+        ans[1] = a[1] + b[1];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn split(d: f64, result: &mut [f64])"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn add(a: &[f64], b: &[f64], ans: &mut [f64])"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("result[0 as usize] = d;")
+            && translation
+                .rust
+                .contains("ans[0 as usize] = a[0 as usize] + b[0 as usize];")
+            && !translation.rust.contains("result: f64")
+            && !translation.rust.contains("a: f64")
+            && !translation.rust.contains("ans: f64"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "parameter_array_dimension_slots",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn null_guarded_array_parameter_writes_use_mut_optional_receiver_once() {
+    let translation = translate_source(
+        r#"
+class NullGuardedArrayParameterWrite {
+    static void fill(final double result[]) {
+        if (result != null) {
+            result[0] = 1.0;
+            result[1] = result[0] + 1.0;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("result.as_mut().expect(\"Java null receiver\")[0 as usize] = 1f64;")
+            && translation.rust.contains(
+                "result.as_mut().expect(\"Java null receiver\")[1 as usize] = result.as_ref().expect(\"Java null receiver\")[0 as usize] + 1f64;"
+            )
+            && !translation.rust.contains(".unwrap().as_mut().expect")
+            && !translation.rust.contains(".unwrap().as_ref().expect"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "null_guarded_array_parameter_write",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn mutable_optional_array_parameter_named_rust_keyword_uses_raw_binding() {
+    let translation = translate_source(
+        r#"
+class KeywordArrayParameterWrite {
+    static void splitReciprocal(final double in[]) {
+        if (in != null) {
+            if (in[0] == 0.0) {
+                in[0] = in[1];
+                in[1] = 0.0;
+            }
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn split_reciprocal(mut r#in: Option<&mut [f64]>)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("r#in.as_mut().expect(\"Java null receiver\")[0 as usize]")
+            && !translation.rust.contains("mut in:"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "keyword_array_parameter_write",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn same_source_static_owner_receiver_keeps_type_path_after_name_normalization() {
+    let translation = translate_source(
+        r#"
+class SameSourceStaticOwnerUse {
+    static void run() {
+        SameSourceStaticHelper.touch();
+    }
+
+    static void dump(int count, double value) {
+        SameSourceStaticHelper.print(count);
+        SameSourceStaticHelper.print(value);
+    }
+}
+
+class SameSourceStaticHelper {
+    static void touch() {
+    }
+
+    static void print(int value) {
+    }
+
+    static void print(double value) {
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("SameSourceStaticHelper::touch();")
+            && translation
+                .rust
+                .contains("SameSourceStaticHelper::print_int(count);")
+            && translation
+                .rust
+                .contains("SameSourceStaticHelper::print_double(value);")
+            && !translation.rust.contains("same_source_static_helper.touch"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "same_source_static_owner_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nested_static_table_field_type_guides_static_overload_selection() {
+    let translation = translate_source(
+        r#"
+class NestedStaticTableOverloadUse {
+    static void run() {
+        StaticTablePrinter.print(Table.VALUES);
+    }
+
+    static class Table {
+        static final double[] VALUES;
+        static {
+            VALUES = new double[2];
+        }
+    }
+}
+
+class StaticTablePrinter {
+    static void print(double[] values) {
+    }
+
+    static void print(int[] values) {
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("StaticTablePrinter::print_double_array(Table::VALUES);")
+            && !translation
+                .rust
+                .contains("StaticTablePrinter::print(Table::VALUES);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_static_table_overload_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn internal_mutable_array_argument_marks_local_vec_binding_mutable() {
+    let translation = translate_source(
+        r#"
+class InternalMutableArrayArgumentLowering {
+    static void fill(double out[]) {
+        out[0] = 1.0;
+    }
+
+    static int run() {
+        double[] values = new double[2];
+        fill(values);
+        return values.length;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut values: Vec<f64> = vec![0.0; 2 as usize];")
+            && translation
+                .rust
+                .contains("Self::fill(values.as_mut_slice());")
+            && translation.rust.contains("return values.len() as i32;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "internal_mutable_array_argument_lowering",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn local_array_argument_to_nullable_out_parameter_stays_owned_vec() {
+    let translation = translate_source(
+        r#"
+class LocalArrayNullableOutParameter {
+    static void fill(double out[]) {
+        if (out != null) {
+            out[0] = 1.0;
+        }
+    }
+
+    static double run() {
+        double[] values = new double[2];
+        fill(values);
+        return values[0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut values: Vec<f64> = vec![0.0; 2 as usize];")
+            && translation
+                .rust
+                .contains("Self::fill(Some(values.as_mut_slice()));")
+            && translation.rust.contains("return values[0 as usize];")
+            && !translation.rust.contains("Option<&mut Vec<f64>>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "local_array_nullable_out_parameter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_read_only_array_parameters_lower_as_optional_borrowed_slices() {
+    let translation = translate_source(
+        r#"
+class NullableReadOnlyArrayParameter {
+    static void copy(double input[], double output[]) {
+        if (input != null) {
+            output[0] = input[0];
+        }
+    }
+
+    static void combine(final double left[], final double right[], final double out[]) {
+        out[0] = left[0] + right[0];
+        out[1] = left[1] + right[1];
+    }
+
+    static double run() {
+        double[] values = new double[2];
+        double[] out = new double[2];
+        copy(values, out);
+        copy(values, out);
+        final double xs[] = new double[2];
+        final double facts[] = new double[2];
+        final double as[] = new double[2];
+        combine(xs, values, as);
+        combine(xs, facts, as);
+        return out[0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn copy(input: Option<&[f64]>, output: &mut [f64])")
+            && translation
+                .rust
+                .contains("pub fn combine(left: &[f64], right: Option<&[f64]>, out: &mut [f64])")
+            && translation
+                .rust
+                .contains("Self::copy(Some(values.as_slice()), out.as_mut_slice());")
+            && translation.rust.contains(
+                "Self::combine(xs.as_slice(), Some(values.as_slice()), r#as.as_mut_slice());"
+            )
+            && translation.rust.contains(
+                "Self::combine(xs.as_slice(), Some(facts.as_slice()), r#as.as_mut_slice());"
+            )
+            && !translation.rust.contains("input: Option<Vec<f64>>")
+            && !translation.rust.contains("left: Option<Vec<f64>>")
+            && !translation.rust.contains("Self::copy(values,"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_read_only_array_parameter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn caller_mutable_array_binding_does_not_force_readonly_callee_params_mutable() {
+    let translation = translate_source(
+        r#"
+class CallerMutableArrayBindingReadonlyCallee {
+    static void fill(double out[]) {
+        out[0] = 1.0;
+    }
+
+    static void sum(double left[], double right[], double out[]) {
+        out[0] = left[0] + right[0];
+    }
+
+    static double run() {
+        double[] values = new double[2];
+        double[] out = new double[2];
+        fill(values);
+        sum(values, values, out);
+        return out[0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn sum(left: &[f64], right: &[f64], out: &mut [f64])")
+            && translation
+                .rust
+                .contains("Self::sum(values.as_slice(), values.as_slice(), out.as_mut_slice());")
+            && !translation.rust.contains("pub fn sum(left: &mut")
+            && !translation
+                .rust
+                .contains("Self::sum(&mut values, &mut values"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "caller_mutable_array_binding_readonly_callee",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn same_call_readonly_array_argument_snapshots_before_mutable_output_alias() {
+    let translation = translate_source(
+        r#"
+class SameCallReadonlyArrayMutableOutputAlias {
+    static void add(double left[], double right[], double out[]) {
+        out[0] = left[0] + right[0];
+    }
+
+    static double run() {
+        double[] values = new double[2];
+        double[] temp = new double[2];
+        add(values, temp, values);
+        return values[0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "Self::add(values.clone()/* TODO(translation): validate same-call alias snapshot */.as_slice(), temp.as_slice(), values.as_mut_slice());"
+        )
+            && translation
+                .rust
+                .contains("pub fn add(left: &[f64], right: &[f64], out: &mut [f64])")
+            && !translation
+                .rust
+                .contains("Self::add(values.as_slice(), temp.as_slice(), values.as_mut_slice());"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "same_call_readonly_array_mutable_output_alias",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_out_parameter_reborrows_for_recursive_call_before_reuse() {
+    let translation = translate_source(
+        r#"
+class NullableOutParameterRecursiveCall {
+    static double fill(double x, double out[]) {
+        if (x < 0.0) {
+            double result = fill(-x, out);
+            if (out != null) {
+                out[0] = result;
+            }
+            return result;
+        }
+        if (out != null) {
+            out[0] = x;
+        }
+        return x;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Self::fill(-x, out.as_deref_mut())")
+            && translation
+                .rust
+                .contains("out.as_mut().expect(\"Java null receiver\")[0 as usize] = result;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_out_parameter_recursive_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_mutable_array_reborrows_as_readonly_slice_without_moving() {
+    let translation = translate_source(
+        r#"
+class OptionalMutableArrayReadonlyReborrow {
+    static void copy(double input[], double output[]) {
+        output[0] = input[0];
+    }
+
+    static void run(double values[]) {
+        double[] out = new double[2];
+        copy(values, out);
+        if (values != null) {
+            values[0] = out[0];
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn copy(input: Option<&[f64]>, output: &mut [f64])")
+            && translation
+                .rust
+                .contains("pub fn run(mut values: Option<&mut [f64]>)")
+            && translation
+                .rust
+                .contains("Self::copy(values.as_deref(), out.as_mut_slice());")
+            && translation.rust.contains(
+                "values.as_mut().expect(\"Java null receiver\")[0 as usize] = out[0 as usize];"
+            )
+            && !translation
+                .rust
+                .contains("values.map(|value| value.as_slice())"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_mutable_array_readonly_reborrow",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn borrowed_primitive_enhanced_for_element_copies_into_value_argument_slot() {
+    let translation = translate_source(
+        r#"
+class BorrowedPrimitiveEnhancedForElement {
+    static String format(double d) {
+        return Double.toString(d);
+    }
+
+    static void print(double[] values) {
+        for (double d : values) {
+            format(d);
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("for d in values.iter().copied()")
+            && translation.rust.contains("Self::format(d);")
+            && !translation.rust.contains("Self::format(*d);")
+            && !translation.rust.contains("for d in values.iter() {"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "borrowed_primitive_enhanced_for_element",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_array_receivers_unwrap_for_read_indexing_and_length() {
+    let translation = translate_source(
+        r#"
+class OptionalArrayReceiverReads {
+    String[] labels;
+    double[][] matrix;
+
+    double localFirst() {
+        double[] xs = new double[2];
+        return xs[0] + xs.length;
+    }
+
+    int labelCount() {
+        return labels.length;
+    }
+
+    String labelAt(int index) {
+        return labels[index];
+    }
+
+    double matrixAt(int row, int col) {
+        return matrix[row][col];
+    }
+
+    int matrixRows() {
+        return matrix.length;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("xs[0 as usize]"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("xs.len() as i32"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("self.labels.as_ref().expect(\"Java null receiver\").len() as i32"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("self.labels.as_ref().expect(\"Java null receiver\")[index as usize]"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "self.matrix.as_ref().expect(\"Java null receiver\")[[row as usize, col as usize]]"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("self.matrix.as_ref().expect(\"Java null receiver\").nrows() as i32"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("self.labels[index as usize]"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("self.matrix[[row as usize, col as usize]]"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn optional_array_field_length_unwraps_on_non_self_receiver() {
+    let translation = translate_source(
+        r#"
+class OptionalArrayFieldLengthOtherReceiver {
+    double[] values;
+
+    int otherLength(OptionalArrayFieldLengthOtherReceiver other) {
+        return other.values.length;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return other.values.as_ref().expect(\"Java null receiver\").len() as i32;")
+            && !translation.rust.contains("other.values.len()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_array_field_length_other_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn static_helper_mutating_parameter_fields_uses_mutable_borrow_slot() {
+    let translation = translate_source(
+        r#"
+class StaticHelperMutatesParameterFields {
+    int count;
+    double[] values;
+
+    static void copy(StaticHelperMutatesParameterFields source,
+                     StaticHelperMutatesParameterFields dest) {
+        dest.count = source.count;
+        dest.values = new double[source.values.length];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn copy(source: &StaticHelperMutatesParameterFields, dest: &mut StaticHelperMutatesParameterFields)"
+        ) && translation.rust.contains("dest.count = source.count;")
+            && translation.rust.contains(
+                "source.values.as_ref().expect(\"Java null receiver\").len() as i32"
+            ),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "static_helper_mutates_parameter_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn null_checked_static_helper_mutating_parameter_fields_keeps_mutable_borrow_slot() {
+    let translation = translate_source(
+        r#"
+class NullCheckedStaticHelperMutatesParameterFields {
+    int count;
+    double[] values;
+
+    static Object checkNotNull(Object value) {
+        if (value == null) {
+            throw new RuntimeException();
+        }
+        return value;
+    }
+
+    static void copy(NullCheckedStaticHelperMutatesParameterFields source,
+                     NullCheckedStaticHelperMutatesParameterFields dest) {
+        checkNotNull(source);
+        checkNotNull(dest);
+        dest.count = source.count;
+        dest.values = new double[source.values.length];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn copy(source: &NullCheckedStaticHelperMutatesParameterFields, dest: &mut NullCheckedStaticHelperMutatesParameterFields)"
+        ) && !translation.rust.contains("Self::check_not_null(source")
+            && !translation.rust.contains("Self::check_not_null(dest")
+            && translation.rust.contains("dest.count = source.count;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn cross_source_null_checked_static_helper_keeps_concrete_mutable_borrow_slot() {
+    let translation = translate_source(
+        r#"
+class CrossSourceNullCheckHelper {
+    static Object checkNotNull(Object value) {
+        if (value == null) {
+            throw new RuntimeException();
+        }
+        return value;
+    }
+}
+
+class CrossSourceNullCheckedCopy {
+    int count;
+    double[] values;
+
+    public static void copy(CrossSourceNullCheckedCopy source, CrossSourceNullCheckedCopy dest) {
+        CrossSourceNullCheckHelper.checkNotNull(source);
+        CrossSourceNullCheckHelper.checkNotNull(dest);
+        dest.count = source.count;
+        dest.values = new double[source.values.length];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn copy(source: CrossSourceNullCheckedCopy, dest: &mut CrossSourceNullCheckedCopy)"
+        ) && !translation
+            .rust
+            .contains("CrossSourceNullCheckHelper::check_not_null(source")
+            && !translation
+                .rust
+                .contains("CrossSourceNullCheckHelper::check_not_null(dest")
+            && translation.rust.contains("dest.count = source.count;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn local_passed_to_resolved_static_mutable_source_param_is_declared_mutable() {
+    let translation = translate_source(
+        r#"
+class LocalPassedToStaticMutableSourceParam {
+    int count;
+    double[] values;
+
+    public static void copy(LocalPassedToStaticMutableSourceParam source,
+                            LocalPassedToStaticMutableSourceParam dest) {
+        dest.count = source.count;
+        dest.values = new double[source.values.length];
+    }
+
+    public LocalPassedToStaticMutableSourceParam copy() {
+        LocalPassedToStaticMutableSourceParam result = new LocalPassedToStaticMutableSourceParam();
+        LocalPassedToStaticMutableSourceParam.copy(this, result);
+        return result;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn copy_local_passed_to_static_mutable_source_param_local_passed_to_static_mutable_source_param(source: LocalPassedToStaticMutableSourceParam, dest: &mut LocalPassedToStaticMutableSourceParam)"
+        ) && translation
+            .rust
+            .contains("let mut result: LocalPassedToStaticMutableSourceParam")
+            && translation.rust.contains("&mut result")
+            && !translation
+                .rust
+                .contains("let result: LocalPassedToStaticMutableSourceParam"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "local_passed_to_static_mutable_source_param",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn two_dimensional_numeric_array_literal_with_comment_lowers_to_ndarray_arr2() {
+    let translation = translate_source(
+        r#"
+class NdarrayMatrixLiteralWithComment {
+    double[][] literal() {
+        return new double[][] {
+            // W C M H
+            {1.0, 2.0},
+            {3.0, 4.0}
+        };
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return ndarray::arr2(&[[1f64, 2f64], [3f64, 4f64]]);"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("vec![//"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn two_dimensional_row_replacement_lowers_to_ndarray_row_mut_assign() {
     let translation = translate_source(
         r#"
 class NdarrayRowReplacement {
     void replace(double[][] values, int row, double[] replacement) {
         values[row] = replacement;
+    }
+
+    void fill(int[][] values) {
+        values[0] = new int[]{2, 3, 6, 4};
     }
 }
 "#,
@@ -8981,5 +18727,279 @@ class NdarrayRowReplacement {
         ),
         "{}",
         translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "values.row_mut(0 as usize).assign(&ndarray::ArrayView1::from(&vec![2, 3, 6, 4]));"
+        ) && !translation
+            .rust
+            .contains("ArrayView1::from(vec![2, 3, 6, 4])"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn ragged_object_two_dimensional_arrays_stay_nested_vecs() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+import java.util.Hashtable;
+import java.util.Vector;
+
+class RaggedObjectGroups {
+    static File[][] groups(File[] files) {
+        Hashtable<String, Vector<File>> fileBases = new Hashtable<String, Vector<File>>();
+        String baseName = files[0].getName();
+        fileBases.put(baseName, new Vector<File>());
+        fileBases.get(baseName).add(files[0]);
+        String[] baseNames = fileBases.keySet().toArray(new String[0]);
+        File[][] fileGroups = new File[baseNames.length][];
+        for (int i = 0; i < baseNames.length; i++) {
+            fileGroups[i] = fileBases.get(baseNames[i]).toArray(new File[0]);
+        }
+        return fileGroups;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("-> Vec<Vec<File>>")
+            && translation
+                .rust
+                .contains("let mut file_groups: Vec<Vec<File>>")
+            && translation
+                .rust
+                .contains("vec![Vec::new(); base_names.len() as i32 as usize]")
+            && translation
+                .rust
+                .contains("file_bases.get_mut(&base_name).expect(\"Java null receiver\").push(")
+            && !translation.rust.contains("ndarray::Array2<File>")
+            && !translation.rust.contains("row_mut"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "ragged_object_groups",
+        vec![GeneratedCrateModule {
+            name: "ragged_object_groups",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn explicit_pushback_input_stream_cast_receiver_keeps_facade_target() {
+    let translation = translate_source(
+        r#"
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.PushbackInputStream;
+import java.util.zip.GZIPInputStream;
+
+class CastedPushbackInputStreamReceiver extends GZIPInputStream {
+    CastedPushbackInputStreamReceiver(InputStream input) throws IOException {
+        super(input);
+    }
+
+    void push(byte[] buffer) throws IOException {
+        ((PushbackInputStream)this.in).unread(buffer, 0, 1);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "{ let _java_facade_cast_source = &(self.r#in); PushbackInputStream::default() }"
+        ) && translation.rust.contains(".unread(")
+            && !translation.rust.contains("self.r#in.unread("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "explicit_pushback_input_stream_cast_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nested_static_table_classes_get_simple_aliases_and_default_array_consts() {
+    let translation = translate_source(
+        r#"
+class NestedStaticTableOwner {
+    private static final int LEN = 2;
+
+    static double first(int index) {
+        return ExpTable.TABLE_A[index] + lowerMant.TABLE[index][0];
+    }
+
+    private static class ExpTable {
+        private static final double[] TABLE_A;
+        static {
+            TABLE_A = new double[NestedStaticTableOwner.LEN];
+        }
+    }
+
+    private static class lowerMant {
+        private static final double[][] TABLE;
+        static {
+            TABLE = new double[NestedStaticTableOwner.LEN][];
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub type ExpTable = NestedStaticTableOwnerExpTable;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub type LowerMant = NestedStaticTableOwnerLowerMant;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("const TABLE_A: &'static [f64] = &[];"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("const TABLE: &'static [&'static [f64]] = &[];"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("ExpTable::TABLE_A[index as usize]")
+            && translation
+                .rust
+                .contains("LowerMant::TABLE[index as usize][0 as usize]"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nested_static_table_aliases",
+        vec![GeneratedCrateModule {
+            name: "nested_static_table_owner",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn trait_impl_forwarding_recovers_owned_array_from_slice_trait_slot() {
+    let translation = translate_source(
+        r#"
+interface SliceArraySink {
+    void accept(double[] values);
+}
+
+class OwningArraySink implements SliceArraySink {
+    private double[] stored;
+
+    public void accept(double[] values) {
+        stored = values;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("fn accept(&mut self, values: &[f64])"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "fn accept(&mut self, values: &[f64]) { OwningArraySink::accept(self, values.to_vec()); }"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("OwningArraySink::accept(self, values);"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "trait_impl_array_forwarding",
+        vec![GeneratedCrateModule {
+            name: "trait_impl_array_forwarding",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn synchronized_statement_preserves_block_body_after_guard_returns() {
+    let translation = translate_source(
+        r#"
+class SynchronizedBodyAfterGuard {
+    private int value;
+
+    boolean matches(Object object) {
+        if (object == this) {
+            return true;
+        }
+        if (object == null) {
+            return false;
+        }
+        synchronized (this) {
+            return value == 3;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("if object.is_none() {\n            return false;\n        }"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("return self.value == 3;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("expected `bool`, found `()`"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "synchronized_body_after_guard",
+        vec![GeneratedCrateModule {
+            name: "synchronized_body_after_guard",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }

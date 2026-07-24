@@ -59,6 +59,93 @@ fn focused_package_support_emits_uri_parse_and_path_helpers() {
         script.contains("pub fn get_path(&self) -> String"),
         "{script}"
     );
+    assert!(
+        script.contains("Path\\nURI\\nFile\\nJavaPathArg\\nIOUtils"),
+        "{script}"
+    );
+    assert!(script.contains("shared[impl_trait]"), "{script}");
+}
+
+#[test]
+fn focused_package_source_type_stub_stripping_is_separate_from_shared_support() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(
+        script.contains("strip_source_type_facade_stubs()"),
+        "{script}"
+    );
+    assert!(
+        script.contains("strip_shared_support_items \"$rust_path\" \"$shared_support_types_path\""),
+        "{script}"
+    );
+    assert!(
+        script.contains("strip_source_type_facade_stubs \"$rust_path\" \"$source_types_path\""),
+        "{script}"
+    );
+    assert!(
+        !script.contains("strip_shared_support_items \"$rust_path\" \"$source_types_path\""),
+        "{script}"
+    );
+}
+
+#[test]
+fn focused_package_shared_support_stripper_keeps_dyn_trait_inherent_impls() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(
+        script.contains("(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\\{"),
+        "{script}"
+    );
+    assert!(
+        script.contains("(dyn[[:space:]]+)?/, \"\", impl_name)"),
+        "{script}"
+    );
+}
+
+#[test]
+fn focused_package_module_type_extractor_strips_trait_bounds() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(script.contains("sub(/[=;{(<:].*/, \"\", name)"), "{script}");
+}
+
+#[test]
+fn focused_package_source_type_stub_stripper_removes_earlier_same_module_duplicate() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(script.contains("current_source_decl_positions"), "{script}");
+    assert!(
+        script.contains("if any(position > index for position in current_source_decl_positions):"),
+        "{script}"
+    );
+}
+
+#[test]
+fn focused_package_source_type_stub_stripping_does_not_treat_lifetimes_as_chars() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(
+        script.contains("if ch == \"'\":\n                next_index = index + 1"),
+        "{script}"
+    );
+    assert!(
+        script.contains("is_char_literal = index + 2 < len(line) and line[index + 2] == \"'\""),
+        "{script}"
+    );
+    assert!(
+        script.contains("if ch == \"'\" and is_char_literal:"),
+        "{script}"
+    );
 }
 
 #[test]
@@ -244,6 +331,38 @@ pub struct UseB;
 "#,
     )
     .unwrap();
+    fs::write(
+        generated_dir.join("00003_UseColorAlias.rs"),
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct JavaAwtColor;
+
+impl JavaAwtColor {
+    pub const BLACK: Color = Color;
+}
+
+pub type Color = JavaAwtColor;
+
+pub struct UseColorAlias;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00004_UseColorTarget.rs"),
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct JavaAwtColor;
+
+impl JavaAwtColor {
+    pub const BLACK: JavaAwtColor = JavaAwtColor;
+}
+
+pub type Color = JavaAwtColor;
+
+pub struct UseColorTarget;
+"#,
+    )
+    .unwrap();
 
     let shared_support = dir.join("shared.rs");
     let shared_types = dir.join("shared-types.tsv");
@@ -279,11 +398,230 @@ pub struct UseB;
         "{shared}"
     );
     assert!(
+        shared.contains("pub const BLACK: Color = JavaAwtColor;")
+            && !shared.contains("pub const BLACK: Color = Color;")
+            && shared.matches("pub const BLACK:").count() == 1,
+        "{shared}"
+    );
+    assert!(
         !fs::read_to_string(generated_dir.join("00001_UseA.rs"))
             .unwrap()
             .contains("impl VCFConstants"),
         "merged support impl should be removed from source module"
     );
+}
+
+#[test]
+fn shared_support_merger_adds_level_constants_for_promoted_logging_facade() {
+    let dir = unique_temp_dir("shared_support_level_consts");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    for (file, primary, field) in [
+        ("00001_UseWarning.rs", "UseWarning", "WARNING"),
+        ("00002_UseSevere.rs", "UseSevere", "SEVERE"),
+    ] {
+        fs::write(
+            generated_dir.join(file),
+            format!(
+                r#"
+#[derive(Clone, Debug, Default)]
+pub struct Level;
+
+pub struct {primary};
+
+impl {primary} {{
+    pub fn value() -> Level {{
+        Level::{field}
+    }}
+}}
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(
+        shared.contains("pub struct Level;")
+            && shared.contains("pub const WARNING: Level = Level;")
+            && shared.contains("pub const SEVERE: Level = Level;"),
+        "{shared}"
+    );
+}
+
+#[test]
+fn shared_support_merger_adds_input_stream_upcast_for_promoted_jdk_facades() {
+    let dir = unique_temp_dir("shared_support_input_stream_upcast");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    for (file, primary) in [
+        ("00001_UseFileInput.rs", "UseFileInput"),
+        ("00002_UseInput.rs", "UseInput"),
+    ] {
+        fs::write(
+            generated_dir.join(file),
+            format!(
+                r#"
+#[derive(Clone, Debug, Default)]
+pub struct InputStream;
+
+#[derive(Clone, Debug, Default)]
+pub struct FileInputStream;
+
+pub struct {primary};
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(
+        &shared_support,
+        "#[derive(Clone, Debug, Default)]\npub struct InputStream;\n",
+    )
+    .unwrap();
+    fs::write(&shared_types, "InputStream\n").unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(
+        shared.contains("impl From<FileInputStream> for InputStream"),
+        "{shared}"
+    );
+}
+
+#[test]
+fn shared_support_merger_does_not_let_local_alias_override_existing_shared_type() {
+    let dir = unique_temp_dir("shared_support_alias_collision");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_Base64.rs"),
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct Base64OutputStream;
+
+pub type OutputStream = Base64OutputStream;
+
+impl Base64OutputStream {
+    pub fn new_output_stream(_arg0: OutputStream) -> Self { Default::default() }
+    pub fn source_owned_stateful_method(&mut self) {
+        self.position = 0;
+    }
+}
+
+pub struct Base64;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_ZipUser.rs"),
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct ZipOutputStream;
+
+pub struct ZipUser;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(
+        &shared_support,
+        "#[derive(Clone, Debug, Default)]\npub struct Base64OutputStream;\n#[derive(Clone, Debug, Default)]\npub struct OutputStream;\n#[derive(Clone, Debug, Default)]\npub struct ZipOutputStream;\npub type OutputStream = Base64OutputStream;\n",
+    )
+    .unwrap();
+    fs::write(
+        &shared_types,
+        "Base64OutputStream\nOutputStream\nZipOutputStream\n",
+    )
+    .unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    let base64 = fs::read_to_string(generated_dir.join("00001_Base64.rs")).unwrap();
+    assert!(shared.contains("pub struct OutputStream;"), "{shared}");
+    assert!(
+        shared.contains("impl From<ZipOutputStream> for OutputStream"),
+        "{shared}"
+    );
+    assert!(
+        !shared.contains("pub type OutputStream = Base64OutputStream;"),
+        "{shared}"
+    );
+    assert!(!shared.contains("source_owned_stateful_method"), "{shared}");
+    assert!(
+        !base64.contains("pub type OutputStream = Base64OutputStream;"),
+        "{base64}"
+    );
+    assert!(!base64.contains("source_owned_stateful_method"), "{base64}");
 }
 
 #[test]
@@ -361,6 +699,351 @@ pub struct UseB;
 }
 
 #[test]
+fn shared_support_merger_promotes_trait_dependency_for_shared_facade_impl() {
+    let dir = unique_temp_dir("shared_support_trait_impl_dependency");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_UseA.rs"),
+        r#"
+pub trait Localizable: std::fmt::Display {}
+
+impl dyn Localizable {
+    pub fn anonymous() -> Box<dyn Localizable> { panic!("anonymous") }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LocalizedFormats;
+
+impl Localizable for LocalizedFormats {}
+
+impl Eq for LocalizedFormats {}
+
+pub trait JavaErasedObjectFacade {
+    fn equals<T0>(&self, _arg0: T0) -> bool;
+}
+
+impl JavaErasedObjectFacade for Box<dyn std::any::Any> {
+    fn equals<T0>(&self, _arg0: T0) -> bool { Default::default() }
+}
+
+pub struct UseA;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_UseB.rs"),
+        r#"
+pub trait Localizable: std::fmt::Display {}
+
+#[derive(Clone, Debug, Default)]
+pub struct LocalizedFormats;
+
+pub struct UseB;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(&shared_support).unwrap();
+    assert!(shared.contains("pub trait Localizable"), "{shared}");
+    assert!(shared.contains("impl dyn Localizable"), "{shared}");
+    assert!(
+        shared.contains("pub fn anonymous() -> Box<dyn Localizable>"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("impl Localizable for LocalizedFormats"),
+        "{shared}"
+    );
+    assert!(
+        !shared.contains("pub trait JavaErasedObjectFacade"),
+        "unrelated traits should not be promoted by trait-dependency closure:\n{shared}"
+    );
+    assert!(
+        !shared.contains("pub trait Eq") && !shared.contains("pub trait PartialEq"),
+        "standard traits should not be promoted as crate-local support traits:\n{shared}"
+    );
+    assert!(
+        !fs::read_to_string(generated_dir.join("00001_UseA.rs"))
+            .unwrap()
+            .contains("impl Localizable for LocalizedFormats"),
+        "promoted trait impl should be removed from source module"
+    );
+    assert!(
+        !fs::read_to_string(generated_dir.join("00002_UseB.rs"))
+            .unwrap()
+            .contains("pub trait Localizable"),
+        "promoted trait declaration should be removed from sibling module"
+    );
+    assert!(
+        !fs::read_to_string(generated_dir.join("00001_UseA.rs"))
+            .unwrap()
+            .contains("impl dyn Localizable"),
+        "promoted dyn-trait inherent impl should be removed from source module"
+    );
+}
+
+#[test]
+fn shared_support_merger_removes_orphan_trait_impl_for_missing_external_target() {
+    let dir = unique_temp_dir("shared_support_orphan_trait_impl");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_UseA.rs"),
+        r#"
+pub trait Localizable: std::fmt::Display {}
+impl Localizable for LocalizedFormats {}
+pub struct UseA;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_UseB.rs"),
+        r#"
+pub trait Localizable: std::fmt::Display {}
+impl Localizable for LocalizedFormats {}
+pub struct UseB;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(shared.contains("pub trait Localizable"), "{shared}");
+    assert!(
+        !shared.contains("impl Localizable for LocalizedFormats"),
+        "orphan impl target should not be promoted without a LocalizedFormats declaration:\n{shared}"
+    );
+    for file in ["00001_UseA.rs", "00002_UseB.rs"] {
+        let source = fs::read_to_string(generated_dir.join(file)).unwrap();
+        assert!(
+            !source.contains("impl Localizable for LocalizedFormats"),
+            "orphan impl should be removed from {file}:\n{source}"
+        );
+        assert!(
+            !source.contains("pub trait Localizable"),
+            "promoted trait should be removed from {file}:\n{source}"
+        );
+    }
+}
+
+#[test]
+fn shared_support_merger_merges_erased_object_facade_trait_and_complex_impl() {
+    let dir = unique_temp_dir("shared_support_erased_object_facade_impl");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_UseA.rs"),
+        r#"
+pub trait JavaErasedObjectFacade {
+    fn close(&self) -> Result<(), JavaException>;
+}
+
+impl JavaErasedObjectFacade for Box<dyn std::any::Any> {
+    fn close(&self) -> Result<(), JavaException> { Ok(()) }
+}
+
+pub struct UseA;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_UseB.rs"),
+        r#"
+pub trait JavaErasedObjectFacade {
+    fn length(&self) -> ();
+}
+
+impl JavaErasedObjectFacade for Box<dyn std::any::Any> {
+    fn length(&self) -> () { () }
+}
+
+pub struct UseB;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(&shared_support).unwrap();
+    assert!(
+        shared.contains("pub trait JavaErasedObjectFacade"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("fn close(&self) -> Result<(), JavaException>;"),
+        "{shared}"
+    );
+    assert!(shared.contains("fn length(&self) -> ();"), "{shared}");
+    assert!(
+        shared.contains("impl JavaErasedObjectFacade for Box<dyn std::any::Any>"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("fn close(&self) -> Result<(), JavaException> { Ok(()) }"),
+        "{shared}"
+    );
+    assert!(shared.contains("fn length(&self) -> () { () }"), "{shared}");
+    for file in ["00001_UseA.rs", "00002_UseB.rs"] {
+        let source = fs::read_to_string(generated_dir.join(file)).unwrap();
+        assert!(
+            !source.contains("impl JavaErasedObjectFacade for Box<dyn std::any::Any>"),
+            "{source}"
+        );
+        assert!(
+            !source.contains("pub trait JavaErasedObjectFacade"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn shared_support_merger_prefers_static_to_string_variant_when_static_call_is_used() {
+    let dir = unique_temp_dir("shared_support_static_to_string_preference");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_UseA.rs"),
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct Integer;
+
+impl Integer {
+    pub fn to_string(&self) -> String { Default::default() }
+}
+
+pub struct UseA;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_UseB.rs"),
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct Integer;
+
+impl Integer {
+    pub fn to_string(_arg0: impl std::fmt::Display) -> String { _arg0.to_string() }
+}
+
+pub struct UseB;
+
+impl UseB {
+    pub fn width(&self, value: i32) -> i32 {
+        Integer::to_string(value).len() as i32
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(&shared_support).unwrap();
+    assert!(
+        shared.contains(
+            "pub fn to_string(_arg0: impl std::fmt::Display) -> String { _arg0.to_string() }"
+        ),
+        "{shared}"
+    );
+    assert!(
+        !shared.contains("pub fn to_string(&self) -> String { Default::default() }"),
+        "{shared}"
+    );
+}
+
+#[test]
 fn shared_support_merger_ignores_braces_inside_format_strings() {
     let dir = unique_temp_dir("shared_support_format_braces");
     let generated_dir = dir.join("generated");
@@ -425,6 +1108,98 @@ impl UseShared {
         fs::read_to_string(generated_dir.join("00001_UseA.rs"))
             .unwrap()
             .contains("pub fn still_here(&self) -> bool")
+    );
+}
+
+#[test]
+fn shared_support_merger_preserves_display_impl_with_formatter_lifetime() {
+    let dir = unique_temp_dir("shared_support_display_lifetime");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    let source = r#"
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SharedKind {
+    INFO,
+    FORMAT,
+}
+
+impl std::fmt::Display for SharedKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl Eq for SharedKind {}
+
+impl PartialEq for SharedKind {
+    fn eq(&self, _other: &Self) -> bool { true }
+}
+
+impl std::hash::Hash for SharedKind {
+    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
+}
+
+pub struct UseShared;
+
+impl UseShared {
+    pub fn kind(&self) -> SharedKind {
+        return SharedKind::INFO;
+    }
+}
+"#;
+    fs::write(generated_dir.join("00001_UseA.rs"), source).unwrap();
+    fs::write(
+        generated_dir.join("00002_UseB.rs"),
+        source.replace("UseShared", "UseB"),
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(
+        shared.contains("impl std::fmt::Display for SharedKind"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("    }\n}"),
+        "Display impl should retain both function and impl closing braces:\n{shared}"
+    );
+    assert!(
+        !fs::read_to_string(generated_dir.join("00001_UseA.rs"))
+            .unwrap()
+            .contains("impl std::fmt::Display for SharedKind")
+    );
+    assert!(!shared.contains("impl Eq for SharedKind"), "{shared}");
+    assert!(
+        !shared.contains("impl PartialEq for SharedKind"),
+        "{shared}"
+    );
+    assert!(
+        !shared.contains("impl std::hash::Hash for SharedKind"),
+        "{shared}"
     );
 }
 

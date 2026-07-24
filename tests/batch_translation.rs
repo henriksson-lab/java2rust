@@ -124,6 +124,67 @@ public class B {
 }
 
 #[test]
+fn batch_duplicate_simple_type_names_keep_distinct_signature_keys() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource {
+            path: "a/DuplicateOwner.java".to_string(),
+            source: r#"
+package a;
+
+public class DuplicateOwner {
+    private int first;
+
+    public int firstValue() {
+        return first;
+    }
+}
+"#
+            .to_string(),
+        },
+        new_java2rust::BatchSource {
+            path: "b/DuplicateOwner.java".to_string(),
+            source: r#"
+package b;
+
+public class DuplicateOwner {
+    private int second;
+
+    public int secondValue() {
+        return second;
+    }
+}
+"#
+            .to_string(),
+        },
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions {
+                emission_jobs: 2,
+                ..Default::default()
+            },
+        );
+
+    assert_eq!(report.translations.len(), 2);
+    assert!(
+        report.translations[0].rust.contains("first_value")
+            && report.translations[1].rust.contains("second_value"),
+        "{:#?}",
+        report
+            .translations
+            .iter()
+            .map(|translation| (&translation.path, &translation.rust))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn translate_batch_cli_writes_phase_and_worker_events() {
     let dir = unique_temp_dir("translate_batch_events");
     let source_dir = dir.join("java");
@@ -251,6 +312,25 @@ fn translate_batch_cli_writes_phase_and_worker_events() {
     assert!(
         worker_events
             .lines()
+            .any(|line| line.starts_with("batch_global_signature\t") && line.contains("\t0\t")),
+        "{worker_events}"
+    );
+    assert!(
+        worker_events.lines().any(|line| {
+            line.starts_with("batch_global_signature_fixpoint_iteration_live\t")
+                && line.contains("\t0\t")
+        }),
+        "{worker_events}"
+    );
+    assert!(
+        worker_events
+            .lines()
+            .any(|line| line.starts_with("batch_emission\t") && line.contains("\t0\t")),
+        "{worker_events}"
+    );
+    assert!(
+        worker_events
+            .lines()
             .any(|line| line.starts_with("emit_start\t") && line.contains("\t1\t")),
         "{worker_events}"
     );
@@ -339,4 +419,65 @@ fn focused_batch_artifact_comparator_ignores_output_prefixes_and_checks_hashes()
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
+}
+
+#[test]
+fn focused_package_offline_cargo_uses_local_ndarray_shim() {
+    let dir = unique_temp_dir("focused_ndarray_shim");
+    let primary = dir.join("java");
+    let out = dir.join("out");
+    fs::create_dir_all(&primary).unwrap();
+    fs::write(
+        primary.join("MatrixSource.java"),
+        r#"
+public class MatrixSource {
+    public double[][] literal() {
+        return new double[][] {{1.0, 2.0}, {3.0, 4.0}};
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let mut command = Command::new(&script);
+    command
+        .arg("--skip-resolver-bench")
+        .arg("--offline-cargo")
+        .arg("--jobs")
+        .arg("1")
+        .arg("--primary")
+        .arg(&primary)
+        .arg("--out")
+        .arg(&out);
+    if let Ok(binary) = std::env::var("CARGO_BIN_EXE_new-java2rust") {
+        command.env("NEW_JAVA2RUST_BIN", binary);
+    }
+    let output = command.output().expect("run focused package wrapper");
+    assert!(
+        output.status.success(),
+        "focused wrapper failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cargo_toml = fs::read_to_string(out.join("generated-crate/Cargo.toml")).unwrap();
+    assert!(
+        cargo_toml.contains("ndarray = { path = \"ndarray-shim\" }"),
+        "{cargo_toml}"
+    );
+    assert!(
+        out.join("generated-crate/ndarray-shim/src/lib.rs").exists(),
+        "missing local ndarray shim"
+    );
+    let ndarray_shim =
+        fs::read_to_string(out.join("generated-crate/ndarray-shim/src/lib.rs")).unwrap();
+    assert!(
+        ndarray_shim.contains("pub fn from_rows(rows: &[&[T]]) -> Self")
+            && ndarray_shim.contains("pub fn iter(&self) -> Rows<'_, T>"),
+        "{ndarray_shim}"
+    );
+    let summary = fs::read_to_string(out.join("summary.tsv")).unwrap();
+    assert!(summary.contains("cargo_check\tok"), "{summary}");
+    assert!(summary.contains("cargo_failure_kind\tnone"), "{summary}");
 }

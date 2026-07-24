@@ -58,11 +58,35 @@ impl TypeEnv {
     }
 
     pub fn local_type(&self, name: &str) -> Option<&JavaType> {
-        self.locals.get(name)
+        self.locals
+            .get(name)
+            .or_else(|| {
+                name.strip_prefix("r#")
+                    .and_then(|plain| self.locals.get(plain))
+            })
+            .or_else(|| {
+                if name.starts_with("r#") {
+                    None
+                } else {
+                    self.locals.get(&format!("r#{name}"))
+                }
+            })
     }
 
     pub fn field_type(&self, name: &str) -> Option<&JavaType> {
-        self.fields.get(name)
+        self.fields
+            .get(name)
+            .or_else(|| {
+                name.strip_prefix("r#")
+                    .and_then(|plain| self.fields.get(plain))
+            })
+            .or_else(|| {
+                if name.starts_with("r#") {
+                    None
+                } else {
+                    self.fields.get(&format!("r#{name}"))
+                }
+            })
     }
 
     pub fn type_field_type(&self, type_name: &str, field_name: &str) -> Option<&JavaType> {
@@ -129,8 +153,10 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
                 JavaType::Unknown(field.clone())
             }
         }
-        Expr::ArrayAccess(array, _) => sequence_element_type(&infer_expr_type(array, env))
-            .unwrap_or_else(|| JavaType::Unknown("array_access".to_string())),
+        Expr::ArrayAccess(array, _) => {
+            sequence_element_type_after_optional(&infer_expr_type(array, env))
+                .unwrap_or_else(|| JavaType::Unknown("array_access".to_string()))
+        }
         Expr::ArrayCreation {
             element_type,
             dimensions,
@@ -284,6 +310,14 @@ pub fn sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
     }
 }
 
+pub fn sequence_element_type_after_optional(java_ty: &JavaType) -> Option<JavaType> {
+    sequence_element_type(java_ty).or_else(|| {
+        optional_element_type(java_ty)
+            .as_ref()
+            .and_then(sequence_element_type)
+    })
+}
+
 pub fn two_dimensional_array_element_type(java_ty: &JavaType) -> Option<JavaType> {
     match java_ty {
         JavaType::Array(row_ty) => match row_ty.as_ref() {
@@ -296,6 +330,11 @@ pub fn two_dimensional_array_element_type(java_ty: &JavaType) -> Option<JavaType
     }
 }
 
+pub fn ndarray_array2_element_type(java_ty: &JavaType) -> Option<JavaType> {
+    let element_ty = two_dimensional_array_element_type(java_ty)?;
+    matches!(element_ty, JavaType::Primitive(_)).then_some(element_ty)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArrayLengthDimension {
     Rows,
@@ -304,15 +343,24 @@ pub enum ArrayLengthDimension {
 }
 
 pub fn array_length_dimension(receiver: &Expr, env: &TypeEnv) -> ArrayLengthDimension {
-    if two_dimensional_array_element_type(&infer_expr_type(receiver, env)).is_some() {
+    if two_dimensional_array_element_type_after_optional(&infer_expr_type(receiver, env)).is_some()
+    {
         return ArrayLengthDimension::Rows;
     }
     if let Expr::ArrayAccess(array, _) = receiver
-        && two_dimensional_array_element_type(&infer_expr_type(array, env)).is_some()
+        && two_dimensional_array_element_type_after_optional(&infer_expr_type(array, env)).is_some()
     {
         return ArrayLengthDimension::Columns;
     }
     ArrayLengthDimension::Linear
+}
+
+fn two_dimensional_array_element_type_after_optional(java_ty: &JavaType) -> Option<JavaType> {
+    two_dimensional_array_element_type(java_ty).or_else(|| {
+        optional_element_type(java_ty)
+            .as_ref()
+            .and_then(two_dimensional_array_element_type)
+    })
 }
 
 pub fn optional_element_type(java_ty: &JavaType) -> Option<JavaType> {
@@ -442,6 +490,14 @@ fn normalize_stream_element_type(ty: JavaType) -> JavaType {
 
 pub fn is_final_by_default(java_ty: &JavaType) -> bool {
     matches!(java_ty, JavaType::Primitive(_) | JavaType::String)
+        || matches!(
+            java_ty,
+            JavaType::Named { name, .. } | JavaType::Unknown(name)
+                if matches!(
+                    name.rsplit('.').next().unwrap_or(name),
+                    "BufferedImage" | "Graphics"
+                )
+        )
 }
 
 pub fn infer_member_access_type(receiver: &Expr, member: &str, env: &TypeEnv) -> Option<JavaType> {
@@ -491,13 +547,23 @@ fn source_type_field_type(receiver_ty: &JavaType, member: &str, env: &TypeEnv) -
         JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
         _ => return None,
     };
+    let member_alias = crate::parser::to_snake_case(member);
     env.type_field_type(receiver_name, member)
-        .or_else(|| env.type_field_type(receiver_name, &crate::parser::to_snake_case(member)))
+        .or_else(|| env.type_field_type(receiver_name, &member_alias))
+        .or_else(|| {
+            env.static_type_alias(receiver_name)
+                .and_then(|owner| env.type_field_type(owner, member))
+        })
+        .or_else(|| {
+            env.static_type_alias(receiver_name)
+                .and_then(|owner| env.type_field_type(owner, &member_alias))
+        })
         .cloned()
 }
 
 fn is_java_length_receiver(ty: &JavaType) -> bool {
     matches!(ty, JavaType::Array(_) | JavaType::String)
+        || optional_element_type(ty).is_some_and(|inner| is_java_length_receiver(&inner))
 }
 
 fn infer_binary_type(op: BinaryOp, left: &Expr, right: &Expr, env: &TypeEnv) -> JavaType {
@@ -546,7 +612,9 @@ fn assignment_target_type(target: &Expr, env: &TypeEnv) -> Option<JavaType> {
                 None
             }
         }
-        Expr::ArrayAccess(array, _) => sequence_element_type(&infer_expr_type(array, env)),
+        Expr::ArrayAccess(array, _) => {
+            sequence_element_type_after_optional(&infer_expr_type(array, env))
+        }
         _ => None,
     }
 }

@@ -1,12 +1,8 @@
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::FactSet;
 use crate::java_ir::{Expr, JavaType, PrimitiveType};
-use crate::shape_projection::{
-    borrowed_string_content_shape, iteration_element_shape_with_effective_facts,
-    owned_string_value_shape, string_list_value_shape,
-};
+use crate::shape_projection::iteration_element_shape_with_effective_facts;
 use crate::slot_shape::RustSlotShape;
-use crate::stdlib::{is_borrowed_string_view_method, is_owned_string_result_method};
 use crate::types::{TypeEnv, infer_expr_type, optional_element_type, stream_element_type};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,12 +42,6 @@ pub fn infer_stream_lambda_body_shape_with_facts(
     if let Some(shape) = infer_stream_lambda_call_shape_from_shared_plan(expr, env, facts) {
         return shape;
     }
-    if stream_lambda_body_is_borrowed_str(expr) {
-        return borrowed_string_content_shape();
-    }
-    if stream_lambda_body_is_owned_string(expr) {
-        return owned_string_value_shape();
-    }
     default.clone()
 }
 
@@ -88,28 +78,6 @@ pub fn infer_stream_source_element_shape_with_effective_facts(
         .map(|ty| iteration_element_shape_with_effective_facts(ty, facts))
 }
 
-fn stream_lambda_body_is_borrowed_str(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Call {
-            name,
-            args,
-            ..
-        } if is_borrowed_string_view_method(name, args.len())
-    )
-}
-
-fn stream_lambda_body_is_owned_string(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::Call {
-            name,
-            args,
-            ..
-        } if is_owned_string_result_method(name, args.len())
-    )
-}
-
 fn infer_stream_lambda_call_shape_from_shared_plan(
     expr: &Expr,
     env: &TypeEnv,
@@ -132,51 +100,8 @@ fn infer_stream_lambda_call_shape_from_shared_plan(
         facts,
         env,
     );
-    match target {
-        crate::call_plan::CallTargetPlan::NativeJavaStatic {
-            method:
-                crate::call_plan::NativeJavaStaticMethod::IntegerParseInt
-                | crate::call_plan::NativeJavaStaticMethod::MathMin
-                | crate::call_plan::NativeJavaStaticMethod::MathToIntExact,
-        }
-        | crate::call_plan::CallTargetPlan::NativeJavaInstance {
-            method: crate::call_plan::NativeJavaInstanceMethod::StringLen,
-            ..
-        } => Some(RustSlotShape::conservative(JavaType::Primitive(
-            PrimitiveType::Int,
-        ))),
-        crate::call_plan::CallTargetPlan::NativeJavaStatic {
-            method: crate::call_plan::NativeJavaStaticMethod::DoubleParseDouble,
-        } => Some(RustSlotShape::conservative(JavaType::Primitive(
-            PrimitiveType::Double,
-        ))),
-        crate::call_plan::CallTargetPlan::NativeJavaInstance {
-            method:
-                crate::call_plan::NativeJavaInstanceMethod::StringIsEmpty
-                | crate::call_plan::NativeJavaInstanceMethod::StringContains
-                | crate::call_plan::NativeJavaInstanceMethod::StringStartsWith
-                | crate::call_plan::NativeJavaInstanceMethod::StringEndsWith
-                | crate::call_plan::NativeJavaInstanceMethod::Equals,
-            ..
-        } => Some(RustSlotShape::conservative(JavaType::Primitive(
-            PrimitiveType::Boolean,
-        ))),
-        crate::call_plan::CallTargetPlan::NativeJavaInstance {
-            method: crate::call_plan::NativeJavaInstanceMethod::StringTrim,
-            ..
-        } => Some(borrowed_string_content_shape()),
-        crate::call_plan::CallTargetPlan::NativeJavaInstance {
-            method:
-                crate::call_plan::NativeJavaInstanceMethod::StringToLowercase
-                | crate::call_plan::NativeJavaInstanceMethod::StringToString,
-            ..
-        } => Some(owned_string_value_shape()),
-        crate::call_plan::CallTargetPlan::NativeJavaInstance {
-            method: crate::call_plan::NativeJavaInstanceMethod::StringSplit,
-            ..
-        } => Some(string_list_value_shape()),
-        _ => None,
-    }
+    crate::call_plan::native_java_call_lowered_type(&target)
+        .map(|lowered| lowered.into_slot_shape())
 }
 
 fn stream_source_element_type_with_effective_facts(

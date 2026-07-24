@@ -868,7 +868,7 @@ fn parse_enum_constant_decl(
     let name = field_text(*node, "name", source)
         .or_else(|| first_named_child(*node).map(|child| text(child, source).to_string()))?;
     Some(FieldDecl {
-        name: to_snake_case(&name),
+        name,
         ty: JavaType::Named {
             name: enum_name.to_string(),
             args: Vec::new(),
@@ -922,6 +922,7 @@ fn parse_field_decl(node: tree_sitter::Node, source: &str) -> Vec<Member> {
         .child_by_field_name("type")
         .map(|node| parse_type_node(node, source))
         .unwrap_or_else(|| JavaType::Unknown("field".to_string()));
+    let declaration_text = text(node, source);
     let mut modifiers = parse_modifiers(node, source);
     if node.kind() == "constant_declaration" {
         for implicit in [Modifier::Public, Modifier::Static, Modifier::Final] {
@@ -946,7 +947,7 @@ fn parse_field_decl(node: tree_sitter::Node, source: &str) -> Vec<Member> {
                 .map(|value| parse_expr_node(value, source));
             Some(Member::Field(FieldDecl {
                 name: field_decl_name(&name, &modifiers),
-                ty: ty.clone(),
+                ty: type_with_declarator_array_dimensions(&ty, declaration_text, &name),
                 modifiers: modifiers.clone(),
                 initializer,
                 span: span(decl),
@@ -1037,6 +1038,7 @@ fn parse_params_node(node: tree_sitter::Node, source: &str) -> Vec<Param> {
                     if is_varargs {
                         ty = JavaType::Array(Box::new(ty));
                     }
+                    ty = type_with_declarator_array_dimensions(&ty, text(param, source), &name);
                     ty
                 })
                 .or_else(|| {
@@ -1089,14 +1091,23 @@ fn parse_param_text_fallback(param_text: &str) -> Option<Param> {
         param_text = rest.trim_start();
     }
     let (type_text, name) = param_text.rsplit_once(char::is_whitespace)?;
+    let mut name = name.trim();
+    let mut declarator_array_depth = 0usize;
+    while let Some(rest) = name.strip_suffix("[]") {
+        declarator_array_depth += 1;
+        name = rest.trim_end();
+    }
     let is_varargs = type_text.contains("...");
-    let ty = if is_varargs {
+    let mut ty = if is_varargs {
         varargs_type_from_param_text(type_text)?
     } else {
         parse_type_text(type_text)
     };
+    for _ in 0..declarator_array_depth.saturating_sub(java_array_depth(&ty)) {
+        ty = JavaType::Array(Box::new(ty));
+    }
     Some(Param {
-        name: to_snake_case(name.trim()),
+        name: to_snake_case(name),
         ty,
         is_varargs,
     })
@@ -1155,6 +1166,7 @@ fn parse_block_like(
             | "enhanced_for_statement"
             | "try_statement"
             | "try_with_resources_statement"
+            | "synchronized_statement"
             | "throw_statement"
             | "switch_expression"
             | "switch_statement"
@@ -1211,6 +1223,7 @@ fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut Diag
         "try_statement" | "try_with_resources_statement" => {
             parse_try_node(node, source, diagnostics)
         }
+        "synchronized_statement" => parse_synchronized_node(node, source, diagnostics),
         "throw_statement" => first_named_child(node)
             .map(|expr| Stmt::Throw(parse_expr_node(expr, source)))
             .unwrap_or_else(|| Stmt::Unsupported("throw without expression".to_string())),
@@ -1229,6 +1242,18 @@ fn parse_stmt_node(node: tree_sitter::Node, source: &str, diagnostics: &mut Diag
         }
         _ => Stmt::Unsupported(format!("unsupported statement node: {}", node.kind())),
     }
+}
+
+fn parse_synchronized_node(
+    node: tree_sitter::Node,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
+) -> Stmt {
+    named_children(node)
+        .into_iter()
+        .find(|child| child.kind() == "block")
+        .map(|block| Stmt::Block(parse_block_like(block, source, diagnostics)))
+        .unwrap_or_else(|| Stmt::Unsupported("synchronized without block".to_string()))
 }
 
 fn parse_try_node(node: tree_sitter::Node, source: &str, diagnostics: &mut DiagnosticBag) -> Stmt {
@@ -1453,6 +1478,7 @@ fn parse_local_var_decls(node: tree_sitter::Node, source: &str) -> Vec<Stmt> {
         .child_by_field_name("type")
         .map(|node| parse_type_node(node, source))
         .unwrap_or_else(|| JavaType::Unknown("local".to_string()));
+    let declaration_text = text(node, source);
     let declarators = field_children(node, "declarator");
     if declarators.is_empty() {
         return vec![Stmt::Unsupported(
@@ -1468,12 +1494,82 @@ fn parse_local_var_decls(node: tree_sitter::Node, source: &str) -> Vec<Stmt> {
                 .child_by_field_name("value")
                 .map(|value| parse_expr_node(value, source));
             Stmt::VarDecl {
-                ty: ty.clone(),
+                ty: type_with_declarator_array_dimensions(&ty, declaration_text, &name),
                 name: to_snake_case(&name),
                 initializer,
             }
         })
         .collect()
+}
+
+fn type_with_declarator_array_dimensions(
+    base_ty: &JavaType,
+    declaration_text: &str,
+    name: &str,
+) -> JavaType {
+    let declared_depth = local_declarator_array_depth(declaration_text, name);
+    let parsed_depth = java_array_depth(base_ty);
+    if declared_depth <= parsed_depth {
+        return base_ty.clone();
+    }
+    (0..(declared_depth - parsed_depth))
+        .fold(base_ty.clone(), |ty, _| JavaType::Array(Box::new(ty)))
+}
+
+fn local_declarator_array_depth(declaration_text: &str, name: &str) -> usize {
+    let Some(name_start) = find_identifier_occurrence(declaration_text, name) else {
+        return 0;
+    };
+    let prefix = &declaration_text[..name_start];
+    let suffix = &declaration_text[name_start + name.len()..];
+    count_empty_array_suffixes(prefix) + count_immediate_empty_array_suffixes(suffix)
+}
+
+fn find_identifier_occurrence(haystack: &str, ident: &str) -> Option<usize> {
+    haystack.match_indices(ident).find_map(|(index, _)| {
+        let before = haystack[..index].chars().next_back();
+        let after = haystack[index + ident.len()..].chars().next();
+        let before_boundary = before.is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()));
+        let after_boundary = after.is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()));
+        (before_boundary && after_boundary).then_some(index)
+    })
+}
+
+fn count_empty_array_suffixes(text: &str) -> usize {
+    let mut depth = 0usize;
+    let mut count = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            '[' if depth == 0 && chars.peek() == Some(&']') => {
+                chars.next();
+                count += 1;
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+fn count_immediate_empty_array_suffixes(mut text: &str) -> usize {
+    let mut depth = 0;
+    loop {
+        text = text.trim_start();
+        let Some(rest) = text.strip_prefix("[]") else {
+            return depth;
+        };
+        depth += 1;
+        text = rest;
+    }
+}
+
+fn java_array_depth(ty: &JavaType) -> usize {
+    match ty {
+        JavaType::Array(inner) => 1 + java_array_depth(inner),
+        _ => 0,
+    }
 }
 
 fn parse_if_node(node: tree_sitter::Node, source: &str, diagnostics: &mut DiagnosticBag) -> Stmt {
@@ -1560,15 +1656,24 @@ fn parse_enhanced_for_node(
     source: &str,
     diagnostics: &mut DiagnosticBag,
 ) -> Stmt {
+    let raw_name = node
+        .child_by_field_name("name")
+        .map(|node| text(node, source).to_string());
+    let var_name = raw_name
+        .as_deref()
+        .map(to_snake_case)
+        .unwrap_or_else(|| "item".to_string());
+    let base_var_type = node
+        .child_by_field_name("type")
+        .map(|node| parse_type_node(node, source))
+        .unwrap_or_else(|| JavaType::Unknown("enhanced_for".to_string()));
+    let var_type = raw_name
+        .as_deref()
+        .map(|name| type_with_declarator_array_dimensions(&base_var_type, text(node, source), name))
+        .unwrap_or(base_var_type);
     Stmt::EnhancedFor {
-        var_type: node
-            .child_by_field_name("type")
-            .map(|node| parse_type_node(node, source))
-            .unwrap_or_else(|| JavaType::Unknown("enhanced_for".to_string())),
-        var_name: node
-            .child_by_field_name("name")
-            .map(|node| to_snake_case(text(node, source)))
-            .unwrap_or_else(|| "item".to_string()),
+        var_type,
+        var_name,
         iterable: node
             .child_by_field_name("value")
             .map(|node| parse_expr_node(node, source))
@@ -1609,7 +1714,7 @@ fn is_empty_statement_kind(kind: &str) -> bool {
 
 fn parse_condition_node(node: tree_sitter::Node, source: &str) -> Expr {
     if node.kind() == "parenthesized_expression" {
-        first_named_child(node)
+        first_named_non_comment_child(node)
             .map(|child| parse_expr_node(child, source))
             .unwrap_or_else(|| Expr::Raw(text(node, source).to_string()))
     } else {
@@ -1619,19 +1724,18 @@ fn parse_condition_node(node: tree_sitter::Node, source: &str) -> Expr {
 
 fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
     match node.kind() {
-        "parenthesized_expression" => first_named_child(node)
+        "parenthesized_expression" => first_named_non_comment_child(node)
             .map(|child| parse_expr_node(child, source))
             .unwrap_or_else(|| Expr::Raw(text(node, source).to_string())),
         "identifier" => Expr::Var(to_snake_case(text(node, source))),
         "this" => Expr::This,
         "super" => Expr::Super,
-        "decimal_integer_literal" => parse_integer_literal(text(node, source)),
-        "decimal_floating_point_literal" | "hex_floating_point_literal" => text(node, source)
-            .trim_end_matches(['d', 'D'])
-            .parse()
-            .map(Literal::Double)
-            .map(Expr::Literal)
-            .unwrap_or_else(|_| Expr::Raw(text(node, source).to_string())),
+        "decimal_integer_literal"
+        | "hex_integer_literal"
+        | "octal_integer_literal"
+        | "binary_integer_literal" => parse_integer_literal(text(node, source)),
+        "decimal_floating_point_literal" => parse_decimal_floating_literal(text(node, source)),
+        "hex_floating_point_literal" => parse_hex_floating_literal(text(node, source)),
         "true" => Expr::Literal(Literal::Bool(true)),
         "false" => Expr::Literal(Literal::Bool(false)),
         "null_literal" => Expr::Literal(Literal::Null),
@@ -1640,9 +1744,19 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         }
         "character_literal" => Expr::Literal(Literal::Char(parse_char_literal(text(node, source)))),
         "field_access" => {
-            let object = node
-                .child_by_field_name("object")
-                .map(|n| parse_expr_node(n, source));
+            let object = node.child_by_field_name("object").map(|n| {
+                if n.kind() == "identifier" {
+                    let ident = text(n, source);
+                    if ident
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_uppercase())
+                    {
+                        return Expr::Var(ident.to_string());
+                    }
+                }
+                parse_expr_node(n, source)
+            });
             let field = field_text(node, "field", source).unwrap_or_else(|| "unknown".to_string());
             if let Some(object) = object {
                 Expr::FieldAccess(Box::new(object), field)
@@ -1692,11 +1806,14 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             let right = node
                 .child_by_field_name("right")
                 .map(|n| parse_expr_node(n, source));
+            let op = node
+                .child_by_field_name("operator")
+                .map(|op| text(op, source));
             match (left, right) {
                 (Some(left), Some(right)) => Expr::Binary {
                     op: BinaryOp::Assign,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                    left: Box::new(left.clone()),
+                    right: Box::new(compound_assignment_value(op, left, right)),
                 },
                 _ => Expr::Raw(text(node, source).to_string()),
             }
@@ -1706,7 +1823,11 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
                 .map(|node| parse_expr_node(node, source))
                 .unwrap_or_else(|| Expr::Raw(text(node, source).to_string()));
             let raw = text(node, source);
-            let op = if raw.contains("--") {
+            let op = if raw.trim_start().starts_with("++") {
+                UnaryOp::PreInc
+            } else if raw.trim_start().starts_with("--") {
+                UnaryOp::PreDec
+            } else if raw.contains("--") {
                 UnaryOp::PostDec
             } else {
                 UnaryOp::PostInc
@@ -1770,9 +1891,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             }
         }
         "object_creation_expression" => {
-            let ty = node
-                .child_by_field_name("type")
-                .map(|node| parse_new_type_node(node, source))
+            let ty = parse_object_creation_type_node(node, source)
                 .unwrap_or_else(|| JavaType::Unknown("new".to_string()));
             Expr::New {
                 ty,
@@ -1867,6 +1986,7 @@ fn parse_cast_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
 fn parse_array_initializer_elements(node: tree_sitter::Node, source: &str) -> Vec<Expr> {
     named_children(node)
         .into_iter()
+        .filter(|child| !matches!(child.kind(), "line_comment" | "block_comment"))
         .map(|child| parse_expr_node(child, source))
         .collect()
 }
@@ -1993,6 +2113,10 @@ fn parse_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
 
 fn parse_new_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
     let raw = text(node, source).trim();
+    parse_new_type_text(raw)
+}
+
+fn parse_new_type_text(raw: &str) -> JavaType {
     let mut ty = parse_type_text(raw);
     if type_text_starts_with_type_like_segment(raw) {
         if let JavaType::Named { name, .. } | JavaType::Unknown(name) = &mut ty {
@@ -2000,6 +2124,27 @@ fn parse_new_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
         }
     }
     ty
+}
+
+fn parse_object_creation_type_node(node: tree_sitter::Node, source: &str) -> Option<JavaType> {
+    let parsed_child = node
+        .child_by_field_name("type")
+        .map(|node| parse_new_type_node(node, source));
+    let args = node.child_by_field_name("arguments")?;
+    let prefix = source.get(node.start_byte()..args.start_byte())?;
+    let raw = prefix.trim().strip_prefix("new")?.trim();
+    if raw.is_empty() {
+        return parsed_child;
+    }
+    let raw_ty = parse_new_type_text(raw);
+    match (&parsed_child, &raw_ty) {
+        (
+            Some(JavaType::Named { name: parsed, .. } | JavaType::Unknown(parsed)),
+            JavaType::Named { name: raw, .. } | JavaType::Unknown(raw),
+        ) if raw.len() > parsed.len() && raw.starts_with(parsed) => Some(raw_ty),
+        (None, _) => Some(raw_ty),
+        _ => parsed_child,
+    }
 }
 
 fn type_text_starts_with_type_like_segment(raw: &str) -> bool {
@@ -2180,16 +2325,132 @@ fn parse_modifiers(node: tree_sitter::Node, source: &str) -> Vec<Modifier> {
 fn parse_integer_literal(src: &str) -> Expr {
     let src = src.replace('_', "");
     if let Some(num) = src.strip_suffix('L').or_else(|| src.strip_suffix('l')) {
-        num.parse()
+        parse_java_integer_digits_i64(num, true)
             .map(Literal::Long)
             .map(Expr::Literal)
             .unwrap_or_else(|_| Expr::Raw(src))
     } else {
-        src.parse()
-            .map(Literal::Int)
+        match parse_java_integer_digits_i64(&src, false) {
+            Ok(value) => match i32::try_from(value) {
+                Ok(value) => Expr::Literal(Literal::Int(value)),
+                Err(_) if integer_literal_allows_twos_complement_int(&src) => {
+                    parse_java_integer_digits_u32(&src)
+                        .map(|value| Expr::Literal(Literal::Int(value as i32)))
+                        .unwrap_or_else(|_| Expr::Raw(src))
+                }
+                Err(_) => Expr::Raw(src),
+            },
+            Err(_) => Expr::Raw(src),
+        }
+    }
+}
+
+fn integer_literal_allows_twos_complement_int(src: &str) -> bool {
+    src.starts_with("0x")
+        || src.starts_with("0X")
+        || src.starts_with("0b")
+        || src.starts_with("0B")
+        || (src.len() > 1 && src.starts_with('0'))
+}
+
+fn parse_java_integer_digits_u32(src: &str) -> Result<u32, std::num::ParseIntError> {
+    let (digits, radix) =
+        if let Some(rest) = src.strip_prefix("0x").or_else(|| src.strip_prefix("0X")) {
+            (rest, 16)
+        } else if let Some(rest) = src.strip_prefix("0b").or_else(|| src.strip_prefix("0B")) {
+            (rest, 2)
+        } else if src.len() > 1 && src.starts_with('0') {
+            (&src[1..], 8)
+        } else {
+            (src, 10)
+        };
+    u32::from_str_radix(digits, radix)
+}
+
+fn parse_java_integer_digits_i64(
+    src: &str,
+    allow_twos_complement_long: bool,
+) -> Result<i64, std::num::ParseIntError> {
+    let (digits, radix) =
+        if let Some(rest) = src.strip_prefix("0x").or_else(|| src.strip_prefix("0X")) {
+            (rest, 16)
+        } else if let Some(rest) = src.strip_prefix("0b").or_else(|| src.strip_prefix("0B")) {
+            (rest, 2)
+        } else if src.len() > 1 && src.starts_with('0') {
+            (&src[1..], 8)
+        } else {
+            (src, 10)
+        };
+    match i64::from_str_radix(digits, radix) {
+        Ok(value) => Ok(value),
+        Err(err) if allow_twos_complement_long && radix != 10 => u64::from_str_radix(digits, radix)
+            .map(|value| value as i64)
+            .map_err(|_| err),
+        Err(err) => Err(err),
+    }
+}
+
+fn parse_decimal_floating_literal(src: &str) -> Expr {
+    let src = src.replace('_', "");
+    if let Some(num) = src.strip_suffix('f').or_else(|| src.strip_suffix('F')) {
+        num.parse()
+            .map(Literal::Float)
+            .map(Expr::Literal)
+            .unwrap_or_else(|_| Expr::Raw(src))
+    } else {
+        let num = src
+            .strip_suffix('d')
+            .or_else(|| src.strip_suffix('D'))
+            .unwrap_or(&src);
+        num.parse()
+            .map(Literal::Double)
             .map(Expr::Literal)
             .unwrap_or_else(|_| Expr::Raw(src))
     }
+}
+
+fn parse_hex_floating_literal(src: &str) -> Expr {
+    let src = src.replace('_', "");
+    let (body, is_float) = match src.chars().last() {
+        Some('f') | Some('F') => (&src[..src.len() - 1], true),
+        Some('d') | Some('D') => (&src[..src.len() - 1], false),
+        _ => (src.as_str(), false),
+    };
+    let Some((mantissa, exponent)) = body.split_once(['p', 'P']) else {
+        return Expr::Raw(src);
+    };
+    let Some(mantissa) = mantissa
+        .strip_prefix("0x")
+        .or_else(|| mantissa.strip_prefix("0X"))
+    else {
+        return Expr::Raw(src);
+    };
+    let Ok(exponent) = exponent.parse::<i32>() else {
+        return Expr::Raw(src);
+    };
+    let Some(value) = parse_hex_float_mantissa(mantissa) else {
+        return Expr::Raw(src);
+    };
+    let value = value * 2f64.powi(exponent);
+    if is_float {
+        Expr::Literal(Literal::Float(value as f32))
+    } else {
+        Expr::Literal(Literal::Double(value))
+    }
+}
+
+fn parse_hex_float_mantissa(mantissa: &str) -> Option<f64> {
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let mut value = 0f64;
+    for ch in whole.chars() {
+        value = value * 16f64 + ch.to_digit(16)? as f64;
+    }
+    let mut place = 1f64 / 16f64;
+    for ch in fraction.chars() {
+        value += ch.to_digit(16)? as f64 * place;
+        place /= 16f64;
+    }
+    Some(value)
 }
 
 fn parse_string_literal(src: &str) -> String {
@@ -2210,6 +2471,27 @@ fn parse_char_literal(src: &str) -> char {
         "\\\"" => '"',
         "\\\\" => '\\',
         _ => inner.chars().next().unwrap_or('\0'),
+    }
+}
+
+fn compound_assignment_value(op: Option<&str>, target: Expr, value: Expr) -> Expr {
+    let op = match op {
+        Some("+=") => BinaryOp::Add,
+        Some("-=") => BinaryOp::Sub,
+        Some("*=") => BinaryOp::Mul,
+        Some("/=") => BinaryOp::Div,
+        Some("%=") => BinaryOp::Rem,
+        Some("&=") => BinaryOp::BitAnd,
+        Some("|=") => BinaryOp::BitOr,
+        Some("^=") => BinaryOp::BitXor,
+        Some("<<=") => BinaryOp::Shl,
+        Some(">>=") | Some(">>>=") => BinaryOp::Shr,
+        _ => return value,
+    };
+    Expr::Binary {
+        op,
+        left: Box::new(target),
+        right: Box::new(value),
     }
 }
 
@@ -2380,6 +2662,12 @@ fn first_named_child<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Nod
     named_children(node).into_iter().next()
 }
 
+fn first_named_non_comment_child<'a>(node: tree_sitter::Node<'a>) -> Option<tree_sitter::Node<'a>> {
+    named_children(node)
+        .into_iter()
+        .find(|child| !matches!(child.kind(), "line_comment" | "block_comment"))
+}
+
 fn field_text(node: tree_sitter::Node, field: &str, source: &str) -> Option<String> {
     node.child_by_field_name(field)
         .map(|node| text(node, source).to_string())
@@ -2441,12 +2729,21 @@ pub fn type_suffix(ty: &JavaType, is_varargs: bool) -> String {
         JavaType::Primitive(p) => format!("{p:?}").to_ascii_lowercase(),
         JavaType::String => "string".to_string(),
         JavaType::Array(inner) => format!("{}_array", type_suffix(inner, false)),
-        JavaType::Named { name, .. } => to_snake_case(name),
+        JavaType::Named { name, .. } => to_snake_case(&java_type_suffix_name(name)),
         JavaType::Wildcard(_) => "wildcard".to_string(),
-        JavaType::Unknown(raw) => to_snake_case(raw),
+        JavaType::Unknown(raw) => to_snake_case(&java_type_suffix_name(raw)),
     };
     if is_varargs {
         suffix.push_str("_varargs");
     }
     suffix
+}
+
+fn java_type_suffix_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| match ch {
+            '.' | '$' | '<' | '>' | ',' | '?' | ' ' | '\t' | '\n' | '\r' => '_',
+            _ => ch,
+        })
+        .collect()
 }

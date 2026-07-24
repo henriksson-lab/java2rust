@@ -78,7 +78,11 @@ fn inner_class_records_outer_this_capture() {
     let inner = owners
         .iter()
         .find(|owner| {
-            owner.kind == CaptureOwnerKind::InnerClass && owner.name.as_deref() == Some("Adder")
+            owner.kind == CaptureOwnerKind::InnerClass
+                && owner
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name == "Adder" || name.ends_with(".Adder"))
         })
         .unwrap_or_else(|| panic!("missing inner class owner: {owners:#?}"));
 

@@ -1,5 +1,5 @@
 use new_java2rust::java_ir::{
-    Expr, JavaType, Literal, Member, PrimitiveType, Stmt, TypeKind, UnaryOp,
+    BinaryOp, Expr, JavaType, Literal, Member, PrimitiveType, Stmt, TypeKind, UnaryOp,
 };
 use new_java2rust::parser::parse_java_source;
 
@@ -92,6 +92,158 @@ fn parses_array_creation_and_unary_plus_without_raw_fallbacks() {
 }
 
 #[test]
+fn parses_nested_qualified_constructor_type_from_object_creation_prefix() {
+    let parsed = parse_java_source(
+        r#"
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
+import net.sourceforge.iharder.base64.Base64;
+
+class NestedQualifiedConstructor {
+    OutputStream wrap(ByteArrayOutputStream os) {
+        return new Base64.OutputStream(os);
+    }
+}
+"#,
+    );
+    let body = method_body(&parsed.program.types[0], "wrap");
+    let Stmt::Return(Some(Expr::New { ty, .. })) = &body.statements[0] else {
+        panic!("expected nested constructor return");
+    };
+    assert_eq!(
+        ty,
+        &JavaType::Named {
+            name: "Base64.OutputStream".to_string(),
+            args: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn parses_local_array_dimensions_between_type_and_name() {
+    let parsed = parse_java_source(
+        r#"
+class LocalArrayDimensionSyntax {
+    void read() {
+        byte [] array = new byte[128];
+    }
+}
+"#,
+    );
+    let body = method_body(&parsed.program.types[0], "read");
+    let Stmt::VarDecl { ty, .. } = &body.statements[0] else {
+        panic!("expected local array declaration");
+    };
+    assert_eq!(
+        ty,
+        &JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)))
+    );
+}
+
+#[test]
+fn local_array_dimensions_ignore_generic_argument_arrays() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.ArrayList;
+
+class LocalGenericArrayArgumentSyntax {
+    void read() {
+        ArrayList<String[]> group = new ArrayList<>();
+    }
+}
+"#,
+    );
+    let body = method_body(&parsed.program.types[0], "read");
+    let Stmt::VarDecl { ty, .. } = &body.statements[0] else {
+        panic!("expected local declaration");
+    };
+    assert_eq!(
+        ty,
+        &JavaType::Named {
+            name: "ArrayList".to_string(),
+            args: vec![JavaType::Array(Box::new(JavaType::String))],
+        }
+    );
+}
+
+#[test]
+fn parses_parameter_array_dimensions_after_name() {
+    let parsed = parse_java_source(
+        r#"
+class ParameterArrayDimensionSyntax {
+    void split(final double d, final double result[]) {
+    }
+}
+"#,
+    );
+    let Member::Method(method) = &parsed.program.types[0].members[0] else {
+        panic!("expected method");
+    };
+    assert_eq!(
+        method.params[0].ty,
+        JavaType::Primitive(PrimitiveType::Double)
+    );
+    assert_eq!(
+        method.params[1].ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Double)))
+    );
+}
+
+#[test]
+fn parses_enhanced_for_array_variable_dimensions() {
+    let parsed = parse_java_source(
+        r#"
+class EnhancedForArrayVariableDimensions {
+    void walk(String[][] group) {
+        for (String[] seg : group) {
+            seg[0].trim();
+        }
+    }
+}
+"#,
+    );
+    let body = method_body(&parsed.program.types[0], "walk");
+
+    let Stmt::EnhancedFor { var_type, .. } = &body.statements[0] else {
+        panic!("expected enhanced for statement");
+    };
+    assert!(matches!(
+        var_type,
+        JavaType::Array(inner) if matches!(inner.as_ref(), JavaType::String)
+    ));
+}
+
+#[test]
+fn parses_field_array_dimensions_after_name() {
+    let parsed = parse_java_source(
+        r#"
+class FieldArrayDimensionSyntax {
+    private static final double FACT[] = new double[] { 1.0, 2.0 };
+    private static final double COEF[][] = { { 1.0, 2.0 } };
+}
+"#,
+    );
+    let fields = parsed.program.types[0]
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) => Some(field),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fields[0].ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Double)))
+    );
+    assert_eq!(
+        fields[1].ty,
+        JavaType::Array(Box::new(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Double
+        )))))
+    );
+}
+
+#[test]
 fn parses_typed_array_initializer_without_raw_fallbacks() {
     let expr = new_java2rust::parser::parse_expr("new String[]{prefix + comment}");
     let Expr::ArrayCreation {
@@ -109,6 +261,98 @@ fn parses_typed_array_initializer_without_raw_fallbacks() {
 }
 
 #[test]
+fn parses_array_initializer_ignores_comment_nodes() {
+    let expr = new_java2rust::parser::parse_expr(
+        r#"new double[] {
+            +1.0d, // first
+            +2.0d  // second
+        }"#,
+    );
+    let Expr::ArrayCreation {
+        initializer: Some(elements),
+        ..
+    } = expr
+    else {
+        panic!("expected typed array initializer");
+    };
+    assert_eq!(elements.len(), 2);
+    assert!(matches!(
+        &elements[0],
+        Expr::Unary {
+            op: UnaryOp::Pos,
+            expr
+        } if matches!(expr.as_ref(), Expr::Literal(Literal::Double(1.0)))
+    ));
+    assert!(matches!(
+        &elements[1],
+        Expr::Unary {
+            op: UnaryOp::Pos,
+            expr
+        } if matches!(expr.as_ref(), Expr::Literal(Literal::Double(2.0)))
+    ));
+}
+
+#[test]
+fn parses_hex_long_sign_bit_as_twos_complement_literal() {
+    let expr = new_java2rust::parser::parse_expr("0x8000000000000000L");
+
+    assert!(matches!(expr, Expr::Literal(Literal::Long(i64::MIN))));
+}
+
+#[test]
+fn parses_hex_int_sign_bit_as_twos_complement_literal() {
+    let expr = new_java2rust::parser::parse_expr("0x80000000");
+
+    assert!(matches!(expr, Expr::Literal(Literal::Int(i32::MIN))));
+}
+
+#[test]
+fn parses_java_hex_floating_point_literals() {
+    let double_expr = new_java2rust::parser::parse_expr("0x1.0p-52d");
+    let float_expr = new_java2rust::parser::parse_expr("0x1.0p-23f");
+
+    assert!(matches!(
+        double_expr,
+        Expr::Literal(Literal::Double(value)) if value == 2f64.powi(-52)
+    ));
+    assert!(matches!(
+        float_expr,
+        Expr::Literal(Literal::Float(value)) if value == 2f32.powi(-23)
+    ));
+}
+
+#[test]
+fn parses_parenthesized_condition_after_block_comment() {
+    let parsed = parse_java_source(
+        r#"
+class CommentedCondition {
+    boolean done(int position, int numSigBytes) {
+        if (/*!encode &&*/ position >= numSigBytes) {
+            return true;
+        }
+        return false;
+    }
+}
+"#,
+    );
+    assert!(collect_program_fallbacks(&parsed.program).is_empty());
+
+    let body = method_body(&parsed.program.types[0], "done");
+    let Stmt::If { condition, .. } = &body.statements[0] else {
+        panic!("expected if statement");
+    };
+    assert!(matches!(
+        condition,
+        Expr::Binary {
+            op: BinaryOp::Ge,
+            left,
+            right,
+        } if matches!(left.as_ref(), Expr::Var(name) if name == "position")
+            && matches!(right.as_ref(), Expr::Var(name) if name == "num_sig_bytes")
+    ));
+}
+
+#[test]
 fn parses_gatk_top_level_enum_without_no_class_error() {
     let parsed = parse_java_source(&parser_gap("GatkTopLevelEnum.java"));
 
@@ -117,6 +361,32 @@ fn parses_gatk_top_level_enum_without_no_class_error() {
     assert_eq!(parsed.program.types[0].kind, TypeKind::Enum);
     assert_eq!(parsed.program.types[0].name, "GatkTopLevelEnum");
     assert!(collect_program_fallbacks(&parsed.program).is_empty());
+}
+
+#[test]
+fn parses_enum_constants_preserving_java_constant_labels() {
+    let parsed = parse_java_source(
+        r#"
+enum LocalizedFormats {
+    MAX_COUNT_EXCEEDED("max"),
+    ILLEGAL_STATE("bad");
+
+    LocalizedFormats(String source) {}
+}
+"#,
+    );
+
+    assert!(!parsed.diagnostics.has_code("parse_no_class"));
+    let ty = &parsed.program.types[0];
+    let enum_fields = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) => Some(field.name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(enum_fields, vec!["MAX_COUNT_EXCEEDED", "ILLEGAL_STATE"]);
 }
 
 #[test]
@@ -241,6 +511,10 @@ fn collect_stmt_fallbacks(stmt: &Stmt, out: &mut Vec<String>) {
         Stmt::While { condition, body } => {
             collect_expr_fallbacks(condition, out);
             collect_block_fallbacks(body, out);
+        }
+        Stmt::DoWhile { body, condition } => {
+            collect_block_fallbacks(body, out);
+            collect_expr_fallbacks(condition, out);
         }
         Stmt::For {
             init,

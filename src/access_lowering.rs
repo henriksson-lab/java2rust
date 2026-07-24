@@ -5,11 +5,21 @@ use crate::rust_ir::RustExpr;
 use crate::types::TypeEnv;
 
 pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
-    if env.local_type(name).is_none() && env.is_instance_field(name) {
+    if env.local_type(name).is_none()
+        && env.is_instance_field(name)
+        && !bare_name_looks_like_static_owner(name)
+    {
         RustExpr::Field(
             Box::new(RustExpr::Var("self".to_string())),
             crate::parser::to_snake_case(name),
         )
+    } else if env.local_type(name).is_none()
+        && let Some(static_name) = env.static_storage_field_access_name(name)
+    {
+        RustExpr::Raw(format!(
+            "Self::__static_{}()",
+            crate::parser::to_snake_case(static_name)
+        ))
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
@@ -20,8 +30,18 @@ pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
 }
 
 pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
-    if env.local_type(name).is_none() && env.is_instance_field(name) {
+    if env.local_type(name).is_none()
+        && env.is_instance_field(name)
+        && !bare_name_looks_like_static_owner(name)
+    {
         format!("self.{}", crate::parser::to_snake_case(name))
+    } else if env.local_type(name).is_none()
+        && let Some(static_name) = env.static_storage_field_access_name(name)
+    {
+        format!(
+            "Self::__static_{}()",
+            crate::parser::to_snake_case(static_name)
+        )
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
@@ -29,6 +49,12 @@ pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
     } else {
         crate::parser::to_snake_case(name)
     }
+}
+
+fn bare_name_looks_like_static_owner(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
 pub fn lower_field_access(
@@ -56,10 +82,41 @@ pub fn lower_field_access_with_facts(
     if let Some(plan) =
         crate::member_access_plan::plan_member_access_with_facts(receiver, field, type_env, facts)
     {
+        let lowered_receiver =
+            lower_optional_sequence_member_receiver(receiver, type_env, &plan, lowered_receiver);
         apply_member_access_plan(&plan, lowered_receiver)
     } else {
         RustExpr::Field(Box::new(lowered_receiver), field.to_string())
     }
+}
+
+fn lower_optional_sequence_member_receiver(
+    receiver: &Expr,
+    type_env: &TypeEnv,
+    plan: &MemberAccessPlan,
+    lowered_receiver: RustExpr,
+) -> RustExpr {
+    if !matches!(
+        plan.op,
+        MemberAccessOp::LenAsI32
+            | MemberAccessOp::Array2RowsAsI32
+            | MemberAccessOp::Array2ColsAsI32
+    ) {
+        return lowered_receiver;
+    }
+    let receiver_ty = crate::types::infer_expr_type(receiver, type_env);
+    let Some(inner_ty) = crate::types::optional_element_type(&receiver_ty) else {
+        return lowered_receiver;
+    };
+    if crate::types::sequence_element_type(&inner_ty).is_none()
+        && crate::types::ndarray_array2_element_type(&inner_ty).is_none()
+    {
+        return lowered_receiver;
+    }
+    RustExpr::Raw(format!(
+        "{}.as_ref().expect(\"Java null receiver\")",
+        crate::emit::emit_expr(&lowered_receiver)
+    ))
 }
 
 fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> RustExpr {
@@ -76,11 +133,20 @@ fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> Rust
             "{}.len() as i32",
             crate::emit::emit_expr(&receiver)
         )),
-        MemberAccessOp::StaticConstant { owner } => {
-            RustExpr::Raw(format!("{owner}::{}", plan.member))
-        }
+        MemberAccessOp::StaticConstant { owner } => RustExpr::Raw(format!(
+            "{owner}::{}",
+            rust_associated_const_ident(&plan.member)
+        )),
         MemberAccessOp::RustField { rust_name } => {
             RustExpr::Field(Box::new(receiver), rust_name.clone())
         }
+    }
+}
+
+fn rust_associated_const_ident(name: &str) -> String {
+    if matches!(name, "in") {
+        "r#in".to_string()
+    } else {
+        name.to_string()
     }
 }

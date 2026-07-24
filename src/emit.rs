@@ -24,12 +24,18 @@ fn emit_struct(strukt: &RustStruct) -> String {
     if !strukt.derives.is_empty() {
         out.push_str(&format!("#[derive({})]\n", strukt.derives.join(", ")));
     }
-    out.push_str(&format!("pub struct {} {{\n", strukt.name));
+    out.push_str(&format!("pub struct {} {{\n", rust_ident(&strukt.name)));
     for field in &strukt.fields {
-        let vis = if field.is_pub { "pub " } else { "" };
+        let vis = if field.is_pub {
+            "pub "
+        } else if field.is_pub_crate {
+            "pub(crate) "
+        } else {
+            ""
+        };
         out.push_str(&format!(
             "    {vis}{}: {},\n",
-            field.name,
+            rust_ident(&field.name),
             emit_type(&field.ty)
         ));
     }
@@ -38,12 +44,12 @@ fn emit_struct(strukt: &RustStruct) -> String {
 }
 
 fn emit_impl(imp: &RustImpl) -> String {
-    let mut out = format!("impl {} {{\n", imp.target);
+    let mut out = format!("impl {} {{\n", rust_ident(&imp.target));
     for associated_const in &imp.associated_consts {
         let vis = if associated_const.is_pub { "pub " } else { "" };
         out.push_str(&format!(
             "    {vis}const {}: {} = {};\n\n",
-            associated_const.name,
+            rust_ident(&associated_const.name),
             emit_type(&associated_const.ty),
             emit_expr(&associated_const.value)
         ));
@@ -69,7 +75,7 @@ fn emit_function(function: &RustFunction, indent: usize) -> String {
         function
             .params
             .iter()
-            .map(|p| format!("{}: {}", p.name, emit_type(&p.ty))),
+            .map(|p| format!("{}: {}", rust_param_ident(&p.name), emit_type(&p.ty))),
     );
     let vis = if function.is_pub { "pub " } else { "" };
     let ret = function
@@ -79,7 +85,7 @@ fn emit_function(function: &RustFunction, indent: usize) -> String {
         .unwrap_or_default();
     let mut out = format!(
         "{pad}{vis}fn {}({}){ret} {{\n",
-        function.name,
+        rust_ident(&function.name),
         params.join(", ")
     );
     out.push_str(&emit_statements(&function.body, indent + 1));
@@ -112,7 +118,7 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
                 .as_ref()
                 .map(|expr| format!(" = {}", emit_expr(expr)))
                 .unwrap_or_default();
-            format!("{pad}let {mutability}{name}{ty}{value};\n")
+            format!("{pad}let {mutability}{}{ty}{value};\n", rust_ident(name))
         }
         RustStmt::Assign { target, value } => {
             format!("{pad}{} = {};\n", emit_expr(target), emit_expr(value))
@@ -176,9 +182,13 @@ pub fn emit_expr(expr: &RustExpr) -> String {
 fn emit_expr_prec(expr: &RustExpr, parent_prec: u8, right_child: bool) -> String {
     let rendered = match expr {
         RustExpr::Literal(value) => value.clone(),
-        RustExpr::Var(name) => name.clone(),
+        RustExpr::Var(name) => rust_ident(name),
         RustExpr::Field(receiver, field) => {
-            format!("{}.{}", emit_expr_prec(receiver, 11, false), field)
+            format!(
+                "{}.{}",
+                emit_expr_prec(receiver, 11, false),
+                rust_ident(field)
+            )
         }
         RustExpr::Index(array, index) => {
             format!(
@@ -194,7 +204,7 @@ fn emit_expr_prec(expr: &RustExpr, parent_prec: u8, right_child: bool) -> String
         ),
         RustExpr::Unary { op, expr } => format!("{op}{}", emit_expr_prec(expr, 10, false)),
         RustExpr::Cast { expr, ty } => {
-            format!("{} as {ty}", emit_expr_prec(expr, 7, false))
+            format!("{} as {ty}", emit_expr_prec(expr, 11, false))
         }
         RustExpr::If {
             condition,
@@ -218,16 +228,16 @@ fn emit_expr_prec(expr: &RustExpr, parent_prec: u8, right_child: bool) -> String
         } => format!(
             "{}.{}({})",
             emit_expr_prec(receiver, 11, false),
-            method,
+            rust_ident(method),
             args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
         ),
         RustExpr::StructLit { name, fields } => {
             let fields = fields
                 .iter()
-                .map(|(name, value)| format!("{name}: {}", emit_expr(value)))
+                .map(|(name, value)| format!("{}: {}", rust_ident(name), emit_expr(value)))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{name} {{ {fields} }}")
+            format!("{} {{ {fields} }}", rust_ident(name))
         }
         RustExpr::Raw(raw) => normalize_raw_expr_for_context(raw, parent_prec),
     };
@@ -237,6 +247,82 @@ fn emit_expr_prec(expr: &RustExpr, parent_prec: u8, right_child: bool) -> String
     } else {
         rendered
     }
+}
+
+fn rust_ident(name: &str) -> String {
+    if name.starts_with("r#")
+        || name.contains("::")
+        || name.contains('<')
+        || name.contains('>')
+        || name.contains(' ')
+        || name.is_empty()
+    {
+        return name.to_string();
+    }
+    if is_raw_identifier_keyword(name) {
+        format!("r#{name}")
+    } else {
+        name.to_string()
+    }
+}
+
+fn rust_param_ident(name: &str) -> String {
+    if let Some(inner) = name.strip_prefix("mut ") {
+        return format!("mut {}", rust_ident(inner));
+    }
+    rust_ident(name)
+}
+
+fn is_raw_identifier_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "static"
+            | "struct"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "try"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+    )
 }
 
 fn expr_needs_parentheses(expr: &RustExpr, parent_prec: u8, right_child: bool) -> bool {
@@ -323,11 +409,59 @@ fn expr_precedence(expr: &RustExpr) -> u8 {
         | RustExpr::Index(_, _)
         | RustExpr::Call { .. }
         | RustExpr::MethodCall { .. } => 11,
+        RustExpr::Raw(raw) if raw_contains_top_level_cast(raw) => 6,
         RustExpr::Literal(_) | RustExpr::Var(_) | RustExpr::StructLit { .. } | RustExpr::Raw(_) => {
             12
         }
         RustExpr::If { .. } => 1,
     }
+}
+
+fn raw_contains_top_level_cast(raw: &str) -> bool {
+    let mut angle_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut chars = raw.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '<' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => angle_depth += 1,
+            '>' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                angle_depth = angle_depth.saturating_sub(1)
+            }
+            'a' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && angle_depth == 0
+                && raw[idx..].starts_with("as")
+                && raw[..idx].ends_with(char::is_whitespace)
+                && raw[idx + 2..].starts_with(char::is_whitespace) =>
+            {
+                return true;
+            }
+            '"' | '\'' => {
+                let quote = ch;
+                let mut escaped = false;
+                for (_, inner) in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if inner == '\\' {
+                        escaped = true;
+                    } else if inner == quote {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn binary_precedence(op: &str) -> u8 {
@@ -405,6 +539,14 @@ mod tests {
         assert_eq!(
             emit_expr(&binary("*", var("acc"), cast)),
             "acc * (end as i64)"
+        );
+        assert_eq!(
+            emit_expr(&binary(
+                "<",
+                RustExpr::Raw("values.len() as i32".to_string()),
+                var("limit")
+            )),
+            "(values.len() as i32) < limit"
         );
     }
 

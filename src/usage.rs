@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::facts::{FactSet, TrivialAccessorKind};
+use crate::facts::{FacadeSlot, FactSet, TrivialAccessorKind};
 use crate::java_ir::{
     Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Program,
     ResolvedCall, ResolvedConstructor, Stmt, TypeDecl,
@@ -177,15 +177,19 @@ pub struct ConstructorCallSiteUse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnedCallResultUse {
     pub name: String,
+    pub arg_count: usize,
     pub receiver_type: Option<JavaType>,
     pub boundary: CallArgumentBoundary,
+    pub resolved: Option<ResolvedCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallResultBoundaryPolicy {
     pub name: String,
+    pub arg_count: usize,
     pub receiver_type: Option<JavaType>,
     pub boundary: CallArgumentBoundary,
+    pub resolved: Option<ResolvedCall>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,7 +369,10 @@ fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph) {
             Member::Method(method) => {
                 let caller = CallableKey::Method {
                     type_name: ty.name.clone(),
-                    method_name: method.name.clone(),
+                    method_name: method
+                        .rust_name
+                        .clone()
+                        .unwrap_or_else(|| method.name.clone()),
                 };
                 graph.nodes.insert(caller.clone());
                 if let Some(body) = &method.body {
@@ -947,6 +954,9 @@ fn analyze_stmt(
                 }
                 analyze_stored_expr(value, facts, field_name);
             }
+            if array_assignment_targets_self_field(target, facts, field_names) {
+                facts.mutates_self = true;
+            }
             analyze_expr(
                 target,
                 facts,
@@ -1258,18 +1268,27 @@ pub fn call_result_boundary_policy(
     facts: &MethodUsageFacts,
 ) -> Option<CallResultBoundaryPolicy> {
     match expr {
-        Expr::Call { receiver, name, .. } => Some(CallResultBoundaryPolicy {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved,
+        } => Some(CallResultBoundaryPolicy {
             name: name.clone(),
+            arg_count: args.len(),
             receiver_type: receiver
                 .as_deref()
                 .and_then(|receiver| call_result_receiver_type(receiver, facts)),
             boundary: call_argument_boundary_policy(receiver.as_deref(), name, internal_methods)
                 .boundary,
+            resolved: resolved.clone(),
         }),
         Expr::New { .. } => Some(CallResultBoundaryPolicy {
             name: "new".to_string(),
+            arg_count: 0,
             receiver_type: None,
             boundary: CallArgumentBoundary::Unknown,
+            resolved: None,
         }),
         _ => None,
     }
@@ -1433,6 +1452,16 @@ fn analyze_expr_with_context(
                         boundary: policy.boundary,
                     },
                 );
+            }
+            if call_mut_borrow_arg_targets_self_field(
+                receiver.as_deref(),
+                name,
+                args,
+                facts,
+                field_names,
+                semantic_facts,
+            ) {
+                facts.mutates_self = true;
             }
             for (arg_index, arg) in args.iter().enumerate() {
                 let arg_boundary =
@@ -1706,8 +1735,10 @@ fn record_returned_call_result_use(
             };
             facts.returned_call_results.push(ReturnedCallResultUse {
                 name: policy.name,
+                arg_count: policy.arg_count,
                 receiver_type: policy.receiver_type,
                 boundary: policy.boundary,
+                resolved: policy.resolved,
             });
         }
         Expr::Cast { expr, .. } => record_returned_call_result_use(expr, facts, internal_methods),
@@ -1777,6 +1808,73 @@ fn record_call_arg_use(
     }
 }
 
+fn call_mut_borrow_arg_targets_self_field(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    usage: &MethodUsageFacts,
+    field_names: &HashSet<String>,
+    facts: &FactSet,
+) -> bool {
+    facts
+        .facade_abi_facts
+        .iter()
+        .filter(|abi| abi.key.member.0 == name && abi.key.arity == args.len())
+        .filter(|abi| {
+            facade_abi_matches_call_receiver(abi.key.owner.type_name.as_str(), receiver, usage)
+        })
+        .any(|abi| {
+            abi.args.iter().enumerate().any(|(index, slot)| {
+                facade_slot_requires_mut_borrow(slot)
+                    && args
+                        .get(index)
+                        .is_some_and(|arg| expr_targets_self_field(arg, usage, field_names))
+            })
+        })
+}
+
+fn facade_abi_matches_call_receiver(
+    owner: &str,
+    receiver: Option<&Expr>,
+    usage: &MethodUsageFacts,
+) -> bool {
+    let Some(Expr::Var(receiver_name)) = receiver else {
+        return true;
+    };
+    if usage.bindings.contains_key(receiver_name) {
+        return true;
+    }
+    crate::stdlib::canonical_external_receiver_type_key(receiver_name)
+        == crate::stdlib::canonical_external_receiver_type_key(owner)
+}
+
+fn facade_slot_requires_mut_borrow(slot: &FacadeSlot) -> bool {
+    match slot {
+        FacadeSlot::MutBorrowed => true,
+        FacadeSlot::Optional(inner) | FacadeSlot::Slice(inner) => {
+            facade_slot_requires_mut_borrow(inner)
+        }
+        FacadeSlot::Owned
+        | FacadeSlot::Borrowed
+        | FacadeSlot::Index
+        | FacadeSlot::DynTrait(_)
+        | FacadeSlot::CrateHandle(_) => false,
+    }
+}
+
+fn expr_targets_self_field(
+    expr: &Expr,
+    facts: &MethodUsageFacts,
+    field_names: &HashSet<String>,
+) -> bool {
+    match expr {
+        Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
+        Expr::FieldAccess(receiver, _) => matches!(receiver.as_ref(), Expr::This),
+        Expr::ArrayAccess(array, _) => expr_targets_self_field(array, facts, field_names),
+        _ => false,
+    }
+}
+
 fn call_receiver_java_type(receiver: Option<&Expr>, facts: &MethodUsageFacts) -> Option<JavaType> {
     let Some(Expr::Var(name)) = receiver else {
         return None;
@@ -1785,6 +1883,22 @@ fn call_receiver_java_type(receiver: Option<&Expr>, facts: &MethodUsageFacts) ->
         .bindings
         .get(name)
         .map(|binding| binding.java_ty.clone())
+        .or_else(|| {
+            static_owner_receiver_name(name).map(|owner| JavaType::Unknown(owner.to_string()))
+        })
+}
+
+fn static_owner_receiver_name(name: &str) -> Option<&str> {
+    let first = name.chars().next()?;
+    if first.is_ascii_uppercase() {
+        Some(name)
+    } else {
+        match crate::stdlib::canonical_external_receiver_type_key(name).as_str() {
+            "Arrays" => Some("Arrays"),
+            "Collections" => Some("Collections"),
+            _ => None,
+        }
+    }
 }
 
 fn record_trivial_accessor_call_use(
@@ -1869,15 +1983,53 @@ fn target_is_this_field(expr: &Expr) -> bool {
     matches!(expr, Expr::FieldAccess(receiver, _) if matches!(receiver.as_ref(), Expr::This))
 }
 
+fn array_assignment_targets_self_field(
+    expr: &Expr,
+    facts: &MethodUsageFacts,
+    field_names: &HashSet<String>,
+) -> bool {
+    let Expr::ArrayAccess(array, _) = expr else {
+        return false;
+    };
+    array_expr_targets_self_field(array, facts, field_names)
+}
+
+fn array_expr_targets_self_field(
+    expr: &Expr,
+    facts: &MethodUsageFacts,
+    field_names: &HashSet<String>,
+) -> bool {
+    match expr {
+        Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
+        Expr::FieldAccess(receiver, _) => matches!(receiver.as_ref(), Expr::This),
+        Expr::ArrayAccess(array, _) => array_expr_targets_self_field(array, facts, field_names),
+        _ => false,
+    }
+}
+
 fn expr_mutates_self_field(
     expr: &Expr,
     facts: &MethodUsageFacts,
     field_names: &HashSet<String>,
 ) -> bool {
     match expr {
+        Expr::Binary {
+            op: crate::java_ir::BinaryOp::Assign,
+            left,
+            ..
+        } => {
+            array_assignment_targets_self_field(left, facts, field_names)
+                || match left.as_ref() {
+                    Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
+                    target => target_is_this_field(target),
+                }
+        }
         Expr::Unary { expr, .. } => match expr.as_ref() {
             Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
-            target => target_is_this_field(target),
+            target => {
+                target_is_this_field(target)
+                    || array_assignment_targets_self_field(target, facts, field_names)
+            }
         },
         Expr::Call {
             receiver: Some(receiver),

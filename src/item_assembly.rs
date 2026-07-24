@@ -4,8 +4,8 @@ use crate::exception_lowering::exception_result_type;
 use crate::exception_plan::MethodExceptionPlan;
 use crate::facts::FactSet;
 use crate::java_ir::{
-    ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
-    PrimitiveType, Program, TypeDecl,
+    BinaryOp, ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
+    PrimitiveType, Program, Stmt, TypeDecl,
 };
 use crate::rust_ir::{
     RustAssociatedConst, RustExpr, RustField, RustFunction, RustImpl, RustItem, RustParam,
@@ -16,7 +16,10 @@ use crate::slot_render::{
     default_expr_for_slot, default_expr_for_slot_with_facts, rust_name_for_java_named_type,
     rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
 };
-use crate::slot_shape::RustSlotShape;
+use crate::slot_shape::{OwnershipShape, RustSlotShape};
+use crate::types::{
+    optional_element_type, sequence_element_type, two_dimensional_array_element_type,
+};
 
 pub fn struct_item_for_type(ty: &TypeDecl, signatures: &SignaturePlan) -> RustItem {
     struct_item_for_type_with_facts(ty, signatures, &FactSet::default())
@@ -303,25 +306,33 @@ fn struct_fields_for_type(
     facts: &FactSet,
     support_program: &Program,
 ) -> Vec<RustField> {
-    let mut fields: Vec<_> = ty
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Field(field)
-                if !is_static_field(field) || is_static_final_non_const_field(field) =>
-            {
-                Some(RustField {
-                    name: field.name.clone(),
-                    ty: rust_type_for_slot_with_facts(
-                        &signatures.required_field_shape(&ty.name, &field.name),
-                        facts,
-                    ),
-                    is_pub: false,
-                })
-            }
-            _ => None,
-        })
-        .collect();
+    let mut fields = Vec::new();
+    if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
+        fields.push(RustField {
+            name: "__outer".to_string(),
+            ty: RustType::Raw(format!(
+                "std::rc::Rc<std::cell::RefCell<{}>>",
+                rust_name_for_java_named_type(outer_type)
+            )),
+            is_pub: false,
+            is_pub_crate: false,
+        });
+    }
+    let upcast_visible_fields = source_type_has_context_subtypes(ty, support_program);
+    fields.extend(ty.members.iter().filter_map(|member| match member {
+        Member::Field(field) if !is_static_field(field) => Some(RustField {
+            name: field.name.clone(),
+            ty: rust_type_for_instance_field(
+                ty,
+                &field.name,
+                &signatures.required_field_shape(&ty.name, &field.name),
+                facts,
+            ),
+            is_pub: source_field_is_public(field),
+            is_pub_crate: !source_field_is_public(field) && upcast_visible_fields,
+        }),
+        _ => None,
+    }));
     fields.extend(
         crate::inherited_members::inherited_instance_fields_for_type(ty, support_program)
             .into_iter()
@@ -332,6 +343,7 @@ fn struct_fields_for_type(
                     facts,
                 ),
                 is_pub: false,
+                is_pub_crate: upcast_visible_fields,
             }),
     );
     fields.extend(
@@ -344,11 +356,117 @@ fn struct_fields_for_type(
                     facts,
                 ),
                 is_pub: false,
+                is_pub_crate: upcast_visible_fields,
             }),
     );
     let mut seen = HashSet::new();
     fields.retain(|field| seen.insert(field.name.clone()));
     fields
+}
+
+fn rust_type_for_instance_field(
+    owner: &TypeDecl,
+    field_name: &str,
+    shape: &RustSlotShape,
+    facts: &FactSet,
+) -> RustType {
+    let rust_ty = rust_type_for_slot_with_facts(shape, facts);
+    if instance_field_is_self_referential(owner, field_name, shape) {
+        return box_recursive_field_type(rust_ty);
+    }
+    rust_ty
+}
+
+fn instance_field_is_self_referential(
+    owner: &TypeDecl,
+    field_name: &str,
+    shape: &RustSlotShape,
+) -> bool {
+    owner.members.iter().any(|member| {
+        let Member::Field(field) = member else {
+            return false;
+        };
+        field.name == field_name
+            && !is_static_field(field)
+            && java_type_names_same_after_optional(
+                &shape.java_ty,
+                &JavaType::Named {
+                    name: owner.name.clone(),
+                    args: Vec::new(),
+                },
+            )
+    })
+}
+
+fn java_type_names_same_after_optional(left: &JavaType, right: &JavaType) -> bool {
+    let left = optional_element_type(left).unwrap_or_else(|| left.clone());
+    let right = optional_element_type(right).unwrap_or_else(|| right.clone());
+    match (&left, &right) {
+        (JavaType::Named { name: left, .. }, JavaType::Named { name: right, .. })
+        | (JavaType::Unknown(left), JavaType::Named { name: right, .. })
+        | (JavaType::Named { name: left, .. }, JavaType::Unknown(right))
+        | (JavaType::Unknown(left), JavaType::Unknown(right)) => {
+            left == right
+                || left.rsplit('.').next() == right.rsplit('.').next()
+                || rust_name_for_java_named_type(left) == rust_name_for_java_named_type(right)
+        }
+        _ => false,
+    }
+}
+
+fn box_recursive_field_type(rust_ty: RustType) -> RustType {
+    match rust_ty {
+        RustType::Option(inner) => RustType::Option(Box::new(RustType::Raw(format!(
+            "Box<{}>",
+            crate::emit::emit_type(&inner)
+        )))),
+        other => RustType::Raw(format!("Box<{}>", crate::emit::emit_type(&other))),
+    }
+}
+
+fn source_field_is_public(field: &FieldDecl) -> bool {
+    field.modifiers.contains(&Modifier::Public)
+}
+
+fn source_type_has_context_subtypes(ty: &TypeDecl, support_program: &Program) -> bool {
+    support_program
+        .types
+        .iter()
+        .any(|candidate| source_type_extends(candidate, &ty.name, support_program))
+}
+
+fn source_type_extends(candidate: &TypeDecl, super_name: &str, support_program: &Program) -> bool {
+    let Some(extends) = candidate.extends.as_deref() else {
+        return false;
+    };
+    if java_type_names_same_after_optional(
+        &JavaType::Named {
+            name: extends.to_string(),
+            args: Vec::new(),
+        },
+        &JavaType::Named {
+            name: super_name.to_string(),
+            args: Vec::new(),
+        },
+    ) {
+        return true;
+    }
+    support_program
+        .types
+        .iter()
+        .find(|ty| {
+            java_type_names_same_after_optional(
+                &JavaType::Named {
+                    name: ty.name.clone(),
+                    args: Vec::new(),
+                },
+                &JavaType::Named {
+                    name: extends.to_string(),
+                    args: Vec::new(),
+                },
+            )
+        })
+        .is_some_and(|parent| source_type_extends(parent, super_name, support_program))
 }
 
 fn struct_derives_for_fields(
@@ -412,8 +530,110 @@ fn rust_type_supports_struct_derive_clone(
             support_program,
             visiting,
         ),
+        RustType::Raw(raw)
+            if raw.starts_with("std::rc::Rc<")
+                || raw_rust_type_supports_derive_clone(
+                    raw,
+                    signatures,
+                    facts,
+                    support_program,
+                    visiting,
+                ) =>
+        {
+            true
+        }
         RustType::Slice(_) | RustType::Ref { .. } | RustType::Raw(_) => false,
     }
+}
+
+fn raw_rust_type_supports_derive_clone(
+    raw: &str,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    let raw = raw.trim();
+    if raw.starts_with("Box<dyn ") && raw.ends_with('>') {
+        return true;
+    }
+    if let Some(args) = raw_generic_args(raw, "std::collections::HashMap")
+        && args.len() == 2
+    {
+        return args.iter().all(|arg| {
+            raw_type_arg_supports_derive_clone(arg, signatures, facts, support_program, visiting)
+        });
+    }
+    false
+}
+
+fn raw_type_arg_supports_derive_clone(
+    arg: &str,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    match arg.trim() {
+        "String" | "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "f32" | "f64" => true,
+        raw if raw.starts_with("Option<") => raw_generic_args(raw, "Option").is_some_and(|args| {
+            args.len() == 1
+                && raw_type_arg_supports_derive_clone(
+                    args[0],
+                    signatures,
+                    facts,
+                    support_program,
+                    visiting,
+                )
+        }),
+        raw if raw.starts_with("Vec<") => raw_generic_args(raw, "Vec").is_some_and(|args| {
+            args.len() == 1
+                && raw_type_arg_supports_derive_clone(
+                    args[0],
+                    signatures,
+                    facts,
+                    support_program,
+                    visiting,
+                )
+        }),
+        raw if raw.starts_with("Box<dyn ") && raw.ends_with('>') => true,
+        raw if raw.contains('<') => {
+            raw_rust_type_supports_derive_clone(raw, signatures, facts, support_program, visiting)
+        }
+        named => rust_named_type_supports_struct_derive_clone(
+            named,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        ),
+    }
+}
+
+fn raw_generic_args<'a>(raw: &'a str, head: &str) -> Option<Vec<&'a str>> {
+    let raw = raw.trim();
+    let rest = raw.strip_prefix(head)?.strip_prefix('<')?;
+    let inner = rest.strip_suffix('>')?;
+    Some(split_top_level_type_args(inner))
+}
+
+fn split_top_level_type_args(args: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    for (idx, ch) in args.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(args[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(args[start..].trim());
+    parts
 }
 
 fn rust_named_type_supports_struct_derive_clone(
@@ -498,24 +718,75 @@ pub fn is_static_final_non_const_field(field: &FieldDecl) -> bool {
     field
         .initializer
         .as_ref()
-        .is_none_or(|initializer| const_type_and_value(&field.ty, initializer).is_none())
+        .is_none_or(|initializer| const_type_and_value(&field.ty, initializer, &[]).is_none())
 }
 
 fn associated_consts_for_type(ty: &TypeDecl) -> Vec<RustAssociatedConst> {
+    let const_infos = static_final_const_infos(ty);
     ty.members
         .iter()
         .filter_map(|member| match member {
             Member::Field(field) if is_static_final_field(field) => {
-                associated_const_for_field(field)
+                associated_const_for_field(field, &const_infos)
             }
             _ => None,
         })
         .collect()
 }
 
-fn associated_const_for_field(field: &FieldDecl) -> Option<RustAssociatedConst> {
-    let initializer = field.initializer.as_ref()?;
-    let (ty, value) = const_type_and_value(&field.ty, initializer)?;
+pub fn static_final_field_has_associated_const(ty: &TypeDecl, field: &FieldDecl) -> bool {
+    if !is_static_final_field(field) {
+        return false;
+    }
+    let const_infos = static_final_const_infos(ty);
+    associated_const_for_field(field, &const_infos).is_some()
+}
+
+#[derive(Debug, Clone)]
+struct StaticFinalConstInfo {
+    normalized: String,
+    original: String,
+    array_len: Option<usize>,
+}
+
+fn static_final_const_infos(ty: &TypeDecl) -> Vec<StaticFinalConstInfo> {
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if is_static_final_field(field) => Some(StaticFinalConstInfo {
+                normalized: crate::parser::to_snake_case(&field.name),
+                original: field.name.clone(),
+                array_len: static_final_array_initializer_len(field),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn static_final_array_initializer_len(field: &FieldDecl) -> Option<usize> {
+    if !matches!(field.ty, JavaType::Array(_)) {
+        return None;
+    }
+    match field.initializer.as_ref()? {
+        Expr::ArrayInitializer(elements) => Some(elements.len()),
+        Expr::ArrayCreation {
+            initializer: Some(elements),
+            ..
+        } => Some(elements.len()),
+        _ => None,
+    }
+}
+
+fn associated_const_for_field(
+    field: &FieldDecl,
+    const_infos: &[StaticFinalConstInfo],
+) -> Option<RustAssociatedConst> {
+    let (ty, value) = field
+        .initializer
+        .as_ref()
+        .and_then(|initializer| const_type_and_value(&field.ty, initializer, const_infos))
+        .or_else(|| non_literal_static_final_const_type_and_value(field))
+        .or_else(|| static_final_default_const_type_and_value(field))?;
     Some(RustAssociatedConst {
         name: field.name.clone(),
         ty,
@@ -524,37 +795,223 @@ fn associated_const_for_field(field: &FieldDecl) -> Option<RustAssociatedConst> 
     })
 }
 
-fn const_type_and_value(ty: &JavaType, initializer: &Expr) -> Option<(RustType, RustExpr)> {
-    let Expr::Literal(literal) = initializer else {
+fn non_literal_static_final_const_type_and_value(
+    field: &FieldDecl,
+) -> Option<(RustType, RustExpr)> {
+    if !is_static_final_field(field) || field.initializer.is_none() {
+        return None;
+    }
+    let JavaType::Named { name, .. } = &field.ty else {
         return None;
     };
-    match (ty, literal) {
-        (JavaType::String, Literal::String(value)) => Some((
-            RustType::Raw("&'static str".to_string()),
-            RustExpr::Literal(format!("{value:?}")),
-        )),
-        (JavaType::Primitive(PrimitiveType::Boolean), Literal::Bool(value)) => {
-            Some((RustType::Bool, RustExpr::Literal(value.to_string())))
+    let rust_name = rust_name_for_java_named_type(name);
+    Some((RustType::Named(rust_name.clone()), RustExpr::Var(rust_name)))
+}
+
+fn static_final_default_const_type_and_value(field: &FieldDecl) -> Option<(RustType, RustExpr)> {
+    if !is_static_final_field(field) || field.initializer.is_some() {
+        return None;
+    }
+    if !matches!(field.ty, JavaType::Array(_)) {
+        return None;
+    }
+    let rust_ty = const_rust_type_for_java_type(&field.ty)?;
+    Some((rust_ty, RustExpr::Raw("&[]".to_string())))
+}
+
+fn const_type_and_value(
+    ty: &JavaType,
+    initializer: &Expr,
+    const_infos: &[StaticFinalConstInfo],
+) -> Option<(RustType, RustExpr)> {
+    let rust_ty = const_rust_type_for_java_type(ty)?;
+    let value = const_expr_value(initializer, const_infos, Some(ty))?;
+    Some((rust_ty, value))
+}
+
+fn const_rust_type_for_java_type(ty: &JavaType) -> Option<RustType> {
+    match ty {
+        JavaType::Array(element) => {
+            let element_ty = const_rust_type_for_java_type(element)?;
+            Some(RustType::Raw(format!(
+                "&'static [{}]",
+                crate::emit::emit_type(&element_ty)
+            )))
         }
-        (JavaType::Primitive(PrimitiveType::Byte), Literal::Int(value))
-        | (JavaType::Primitive(PrimitiveType::Short), Literal::Int(value))
-        | (JavaType::Primitive(PrimitiveType::Int), Literal::Int(value)) => {
-            Some((RustType::I32, RustExpr::Literal(value.to_string())))
+        JavaType::String => Some(RustType::Raw("&'static str".to_string())),
+        JavaType::Primitive(PrimitiveType::Boolean) => Some(RustType::Bool),
+        JavaType::Primitive(PrimitiveType::Byte) => Some(RustType::I8),
+        JavaType::Primitive(PrimitiveType::Short) => Some(RustType::I16),
+        JavaType::Primitive(PrimitiveType::Int) => Some(RustType::I32),
+        JavaType::Primitive(PrimitiveType::Long) => Some(RustType::I64),
+        JavaType::Primitive(PrimitiveType::Float) => Some(RustType::F32),
+        JavaType::Primitive(PrimitiveType::Double) => Some(RustType::F64),
+        JavaType::Primitive(PrimitiveType::Char) => Some(RustType::Char),
+        _ => None,
+    }
+}
+
+fn const_expr_value(
+    expr: &Expr,
+    const_infos: &[StaticFinalConstInfo],
+    expected_ty: Option<&JavaType>,
+) -> Option<RustExpr> {
+    match expr {
+        Expr::Literal(literal) => const_literal_expr_value(literal, expected_ty),
+        Expr::Var(name) => Some(RustExpr::Raw(format!(
+            "Self::{}",
+            const_reference_name(name, const_infos)
+        ))),
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            Some(RustExpr::Raw(format!(
+                "Self::{}",
+                const_reference_name(field, const_infos)
+            )))
         }
-        (JavaType::Primitive(PrimitiveType::Long), Literal::Long(value)) => {
-            Some((RustType::I64, RustExpr::Literal(format!("{value}i64"))))
+        Expr::FieldAccess(receiver, field)
+            if field == "length" && matches!(expected_ty, Some(JavaType::Primitive(_))) =>
+        {
+            let Expr::Var(name) = receiver.as_ref() else {
+                return None;
+            };
+            static_const_array_len(name, const_infos).map(|len| RustExpr::Literal(len.to_string()))
         }
-        (JavaType::Primitive(PrimitiveType::Float), Literal::Float(value)) => {
-            Some((RustType::F32, RustExpr::Literal(format!("{value}f32"))))
+        Expr::FieldAccess(receiver, field) => {
+            let Expr::Var(owner) = receiver.as_ref() else {
+                return None;
+            };
+            Some(RustExpr::Raw(format!(
+                "{}::{}",
+                rust_name_for_java_named_type(owner),
+                const_reference_name(field, const_infos)
+            )))
         }
-        (JavaType::Primitive(PrimitiveType::Double), Literal::Double(value)) => {
-            Some((RustType::F64, RustExpr::Literal(format!("{value}f64"))))
+        Expr::Unary {
+            op: crate::java_ir::UnaryOp::Neg,
+            expr,
+        } => Some(RustExpr::Unary {
+            op: "-".to_string(),
+            expr: Box::new(const_expr_value(expr, const_infos, expected_ty)?),
+        }),
+        Expr::Unary {
+            op: crate::java_ir::UnaryOp::Pos,
+            expr,
+        } => const_expr_value(expr, const_infos, expected_ty),
+        Expr::Binary { op, left, right } if const_binary_op_is_allowed(*op) => {
+            Some(RustExpr::Binary {
+                op: crate::operator_lowering::binary_op_to_rust(*op).to_string(),
+                left: Box::new(const_expr_value(left, const_infos, expected_ty)?),
+                right: Box::new(const_expr_value(right, const_infos, expected_ty)?),
+            })
         }
-        (JavaType::Primitive(PrimitiveType::Char), Literal::Char(value)) => {
-            Some((RustType::Char, RustExpr::Literal(format!("{value:?}"))))
+        Expr::Cast { expr, ty } if const_rust_type_for_java_type(ty).is_some() => {
+            Some(RustExpr::Cast {
+                expr: Box::new(const_expr_value(expr, const_infos, Some(ty))?),
+                ty: crate::emit::emit_type(&const_rust_type_for_java_type(ty)?),
+            })
+        }
+        Expr::ArrayInitializer(elements) => {
+            let element_ty = expected_array_element_type(expected_ty)?;
+            const_array_expr_value(elements, const_infos, element_ty)
+        }
+        Expr::ArrayCreation {
+            element_type,
+            initializer: Some(elements),
+            ..
+        } => {
+            let element_ty = expected_array_element_type(expected_ty).unwrap_or(element_type);
+            const_array_expr_value(elements, const_infos, element_ty)
         }
         _ => None,
     }
+}
+
+fn const_array_expr_value(
+    elements: &[Expr],
+    const_infos: &[StaticFinalConstInfo],
+    element_ty: &JavaType,
+) -> Option<RustExpr> {
+    let values = elements
+        .iter()
+        .map(|element| const_expr_value(element, const_infos, Some(element_ty)))
+        .collect::<Option<Vec<_>>>()?;
+    Some(RustExpr::Raw(format!(
+        "&[{}]",
+        values
+            .iter()
+            .map(crate::emit::emit_expr)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+fn expected_array_element_type(expected_ty: Option<&JavaType>) -> Option<&JavaType> {
+    match expected_ty {
+        Some(JavaType::Array(element)) => Some(element.as_ref()),
+        _ => None,
+    }
+}
+
+fn const_literal_expr_value(literal: &Literal, expected_ty: Option<&JavaType>) -> Option<RustExpr> {
+    match (literal, expected_ty) {
+        (Literal::String(value), _) => Some(RustExpr::Literal(format!("{value:?}"))),
+        (Literal::Int(value), Some(JavaType::Primitive(PrimitiveType::Long))) => {
+            Some(RustExpr::Literal(format!("{value}i64")))
+        }
+        (Literal::Int(value), Some(JavaType::Primitive(PrimitiveType::Float))) => {
+            Some(RustExpr::Literal(format!("{value}f32")))
+        }
+        (Literal::Int(value), Some(JavaType::Primitive(PrimitiveType::Double))) => {
+            Some(RustExpr::Literal(format!("{value}f64")))
+        }
+        (Literal::Long(value), Some(JavaType::Primitive(PrimitiveType::Float))) => {
+            Some(RustExpr::Cast {
+                expr: Box::new(RustExpr::Literal(format!("{value}i64"))),
+                ty: "f32".to_string(),
+            })
+        }
+        (Literal::Long(value), Some(JavaType::Primitive(PrimitiveType::Double))) => {
+            Some(RustExpr::Cast {
+                expr: Box::new(RustExpr::Literal(format!("{value}i64"))),
+                ty: "f64".to_string(),
+            })
+        }
+        (Literal::Float(value), Some(JavaType::Primitive(PrimitiveType::Double))) => {
+            Some(RustExpr::Literal(format!("{value}f64")))
+        }
+        _ => Some(crate::expr_render::literal_expr(literal)),
+    }
+}
+
+fn const_reference_name<'a>(name: &'a str, const_infos: &'a [StaticFinalConstInfo]) -> &'a str {
+    const_infos
+        .iter()
+        .find(|info| name == info.normalized || name == info.original)
+        .map(|info| info.original.as_str())
+        .unwrap_or(name)
+}
+
+fn static_const_array_len(name: &str, const_infos: &[StaticFinalConstInfo]) -> Option<usize> {
+    const_infos
+        .iter()
+        .find(|info| name == info.normalized || name == info.original)
+        .and_then(|info| info.array_len)
+}
+
+fn const_binary_op_is_allowed(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+    )
 }
 
 fn constructor_params(
@@ -599,15 +1056,26 @@ fn method_params_with_optional_lifetime(
     facts: &FactSet,
     lifetime: bool,
 ) -> Vec<RustParam> {
-    signatures
-        .required_method_signature(ty, method)
+    let signature = signatures.required_method_signature(ty, method);
+    let mutable_array_target_params = mutable_array_target_params(method);
+    signature
         .params
         .iter()
         .map(|param| {
             let callback_param =
                 method_param_is_nonescaping_functional_callback(method, &param.name);
+            let mutable_optional_sequence_param = mutable_array_target_params.contains(&param.name)
+                && optional_sequence_slot(&param.shape);
+            let mutable_owned_binding_param = param.binding_mutable
+                && matches!(
+                    param.shape.ownership,
+                    OwnershipShape::Owned | OwnershipShape::CopyValue
+                );
             RustParam {
-                name: if callback_param {
+                name: if callback_param
+                    || mutable_optional_sequence_param
+                    || mutable_owned_binding_param
+                {
                     format!("mut {}", param.name)
                 } else {
                     param.name.clone()
@@ -628,6 +1096,214 @@ fn method_params_with_optional_lifetime(
             }
         })
         .collect()
+}
+
+fn optional_sequence_slot(shape: &RustSlotShape) -> bool {
+    optional_element_type(&shape.java_ty).is_some_and(|inner| {
+        sequence_element_type(&inner).is_some()
+            || two_dimensional_array_element_type(&inner).is_some()
+    })
+}
+
+fn mutable_array_target_params(method: &MethodDecl) -> HashSet<String> {
+    let mut names = HashSet::new();
+    if let Some(body) = &method.body {
+        collect_mutable_array_target_params_in_stmts(&body.statements, &mut names);
+    }
+    names
+}
+
+fn collect_mutable_array_target_params_in_stmts(statements: &[Stmt], names: &mut HashSet<String>) {
+    for stmt in statements {
+        match stmt {
+            Stmt::Assign { target, value } => {
+                collect_array_target_root_name(target, names);
+                collect_mutable_array_target_params_in_expr(value, names);
+            }
+            Stmt::VarDecl { initializer, .. } => {
+                if let Some(initializer) = initializer {
+                    collect_mutable_array_target_params_in_expr(initializer, names);
+                }
+            }
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+                collect_mutable_array_target_params_in_expr(expr, names);
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                collect_mutable_array_target_params_in_expr(condition, names);
+                collect_mutable_array_target_params_in_stmts(&then_block.statements, names);
+                if let Some(else_block) = else_block {
+                    collect_mutable_array_target_params_in_stmts(&else_block.statements, names);
+                }
+            }
+            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+                collect_mutable_array_target_params_in_expr(condition, names);
+                collect_mutable_array_target_params_in_stmts(&body.statements, names);
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+                ..
+            } => {
+                collect_mutable_array_target_params_in_stmts(init, names);
+                if let Some(condition) = condition {
+                    collect_mutable_array_target_params_in_expr(condition, names);
+                }
+                for expr in update {
+                    collect_mutable_array_target_params_in_expr(expr, names);
+                }
+                collect_mutable_array_target_params_in_stmts(&body.statements, names);
+            }
+            Stmt::EnhancedFor { iterable, body, .. } => {
+                collect_mutable_array_target_params_in_expr(iterable, names);
+                collect_mutable_array_target_params_in_stmts(&body.statements, names);
+            }
+            Stmt::Switch { selector, cases } => {
+                collect_mutable_array_target_params_in_expr(selector, names);
+                for case in cases {
+                    collect_mutable_array_target_params_in_stmts(&case.statements, names);
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                collect_mutable_array_target_params_in_stmts(resources, names);
+                collect_mutable_array_target_params_in_stmts(&body.statements, names);
+                for catch in catches {
+                    collect_mutable_array_target_params_in_stmts(&catch.body.statements, names);
+                }
+                if let Some(finally_block) = finally_block {
+                    collect_mutable_array_target_params_in_stmts(&finally_block.statements, names);
+                }
+            }
+            Stmt::Block(block) => {
+                collect_mutable_array_target_params_in_stmts(&block.statements, names);
+            }
+            Stmt::ConstructorInvocation { args, .. } => {
+                for arg in args {
+                    collect_mutable_array_target_params_in_expr(arg, names);
+                }
+            }
+            Stmt::Return(None)
+            | Stmt::LocalType(_)
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => {}
+        }
+    }
+}
+
+fn collect_mutable_array_target_params_in_expr(expr: &Expr, names: &mut HashSet<String>) {
+    match expr {
+        Expr::Binary {
+            op: crate::java_ir::BinaryOp::Assign,
+            left,
+            right,
+        } => {
+            collect_array_target_root_name(left, names);
+            collect_mutable_array_target_params_in_expr(right, names);
+        }
+        Expr::Unary {
+            op:
+                crate::java_ir::UnaryOp::PostInc
+                | crate::java_ir::UnaryOp::PostDec
+                | crate::java_ir::UnaryOp::PreInc
+                | crate::java_ir::UnaryOp::PreDec,
+            expr,
+        } => {
+            collect_array_target_root_name(expr, names);
+        }
+        Expr::FieldAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            collect_mutable_array_target_params_in_expr(receiver, names);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_mutable_array_target_params_in_expr(left, names);
+            collect_mutable_array_target_params_in_expr(right, names);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_mutable_array_target_params_in_expr(condition, names);
+            collect_mutable_array_target_params_in_expr(then_expr, names);
+            collect_mutable_array_target_params_in_expr(else_expr, names);
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_mutable_array_target_params_in_expr(receiver, names);
+            }
+            for arg in args {
+                collect_mutable_array_target_params_in_expr(arg, names);
+            }
+        }
+        Expr::New { args, .. } | Expr::ArrayInitializer(args) => {
+            for arg in args {
+                collect_mutable_array_target_params_in_expr(arg, names);
+            }
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_mutable_array_target_params_in_expr(array, names);
+            collect_mutable_array_target_params_in_expr(index, names);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_mutable_array_target_params_in_expr(dimension, names);
+            }
+            if let Some(initializer) = initializer {
+                for element in initializer {
+                    collect_mutable_array_target_params_in_expr(element, names);
+                }
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => {
+                collect_mutable_array_target_params_in_expr(expr, names);
+            }
+            crate::java_ir::LambdaBody::Block(block) => {
+                collect_mutable_array_target_params_in_stmts(&block.statements, names);
+            }
+        },
+        Expr::MethodReference { .. }
+        | Expr::Var(_)
+        | Expr::Literal(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn collect_array_target_root_name(expr: &Expr, names: &mut HashSet<String>) {
+    let Expr::ArrayAccess(array, _) = expr else {
+        return;
+    };
+    if let Some(name) = array_access_root_var(array) {
+        names.insert(name.to_string());
+    }
+}
+
+fn array_access_root_var(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Var(name) => Some(name),
+        Expr::ArrayAccess(array, _) => array_access_root_var(array),
+        _ => None,
+    }
 }
 
 fn functional_callback_param_type(java_ty: &JavaType, facts: &FactSet) -> Option<RustType> {

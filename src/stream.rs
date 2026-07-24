@@ -2,6 +2,7 @@ use crate::conversion_plan::LoweredType;
 use crate::expr_shape::{ExprShapeContext, ShapeEnv, infer_expr_shape_with_context};
 use crate::facts::FactSet;
 use crate::java_ir::{Block, Expr, JavaType, LambdaBody, PrimitiveType, Stmt};
+use crate::method_reference_shape::infer_single_input_method_reference_output_shape;
 use crate::shape_projection::iteration_element_shape;
 use crate::slot_shape::RustSlotShape;
 use crate::stdlib::JavaCollectionKind;
@@ -524,7 +525,7 @@ fn infer_stream_lambda_output_shape(
     facts: &FactSet,
 ) -> RustSlotShape {
     if let StreamLambdaBody::MethodReference { target, method } = lambda.body {
-        return infer_stream_method_reference_output_shape(target, method, input_shape)
+        return infer_single_input_method_reference_output_shape(target, method, input_shape)
             .unwrap_or_else(|| input_shape.clone());
     }
     let Some(return_expr) = lambda.body.return_expr() else {
@@ -541,28 +542,6 @@ fn infer_stream_lambda_output_shape(
         nullable
     } else {
         output_shape
-    }
-}
-
-fn infer_stream_method_reference_output_shape(
-    target: &str,
-    method: &str,
-    input_shape: &RustSlotShape,
-) -> Option<RustSlotShape> {
-    let target = crate::stdlib::canonical_external_receiver_type_key(target);
-    match (target.as_str(), method) {
-        ("Integer", "intValue" | "int_value") => Some(RustSlotShape::for_storage(
-            JavaType::Primitive(PrimitiveType::Int),
-        )),
-        ("String", "valueOf" | "value_of") | ("Object", "toString" | "to_string") => {
-            Some(crate::shape_projection::owned_string_value_shape())
-        }
-        (_, method) if method.starts_with("get") || method.starts_with("get_") => {
-            let mut shape = input_shape.clone();
-            shape.java_ty = JavaType::Unknown(crate::parser::to_snake_case(method));
-            Some(shape)
-        }
-        _ => None,
     }
 }
 
@@ -604,13 +583,28 @@ fn is_non_null_filter_arg(expr: &Expr) -> bool {
 }
 
 fn is_non_null_predicate_expr(expr: &Expr, param_name: &str) -> bool {
-    matches!(
+    if matches!(
         expr,
         Expr::Binary {
             op: crate::java_ir::BinaryOp::Ne,
             left,
             right,
         } if is_param_and_null(left, right, param_name) || is_param_and_null(right, left, param_name)
+    ) {
+        return true;
+    }
+    matches!(
+        expr,
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if args.len() == 1
+            && matches!(args.first(), Some(Expr::Var(name)) if name == param_name)
+            && matches!(name.as_str(), "nonNull" | "non_null")
+            && matches!(receiver.as_ref(), Expr::Var(owner)
+                if crate::stdlib::canonical_external_receiver_type_key(owner) == "Objects")
     )
 }
 
@@ -788,7 +782,7 @@ fn infer_terminal_lambda_output_shape(
     _facts: &FactSet,
 ) -> RustSlotShape {
     if let StreamLambdaBody::MethodReference { target, method } = lambda.body {
-        return infer_stream_method_reference_output_shape(target, method, element_shape)
+        return infer_single_input_method_reference_output_shape(target, method, element_shape)
             .unwrap_or_else(|| element_shape.clone());
     }
     let Some(return_expr) = lambda.body.return_expr() else {

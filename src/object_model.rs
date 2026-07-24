@@ -500,6 +500,9 @@ pub fn java_enum_variant_names(ty: &TypeDecl) -> Vec<String> {
 }
 
 pub fn rust_enum_variant_name_from_parsed_constant(name: &str) -> String {
+    if parsed_constant_name_is_valid_rust_variant(name) {
+        return name.to_string();
+    }
     let mut out = String::new();
     for part in name.split('_').filter(|part| !part.is_empty()) {
         let mut chars = part.chars();
@@ -513,6 +516,15 @@ pub fn rust_enum_variant_name_from_parsed_constant(name: &str) -> String {
     } else {
         out
     }
+}
+
+fn parsed_constant_name_is_valid_rust_variant(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_uppercase())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn named_type(name: &str) -> JavaType {
@@ -935,6 +947,12 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             continue;
         };
         if let Some(strategy) = plan.strategy_for_mut(&policy.type_name) {
+            if external_pack_erased_override_should_not_replace_parsed_source(
+                override_fact,
+                strategy,
+            ) {
+                continue;
+            }
             strategy.strategy = representation;
             strategy.replace_provenance(policy.provenance);
             strategy.direct_subtypes = policy.direct_subtypes;
@@ -951,6 +969,15 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             diagnostics: Vec::new(),
         });
     }
+}
+
+fn external_pack_erased_override_should_not_replace_parsed_source(
+    override_fact: &HierarchyOverride,
+    strategy: &ObjectStrategyPlan,
+) -> bool {
+    override_fact.provenance == FactProvenance::ExternalLibraryPack
+        && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
+        && strategy.primary_provenance() == FactProvenance::ParsedSource
 }
 
 fn object_hierarchy_context_for_strategy_plan(plan: &ObjectModelPlan) -> ObjectHierarchyContext {

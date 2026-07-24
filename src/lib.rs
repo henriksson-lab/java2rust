@@ -35,6 +35,7 @@ pub mod lowering_diagnostics;
 pub mod member_access_plan;
 pub mod method_reference_lowering;
 pub mod method_reference_plan;
+pub mod method_reference_shape;
 pub mod nullability_plan;
 pub mod object_model;
 pub mod operator_lowering;
@@ -166,7 +167,16 @@ pub fn translate_source(source: &str) -> Translation {
 
 pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Translation {
     let parsed = parser::parse_java_source(source);
-    translate_parsed_source_with_context(parsed, None, None, None, None, false, external_facts)
+    let effective_external_facts = effective_external_facts_with_stdlib(external_facts, None);
+    translate_parsed_source_with_context(
+        parsed,
+        None,
+        None,
+        None,
+        None,
+        false,
+        &effective_external_facts,
+    )
 }
 
 pub fn translate_source_with_context_sources(
@@ -228,8 +238,8 @@ pub fn translate_source_with_context_sources_and_summary_sources(
         (!context_sources.is_empty() || !summary_sources.is_empty()).then_some(source_program);
     let support_program_context = source_program_context.clone();
     let summary_program_context = (!summary_sources.is_empty()).then_some(summary_program);
-    let mut effective_external_facts = external_facts.clone();
-    effective_external_facts.extend_from(summary_facts);
+    let effective_external_facts =
+        effective_external_facts_with_stdlib(external_facts, Some(summary_facts));
     let mut translation = translate_parsed_source_with_context(
         parsed,
         source_program_context.clone(),
@@ -269,11 +279,20 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     external_facts: &FactSet,
     options: &BatchTranslationOptions,
 ) -> BatchTranslationReport {
+    let batch_start = Instant::now();
+    let event_sink = options.event_sink.as_deref();
     let mut timings = BatchTranslationTimings::default();
     let mut parsed_primary = Vec::with_capacity(primary_sources.len());
     let mut source_program = Program::default();
     let mut context_diagnostics = DiagnosticBag::new();
 
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_primary_parse",
+        "running",
+        batch_start.elapsed().as_millis(),
+        &format!("{} primary files", primary_sources.len()),
+    );
     let primary_parse_start = Instant::now();
     for source in primary_sources {
         let parsed = parser::parse_java_source(&source.source);
@@ -282,9 +301,23 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         parsed_primary.push((source.path.clone(), parsed));
     }
     timings.primary_parse_ms = primary_parse_start.elapsed().as_millis();
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_primary_parse",
+        "ok",
+        timings.primary_parse_ms,
+        &format!("{} primary files", primary_sources.len()),
+    );
 
     let mut summary_program = Program::default();
     let mut summary_facts = FactSet::default();
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_context_parse",
+        "running",
+        batch_start.elapsed().as_millis(),
+        &format!("{} context files", context_sources.len()),
+    );
     let context_parse_start = Instant::now();
     for context_source in context_sources {
         let context_parsed = parser::parse_java_source(context_source);
@@ -292,6 +325,20 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         merge_program_context(&mut source_program, context_parsed.program.clone());
     }
     timings.context_parse_ms = context_parse_start.elapsed().as_millis();
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_context_parse",
+        "ok",
+        timings.context_parse_ms,
+        &format!("{} context files", context_sources.len()),
+    );
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_summary_parse",
+        "running",
+        batch_start.elapsed().as_millis(),
+        &format!("{} summary files", summary_sources.len()),
+    );
     let summary_parse_start = Instant::now();
     for summary_source in summary_sources {
         let summary_parsed = parser::parse_java_source(summary_source);
@@ -304,22 +351,52 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         merge_program_context(&mut source_program, summary_declarations);
     }
     timings.summary_parse_ms = summary_parse_start.elapsed().as_millis();
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_summary_parse",
+        "ok",
+        timings.summary_parse_ms,
+        &format!("{} summary files", summary_sources.len()),
+    );
 
-    let mut effective_external_facts = external_facts.clone();
-    effective_external_facts.extend_from(summary_facts);
+    let effective_external_facts =
+        effective_external_facts_with_stdlib(external_facts, Some(summary_facts));
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_global_analysis",
+        "running",
+        batch_start.elapsed().as_millis(),
+        "resolver/semantic/representation/signature",
+    );
     let global_analysis_start = Instant::now();
     let context_build = build_batch_translation_context(
         source_program,
         summary_program,
         context_sources_are_emitted,
         &effective_external_facts,
+        event_sink,
+        batch_start,
     );
     timings.global_analysis_ms = global_analysis_start.elapsed().as_millis();
     timings.global_resolve_ms = context_build.timings.global_resolve_ms;
     timings.global_semantic_ms = context_build.timings.global_semantic_ms;
     timings.global_representation_ms = context_build.timings.global_representation_ms;
     timings.global_signature_ms = context_build.timings.global_signature_ms;
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_global_analysis",
+        "ok",
+        timings.global_analysis_ms,
+        "resolver/semantic/representation/signature",
+    );
 
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_emission",
+        "running",
+        batch_start.elapsed().as_millis(),
+        &format!("jobs={}", options.emission_jobs.max(1)),
+    );
     let emission_start = Instant::now();
     let (translations, events) = emit_batch_translations(
         parsed_primary,
@@ -329,6 +406,13 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         options.event_sink.as_deref(),
     );
     timings.emission_ms = emission_start.elapsed().as_millis();
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_emission",
+        "ok",
+        timings.emission_ms,
+        &format!("jobs={}", options.emission_jobs.max(1)),
+    );
     let mut analysis_profile = context_build.analysis_profile;
     analysis_profile.primary_files = primary_sources.len();
     analysis_profile.context_files = context_sources.len();
@@ -339,6 +423,18 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         analysis_profile,
         events,
     }
+}
+
+fn effective_external_facts_with_stdlib(
+    external_facts: &FactSet,
+    summary_facts: Option<FactSet>,
+) -> FactSet {
+    let mut effective = stdlib::rust_stdlib_signature_facts();
+    effective.extend_from(external_facts.clone());
+    if let Some(summary_facts) = summary_facts {
+        effective.extend_from(summary_facts);
+    }
+    effective
 }
 
 struct BatchTranslationContext {
@@ -363,6 +459,8 @@ fn build_batch_translation_context(
     summary_program: Program,
     context_sources_are_emitted: bool,
     external_facts: &FactSet,
+    event_sink: Option<&(dyn Fn(BatchTranslationEvent) + Send + Sync)>,
+    batch_start: Instant,
 ) -> BatchTranslationContextBuild {
     let mut timings = BatchTranslationTimings::default();
     let mut analysis_profile = BatchAnalysisProfile {
@@ -373,6 +471,13 @@ fn build_batch_translation_context(
         external_fact_count: count_facts(external_facts),
         ..BatchAnalysisProfile::default()
     };
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_global_resolve_context",
+        "running",
+        batch_start.elapsed().as_millis(),
+        "resolve_program_with_source_program_and_facts",
+    );
     let resolve_start = Instant::now();
     let source_symbols = resolve::source_symbols_from_program(&source_program);
     let resolved_context = resolve::resolve_program_with_source_symbols_and_facts(
@@ -382,7 +487,21 @@ fn build_batch_translation_context(
         external_facts,
     );
     timings.global_resolve_ms = resolve_start.elapsed().as_millis();
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_global_resolve_context",
+        "ok",
+        timings.global_resolve_ms,
+        "resolve_program_with_source_program_and_facts",
+    );
 
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_global_semantic",
+        "running",
+        batch_start.elapsed().as_millis(),
+        "semantic_analysis::analyze_program",
+    );
     let semantic_start = Instant::now();
     let semantic = semantic_analysis::analyze_program(
         &resolved_context.program,
@@ -390,22 +509,68 @@ fn build_batch_translation_context(
         external_facts,
     );
     timings.global_semantic_ms = semantic_start.elapsed().as_millis();
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_global_semantic",
+        "ok",
+        timings.global_semantic_ms,
+        "semantic_analysis::analyze_program",
+    );
 
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_global_representation",
+        "running",
+        batch_start.elapsed().as_millis(),
+        "representation::plan_representations",
+    );
     let representation_start = Instant::now();
     let representations =
         representation::plan_representations(&resolved_context.program, &semantic.facts);
     timings.global_representation_ms = representation_start.elapsed().as_millis();
-
-    let signature_start = Instant::now();
-    let profiled_signatures = signature::solve_signatures_with_facts_and_support_context_profiled(
-        &resolved_context.program,
-        &representations,
-        &semantic.usage,
-        &semantic.facts,
-        &resolved_context.program,
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_global_representation",
+        "ok",
+        timings.global_representation_ms,
+        "representation::plan_representations",
     );
+
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_global_signature",
+        "running",
+        batch_start.elapsed().as_millis(),
+        "signature::solve_signatures",
+    );
+    let signature_start = Instant::now();
+    let signature_progress = |event: signature::SignatureSolverProgressEvent| {
+        emit_batch_phase_progress(
+            event_sink,
+            signature_solver_batch_phase(event.phase),
+            event.status,
+            event.elapsed_ms,
+            &event.detail,
+        );
+    };
+    let profiled_signatures =
+        signature::solve_signatures_with_facts_and_support_context_profiled_with_progress(
+            &resolved_context.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+            &resolved_context.program,
+            event_sink.map(|_| &signature_progress as signature::SignatureSolverProgressSink<'_>),
+        );
     timings.global_signature_ms = signature_start.elapsed().as_millis();
     analysis_profile.signature = profiled_signatures.profile;
+    emit_batch_phase_progress(
+        event_sink,
+        "batch_global_signature",
+        "ok",
+        timings.global_signature_ms,
+        "signature::solve_signatures",
+    );
 
     BatchTranslationContextBuild {
         context: BatchTranslationContext {
@@ -420,6 +585,39 @@ fn build_batch_translation_context(
         },
         analysis_profile,
         timings,
+    }
+}
+
+fn emit_batch_phase_progress(
+    event_sink: Option<&(dyn Fn(BatchTranslationEvent) + Send + Sync)>,
+    phase: &'static str,
+    status: &'static str,
+    elapsed_ms: u128,
+    detail: &str,
+) {
+    if let Some(event_sink) = event_sink {
+        event_sink(BatchTranslationEvent {
+            phase,
+            index: 0,
+            path: detail.to_string(),
+            elapsed_ms,
+            status,
+        });
+    }
+}
+
+fn signature_solver_batch_phase(phase: &'static str) -> &'static str {
+    match phase {
+        "collect_constraints" => "batch_global_signature_collect_constraints_live",
+        "dependency_graph" => "batch_global_signature_dependency_graph_live",
+        "scc_analysis" => "batch_global_signature_scc_live",
+        "pass_plan" => "batch_global_signature_pass_plan_live",
+        "fixpoint" => "batch_global_signature_fixpoint_live",
+        "fixpoint_iteration" => "batch_global_signature_fixpoint_iteration_live",
+        "fixpoint_component" => "batch_global_signature_fixpoint_component_live",
+        "fixpoint_component_sweep" => "batch_global_signature_fixpoint_component_sweep_live",
+        "plan_build" => "batch_global_signature_plan_build_live",
+        _ => "batch_global_signature_progress",
     }
 }
 
@@ -746,18 +944,38 @@ fn translate_parsed_source_with_context(
 
 fn merge_program_context(target: &mut Program, source: Program) {
     if target.package.is_none() {
-        target.package = source.package;
+        target.package = source.package.clone();
     }
     for import in source.imports {
         if !target.imports.contains(&import) {
             target.imports.push(import);
         }
     }
-    for ty in source.types {
-        if !target.types.iter().any(|existing| existing.name == ty.name) {
-            target.types.push(ty);
+    for mut ty in source.types {
+        if target.types.iter().any(|existing| existing.name == ty.name) {
+            if let Some(qualified) = source
+                .package
+                .as_deref()
+                .and_then(|package| qualified_merge_type_name(package, &ty.name))
+                && !target
+                    .types
+                    .iter()
+                    .any(|existing| existing.name == qualified)
+            {
+                ty.name = qualified;
+                target.types.push(ty);
+            }
+            continue;
         }
+        target.types.push(ty);
     }
+}
+
+fn qualified_merge_type_name(package: &str, type_name: &str) -> Option<String> {
+    if package.is_empty() || type_name.contains('.') {
+        return None;
+    }
+    Some(format!("{package}.{type_name}"))
 }
 
 fn declaration_only_program(mut program: Program) -> Program {
@@ -770,13 +988,7 @@ fn declaration_only_program(mut program: Program) -> Program {
 fn strip_summary_bodies_from_type(ty: &mut java_ir::TypeDecl) {
     for member in &mut ty.members {
         match member {
-            java_ir::Member::Field(field) => {
-                if !field.modifiers.contains(&java_ir::Modifier::Static)
-                    || !field.modifiers.contains(&java_ir::Modifier::Final)
-                {
-                    field.initializer = None;
-                }
-            }
+            java_ir::Member::Field(_) => {}
             java_ir::Member::Method(method) => {
                 method.body = None;
             }

@@ -40,7 +40,8 @@ use new_java2rust::conversion_plan::{
     java_cast_type_conversion_plan, java_type_conversion_plan_from_evidence,
     lowered_slot_conversion_plan, lowered_slot_conversion_plan_with_facts,
     optional_element_target_match_policy, optional_shape_coercion_policy,
-    optional_shape_coercion_policy_with_facts, ownership_coercion_policy,
+    optional_shape_coercion_policy_with_facts, optional_slot_construction_plan,
+    optional_slot_construction_plan_for_actual, ownership_coercion_policy,
     ownership_coercion_policy_with_effective_facts, plan_instanceof_check,
     plan_instanceof_check_with_facts, plan_lowered_slot_conversion, plan_slot_conversion,
     primitive_rank_policy, primitive_widening_policy, return_slot, return_value_plan,
@@ -540,6 +541,26 @@ fn type_inference_owns_java_length_type() {
 }
 
 #[test]
+fn type_inference_owns_optional_array_access_element_type() {
+    let mut env = TypeEnv::new();
+    env.insert_local(
+        "values",
+        optional_java_type(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Double,
+        )))),
+    );
+
+    assert_eq!(
+        infer_expr_type(&parse_expr("values[0]"), &env),
+        JavaType::Primitive(PrimitiveType::Double)
+    );
+    assert_eq!(
+        infer_expr_type(&parse_expr("values[0] * 1073741824L"), &env),
+        JavaType::Primitive(PrimitiveType::Double)
+    );
+}
+
+#[test]
 fn member_access_plan_snake_cases_proved_instance_fields() {
     let mut env = TypeEnv::new();
     env.insert_local(
@@ -887,7 +908,7 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
             &Slot::StringConcatSegment,
             &FactSet::default()
         ),
-        SyntaxSlotCoercionPolicy::ToStringForConcat
+        SyntaxSlotCoercionPolicy::ErasedObjectToJavaDisplayString
     );
     assert_eq!(
         syntax_slot_coercion_policy(&external_id, &Slot::StringConcatSegment, &facts),
@@ -913,6 +934,23 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
         RustExpr::Raw("i as usize".to_string())
     );
     assert_eq!(
+        apply_syntax_coercion_plan(
+            RustExpr::Raw("(bits & 4499201580859392i64) >> 42".to_string()),
+            &syntax_coercion_plan(&JavaType::Primitive(PrimitiveType::Long), &Slot::Index),
+        ),
+        RustExpr::Raw("((bits & 4499201580859392i64) >> 42) as usize".to_string())
+    );
+    assert_eq!(
+        apply_coercions(
+            RustExpr::Raw("value >> 12".to_string()),
+            &[Coercion::WidenPrimitive {
+                from: PrimitiveType::Long,
+                to: PrimitiveType::Double,
+            }],
+        ),
+        RustExpr::Raw("(value >> 12) as f64".to_string())
+    );
+    assert_eq!(
         syntax_coercion_plan_with_facts(&external_id, &Slot::StringConcatSegment, &facts),
         SyntaxCoercionPlan {
             actual: external_id.clone(),
@@ -933,7 +971,7 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
     );
     assert_eq!(
         syntax_coercion_plan(&external_id, &Slot::StringConcatSegment).policy,
-        SyntaxSlotCoercionPolicy::ToStringForConcat,
+        SyntaxSlotCoercionPolicy::ErasedObjectToJavaDisplayString,
     );
     assert_eq!(
         coercion_content_policy(&external_id, &facts),
@@ -1151,6 +1189,111 @@ fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
             ..
         })
     ));
+}
+
+#[test]
+fn borrowed_whole_optional_string_recovery_uses_borrowed_carrier_policy() {
+    let option_shape = RustSlotShape::conservative(optional_java_type(JavaType::String));
+    let mut element_shape = RustSlotShape::conservative(JavaType::String);
+    element_shape.ownership = OwnershipShape::SharedBorrow;
+    element_shape.view = ViewShape::Str;
+    let target = RustSlotShape::conservative(optional_java_type(JavaType::String));
+    let actual = LoweredType::OptionalElementBorrow {
+        option_shape: Box::new(option_shape),
+        element_shape: Box::new(element_shape),
+    };
+
+    let plan = lowered_slot_conversion_plan_with_facts(
+        &actual,
+        &Slot::Return(target),
+        &FactSet::default(),
+    );
+
+    assert!(matches!(
+        plan,
+        SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
+            adapter: Some(BorrowedElementAdapterPolicy {
+                recovery: BorrowedElementRecoveryPolicy::StringViewToOwned,
+                ..
+            }),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn optional_owned_recovery_capability_follows_element_capability() {
+    let facts = FactSet::default();
+    let optional_string = optional_java_type(JavaType::String);
+
+    assert!(matches!(
+        facts.owned_recovery_capability_for(&optional_string),
+        OwnedRecoveryCapability::ExplicitClone { java_ty } if java_ty == optional_string
+    ));
+}
+
+#[test]
+fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy() {
+    let array_ty = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int)));
+    let option_shape = RustSlotShape::conservative(optional_java_type(array_ty.clone()));
+    let element_shape = RustSlotShape::conservative(array_ty.clone());
+    let mut target = RustSlotShape::conservative(optional_java_type(array_ty));
+    target.ownership = OwnershipShape::SharedBorrow;
+    target.view = ViewShape::Slice;
+
+    let plan = lowered_slot_conversion_plan_with_facts(
+        &LoweredType::OptionalElementBorrow {
+            option_shape: Box::new(option_shape.clone()),
+            element_shape: Box::new(element_shape.clone()),
+        },
+        &Slot::Argument(target.clone()),
+        &FactSet::default(),
+    );
+
+    assert_eq!(
+        plan,
+        SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
+            target,
+            carrier_shape: option_shape,
+            element_shape: element_shape.clone(),
+            carrier: BorrowedElementCarrier::Option,
+            matches: true,
+            adapter: Some(BorrowedElementAdapterPolicy {
+                carrier: BorrowedElementCarrier::Option,
+                element_shape,
+                recovery: BorrowedElementRecoveryPolicy::BorrowElement,
+                unwrap_carrier: false,
+            }),
+        })
+    );
+    assert_eq!(
+        apply_slot_conversion_plan(RustExpr::Raw("values".to_string()), &plan),
+        RustExpr::Raw("values.as_deref()".to_string())
+    );
+}
+
+#[test]
+fn optional_array_carrier_to_required_slice_target_borrows_before_unwrap() {
+    let array_ty = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int)));
+    let option_shape = RustSlotShape::conservative(optional_java_type(array_ty.clone()));
+    let element_shape = RustSlotShape::conservative(array_ty.clone());
+    let mut target = RustSlotShape::conservative(array_ty);
+    target.ownership = OwnershipShape::SharedBorrow;
+    target.view = ViewShape::Slice;
+
+    let plan = lowered_slot_conversion_plan_with_facts(
+        &LoweredType::OptionalElementBorrow {
+            option_shape: Box::new(option_shape),
+            element_shape: Box::new(element_shape),
+        },
+        &Slot::Argument(target),
+        &FactSet::default(),
+    );
+
+    assert_eq!(
+        apply_slot_conversion_plan(RustExpr::Raw("values".to_string()), &plan),
+        RustExpr::Raw("values.as_ref().expect(\"Java null receiver\").as_slice()".to_string())
+    );
 }
 
 #[test]
@@ -1838,6 +1981,32 @@ fn optional_shape_coercion_policy_records_structural_element_coercions() {
         vec![Coercion::Borrow, Coercion::WrapOption]
     );
 
+    let construction = optional_slot_construction_plan(&target, JavaType::String);
+    assert_eq!(construction.wrapper_ownership, OwnershipShape::Owned);
+    assert_eq!(construction.target, target);
+    assert_eq!(construction.element_shape.java_ty, JavaType::String);
+    assert_eq!(
+        construction.element_shape.ownership,
+        OwnershipShape::SharedBorrow
+    );
+    let actual_owned = RustSlotShape::conservative(JavaType::String);
+    let construction = optional_slot_construction_plan_for_actual(&actual_owned, &target, &facts);
+    assert_eq!(construction.wrapper_ownership, OwnershipShape::Owned);
+    assert_eq!(construction.target, target);
+    assert_eq!(construction.element_shape, actual_owned);
+    assert_eq!(
+        construction.element_plan.coercions(),
+        vec![Coercion::Borrow]
+    );
+    let optional_construction = SlotConversionPlan::OptionalConstruction(construction);
+    assert_eq!(
+        apply_slot_conversion_plan(RustExpr::Var("name".to_string()), &optional_construction),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Var("Some".to_string())),
+            args: vec![RustExpr::Raw("&name".to_string())],
+        }
+    );
+
     let unwrap_actual = RustSlotShape::conservative(optional_java_type(JavaType::String));
     let unwrap_target = RustSlotShape::conservative(JavaType::String);
     let mut unwrap_actual_element = unwrap_actual.clone();
@@ -1879,6 +2048,61 @@ fn external_into_adapter_matches_unresolved_external_type_names() {
     let plan = dispatch_coercion_policy_with_facts(&actual, &target, &facts);
 
     assert!(matches!(plan, DispatchCoercionPolicy::ExternalInto { .. }));
+}
+
+#[test]
+fn java_platform_zip_output_stream_converts_to_output_stream_slot() {
+    let actual = RustSlotShape::conservative(JavaType::Named {
+        name: "ZipOutputStream".to_string(),
+        args: Vec::new(),
+    });
+    let target = RustSlotShape::conservative(JavaType::Named {
+        name: "OutputStream".to_string(),
+        args: Vec::new(),
+    });
+
+    let plan = dispatch_coercion_policy_with_facts(&actual, &target, &FactSet::default());
+
+    assert!(matches!(plan, DispatchCoercionPolicy::ExternalInto { .. }));
+}
+
+#[test]
+fn java_platform_file_input_stream_converts_to_input_stream_slot() {
+    let actual = RustSlotShape::conservative(JavaType::Named {
+        name: "FileInputStream".to_string(),
+        args: Vec::new(),
+    });
+    let target = RustSlotShape::conservative(JavaType::Named {
+        name: "InputStream".to_string(),
+        args: Vec::new(),
+    });
+
+    let plan = dispatch_coercion_policy_with_facts(&actual, &target, &FactSet::default());
+
+    assert!(matches!(plan, DispatchCoercionPolicy::ExternalInto { .. }));
+}
+
+#[test]
+fn java_platform_file_input_stream_converts_before_optional_wrap() {
+    let actual = RustSlotShape::conservative(JavaType::Named {
+        name: "FileInputStream".to_string(),
+        args: Vec::new(),
+    });
+    let target = RustSlotShape::conservative(optional_java_type(JavaType::Named {
+        name: "InputStream".to_string(),
+        args: Vec::new(),
+    }));
+
+    let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
+
+    let coercions = plan.coercions();
+    assert!(
+        matches!(
+            coercions.as_slice(),
+            [Coercion::ExternalInto { .. }, Coercion::WrapOption]
+        ),
+        "{coercions:?}"
+    );
 }
 
 #[test]
@@ -1940,7 +2164,7 @@ fn coercion_uses_type_capability_facts_for_concat_segments() {
 
     assert_eq!(
         plan_coercion(&external_id, &Slot::StringConcatSegment),
-        vec![Coercion::ToStringForConcat]
+        vec![Coercion::ErasedObjectToJavaDisplayString]
     );
     assert_eq!(
         plan_coercion_with_facts(&external_id, &Slot::StringConcatSegment, &facts),
@@ -2768,7 +2992,7 @@ fn unsupported_coercion_message_policy_feeds_diagnostics_and_compile_errors() {
     assert_eq!(
         ownership_message.compile_error_expr_consuming(&RustExpr::Var("value".to_string())),
         RustExpr::Raw(format!(
-            "{{ let _ = value; compile_error!(\"{}\") }}",
+            "{{ let _ = value; compile_error!({:?}) }}",
             ownership_message.message
         ))
     );
@@ -2790,7 +3014,7 @@ fn unsupported_coercion_message_policy_feeds_diagnostics_and_compile_errors() {
     assert_eq!(
         element_message.compile_error_expr_consuming(&RustExpr::Var("item".to_string())),
         RustExpr::Raw(format!(
-            "{{ let _ = item; compile_error!(\"{}\") }}",
+            "{{ let _ = item; compile_error!({:?}) }}",
             element_message.message
         ))
     );
@@ -3170,19 +3394,8 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
         dispatch_coercion_policy(&borrowed_dyn_actual, &owned_boxed_target);
     assert_eq!(
         borrowed_dyn_to_owned_box,
-        DispatchCoercionPolicy::Unsupported {
-            actual_dispatch: DispatchShape::DynTrait {
-                trait_name: "Animal".to_string(),
-            },
-            target_dispatch: DispatchShape::BoxedDynTrait {
-                trait_name: "Animal".to_string(),
-            },
-            policy: DispatchCoercionFallbackPolicy::BorrowedDynToOwnedBoxedDyn {
-                trait_name: "Animal".to_string(),
-                recovery: BorrowedDynToOwnedBoxedDynRecoveryPolicy::CloneBoxAdapterRequired {
-                    policy: CloneRecoveryPolicy::AuditRequired,
-                },
-            },
+        DispatchCoercionPolicy::CloneBoxDynTrait {
+            trait_name: "Animal".to_string(),
         }
     );
     assert_eq!(
@@ -3223,30 +3436,11 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
             trait_name: "Animal".to_string(),
         }
     );
-    assert_eq!(
-        borrowed_dyn_to_owned_box.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_borrowed_dyn_to_owned_boxed_dyn_clone_box_adapter_deferred",
-            message:
-                "unsupported Java borrowed dyn trait to owned boxed dyn recovery for Animal; only conservative clone proof exists, but dyn clone-box adapter generation is explicitly deferred"
-                    .to_string(),
-        }]
-    );
+    assert_eq!(borrowed_dyn_to_owned_box.diagnostics(), Vec::new());
     assert_eq!(
         plan_shape_coercion(&borrowed_dyn_actual, &owned_boxed_target),
-        vec![Coercion::UnsupportedDispatch {
-            actual_dispatch: DispatchShape::DynTrait {
-                trait_name: "Animal".to_string(),
-            },
-            target_dispatch: DispatchShape::BoxedDynTrait {
-                trait_name: "Animal".to_string(),
-            },
-            policy: DispatchCoercionFallbackPolicy::BorrowedDynToOwnedBoxedDyn {
-                trait_name: "Animal".to_string(),
-                recovery: BorrowedDynToOwnedBoxedDynRecoveryPolicy::CloneBoxAdapterRequired {
-                    policy: CloneRecoveryPolicy::AuditRequired,
-                },
-            },
+        vec![Coercion::CloneBoxDynTrait {
+            trait_name: "Animal".to_string(),
         }]
     );
     assert_eq!(
@@ -3255,10 +3449,7 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
             borrowed_dyn_actual,
             &Slot::Argument(owned_boxed_target)
         ),
-        RustExpr::Raw(
-            "{ let _ = animal; compile_error!(\"unsupported Java borrowed dyn trait to owned boxed dyn recovery for Animal; only conservative clone proof exists, but dyn clone-box adapter generation is explicitly deferred\") }"
-                .to_string()
-        )
+        RustExpr::Raw("animal.clone_box()".to_string())
     );
 }
 
@@ -3297,21 +3488,8 @@ fn dispatch_coercion_uses_clone_facts_for_borrowed_dyn_to_boxed_dyn_fallback() {
 
     assert_eq!(
         policy,
-        DispatchCoercionPolicy::Unsupported {
-            actual_dispatch: DispatchShape::DynTrait {
-                trait_name: "Animal".to_string(),
-            },
-            target_dispatch: DispatchShape::BoxedDynTrait {
-                trait_name: "Animal".to_string(),
-            },
-            policy: DispatchCoercionFallbackPolicy::BorrowedDynToOwnedBoxedDyn {
-                trait_name: "Animal".to_string(),
-                recovery: BorrowedDynToOwnedBoxedDynRecoveryPolicy::CloneBoxAdapterRequired {
-                    policy: CloneRecoveryPolicy::ProvenCloneCapability {
-                        java_ty: animal.clone(),
-                    },
-                },
-            },
+        DispatchCoercionPolicy::CloneBoxDynTrait {
+            trait_name: "Animal".to_string(),
         }
     );
     assert_eq!(
@@ -3362,30 +3540,11 @@ fn dispatch_coercion_uses_clone_facts_for_borrowed_dyn_to_boxed_dyn_fallback() {
             },
         }
     );
-    assert_eq!(
-        policy.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_borrowed_dyn_to_owned_boxed_dyn_clone_box_adapter_deferred",
-            message:
-                "unsupported Java borrowed dyn trait to owned boxed dyn recovery for Animal; explicit clone proof exists, but dyn clone-box adapter generation is explicitly deferred"
-                    .to_string(),
-        }]
-    );
+    assert_eq!(policy.diagnostics(), Vec::new());
     assert_eq!(
         plan_shape_coercion_with_facts(&borrowed_dyn_actual, &owned_boxed_target, &facts),
-        vec![Coercion::UnsupportedDispatch {
-            actual_dispatch: DispatchShape::DynTrait {
-                trait_name: "Animal".to_string(),
-            },
-            target_dispatch: DispatchShape::BoxedDynTrait {
-                trait_name: "Animal".to_string(),
-            },
-            policy: DispatchCoercionFallbackPolicy::BorrowedDynToOwnedBoxedDyn {
-                trait_name: "Animal".to_string(),
-                recovery: BorrowedDynToOwnedBoxedDynRecoveryPolicy::CloneBoxAdapterRequired {
-                    policy: CloneRecoveryPolicy::ProvenCloneCapability { java_ty: animal },
-                },
-            },
+        vec![Coercion::CloneBoxDynTrait {
+            trait_name: "Animal".to_string(),
         }]
     );
 
@@ -3427,12 +3586,7 @@ fn dispatch_coercion_uses_clone_facts_for_borrowed_dyn_to_boxed_dyn_fallback() {
             &non_clone_facts
         )
         .diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_borrowed_dyn_to_owned_boxed_dyn",
-            message:
-                "unsupported Java borrowed dyn trait to owned boxed dyn recovery for Animal; no ownership proof is available"
-                    .to_string(),
-        }]
+        Vec::new()
     );
     assert_eq!(
         dyn_clone_box_adapter_requirement(
@@ -3473,19 +3627,8 @@ fn borrowed_dyn_recovery_uses_clone_box_capability_fact_once() {
 
     assert_eq!(
         dispatch_coercion_policy_with_facts(&borrowed_dyn_actual, &owned_boxed_target, &facts),
-        DispatchCoercionPolicy::Unsupported {
-            actual_dispatch: DispatchShape::DynTrait {
-                trait_name: "Animal".to_string(),
-            },
-            target_dispatch: DispatchShape::BoxedDynTrait {
-                trait_name: "Animal".to_string(),
-            },
-            policy: DispatchCoercionFallbackPolicy::BorrowedDynToOwnedBoxedDyn {
-                trait_name: "Animal".to_string(),
-                recovery: BorrowedDynToOwnedBoxedDynRecoveryPolicy::CloneBoxAdapterRequired {
-                    policy: CloneRecoveryPolicy::ProvenCloneCapability { java_ty: animal },
-                },
-            },
+        DispatchCoercionPolicy::CloneBoxDynTrait {
+            trait_name: "Animal".to_string(),
         }
     );
 }
@@ -3525,10 +3668,10 @@ fn shape_coercion_owns_unsupported_dispatch_fallback_policy() {
             actual,
             &Slot::Argument(target)
         ),
-        RustExpr::Raw(
-            "{ let _ = animal; compile_error!(\"unsupported Java dispatch coercion: actual=ClosedEnum { enum_name: \"AnimalValue\" }, target=DynTrait { trait_name: \"Animal\" }\") }"
-                .to_string()
-        )
+        RustExpr::Raw(format!(
+            "{{ let _ = animal; compile_error!({:?}) }}",
+            "unsupported Java dispatch coercion: actual=ClosedEnum { enum_name: \"AnimalValue\" }, target=DynTrait { trait_name: \"Animal\" }"
+        ))
     );
 }
 
@@ -4014,6 +4157,40 @@ fn borrowed_element_clone_recovery_audits_conservative_clone_capability() {
 }
 
 #[test]
+fn borrowed_sequence_ownership_recovery_uses_to_vec() {
+    let java_array = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Double)));
+    let mut actual = RustSlotShape::conservative(java_array.clone());
+    actual.ownership = OwnershipShape::SharedBorrow;
+    let target = RustSlotShape::conservative(java_array);
+
+    let plan = shape_coercion_plan(&actual, &target);
+
+    assert!(matches!(
+        plan.ownership,
+        OwnershipCoercionPolicy::RecoverOwnedSequenceWithToVec { .. }
+    ));
+    assert_eq!(
+        plan.coercions(),
+        vec![Coercion::ToOwnedSequence {
+            policy: CloneRecoveryPolicy::AuditRequired,
+        }]
+    );
+    assert_eq!(
+        apply_lowered_expr_to_slot(
+            LoweredExpr {
+                expr: RustExpr::Raw("Table::VALUES[index as usize]".to_string()),
+                actual: LoweredType::Slot(Box::new(actual)),
+            },
+            &Slot::Return(target),
+        ),
+        RustExpr::Raw(
+            "(Table::VALUES[index as usize]).to_vec()/* TODO(translation): validate added clone */"
+                .to_string()
+        )
+    );
+}
+
+#[test]
 fn borrowed_element_recovery_uses_richer_owned_recovery_facts() {
     let immutable = JavaType::Named {
         name: "ImmutableSharedHandle".to_string(),
@@ -4146,16 +4323,7 @@ fn borrowed_element_slot_adapter_policy_combines_carrier_match_and_recovery() {
             element_shape: string_element.clone(),
             carrier: BorrowedElementCarrier::Option,
             matches: true,
-            adapter: Some(BorrowedElementAdapterPolicy {
-                carrier: BorrowedElementCarrier::Option,
-                element_shape: string_element.clone(),
-                recovery: BorrowedElementRecoveryPolicy::CloneElements {
-                    policy: CloneRecoveryPolicy::ProvenCloneCapability {
-                        java_ty: JavaType::String,
-                    },
-                },
-                unwrap_carrier: false,
-            }),
+            adapter: None,
         }
     );
 

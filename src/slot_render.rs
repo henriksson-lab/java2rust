@@ -21,7 +21,7 @@ pub struct SlotNoDefaultMessagePolicy {
 
 impl SlotNoDefaultMessagePolicy {
     pub fn compile_error_expr(&self) -> RustExpr {
-        RustExpr::Raw(format!("compile_error!(\"{}\")", self.message))
+        RustExpr::Raw(format!("compile_error!({:?})", self.message))
     }
 }
 
@@ -31,6 +31,8 @@ pub enum SlotDefaultValuePolicy {
     EmptySliceView,
     PrimitiveBooleanZero,
     PrimitiveNumericZero,
+    PrimitiveFloatZero,
+    PrimitiveDoubleZero,
     EmptyString,
     EmptySequence,
     DefaultTrait,
@@ -173,7 +175,7 @@ pub fn slot_value_rust_type_policy_with_effective_facts(
         }
         (ViewShape::Str, _, _) if content.string_content => SlotValueRustTypePolicy::StringView,
         (ViewShape::Slice, _, java_ty)
-            if crate::types::two_dimensional_array_element_type(java_ty).is_some() =>
+            if crate::types::ndarray_array2_element_type(java_ty).is_some() =>
         {
             slot_dispatch_rust_type_policy(shape)
         }
@@ -319,14 +321,22 @@ fn dyn_trait_rust_path_with_effective_facts(
         {
             return format!("{crate_name}::{fact_trait_name}");
         }
-        return fact_trait_name.clone();
+        return rust_trait_name_path(fact_trait_name);
     }
-    trait_name.to_string()
+    rust_trait_name_path(trait_name)
 }
 
 pub fn dyn_trait_rust_path(trait_name: &str, facts: &FactSet) -> String {
     let effective_facts = EffectiveFacts::new(facts);
     dyn_trait_rust_path_with_effective_facts(trait_name, &effective_facts)
+}
+
+fn rust_trait_name_path(trait_name: &str) -> String {
+    if trait_name.contains("::") {
+        trait_name.to_string()
+    } else {
+        rust_name_for_java_named_type(trait_name)
+    }
 }
 
 pub fn default_expr_for_slot(shape: &RustSlotShape) -> RustExpr {
@@ -403,6 +413,12 @@ pub fn slot_default_value_policy_with_effective_facts(
         (_, _, JavaType::Primitive(PrimitiveType::Boolean)) => {
             SlotDefaultValuePolicy::PrimitiveBooleanZero
         }
+        (_, _, JavaType::Primitive(PrimitiveType::Float)) => {
+            SlotDefaultValuePolicy::PrimitiveFloatZero
+        }
+        (_, _, JavaType::Primitive(PrimitiveType::Double)) => {
+            SlotDefaultValuePolicy::PrimitiveDoubleZero
+        }
         (_, _, JavaType::Primitive(_)) => SlotDefaultValuePolicy::PrimitiveNumericZero,
         (OwnershipShape::Owned, ViewShape::Native, JavaType::String) => {
             SlotDefaultValuePolicy::EmptyString
@@ -453,6 +469,8 @@ pub fn render_slot_default_value_policy(policy: &SlotDefaultValuePolicy) -> Rust
         SlotDefaultValuePolicy::EmptySliceView => RustExpr::Raw("&[]".to_string()),
         SlotDefaultValuePolicy::PrimitiveBooleanZero => RustExpr::Literal("false".to_string()),
         SlotDefaultValuePolicy::PrimitiveNumericZero => RustExpr::Literal("0".to_string()),
+        SlotDefaultValuePolicy::PrimitiveFloatZero => RustExpr::Literal("0f32".to_string()),
+        SlotDefaultValuePolicy::PrimitiveDoubleZero => RustExpr::Literal("0f64".to_string()),
         SlotDefaultValuePolicy::EmptyString => RustExpr::Raw("String::new()".to_string()),
         SlotDefaultValuePolicy::EmptySequence => RustExpr::Raw("Vec::new()".to_string()),
         SlotDefaultValuePolicy::DefaultTrait => RustExpr::Raw("Default::default()".to_string()),
@@ -487,7 +505,7 @@ pub fn native_java_rust_type_policy_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> NativeJavaRustTypePolicy {
-    if let Some(element_ty) = crate::types::two_dimensional_array_element_type(ty) {
+    if let Some(element_ty) = crate::types::ndarray_array2_element_type(ty) {
         return NativeJavaRustTypePolicy::Direct {
             ty: RustType::Array2(Box::new(
                 rust_type_for_java_generic_arg_with_effective_facts(&element_ty, facts),
@@ -603,6 +621,26 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             );
             NativeJavaRustTypePolicy::Direct {
                 ty: RustType::Raw(format!("JavaClass<{token_ty}>")),
+            }
+        }
+        JavaType::Named { name, args }
+            if matches!(
+                crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+                "Iterator" | "java.util.Iterator"
+            ) =>
+        {
+            let element_ty = args
+                .first()
+                .cloned()
+                .unwrap_or_else(erased_object_java_type);
+            NativeJavaRustTypePolicy::Direct {
+                ty: RustType::Raw(format!(
+                    "JavaIterator<{}>",
+                    crate::emit::emit_type(&rust_type_for_java_generic_arg_with_effective_facts(
+                        &element_ty,
+                        facts
+                    ))
+                )),
             }
         }
         JavaType::Named { .. } if crate::stdlib::java_map_type_args(ty).is_some() => {
@@ -809,6 +847,23 @@ fn rust_type_for_java_generic_arg_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
+    if let Some(HierarchyStrategy::DynTrait { trait_name }) =
+        facts.object_representation_override_strategy_for(ty)
+    {
+        return RustType::Raw(format!(
+            "Box<dyn {}>",
+            dyn_trait_rust_path_with_effective_facts(trait_name, facts)
+        ));
+    }
+    if let JavaType::Named { name, args } = ty
+        && args.is_empty()
+        && facts.object_safe_trait_fact_for_name(name) == Some(true)
+    {
+        return RustType::Raw(format!(
+            "Box<dyn {}>",
+            dyn_trait_rust_path_with_effective_facts(name, facts)
+        ));
+    }
     if let JavaType::Unknown(raw) = ty
         && java_type_variable_name(raw)
     {

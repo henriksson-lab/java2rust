@@ -156,14 +156,14 @@ fn static_constant_owner(receiver: &Expr, env: &TypeEnv) -> Option<String> {
     let Expr::Var(owner) = receiver else {
         return None;
     };
-    if env.local_type(owner).is_some() || env.field_type(owner).is_some() {
-        return None;
-    }
-    if owner
+    let upper_camel_owner = owner
         .chars()
         .next()
-        .is_some_and(|ch| ch.is_ascii_uppercase())
-    {
+        .is_some_and(|ch| ch.is_ascii_uppercase());
+    if env.local_type(owner).is_some() || (!upper_camel_owner && env.field_type(owner).is_some()) {
+        return None;
+    }
+    if upper_camel_owner {
         Some(owner.to_string())
     } else if owner.contains('_') || owner.chars().all(|ch| ch.is_ascii_lowercase()) {
         Some(upper_camel_from_snake(owner))

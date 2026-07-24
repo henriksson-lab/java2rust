@@ -1386,6 +1386,9 @@ fn append_facade_structured_method_abi_fact(
     let Some(return_type) = abi.return_type.as_deref() else {
         return;
     };
+    let return_slot = facade_return_slot_for_rust_type(return_type);
+    let borrow_source = facade_slot_contains_shared_borrow(&return_slot)
+        .then_some(new_java2rust::facts::BorrowSource::Receiver);
     facts
         .facade_abi_facts
         .push(new_java2rust::facts::FacadeAbiFact {
@@ -1397,16 +1400,9 @@ fn append_facade_structured_method_abi_fact(
                 .iter()
                 .map(|param| facade_slot_for_rust_type(param))
                 .collect(),
-            return_slot: facade_return_slot_for_rust_type(return_type),
+            return_slot,
             result: facade_result_abi(return_type),
-            borrow_source: if rust_return_payload_type(return_type)
-                .trim_start()
-                .starts_with('&')
-            {
-                Some(new_java2rust::facts::BorrowSource::Receiver)
-            } else {
-                None
-            },
+            borrow_source,
             provenance: new_java2rust::facts::FactProvenance::ExternalLibraryPack,
         });
 }
@@ -1436,6 +1432,9 @@ fn facade_return_slot_for_rust_type(return_type: &str) -> new_java2rust::facts::
 
 fn facade_slot_for_rust_type(ty: &str) -> new_java2rust::facts::FacadeSlot {
     let ty = ty.trim();
+    if ty == "usize" {
+        return new_java2rust::facts::FacadeSlot::Index;
+    }
     if let Some(inner) = ty
         .strip_prefix("Option<")
         .and_then(|ty| ty.strip_suffix('>'))
@@ -1455,7 +1454,7 @@ fn facade_slot_for_rust_type(ty: &str) -> new_java2rust::facts::FacadeSlot {
     if let Some(inner) = ty.strip_prefix("&mut ") {
         if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
             return new_java2rust::facts::FacadeSlot::Slice(Box::new(facade_slot_for_rust_type(
-                slice,
+                &format!("&mut {slice}"),
             )));
         }
         return new_java2rust::facts::FacadeSlot::MutBorrowed;
@@ -1470,6 +1469,34 @@ fn facade_slot_for_rust_type(ty: &str) -> new_java2rust::facts::FacadeSlot {
         return new_java2rust::facts::FacadeSlot::Borrowed;
     }
     new_java2rust::facts::FacadeSlot::Owned
+}
+
+fn facade_slot_contains_shared_borrow(slot: &new_java2rust::facts::FacadeSlot) -> bool {
+    match slot {
+        new_java2rust::facts::FacadeSlot::Borrowed => true,
+        new_java2rust::facts::FacadeSlot::Optional(inner)
+        | new_java2rust::facts::FacadeSlot::Slice(inner) => {
+            facade_slot_contains_shared_borrow(inner)
+        }
+        new_java2rust::facts::FacadeSlot::Owned
+        | new_java2rust::facts::FacadeSlot::Index
+        | new_java2rust::facts::FacadeSlot::MutBorrowed
+        | new_java2rust::facts::FacadeSlot::DynTrait(_)
+        | new_java2rust::facts::FacadeSlot::CrateHandle(_) => false,
+    }
+}
+
+fn facade_slot_contains_mut_borrow(slot: &new_java2rust::facts::FacadeSlot) -> bool {
+    match slot {
+        new_java2rust::facts::FacadeSlot::MutBorrowed => true,
+        new_java2rust::facts::FacadeSlot::Optional(inner)
+        | new_java2rust::facts::FacadeSlot::Slice(inner) => facade_slot_contains_mut_borrow(inner),
+        new_java2rust::facts::FacadeSlot::Owned
+        | new_java2rust::facts::FacadeSlot::Index
+        | new_java2rust::facts::FacadeSlot::Borrowed
+        | new_java2rust::facts::FacadeSlot::DynTrait(_)
+        | new_java2rust::facts::FacadeSlot::CrateHandle(_) => false,
+    }
 }
 
 fn append_facade_argument_abi_facts(
@@ -1545,7 +1572,9 @@ fn append_facade_constructor_argument_abi_facts(
                 } else {
                     new_java2rust::facts::NullabilityState::DefinitelyNonNull
                 },
-                argument_mutability: if param.trim().starts_with("&mut ") {
+                argument_mutability: if facade_slot_contains_mut_borrow(&facade_slot_for_rust_type(
+                    param,
+                )) {
                     new_java2rust::facts::ReceiverMutabilityFact::MutatesReceiver
                 } else {
                     new_java2rust::facts::ReceiverMutabilityFact::ReadOnly
@@ -2681,10 +2710,14 @@ mod tests {
             facade_dir.join("lib.rs"),
             "pub struct Assert;\n\
              pub struct Schema;\n\
+             pub struct Buffer;\n\
              impl Assert {\n\
                  pub fn get_schema(&self) -> Option<&Schema> { None }\n\
                  pub fn assert_null<T>(_actual: T) {}\n\
                  pub fn set_string<S: Into<String>>(_actual: S) {}\n\
+             }\n\
+             impl Buffer {\n\
+                 pub fn new(_bytes: &mut [u8]) -> Self { Self }\n\
              }\n",
         )
         .unwrap();
@@ -2697,7 +2730,9 @@ mod tests {
              external-pack-api dep Assert assertNull mapped side-effect read-only definitely-non-null args=1 return=void rust=assert_null\n\
              external-pack-argument dep Assert assertNull 0 maybe-null read-only borrowed type=Object\n\
              external-pack-api dep Assert setString mapped side-effect read-only definitely-non-null args=1 return=void rust=set_string\n\
-             external-pack-argument dep Assert setString 0 maybe-null read-only borrowed type=String\n",
+             external-pack-argument dep Assert setString 0 maybe-null read-only borrowed type=String\n\
+             external-pack dep Buffer rust-crate-mapping mapped target=dep_facade path=facade\n\
+             external-pack-constructor dep Buffer 1 mapped rust-type=Buffer rust=new\n",
         )
         .unwrap();
 
@@ -2755,6 +2790,17 @@ mod tests {
         );
         assert_eq!(abi.result, new_java2rust::facts::ResultAbi::OptionWrapped);
         assert_eq!(abi.rust_path, "dep_facade::Assert::get_schema");
+        assert_eq!(
+            abi.borrow_source,
+            Some(new_java2rust::facts::BorrowSource::Receiver)
+        );
+        assert_eq!(
+            facts
+                .external_constructor_argument_effect_for("Buffer", 1, 0)
+                .expect("constructor &mut [u8] should become a mutating borrowed argument")
+                .argument_mutability,
+            new_java2rust::facts::ReceiverMutabilityFact::MutatesReceiver
+        );
 
         std::fs::remove_dir_all(temp_dir).unwrap();
     }

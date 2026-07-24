@@ -4,13 +4,14 @@ use crate::effective_facts::EffectiveFacts;
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
     CaptureOrigin, CaptureSource, DispatchRequirementKind, ExternalApiArgumentEffectFact,
-    ExternalArgumentAliasPolicy, FactProvenance, FactSet, HierarchyStrategy, NullabilityState,
-    OwnedRecoveryCapability, ReceiverMutabilityFact, external_parameter_nullability_policy,
+    ExternalArgumentAliasPolicy, FacadeAbiFact, FacadeSlot, FactProvenance, FactSet,
+    HierarchyStrategy, NullabilityState, OwnedRecoveryCapability, ReceiverAbi,
+    ReceiverMutabilityFact, external_parameter_nullability_policy,
 };
 use crate::graph::strongly_connected_components;
 use crate::java_ir::{
     BinaryOp, Block, ConstructorDecl, Expr, FieldDecl, JavaType, LambdaBody, Literal, MethodDecl,
-    Modifier, Param, Program, Stmt, TypeDecl, UnaryOp,
+    Modifier, Param, Program, Stmt, TypeDecl, TypeKind, UnaryOp,
 };
 use crate::lattice::{
     dispatch_shape_lattice_rank, join_ranked_lattice, ownership_lattice_rank,
@@ -87,6 +88,7 @@ pub struct ParamPlan {
     pub java_ty: JavaType,
     pub is_varargs: bool,
     pub shape: RustSlotShape,
+    pub binding_mutable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -524,6 +526,16 @@ pub struct ProfiledSignaturePlan {
     pub profile: SignatureSolverProfile,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureSolverProgressEvent {
+    pub phase: &'static str,
+    pub status: &'static str,
+    pub elapsed_ms: u128,
+    pub detail: String,
+}
+
+pub type SignatureSolverProgressSink<'a> = &'a (dyn Fn(SignatureSolverProgressEvent) + Send + Sync);
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SignatureSolverExecutionStats {
     pub component_sweeps: usize,
@@ -537,17 +549,6 @@ pub struct SignatureSolverExecutionStats {
 }
 
 impl SignatureSolverExecutionStats {
-    fn add(&mut self, other: &SignatureSolverExecutionStats) {
-        self.component_sweeps += other.component_sweeps;
-        self.changed_component_sweeps += other.changed_component_sweeps;
-        self.state_clones += other.state_clones;
-        self.state_clone_ms += other.state_clone_ms;
-        self.propagation_sweep_ms += other.propagation_sweep_ms;
-        self.component_rollback_ms += other.component_rollback_ms;
-        self.component_change_check_ms += other.component_change_check_ms;
-        self.add_propagation_arm_stats(&other.propagation_arms);
-    }
-
     fn add_propagation_arm_stats(
         &mut self,
         other: &BTreeMap<String, SignaturePropagationArmProfile>,
@@ -878,37 +879,162 @@ pub fn solve_signatures_with_facts_and_support_context_profiled(
     facts: &FactSet,
     support_program: &Program,
 ) -> ProfiledSignaturePlan {
+    solve_signatures_with_facts_and_support_context_profiled_with_progress(
+        program,
+        representations,
+        usage,
+        facts,
+        support_program,
+        None,
+    )
+}
+
+pub fn solve_signatures_with_facts_and_support_context_profiled_with_progress(
+    program: &Program,
+    representations: &RepresentationPlan,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    support_program: &Program,
+    progress_sink: Option<SignatureSolverProgressSink<'_>>,
+) -> ProfiledSignaturePlan {
+    emit_signature_solver_progress(
+        progress_sink,
+        "collect_constraints",
+        "running",
+        0,
+        "collect_signature_constraints",
+    );
     let collect_start = std::time::Instant::now();
     let constraints = collect_signature_constraints(program, usage, facts);
     let collect_constraints_ms = collect_start.elapsed().as_millis();
+    emit_signature_solver_progress(
+        progress_sink,
+        "collect_constraints",
+        "ok",
+        collect_constraints_ms,
+        "collect_signature_constraints",
+    );
 
     let domain_stats = signature_fixpoint_domain_stats(&constraints);
 
+    emit_signature_solver_progress(
+        progress_sink,
+        "dependency_graph",
+        "running",
+        0,
+        "build_signature_dependency_graph",
+    );
     let graph_start = std::time::Instant::now();
     let dependency_graph = build_signature_dependency_graph(&constraints, usage);
     let dependency_graph_ms = graph_start.elapsed().as_millis();
+    emit_signature_solver_progress(
+        progress_sink,
+        "dependency_graph",
+        "ok",
+        dependency_graph_ms,
+        &format!(
+            "nodes={} edges={}",
+            dependency_graph.nodes.len(),
+            dependency_graph.edges.len()
+        ),
+    );
 
+    emit_signature_solver_progress(
+        progress_sink,
+        "scc_analysis",
+        "running",
+        0,
+        "analyze_signature_dependency_sccs",
+    );
     let scc_start = std::time::Instant::now();
     let dependency_sccs = analyze_signature_dependency_sccs(&dependency_graph);
     let scc_analysis_ms = scc_start.elapsed().as_millis();
+    emit_signature_solver_progress(
+        progress_sink,
+        "scc_analysis",
+        "ok",
+        scc_analysis_ms,
+        &format!(
+            "components={} cyclic={} max_component_size={}",
+            dependency_sccs.stats.component_count,
+            dependency_sccs.stats.cyclic_component_count,
+            dependency_sccs.stats.max_component_size
+        ),
+    );
 
+    emit_signature_solver_progress(
+        progress_sink,
+        "pass_plan",
+        "running",
+        0,
+        "plan_signature_solver_passes",
+    );
     let pass_plan_start = std::time::Instant::now();
     let pass_plan = plan_signature_solver_passes(&dependency_sccs);
     let pass_plan_ms = pass_plan_start.elapsed().as_millis();
+    emit_signature_solver_progress(
+        progress_sink,
+        "pass_plan",
+        "ok",
+        pass_plan_ms,
+        &format!(
+            "components={} mutable={}",
+            pass_plan.component_order.len(),
+            pass_plan.mutable_components.len()
+        ),
+    );
 
+    emit_signature_solver_progress(
+        progress_sink,
+        "fixpoint",
+        "running",
+        0,
+        &format!(
+            "slots={} constraints={} budget={}",
+            domain_stats.slot_count,
+            domain_stats.unique_constraint_count,
+            domain_stats.iteration_budget
+        ),
+    );
     let fixpoint_start = std::time::Instant::now();
     let saturation_policy = signature_fixpoint_saturation_policy(&constraints);
     let mut execution_stats = SignatureSolverExecutionStats::default();
+    let mut current_iteration = 0usize;
     let result = saturation_policy.saturate(
         constraints,
         |constraints| {
+            current_iteration += 1;
             let (changed, stats) = execute_signature_solver_pass_plan_with_stats(
                 constraints,
                 usage,
                 &dependency_sccs,
                 &pass_plan,
+                Some(SignatureSolverPassProgress {
+                    progress_sink,
+                    fixpoint_start,
+                    iteration: current_iteration,
+                }),
             );
-            execution_stats.add(&stats);
+            execution_stats.component_sweeps += stats.component_sweeps;
+            execution_stats.changed_component_sweeps += stats.changed_component_sweeps;
+            execution_stats.state_clones += stats.state_clones;
+            execution_stats.state_clone_ms += stats.state_clone_ms;
+            execution_stats.propagation_sweep_ms += stats.propagation_sweep_ms;
+            execution_stats.component_rollback_ms += stats.component_rollback_ms;
+            execution_stats.component_change_check_ms += stats.component_change_check_ms;
+            execution_stats.add_propagation_arm_stats(&stats.propagation_arms);
+            emit_signature_solver_progress(
+                progress_sink,
+                "fixpoint_iteration",
+                if changed { "changed" } else { "stable" },
+                fixpoint_start.elapsed().as_millis(),
+                &format!(
+                    "iteration={} component_sweeps={} changed_component_sweeps={}",
+                    current_iteration,
+                    execution_stats.component_sweeps,
+                    execution_stats.changed_component_sweeps
+                ),
+            );
             SaturationStep::from(changed)
         },
         |max_iterations| SignatureDiagnostic {
@@ -921,7 +1047,21 @@ pub fn solve_signatures_with_facts_and_support_context_profiled(
     let fixpoint_ms = fixpoint_start.elapsed().as_millis();
     let fixpoint_iterations = result.iterations;
     let fixpoint_diagnostics = result.diagnostics.len();
+    emit_signature_solver_progress(
+        progress_sink,
+        "fixpoint",
+        "ok",
+        fixpoint_ms,
+        &format!("iterations={fixpoint_iterations} diagnostics={fixpoint_diagnostics}"),
+    );
 
+    emit_signature_solver_progress(
+        progress_sink,
+        "plan_build",
+        "running",
+        0,
+        "build_signature_plan_from_constraints",
+    );
     let plan_build_start = std::time::Instant::now();
     let plan = build_signature_plan_from_constraints(
         program,
@@ -933,6 +1073,13 @@ pub fn solve_signatures_with_facts_and_support_context_profiled(
         facts,
     );
     let plan_build_ms = plan_build_start.elapsed().as_millis();
+    emit_signature_solver_progress(
+        progress_sink,
+        "plan_build",
+        "ok",
+        plan_build_ms,
+        "build_signature_plan_from_constraints",
+    );
 
     let profile = SignatureSolverProfile {
         collect_constraints_ms,
@@ -963,6 +1110,23 @@ pub fn solve_signatures_with_facts_and_support_context_profiled(
         propagation_arms: execution_stats.propagation_arms,
     };
     ProfiledSignaturePlan { plan, profile }
+}
+
+fn emit_signature_solver_progress(
+    progress_sink: Option<SignatureSolverProgressSink<'_>>,
+    phase: &'static str,
+    status: &'static str,
+    elapsed_ms: u128,
+    detail: &str,
+) {
+    if let Some(progress_sink) = progress_sink {
+        progress_sink(SignatureSolverProgressEvent {
+            phase,
+            status,
+            elapsed_ms,
+            detail: detail.to_string(),
+        });
+    }
 }
 
 pub fn collect_signature_constraints(
@@ -1027,7 +1191,6 @@ pub fn analyze_signature_dependency_sccs(
             .count(),
         max_component_size: scc.components.iter().map(Vec::len).max().unwrap_or(0),
     };
-
     SignatureDependencySccAnalysis {
         components: scc.components,
         component_successors: scc.component_successors,
@@ -2088,7 +2251,14 @@ fn execute_signature_solver_pass_plan(
     analysis: &SignatureDependencySccAnalysis,
     pass_plan: &SignatureSolverPassPlan,
 ) -> bool {
-    execute_signature_solver_pass_plan_with_stats(constraints, usage, analysis, pass_plan).0
+    execute_signature_solver_pass_plan_with_stats(constraints, usage, analysis, pass_plan, None).0
+}
+
+#[derive(Clone, Copy)]
+struct SignatureSolverPassProgress<'a> {
+    progress_sink: Option<SignatureSolverProgressSink<'a>>,
+    fixpoint_start: std::time::Instant,
+    iteration: usize,
 }
 
 fn execute_signature_solver_pass_plan_with_stats(
@@ -2096,16 +2266,53 @@ fn execute_signature_solver_pass_plan_with_stats(
     usage: &UsageFacts,
     analysis: &SignatureDependencySccAnalysis,
     pass_plan: &SignatureSolverPassPlan,
+    progress: Option<SignatureSolverPassProgress<'_>>,
 ) -> (bool, SignatureSolverExecutionStats) {
     let mut changed = false;
     let mut stats = SignatureSolverExecutionStats::default();
+    let mut mutable_component_count = 0usize;
+    let total_mutable_components = pass_plan.mutable_components.len();
     for component_index in &pass_plan.component_order {
         if !pass_plan.mutable_components.contains(component_index) {
             continue;
         }
+        mutable_component_count += 1;
+        if let Some(progress) = progress
+            && (mutable_component_count == 1
+                || mutable_component_count % 250 == 0
+                || mutable_component_count == total_mutable_components)
+        {
+            emit_signature_solver_progress(
+                progress.progress_sink,
+                "fixpoint_component",
+                "running",
+                progress.fixpoint_start.elapsed().as_millis(),
+                &format!(
+                    "iteration={} component={}/{} scc={}",
+                    progress.iteration,
+                    mutable_component_count,
+                    total_mutable_components,
+                    component_index
+                ),
+            );
+        }
         let mut component_changed = true;
         while component_changed {
             stats.component_sweeps += 1;
+            if let Some(progress) = progress
+                && (stats.component_sweeps == 1 || stats.component_sweeps % 500 == 0)
+            {
+                emit_signature_solver_progress(
+                    progress.progress_sink,
+                    "fixpoint_component_sweep",
+                    "running",
+                    progress.fixpoint_start.elapsed().as_millis(),
+                    &format!(
+                        "iteration={} component_sweeps={} current_scc={}",
+                        progress.iteration, stats.component_sweeps, component_index
+                    ),
+                );
+            }
             let propagation_start = std::time::Instant::now();
             let scope = SignatureMutationScope {
                 analysis,
@@ -2141,6 +2348,152 @@ impl SignatureMutationScope<'_> {
             .get(node)
             .is_some_and(|actual| *actual == self.component_index)
     }
+
+    fn has_method_binding_target(&self) -> bool {
+        self.analysis.components[self.component_index]
+            .iter()
+            .any(|node| {
+                matches!(
+                    node,
+                    SignatureDependencyNode::MethodParam { .. }
+                        | SignatureDependencyNode::MethodLocal { .. }
+                )
+            })
+    }
+
+    fn has_constructor_binding_target(&self) -> bool {
+        self.analysis.components[self.component_index]
+            .iter()
+            .any(|node| {
+                matches!(
+                    node,
+                    SignatureDependencyNode::ConstructorParam { .. }
+                        | SignatureDependencyNode::ConstructorLocal { .. }
+                )
+            })
+    }
+
+    fn has_method_local_target(&self) -> bool {
+        self.analysis.components[self.component_index]
+            .iter()
+            .any(|node| matches!(node, SignatureDependencyNode::MethodLocal { .. }))
+    }
+
+    fn has_constructor_local_target(&self) -> bool {
+        self.analysis.components[self.component_index]
+            .iter()
+            .any(|node| matches!(node, SignatureDependencyNode::ConstructorLocal { .. }))
+    }
+
+    fn has_method_return_target(&self) -> bool {
+        self.analysis.components[self.component_index]
+            .iter()
+            .any(|node| matches!(node, SignatureDependencyNode::MethodReturn { .. }))
+    }
+
+    fn has_field_target(&self) -> bool {
+        self.analysis.components[self.component_index]
+            .iter()
+            .any(|node| matches!(node, SignatureDependencyNode::Field { .. }))
+    }
+}
+
+fn scope_permits_method_binding_target(
+    constraints: &SignatureConstraintState,
+    scope: Option<SignatureMutationScope<'_>>,
+    method_key: &MethodKey,
+    binding_name: &str,
+) -> bool {
+    let Some(scope) = scope else {
+        return true;
+    };
+    method_binding_dependency_node(constraints, method_key, binding_name)
+        .is_some_and(|node| scope.permits(&node))
+}
+
+fn scope_permits_method_local_target(
+    constraints: &SignatureConstraintState,
+    scope: Option<SignatureMutationScope<'_>>,
+    method_key: &MethodKey,
+    local_name: &str,
+) -> bool {
+    let Some(scope) = scope else {
+        return true;
+    };
+    if constraints
+        .methods
+        .get(method_key)
+        .and_then(|method_constraints| method_constraints.local(local_name))
+        .is_none()
+    {
+        return false;
+    }
+    scope.permits(&SignatureDependencyNode::MethodLocal {
+        method: method_key.clone(),
+        name: local_name.to_string(),
+    })
+}
+
+fn scope_permits_method_return_target(
+    scope: Option<SignatureMutationScope<'_>>,
+    method_key: &MethodKey,
+) -> bool {
+    scope.is_none_or(|scope| {
+        scope.permits(&SignatureDependencyNode::MethodReturn {
+            method: method_key.clone(),
+        })
+    })
+}
+
+fn scope_permits_constructor_binding_target(
+    constraints: &SignatureConstraintState,
+    scope: Option<SignatureMutationScope<'_>>,
+    constructor_key: &ConstructorKey,
+    binding_name: &str,
+) -> bool {
+    let Some(scope) = scope else {
+        return true;
+    };
+    constructor_binding_dependency_node(constraints, constructor_key, binding_name)
+        .is_some_and(|node| scope.permits(&node))
+}
+
+fn scope_permits_constructor_local_target(
+    constraints: &SignatureConstraintState,
+    scope: Option<SignatureMutationScope<'_>>,
+    constructor_key: &ConstructorKey,
+    local_name: &str,
+) -> bool {
+    let Some(scope) = scope else {
+        return true;
+    };
+    if constraints
+        .constructors
+        .get(constructor_key)
+        .and_then(|constructor_constraints| constructor_constraints.local(local_name))
+        .is_none()
+    {
+        return false;
+    }
+    scope.permits(&SignatureDependencyNode::ConstructorLocal {
+        constructor: constructor_key.clone(),
+        name: local_name.to_string(),
+    })
+}
+
+fn scope_permits_field_target(
+    scope: Option<SignatureMutationScope<'_>>,
+    type_name: &str,
+    field_name: &str,
+) -> bool {
+    scope.is_none_or(|scope| {
+        scope.permits(&SignatureDependencyNode::Field {
+            field: FieldKey {
+                type_name: type_name.to_string(),
+                field_name: field_name.to_string(),
+            },
+        })
+    })
 }
 
 fn apply_signature_propagation_sweep_with_stats(
@@ -2154,7 +2507,27 @@ fn apply_signature_propagation_sweep_with_stats(
             propagate_call_site_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "constructor_call_site", || {
             propagate_constructor_call_site_constraints(constraints, usage, scope)
-        }) | record_signature_propagation_arm(&mut stats, "constructor_delegation", || {
+        }) | record_signature_propagation_arm(
+            &mut stats,
+            "resolved_source_mutable_argument_binding",
+            || {
+                propagate_resolved_source_mutable_argument_binding_constraints(
+                    constraints,
+                    usage,
+                    scope,
+                )
+            },
+        ) | record_signature_propagation_arm(
+            &mut stats,
+            "resolved_source_mutable_receiver_binding",
+            || {
+                propagate_resolved_source_mutable_receiver_binding_constraints(
+                    constraints,
+                    usage,
+                    scope,
+                )
+            },
+        ) | record_signature_propagation_arm(&mut stats, "constructor_delegation", || {
             propagate_constructor_delegation_constraints(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "call_argument_to_callee", || {
             propagate_call_argument_constraints_to_callees(constraints, usage, scope)
@@ -2357,8 +2730,13 @@ fn propagate_call_site_constraints(
                     {
                         continue;
                     }
-                    for constraint in &callee_constraints.params[*arg_index] {
-                        if signature_shape_constraint_propagation_policy().allows(constraint) {
+                    for constraint in propagated_callee_param_constraints_for_binding(
+                        &callee_constraints.params[*arg_index],
+                        &binding.java_ty,
+                    ) {
+                        if signature_shape_constraint_propagation_policy().allows(constraint)
+                            || matches!(constraint, SignatureConstraint::MutableBinding)
+                        {
                             pending.push((
                                 caller_key.clone(),
                                 binding.name.clone(),
@@ -2438,8 +2816,13 @@ fn propagate_constructor_call_site_constraints(
                     {
                         continue;
                     }
-                    for constraint in &callee_constraints.params[*arg_index] {
-                        if signature_shape_constraint_propagation_policy().allows(constraint) {
+                    for constraint in propagated_callee_param_constraints_for_binding(
+                        &callee_constraints.params[*arg_index],
+                        &binding.java_ty,
+                    ) {
+                        if signature_shape_constraint_propagation_policy().allows(constraint)
+                            || matches!(constraint, SignatureConstraint::MutableBinding)
+                        {
                             pending.push((
                                 constructor_key.clone(),
                                 binding.name.clone(),
@@ -2462,6 +2845,211 @@ fn propagate_constructor_call_site_constraints(
         );
     }
     changed
+}
+
+fn propagate_resolved_source_mutable_argument_binding_constraints(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_binding_target()) {
+        return false;
+    }
+    let mut pending = Vec::new();
+    for (usage_key, method_usage) in &usage.methods {
+        let Some(caller_key) = method_key_for_usage(constraints, usage_key) else {
+            continue;
+        };
+        if !constraints.methods.contains_key(&caller_key) {
+            continue;
+        }
+        for call_site in &method_usage.call_sites {
+            let Some(resolved) = &call_site.resolved else {
+                continue;
+            };
+            let callee_key = MethodKey {
+                type_name: resolved.declaring_type.clone(),
+                rust_name: resolved.rust_name.clone(),
+            };
+            let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
+                continue;
+            };
+            for binding in method_usage.bindings.values() {
+                for usage in &binding.uses {
+                    let BindingUse::PassedToCall {
+                        name,
+                        arg_index,
+                        boundary,
+                        ..
+                    } = usage
+                    else {
+                        continue;
+                    };
+                    if name != &call_site.name
+                        || *boundary != call_site.boundary
+                        || *arg_index >= callee_constraints.params.len()
+                    {
+                        continue;
+                    }
+                    if callee_param_requires_mutable_binding(&callee_constraints.params[*arg_index])
+                    {
+                        pending.push((
+                            caller_key.clone(),
+                            binding.name.clone(),
+                            SignatureConstraint::MutableBinding,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let mut changed = false;
+    for (method_key, binding_name, constraint) in pending {
+        changed |= add_method_binding_constraint_scoped(
+            constraints,
+            &method_key,
+            &binding_name,
+            constraint,
+            scope,
+        );
+    }
+    changed
+}
+
+fn propagate_resolved_source_mutable_receiver_binding_constraints(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_binding_target()) {
+        return false;
+    }
+    let mut pending = Vec::new();
+    for (usage_key, method_usage) in &usage.methods {
+        let Some(caller_key) = method_key_for_usage(constraints, usage_key) else {
+            continue;
+        };
+        if !constraints.methods.contains_key(&caller_key) {
+            continue;
+        }
+        for call_site in &method_usage.call_sites {
+            let Some(resolved) = &call_site.resolved else {
+                continue;
+            };
+            let callee_key = MethodKey {
+                type_name: resolved.declaring_type.clone(),
+                rust_name: resolved.rust_name.clone(),
+            };
+            let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
+                continue;
+            };
+            if !callee_constraints
+                .receiver
+                .contains(&ReceiverConstraint::MutableReceiver)
+            {
+                continue;
+            }
+            for binding in method_usage.bindings.values() {
+                if binding.uses.iter().any(|usage| {
+                    matches!(
+                        usage,
+                        BindingUse::ReceiverForCall { name, boundary }
+                            if name == &call_site.name && *boundary == call_site.boundary
+                    )
+                }) {
+                    pending.push((
+                        caller_key.clone(),
+                        binding.name.clone(),
+                        SignatureConstraint::MutableBinding,
+                    ));
+                }
+            }
+        }
+    }
+    let mut changed = false;
+    for (method_key, binding_name, constraint) in pending {
+        changed |= add_method_binding_constraint_scoped(
+            constraints,
+            &method_key,
+            &binding_name,
+            constraint,
+            scope,
+        );
+    }
+    changed
+}
+
+fn callee_param_requires_mutable_binding(constraints: &[SignatureConstraint]) -> bool {
+    constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow)
+        )
+    }) && constraints
+        .iter()
+        .any(|constraint| matches!(constraint, SignatureConstraint::MutableBinding))
+}
+
+fn propagated_callee_param_constraints(
+    constraints: &[SignatureConstraint],
+) -> Vec<&SignatureConstraint> {
+    let mutable_borrow_param = constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow)
+        )
+    }) && constraints
+        .iter()
+        .any(|constraint| matches!(constraint, SignatureConstraint::MutableBinding));
+    constraints
+        .iter()
+        .filter(|constraint| {
+            signature_shape_constraint_propagation_policy().allows(constraint)
+                || (mutable_borrow_param
+                    && matches!(constraint, SignatureConstraint::MutableBinding))
+        })
+        .collect()
+}
+
+fn propagated_callee_param_constraints_for_binding<'a>(
+    constraints: &'a [SignatureConstraint],
+    caller_binding_ty: &JavaType,
+) -> Vec<&'a SignatureConstraint> {
+    let callee_slot_is_erased_object = constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            SignatureConstraint::RequiredDispatch(DispatchShape::ErasedObject)
+                | SignatureConstraint::RequiredView(ViewShape::ErasedObjectView)
+        )
+    });
+    propagated_callee_param_constraints(constraints)
+        .into_iter()
+        .filter(|constraint| {
+            !callee_erased_object_slot_constraint_should_stay_local(
+                constraint,
+                caller_binding_ty,
+                callee_slot_is_erased_object,
+            )
+        })
+        .collect()
+}
+
+fn callee_erased_object_slot_constraint_should_stay_local(
+    constraint: &SignatureConstraint,
+    caller_binding_ty: &JavaType,
+    callee_slot_is_erased_object: bool,
+) -> bool {
+    if is_declared_java_object_type(caller_binding_ty) || !callee_slot_is_erased_object {
+        return false;
+    }
+    matches!(
+        constraint,
+        SignatureConstraint::RequiredOwnership(_)
+            | SignatureConstraint::RequiredDispatch(DispatchShape::ErasedObject)
+            | SignatureConstraint::RequiredView(ViewShape::ErasedObjectView)
+            | SignatureConstraint::RequiredStorageNullability(_)
+            | SignatureConstraint::StorageSlot
+    )
 }
 
 fn propagate_constructor_delegation_constraints(
@@ -2543,6 +3131,9 @@ fn propagate_call_argument_constraints_to_callees(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_binding_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(caller_key) = method_key_for_usage(constraints, usage_key) else {
@@ -2565,9 +3156,9 @@ fn propagate_call_argument_constraints_to_callees(
                 type_name: resolved.declaring_type.clone(),
                 rust_name: resolved.rust_name.clone(),
             };
-            if !constraints.methods.contains_key(&callee_key) {
+            let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
-            }
+            };
             for binding in method_usage.bindings.values() {
                 for usage in &binding.uses {
                     let BindingUse::PassedToCall {
@@ -2579,11 +3170,21 @@ fn propagate_call_argument_constraints_to_callees(
                     else {
                         continue;
                     };
-                    if name != &call_site.name || *boundary != call_site.boundary {
+                    if name != &call_site.name
+                        || *boundary != call_site.boundary
+                        || *arg_index >= callee_constraints.params.len()
+                    {
                         continue;
                     }
+                    let callee_param_constraints = &callee_constraints.params[*arg_index];
                     for constraint in binding_slot_requirements(caller_constraints, &binding.name) {
                         if signature_shape_constraint_propagation_policy().allows(constraint) {
+                            if !should_propagate_caller_binding_constraint_to_callee_param(
+                                constraint,
+                                callee_param_constraints,
+                            ) {
+                                continue;
+                            }
                             pending.push((callee_key.clone(), *arg_index, constraint.clone()));
                         }
                     }
@@ -2616,6 +3217,9 @@ fn propagate_constructor_call_argument_constraints_to_callees(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_binding_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, constructor_usage) in &usage.constructors {
         let constructor_key = ConstructorKey {
@@ -2639,9 +3243,9 @@ fn propagate_constructor_call_argument_constraints_to_callees(
                 type_name: resolved.declaring_type.clone(),
                 rust_name: resolved.rust_name.clone(),
             };
-            if !constraints.methods.contains_key(&callee_key) {
+            let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
-            }
+            };
             for binding in constructor_usage.bindings.values() {
                 for usage in &binding.uses {
                     let BindingUse::PassedToCall {
@@ -2653,14 +3257,24 @@ fn propagate_constructor_call_argument_constraints_to_callees(
                     else {
                         continue;
                     };
-                    if name != &call_site.name || *boundary != call_site.boundary {
+                    if name != &call_site.name
+                        || *boundary != call_site.boundary
+                        || *arg_index >= callee_constraints.params.len()
+                    {
                         continue;
                     }
+                    let callee_param_constraints = &callee_constraints.params[*arg_index];
                     for constraint in constructor_binding_slot_requirements(
                         constructor_constraints,
                         &binding.name,
                     ) {
                         if signature_shape_constraint_propagation_policy().allows(constraint) {
+                            if !should_propagate_caller_binding_constraint_to_callee_param(
+                                constraint,
+                                callee_param_constraints,
+                            ) {
+                                continue;
+                            }
                             pending.push((callee_key.clone(), *arg_index, constraint.clone()));
                         }
                     }
@@ -2688,11 +3302,50 @@ fn propagate_constructor_call_argument_constraints_to_callees(
     changed
 }
 
+fn should_propagate_caller_binding_constraint_to_callee_param(
+    constraint: &SignatureConstraint,
+    callee_param_constraints: &[SignatureConstraint],
+) -> bool {
+    if matches!(
+        constraint,
+        SignatureConstraint::RequiredOwnership(OwnershipShape::Owned)
+    ) && callee_param_constraints.iter().any(|callee_constraint| {
+        matches!(
+            callee_constraint,
+            SignatureConstraint::RequiredOwnership(
+                OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+            )
+        )
+    }) {
+        return false;
+    }
+    if matches!(
+        constraint,
+        SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow)
+    ) && callee_param_constraints.iter().any(|callee_constraint| {
+        matches!(
+            callee_constraint,
+            SignatureConstraint::RequiredOwnership(OwnershipShape::SharedBorrow)
+        )
+    }) && !callee_param_constraints.iter().any(|callee_constraint| {
+        matches!(
+            callee_constraint,
+            SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow)
+        )
+    }) {
+        return false;
+    }
+    true
+}
+
 fn propagate_constructor_delegation_argument_constraints_to_callees(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_constructor_binding_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, constructor_usage) in &usage.constructors {
         let constructor_key = ConstructorKey {
@@ -2867,12 +3520,19 @@ fn propagate_call_result_constraints_to_bindings(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_binding_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
             continue;
         };
         for binding in method_usage.bindings.values() {
+            if !scope_permits_method_binding_target(constraints, scope, &method_key, &binding.name)
+            {
+                continue;
+            }
             for use_site in &binding.uses {
                 let BindingUse::AssignedFromCall { name, boundary, .. } = use_site else {
                     continue;
@@ -2906,6 +3566,9 @@ fn propagate_constructor_call_result_constraints_to_bindings(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_constructor_binding_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (constructor_key, constructor_usage) in &usage.constructors {
         let key = ConstructorKey {
@@ -2913,6 +3576,9 @@ fn propagate_constructor_call_result_constraints_to_bindings(
             rust_name: constructor_key.rust_name.clone(),
         };
         for binding in constructor_usage.bindings.values() {
+            if !scope_permits_constructor_binding_target(constraints, scope, &key, &binding.name) {
+                continue;
+            }
             for use_site in &binding.uses {
                 let BindingUse::AssignedFromCall { name, boundary, .. } = use_site else {
                     continue;
@@ -2946,6 +3612,9 @@ fn propagate_call_result_constraints_to_fields(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_field_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
@@ -2961,6 +3630,9 @@ fn propagate_call_result_constraints_to_fields(
             else {
                 continue;
             };
+            if !scope_permits_field_target(scope, &method_key.type_name, field_name) {
+                continue;
+            }
             for constraint in internal_call_return_constraints(
                 constraints,
                 &method_usage.call_sites,
@@ -2988,6 +3660,9 @@ fn propagate_constructor_call_result_constraints_to_fields(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_field_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (constructor_key, constructor_usage) in &usage.constructors {
         for field_use in &constructor_usage.field_uses {
@@ -3000,6 +3675,9 @@ fn propagate_constructor_call_result_constraints_to_fields(
             else {
                 continue;
             };
+            if !scope_permits_field_target(scope, &constructor_key.type_name, field_name) {
+                continue;
+            }
             for constraint in internal_call_return_constraints(
                 constraints,
                 &constructor_usage.call_sites,
@@ -3027,11 +3705,17 @@ fn propagate_call_result_constraints_to_returns(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_return_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
             continue;
         };
+        if !scope_permits_method_return_target(scope, &method_key) {
+            continue;
+        }
         for returned in &method_usage.returned_call_results {
             for constraint in internal_call_return_constraints(
                 constraints,
@@ -3081,6 +3765,9 @@ fn propagate_method_local_alias_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_binding_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
@@ -3090,6 +3777,10 @@ fn propagate_method_local_alias_constraints(
             continue;
         };
         for binding in method_usage.bindings.values() {
+            if !scope_permits_method_binding_target(constraints, scope, &method_key, &binding.name)
+            {
+                continue;
+            }
             for use_site in &binding.uses {
                 let BindingUse::AssignedToLocal { local_name } = use_site else {
                     continue;
@@ -3118,6 +3809,9 @@ fn propagate_constructor_local_alias_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_constructor_binding_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (constructor_key, constructor_usage) in &usage.constructors {
         let key = ConstructorKey {
@@ -3128,6 +3822,9 @@ fn propagate_constructor_local_alias_constraints(
             continue;
         };
         for binding in constructor_usage.bindings.values() {
+            if !scope_permits_constructor_binding_target(constraints, scope, &key, &binding.name) {
+                continue;
+            }
             for use_site in &binding.uses {
                 let BindingUse::AssignedToLocal { local_name } = use_site else {
                     continue;
@@ -3158,6 +3855,9 @@ fn propagate_method_local_alias_source_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_local_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
@@ -3171,6 +3871,9 @@ fn propagate_method_local_alias_source_constraints(
                 let BindingUse::AssignedToLocal { local_name } = use_site else {
                     continue;
                 };
+                if !scope_permits_method_local_target(constraints, scope, &method_key, local_name) {
+                    continue;
+                }
                 for constraint in binding_slot_requirements(method_constraints, &binding.name) {
                     pending.push((method_key.clone(), local_name.clone(), constraint.clone()));
                 }
@@ -3195,6 +3898,9 @@ fn propagate_constructor_local_alias_source_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_constructor_local_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (constructor_key, constructor_usage) in &usage.constructors {
         let key = ConstructorKey {
@@ -3209,6 +3915,9 @@ fn propagate_constructor_local_alias_source_constraints(
                 let BindingUse::AssignedToLocal { local_name } = use_site else {
                     continue;
                 };
+                if !scope_permits_constructor_local_target(constraints, scope, &key, local_name) {
+                    continue;
+                }
                 for constraint in
                     constructor_binding_slot_requirements(constructor_constraints, &binding.name)
                 {
@@ -3235,12 +3944,19 @@ fn propagate_method_field_storage_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_binding_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
             continue;
         };
         for binding in method_usage.bindings.values() {
+            if !scope_permits_method_binding_target(constraints, scope, &method_key, &binding.name)
+            {
+                continue;
+            }
             for use_site in &binding.uses {
                 let BindingUse::StoredInField { field_name } = use_site else {
                     continue;
@@ -3271,6 +3987,9 @@ fn propagate_constructor_field_storage_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_constructor_binding_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (constructor_key, constructor_usage) in &usage.constructors {
         let key = ConstructorKey {
@@ -3278,6 +3997,9 @@ fn propagate_constructor_field_storage_constraints(
             rust_name: constructor_key.rust_name.clone(),
         };
         for binding in constructor_usage.bindings.values() {
+            if !scope_permits_constructor_binding_target(constraints, scope, &key, &binding.name) {
+                continue;
+            }
             for use_site in &binding.uses {
                 let BindingUse::StoredInField { field_name } = use_site else {
                     continue;
@@ -3310,6 +4032,9 @@ fn propagate_method_return_binding_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_binding_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
@@ -3318,6 +4043,9 @@ fn propagate_method_return_binding_constraints(
         let Some(method_constraints) = constraints.methods.get(&method_key) else {
             continue;
         };
+        if !scope_permits_method_return_target(scope, &method_key) {
+            continue;
+        }
         for binding in method_usage.bindings.values() {
             if !binding
                 .uses
@@ -3355,6 +4083,9 @@ fn propagate_method_binding_return_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_return_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
@@ -3364,6 +4095,10 @@ fn propagate_method_binding_return_constraints(
             continue;
         };
         for binding in method_usage.bindings.values() {
+            if !scope_permits_method_binding_target(constraints, scope, &method_key, &binding.name)
+            {
+                continue;
+            }
             if !binding
                 .uses
                 .iter()
@@ -3388,6 +4123,9 @@ fn propagate_method_return_field_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_field_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
@@ -3400,6 +4138,9 @@ fn propagate_method_return_field_constraints(
             let FieldUse::Returned { field_name } = field_use else {
                 continue;
             };
+            if !scope_permits_field_target(scope, &method_key.type_name, field_name) {
+                continue;
+            }
             for constraint in method_constraints
                 .return_constraints
                 .iter()
@@ -3428,11 +4169,17 @@ fn propagate_method_field_return_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    if scope.is_some_and(|scope| !scope.has_method_return_target()) {
+        return false;
+    }
     let mut pending = Vec::new();
     for (usage_key, method_usage) in &usage.methods {
         let Some(method_key) = method_key_for_usage(constraints, usage_key) else {
             continue;
         };
+        if !scope_permits_method_return_target(scope, &method_key) {
+            continue;
+        }
         for field_use in &method_usage.field_uses {
             let FieldUse::Returned { field_name } = field_use else {
                 continue;
@@ -4300,8 +5047,22 @@ impl SignaturePlan {
         ty: &TypeDecl,
         method: &MethodDecl,
     ) -> &MethodSignaturePlan {
-        self.method_signature(ty, method)
-            .expect("signature solver must plan every lowered method")
+        let key = MethodKey {
+            type_name: ty.name.clone(),
+            rust_name: method_rust_name(method),
+        };
+        self.methods
+            .get(&key)
+            .or_else(|| self.unique_method_signature_for_simple_owner(&key))
+            .unwrap_or_else(|| {
+            panic!(
+                "signature solver must plan every lowered method: missing {}::{}, available for type: [{}], nearby types: [{}]",
+                key.type_name,
+                key.rust_name,
+                self.available_method_names_for_type(&key.type_name),
+                self.nearby_method_type_names(&key.type_name)
+            )
+        })
     }
 
     pub fn method_signature_by_rust_name(
@@ -4520,9 +5281,102 @@ impl SignaturePlan {
     }
 
     pub fn required_field_shape(&self, type_name: &str, field_name: &str) -> RustSlotShape {
-        self.field_shape(type_name, field_name)
+        let key = FieldKey {
+            type_name: type_name.to_string(),
+            field_name: field_name.to_string(),
+        };
+        self.fields
+            .get(&key)
+            .or_else(|| self.unique_field_shape_for_simple_owner(&key))
             .cloned()
-            .expect("signature solver must plan every lowered field")
+            .unwrap_or_else(|| {
+            panic!(
+                "signature solver must plan every lowered field: missing {}::{}, available for type: [{}], nearby types: [{}]",
+                key.type_name,
+                key.field_name,
+                self.available_field_names_for_type(&key.type_name),
+                self.nearby_field_type_names(&key.type_name)
+            )
+        })
+    }
+
+    fn available_method_names_for_type(&self, type_name: &str) -> String {
+        let mut names = self
+            .methods
+            .keys()
+            .filter(|key| key.type_name == type_name)
+            .map(|key| key.rust_name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        names.join(", ")
+    }
+
+    fn nearby_method_type_names(&self, type_name: &str) -> String {
+        nearby_type_names(
+            self.methods.keys().map(|key| key.type_name.as_str()),
+            type_name,
+        )
+    }
+
+    fn unique_method_signature_for_simple_owner(
+        &self,
+        missing: &MethodKey,
+    ) -> Option<&MethodSignaturePlan> {
+        let missing_simple = type_name_simple_segment(&missing.type_name);
+        let mut matches = self
+            .methods
+            .iter()
+            .filter(|(key, _)| {
+                key.rust_name == missing.rust_name
+                    && key.type_name != missing.type_name
+                    && type_name_simple_segment(&key.type_name) == missing_simple
+            })
+            .map(|(_, signature)| signature)
+            .collect::<Vec<_>>();
+        matches.dedup_by(|left, right| std::ptr::eq(*left, *right));
+        match matches.as_slice() {
+            [signature] => Some(*signature),
+            _ => None,
+        }
+    }
+
+    fn available_field_names_for_type(&self, type_name: &str) -> String {
+        let mut names = self
+            .fields
+            .keys()
+            .filter(|key| key.type_name == type_name)
+            .map(|key| key.field_name.as_str())
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        names.dedup();
+        names.join(", ")
+    }
+
+    fn nearby_field_type_names(&self, type_name: &str) -> String {
+        nearby_type_names(
+            self.fields.keys().map(|key| key.type_name.as_str()),
+            type_name,
+        )
+    }
+
+    fn unique_field_shape_for_simple_owner(&self, missing: &FieldKey) -> Option<&RustSlotShape> {
+        let missing_simple = type_name_simple_segment(&missing.type_name);
+        let mut matches = self
+            .fields
+            .iter()
+            .filter(|(key, _)| {
+                key.field_name == missing.field_name
+                    && key.type_name != missing.type_name
+                    && type_name_simple_segment(&key.type_name) == missing_simple
+            })
+            .map(|(_, shape)| shape)
+            .collect::<Vec<_>>();
+        matches.dedup_by(|left, right| std::ptr::eq(*left, *right));
+        match matches.as_slice() {
+            [shape] => Some(*shape),
+            _ => None,
+        }
     }
 
     pub fn constructor_param_plans(
@@ -4599,6 +5453,29 @@ impl SignaturePlan {
             .find(|local| local.name == local_name)
             .map(|local| local.binding_mutable)
     }
+}
+
+fn nearby_type_names<'a>(names: impl Iterator<Item = &'a str>, target: &str) -> String {
+    let target_simple = type_name_simple_segment(target);
+    let mut nearby = names
+        .filter(|name| {
+            name == &target
+                || type_name_simple_segment(name) == target_simple
+                || name.contains(target_simple)
+                || target.contains(type_name_simple_segment(name))
+        })
+        .take(12)
+        .collect::<Vec<_>>();
+    nearby.sort_unstable();
+    nearby.dedup();
+    nearby.join(", ")
+}
+
+fn type_name_simple_segment(type_name: &str) -> &str {
+    type_name
+        .rsplit(['.', '$'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(type_name)
 }
 
 fn method_signature_base_name_matches(rust_name: &str, base_name: &str) -> bool {
@@ -4710,6 +5587,9 @@ fn method_signature_type_name_matches(key_type_name: &str, query_type_name: &str
     method_signature_type_name_aliases(key_type_name)
         .iter()
         .any(|alias| alias == query_type_name)
+        || method_signature_type_name_aliases(query_type_name)
+            .iter()
+            .any(|alias| alias == key_type_name)
 }
 
 fn java_signature_argument_matches(actual: &JavaType, target: &JavaType) -> bool {
@@ -4821,7 +5701,13 @@ fn collect_type_signatures(
                             let constraints = method_constraints
                                 .map(|constraints| constraints.return_constraints.clone())
                                 .unwrap_or_default();
-                            constrained_return_shape(method, representations, &constraints, facts)
+                            constrained_return_shape(
+                                ty,
+                                method,
+                                representations,
+                                &constraints,
+                                facts,
+                            )
                         },
                         locals: method
                             .body
@@ -4907,7 +5793,13 @@ fn collect_type_signatures(
             .fields
             .get(&field_key)
             .cloned()
-            .unwrap_or_else(|| field_shape_constraints_with_facts(ty, &inherited.field, facts));
+            .unwrap_or_else(|| {
+                field_shape_constraints_with_owner_name(
+                    &inherited.declaring_type,
+                    &inherited.field,
+                    facts,
+                )
+            });
         plan.fields.insert(
             field_key,
             constrained_field_shape(
@@ -4945,6 +5837,76 @@ fn collect_type_signatures(
             external_inherited_method_signature(&inherited, representations, facts)
         });
     }
+    for inherited in
+        crate::inherited_members::inherited_instance_method_refs_for_type(ty, support_program)
+    {
+        let method_key = MethodKey {
+            type_name: ty.name.clone(),
+            rust_name: method_rust_name(inherited.method),
+        };
+        plan.methods.entry(method_key).or_insert_with(|| {
+            inherited_source_method_signature(inherited, representations, constraints, facts)
+        });
+    }
+}
+
+fn inherited_source_method_signature(
+    inherited: crate::inherited_members::InheritedInstanceMethodRef<'_>,
+    representations: &RepresentationPlan,
+    constraints: &SignatureConstraintState,
+    facts: &FactSet,
+) -> MethodSignaturePlan {
+    let method_constraints = constraints.methods.get(&MethodKey {
+        type_name: inherited.declaring_type.to_string(),
+        rust_name: method_rust_name(inherited.method),
+    });
+    MethodSignaturePlan {
+        params: inherited
+            .method
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| {
+                let constraints = method_constraints
+                    .and_then(|constraints| constraints.params.get(index))
+                    .cloned()
+                    .unwrap_or_default();
+                constrained_param_plan(param, representations, &constraints, facts)
+            })
+            .collect(),
+        return_shape: {
+            let constraints = method_constraints
+                .map(|constraints| constraints.return_constraints.clone())
+                .unwrap_or_default();
+            constrained_return_shape(
+                inherited.declaring_ty,
+                inherited.method,
+                representations,
+                &constraints,
+                facts,
+            )
+        },
+        locals: inherited
+            .method
+            .body
+            .as_ref()
+            .map(|body| {
+                collect_local_plans_from_constraints(
+                    body,
+                    representations,
+                    method_constraints
+                        .map(|constraints| constraints.locals.as_slice())
+                        .unwrap_or(&[]),
+                    facts,
+                )
+            })
+            .unwrap_or_default(),
+        receiver: constrained_receiver_plan(
+            method_constraints
+                .map(|constraints| constraints.receiver.as_slice())
+                .unwrap_or(&[]),
+        ),
+    }
 }
 
 fn external_inherited_method_signature(
@@ -4961,6 +5923,7 @@ fn external_inherited_method_signature(
                     java_ty: java_ty.clone(),
                     is_varargs: false,
                     shape: storage_shape_for_java_type(representations, java_ty),
+                    binding_mutable: false,
                 }
             })
             .collect(),
@@ -4995,7 +5958,35 @@ pub fn method_param_shape_constraints(
         method_name: method.name.clone(),
     });
     let binding = method_usage.and_then(|method_usage| method_usage.bindings.get(&param.name));
+    let field_receiver_mutated_names = method
+        .body
+        .as_ref()
+        .map(collect_field_receiver_mutated_names)
+        .unwrap_or_default();
+    let array_element_mutated_names = method
+        .body
+        .as_ref()
+        .map(collect_array_element_mutated_names)
+        .unwrap_or_default();
+    let facade_mut_borrow_argument_names = method
+        .body
+        .as_ref()
+        .map(|body| {
+            let mut local_types = method
+                .params
+                .iter()
+                .map(|param| (param.name.clone(), param.ty.clone()))
+                .collect::<HashMap<_, _>>();
+            collect_facade_mut_borrow_argument_names(body, facts, &mut local_types)
+        })
+        .unwrap_or_default();
     let mut boundary_kind = method_param_boundary_policy(ty, method, param, usage).kind;
+    if field_receiver_mutated_names.contains(&param.name)
+        || array_element_mutated_names.contains(&param.name)
+        || facade_mut_borrow_argument_names.contains(&param.name)
+    {
+        boundary_kind = None;
+    }
     let public_readonly_receiver_read_product = boundary_kind
         == Some(SignatureBoundaryKind::PublicApi)
         && !java_types_have_same_signature_boundary_identity(&method.return_type, &param.ty)
@@ -5014,8 +6005,7 @@ pub fn method_param_shape_constraints(
     if unknown_boundary_fully_modeled_by_external_arguments {
         boundary_kind = None;
     }
-    if (boundary_kind != Some(SignatureBoundaryKind::PublicApi)
-        || binding.is_some_and(binding_is_forwarded_to_known_source_call_only))
+    if boundary_kind != Some(SignatureBoundaryKind::PublicApi)
         && binding
             .is_some_and(|binding| internal_object_binding_is_shared_borrow_safe(binding, facts))
     {
@@ -5049,6 +6039,10 @@ pub fn method_param_shape_constraints(
                 &external_argument_binding_constraints(binding, facts),
             );
         }
+        push_unique_signature_constraints(
+            &mut constraints,
+            &facade_abi_argument_binding_constraints(binding, facts),
+        );
         if method_param_borrowed_content_policy_with_facts(ty, method, param, usage, facts)
             .is_none()
             && !signature_capability_policy(&param.ty, facts)
@@ -5069,7 +6063,21 @@ pub fn method_param_shape_constraints(
             &mut constraints,
             &source_binding_nullability_constraints(body, &param.name),
         );
-        if collect_array_element_mutated_names(body).contains(&param.name) {
+        if field_receiver_mutated_names.contains(&param.name) {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[
+                    SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+                    SignatureConstraint::MutableBinding,
+                ],
+            );
+        } else if collect_mutated_local_names(body).contains(&param.name) {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[SignatureConstraint::MutableBinding],
+            );
+        }
+        if array_element_mutated_names.contains(&param.name) {
             push_unique_signature_constraints(
                 &mut constraints,
                 &[
@@ -5078,6 +6086,33 @@ pub fn method_param_shape_constraints(
                 ],
             );
         }
+        if facade_mut_borrow_argument_names.contains(&param.name) {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[
+                    SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+                    SignatureConstraint::MutableBinding,
+                ],
+            );
+        }
+    }
+    let public_borrowed_content_constraints =
+        if boundary_kind == Some(SignatureBoundaryKind::PublicApi) {
+            method_param_borrowed_content_policy_with_facts(ty, method, param, usage, facts)
+                .map(signature_constraints_for_borrowed_content_policy)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+    if !public_borrowed_content_constraints.is_empty() {
+        constraints.retain(|constraint| {
+            !matches!(
+                constraint,
+                SignatureConstraint::RequiredView(ViewShape::Native)
+                    | SignatureConstraint::RequiredOwnership(OwnershipShape::Owned)
+            )
+        });
+        push_unique_signature_constraints(&mut constraints, &public_borrowed_content_constraints);
     }
     push_unique_signature_constraints(
         &mut constraints,
@@ -5728,7 +6763,13 @@ fn constrained_param_plan(
         facts,
     )
     .expect("parameter signature shape is always present");
-    param_plan_with_shape(param, shape)
+    ParamPlan {
+        name: param.name.clone(),
+        java_ty: param.ty.clone(),
+        is_varargs: param.is_varargs,
+        shape,
+        binding_mutable: signature_constraints_require_mutable_binding(constraints),
+    }
 }
 
 pub fn solve_signature_shape(
@@ -5834,6 +6875,7 @@ impl MergedSignatureConstraints {
         if let Some(requirement) = &self.slot_view_req {
             apply_required_view(&mut shape, requirement.clone());
         }
+        normalize_borrowed_array_slot_view(&mut shape);
         shape
     }
 
@@ -5918,6 +6960,22 @@ impl MergedSignatureConstraints {
                     merge_signature_flag_requirement_policy(self.storage_slot, true).kept;
             }
         }
+    }
+}
+
+fn normalize_borrowed_array_slot_view(shape: &mut RustSlotShape) {
+    if !matches!(
+        shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) || shape.view != ViewShape::Native
+    {
+        return;
+    }
+    let is_array_like = matches!(shape.java_ty, JavaType::Array(_))
+        || optional_element_type(&shape.java_ty)
+            .is_some_and(|element_ty| matches!(element_ty, JavaType::Array(_)));
+    if is_array_like {
+        apply_required_view(shape, ViewShape::Slice);
     }
 }
 
@@ -6146,10 +7204,18 @@ pub fn field_shape_constraints_with_facts(
     field: &FieldDecl,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
+    field_shape_constraints_with_owner_name(&ty.name, field, facts)
+}
+
+fn field_shape_constraints_with_owner_name(
+    owner_type_name: &str,
+    field: &FieldDecl,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
     let mut constraints = field_shape_constraints();
     push_unique_signature_constraints(
         &mut constraints,
-        &field_nullability_shape_policy(ty, field, facts).constraints,
+        &field_nullability_shape_policy_with_owner_name(owner_type_name, field, facts).constraints,
     );
     push_unique_signature_constraints(
         &mut constraints,
@@ -6170,8 +7236,16 @@ pub fn field_nullability_shape_policy(
     field: &FieldDecl,
     facts: &FactSet,
 ) -> FieldNullabilityShapePolicy {
+    field_nullability_shape_policy_with_owner_name(&ty.name, field, facts)
+}
+
+fn field_nullability_shape_policy_with_owner_name(
+    owner_type_name: &str,
+    field: &FieldDecl,
+    facts: &FactSet,
+) -> FieldNullabilityShapePolicy {
     let nullability = facts
-        .field_nullability_for(&ty.name, &field.name)
+        .field_nullability_for(owner_type_name, &field.name)
         .or_else(|| {
             field
                 .initializer
@@ -6179,7 +7253,7 @@ pub fn field_nullability_shape_policy(
                 .and_then(source_expr_nullability_state)
         });
     FieldNullabilityShapePolicy {
-        type_name: ty.name.clone(),
+        type_name: owner_type_name.to_string(),
         field_name: field.name.clone(),
         nullability,
         constraints: nullability
@@ -6237,15 +7311,52 @@ pub fn external_call_return_field_constraints(
             continue;
         };
         if field_name == &field.name {
-            push_external_call_return_constraints(
+            push_external_call_return_field_constraints(
                 &mut constraints,
                 receiver_type.as_ref(),
                 name,
+                &field.ty,
                 facts,
             );
         }
     }
     constraints
+}
+
+fn push_external_call_return_field_constraints(
+    constraints: &mut Vec<SignatureConstraint>,
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    field_ty: &JavaType,
+    facts: &FactSet,
+) {
+    let receiver_type = receiver_type.and_then(external_api_receiver_type_key);
+    let Some(effect) = facts.external_api_effect_for_receiver(receiver_type.as_deref(), name)
+    else {
+        return;
+    };
+    if effect.return_nullability != NullabilityState::Unknown
+        && external_effect_return_nullability_is_signature_evidence(effect)
+    {
+        push_unique_signature_constraints(
+            constraints,
+            &[SignatureConstraint::RequiredStorageNullability(
+                effect.return_nullability,
+            )],
+        );
+    }
+    if effect.return_type.as_ref().is_some_and(|return_ty| {
+        java_types_have_same_signature_boundary_identity(return_ty, field_ty)
+    }) {
+        push_unique_signature_constraints(
+            constraints,
+            &[
+                SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+                SignatureConstraint::RequiredView(ViewShape::Native),
+                SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+            ],
+        );
+    }
 }
 
 pub fn field_boundary_policy(
@@ -6294,7 +7405,7 @@ fn constrained_field_shape(
     constraints: &[SignatureConstraint],
     facts: &FactSet,
 ) -> RustSlotShape {
-    solve_signature_shape_with_facts(
+    let mut shape = solve_signature_shape_with_facts(
         representations,
         SignatureShapeRequest {
             java_ty: java_ty.clone(),
@@ -6303,16 +7414,12 @@ fn constrained_field_shape(
         },
         facts,
     )
-    .expect("field signature shape is always present")
-}
-
-fn param_plan_with_shape(param: &Param, shape: RustSlotShape) -> ParamPlan {
-    ParamPlan {
-        name: param.name.clone(),
-        java_ty: param.ty.clone(),
-        is_varargs: param.is_varargs,
-        shape,
+    .expect("field signature shape is always present");
+    if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) {
+        apply_required_ownership(&mut shape, OwnershipShape::Owned);
+        apply_required_view(&mut shape, ViewShape::Native);
     }
+    shape
 }
 
 fn collect_type_signature_constraints(
@@ -7473,13 +8580,18 @@ fn collect_local_constraint_sets(
     captured: &HashSet<String>,
 ) -> Vec<LocalConstraintSet> {
     let mut locals = Vec::new();
-    let mutated = collect_mutated_local_names(block);
-    let source_nullability = collect_binding_nullability_constraint_map(block);
-    let duplicate_names = collect_duplicate_declared_local_names(block);
     let mut local_types = params
         .iter()
         .map(|param| (param.name.clone(), param.ty.clone()))
         .collect::<HashMap<_, _>>();
+    let mut mutated = collect_mutated_local_names(block);
+    mutated.extend(collect_facade_mut_borrow_argument_names(
+        block,
+        facts,
+        &mut local_types.clone(),
+    ));
+    let source_nullability = collect_binding_nullability_constraint_map(block);
+    let duplicate_names = collect_duplicate_declared_local_names(block);
     collect_local_constraint_sets_from_stmts(
         &block.statements,
         &mutated,
@@ -7584,6 +8696,18 @@ fn collect_local_constraint_sets_from_stmts(
                 };
                 let mut constraints =
                     local_shape_constraints_with_usage(name, ty, mutated, usage, facts);
+                if initializer.as_ref().is_some_and(|initializer| {
+                    local_initializer_requires_owned_storage(initializer, ty)
+                }) {
+                    push_unique_signature_constraints(
+                        &mut constraints,
+                        &[
+                            SignatureConstraint::StorageSlot,
+                            SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+                            SignatureConstraint::RequiredView(ViewShape::Native),
+                        ],
+                    );
+                }
                 if !initializer.as_ref().is_some_and(|initializer| {
                     initializer_proves_declared_non_null(initializer, ty, facts, local_types)
                 }) && let Some(source_constraints) = source_nullability.get(name)
@@ -7763,6 +8887,30 @@ fn collect_local_constraint_sets_from_stmts(
     }
 }
 
+fn local_initializer_requires_owned_storage(initializer: &Expr, ty: &JavaType) -> bool {
+    if !matches!(ty, JavaType::String) {
+        return false;
+    }
+    match initializer {
+        Expr::Literal(Literal::String(_)) => true,
+        Expr::Binary { op, .. } if *op == BinaryOp::Add => true,
+        Expr::Call { name, .. } => matches!(
+            name.as_str(),
+            "format"
+                | "toString"
+                | "to_string"
+                | "substring"
+                | "trim"
+                | "toLowerCase"
+                | "toUpperCase"
+                | "replace"
+                | "replaceFirst"
+                | "replaceAll"
+        ),
+        _ => false,
+    }
+}
+
 fn collect_local_plans_from_constraints(
     block: &crate::java_ir::Block,
     representations: &RepresentationPlan,
@@ -7790,10 +8938,15 @@ fn collect_local_plans_from_stmts(
     use crate::java_ir::Stmt;
     for stmt in statements {
         match stmt {
-            Stmt::VarDecl { ty, name, .. } => {
+            Stmt::VarDecl {
+                ty,
+                name,
+                initializer,
+            } => {
                 locals.push(local_plan(
                     name,
                     ty,
+                    initializer.as_ref(),
                     representations,
                     local_constraints_for_declared_type(constraints, name, ty),
                     facts,
@@ -7818,6 +8971,7 @@ fn collect_local_plans_from_stmts(
                 locals.push(local_plan(
                     var_name,
                     var_type,
+                    None,
                     representations,
                     local_constraints_for_declared_type(constraints, var_name, var_type),
                     facts,
@@ -7972,6 +9126,14 @@ fn local_shape_constraints_with_usage_and_effective_facts(
         push_unique_signature_constraints(
             &mut constraints,
             &external_receiver_binding_constraints(binding, facts, false, false),
+        );
+        push_unique_signature_constraints(
+            &mut constraints,
+            &external_argument_binding_constraints(binding, facts),
+        );
+        push_unique_signature_constraints(
+            &mut constraints,
+            &facade_abi_argument_binding_constraints(binding, facts),
         );
         push_unique_signature_constraints(
             &mut constraints,
@@ -8149,9 +9311,39 @@ pub fn external_receiver_binding_constraints(
                     OwnershipShape::SharedBorrow,
                 )],
             );
+            if external_receiver_binding_should_keep_typed_erased_facade(binding, facts) {
+                push_unique_signature_constraints(
+                    &mut constraints,
+                    &[
+                        SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+                        SignatureConstraint::RequiredView(ViewShape::Native),
+                    ],
+                );
+            }
         }
     }
     constraints
+}
+
+fn external_receiver_binding_should_keep_typed_erased_facade(
+    binding: &BindingUseFacts,
+    facts: &FactSet,
+) -> bool {
+    let Some(receiver_type) = external_api_receiver_type_key(&binding.java_ty) else {
+        return false;
+    };
+    if matches!(receiver_type.as_str(), "Object" | "java.lang.Object") {
+        return false;
+    }
+    let erased = JavaType::Named {
+        name: receiver_type,
+        args: Vec::new(),
+    };
+    let effective_facts = EffectiveFacts::new(facts);
+    matches!(
+        effective_facts.object_representation_override_strategy_for(&erased),
+        Some(HierarchyStrategy::ErasedObject)
+    )
 }
 
 fn binding_is_fully_modeled_by_readonly_external_receivers(
@@ -8238,28 +9430,6 @@ fn internal_object_binding_is_shared_borrow_safe(
     saw_read
 }
 
-fn binding_is_forwarded_to_known_source_call_only(binding: &BindingUseFacts) -> bool {
-    let mut saw_forward = false;
-    for usage in &binding.uses {
-        match usage {
-            BindingUse::PassedToCall {
-                boundary: CallArgumentBoundary::Unknown,
-                ..
-            } => return false,
-            BindingUse::PassedToCall { .. } => {
-                saw_forward = true;
-            }
-            BindingUse::ContentRead | BindingUse::AssignedToLocal { .. } => {}
-            BindingUse::ReceiverForCall { .. }
-            | BindingUse::Returned
-            | BindingUse::AssignedFromCall { .. }
-            | BindingUse::StoredInField { .. }
-            | BindingUse::Mutated => return false,
-        }
-    }
-    saw_forward
-}
-
 fn external_receiver_call_is_readonly(java_ty: &JavaType, name: &str, facts: &FactSet) -> bool {
     let receiver_type = external_api_receiver_type_key(java_ty);
     facts
@@ -8317,11 +9487,14 @@ pub fn external_argument_binding_constraints(
             name,
             receiver_type,
             arg_index,
-            boundary: CallArgumentBoundary::Unknown,
+            boundary,
         } = usage
         else {
             continue;
         };
+        if *boundary == CallArgumentBoundary::InternalSameType {
+            continue;
+        }
         if let Some(effect) = external_api_argument_effect_for_call_arg(
             receiver_type.as_ref(),
             name,
@@ -8351,6 +9524,88 @@ pub fn external_argument_binding_constraints(
         }
     }
     constraints
+}
+
+fn facade_abi_argument_binding_constraints(
+    binding: &BindingUseFacts,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let mut constraints = Vec::new();
+    for usage in &binding.uses {
+        let BindingUse::PassedToCall {
+            name,
+            receiver_type,
+            arg_index,
+            boundary,
+        } = usage
+        else {
+            continue;
+        };
+        if *boundary == CallArgumentBoundary::InternalSameType {
+            continue;
+        }
+        for abi in matching_facade_abi_argument_facts(facts, receiver_type.as_ref(), name) {
+            let Some(slot) = abi.args.get(*arg_index) else {
+                continue;
+            };
+            if facade_slot_requires_mutable_binding(slot) {
+                push_unique_signature_constraints(
+                    &mut constraints,
+                    &[
+                        SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+                        SignatureConstraint::MutableBinding,
+                    ],
+                );
+            }
+        }
+    }
+    constraints
+}
+
+fn matching_facade_abi_argument_facts<'a>(
+    facts: &'a FactSet,
+    receiver_type: Option<&JavaType>,
+    name: &str,
+) -> Vec<&'a FacadeAbiFact> {
+    let candidates = facts
+        .facade_abi_facts
+        .iter()
+        .filter(|abi| abi.key.member.0 == name)
+        .collect::<Vec<_>>();
+    if let Some(receiver_type) = receiver_type
+        && let Some(receiver_key) = external_api_receiver_type_key(receiver_type)
+    {
+        let matched = candidates
+            .iter()
+            .copied()
+            .filter(|abi| {
+                crate::stdlib::canonical_external_receiver_type_key(&abi.key.owner.type_name)
+                    == receiver_key
+            })
+            .collect::<Vec<_>>();
+        if !matched.is_empty() {
+            return matched;
+        }
+    }
+    if candidates.len() == 1 {
+        candidates
+    } else {
+        Vec::new()
+    }
+}
+
+fn facade_slot_requires_mutable_binding(slot: &FacadeSlot) -> bool {
+    match slot {
+        FacadeSlot::MutBorrowed => true,
+        FacadeSlot::Optional(inner) | FacadeSlot::Slice(inner) => {
+            facade_slot_requires_mutable_binding(inner)
+        }
+        FacadeSlot::Owned
+        | FacadeSlot::Borrowed
+        | FacadeSlot::Index
+        | FacadeSlot::DynTrait(_)
+        | FacadeSlot::CrateHandle(_) => false,
+    }
 }
 
 fn unknown_boundary_is_fully_modeled_by_external_argument_effects(
@@ -8533,8 +9788,11 @@ pub fn external_call_return_binding_constraints(
         };
         push_external_call_return_constraints(
             &mut constraints,
-            receiver_type.as_ref(),
+            receiver_type
+                .as_ref()
+                .and_then(external_api_receiver_type_key),
             name,
+            None,
             facts,
         );
     }
@@ -8543,12 +9801,13 @@ pub fn external_call_return_binding_constraints(
 
 fn push_external_call_return_constraints(
     constraints: &mut Vec<SignatureConstraint>,
-    receiver_type: Option<&JavaType>,
+    receiver_type: Option<String>,
     name: &str,
+    arg_count: Option<usize>,
     facts: &FactSet,
 ) {
-    let receiver_type = receiver_type.and_then(external_api_receiver_type_key);
-    if let Some(effect) = facts.external_api_effect_for_receiver(receiver_type.as_deref(), name)
+    if let Some(effect) =
+        facts.external_api_effect_for_receiver_with_arity(receiver_type.as_deref(), name, arg_count)
         && effect.return_nullability != NullabilityState::Unknown
         && external_effect_return_nullability_is_signature_evidence(effect)
     {
@@ -8650,35 +9909,64 @@ fn java_type_is_obvious_read_product(java_ty: &JavaType) -> bool {
 fn local_plan(
     name: &str,
     java_ty: &JavaType,
+    initializer: Option<&Expr>,
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
     facts: &FactSet,
 ) -> LocalPlan {
-    let shape = if local_constraints_select_concrete_borrowed_value(constraints) {
-        let mut shape =
-            apply_signature_constraints(RustSlotShape::conservative(java_ty.clone()), constraints);
-        apply_required_dispatch(&mut shape, DispatchShape::Concrete);
-        apply_required_view(&mut shape, ViewShape::Native);
-        apply_required_ownership(&mut shape, OwnershipShape::SharedBorrow);
-        shape
-    } else {
-        solve_signature_shape_with_facts(
-            representations,
-            SignatureShapeRequest {
-                java_ty: java_ty.clone(),
-                role: SignatureSlotRole::Storage,
-                constraints: constraints.to_vec(),
-            },
-            facts,
-        )
-        .expect("local signature shape is always present")
-    };
+    let shape =
+        if declared_graphics_create_initializer_should_anchor_local_type(java_ty, initializer) {
+            RustSlotShape::for_storage(java_ty.clone())
+        } else if local_constraints_select_concrete_borrowed_value(constraints) {
+            let mut shape = apply_signature_constraints(
+                RustSlotShape::conservative(java_ty.clone()),
+                constraints,
+            );
+            apply_required_dispatch(&mut shape, DispatchShape::Concrete);
+            apply_required_view(&mut shape, ViewShape::Native);
+            apply_required_ownership(&mut shape, OwnershipShape::SharedBorrow);
+            shape
+        } else {
+            solve_signature_shape_with_facts(
+                representations,
+                SignatureShapeRequest {
+                    java_ty: java_ty.clone(),
+                    role: SignatureSlotRole::Storage,
+                    constraints: constraints.to_vec(),
+                },
+                facts,
+            )
+            .expect("local signature shape is always present")
+        };
     LocalPlan {
         name: name.to_string(),
         java_ty: java_ty.clone(),
         shape,
         binding_mutable: signature_constraints_require_mutable_binding(constraints),
     }
+}
+
+fn declared_graphics_create_initializer_should_anchor_local_type(
+    declared_ty: &JavaType,
+    initializer: Option<&Expr>,
+) -> bool {
+    let name = match declared_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        _ => return false,
+    };
+    if !matches!(name.rsplit('.').next().unwrap_or(name.as_str()), "Graphics") {
+        return false;
+    }
+    let Some(Expr::Call {
+        receiver: Some(_),
+        name,
+        args,
+        resolved: _,
+    }) = initializer
+    else {
+        return false;
+    };
+    args.is_empty() && matches!(name.as_str(), "createGraphics" | "create_graphics")
 }
 
 fn local_constraints_select_concrete_borrowed_value(constraints: &[SignatureConstraint]) -> bool {
@@ -8704,6 +9992,622 @@ fn collect_array_element_mutated_names(block: &Block) -> HashSet<String> {
     let mut mutated = HashSet::new();
     collect_array_element_mutated_names_from_stmts(&block.statements, &mut mutated);
     mutated
+}
+
+fn collect_facade_mut_borrow_argument_names(
+    block: &Block,
+    facts: &FactSet,
+    local_types: &mut HashMap<String, JavaType>,
+) -> HashSet<String> {
+    let mut mutated = HashSet::new();
+    collect_facade_mut_borrow_argument_names_from_stmts(
+        &block.statements,
+        facts,
+        local_types,
+        &mut mutated,
+    );
+    mutated
+}
+
+fn collect_field_receiver_mutated_names(block: &Block) -> HashSet<String> {
+    let mut mutated = HashSet::new();
+    collect_field_receiver_mutated_names_from_stmts(&block.statements, &mut mutated);
+    mutated
+}
+
+fn collect_facade_mut_borrow_argument_names_from_stmts(
+    statements: &[Stmt],
+    facts: &FactSet,
+    local_types: &mut HashMap<String, JavaType>,
+    mutated: &mut HashSet<String>,
+) {
+    for stmt in statements {
+        match stmt {
+            Stmt::VarDecl {
+                initializer: Some(expr),
+                name,
+                ty,
+            } => {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    expr,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+                local_types.insert(name.clone(), ty.clone());
+            }
+            Stmt::VarDecl {
+                initializer: None,
+                name,
+                ty,
+            } => {
+                local_types.insert(name.clone(), ty.clone());
+            }
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    expr,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+            }
+            Stmt::Assign { target, value } => {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    target,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    value,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    condition,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+                let mut then_types = local_types.clone();
+                collect_facade_mut_borrow_argument_names_from_stmts(
+                    &then_block.statements,
+                    facts,
+                    &mut then_types,
+                    mutated,
+                );
+                if let Some(else_block) = else_block {
+                    let mut else_types = local_types.clone();
+                    collect_facade_mut_borrow_argument_names_from_stmts(
+                        &else_block.statements,
+                        facts,
+                        &mut else_types,
+                        mutated,
+                    );
+                }
+            }
+            Stmt::While { condition, body } | Stmt::DoWhile { body, condition } => {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    condition,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+                let mut body_types = local_types.clone();
+                collect_facade_mut_borrow_argument_names_from_stmts(
+                    &body.statements,
+                    facts,
+                    &mut body_types,
+                    mutated,
+                );
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+                ..
+            } => {
+                let mut for_types = local_types.clone();
+                collect_facade_mut_borrow_argument_names_from_stmts(
+                    init,
+                    facts,
+                    &mut for_types,
+                    mutated,
+                );
+                if let Some(condition) = condition {
+                    collect_facade_mut_borrow_argument_names_from_expr(
+                        condition, facts, &for_types, mutated,
+                    );
+                }
+                for expr in update {
+                    collect_facade_mut_borrow_argument_names_from_expr(
+                        expr, facts, &for_types, mutated,
+                    );
+                }
+                collect_facade_mut_borrow_argument_names_from_stmts(
+                    &body.statements,
+                    facts,
+                    &mut for_types,
+                    mutated,
+                );
+            }
+            Stmt::EnhancedFor {
+                var_type,
+                var_name,
+                iterable,
+                body,
+                ..
+            } => {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    iterable,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+                let mut body_types = local_types.clone();
+                body_types.insert(var_name.clone(), var_type.clone());
+                collect_facade_mut_borrow_argument_names_from_stmts(
+                    &body.statements,
+                    facts,
+                    &mut body_types,
+                    mutated,
+                );
+            }
+            Stmt::Switch { selector, cases } => {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    selector,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+                for case in cases {
+                    let mut case_types = local_types.clone();
+                    collect_facade_mut_borrow_argument_names_from_stmts(
+                        &case.statements,
+                        facts,
+                        &mut case_types,
+                        mutated,
+                    );
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                let mut try_types = local_types.clone();
+                collect_facade_mut_borrow_argument_names_from_stmts(
+                    resources,
+                    facts,
+                    &mut try_types,
+                    mutated,
+                );
+                collect_facade_mut_borrow_argument_names_from_stmts(
+                    &body.statements,
+                    facts,
+                    &mut try_types,
+                    mutated,
+                );
+                for catch in catches {
+                    let mut catch_types = try_types.clone();
+                    if let Some(catch_ty) = catch.types.first() {
+                        catch_types.insert(catch.name.clone(), catch_ty.clone());
+                    }
+                    collect_facade_mut_borrow_argument_names_from_stmts(
+                        &catch.body.statements,
+                        facts,
+                        &mut catch_types,
+                        mutated,
+                    );
+                }
+                if let Some(finally_block) = finally_block {
+                    let mut finally_types = try_types.clone();
+                    collect_facade_mut_borrow_argument_names_from_stmts(
+                        &finally_block.statements,
+                        facts,
+                        &mut finally_types,
+                        mutated,
+                    );
+                }
+            }
+            Stmt::ConstructorInvocation { args, .. } => {
+                for arg in args {
+                    collect_facade_mut_borrow_argument_names_from_expr(
+                        arg,
+                        facts,
+                        local_types,
+                        mutated,
+                    );
+                }
+            }
+            Stmt::Block(block) => {
+                let mut block_types = local_types.clone();
+                collect_facade_mut_borrow_argument_names_from_stmts(
+                    &block.statements,
+                    facts,
+                    &mut block_types,
+                    mutated,
+                );
+            }
+            Stmt::Return(None)
+            | Stmt::LocalType(_)
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => {}
+        }
+    }
+}
+
+fn collect_facade_mut_borrow_argument_names_from_expr(
+    expr: &Expr,
+    facts: &FactSet,
+    local_types: &HashMap<String, JavaType>,
+    mutated: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            for abi in facts.facade_abi_facts.iter().filter(|abi| {
+                abi.key.member.0 == *name
+                    && abi.key.arity == args.len()
+                    && abi.args.len() == args.len()
+            }) {
+                if abi.receiver == ReceiverAbi::MutBorrowedSelf
+                    && receiver.as_deref().is_some_and(|receiver| {
+                        facade_abi_matches_receiver_expr(abi, receiver, local_types)
+                    })
+                    && let Some(Expr::Var(name)) = receiver.as_deref()
+                {
+                    mutated.insert(name.clone());
+                }
+                for (index, slot) in abi.args.iter().enumerate() {
+                    if !facade_slot_requires_mutable_binding(slot) {
+                        continue;
+                    }
+                    if let Some(Expr::Var(name)) = args.get(index) {
+                        mutated.insert(name.clone());
+                    }
+                }
+            }
+            if let Some(receiver) = receiver {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    receiver,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+            }
+            for arg in args {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    arg,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+            }
+        }
+        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+            collect_facade_mut_borrow_argument_names_from_expr(
+                receiver,
+                facts,
+                local_types,
+                mutated,
+            );
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_facade_mut_borrow_argument_names_from_expr(left, facts, local_types, mutated);
+            collect_facade_mut_borrow_argument_names_from_expr(right, facts, local_types, mutated);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_facade_mut_borrow_argument_names_from_expr(
+                condition,
+                facts,
+                local_types,
+                mutated,
+            );
+            collect_facade_mut_borrow_argument_names_from_expr(
+                then_expr,
+                facts,
+                local_types,
+                mutated,
+            );
+            collect_facade_mut_borrow_argument_names_from_expr(
+                else_expr,
+                facts,
+                local_types,
+                mutated,
+            );
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_facade_mut_borrow_argument_names_from_expr(array, facts, local_types, mutated);
+            collect_facade_mut_borrow_argument_names_from_expr(index, facts, local_types, mutated);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    expr,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+            }
+            for expr in initializer.iter().flatten() {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    expr,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+            }
+        }
+        Expr::ArrayInitializer(items) => {
+            for expr in items {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    expr,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+            }
+        }
+        Expr::New { args, .. } => {
+            for arg in args {
+                collect_facade_mut_borrow_argument_names_from_expr(
+                    arg,
+                    facts,
+                    local_types,
+                    mutated,
+                );
+            }
+        }
+        Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            collect_facade_mut_borrow_argument_names_from_expr(expr, facts, local_types, mutated);
+        }
+        Expr::Lambda { .. }
+        | Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn facade_abi_matches_receiver_expr(
+    abi: &FacadeAbiFact,
+    receiver: &Expr,
+    local_types: &HashMap<String, JavaType>,
+) -> bool {
+    let Some(receiver_ty) = local_receiver_type(receiver, local_types) else {
+        return false;
+    };
+    facade_abi_owner_matches_java_type(abi, receiver_ty)
+}
+
+fn local_receiver_type<'a>(
+    receiver: &'a Expr,
+    local_types: &'a HashMap<String, JavaType>,
+) -> Option<&'a JavaType> {
+    match receiver {
+        Expr::Var(name) => local_types.get(name),
+        _ => None,
+    }
+}
+
+fn facade_abi_owner_matches_java_type(abi: &FacadeAbiFact, receiver_ty: &JavaType) -> bool {
+    let owner = &abi.key.owner.type_name;
+    match receiver_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::facts::external_type_name_matches(owner, name)
+        }
+        _ => false,
+    }
+}
+
+fn collect_field_receiver_mutated_names_from_stmts(
+    statements: &[Stmt],
+    mutated: &mut HashSet<String>,
+) {
+    for stmt in statements {
+        match stmt {
+            Stmt::Assign { target, value } => {
+                collect_field_receiver_assignment_target_name(target, mutated);
+                collect_field_receiver_mutated_names_from_expr(value, mutated);
+            }
+            Stmt::VarDecl { initializer, .. } => {
+                if let Some(expr) = initializer {
+                    collect_field_receiver_mutated_names_from_expr(expr, mutated);
+                }
+            }
+            Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+                collect_field_receiver_mutated_names_from_expr(expr, mutated);
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                collect_field_receiver_mutated_names_from_expr(condition, mutated);
+                collect_field_receiver_mutated_names_from_stmts(&then_block.statements, mutated);
+                if let Some(else_block) = else_block {
+                    collect_field_receiver_mutated_names_from_stmts(
+                        &else_block.statements,
+                        mutated,
+                    );
+                }
+            }
+            Stmt::While { condition, body } | Stmt::DoWhile { condition, body } => {
+                collect_field_receiver_mutated_names_from_expr(condition, mutated);
+                collect_field_receiver_mutated_names_from_stmts(&body.statements, mutated);
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+                ..
+            } => {
+                collect_field_receiver_mutated_names_from_stmts(init, mutated);
+                if let Some(condition) = condition {
+                    collect_field_receiver_mutated_names_from_expr(condition, mutated);
+                }
+                for expr in update {
+                    collect_field_receiver_mutated_names_from_expr(expr, mutated);
+                }
+                collect_field_receiver_mutated_names_from_stmts(&body.statements, mutated);
+            }
+            Stmt::EnhancedFor { iterable, body, .. } => {
+                collect_field_receiver_mutated_names_from_expr(iterable, mutated);
+                collect_field_receiver_mutated_names_from_stmts(&body.statements, mutated);
+            }
+            Stmt::Switch { selector, cases } => {
+                collect_field_receiver_mutated_names_from_expr(selector, mutated);
+                for case in cases {
+                    collect_field_receiver_mutated_names_from_stmts(&case.statements, mutated);
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                collect_field_receiver_mutated_names_from_stmts(resources, mutated);
+                collect_field_receiver_mutated_names_from_stmts(&body.statements, mutated);
+                for catch in catches {
+                    collect_field_receiver_mutated_names_from_stmts(
+                        &catch.body.statements,
+                        mutated,
+                    );
+                }
+                if let Some(finally_block) = finally_block {
+                    collect_field_receiver_mutated_names_from_stmts(
+                        &finally_block.statements,
+                        mutated,
+                    );
+                }
+            }
+            Stmt::Block(block) => {
+                collect_field_receiver_mutated_names_from_stmts(&block.statements, mutated);
+            }
+            Stmt::Return(None)
+            | Stmt::LocalType(_)
+            | Stmt::ConstructorInvocation { .. }
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => {}
+        }
+    }
+}
+
+fn collect_field_receiver_mutated_names_from_expr(expr: &Expr, mutated: &mut HashSet<String>) {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        } => {
+            collect_field_receiver_assignment_target_name(left, mutated);
+            collect_field_receiver_mutated_names_from_expr(right, mutated);
+        }
+        Expr::Unary {
+            op: UnaryOp::PostInc | UnaryOp::PostDec | UnaryOp::PreInc | UnaryOp::PreDec,
+            expr,
+        } => collect_field_receiver_assignment_target_name(expr, mutated),
+        Expr::Unary { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::InstanceOf { expr, .. }
+        | Expr::FieldAccess(expr, _) => {
+            collect_field_receiver_mutated_names_from_expr(expr, mutated)
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_field_receiver_mutated_names_from_expr(left, mutated);
+            collect_field_receiver_mutated_names_from_expr(right, mutated);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_field_receiver_mutated_names_from_expr(condition, mutated);
+            collect_field_receiver_mutated_names_from_expr(then_expr, mutated);
+            collect_field_receiver_mutated_names_from_expr(else_expr, mutated);
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_field_receiver_mutated_names_from_expr(array, mutated);
+            collect_field_receiver_mutated_names_from_expr(index, mutated);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for expr in dimensions {
+                collect_field_receiver_mutated_names_from_expr(expr, mutated);
+            }
+            if let Some(initializer) = initializer {
+                for expr in initializer {
+                    collect_field_receiver_mutated_names_from_expr(expr, mutated);
+                }
+            }
+        }
+        Expr::ArrayInitializer(elements) | Expr::New { args: elements, .. } => {
+            for expr in elements {
+                collect_field_receiver_mutated_names_from_expr(expr, mutated);
+            }
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_field_receiver_mutated_names_from_expr(receiver, mutated);
+            }
+            for arg in args {
+                collect_field_receiver_mutated_names_from_expr(arg, mutated);
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => collect_field_receiver_mutated_names_from_expr(expr, mutated),
+            LambdaBody::Block(block) => {
+                collect_field_receiver_mutated_names_from_stmts(&block.statements, mutated);
+            }
+        },
+        Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_) => {}
+    }
+}
+
+fn collect_field_receiver_assignment_target_name(expr: &Expr, mutated: &mut HashSet<String>) {
+    if let Expr::FieldAccess(receiver, _) = expr
+        && let Expr::Var(name) = receiver.as_ref()
+    {
+        mutated.insert(name.clone());
+    }
 }
 
 fn collect_array_element_mutated_names_from_stmts(
@@ -9079,7 +10983,12 @@ fn collect_assignment_target_name(expr: &Expr, mutated: &mut HashSet<String>) {
             collect_mutated_local_names_from_expr(array, mutated);
             collect_mutated_local_names_from_expr(index, mutated);
         }
-        Expr::FieldAccess(receiver, _) => collect_mutated_local_names_from_expr(receiver, mutated),
+        Expr::FieldAccess(receiver, _) => {
+            if let Expr::Var(name) = receiver.as_ref() {
+                mutated.insert(name.clone());
+            }
+            collect_mutated_local_names_from_expr(receiver, mutated);
+        }
         _ => collect_mutated_local_names_from_expr(expr, mutated),
     }
 }
@@ -9158,9 +11067,36 @@ pub fn method_return_shape_constraints(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
-    let boundary_kind = method_return_boundary_policy(ty, method, usage, facts).kind;
+    if method.body.is_none()
+        && !method.modifiers.contains(&Modifier::Abstract)
+        && source_summary_bodyless_return_may_be_null(&method.return_type)
+    {
+        return vec![SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::MaybeNull,
+        )];
+    }
+    if source_static_initialized_singleton_getter(ty, method).is_some() {
+        return vec![
+            SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull),
+            SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+            SignatureConstraint::RequiredView(ViewShape::Native),
+        ];
+    }
+    let mut boundary_kind = method_return_boundary_policy(ty, method, usage, facts).kind;
+    let borrowed_object_return = source_method_return_should_borrow_object(ty, method, facts);
+    if borrowed_object_return {
+        boundary_kind = None;
+    }
     let mut constraints =
         signature_slot_baseline_policy(&method.return_type, boundary_kind, facts).constraints;
+    if borrowed_object_return {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &[SignatureConstraint::RequiredOwnership(
+                OwnershipShape::SharedBorrow,
+            )],
+        );
+    }
     let method_effect_nullability =
         facts
             .method_effect_for(&ty.name, &method.name)
@@ -9200,7 +11136,15 @@ pub fn method_return_shape_constraints(
     push_unique_signature_constraints(&mut constraints, &external_return_constraints);
     let borrowed_return_content_policy =
         borrowed_return_content_policy_from_param_with_facts(ty, method, usage, facts);
+    let returns_call_result = usage
+        .methods
+        .get(&UsageMethodKey {
+            type_name: ty.name.clone(),
+            method_name: method.name.clone(),
+        })
+        .is_some_and(|method_usage| !method_usage.returned_call_results.is_empty());
     if borrowed_return_content_policy.is_none()
+        && !returns_call_result
         && declared_return_should_use_concrete_shape(
             method,
             method_effect_nullability,
@@ -9221,6 +11165,7 @@ pub fn method_return_shape_constraints(
                     NullabilityState::DefinitelyNonNull,
                 ),
                 SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+                SignatureConstraint::RequiredView(ViewShape::Native),
             ],
         );
     }
@@ -9244,6 +11189,105 @@ pub fn method_return_shape_constraints(
         );
     }
     constraints
+}
+
+fn source_summary_bodyless_return_may_be_null(java_ty: &JavaType) -> bool {
+    crate::stdlib::java_collection_kind_for_type(java_ty).is_some()
+}
+
+fn source_method_return_should_borrow_object(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    facts: &FactSet,
+) -> bool {
+    if source_static_initialized_singleton_getter(ty, method).is_some() {
+        return false;
+    }
+    if !java_return_type_can_borrow_as_object(&method.return_type, facts) {
+        return false;
+    }
+    if ty.kind == TypeKind::Interface {
+        return true;
+    }
+    direct_self_field_return_type(ty, method).is_some_and(|field_ty| field_ty == method.return_type)
+}
+
+fn source_static_initialized_singleton_getter<'a>(
+    ty: &'a TypeDecl,
+    method: &MethodDecl,
+) -> Option<&'a crate::java_ir::FieldDecl> {
+    if !method.modifiers.contains(&Modifier::Static) || !method.params.is_empty() {
+        return None;
+    }
+    let body = method.body.as_ref()?;
+    let [Stmt::Return(Some(Expr::Var(field_name)))] = body.statements.as_slice() else {
+        return None;
+    };
+    ty.members.iter().find_map(|member| {
+        let crate::java_ir::Member::Field(field) = member else {
+            return None;
+        };
+        if field.name != *field_name
+            || !field.modifiers.contains(&Modifier::Static)
+            || !java_types_have_same_signature_boundary_identity(&field.ty, &method.return_type)
+        {
+            return None;
+        }
+        static_field_has_same_type_new_initializer(field, &method.return_type).then_some(field)
+    })
+}
+
+fn static_field_has_same_type_new_initializer(
+    field: &crate::java_ir::FieldDecl,
+    return_type: &JavaType,
+) -> bool {
+    let Some(Expr::New { ty, args, body, .. }) = &field.initializer else {
+        return false;
+    };
+    args.is_empty()
+        && body.as_ref().is_none_or(|members| members.is_empty())
+        && java_types_have_same_signature_boundary_identity(ty, return_type)
+}
+
+fn direct_self_field_return_type(ty: &TypeDecl, method: &MethodDecl) -> Option<JavaType> {
+    let body = method.body.as_ref()?;
+    let [Stmt::Return(Some(expr))] = body.statements.as_slice() else {
+        return None;
+    };
+    let field_name = match expr {
+        Expr::Var(name) => name,
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => field,
+        _ => return None,
+    };
+    ty.members.iter().find_map(|member| match member {
+        crate::java_ir::Member::Field(field) if field.name == *field_name => Some(field.ty.clone()),
+        _ => None,
+    })
+}
+
+fn java_return_type_can_borrow_as_object(java_ty: &JavaType, facts: &FactSet) -> bool {
+    match java_ty {
+        JavaType::Primitive(_) | JavaType::String | JavaType::Void | JavaType::Array(_) => {
+            return false;
+        }
+        JavaType::Named { name, args } => {
+            if crate::stdlib::canonical_external_receiver_type_key(name) == "Object"
+                || crate::stdlib::java_collection_kind_for_type(java_ty).is_some()
+            {
+                return false;
+            }
+            if args.is_empty() && facts.object_safe_trait_fact_for_name(name) == Some(true) {
+                return true;
+            }
+        }
+        JavaType::Unknown(name) => {
+            if crate::stdlib::canonical_external_receiver_type_key(name) == "Object" {
+                return false;
+            }
+        }
+        JavaType::Wildcard(_) => return false,
+    }
+    !matches!(conservative_ownership(java_ty), OwnershipShape::CopyValue)
 }
 
 fn declared_return_should_use_concrete_shape(
@@ -9319,6 +11363,16 @@ fn internal_returned_object_alias_borrow_constraints(
     if matches!(method.return_type, JavaType::Primitive(_) | JavaType::Void) {
         return Vec::new();
     }
+    let param_names = method
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect::<HashSet<_>>();
+    let exactly_returned_param_names = method
+        .body
+        .as_ref()
+        .map(|body| exact_returned_var_names_from_stmts(&body.statements))
+        .unwrap_or_default();
     let Some(method_usage) = usage.methods.get(&UsageMethodKey {
         type_name: ty.name.clone(),
         method_name: method.name.clone(),
@@ -9326,10 +11380,8 @@ fn internal_returned_object_alias_borrow_constraints(
         return Vec::new();
     };
     let returned_borrow_safe_alias = method_usage.bindings.values().any(|binding| {
-        binding
-            .uses
-            .iter()
-            .any(|usage| matches!(usage, BindingUse::Returned))
+        param_names.contains(binding.name.as_str())
+            && exactly_returned_param_names.contains(binding.name.as_str())
             && java_types_have_same_signature_boundary_identity(
                 &binding.java_ty,
                 &method.return_type,
@@ -9343,6 +11395,72 @@ fn internal_returned_object_alias_borrow_constraints(
             )]
         })
         .unwrap_or_default()
+}
+
+fn exact_returned_var_names_from_stmts(statements: &[Stmt]) -> HashSet<&str> {
+    let mut names = HashSet::new();
+    collect_exact_returned_var_names_from_stmts(statements, &mut names);
+    names
+}
+
+fn collect_exact_returned_var_names_from_stmts<'a>(
+    statements: &'a [Stmt],
+    names: &mut HashSet<&'a str>,
+) {
+    for stmt in statements {
+        match stmt {
+            Stmt::Return(Some(Expr::Var(name))) => {
+                names.insert(name.as_str());
+            }
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_exact_returned_var_names_from_stmts(&then_block.statements, names);
+                if let Some(else_block) = else_block {
+                    collect_exact_returned_var_names_from_stmts(&else_block.statements, names);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::EnhancedFor { body, .. }
+            | Stmt::Block(body) => {
+                collect_exact_returned_var_names_from_stmts(&body.statements, names);
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    collect_exact_returned_var_names_from_stmts(&case.statements, names);
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                collect_exact_returned_var_names_from_stmts(resources, names);
+                collect_exact_returned_var_names_from_stmts(&body.statements, names);
+                for catch in catches {
+                    collect_exact_returned_var_names_from_stmts(&catch.body.statements, names);
+                }
+                if let Some(finally_block) = finally_block {
+                    collect_exact_returned_var_names_from_stmts(&finally_block.statements, names);
+                }
+            }
+            Stmt::VarDecl { .. }
+            | Stmt::Assign { .. }
+            | Stmt::Expr(_)
+            | Stmt::Return(_)
+            | Stmt::Throw(_)
+            | Stmt::LocalType(_)
+            | Stmt::ConstructorInvocation { .. }
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => {}
+        }
+    }
 }
 
 pub fn external_call_return_method_return_constraints(
@@ -9361,10 +11479,23 @@ pub fn external_call_return_method_return_constraints(
     for returned in &method_usage.returned_call_results {
         push_external_call_return_constraints(
             &mut constraints,
-            returned.receiver_type.as_ref(),
+            returned_call_receiver_type_for_external_lookup(returned),
             &returned.name,
+            Some(returned.arg_count),
             facts,
         );
+        if returned_external_call_result_matches_declared_return(
+            returned,
+            &method.return_type,
+            facts,
+        ) {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[SignatureConstraint::RequiredDispatch(
+                    DispatchShape::Concrete,
+                )],
+            );
+        }
     }
     constraints
 }
@@ -9487,20 +11618,36 @@ fn returned_external_call_result_matches_declared_return(
     declared_return: &JavaType,
     facts: &FactSet,
 ) -> bool {
-    let receiver_type = returned
-        .receiver_type
-        .as_ref()
-        .and_then(|receiver| match receiver {
-            JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name.as_str()),
-            _ => None,
-        });
-    let Some(effect) = facts.external_api_effect_for_receiver(receiver_type, &returned.name) else {
+    let receiver_type = returned_call_receiver_type_for_external_lookup(returned);
+    let Some(effect) = facts.external_api_effect_for_receiver_with_arity(
+        receiver_type.as_deref(),
+        &returned.name,
+        Some(returned.arg_count),
+    ) else {
         return false;
     };
     let Some(return_type) = effect.return_type.as_ref() else {
         return false;
     };
     java_types_match_with_external_aliases(return_type, declared_return)
+}
+
+fn returned_call_receiver_type_for_external_lookup(
+    returned: &ReturnedCallResultUse,
+) -> Option<String> {
+    returned
+        .resolved
+        .as_ref()
+        .map(|resolved| resolved.declaring_type.clone())
+        .or_else(|| {
+            returned
+                .receiver_type
+                .as_ref()
+                .and_then(|receiver| match receiver {
+                    JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name.clone()),
+                    _ => None,
+                })
+        })
 }
 
 fn java_types_match_with_external_aliases(left: &JavaType, right: &JavaType) -> bool {
@@ -9527,12 +11674,14 @@ fn java_types_match_with_external_aliases(left: &JavaType, right: &JavaType) -> 
 }
 
 fn constrained_return_shape(
+    ty: &TypeDecl,
     method: &MethodDecl,
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
     facts: &FactSet,
 ) -> Option<RustSlotShape> {
-    if !java_type_is_erased_object_boundary(&method.return_type)
+    let return_type = method_return_type_for_signature(method).unwrap_or(&method.return_type);
+    if !java_type_is_erased_object_boundary(return_type)
         && return_constraints_select_concrete_declared_value(constraints)
     {
         let constraints = constraints
@@ -9548,7 +11697,7 @@ fn constrained_return_shape(
             .cloned()
             .collect::<Vec<_>>();
         let mut shape = apply_signature_constraints(
-            RustSlotShape::conservative(method.return_type.clone()),
+            RustSlotShape::conservative(return_type.clone()),
             &constraints,
         );
         apply_required_dispatch(&mut shape, DispatchShape::Concrete);
@@ -9556,15 +11705,246 @@ fn constrained_return_shape(
         apply_required_ownership(&mut shape, OwnershipShape::Owned);
         return Some(shape);
     }
-    solve_signature_shape_with_facts(
+    let mut shape = solve_signature_shape_with_facts(
         representations,
         SignatureShapeRequest {
-            java_ty: method.return_type.clone(),
+            java_ty: return_type.clone(),
             role: SignatureSlotRole::Return,
             constraints: constraints.to_vec(),
         },
         facts,
-    )
+    )?;
+    if source_method_return_should_borrow_object(ty, method, facts) {
+        apply_required_ownership(&mut shape, OwnershipShape::SharedBorrow);
+    }
+    Some(shape)
+}
+
+fn method_return_type_for_signature(method: &MethodDecl) -> Option<&JavaType> {
+    let declared_collection_name = raw_collection_type_name(&method.return_type)?;
+    let body = method.body.as_ref()?;
+    let local_types = method_declared_binding_types(method, body);
+    let mut returned_types = Vec::new();
+    if !collect_returned_var_types_from_stmts(&body.statements, &local_types, &mut returned_types) {
+        return None;
+    }
+    let first = returned_types.first()?;
+    if collection_type_name(first).as_deref() != Some(declared_collection_name.as_str()) {
+        return None;
+    }
+    if first_type_args(first).is_empty() {
+        return None;
+    }
+    returned_types.iter().all(|ty| ty == first).then_some(first)
+}
+
+fn raw_collection_type_name(java_ty: &JavaType) -> Option<String> {
+    match java_ty {
+        JavaType::Named { name, args } if args.is_empty() => {
+            collection_type_name(java_ty).or_else(|| {
+                Some(crate::stdlib::canonical_external_receiver_type_key(name))
+                    .filter(|_| crate::stdlib::java_collection_kind_for_type(java_ty).is_some())
+            })
+        }
+        JavaType::Unknown(name) => collection_type_name(java_ty).or_else(|| {
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+                .filter(|_| crate::stdlib::java_collection_kind_for_type(java_ty).is_some())
+        }),
+        _ => None,
+    }
+}
+
+fn collection_type_name(java_ty: &JavaType) -> Option<String> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::java_collection_kind_for_type(java_ty)?;
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+        }
+        _ => None,
+    }
+}
+
+fn first_type_args(java_ty: &JavaType) -> &[JavaType] {
+    match java_ty {
+        JavaType::Named { args, .. } => args,
+        _ => &[],
+    }
+}
+
+fn method_declared_binding_types<'a>(
+    method: &'a MethodDecl,
+    body: &'a Block,
+) -> HashMap<&'a str, Option<&'a JavaType>> {
+    let mut types = HashMap::new();
+    for param in &method.params {
+        insert_declared_binding_type(&mut types, &param.name, &param.ty);
+    }
+    collect_declared_binding_types_from_stmts(&body.statements, &mut types);
+    types
+}
+
+fn insert_declared_binding_type<'a>(
+    types: &mut HashMap<&'a str, Option<&'a JavaType>>,
+    name: &'a str,
+    java_ty: &'a JavaType,
+) {
+    types
+        .entry(name)
+        .and_modify(|existing| {
+            if existing
+                .as_ref()
+                .is_some_and(|existing| *existing != java_ty)
+            {
+                *existing = None;
+            }
+        })
+        .or_insert(Some(java_ty));
+}
+
+fn collect_declared_binding_types_from_stmts<'a>(
+    statements: &'a [Stmt],
+    types: &mut HashMap<&'a str, Option<&'a JavaType>>,
+) {
+    for stmt in statements {
+        match stmt {
+            Stmt::VarDecl { ty, name, .. } => {
+                insert_declared_binding_type(types, name, ty);
+            }
+            Stmt::For { init, body, .. } => {
+                collect_declared_binding_types_from_stmts(init, types);
+                collect_declared_binding_types_from_stmts(&body.statements, types);
+            }
+            Stmt::EnhancedFor {
+                var_type,
+                var_name,
+                body,
+                ..
+            } => {
+                insert_declared_binding_type(types, var_name, var_type);
+                collect_declared_binding_types_from_stmts(&body.statements, types);
+            }
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_declared_binding_types_from_stmts(&then_block.statements, types);
+                if let Some(else_block) = else_block {
+                    collect_declared_binding_types_from_stmts(&else_block.statements, types);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+                collect_declared_binding_types_from_stmts(&body.statements, types);
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    collect_declared_binding_types_from_stmts(&case.statements, types);
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                collect_declared_binding_types_from_stmts(resources, types);
+                collect_declared_binding_types_from_stmts(&body.statements, types);
+                for catch in catches {
+                    collect_declared_binding_types_from_stmts(&catch.body.statements, types);
+                }
+                if let Some(finally_block) = finally_block {
+                    collect_declared_binding_types_from_stmts(&finally_block.statements, types);
+                }
+            }
+            Stmt::Assign { .. }
+            | Stmt::Expr(_)
+            | Stmt::Return(_)
+            | Stmt::Throw(_)
+            | Stmt::LocalType(_)
+            | Stmt::ConstructorInvocation { .. }
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => {}
+        }
+    }
+}
+
+fn collect_returned_var_types_from_stmts<'a>(
+    statements: &'a [Stmt],
+    local_types: &HashMap<&'a str, Option<&'a JavaType>>,
+    out: &mut Vec<&'a JavaType>,
+) -> bool {
+    for stmt in statements {
+        if !collect_returned_var_types_from_stmt(stmt, local_types, out) {
+            return false;
+        }
+    }
+    true
+}
+
+fn collect_returned_var_types_from_stmt<'a>(
+    stmt: &'a Stmt,
+    local_types: &HashMap<&'a str, Option<&'a JavaType>>,
+    out: &mut Vec<&'a JavaType>,
+) -> bool {
+    match stmt {
+        Stmt::Return(Some(Expr::Var(name))) => {
+            let Some(Some(java_ty)) = local_types.get(name.as_str()) else {
+                return false;
+            };
+            out.push(*java_ty);
+            true
+        }
+        Stmt::Return(Some(_)) | Stmt::Return(None) => false,
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_returned_var_types_from_stmts(&then_block.statements, local_types, out)
+                && else_block.as_ref().is_none_or(|else_block| {
+                    collect_returned_var_types_from_stmts(&else_block.statements, local_types, out)
+                })
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::EnhancedFor { body, .. }
+        | Stmt::Block(body) => {
+            collect_returned_var_types_from_stmts(&body.statements, local_types, out)
+        }
+        Stmt::Switch { cases, .. } => cases
+            .iter()
+            .all(|case| collect_returned_var_types_from_stmts(&case.statements, local_types, out)),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            collect_returned_var_types_from_stmts(resources, local_types, out)
+                && collect_returned_var_types_from_stmts(&body.statements, local_types, out)
+                && catches.iter().all(|catch| {
+                    collect_returned_var_types_from_stmts(&catch.body.statements, local_types, out)
+                })
+                && finally_block.as_ref().is_none_or(|finally_block| {
+                    collect_returned_var_types_from_stmts(
+                        &finally_block.statements,
+                        local_types,
+                        out,
+                    )
+                })
+        }
+        Stmt::VarDecl { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Throw(_)
+        | Stmt::LocalType(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => true,
+    }
 }
 
 fn java_type_is_erased_object_boundary(java_ty: &JavaType) -> bool {

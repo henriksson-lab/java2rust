@@ -1,4 +1,4 @@
-use crate::java_ir::{BinaryOp, Block, Expr, Stmt};
+use crate::java_ir::{BinaryOp, Block, Expr, Literal, Stmt};
 use crate::rewrite::NullTestKind;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +26,9 @@ pub enum WhileStmtPlan<'a> {
         local_name: &'a str,
         value: &'a Expr,
         null_test: NullTestKind,
+        body: &'a Block,
+    },
+    Infinite {
         body: &'a Block,
     },
     Plain {
@@ -65,6 +68,8 @@ pub fn plan_while_stmt<'a>(condition: &'a Expr, body: &'a Block) -> WhileStmtPla
             null_test,
             body,
         }
+    } else if matches!(condition, Expr::Literal(Literal::Bool(true))) {
+        WhileStmtPlan::Infinite { body }
     } else {
         WhileStmtPlan::Plain { condition, body }
     }

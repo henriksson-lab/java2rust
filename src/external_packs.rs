@@ -51,6 +51,7 @@ const APACHE_COMMONS_COLLECTIONS_PACK: &str = "org.apache.commons.collections4";
 const APACHE_COMMONS_COMPRESS_PACK: &str = "org.apache.commons.compress";
 const APACHE_COMMONS_LANG_PACK: &str = "org.apache.commons.lang3";
 const APACHE_COMMONS_CODEC_PACK: &str = "org.apache.commons.codec";
+const IHARDER_BASE64_PACK: &str = "net.sourceforge.iharder.base64";
 const JAMA_PACK: &str = "Jama";
 const HIPPARCHUS_DISTRIBUTION_PACK: &str = "org.hipparchus.random";
 const APACHE_HTTP_PACK: &str = "org.apache.http";
@@ -443,10 +444,21 @@ impl ExternalPackManifest {
 }
 
 pub fn modeled_no_state_external_super_constructor(type_name: &str, arg_count: usize) -> bool {
-    external_type_name_matches(
-        erased_external_type_name(type_name),
-        "htsjdk.samtools.util.AbstractAsyncWriter",
-    ) && arg_count == 1
+    let erased = erased_external_type_name(type_name);
+    (external_type_name_matches(erased, "htsjdk.samtools.util.AbstractAsyncWriter")
+        && arg_count == 1)
+        || (external_type_name_matches(erased, "java.io.FileReader")
+            || external_type_name_matches(erased, "FileReader"))
+            && arg_count == 1
+        || (external_type_name_matches(erased, "java.util.zip.GZIPInputStream")
+            || external_type_name_matches(erased, "GZIPInputStream"))
+            && matches!(arg_count, 1 | 2)
+        || (external_type_name_matches(erased, "java.io.FilterInputStream")
+            || external_type_name_matches(erased, "FilterInputStream"))
+            && arg_count == 1
+        || (external_type_name_matches(erased, "java.io.FilterOutputStream")
+            || external_type_name_matches(erased, "FilterOutputStream"))
+            && arg_count == 1
 }
 
 pub fn external_template_method_hook_for_super_method(
@@ -3970,6 +3982,9 @@ struct ExternalApiMetadata {
 
 fn facade_slot_for_manifest_rust_type(ty: &str) -> FacadeSlot {
     let ty = ty.trim();
+    if ty == "usize" {
+        return FacadeSlot::Index;
+    }
     if let Some(inner) = ty
         .strip_prefix("Option<")
         .and_then(|ty| ty.strip_suffix('>'))
@@ -3982,7 +3997,9 @@ fn facade_slot_for_manifest_rust_type(ty: &str) -> FacadeSlot {
     }
     if let Some(inner) = ty.strip_prefix("&mut ") {
         if let Some(slice) = inner.strip_prefix('[').and_then(|ty| ty.strip_suffix(']')) {
-            return FacadeSlot::Slice(Box::new(facade_slot_for_manifest_rust_type(slice)));
+            return FacadeSlot::Slice(Box::new(facade_slot_for_manifest_rust_type(&format!(
+                "&mut {slice}"
+            ))));
         }
         return FacadeSlot::MutBorrowed;
     }
@@ -4494,6 +4511,10 @@ const VARIANTCONTEXT_OWNED_TYPES: &[&str] = &[
     "JexlMissingValueTreatment",
 ];
 const APACHE_COMMONS_MATH_OWNED_TYPES: &[&str] = &[
+    "org.apache.commons.math3.exception.util.Localizable",
+    "Localizable",
+    "org.apache.commons.math3.exception.util.LocalizedFormats",
+    "LocalizedFormats",
     "org.apache.commons.math3.linear.Array2DRowRealMatrix",
     "Array2DRowRealMatrix",
     "org.apache.commons.math3.linear.ArrayRealVector",
@@ -4609,8 +4630,17 @@ const APACHE_COMMONS_LANG_OWNED_TYPES: &[&str] = &[
     "MutableTriple",
 ];
 const APACHE_COMMONS_CODEC_OWNED_TYPES: &[&str] = &[
+    "org.apache.commons.codec.binary.Base64OutputStream",
+    "Base64OutputStream",
     "org.apache.commons.codec.digest.MessageDigestAlgorithms",
     "MessageDigestAlgorithms",
+];
+const IHARDER_BASE64_OWNED_TYPES: &[&str] = &[
+    "net.sourceforge.iharder.base64.Base64",
+    "Base64",
+    "net.sourceforge.iharder.base64.Base64.OutputStream",
+    "Base64.OutputStream",
+    "Base64OutputStream",
 ];
 const JAMA_OWNED_TYPES: &[&str] = &["Jama.Matrix", "Matrix"];
 const HIPPARCHUS_DISTRIBUTION_OWNED_TYPES: &[&str] = &[
@@ -5040,12 +5070,23 @@ const fn concrete_object_strategy(type_name: &'static str) -> ExternalPackObject
     }
 }
 
+const fn dyn_trait_strategy(
+    type_name: &'static str,
+    trait_name: &'static str,
+) -> ExternalPackObjectStrategy {
+    ExternalPackObjectStrategy {
+        type_name,
+        strategy: ExternalPackObjectStrategyKind::DynTrait { trait_name },
+    }
+}
+
 const NO_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[];
 const NO_CLOSED_HIERARCHY: &[ExternalPackClosedHierarchy] = &[];
 const NO_OBJECT_SAFETY: &[ExternalPackObjectSafety] = &[];
 
 const LOCATABLE_IMPL: &[&str] = &["Locatable"];
 const FEATURE_LOCATABLE_IMPL: &[&str] = &["Feature", "Locatable"];
+const LOCALIZABLE_IMPL: &[&str] = &["Localizable"];
 
 const fn empty_manifest_capability(type_name: &'static str) -> ExternalPackTypeCapability {
     ExternalPackTypeCapability {
@@ -5084,6 +5125,12 @@ const fn cloneable_final_implements_capability(
 ) -> ExternalPackTypeCapability {
     let mut capability = cloneable_final_capability(type_name);
     capability.implements = implements;
+    capability
+}
+
+const fn object_safe_trait_capability(type_name: &'static str) -> ExternalPackTypeCapability {
+    let mut capability = empty_manifest_capability(type_name);
+    capability.object_safe_trait = Some(true);
     capability
 }
 
@@ -5311,6 +5358,13 @@ const VCF_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
 ];
 
 const APACHE_COMMONS_MATH_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
+    object_safe_trait_capability("org.apache.commons.math3.exception.util.Localizable"),
+    object_safe_trait_capability("Localizable"),
+    cloneable_final_implements_capability(
+        "org.apache.commons.math3.exception.util.LocalizedFormats",
+        LOCALIZABLE_IMPL,
+    ),
+    cloneable_final_implements_capability("LocalizedFormats", LOCALIZABLE_IMPL),
     cloneable_final_capability("org.apache.commons.math3.linear.Array2DRowRealMatrix"),
     cloneable_final_capability("Array2DRowRealMatrix"),
     cloneable_final_capability("org.apache.commons.math3.linear.ArrayRealVector"),
@@ -5442,8 +5496,18 @@ const APACHE_COMMONS_LANG_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
 ];
 
 const APACHE_COMMONS_CODEC_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
+    cloneable_final_capability("org.apache.commons.codec.binary.Base64OutputStream"),
+    cloneable_final_capability("Base64OutputStream"),
     cloneable_final_capability("org.apache.commons.codec.digest.MessageDigestAlgorithms"),
     cloneable_final_capability("MessageDigestAlgorithms"),
+];
+
+const IHARDER_BASE64_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
+    cloneable_final_capability("net.sourceforge.iharder.base64.Base64"),
+    cloneable_final_capability("Base64"),
+    cloneable_final_capability("net.sourceforge.iharder.base64.Base64.OutputStream"),
+    cloneable_final_capability("Base64.OutputStream"),
+    cloneable_final_capability("Base64OutputStream"),
 ];
 
 const JAMA_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
@@ -18895,6 +18959,11 @@ const APACHE_COMMONS_MATH_OPTIM_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy]
 ];
 
 const APACHE_COMMONS_MATH_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
+    dyn_trait_strategy(
+        "org.apache.commons.math3.exception.util.Localizable",
+        "Localizable",
+    ),
+    dyn_trait_strategy("Localizable", "Localizable"),
     erased_object_strategy("org.apache.commons.math3.linear.Array2DRowRealMatrix"),
     erased_object_strategy("Array2DRowRealMatrix"),
     erased_object_strategy("org.apache.commons.math3.linear.ArrayRealVector"),
@@ -19011,8 +19080,18 @@ const APACHE_COMMONS_LANG_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
 ];
 
 const APACHE_COMMONS_CODEC_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
+    erased_object_strategy("org.apache.commons.codec.binary.Base64OutputStream"),
+    erased_object_strategy("Base64OutputStream"),
     erased_object_strategy("org.apache.commons.codec.digest.MessageDigestAlgorithms"),
     erased_object_strategy("MessageDigestAlgorithms"),
+];
+
+const IHARDER_BASE64_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
+    erased_object_strategy("net.sourceforge.iharder.base64.Base64"),
+    erased_object_strategy("Base64"),
+    erased_object_strategy("net.sourceforge.iharder.base64.Base64.OutputStream"),
+    erased_object_strategy("Base64.OutputStream"),
+    erased_object_strategy("Base64OutputStream"),
 ];
 
 const JAMA_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
@@ -20147,6 +20226,18 @@ const SAM_RECORD_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("SAMRecord", "NULL_QUALS_STRING"),
     modeled_semantic_field("htsjdk.samtools.SAMRecord", "NULL_SEQUENCE"),
     modeled_semantic_field("SAMRecord", "NULL_SEQUENCE"),
+    modeled_semantic_field_typed(
+        "htsjdk.samtools.SAMTag",
+        "CO",
+        "htsjdk.samtools.SAMTag",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "htsjdk.samtools.SAMTag",
+        "NM",
+        "htsjdk.samtools.SAMTag",
+        ExternalFieldKind::EnumVariant,
+    ),
     modeled_semantic_field("htsjdk.samtools.SAMTagAndValue", "tag"),
     modeled_semantic_field("SAMTagAndValue", "tag"),
     modeled_semantic_field("htsjdk.samtools.SAMTagAndValue", "value"),
@@ -20524,6 +20615,34 @@ const APACHE_COMMONS_MATH_OPTIM_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("GoalType", "MINIMIZE"),
 ];
 
+const APACHE_COMMONS_MATH_MODELED_FIELDS: &[ExternalPackModeledField] = &[
+    commons_math_localized_format_simple("ARRAY_ELEMENT"),
+    commons_math_localized_format_simple("BINOMIAL_INVALID_PARAMETERS_ORDER"),
+    commons_math_localized_format_simple("BINOMIAL_NEGATIVE_PARAMETER"),
+    commons_math_localized_format_simple("CANNOT_DISCARD_NEGATIVE_NUMBER_OF_ELEMENTS"),
+    commons_math_localized_format_simple("CANNOT_SUBSTITUTE_ELEMENT_FROM_EMPTY_ARRAY"),
+    commons_math_localized_format_simple("CONTINUED_FRACTION_INFINITY_DIVERGENCE"),
+    commons_math_localized_format_simple("CONTINUED_FRACTION_NAN_DIVERGENCE"),
+    commons_math_localized_format_simple("CONTRACTION_CRITERIA_SMALLER_THAN_EXPANSION_FACTOR"),
+    commons_math_localized_format_simple("CONTRACTION_CRITERIA_SMALLER_THAN_ONE"),
+    commons_math_localized_format_simple("EXPANSION_FACTOR_SMALLER_THAN_ONE"),
+    commons_math_localized_format_simple("EXPONENT"),
+    commons_math_localized_format_simple("FACTORIAL_NEGATIVE_PARAMETER"),
+    commons_math_localized_format_simple("GCD_OVERFLOW_32_BITS"),
+    commons_math_localized_format_simple("GCD_OVERFLOW_64_BITS"),
+    commons_math_localized_format_simple("INDEX_NOT_POSITIVE"),
+    commons_math_localized_format_simple("INITIAL_CAPACITY_NOT_POSITIVE"),
+    commons_math_localized_format_simple("INVALID_ROUNDING_METHOD"),
+    commons_math_localized_format_simple("LCM_OVERFLOW_32_BITS"),
+    commons_math_localized_format_simple("LCM_OVERFLOW_64_BITS"),
+    commons_math_localized_format_simple("NON_CONVERGENT_CONTINUED_FRACTION"),
+    commons_math_localized_format_simple("OVERFLOW"),
+    commons_math_localized_format_simple("OVERFLOW_IN_ADDITION"),
+    commons_math_localized_format_simple("OVERFLOW_IN_SUBTRACTION"),
+    commons_math_localized_format_simple("TOO_MANY_ELEMENTS_TO_DISCARD_FROM_ARRAY"),
+    commons_math_localized_format_simple("UNSUPPORTED_EXPANSION_MODE"),
+];
+
 const APACHE_COMMONS_MATH_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
     modeled_semantic_constructor("org.apache.commons.math3.linear.Array2DRowRealMatrix", 1),
     modeled_semantic_constructor("Array2DRowRealMatrix", 1),
@@ -20776,6 +20895,17 @@ const APACHE_COMMONS_CODEC_MODELED_FIELDS: &[ExternalPackModeledField] = &[
         "SHA_256",
     ),
     modeled_semantic_field("MessageDigestAlgorithms", "SHA_256"),
+];
+
+const APACHE_COMMONS_CODEC_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
+    modeled_semantic_constructor("org.apache.commons.codec.binary.Base64OutputStream", 1),
+    modeled_semantic_constructor("Base64OutputStream", 1),
+];
+
+const IHARDER_BASE64_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
+    modeled_semantic_constructor("net.sourceforge.iharder.base64.Base64.OutputStream", 1),
+    modeled_semantic_constructor("Base64.OutputStream", 1),
+    modeled_semantic_constructor("Base64OutputStream", 1),
 ];
 
 const JAMA_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
@@ -26909,6 +27039,17 @@ const fn modeled_semantic_field_typed(
     }
 }
 
+const fn commons_math_localized_format_simple(
+    field_name: &'static str,
+) -> ExternalPackModeledField {
+    modeled_semantic_field_typed(
+        "LocalizedFormats",
+        field_name,
+        "LocalizedFormats",
+        ExternalFieldKind::EnumVariant,
+    )
+}
+
 const fn modeled_mapped_field(
     type_name: &'static str,
     field_name: &'static str,
@@ -27282,7 +27423,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             api_effects: &[],
             modeled_apis: &[],
             modeled_constructors: APACHE_COMMONS_MATH_MODELED_CONSTRUCTORS,
-            modeled_fields: NO_MODELED_FIELDS,
+            modeled_fields: APACHE_COMMONS_MATH_MODELED_FIELDS,
             unsupported_apis: &[],
         },
         ExternalPackManifest {
@@ -27395,8 +27536,27 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             exceptions: NO_EXCEPTIONS,
             api_effects: &[],
             modeled_apis: &[],
-            modeled_constructors: &[],
+            modeled_constructors: APACHE_COMMONS_CODEC_MODELED_CONSTRUCTORS,
             modeled_fields: APACHE_COMMONS_CODEC_MODELED_FIELDS,
+            unsupported_apis: &[],
+        },
+        ExternalPackManifest {
+            pack_name: IHARDER_BASE64_PACK,
+            owned_type_patterns: IHARDER_BASE64_OWNED_TYPES,
+            mode: ExternalLibraryMode::ExternalFactModel,
+            default_coverage: ExternalApiCoverage::Semantic,
+            rust_target: Some("crate::external::iharder_base64"),
+            object_strategies: IHARDER_BASE64_OBJECT_STRATEGIES,
+            closed_hierarchy: NO_CLOSED_HIERARCHY,
+            object_safety: NO_OBJECT_SAFETY,
+            type_capabilities: IHARDER_BASE64_TYPE_CAPABILITIES,
+            field_nullability: NO_FIELD_NULLABILITY,
+            argument_effects: NO_ARGUMENT_EFFECTS,
+            exceptions: NO_EXCEPTIONS,
+            api_effects: &[],
+            modeled_apis: &[],
+            modeled_constructors: IHARDER_BASE64_MODELED_CONSTRUCTORS,
+            modeled_fields: NO_MODELED_FIELDS,
             unsupported_apis: &[],
         },
         ExternalPackManifest {
@@ -28168,6 +28328,7 @@ pub fn builtin_external_library_packs() -> FactSet {
     facts.extend_from(apache_commons_compress_pack_facts());
     facts.extend_from(apache_commons_lang_pack_facts());
     facts.extend_from(apache_commons_codec_pack_facts());
+    facts.extend_from(iharder_base64_pack_facts());
     facts.extend_from(jama_pack_facts());
     facts.extend_from(hipparchus_distribution_pack_facts());
     facts.extend_from(apache_http_pack_facts());
@@ -28214,7 +28375,7 @@ pub fn builtin_external_api_argument_effect_facts() -> Vec<ExternalApiArgumentEf
 }
 
 pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffectFact> {
-    ["Class", "java.lang.Class"]
+    let mut facts = ["Class", "java.lang.Class"]
         .into_iter()
         .map(|receiver_type| ExternalApiArgumentEffectFact {
             method_name: "forName".to_string(),
@@ -28226,7 +28387,166 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             alias_policy: ExternalArgumentAliasPolicy::Borrowed,
             provenance: FactProvenance::BuiltinExternalModel,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    for receiver_type in ["ObjectOutputStream", "java.io.ObjectOutputStream"] {
+        for method_name in ["writeObject", "write_object"] {
+            facts.push(ExternalApiArgumentEffectFact {
+                method_name: method_name.to_string(),
+                receiver_type: Some(receiver_type.to_string()),
+                parameter_index: 0,
+                parameter_type: Some(JavaType::Named {
+                    name: "Object".to_string(),
+                    args: Vec::new(),
+                }),
+                parameter_nullability: NullabilityState::MaybeNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+        }
+    }
+    for receiver_type in [
+        "StringBuilder",
+        "java.lang.StringBuilder",
+        "StringBuffer",
+        "java.lang.StringBuffer",
+    ] {
+        for method_name in ["append"] {
+            facts.push(ExternalApiArgumentEffectFact {
+                method_name: method_name.to_string(),
+                receiver_type: Some(receiver_type.to_string()),
+                parameter_index: 0,
+                parameter_type: Some(JavaType::String),
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+        }
+    }
+    for receiver_type in ["Collections", "java.util.Collections"] {
+        facts.push(ExternalApiArgumentEffectFact {
+            method_name: "sort".to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            parameter_index: 0,
+            parameter_type: None,
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::MutatesReceiver,
+            alias_policy: ExternalArgumentAliasPolicy::Unknown,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    for receiver_type in [
+        "JPanel",
+        "javax.swing.JPanel",
+        "Component",
+        "java.awt.Component",
+    ] {
+        facts.push(ExternalApiArgumentEffectFact {
+            method_name: "print".to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::Named {
+                name: "Graphics".to_string(),
+                args: Vec::new(),
+            }),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    for receiver_type in [
+        "InputStream",
+        "java.io.InputStream",
+        "FileInputStream",
+        "java.io.FileInputStream",
+        "ByteArrayInputStream",
+        "java.io.ByteArrayInputStream",
+        "BufferedInputStream",
+        "java.io.BufferedInputStream",
+        "DataInputStream",
+        "java.io.DataInputStream",
+        "GZIPInputStream",
+        "java.util.zip.GZIPInputStream",
+        "ObjectInputStream",
+        "java.io.ObjectInputStream",
+        "FilterInputStream",
+        "java.io.FilterInputStream",
+    ] {
+        facts.push(ExternalApiArgumentEffectFact {
+            method_name: "read".to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::Array(Box::new(JavaType::Primitive(
+                PrimitiveType::Byte,
+            )))),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+        for parameter_index in [1, 2] {
+            facts.push(ExternalApiArgumentEffectFact {
+                method_name: "read".to_string(),
+                receiver_type: Some(receiver_type.to_string()),
+                parameter_index,
+                parameter_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+        }
+    }
+    for receiver_type in [
+        "OutputStream",
+        "java.io.OutputStream",
+        "FileOutputStream",
+        "java.io.FileOutputStream",
+        "ByteArrayOutputStream",
+        "java.io.ByteArrayOutputStream",
+        "BufferedOutputStream",
+        "java.io.BufferedOutputStream",
+        "DataOutputStream",
+        "java.io.DataOutputStream",
+        "GZIPOutputStream",
+        "java.util.zip.GZIPOutputStream",
+        "ZipOutputStream",
+        "java.util.zip.ZipOutputStream",
+        "ObjectOutputStream",
+        "java.io.ObjectOutputStream",
+        "FilterOutputStream",
+        "java.io.FilterOutputStream",
+    ] {
+        for method_name in ["write", "write_3"] {
+            facts.push(ExternalApiArgumentEffectFact {
+                method_name: method_name.to_string(),
+                receiver_type: Some(receiver_type.to_string()),
+                parameter_index: 0,
+                parameter_type: Some(JavaType::Array(Box::new(JavaType::Primitive(
+                    PrimitiveType::Byte,
+                )))),
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+            for parameter_index in [1, 2] {
+                facts.push(ExternalApiArgumentEffectFact {
+                    method_name: method_name.to_string(),
+                    receiver_type: Some(receiver_type.to_string()),
+                    parameter_index,
+                    parameter_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+                    parameter_nullability: NullabilityState::DefinitelyNonNull,
+                    argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                    alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                    provenance: FactProvenance::BuiltinExternalModel,
+                });
+            }
+        }
+    }
+    facts
 }
 
 pub fn java_platform_exception_facts() -> Vec<ExceptionFact> {
@@ -28320,6 +28640,7 @@ fn builtin_external_pack_fact_sets() -> &'static [(String, FactSet)] {
                 APACHE_COMMONS_CODEC_PACK.to_string(),
                 apache_commons_codec_pack_facts(),
             ),
+            (IHARDER_BASE64_PACK.to_string(), iharder_base64_pack_facts()),
             (JAMA_PACK.to_string(), jama_pack_facts()),
             (
                 HIPPARCHUS_DISTRIBUTION_PACK.to_string(),
@@ -28676,6 +28997,11 @@ fn external_field_name_lookup_aliases(field_name: &str) -> Vec<String> {
 fn external_method_name_lookup_aliases(method_name: &str) -> Vec<String> {
     let canonical = crate::parser::to_snake_case(method_name);
     let mut aliases = vec![method_name.to_string(), canonical];
+    match method_name {
+        "read_3" => aliases.push("read".to_string()),
+        "write_3" => aliases.push("write".to_string()),
+        _ => {}
+    }
     aliases.sort();
     aliases.dedup();
     aliases
@@ -28745,14 +29071,17 @@ pub fn external_api_effects_for_method_arity(
 ) -> Vec<ExternalApiEffectFact> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
-    for fact in java_platform_api_effects_for_method_arity(method_name, arg_count) {
-        let key = (
-            fact.receiver_type.clone(),
-            fact.method_name.clone(),
-            fact.arg_count,
-        );
-        if seen.insert(key) {
-            out.push(fact);
+    let method_aliases = external_method_name_lookup_aliases(method_name);
+    for method_alias in &method_aliases {
+        for fact in java_platform_api_effects_for_method_arity(method_alias, arg_count) {
+            let key = (
+                fact.receiver_type.clone(),
+                fact.method_name.clone(),
+                fact.arg_count,
+            );
+            if seen.insert(key) {
+                out.push(fact);
+            }
         }
     }
     for (_, facts) in builtin_external_pack_fact_sets() {
@@ -28765,7 +29094,7 @@ pub fn external_api_effects_for_method_arity(
             }
             if !external_method_name_lookup_aliases(&fact.method_name)
                 .iter()
-                .any(|alias| alias == method_name)
+                .any(|alias| method_aliases.iter().any(|query| query == alias))
             {
                 continue;
             }
@@ -28791,17 +29120,68 @@ fn java_platform_api_effects_for_method_arity(
         "PrintStream",
         "java.lang.Appendable",
         "Appendable",
+        "java.lang.StringBuilder",
+        "StringBuilder",
+        "java.lang.StringBuffer",
+        "StringBuffer",
         "java.io.InputStream",
         "InputStream",
+        "java.io.BufferedInputStream",
+        "BufferedInputStream",
         "java.io.OutputStream",
         "OutputStream",
+        "java.io.ByteArrayOutputStream",
+        "ByteArrayOutputStream",
         "java.io.Reader",
         "Reader",
         "java.io.BufferedReader",
         "BufferedReader",
+        "java.util.Enumeration",
+        "Enumeration",
+        "java.util.zip.ZipEntry",
+        "ZipEntry",
+        "javax.xml.stream.XMLOutputFactory",
+        "XMLOutputFactory",
+        "JavaxXmlStreamXMLOutputFactory",
+        "javax.imageio.ImageIO",
+        "ImageIO",
+        "JavaxImageioImageIO",
+        "java.util.Base64",
+        "Base64",
+        "JavaUtilBase64",
+        "java.util.Base64.Encoder",
+        "Base64Encoder",
+        "Encoder",
         "java.nio.file.Files",
         "Files",
         "JavaNioFileFiles",
+        "java.awt.Image",
+        "Image",
+        "JavaAwtImage",
+        "java.awt.Component",
+        "Component",
+        "JavaAwtComponent",
+        "java.awt.Color",
+        "Color",
+        "JavaAwtColor",
+        "java.awt.Font",
+        "Font",
+        "JavaAwtFont",
+        "java.awt.Graphics",
+        "Graphics",
+        "JavaAwtGraphics",
+        "javax.swing.RepaintManager",
+        "RepaintManager",
+        "JavaxSwingRepaintManager",
+        "javax.swing.table.TableModel",
+        "TableModel",
+        "JavaxSwingTableTableModel",
+        "java.util.regex.Pattern",
+        "Pattern",
+        "JavaUtilRegexPattern",
+        "java.util.regex.Matcher",
+        "Matcher",
+        "JavaUtilRegexMatcher",
         "java.lang.Class",
         "Class",
     ]
@@ -28845,6 +29225,497 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
         java_platform_concurrent_api_effect(receiver_type, method_name, matches_arg_count)
     {
         return Some(effect);
+    }
+    let simple_receiver = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
+    if matches!(
+        simple_receiver,
+        "DecimalFormat" | "NumberFormat" | "DateFormat" | "MessageFormat" | "Format"
+    ) && method_name == "format"
+        && matches_arg_count(1)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::String),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(simple_receiver, "StringBuilder" | "StringBuffer")
+        && method_name == "append"
+        && matches_arg_count(1)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            role: ExternalApiRole::FluentMutator,
+            receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+            return_type: Some(JavaType::Named {
+                name: simple_receiver.to_string(),
+                args: Vec::new(),
+            }),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(simple_receiver, "StringBuilder" | "StringBuffer")
+        && matches!(method_name, "length")
+        && matches_arg_count(0)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(simple_receiver, "Random" | "java.util.Random")
+        && matches!(method_name, "nextInt" | "next_int")
+        && matches_arg_count(1)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "Pattern" | "JavaUtilRegexPattern" | "java.util.regex.Pattern"
+    ) {
+        let (expected_args, return_type) = match method_name {
+            "compile" if matches_arg_count(1) => (
+                1,
+                JavaType::Named {
+                    name: "Pattern".to_string(),
+                    args: Vec::new(),
+                },
+            ),
+            "matcher" if matches_arg_count(1) => (
+                1,
+                JavaType::Named {
+                    name: "Matcher".to_string(),
+                    args: Vec::new(),
+                },
+            ),
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(expected_args),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "ClassLoader" | "JavaLangClassLoader" | "java.lang.ClassLoader"
+    ) && matches!(method_name, "getSystemResource" | "get_system_resource")
+        && matches_arg_count(1)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Named {
+                name: "URL".to_string(),
+                args: Vec::new(),
+            }),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "XMLOutputFactory" | "JavaxXmlStreamXMLOutputFactory" | "javax.xml.stream.XMLOutputFactory"
+    ) && matches!(
+        method_name,
+        "createXMLStreamWriter" | "create_x_m_l_stream_writer"
+    ) && matches_arg_count(1)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Named {
+                name: "XMLStreamWriter".to_string(),
+                args: Vec::new(),
+            }),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "ImageIO" | "JavaxImageioImageIO" | "javax.imageio.ImageIO"
+    ) {
+        let (expected_args, return_type) = match method_name {
+            "read" if matches_arg_count(1) => (
+                1,
+                JavaType::Named {
+                    name: "BufferedImage".to_string(),
+                    args: Vec::new(),
+                },
+            ),
+            "write" if matches_arg_count(3) => (3, JavaType::Primitive(PrimitiveType::Boolean)),
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(expected_args),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "Base64" | "JavaUtilBase64" | "java.util.Base64"
+    ) && matches!(method_name, "getEncoder" | "get_encoder")
+        && matches_arg_count(0)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Named {
+                name: "Base64Encoder".to_string(),
+                args: Vec::new(),
+            }),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "Base64Encoder" | "Encoder" | "java.util.Base64.Encoder"
+    ) && matches!(method_name, "encodeToString" | "encode_to_string")
+        && matches_arg_count(1)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::String),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "Matcher" | "JavaUtilRegexMatcher" | "java.util.regex.Matcher"
+    ) {
+        let (expected_args, return_type) = match method_name {
+            "matches" if matches_arg_count(0) => (0, JavaType::Primitive(PrimitiveType::Boolean)),
+            "group" if matches_arg_count(1) => (1, JavaType::String),
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(expected_args),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "BufferedImage" | "JavaAwtImageBufferedImage" | "java.awt.image.BufferedImage"
+    ) && matches_arg_count(0)
+    {
+        let return_type = if matches!(method_name, "createGraphics" | "create_graphics") {
+            JavaType::Named {
+                name: "Graphics2D".to_string(),
+                args: Vec::new(),
+            }
+        } else if matches!(method_name, "getGraphics" | "get_graphics") {
+            JavaType::Named {
+                name: "Graphics".to_string(),
+                args: Vec::new(),
+            }
+        } else {
+            return None;
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "Component" | "JavaAwtComponent" | "java.awt.Component"
+    ) && matches!(method_name, "getGraphics" | "get_graphics")
+        && matches_arg_count(0)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Named {
+                name: "Graphics".to_string(),
+                args: Vec::new(),
+            }),
+            return_nullability: NullabilityState::MaybeNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(simple_receiver, "Image" | "JavaAwtImage" | "java.awt.Image")
+        && matches!(
+            method_name,
+            "getWidth" | "get_width" | "getHeight" | "get_height"
+        )
+        && matches_arg_count(1)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "RepaintManager" | "JavaxSwingRepaintManager" | "javax.swing.RepaintManager"
+    ) {
+        let (expected_args, role, return_type) = match method_name {
+            "currentManager" | "current_manager" if matches_arg_count(1) => (
+                1,
+                ExternalApiRole::Getter,
+                JavaType::Named {
+                    name: "RepaintManager".to_string(),
+                    args: Vec::new(),
+                },
+            ),
+            "isDoubleBufferingEnabled" | "is_double_buffering_enabled" if matches_arg_count(0) => (
+                0,
+                ExternalApiRole::BooleanGetter,
+                JavaType::Primitive(PrimitiveType::Boolean),
+            ),
+            "setDoubleBufferingEnabled" | "set_double_buffering_enabled"
+                if matches_arg_count(1) =>
+            {
+                (1, ExternalApiRole::Mutator, JavaType::Void)
+            }
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(expected_args),
+            role,
+            receiver_mutability: if role == ExternalApiRole::Mutator {
+                ReceiverMutabilityFact::MutatesReceiver
+            } else {
+                ReceiverMutabilityFact::ReadOnly
+            },
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "Component" | "JavaAwtComponent" | "java.awt.Component"
+    ) && matches!(
+        method_name,
+        "getWidth" | "get_width" | "getHeight" | "get_height"
+    ) && matches_arg_count(0)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(simple_receiver, "Color" | "JavaAwtColor" | "java.awt.Color")
+        && matches!(
+            method_name,
+            "getRed" | "get_red" | "getGreen" | "get_green" | "getBlue" | "get_blue"
+        )
+        && matches_arg_count(0)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(simple_receiver, "Font" | "JavaAwtFont" | "java.awt.Font") {
+        let return_type = match method_name {
+            "getSize" | "get_size" if matches_arg_count(0) => {
+                JavaType::Primitive(PrimitiveType::Int)
+            }
+            "isBold" | "is_bold" if matches_arg_count(0) => {
+                JavaType::Primitive(PrimitiveType::Boolean)
+            }
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "TableModel" | "JavaxSwingTableTableModel" | "javax.swing.table.TableModel"
+    ) {
+        let (expected_args, return_type) = match method_name {
+            "getRowCount" | "get_row_count" | "getColumnCount" | "get_column_count"
+                if matches_arg_count(0) =>
+            {
+                (0, JavaType::Primitive(PrimitiveType::Int))
+            }
+            "getColumnName" | "get_column_name" if matches_arg_count(1) => (1, JavaType::String),
+            "getValueAt" | "get_value_at" if matches_arg_count(2) => (
+                2,
+                JavaType::Named {
+                    name: "Object".to_string(),
+                    args: Vec::new(),
+                },
+            ),
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(expected_args),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "Graphics" | "JavaAwtGraphics" | "java.awt.Graphics"
+    ) {
+        let (expected_args, role, return_type) = match method_name {
+            "dispose" if matches_arg_count(0) => (0, ExternalApiRole::Mutator, JavaType::Void),
+            "drawImage" | "draw_image" if matches_arg_count(4) => (
+                4,
+                ExternalApiRole::Getter,
+                JavaType::Primitive(PrimitiveType::Boolean),
+            ),
+            "getClip" | "get_clip" if matches_arg_count(0) => (
+                0,
+                ExternalApiRole::Getter,
+                JavaType::Named {
+                    name: "Shape".to_string(),
+                    args: Vec::new(),
+                },
+            ),
+            "getClipBounds" | "get_clip_bounds" if matches_arg_count(0) => (
+                0,
+                ExternalApiRole::Getter,
+                JavaType::Named {
+                    name: "Rectangle".to_string(),
+                    args: Vec::new(),
+                },
+            ),
+            "getFontMetrics" | "get_font_metrics" if matches_arg_count(1) => (
+                1,
+                ExternalApiRole::Getter,
+                JavaType::Named {
+                    name: "FontMetrics".to_string(),
+                    args: Vec::new(),
+                },
+            ),
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(expected_args),
+            role,
+            receiver_mutability: if role == ExternalApiRole::Mutator {
+                ReceiverMutabilityFact::MutatesReceiver
+            } else {
+                ReceiverMutabilityFact::ReadOnly
+            },
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
     }
     if matches!(method_name, "toString" | "to_string") && matches_arg_count(0) {
         return Some(ExternalApiEffectFact {
@@ -28972,16 +29843,156 @@ fn java_platform_io_api_effect(
             ExternalApiRole::BooleanGetter,
             JavaType::Primitive(PrimitiveType::Boolean),
         ),
-        ("InputStream", "read") if matches_arg_count(1) => (
-            1,
+        (receiver, "read" | "read_0")
+            if is_java_platform_input_stream_receiver(receiver) && matches_arg_count(0) =>
+        {
+            (
+                0,
+                ExternalApiRole::Getter,
+                JavaType::Primitive(PrimitiveType::Int),
+            )
+        }
+        (receiver, "read")
+            if is_java_platform_input_stream_receiver(receiver) && matches_arg_count(1) =>
+        {
+            (
+                1,
+                ExternalApiRole::Getter,
+                JavaType::Primitive(PrimitiveType::Int),
+            )
+        }
+        (receiver, "read" | "read_3")
+            if is_java_platform_input_stream_receiver(receiver) && matches_arg_count(3) =>
+        {
+            (
+                3,
+                ExternalApiRole::Getter,
+                JavaType::Primitive(PrimitiveType::Int),
+            )
+        }
+        ("Enumeration", "hasMoreElements" | "has_more_elements") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::BooleanGetter,
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        ("Enumeration", "nextElement" | "next_element") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "ZipEntry".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("ZipEntry", "isDirectory" | "is_directory") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::BooleanGetter,
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        ("ZipEntry", "getName" | "get_name") if matches_arg_count(0) => {
+            (0, ExternalApiRole::Getter, JavaType::String)
+        }
+        ("URL", "getFile" | "get_file") if matches_arg_count(0) => {
+            (0, ExternalApiRole::Getter, JavaType::String)
+        }
+        ("URL", "openConnection" | "open_connection") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "URLConnection".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("JarURLConnection", "getJarFile" | "get_jar_file") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "JarFile".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("JarFile", "entries") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "Enumeration".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("JarFile", "getManifest" | "get_manifest") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "Manifest".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("Manifest", "getMainAttributes" | "get_main_attributes") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "Attributes".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("Attributes", "getValue" | "get_value") if matches_arg_count(1) => {
+            (1, ExternalApiRole::Getter, JavaType::String)
+        }
+        ("ByteArrayOutputStream", "toString" | "to_string") if matches_arg_count(1) => {
+            (1, ExternalApiRole::Getter, JavaType::String)
+        }
+        ("ObjectInputStream", "readInt" | "read_int") if matches_arg_count(0) => (
+            0,
             ExternalApiRole::Getter,
             JavaType::Primitive(PrimitiveType::Int),
         ),
-        ("OutputStream", "write") if matches_arg_count(3) => {
+        ("ObjectInputStream", "readObject" | "read_object") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "Object".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("ObjectOutputStream", "writeInt" | "write_int") if matches_arg_count(1) => {
+            (1, ExternalApiRole::SideEffect, JavaType::Void)
+        }
+        ("ObjectOutputStream", "writeObject" | "write_object") if matches_arg_count(1) => {
+            (1, ExternalApiRole::SideEffect, JavaType::Void)
+        }
+        ("Inflater", "getRemaining" | "get_remaining") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (receiver, "write" | "write_3")
+            if is_java_platform_output_stream_receiver(receiver) && matches_arg_count(3) =>
+        {
             (3, ExternalApiRole::SideEffect, JavaType::Void)
         }
-        ("InputStream" | "OutputStream" | "Reader" | "BufferedReader", "close")
-            if matches_arg_count(0) =>
+        ("ZipFile", "entries") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "Enumeration".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("ZipFile", "getInputStream" | "get_input_stream") if matches_arg_count(1) => (
+            1,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "InputStream".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        ("ZipFile", "close") if matches_arg_count(0) => {
+            (0, ExternalApiRole::SideEffect, JavaType::Void)
+        }
+        (receiver, "close")
+            if (is_java_platform_input_stream_receiver(receiver)
+                || is_java_platform_output_stream_receiver(receiver)
+                || matches!(receiver, "Reader" | "BufferedReader"))
+                && matches_arg_count(0) =>
         {
             (0, ExternalApiRole::SideEffect, JavaType::Void)
         }
@@ -29008,7 +30019,7 @@ fn java_platform_io_api_effect(
     };
     let thrown = if (matches!(simple_receiver, "Files" | "JavaNioFileFiles")
         && matches!(method_name, "exists"))
-        || matches!(simple_receiver, "PrintStream")
+        || matches!(simple_receiver, "Inflater" | "PrintStream")
     {
         Vec::new()
     } else {
@@ -29022,6 +30033,14 @@ fn java_platform_io_api_effect(
     } else {
         ReceiverMutabilityFact::ReadOnly
     };
+    let return_nullability = if matches!(simple_receiver, "Reader" | "BufferedReader")
+        && matches!(method_name, "readLine" | "read_line")
+        && expected_args == 0
+    {
+        NullabilityState::MaybeNull
+    } else {
+        NullabilityState::DefinitelyNonNull
+    };
     Some(ExternalApiEffectFact {
         method_name: method_name.to_string(),
         receiver_type: Some(receiver_type.to_string()),
@@ -29029,10 +30048,43 @@ fn java_platform_io_api_effect(
         role,
         receiver_mutability,
         return_type: Some(return_type),
-        return_nullability: NullabilityState::DefinitelyNonNull,
+        return_nullability,
         thrown,
         provenance: FactProvenance::BuiltinExternalModel,
     })
+}
+
+fn is_java_platform_input_stream_receiver(receiver: &str) -> bool {
+    matches!(
+        receiver,
+        "InputStream"
+            | "FileInputStream"
+            | "ByteArrayInputStream"
+            | "BufferedInputStream"
+            | "DataInputStream"
+            | "GZIPInputStream"
+            | "ZipInputStream"
+            | "ObjectInputStream"
+            | "FilterInputStream"
+            | "PushbackInputStream"
+            | "SequenceInputStream"
+    )
+}
+
+fn is_java_platform_output_stream_receiver(receiver: &str) -> bool {
+    matches!(
+        receiver,
+        "OutputStream"
+            | "FileOutputStream"
+            | "ByteArrayOutputStream"
+            | "BufferedOutputStream"
+            | "DataOutputStream"
+            | "GZIPOutputStream"
+            | "ZipOutputStream"
+            | "ObjectOutputStream"
+            | "FilterOutputStream"
+            | "PrintStream"
+    )
 }
 
 pub fn java_platform_constructor_argument_effect_for(
@@ -29057,6 +30109,69 @@ pub fn java_platform_constructor_argument_effect_for(
             alias_policy: ExternalArgumentAliasPolicy::Escapes,
             provenance: FactProvenance::BuiltinExternalModel,
         });
+    }
+    None
+}
+
+pub fn java_platform_constructor_argument_effect_for_actual_arg(
+    type_name: &str,
+    arg_count: usize,
+    parameter_index: usize,
+    actual_arg_type: &JavaType,
+) -> Option<ExternalConstructorArgumentEffectFact> {
+    let actual_arg_type = crate::types::optional_element_type(actual_arg_type)
+        .unwrap_or_else(|| actual_arg_type.clone());
+    if arg_count == 1
+        && parameter_index == 0
+        && crate::facts::external_type_name_matches(type_name, "java.io.File")
+        && actual_arg_type == JavaType::String
+    {
+        return Some(ExternalConstructorArgumentEffectFact {
+            type_name: type_name.to_string(),
+            arg_count,
+            parameter_index,
+            parameter_type: Some(JavaType::String),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if arg_count == 1
+        && parameter_index == 0
+        && crate::facts::external_type_name_matches(type_name, "java.io.FileOutputStream")
+    {
+        if matches!(
+            &actual_arg_type,
+            JavaType::Named { name, .. }
+                if crate::facts::external_type_name_matches(name, "java.io.File")
+        ) {
+            return Some(ExternalConstructorArgumentEffectFact {
+                type_name: type_name.to_string(),
+                arg_count,
+                parameter_index,
+                parameter_type: Some(JavaType::Named {
+                    name: "File".to_string(),
+                    args: Vec::new(),
+                }),
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::Escapes,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+        }
+        if actual_arg_type == JavaType::String {
+            return Some(ExternalConstructorArgumentEffectFact {
+                type_name: type_name.to_string(),
+                arg_count,
+                parameter_index,
+                parameter_type: Some(JavaType::String),
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+        }
     }
     None
 }
@@ -29257,7 +30372,7 @@ fn java_platform_conversion_adapter_for(
 }
 
 fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
-    [
+    let mut adapters = [
         "java.lang.StringBuilder",
         "StringBuilder",
         "java.lang.StringBuffer",
@@ -29272,7 +30387,72 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
         kind: ExternalConversionAdapterKind::Into,
         provenance: FactProvenance::BuiltinExternalModel,
     })
-    .collect()
+    .collect::<Vec<_>>();
+    adapters.extend(
+        ["java.util.zip.ZipOutputStream", "ZipOutputStream"]
+            .into_iter()
+            .map(|from_type| ExternalConversionAdapterFact {
+                from_type: from_type.to_string(),
+                to_type: "OutputStream".to_string(),
+                kind: ExternalConversionAdapterKind::Into,
+                provenance: FactProvenance::BuiltinExternalModel,
+            }),
+    );
+    adapters.extend(
+        [
+            "java.io.FileInputStream",
+            "FileInputStream",
+            "java.io.ByteArrayInputStream",
+            "ByteArrayInputStream",
+            "java.io.BufferedInputStream",
+            "BufferedInputStream",
+            "java.io.DataInputStream",
+            "DataInputStream",
+            "java.util.zip.GZIPInputStream",
+            "GZIPInputStream",
+            "java.io.ObjectInputStream",
+            "ObjectInputStream",
+            "java.io.FilterInputStream",
+            "FilterInputStream",
+            "java.io.PushbackInputStream",
+            "PushbackInputStream",
+            "java.io.SequenceInputStream",
+            "SequenceInputStream",
+        ]
+        .into_iter()
+        .map(|from_type| ExternalConversionAdapterFact {
+            from_type: from_type.to_string(),
+            to_type: "InputStream".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        }),
+    );
+    adapters.extend(
+        [
+            "javax.swing.JPanel",
+            "JPanel",
+            "javax.swing.JComponent",
+            "JComponent",
+        ]
+        .into_iter()
+        .map(|from_type| ExternalConversionAdapterFact {
+            from_type: from_type.to_string(),
+            to_type: "Component".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        }),
+    );
+    adapters.extend(
+        ["java.awt.Graphics2D", "Graphics2D"]
+            .into_iter()
+            .map(|from_type| ExternalConversionAdapterFact {
+                from_type: from_type.to_string(),
+                to_type: "Graphics".to_string(),
+                kind: ExternalConversionAdapterKind::Into,
+                provenance: FactProvenance::BuiltinExternalModel,
+            }),
+    );
+    adapters
 }
 
 pub fn external_crate_api_mapping_for_receiver(
@@ -29610,6 +30790,32 @@ pub fn apache_commons_lang_pack_facts() -> FactSet {
 pub fn apache_commons_codec_pack_facts() -> FactSet {
     let mut facts = FactSet::default();
     manifest_by_name(APACHE_COMMONS_CODEC_PACK).apply_boundary_facts(&mut facts);
+    facts.extend_from(
+        parse_external_pack_manifest(
+            r#"
+external-pack-conversion org.apache.commons.codec org.apache.commons.codec.binary.Base64OutputStream OutputStream into
+external-pack-conversion org.apache.commons.codec Base64OutputStream OutputStream into
+"#,
+        )
+        .facts,
+    );
+
+    facts
+}
+
+pub fn iharder_base64_pack_facts() -> FactSet {
+    let mut facts = FactSet::default();
+    manifest_by_name(IHARDER_BASE64_PACK).apply_boundary_facts(&mut facts);
+    facts.extend_from(
+        parse_external_pack_manifest(
+            r#"
+external-pack-conversion net.sourceforge.iharder.base64 net.sourceforge.iharder.base64.Base64.OutputStream OutputStream into
+external-pack-conversion net.sourceforge.iharder.base64 Base64.OutputStream OutputStream into
+external-pack-conversion net.sourceforge.iharder.base64 Base64OutputStream OutputStream into
+"#,
+        )
+        .facts,
+    );
 
     facts
 }

@@ -862,6 +862,31 @@ final class Num implements Expr {}
 }
 
 #[test]
+fn object_model_keeps_parsed_source_concrete_over_external_erased_override() {
+    let parsed = parse_java_source(
+        r#"
+class FastqConstants {
+    static final String SEQUENCE_HEADER = "@";
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "FastqConstants".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let object_plan = plan_object_model(&resolved.program, &facts);
+    let constants = object_plan.strategy_for("FastqConstants").unwrap();
+
+    assert_eq!(constants.strategy, ObjectRepresentation::ConcreteStruct);
+    assert_eq!(constants.primary_provenance(), FactProvenance::ParsedSource);
+    assert_eq!(constants.provenance, vec![FactProvenance::ParsedSource]);
+}
+
+#[test]
 fn object_model_rejects_inferred_closed_enum_for_public_extensible_api() {
     let parsed = parse_java_source(
         r#"

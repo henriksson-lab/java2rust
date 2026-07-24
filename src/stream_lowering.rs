@@ -1,4 +1,5 @@
 use crate::coercion::LoweredExpr;
+use crate::conversion_plan::Slot;
 use crate::expr_shape::ShapeEnv;
 use crate::facts::{ExternalFactLookupIndex, FactSet, ReceiverMutabilityFact};
 use crate::java_ir::{BinaryOp, CallKind, Expr, JavaType, Literal, Stmt, UnaryOp};
@@ -85,6 +86,16 @@ impl<'a> StreamRenderContext<'a> {
     }
 
     fn render_bare_name(self, name: &str, locals: &[&str]) -> String {
+        if let Some((owner, member)) = name.rsplit_once('.')
+            && is_static_constant_member(member)
+        {
+            return format!("{}::{member}", stream_static_owner_segment_name(owner));
+        }
+        if let Some((owner, member)) = name.rsplit_once("::")
+            && is_static_constant_member(member)
+        {
+            return format!("{}::{member}", stream_static_owner_segment_name(owner));
+        }
         if locals.iter().any(|local| *local == name) {
             return crate::parser::to_snake_case(name);
         }
@@ -184,6 +195,7 @@ fn emit_stream_lambda_shared_native_call(
         Some(receiver),
         name,
         args,
+        resolved,
         param,
         value,
         locals,
@@ -213,6 +225,8 @@ fn stream_native_string_method_requires_string_receiver(name: &str) -> bool {
             | "startsWith"
             | "endsWith"
             | "split"
+            | "charAt"
+            | "char_at"
     )
 }
 
@@ -256,6 +270,7 @@ fn emit_stream_lambda_body_with_locals_prec(
 ) -> Option<String> {
     let (rendered, own_prec) = match expr {
         Expr::Literal(lit) => (literal_to_rust(lit), 12),
+        Expr::Raw(raw) => (render_stream_raw_expr(raw), 12),
         Expr::Var(name) if name == param => (
             match value {
                 StreamLambdaValue::FilterBorrowed => format!("**{param}"),
@@ -334,6 +349,7 @@ fn emit_stream_lambda_body_with_locals_prec(
             }
             if is_static_constant_member(field)
                 && let Some(owner) = stream_static_owner_expr_type_name(receiver, locals, ctx)
+                    .or_else(|| stream_static_constant_owner_name(receiver, locals, ctx))
             {
                 return parenthesize_stream_expr_if_needed(
                     format!("{owner}::{field}"),
@@ -406,6 +422,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                     Some(receiver),
                     name,
                     args,
+                    Some(resolved),
                     param,
                     value,
                     locals,
@@ -430,6 +447,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                     Some(receiver),
                     name,
                     args,
+                    None,
                     param,
                     value,
                     locals,
@@ -568,6 +586,20 @@ fn emit_stream_lambda_body_with_locals_prec(
             _ => None,
         },
     )
+}
+
+fn render_stream_raw_expr(raw: &str) -> String {
+    if let Some((owner, member)) = raw.rsplit_once('.')
+        && is_static_constant_member(member)
+    {
+        return format!("{}::{member}", stream_static_owner_segment_name(owner));
+    }
+    if let Some((owner, member)) = raw.rsplit_once("::")
+        && is_static_constant_member(member)
+    {
+        return format!("{}::{member}", stream_static_owner_segment_name(owner));
+    }
+    raw.to_string()
 }
 
 pub fn render_stream_plan(plan: &StreamPlan<'_>, lowered_source: RustExpr) -> Option<LoweredExpr> {
@@ -1040,7 +1072,7 @@ fn emit_stream_method_reference_body(
     value: StreamLambdaValue,
     _ctx: StreamRenderContext<'_>,
 ) -> Option<String> {
-    let target = crate::stdlib::canonical_external_receiver_type_key(target);
+    let plan = crate::method_reference_plan::plan_method_reference(target, method);
     let value_expr = match value {
         StreamLambdaValue::FilterBorrowed => format!("**{param}"),
         StreamLambdaValue::BorrowedItem => format!("*{param}"),
@@ -1051,31 +1083,13 @@ fn emit_stream_method_reference_body(
         StreamLambdaValue::BorrowedItem => format!("(*{param})"),
         StreamLambdaValue::OwnedItem => param.to_string(),
     };
-    match (target.as_str(), method) {
-        ("Integer", "intValue" | "int_value") => Some(value_expr),
-        ("Object", "toString" | "to_string") => Some(format!("{receiver}.to_string()")),
-        ("String", "valueOf" | "value_of") => Some(format!("{receiver}.to_string()")),
-        (_, method) if is_scala_tuple_accessor(method) => Some(format!("{receiver}.{method}()")),
-        (_, method) if method.starts_with("get") || method.starts_with("get_") => Some(format!(
-            "{receiver}.{}()",
-            crate::parser::to_snake_case(method)
-        )),
-        _ if target == "this" || target == "self" => Some(format!(
-            "self.{}({receiver})",
-            crate::parser::to_snake_case(method)
-        )),
-        _ => Some(format!(
-            "{}::{}({receiver})",
-            target,
-            crate::parser::to_snake_case(method)
-        )),
-    }
-}
-
-fn is_scala_tuple_accessor(method: &str) -> bool {
-    method
-        .strip_prefix('_')
-        .is_some_and(|index| !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()))
+    Some(
+        crate::method_reference_lowering::render_single_input_method_reference_body(
+            &plan,
+            &receiver,
+            &value_expr,
+        ),
+    )
 }
 
 fn emit_nullable_stream_lambda_closure_body(
@@ -1564,6 +1578,7 @@ fn emit_stream_lambda_call_args_for_receiver(
     receiver: Option<&Expr>,
     name: &str,
     args: &[Expr],
+    resolved: Option<&crate::java_ir::ResolvedCall>,
     param: &str,
     value: StreamLambdaValue,
     locals: &[&str],
@@ -1578,12 +1593,45 @@ fn emit_stream_lambda_call_args_for_receiver(
     let Some(env) = ctx.env else {
         return Some(default_args);
     };
+    let mut typed_lambda_env = env.type_env().clone();
+    if let Some(param_shape) = param_shape {
+        typed_lambda_env.insert_local(param.to_string(), param_shape.java_ty.clone());
+    }
+
+    let default_signatures;
+    let signatures = match ctx.signatures {
+        Some(signatures) => signatures,
+        None => {
+            default_signatures = SignaturePlan::default();
+            &default_signatures
+        }
+    };
+    let plan = crate::call_plan::plan_call_arguments_with_facts_and_args(
+        receiver,
+        name,
+        resolved,
+        args,
+        signatures,
+        facts,
+        &typed_lambda_env,
+    );
+    let crate::call_plan::ArgumentLoweringPlan::Unshaped { .. } = plan else {
+        return Some(adapt_stream_lambda_args_for_plan(
+            args,
+            default_args,
+            plan,
+            param,
+            locals,
+            ctx,
+        ));
+    };
+
     let Some(slots) = crate::call_plan::external_call_arg_shapes(
         receiver,
         name,
         args.len(),
         facts,
-        env.type_env(),
+        &typed_lambda_env,
     ) else {
         return Some(default_args);
     };
@@ -1596,6 +1644,35 @@ fn emit_stream_lambda_call_args_for_receiver(
             })
             .collect(),
     )
+}
+
+fn adapt_stream_lambda_args_for_plan(
+    args: &[Expr],
+    rendered_args: Vec<String>,
+    plan: crate::call_plan::ArgumentLoweringPlan,
+    param: &str,
+    locals: &[&str],
+    ctx: StreamRenderContext<'_>,
+) -> Vec<String> {
+    match plan {
+        crate::call_plan::ArgumentLoweringPlan::Shaped(shapes) => args
+            .iter()
+            .zip(rendered_args)
+            .zip(shapes.iter())
+            .map(|((arg, rendered), slot)| {
+                adapt_stream_lambda_arg_for_slot(arg, rendered, slot, param, locals, ctx)
+            })
+            .collect(),
+        crate::call_plan::ArgumentLoweringPlan::Slotted(slots) => args
+            .iter()
+            .zip(rendered_args)
+            .zip(slots.iter())
+            .map(|((arg, rendered), slot)| {
+                adapt_stream_lambda_arg_for_explicit_slot(arg, rendered, slot, param, locals, ctx)
+            })
+            .collect(),
+        crate::call_plan::ArgumentLoweringPlan::Unshaped { .. } => rendered_args,
+    }
 }
 
 fn emit_stream_lambda_call_args_for_resolved(
@@ -1723,6 +1800,39 @@ fn adapt_stream_lambda_arg_for_slot(
     rendered
 }
 
+fn adapt_stream_lambda_arg_for_explicit_slot(
+    arg: &Expr,
+    rendered: String,
+    slot: &Slot,
+    param: &str,
+    locals: &[&str],
+    ctx: StreamRenderContext<'_>,
+) -> String {
+    match slot {
+        Slot::Argument(shape) => {
+            adapt_stream_lambda_arg_for_slot(arg, rendered, shape, param, locals, ctx)
+        }
+        Slot::Index => render_stream_lambda_index_arg(rendered),
+        Slot::Value
+        | Slot::Condition
+        | Slot::Assignment(_)
+        | Slot::Return(_)
+        | Slot::StringConcatSegment
+        | Slot::DisplaySegment => rendered,
+    }
+}
+
+fn render_stream_lambda_index_arg(rendered: String) -> String {
+    if rendered.ends_with(" as usize") {
+        return rendered;
+    }
+    if rendered.starts_with('*') || rendered.contains(' ') {
+        format!("({rendered}) as usize")
+    } else {
+        format!("{rendered} as usize")
+    }
+}
+
 fn render_stream_lambda_borrowed_str_arg(
     arg: &Expr,
     rendered: String,
@@ -1844,10 +1954,60 @@ fn stream_static_owner_expr_type_name(
     stream_static_owner_expr_segment(receiver, locals, ctx)
 }
 
+fn stream_static_constant_owner_name(
+    receiver: &Expr,
+    locals: &[&str],
+    ctx: StreamRenderContext<'_>,
+) -> Option<String> {
+    let Expr::Var(name) = receiver else {
+        return None;
+    };
+    if locals.iter().any(|local| *local == name) {
+        return None;
+    }
+    if ctx
+        .env
+        .is_some_and(|env| env.local_type(name).is_some() || env.field_type(name).is_some())
+    {
+        return None;
+    }
+    Some(stream_static_owner_segment_name(name))
+}
+
+fn stream_static_owner_segment_name(owner: &str) -> String {
+    if owner.contains('.') {
+        return crate::slot_render::rust_name_for_java_named_type(owner);
+    }
+    let mut out = String::new();
+    let mut uppercase_next = true;
+    for ch in owner.chars() {
+        if ch == '_' || ch == '-' || ch == '$' {
+            uppercase_next = true;
+        } else if uppercase_next {
+            out.push(ch.to_ascii_uppercase());
+            uppercase_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn stream_static_owner_type_name_with_context(owner: &str, ctx: StreamRenderContext<'_>) -> String {
-    ctx.facts
+    let rendered = ctx
+        .facts
         .map(|facts| crate::call_plan::rust_static_owner_type_name_with_facts(owner, facts))
-        .unwrap_or_else(|| crate::call_plan::rust_static_owner_type_name(owner))
+        .unwrap_or_else(|| crate::call_plan::rust_static_owner_type_name(owner));
+    if rendered == crate::parser::to_snake_case(owner)
+        && owner
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase())
+    {
+        stream_static_owner_segment_name(owner)
+    } else {
+        rendered
+    }
 }
 
 fn stream_static_owner_expr_segment(

@@ -6,17 +6,27 @@ from pathlib import Path
 
 
 TYPE_RE = re.compile(r"^pub\s+(struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)")
+TRAIT_DECL_RE = re.compile(r"^pub\s+trait\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 ALIAS_RE = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
 DERIVE_RE = re.compile(r"^#\[derive")
-INHERENT_IMPL_RE = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)")
+INHERENT_IMPL_RE = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)")
 TRAIT_IMPL_RE = re.compile(
-    r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)"
+    r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)"
 )
 FROM_TRAIT_RE = re.compile(r"^From<([A-Za-z_][A-Za-z0-9_]*)>$")
 FN_RE = re.compile(r"^\s*(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 CONST_RE = re.compile(r"^\s*pub\s+const\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 STATIC_METHOD_CALL_RE_TEMPLATE = r"\b{}\s*::\s*{}\s*(?:<|\()"
 INSTANCE_METHOD_CALL_RE_TEMPLATE = r"\.\s*{}\s*(?:<|\()"
+
+
+def is_char_literal_start(line: str, index: int) -> bool:
+    next_index = index + 1
+    if next_index >= len(line):
+        return False
+    if line[next_index] == "\\":
+        return index + 3 < len(line) and line[index + 3] == "'"
+    return index + 2 < len(line) and line[index + 2] == "'"
 
 
 def brace_delta(line: str) -> int:
@@ -37,7 +47,7 @@ def brace_delta(line: str) -> int:
                 state = "string"
                 index += 1
                 continue
-            if ch == "'":
+            if ch == "'" and is_char_literal_start(line, index):
                 state = "char"
                 index += 1
                 continue
@@ -119,6 +129,9 @@ def prelude_support_types(path: Path) -> set[str]:
                     depth += brace_delta(line)
                     continue
                 names.add(name)
+            trait_match = TRAIT_DECL_RE.match(line)
+            if trait_match:
+                names.add(trait_match.group(1))
         depth += brace_delta(line)
     return names
 
@@ -140,6 +153,24 @@ def prelude_aliases(path: Path) -> list[tuple[str, str]]:
     return aliases
 
 
+def prelude_source_owned_nested_types(path: Path) -> set[str]:
+    source_type = source_type_for(path)
+    lines = path.read_text().splitlines(keepends=True)
+    names = set()
+    depth = 0
+    for line in lines:
+        if depth == 0:
+            type_match = TYPE_RE.match(line)
+            if type_match:
+                name = type_match.group(2)
+                if name == source_type:
+                    break
+                if source_owned_nested_type_name(source_type, name):
+                    names.add(name)
+        depth += brace_delta(line)
+    return names
+
+
 def prelude_from_impls(path: Path) -> list[tuple[str, str]]:
     source_type = source_type_for(path)
     lines = path.read_text().splitlines(keepends=True)
@@ -155,6 +186,27 @@ def prelude_from_impls(path: Path) -> list[tuple[str, str]]:
                 from_match = FROM_TRAIT_RE.match(trait_match.group(1).strip())
                 if from_match:
                     impls.append((from_match.group(1), trait_match.group(2)))
+        depth += brace_delta(line)
+    return impls
+
+
+def prelude_trait_impls(path: Path) -> list[tuple[str, str]]:
+    source_type = source_type_for(path)
+    lines = path.read_text().splitlines(keepends=True)
+    impls = []
+    declared_traits = set()
+    depth = 0
+    for line in lines:
+        if depth == 0:
+            type_match = TYPE_RE.match(line)
+            if type_match and type_match.group(2) == source_type:
+                break
+            trait_decl_match = TRAIT_DECL_RE.match(line)
+            if trait_decl_match:
+                declared_traits.add(trait_decl_match.group(1))
+            trait_match = TRAIT_IMPL_RE.match(line)
+            if trait_match and trait_match.group(1).strip() in declared_traits:
+                impls.append((trait_match.group(1).strip(), trait_match.group(2)))
         depth += brace_delta(line)
     return impls
 
@@ -238,15 +290,33 @@ def parse_items(path: Path, selected: set[str]) -> list[dict]:
         line = lines[index]
         if depth == 0:
             type_match = TYPE_RE.match(line)
+            trait_decl_match = TRAIT_DECL_RE.match(line)
             if type_match and type_match.group(2) == source_type:
                 after_primary = True
             if type_match and type_match.group(2) in selected:
+                name = type_match.group(2)
                 start = attached_start(lines, index)
                 end = item_end(lines, index)
                 items.append(
                     {
                         "kind": "decl",
-                        "name": type_match.group(2),
+                        "name": name,
+                        "start": start,
+                        "end": end,
+                        "text": "".join(lines[start:end]),
+                        "prelude": not after_primary,
+                        "source_owned_nested": source_owned_nested_type_name(source_type, name),
+                    }
+                )
+                index = end
+                continue
+            if trait_decl_match and trait_decl_match.group(1) in selected:
+                start = attached_start(lines, index)
+                end = item_end(lines, index)
+                items.append(
+                    {
+                        "kind": "decl",
+                        "name": trait_decl_match.group(1),
                         "start": start,
                         "end": end,
                         "text": "".join(lines[start:end]),
@@ -275,7 +345,9 @@ def parse_items(path: Path, selected: set[str]) -> list[dict]:
                 continue
 
             trait_match = TRAIT_IMPL_RE.match(line)
-            if trait_match and trait_match.group(2) in selected:
+            if trait_match and (
+                trait_match.group(2) in selected or trait_match.group(1).strip() in selected
+            ):
                 end = item_end(lines, index)
                 items.append(
                     {
@@ -293,15 +365,17 @@ def parse_items(path: Path, selected: set[str]) -> list[dict]:
 
             inherent_match = INHERENT_IMPL_RE.match(line)
             if inherent_match and inherent_match.group(1) in selected:
+                name = inherent_match.group(1)
                 end = item_end(lines, index)
                 items.append(
                     {
                         "kind": "inherent_impl",
-                        "name": inherent_match.group(1),
+                        "name": name,
                         "start": index,
                         "end": end,
                         "text": "".join(lines[index:end]),
                         "prelude": not after_primary,
+                        "source_owned_nested": source_owned_nested_type_name(source_type, name),
                     }
                 )
                 index = end
@@ -423,6 +497,66 @@ def extract_methods(impl_text: str) -> list[tuple[str, str]]:
     return methods
 
 
+def extract_trait_methods(trait_text: str) -> list[tuple[str, str]]:
+    lines = trait_text.splitlines(keepends=True)
+    methods = []
+    index = 1
+    while index < max(1, len(lines) - 1):
+        line = lines[index]
+        match = FN_RE.match(line)
+        if not match:
+            index += 1
+            continue
+        start = index
+        if "{" in line:
+            depth = brace_delta(line)
+            index += 1
+            while index < len(lines) - 1 and depth > 0:
+                depth += brace_delta(lines[index])
+                index += 1
+            methods.append((match.group(1), "".join(lines[start:index]).strip()))
+            continue
+        while index < len(lines) - 1:
+            if ";" in lines[index]:
+                index += 1
+                break
+            index += 1
+        methods.append((match.group(1), "".join(lines[start:index]).strip()))
+    return methods
+
+
+def merge_trait_declarations(name: str, declarations: list[str]) -> str:
+    unique_decls = []
+    seen_decls = set()
+    for text in declarations:
+        if text not in seen_decls:
+            unique_decls.append(text)
+            seen_decls.add(text)
+    if len(unique_decls) <= 1:
+        return unique_decls[0]
+
+    methods_by_name = defaultdict(list)
+    for text in unique_decls:
+        for method_name, method_text in extract_trait_methods(text):
+            methods_by_name[method_name].append(method_text)
+    if not methods_by_name:
+        return unique_decls[0]
+
+    header = unique_decls[0].split("{", 1)[0].rstrip()
+    lines = [f"{header} {{"]
+    for method_name in sorted(methods_by_name):
+        variants = []
+        seen_methods = set()
+        for text in methods_by_name[method_name]:
+            if text not in seen_methods:
+                variants.append(text)
+                seen_methods.add(text)
+        selected_method = sorted(variants)[0]
+        lines.append("    " + selected_method.replace("\n", "\n    ").rstrip())
+    lines.append("}")
+    return "\n".join(lines)
+
+
 def extract_consts(impl_text: str) -> list[tuple[str, str]]:
     lines = impl_text.splitlines(keepends=True)
     consts = []
@@ -431,6 +565,80 @@ def extract_consts(impl_text: str) -> list[tuple[str, str]]:
         if match:
             consts.append((match.group(1), line.strip()))
     return consts
+
+
+def normalize_const_for_impl_target(
+    impl_target: str, const_text: str, alias_targets: dict[str, str]
+) -> str:
+    match = re.match(
+        r"^(pub\s+const\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*)"
+        r"([A-Za-z_][A-Za-z0-9_]*)"
+        r"(\s*=\s*)"
+        r"([A-Za-z_][A-Za-z0-9_]*)"
+        r"(\s*;)$",
+        const_text,
+    )
+    if not match:
+        return const_text
+    prefix, const_type, equals, value, suffix = match.groups()
+    if value == const_type and alias_targets.get(value) == impl_target:
+        return f"{prefix}{const_type}{equals}{impl_target}{suffix}"
+    return const_text
+
+
+def builtin_inherent_consts(name: str) -> list[tuple[str, str]]:
+    if name != "Level":
+        return []
+    return [
+        ("DEBUG", "pub const DEBUG: Level = Level;"),
+        ("ERROR", "pub const ERROR: Level = Level;"),
+        ("INFO", "pub const INFO: Level = Level;"),
+        ("SEVERE", "pub const SEVERE: Level = Level;"),
+        ("WARNING", "pub const WARNING: Level = Level;"),
+    ]
+
+
+def builtin_from_impls(selected: set[str]) -> list[tuple[str, str, str]]:
+    stream_sources_by_target = {
+        "InputStream": [
+            "BufferedInputStream",
+            "ByteArrayInputStream",
+            "DataInputStream",
+            "FileInputStream",
+            "FilterInputStream",
+            "GZIPInputStream",
+            "ObjectInputStream",
+            "PushbackInputStream",
+            "SequenceInputStream",
+        ],
+        "OutputStream": [
+            "BufferedOutputStream",
+            "ByteArrayOutputStream",
+            "DataOutputStream",
+            "FileOutputStream",
+            "FilterOutputStream",
+            "GZIPOutputStream",
+            "ObjectOutputStream",
+            "PrintStream",
+            "ZipOutputStream",
+        ],
+    }
+    impls = []
+    for to_name, from_names in stream_sources_by_target.items():
+        if to_name not in selected:
+            continue
+        for from_name in from_names:
+            if from_name in selected:
+                impls.append(
+                    (
+                        from_name,
+                        to_name,
+                        f"impl From<{from_name}> for {to_name} {{\n"
+                        f"    fn from(_value: {from_name}) -> Self {{ Default::default() }}\n"
+                        f"}}",
+                    )
+                )
+    return impls
 
 
 def method_return_type(method_text: str) -> str:
@@ -483,6 +691,8 @@ def method_receiver_preference_rank(method_text: str, preferred_receiver_kinds: 
 
 def default_receiver_rank(method_name: str, method_text: str) -> int:
     receiver = method_receiver_kind(method_text)
+    if method_name == "to_string" and receiver == "static":
+        return 0
     if method_name in {"new_builder", "get_instance"} and receiver == "static":
         return 0
     if receiver == "static":
@@ -585,6 +795,54 @@ def item_targets_name(item_name: str, target_name: str, alias_targets: dict[str,
     return item_name == target_name or alias_targets.get(item_name) == target_name
 
 
+def derived_traits_for_decl(text: str) -> set[str]:
+    traits = set()
+    for match in re.finditer(r"#\[derive\(([^)]*)\)\]", text):
+        for trait in match.group(1).split(","):
+            trait = trait.strip()
+            if trait:
+                traits.add(trait)
+    return traits
+
+
+def trait_is_derived_by_decl(trait_name: str, derived_traits: set[str]) -> bool:
+    short_name = trait_name.rsplit("::", 1)[-1]
+    return trait_name in derived_traits or short_name in derived_traits
+
+
+def simple_rust_type_name(name: str) -> bool:
+    return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name))
+
+
+def trait_impl_target_can_be_emitted_without_decl(target_name: str) -> bool:
+    return not simple_rust_type_name(target_name) and (
+        target_name.startswith("Box<") or "::" in target_name or target_name.startswith("&")
+    )
+
+
+def read_existing_shared_types(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return {
+        line.strip()
+        for line in path.read_text().splitlines()
+        if line.strip()
+    }
+
+
+def remove_protected_aliases_from_shared_support(path: Path, aliases: set[str]) -> None:
+    if not aliases or not path.exists():
+        return
+    lines = path.read_text().splitlines(keepends=True)
+    kept = []
+    for line in lines:
+        alias_match = ALIAS_RE.match(line)
+        if alias_match and alias_match.group(1) in aliases:
+            continue
+        kept.append(line)
+    path.write_text("".join(kept))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generated-dir", required=True)
@@ -599,11 +857,13 @@ def main() -> int:
     existing_shared_text = (
         shared_support_path.read_text() if shared_support_path.exists() else ""
     )
-    removal_only_names = {
+    existing_shared_types = read_existing_shared_types(Path(args.shared_types))
+    existing_shared_alias_names = {
         match.group(1)
         for line in existing_shared_text.splitlines()
         if (match := ALIAS_RE.match(line))
     }
+    removal_only_names = set(existing_shared_alias_names)
     primary_output_types = {source_type_for(path) for path in rust_paths}
     candidates_by_type = defaultdict(list)
     for path in rust_paths:
@@ -618,22 +878,42 @@ def main() -> int:
         and name not in {"Box", "String", "Vec", "Option", "Result"}
     }
     keep_last_prelude_names = set()
+    protected_source_owned_nested_names = set()
     for path in rust_paths:
         removal_only_names.update(prelude_types_redeclared_after_primary(path))
         keep_last_prelude_names.update(duplicate_prelude_types_before_primary(path))
+        protected_source_owned_nested_names.update(
+            name
+            for name in prelude_source_owned_nested_types(path)
+            if name in existing_shared_types and name not in primary_output_types
+        )
     removal_only_names.update(keep_last_prelude_names)
+    removal_only_names.update(protected_source_owned_nested_names)
     selected.update(removal_only_names - primary_output_types)
     promoted_aliases = set()
+    protected_shared_aliases = {
+        alias
+        for alias in existing_shared_alias_names
+        if alias in existing_shared_types and alias not in primary_output_types
+    }
     for path in rust_paths:
         for alias, target in prelude_aliases(path):
+            if alias in existing_shared_types and alias not in primary_output_types:
+                protected_shared_aliases.add(alias)
+                continue
             if target in selected and alias not in primary_output_types:
                 promoted_aliases.add(alias)
     selected.update(promoted_aliases)
     removal_only_names.update(promoted_aliases)
+    selected.update(protected_shared_aliases)
+    removal_only_names.update(protected_shared_aliases)
 
     from_impls = []
     for path in rust_paths:
         from_impls.extend(prelude_from_impls(path))
+    trait_impls_for_dependency = []
+    for path in rust_paths:
+        trait_impls_for_dependency.extend(prelude_trait_impls(path))
     changed = True
     while changed:
         changed = False
@@ -645,6 +925,16 @@ def main() -> int:
                 changed = True
             if to_name in selected and from_name not in selected:
                 selected.add(from_name)
+                changed = True
+        for trait_name, target_name in trait_impls_for_dependency:
+            if target_name not in selected or target_name in primary_output_types:
+                continue
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", trait_name):
+                continue
+            if trait_name in primary_output_types:
+                continue
+            if trait_name not in selected:
+                selected.add(trait_name)
                 changed = True
 
     conflict_lines = ["type\tkind\tdetail\n"]
@@ -666,6 +956,11 @@ def main() -> int:
         items = parse_items(path, selected)
         items_by_path[path] = items
         for item in items:
+            if (
+                item.get("source_owned_nested")
+                and item["name"] in protected_source_owned_nested_names
+            ):
+                continue
             if item["kind"] == "decl":
                 declarations[item["name"]].append((path, item["text"]))
             elif item["kind"] == "alias":
@@ -682,10 +977,13 @@ def main() -> int:
     shared_aliases = set()
     alias_targets = {}
     for alias_name, variants in aliases.items():
+        if alias_name in protected_shared_aliases:
+            continue
         for _, target, _ in variants:
             if target in selected:
                 alias_targets[alias_name] = target
                 break
+    remove_protected_aliases_from_shared_support(shared_support_path, protected_shared_aliases)
     receiver_preferences = method_call_receiver_preferences(rust_paths, selected, alias_targets)
     for name in sorted(selected):
         if name in removal_only_names:
@@ -699,27 +997,45 @@ def main() -> int:
                 seen_decls.add(text)
         if not unique_decls:
             continue
+        selected_decl_is_trait = bool(re.match(r"^pub\s+trait\b", unique_decls[0]))
         if len(unique_decls) > 1:
             conflict_lines.append(f"{name}\tdeclaration\tkept first of {len(unique_decls)} variants\n")
-        shared_chunks.append(box_self_recursive_fields(name, unique_decls[0]).rstrip() + "\n")
+        selected_decl = (
+            merge_trait_declarations(name, unique_decls)
+            if selected_decl_is_trait
+            else unique_decls[0]
+        )
+        derived_traits = derived_traits_for_decl(selected_decl)
+        shared_chunks.append(box_self_recursive_fields(name, selected_decl).rstrip() + "\n")
 
         method_variants_by_name = defaultdict(list)
         methods_for_type = []
         consts_for_type = []
-        for (type_name, const_name), variants in sorted(inherent_consts.items()):
-            if not item_targets_name(type_name, name, alias_targets):
-                continue
-            unique_variants = []
-            seen_consts = set()
-            for _, text in variants:
-                if text not in seen_consts:
-                    unique_variants.append(text)
-                    seen_consts.add(text)
-            if len(unique_variants) > 1:
-                conflict_lines.append(
-                    f"{name}\tconst\t{const_name}: kept first of {len(unique_variants)} variants\n"
+        emitted_const_names = set()
+        if not selected_decl_is_trait:
+            for (type_name, const_name), variants in sorted(inherent_consts.items()):
+                if not item_targets_name(type_name, name, alias_targets):
+                    continue
+                unique_variants = []
+                seen_consts = set()
+                for _, text in variants:
+                    if text not in seen_consts:
+                        unique_variants.append(text)
+                        seen_consts.add(text)
+                if len(unique_variants) > 1:
+                    conflict_lines.append(
+                        f"{name}\tconst\t{const_name}: kept first of {len(unique_variants)} variants\n"
+                    )
+                if const_name in emitted_const_names:
+                    continue
+                consts_for_type.append(
+                    normalize_const_for_impl_target(name, unique_variants[0], alias_targets)
                 )
-            consts_for_type.append(unique_variants[0])
+                emitted_const_names.add(const_name)
+            for const_name, const_text in builtin_inherent_consts(name):
+                if const_name not in emitted_const_names:
+                    consts_for_type.append(const_text)
+                    emitted_const_names.add(const_name)
         for (type_name, method_name), variants in sorted(inherent_methods.items()):
             if not item_targets_name(type_name, name, alias_targets):
                 continue
@@ -741,7 +1057,8 @@ def main() -> int:
                 best_method_variant(method_name, unique_variants, preferred_receiver_kinds)
             )
         if consts_for_type or methods_for_type:
-            shared_chunks.append(f"\nimpl {name} {{\n")
+            impl_target = f"dyn {name}" if selected_decl_is_trait else name
+            shared_chunks.append(f"\nimpl {impl_target} {{\n")
             for const in consts_for_type:
                 shared_chunks.append(f"    {const}\n")
             for method in methods_for_type:
@@ -761,10 +1078,54 @@ def main() -> int:
                 conflict_lines.append(
                     f"{name}\ttrait_impl\t{trait_name}: kept first of {len(unique_variants)} variants\n"
                 )
+            if trait_is_derived_by_decl(trait_name, derived_traits):
+                continue
             shared_chunks.append("\n" + unique_variants[0].rstrip() + "\n")
+        if selected_decl_is_trait:
+            for (type_name, trait_name), variants in sorted(trait_impls.items()):
+                if trait_name != name or type_name in selected:
+                    continue
+                if not trait_impl_target_can_be_emitted_without_decl(type_name):
+                    continue
+                methods_by_name = defaultdict(list)
+                for _, text in variants:
+                    for method_name, method_text in extract_methods(text):
+                        methods_by_name[method_name].append(method_text)
+                if not methods_by_name:
+                    continue
+                shared_chunks.append(f"\nimpl {name} for {type_name} {{\n")
+                for method_name, method_variants in sorted(methods_by_name.items()):
+                    unique_variants = []
+                    seen_methods = set()
+                    for text in method_variants:
+                        if text not in seen_methods:
+                            unique_variants.append(text)
+                            seen_methods.add(text)
+                    if len(unique_variants) > 1:
+                        conflict_lines.append(
+                            f"{type_name}\ttrait_impl\t{name}.{method_name}: kept preferred of {len(unique_variants)} variants\n"
+                        )
+                    selected_method = best_method_variant(method_name, unique_variants, set())
+                    shared_chunks.append(
+                        "    " + selected_method.replace("\n", "\n    ").rstrip() + "\n"
+                    )
+                shared_chunks.append("}\n")
         shared_chunks.append("\n")
 
+    existing_from_impl_keys = set(from_impls)
+    shared_type_universe = selected | existing_shared_types
+    for from_name, to_name, text in builtin_from_impls(shared_type_universe):
+        if (
+            from_name in primary_output_types
+            or to_name in primary_output_types
+            or (from_name, to_name) in existing_from_impl_keys
+        ):
+            continue
+        shared_chunks.append("\n" + text.rstrip() + "\n")
+
     for alias_name, variants in sorted(aliases.items()):
+        if alias_name in protected_shared_aliases:
+            continue
         if not any(target in selected for _, target, _ in variants):
             continue
         unique_variants = []

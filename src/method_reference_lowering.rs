@@ -8,7 +8,7 @@ pub fn render_method_reference(plan: &MethodReferencePlan) -> RustExpr {
         }
         MethodReferencePlan::AssociatedFunction { owner, method } => {
             if owner == "Objects" && method == "non_null" {
-                return RustExpr::Raw("|value| Objects::non_null(value)".to_string());
+                return RustExpr::Raw("|_value| true".to_string());
             }
             RustExpr::Raw(format!("{owner}::{method}"))
         }
@@ -31,6 +31,38 @@ pub fn render_method_reference(plan: &MethodReferencePlan) -> RustExpr {
                 args.join(", "),
                 args.join(", ")
             ))
+        }
+    }
+}
+
+pub fn render_single_input_method_reference_body(
+    plan: &MethodReferencePlan,
+    receiver: &str,
+    value_expr: &str,
+) -> String {
+    match plan {
+        MethodReferencePlan::Constructor { type_name } => {
+            format!("{type_name}::new({receiver})")
+        }
+        MethodReferencePlan::AssociatedFunction { owner, method } => {
+            if owner == "Integer" && method == "int_value" {
+                return value_expr.to_string();
+            }
+            if (owner == "Object" && method == "to_string")
+                || (owner == "String" && method == "value_of")
+            {
+                return format!("{receiver}.to_string()");
+            }
+            if owner == "Objects" && method == "non_null" {
+                return "true".to_string();
+            }
+            format!("{owner}::{method}({receiver})")
+        }
+        MethodReferencePlan::UnboundAccessor { method } => {
+            format!("{receiver}.{method}()")
+        }
+        MethodReferencePlan::CurrentReceiverMethod { method, .. } => {
+            format!("self.{method}({receiver})")
         }
     }
 }

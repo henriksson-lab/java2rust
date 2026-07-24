@@ -144,6 +144,9 @@ pub fn apply_borrowed_sequence_content_projection(shape: &mut RustSlotShape) {
 pub fn borrowed_sequence_element_shape(element_ty: JavaType) -> RustSlotShape {
     let mut shape = RustSlotShape::conservative(element_ty);
     apply_borrowed_sequence_element_projection(&mut shape);
+    if matches!(shape.java_ty, JavaType::Array(_)) {
+        apply_required_view(&mut shape, ViewShape::Slice);
+    }
     shape
 }
 

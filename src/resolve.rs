@@ -2391,20 +2391,20 @@ fn inferred_constructed_type(
     }
     let source_name = symbols.source_type_name(name);
     let source_target = symbols.source_type_name(target_name);
-    if source_name == source_target
-        || crate::stdlib::is_known_java_subtype(source_name, source_target)
-        || symbols
+    if source_name != source_target
+        && !crate::stdlib::is_known_java_subtype(source_name, source_target)
+        && symbols
             .source_subtype_distance(source_name, source_target, external_facts)
-            .is_some()
+            .is_none()
     {
         return JavaType::Named {
             name: declaring_type.to_string(),
-            args: target_args.clone(),
+            args: Vec::new(),
         };
     }
     JavaType::Named {
         name: declaring_type.to_string(),
-        args: Vec::new(),
+        args: target_args.clone(),
     }
 }
 

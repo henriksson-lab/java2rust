@@ -8,12 +8,24 @@ use crate::slot_shape::RustSlotShape;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EqualityComparisonPlan {
     Direct,
+    StringView {
+        left_view: StringEqualityOperandView,
+        right_view: StringEqualityOperandView,
+    },
     BothOptionalByRef,
     LeftOptionalByRef,
     RightOptionalByRef,
     LeftOptionalStringView,
     RightOptionalStringView,
-    BothOptionalCustomEquals { method_name: String },
+    BothOptionalCustomEquals {
+        method_name: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringEqualityOperandView {
+    NativeString,
+    BorrowedStr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +80,8 @@ pub fn plan_numeric_binary_promotion(
             | BinaryOp::BitAnd
             | BinaryOp::BitOr
             | BinaryOp::BitXor
+            | BinaryOp::Eq
+            | BinaryOp::Ne
             | BinaryOp::Lt
             | BinaryOp::Le
             | BinaryOp::Gt
@@ -177,6 +191,16 @@ pub fn plan_equality_comparison_with_facts(
     right: &RustSlotShape,
     facts: &FactSet,
 ) -> EqualityComparisonPlan {
+    if left.optional_element_type().is_none()
+        && right.optional_element_type().is_none()
+        && left.java_ty == JavaType::String
+        && right.java_ty == JavaType::String
+    {
+        return EqualityComparisonPlan::StringView {
+            left_view: string_equality_operand_view(left),
+            right_view: string_equality_operand_view(right),
+        };
+    }
     match (left.optional_element_type(), right.optional_element_type()) {
         (Some(left_element), Some(right_element)) if left_element == right_element => {
             if let Some(method_name) = custom_equals_method(&left_element, facts) {
@@ -201,6 +225,14 @@ pub fn plan_equality_comparison_with_facts(
             EqualityComparisonPlan::RightOptionalByRef
         }
         _ => EqualityComparisonPlan::Direct,
+    }
+}
+
+fn string_equality_operand_view(shape: &RustSlotShape) -> StringEqualityOperandView {
+    if shape_is_borrowed_string_content(shape) {
+        StringEqualityOperandView::BorrowedStr
+    } else {
+        StringEqualityOperandView::NativeString
     }
 }
 
@@ -242,6 +274,14 @@ pub fn lower_equality_comparison_expr_for_op(
             crate::emit::emit_expr(&left),
             crate::emit::emit_expr(&right)
         )),
+        EqualityComparisonPlan::StringView {
+            left_view,
+            right_view,
+        } => RustExpr::Raw(format!(
+            "({} {op} {})",
+            string_equality_operand_expr(left, left_view),
+            string_equality_operand_expr(right, right_view),
+        )),
         EqualityComparisonPlan::BothOptionalByRef => RustExpr::Binary {
             op: op.to_string(),
             left: Box::new(option_as_ref(left)),
@@ -276,6 +316,14 @@ pub fn lower_equality_comparison_expr_for_op(
                 crate::emit::emit_expr(&right),
             ))
         }
+    }
+}
+
+fn string_equality_operand_expr(expr: RustExpr, view: StringEqualityOperandView) -> String {
+    let rendered = crate::emit::emit_expr(&expr);
+    match view {
+        StringEqualityOperandView::BorrowedStr => rendered,
+        StringEqualityOperandView::NativeString => format!("{rendered}.as_str()"),
     }
 }
 

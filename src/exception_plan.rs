@@ -71,7 +71,8 @@ pub enum TryBlockCompletion {
 impl ProgramExceptionPlan {
     pub fn method_plan(&self, ty: &TypeDecl, method: &MethodDecl) -> MethodExceptionPlan {
         self.methods
-            .get(&(ty.name.clone(), method.name.clone()))
+            .get(&method_exception_key(ty, method))
+            .or_else(|| self.methods.get(&(ty.name.clone(), method.name.clone())))
             .copied()
             .unwrap_or(MethodExceptionPlan {
                 wrap_returns_in_result: false,
@@ -181,8 +182,13 @@ pub fn plan_method_exceptions(
     method: &MethodDecl,
     facts: &FactSet,
 ) -> MethodExceptionPlan {
+    let rust_name = method
+        .rust_name
+        .clone()
+        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
     MethodExceptionPlan {
-        wrap_returns_in_result: facts.method_has_thrown_exceptions(&ty.name, &method.name),
+        wrap_returns_in_result: facts.method_has_thrown_exceptions(&ty.name, &rust_name)
+            || facts.method_has_thrown_exceptions(&ty.name, &method.name),
     }
 }
 
@@ -402,7 +408,7 @@ fn collect_method_exception_plans_for_type(
         match member {
             Member::Method(method) => {
                 methods.insert(
-                    (ty.name.clone(), method.name.clone()),
+                    method_exception_key(ty, method),
                     plan_method_exceptions(ty, method, facts),
                 );
             }
@@ -410,6 +416,16 @@ fn collect_method_exception_plans_for_type(
             _ => {}
         }
     }
+}
+
+fn method_exception_key(ty: &TypeDecl, method: &MethodDecl) -> (String, String) {
+    (
+        ty.name.clone(),
+        method
+            .rust_name
+            .clone()
+            .unwrap_or_else(|| crate::parser::to_snake_case(&method.name)),
+    )
 }
 
 pub fn plan_throw_expr(expr: &Expr) -> ThrowExprPlan<'_> {
