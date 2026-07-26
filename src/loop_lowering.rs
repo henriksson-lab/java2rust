@@ -1,3 +1,4 @@
+use crate::coercion::unwrap_optional_shared_value;
 use crate::rewrite::NullTestKind;
 use crate::rust_ir::{RustExpr, RustStmt};
 
@@ -56,7 +57,7 @@ pub fn assignment_condition_loop(
             mutable: false,
             name: local_name.to_string(),
             ty: None,
-            value: Some(RustExpr::Raw(format!("{local_name}.as_ref().unwrap()"))),
+            value: Some(unwrap_optional_shared_value(local)),
         });
     }
     loop_body.append(&mut body);

@@ -3815,6 +3815,14 @@ reuse the same `coercion` path projections from `lower.rs` and
 modules continue to own Java constructor delegation, field initialization, and
 fallback selection semantics.
 
+Loop/array borrow projection cleanup: assignment-in-condition loops now use the
+shared optional shared-value unwrap projection when introducing the narrowed
+loop-local binding, and borrowed 2D-array temporaries now enter the shared
+borrow projection helper instead of formatting `&...`/`&mut ...` in
+`array_lowering.rs`. This is another small step toward routing nullable and
+borrowed ABI surfaces through slot/projection facts rather than local rendered
+string choices.
+
 ## Rerun Protocol
 
 After each fix:

@@ -30735,6 +30735,8 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
     assert!(!plan_source.contains("RustExpr"));
     assert!(lowering_source.contains("continue_with_updates"));
     assert!(lowering_source.contains("assignment_condition_loop"));
+    assert!(lowering_source.contains("unwrap_optional_shared_value("));
+    assert!(!lowering_source.contains("format!(\"{local_name}.as_ref().unwrap()\""));
     assert!(lower_source.contains("plan_for_body_stmt"));
     assert!(lower_source.contains("plan_while_stmt"));
     assert!(lower_source.contains("ForBodyStmtPlan::ContinueWithUpdates"));
@@ -31261,6 +31263,11 @@ fn array_plan_and_lowering_own_java_array_shape_before_orchestrator() {
     assert!(!plan_source.contains("emit_expr"));
     assert!(lowering_source.contains("emit_expr"));
     assert!(lowering_source.contains("Java array creation"));
+    assert!(lowering_source.contains("ensure_borrow_projection("));
+    assert!(lowering_source.contains("BorrowProjectionUse::Argument"));
+    assert!(lowering_source.contains("BorrowProjectionUse::MutableSliceView"));
+    assert!(!lowering_source.contains("format!(\"&{}\""));
+    assert!(!lowering_source.contains("format!(\"&mut {}\""));
     assert!(lower_source.contains("plan_array_expr"));
     assert!(lower_source.contains("render_array_expr"));
     assert!(!lower_source.contains("crate::emit::emit_expr"));

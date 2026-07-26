@@ -1,4 +1,5 @@
 use crate::array_plan::ArrayExprPlan;
+use crate::coercion::{BorrowProjectionUse, ensure_borrow_projection};
 use crate::emit::emit_expr;
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::rust_ir::{RustExpr, RustStmt};
@@ -53,10 +54,18 @@ pub fn borrowed_array2_temporary_for_slot(
         return None;
     }
     match target.ownership {
-        OwnershipShape::SharedBorrow => Some(RustExpr::Raw(format!("&{}", emit_expr(lowered)))),
-        OwnershipShape::MutableBorrow => {
-            Some(RustExpr::Raw(format!("&mut {}", emit_expr(lowered))))
-        }
+        OwnershipShape::SharedBorrow => Some(ensure_borrow_projection(
+            lowered.clone(),
+            None,
+            Some(target),
+            BorrowProjectionUse::Argument,
+        )),
+        OwnershipShape::MutableBorrow => Some(ensure_borrow_projection(
+            lowered.clone(),
+            None,
+            Some(target),
+            BorrowProjectionUse::MutableSliceView,
+        )),
         OwnershipShape::Owned | OwnershipShape::CopyValue => None,
     }
 }
