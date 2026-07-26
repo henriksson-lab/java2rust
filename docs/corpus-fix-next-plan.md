@@ -3798,6 +3798,16 @@ planning so untyped lowercase receivers with lowercase fields no longer match
 procedural external/static field guesses; static fallback now requires a
 static-looking member or a receiver that is already shaped like a type name.
 
+Method-reference projection cleanup: generic method-reference lowering now
+shares the same associated-path, unbound-method, current-receiver-method, and
+typed single-input callback projection helpers used by call/member cleanup.
+Typed stream callback lowering no longer rebuilds `|value: T| ...` callback
+forms directly in `lower.rs`; it asks `method_reference_lowering` to render the
+planned method reference. The remaining semantic work is to make the
+method-reference plan itself resolve through callable keys/facade ABI facts
+instead of keeping Java owner/method special cases in the method-reference
+shape/lowering helpers.
+
 ## Rerun Protocol
 
 After each fix:

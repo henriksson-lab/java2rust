@@ -852,6 +852,47 @@ pub fn associated_const_projection(owner: &str, member: &str) -> RustExpr {
     RustExpr::Raw(format!("{owner}::{member}"))
 }
 
+pub fn unbound_method_reference_projection(method: &str) -> RustExpr {
+    RustExpr::Raw(format!("|value| value.{method}()"))
+}
+
+pub fn current_receiver_method_reference_projection(method: &str, arity: usize) -> RustExpr {
+    let args = (0..arity)
+        .map(|index| {
+            if arity == 1 {
+                "value".to_string()
+            } else {
+                format!("arg{index}")
+            }
+        })
+        .collect::<Vec<_>>();
+    RustExpr::Raw(format!(
+        "|{}| self.{method}({})",
+        args.join(", "),
+        args.join(", ")
+    ))
+}
+
+pub fn unbound_method_call_projection(receiver: RustExpr, method: &str) -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(receiver),
+        method: method.to_string(),
+        args: Vec::new(),
+    }
+}
+
+pub fn current_receiver_method_call_projection(method: &str, args: Vec<RustExpr>) -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::Raw("self".to_string())),
+        method: method.to_string(),
+        args,
+    }
+}
+
+pub fn typed_single_input_callback_projection(param_type: &str, body: &str) -> RustExpr {
+    RustExpr::Raw(format!("|value: {param_type}| {body}"))
+}
+
 pub fn borrow_as_dyn_trait(expr: RustExpr, trait_name: &str) -> RustExpr {
     RustExpr::Raw(format!("&{} as &dyn {trait_name}", emit::emit_expr(&expr)))
 }
@@ -3720,6 +3761,35 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&associated_const_projection("Owner", "VALUE")),
             "Owner::VALUE"
+        );
+        assert_eq!(
+            emit::emit_expr(&unbound_method_reference_projection("name")),
+            "|value| value.name()"
+        );
+        assert_eq!(
+            emit::emit_expr(&current_receiver_method_reference_projection("emit", 3)),
+            "|arg0, arg1, arg2| self.emit(arg0, arg1, arg2)"
+        );
+        assert_eq!(
+            emit::emit_expr(&unbound_method_call_projection(
+                RustExpr::Raw("value".to_string()),
+                "name",
+            )),
+            "value.name()"
+        );
+        assert_eq!(
+            emit::emit_expr(&current_receiver_method_call_projection(
+                "emit",
+                vec![RustExpr::Raw("value".to_string())],
+            )),
+            "self.emit(value)"
+        );
+        assert_eq!(
+            emit::emit_expr(&typed_single_input_callback_projection(
+                "String",
+                "value.trim()"
+            )),
+            "|value: String| value.trim()"
         );
         assert_eq!(
             emit::emit_expr(&logical_not_projection(RustExpr::Var("ready".to_string()))),

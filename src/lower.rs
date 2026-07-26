@@ -112,7 +112,9 @@ use crate::javalibs::{broad_ioutils_support_item, program_uses_broad_ioutils_fac
 use crate::loop_lowering::{assemble_for_loop, assignment_condition_loop, continue_with_updates};
 use crate::loop_plan::{ForBodyStmtPlan, WhileStmtPlan, plan_for_body_stmt, plan_while_stmt};
 use crate::lowering_diagnostics::{LoweringDiagnosticPlan, collect_lowering_diagnostic_plans};
-use crate::method_reference_lowering::render_method_reference;
+use crate::method_reference_lowering::{
+    render_method_reference, render_typed_single_input_method_reference_callback,
+};
 use crate::method_reference_plan::{
     MethodReferencePlan, plan_current_receiver_method_reference, plan_method_reference,
 };
@@ -7705,33 +7707,10 @@ fn render_typed_method_reference_callback(
     ctx: LowerCtx,
 ) -> RustExpr {
     let param_type = render_callback_param_type(element_shape, ctx);
-    match plan_method_reference(target, method) {
-        MethodReferencePlan::AssociatedFunction { owner, method } => {
-            RustExpr::Raw(format!("|value: {param_type}| {owner}::{method}(value)"))
-        }
-        MethodReferencePlan::UnboundAccessor { method } => {
-            RustExpr::Raw(format!("|value: {param_type}| value.{method}()"))
-        }
-        MethodReferencePlan::CurrentReceiverMethod { method, arity } => {
-            let arg_count = arity.unwrap_or(1);
-            let args = (0..arg_count)
-                .map(|index| {
-                    if index == 0 {
-                        "value".to_string()
-                    } else {
-                        format!("arg{index}")
-                    }
-                })
-                .collect::<Vec<_>>();
-            RustExpr::Raw(format!(
-                "|value: {param_type}| self.{method}({})",
-                args.join(", ")
-            ))
-        }
-        MethodReferencePlan::Constructor { type_name } => {
-            RustExpr::Raw(format!("|value: {param_type}| {type_name}::new(value)"))
-        }
-    }
+    render_typed_single_input_method_reference_callback(
+        &plan_method_reference(target, method),
+        &param_type,
+    )
 }
 
 fn render_callback_param_type(shape: &RustSlotShape, ctx: LowerCtx) -> String {

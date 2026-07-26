@@ -30863,6 +30863,13 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         "(*value).get_name()"
     );
     assert_eq!(
+        new_java2rust::method_reference_lowering::render_typed_single_input_method_reference_callback(
+            &plan_method_reference("NameHolder", "getName"),
+            "&String",
+        ),
+        RustExpr::Raw("|value: &String| value.get_name()".to_string())
+    );
+    assert_eq!(
         infer_single_input_method_reference_output_shape(
             "Integer",
             "intValue",
@@ -30909,6 +30916,11 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(!plan_source.contains("RustExpr"));
     assert!(lowering_source.contains("pub fn render_method_reference"));
     assert!(lowering_source.contains("pub fn render_single_input_method_reference_body"));
+    assert!(lowering_source.contains("pub fn render_typed_single_input_method_reference_callback"));
+    assert!(lowering_source.contains("owner_associated_path_projection"));
+    assert!(lowering_source.contains("typed_single_input_callback_projection"));
+    assert!(!lowering_source.contains("format!(\"{type_name}::new"));
+    assert!(!lowering_source.contains("format!(\"{owner}::{method}"));
     assert!(shape_source.contains("pub fn infer_single_input_method_reference_output_shape"));
     assert!(shape_source.contains("infer_method_reference_output_shape_from_call_plan"));
     assert!(
@@ -30926,6 +30938,10 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(stream_lowering_source.contains("fn rendered_stream_lambda_borrowed_item_expr"));
     assert!(stream_lowering_source.contains("fn stream_lambda_param_projection"));
     assert!(stream_lowering_source.contains("render_stream_lambda_param_projection"));
+    assert!(lower_source.contains("render_typed_single_input_method_reference_callback"));
+    assert!(!lower_source.contains("format!(\"|value: {param_type}| {owner}::{method}(value)"));
+    assert!(!lower_source.contains("format!(\"|value: {param_type}| value.{method}()"));
+    assert!(!lower_source.contains("format!(\"|value: {param_type}| {type_name}::new(value)"));
     assert!(!stream_lowering_source.contains("format!(\"**{param}\")"));
     assert!(!stream_lowering_source.contains("format!(\"*{param}\")"));
     assert!(!stream_lowering_source.contains("format!(\"(**{param})\")"));
