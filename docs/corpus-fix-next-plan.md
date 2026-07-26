@@ -3808,6 +3808,13 @@ method-reference plan itself resolve through callable keys/facade ABI facts
 instead of keeping Java owner/method special cases in the method-reference
 shape/lowering helpers.
 
+Lowerer path projection follow-up: delegated constructor calls, static fallback
+calls, enum/static constant labels, and no-argument default constructors now
+reuse the same `coercion` path projections from `lower.rs` and
+`item_assembly.rs`. This keeps Rust path construction centralized while those
+modules continue to own Java constructor delegation, field initialization, and
+fallback selection semantics.
+
 ## Rerun Protocol
 
 After each fix:

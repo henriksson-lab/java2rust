@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::coercion::self_associated_path_projection;
 use crate::exception_lowering::exception_result_type;
 use crate::exception_plan::MethodExceptionPlan;
 use crate::facts::FactSet;
@@ -189,7 +190,7 @@ pub fn constructor_default_field_value_with_facts(
 
 pub fn delegating_constructor_return_body(rust_name: &str, args: Vec<RustExpr>) -> Vec<RustStmt> {
     vec![RustStmt::Return(Some(RustExpr::Call {
-        function: Box::new(RustExpr::Raw(format!("Self::{rust_name}"))),
+        function: Box::new(self_associated_path_projection(rust_name)),
         args,
     }))]
 }

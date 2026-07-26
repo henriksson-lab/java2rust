@@ -27410,6 +27410,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let stream_source = include_str!("../src/stream_lowering.rs");
     let access_source = include_str!("../src/access_lowering.rs");
     let array_source = include_str!("../src/array_lowering.rs");
+    let item_assembly_source = include_str!("../src/item_assembly.rs");
 
     assert!(coercion_source.contains("pub fn ensure_borrow_projection"));
     assert!(coercion_source.contains("pub fn rendered_expr_has_clone_recovery"));
@@ -27522,6 +27523,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn external_crate_associated_path_projection"));
     assert!(coercion_source.contains("pub fn static_storage_accessor_projection"));
     assert!(coercion_source.contains("pub fn associated_const_projection"));
+    assert!(coercion_source.contains("pub fn unbound_method_reference_projection"));
+    assert!(coercion_source.contains("pub fn current_receiver_method_reference_projection"));
+    assert!(coercion_source.contains("pub fn unbound_method_call_projection"));
+    assert!(coercion_source.contains("pub fn current_receiver_method_call_projection"));
+    assert!(coercion_source.contains("pub fn typed_single_input_callback_projection"));
     assert!(coercion_source.contains("pub fn collapse_redundant_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));
@@ -27615,6 +27621,13 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(call_source.contains("java_class_static_path_projection("));
     assert!(call_source.contains("external_crate_path_projection("));
     assert!(call_source.contains("external_crate_associated_path_projection("));
+    assert!(!lower_source.contains("RustExpr::Raw(format!(\"Self::{}\""));
+    assert!(!lower_source.contains("RustExpr::Raw(format!(\"{rust_name}::new"));
+    assert!(!lower_source.contains("RustExpr::Raw(format!(\"{owner}::{field}\""));
+    assert!(!item_assembly_source.contains("RustExpr::Raw(format!(\"Self::{rust_name}\""));
+    assert!(lower_source.contains("self_associated_path_projection("));
+    assert!(lower_source.contains("owner_associated_path_projection("));
+    assert!(item_assembly_source.contains("self_associated_path_projection("));
     assert!(!lower_source.contains("format!(\"{}.as_ref().unwrap()\""));
     assert!(!lower_source.contains("format!(\"&{name}\")"));
     assert!(!lower_source.contains("self.clone()/* TODO(translation): validate added clone */"));

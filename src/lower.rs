@@ -40,16 +40,17 @@ use crate::coercion::{
     logical_not_projection, map_get_expect_projection, map_get_mut_expect_projection,
     map_get_projection, normalize_map_key_borrow_projection,
     normalize_reused_clone_for_borrowed_argument, optional_copied_expect_projection,
-    owned_map_keys_set_projection, parenthesize_borrowed_method_receiver, print_macro_projection,
+    owned_map_keys_set_projection, owner_associated_path_projection,
+    parenthesize_borrowed_method_receiver, print_macro_projection,
     project_optional_element_borrow_carrier, project_optional_receiver,
     project_optional_sequence_receiver, reborrow_optional_mut_projection,
     render_sequence_iteration_source, rendered_expr_has_clone_recovery,
     rendered_expr_has_direct_clone_recovery, rendered_expr_is_mutable_alias,
     rewrite_downcast_expect_message, rust_expr_mentions_constructor_self_temporary,
-    sequence_get_expect_projection, sequence_iter_cloned_projection,
-    sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
-    subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
-    tuple_field_projection, typed_none_projection,
+    self_associated_path_projection, sequence_get_expect_projection,
+    sequence_iter_cloned_projection, sequence_iter_copied_projection,
+    snapshot_rendered_shared_borrow_argument, subtype_owned_constructor_from_borrowed_projection,
+    to_owned_sequence_projection, tuple_field_projection, typed_none_projection,
     unsupported_deserialization_cast_handoff_projection, unwrap_java_null_receiver_projection,
     unwrap_optional_shared_value, unwrap_result_or_panic_uncaught_java_exception,
     varargs_packed_vec_projection, varargs_spread_extend_projection,
@@ -835,7 +836,9 @@ fn static_storage_initial_value_expr(
         }
         Expr::Literal(literal) => literal_expr(literal),
         Expr::Var(name) => {
-            let reference = format!("Self::{}", static_const_reference_name_for_type(ty, name));
+            let reference = emit::emit_expr(&self_associated_path_projection(
+                &static_const_reference_name_for_type(ty, name),
+            ));
             if matches!(shape.java_ty, JavaType::String) {
                 RustExpr::Raw(format!("{reference}.to_string()"))
             } else {
@@ -852,7 +855,10 @@ fn static_storage_initial_value_expr(
             if rust_name.is_empty() {
                 crate::slot_render::default_expr_for_slot_with_facts(shape, ctx.facts)
             } else {
-                RustExpr::Raw(format!("{rust_name}::new()"))
+                RustExpr::Call {
+                    function: Box::new(owner_associated_path_projection(&rust_name, "new")),
+                    args: Vec::new(),
+                }
             }
         }
         _ => crate::slot_render::default_expr_for_slot_with_facts(shape, ctx.facts),
@@ -2605,7 +2611,7 @@ fn delegated_constructor_with_trailing_body(
         name: "__java_self".to_string(),
         ty: None,
         value: Some(RustExpr::Call {
-            function: Box::new(RustExpr::Raw(format!("Self::{}", resolved.rust_name))),
+            function: Box::new(self_associated_path_projection(&resolved.rust_name)),
             args: lower_args_with_plan(
                 args,
                 env,
@@ -4960,7 +4966,7 @@ fn lower_switch_case_label_expr(
                 &crate::stdlib::canonical_external_receiver_type_key(name),
             );
             let field = crate::parser::to_snake_case(label_name);
-            return RustExpr::Raw(format!("{owner}::{field}"));
+            return owner_associated_path_projection(&owner, &field);
         }
     }
     lower_expr(expr, env, ctx)
@@ -11245,7 +11251,7 @@ fn apply_call_target_with_lower_context(
         && let CallTargetPlan::FallbackSelf { rust_name } = target
     {
         return RustExpr::Call {
-            function: Box::new(RustExpr::Raw(format!("Self::{rust_name}"))),
+            function: Box::new(self_associated_path_projection(rust_name)),
             args,
         };
     }
@@ -13744,7 +13750,7 @@ fn lower_static_initialized_singleton_field_for_slot(
     let rust_name =
         crate::slot_render::rust_name_for_java_named_type(concrete_java_type_name(initializer_ty)?);
     Some(RustExpr::Call {
-        function: Box::new(RustExpr::Raw(format!("{rust_name}::new"))),
+        function: Box::new(owner_associated_path_projection(&rust_name, "new")),
         args: Vec::new(),
     })
 }
