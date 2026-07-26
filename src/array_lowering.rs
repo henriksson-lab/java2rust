@@ -1,7 +1,7 @@
 use crate::array_plan::ArrayExprPlan;
 use crate::emit::emit_expr;
 use crate::java_ir::{JavaType, PrimitiveType};
-use crate::rust_ir::RustExpr;
+use crate::rust_ir::{RustExpr, RustStmt};
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 
 pub fn render_array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> RustExpr {
@@ -59,6 +59,39 @@ pub fn borrowed_array2_temporary_for_slot(
         }
         OwnershipShape::Owned | OwnershipShape::CopyValue => None,
     }
+}
+
+pub fn array2_from_rows_projection(rows: RustExpr, ownership: OwnershipShape) -> Option<RustExpr> {
+    let rows = emit_expr(&rows);
+    match ownership {
+        OwnershipShape::SharedBorrow => Some(RustExpr::Raw(format!(
+            "&ndarray::Array2::from_rows({rows})"
+        ))),
+        OwnershipShape::Owned => Some(RustExpr::Raw(format!("ndarray::Array2::from_rows({rows})"))),
+        OwnershipShape::MutableBorrow | OwnershipShape::CopyValue => None,
+    }
+}
+
+pub fn array2_index_projection(array: RustExpr, row: RustExpr, col: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{}[[{}, {}]]",
+        emit_expr(&array),
+        emit_expr(&row),
+        emit_expr(&col)
+    ))
+}
+
+pub fn array2_row_mut_assign_stmt(array: RustExpr, index: RustExpr, value: RustExpr) -> RustStmt {
+    RustStmt::Raw(format!(
+        "{}.row_mut({}).assign(&ndarray::ArrayView1::from({}));",
+        emit_expr(&array),
+        emit_expr(&index),
+        emit_expr(&value)
+    ))
+}
+
+pub fn ragged_array_outer_creation_projection(len: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!("vec![Vec::new(); {}]", emit_expr(&len)))
 }
 
 fn array_dimension_len_expr(expr: &RustExpr) -> String {
@@ -186,5 +219,66 @@ fn default_array_element_expr(element_type: &JavaType) -> Option<&'static str> {
         JavaType::Primitive(PrimitiveType::Char) => Some("'\\0'"),
         JavaType::String => Some("String::new()"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn array2_from_rows_projection_owns_static_matrix_handoff_spelling() {
+        assert_eq!(
+            emit_expr(
+                &array2_from_rows_projection(
+                    RustExpr::Raw("Self::COEF".to_string()),
+                    OwnershipShape::SharedBorrow,
+                )
+                .unwrap()
+            ),
+            "&ndarray::Array2::from_rows(Self::COEF)"
+        );
+        assert_eq!(
+            emit_expr(
+                &array2_from_rows_projection(
+                    RustExpr::Raw("Self::COEF".to_string()),
+                    OwnershipShape::Owned,
+                )
+                .unwrap()
+            ),
+            "ndarray::Array2::from_rows(Self::COEF)"
+        );
+        assert!(
+            array2_from_rows_projection(
+                RustExpr::Raw("Self::COEF".to_string()),
+                OwnershipShape::MutableBorrow,
+            )
+            .is_none()
+        );
+        assert_eq!(
+            emit_expr(&array2_index_projection(
+                RustExpr::Var("values".to_string()),
+                RustExpr::Raw("row as usize".to_string()),
+                RustExpr::Raw("col as usize".to_string()),
+            )),
+            "values[[row as usize, col as usize]]"
+        );
+        assert_eq!(
+            array2_row_mut_assign_stmt(
+                RustExpr::Var("values".to_string()),
+                RustExpr::Raw("row as usize".to_string()),
+                RustExpr::Var("replacement".to_string()),
+            ),
+            RustStmt::Raw(
+                "values.row_mut(row as usize).assign(&ndarray::ArrayView1::from(replacement));"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            emit_expr(&ragged_array_outer_creation_projection(RustExpr::Raw(
+                "base_names.len() as i32 as usize".to_string()
+            ))),
+            "vec![Vec::new(); base_names.len() as i32 as usize]"
+        );
     }
 }

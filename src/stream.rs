@@ -2,7 +2,7 @@ use crate::conversion_plan::LoweredType;
 use crate::expr_shape::{ExprShapeContext, ShapeEnv, infer_expr_shape_with_context};
 use crate::facts::FactSet;
 use crate::java_ir::{Block, Expr, JavaType, LambdaBody, PrimitiveType, Stmt};
-use crate::method_reference_shape::infer_single_input_method_reference_output_shape;
+use crate::method_reference_shape::infer_single_input_method_reference_output_shape_with_context;
 use crate::shape_projection::iteration_element_shape;
 use crate::slot_shape::RustSlotShape;
 use crate::stdlib::JavaCollectionKind;
@@ -525,8 +525,14 @@ fn infer_stream_lambda_output_shape(
     facts: &FactSet,
 ) -> RustSlotShape {
     if let StreamLambdaBody::MethodReference { target, method } = lambda.body {
-        return infer_single_input_method_reference_output_shape(target, method, input_shape)
-            .unwrap_or_else(|| input_shape.clone());
+        return infer_single_input_method_reference_output_shape_with_context(
+            target,
+            method,
+            input_shape,
+            env,
+            facts,
+        )
+        .unwrap_or_else(|| input_shape.clone());
     }
     let Some(return_expr) = lambda.body.return_expr() else {
         return input_shape.clone();
@@ -782,8 +788,14 @@ fn infer_terminal_lambda_output_shape(
     _facts: &FactSet,
 ) -> RustSlotShape {
     if let StreamLambdaBody::MethodReference { target, method } = lambda.body {
-        return infer_single_input_method_reference_output_shape(target, method, element_shape)
-            .unwrap_or_else(|| element_shape.clone());
+        return infer_single_input_method_reference_output_shape_with_context(
+            target,
+            method,
+            element_shape,
+            _env,
+            _facts,
+        )
+        .unwrap_or_else(|| element_shape.clone());
     }
     let Some(return_expr) = lambda.body.return_expr() else {
         return element_shape.clone();

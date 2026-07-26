@@ -113,26 +113,17 @@ fn lower_optional_sequence_member_receiver(
     {
         return lowered_receiver;
     }
-    RustExpr::Raw(format!(
-        "{}.as_ref().expect(\"Java null receiver\")",
-        crate::emit::emit_expr(&lowered_receiver)
-    ))
+    crate::coercion::project_optional_receiver(
+        lowered_receiver,
+        crate::coercion::OptionalReceiverProjection::Shared,
+    )
 }
 
 fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> RustExpr {
     match &plan.op {
-        MemberAccessOp::LenAsI32 => RustExpr::Raw(format!(
-            "{}.len() as i32",
-            crate::emit::emit_expr(&receiver)
-        )),
-        MemberAccessOp::Array2RowsAsI32 => RustExpr::Raw(format!(
-            "{}.nrows() as i32",
-            crate::emit::emit_expr(&receiver)
-        )),
-        MemberAccessOp::Array2ColsAsI32 => RustExpr::Raw(format!(
-            "{}.len() as i32",
-            crate::emit::emit_expr(&receiver)
-        )),
+        MemberAccessOp::LenAsI32 => crate::coercion::len_i32_projection(receiver),
+        MemberAccessOp::Array2RowsAsI32 => crate::coercion::array2_rows_i32_projection(receiver),
+        MemberAccessOp::Array2ColsAsI32 => crate::coercion::array2_cols_i32_projection(receiver),
         MemberAccessOp::StaticConstant { owner } => RustExpr::Raw(format!(
             "{owner}::{}",
             rust_associated_const_ident(&plan.member)

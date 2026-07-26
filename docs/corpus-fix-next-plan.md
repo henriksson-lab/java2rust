@@ -6,6 +6,12 @@ This plan starts from `docs/current-corpus-issue-audit.md`. The current local
 gates are green, so the next work should preserve that baseline while reducing
 real corpus failures one minimized idiom at a time.
 
+Companion design-convergence plan: `docs/rule-generalization-convergence-plan.md`
+tracks how to reduce the current rule count by replacing repeated borrow,
+clone, optional-carrier, stream, and facade ABI special cases with shared facts,
+plans, or helpers. Use that plan when choosing between a new local idiom fix and
+a broader fact/policy extraction.
+
 ## Top Design Priority: Infer Rust Facade ABI Slots
 
 Repeated corpus failures around missing `&`, `&mut`, clones, slices, optional
@@ -29,6 +35,30 @@ Rust API ABI problem, first ask whether a Rust std/core/alloc signature fact
 would produce the same lowering as the proposed special case. If yes, add or
 extract the signature fact and route the call through the shared slot planner;
 do not add a new bespoke stdlib branch.
+
+Landed receiver-ABI slot slice: `facade_receiver_slot_plan` maps
+`ReceiverAbi::{BorrowedSelf, MutBorrowedSelf, OwnedSelf, AssociatedFunction}` to
+shared receiver slots, and non-optional external facade receivers now pass
+through `plan_lowered_slot_conversion` before method-call emission. Pure
+`&self`/`&mut self` receiver requirements are still emitted as ordinary Rust
+method syntax when method-call autoref satisfies the fact; casts, owned moves,
+optional projections, and non-autoref-compatible conversions remain explicit
+slot conversions. Optional receiver projection remains on the older unwrap path
+and should be migrated only when optional receiver carriers are represented by
+the same slot plan. The current focused coverage is
+`facade_receiver_abi_maps_to_receiver_slot_shapes`,
+`facade_borrowed_self_receiver_uses_receiver_slot_conversion`,
+`class_literal_get_class_loader_uses_platform_facade`,
+`cargo test facade_abi --test slot_shape_design --quiet`, and
+`cargo test receiver --test idiom_gaps --quiet`.
+
+Landed fallible facade-support slice: external facade support return types now
+wrap `Result<..., JavaException>` using both user `FactSet` effects and builtin
+external-pack effects after ABI/custom return type selection. This keeps
+try-with-resources cleanup (`input.close()?`, `output.close()?`) and JDK
+`Files.newInputStream/newOutputStream` support aligned with the selected
+callable facts instead of re-deriving fallibility from a partial fact source.
+Focused coverage: `documents_try_with_resources_copy_gap`.
 
 Highest-priority expansion: make optional wrapper construction a first-class
 slot conversion/fact result, not a local `Some(...)` rewrite. The current
@@ -68,6 +98,78 @@ same actual-shape construction path to map lookups, field getters, facade
 optional returns, and any remaining nullable helper that still manually chooses
 between `Some(value)`, `Some(&value)`, `.as_ref()`, or `.as_deref()`.
 
+Optional assignment rewrap follow-up: assignment values that arrive as
+already-rendered `Some(inner)` now unwrap the element and re-enter
+`SlotConversionPlan::OptionalConstruction` instead of formatting a new
+`Some(...)` wrapper in `lower.rs`. The helper has a preconverted-element mode
+for compatibility paths that already performed raw/generic element adaptation,
+so optional list ternaries and `FileInputStream -> InputStream` facade upcasts
+avoid double coercion while wrapper construction is still centralized. Verified
+with `optional_assignment_rewrap_uses_optional_construction_plan`,
+`file_input_stream_constructor_upcasts_into_optional_input_stream_slot`,
+`optional_ternary_list_assignment_wraps_once_without_runtime_downcast`, and
+`cargo test optional_ --test idiom_gaps --quiet`.
+Present-value optional construction cleanup: `lower_present_expr_for_optional_target`
+now delegates both ternary and single-expression present branches to
+`construct_optional_value_for_target` after lowering the element into the
+planned construction element slot. This removes the remaining local
+`LoweredSlotExprConversionPlan { OptionalConstruction(...) }` assembly from the
+present-value helper while preserving indexed-borrow and ternary element-slot
+selection.
+Array-access optional construction cleanup: `lower_array_access_expr_for_slot`
+now uses the same `construct_optional_value_for_target` helper when an indexed
+read feeds an optional borrowed target, preserving the conservative indexed
+element actual shape while keeping optional wrapper construction on the shared
+path.
+Optional construction boundary cleanup: the concrete
+`LoweredSlotExprConversionPlan { SlotConversionPlan::OptionalConstruction(..) }`
+assembly now lives in `conversion_lowering.rs` rather than `lower.rs`.
+Expression lowering may still infer actual element shape and choose branch
+slots, but optional wrapper application is a conversion-lowering concern.
+Optional assignment adaptation cleanup: `wrap_optional_assignment_value_if_needed`
+now delegates already-optional result unwrapping, legacy rendered `Some(...)`
+compatibility, `None` idempotence, and fallback slot conversion to
+`conversion_lowering::adapt_optional_assignment_value_for_target`. Lowering
+still chooses the actual expression shape from source/fact context, but it no
+longer parses optional wrapper renderings locally.
+Remaining cleanup should continue replacing nullable call sites that choose
+`.as_ref()`, `.as_deref()`, `Some(...)`, or clone recovery locally with calls
+through these shared conversion helpers or direct slot plans.
+
+Rendered compatibility centralization follow-up: same-call alias snapshots still
+decide in `lower.rs` because they need argument aliasing and slot-shape context,
+but the rendered replacement table now lives in `coercion.rs` as
+`snapshot_rendered_shared_borrow_argument`. This keeps the compatibility
+spellings for `&name`, `Some(&name)`, `.as_slice()`, and `.as_str()` snapshots
+beside clone/borrow rendering helpers instead of inside argument lowering.
+Verified with `rendered_string_heuristics_have_centralization_guardrails`,
+`cargo test same_call --test idiom_gaps --quiet`, and
+`cargo test alias --test idiom_gaps --quiet`.
+
+Direct clone idempotence follow-up: `lower.rs` no longer owns a local
+`.clone()`/`.clone_box()` suffix table for direct clone idempotence; it calls
+`rendered_expr_has_direct_clone_recovery` from `coercion.rs`, beside the broader
+clone-recovery idempotence helper. Verified with
+`rendered_string_heuristics_have_centralization_guardrails`,
+`cargo test clone_recovery --test slot_shape_design --quiet`, and
+`cargo test clone --test idiom_gaps --quiet`.
+Audited clone projection follow-up: self-cast facade boundaries and owned
+receiver-field recoveries now call `coercion::apply_audited_clone_recovery`
+instead of formatting `self.clone()/* TODO(...) */` or
+`expr.clone()/* TODO(...) */` in `lower.rs`. Lowering still decides when a Java
+self/field value crosses an owned facade boundary, but the Rust clone spelling
+and audit marker live with the shared clone recovery policy.
+
+Landed optional-carrier follow-up: raw-erasure casts into optional targets now
+route through `lower_present_expr_for_optional_target`, so typed optional
+collection slots preserve the target element shape instead of falling back to
+runtime downcasts. Present ternaries feeding optional targets lower the branch
+value once and apply `SlotConversionPlan::OptionalConstruction` around the
+whole conditional, producing `Some(if ... { element } else { element })`
+rather than branch-local optional wrappers. Unknown or already-optional branch
+actuals inherit the target element shape before construction, which keeps
+nullable list and borrowed-array cases on the shared slot path.
+
 Map lookup follow-up: `Map.get(...)` lowering now handles optional target slots
 as an optional borrowed carrier (`OptionalElementBorrow`) and routes adaptation
 through `plan_lowered_slot_conversion`, preserving Rust `HashMap::get` missing
@@ -75,9 +177,22 @@ key semantics instead of forcing a Java null-receiver unwrap. The call-argument
 optional shared-borrow adapter now asks the call planner whether an argument is
 already an optional borrowed native collection result before adding `.as_ref()`,
 so `values.get(key.as_str())` can flow directly into `Option<&T>` parameters.
-The remaining map work is owned recovery (`Option<&T>` to `Option<T>`) and
-optional element view changes that still need to be proven by slot facts rather
-than by rendered-expression cleanup.
+Map-owned recovery follow-up: `Map.get(...).toArray(...)` now treats the
+lookup result as `LoweredType::OptionalElementBorrow` and recovers the owned
+collection through `plan_lowered_slot_conversion` before final target-slot
+adaptation, so clone/null unwrap policy comes from borrowed-element facts rather
+than a local `.expect(...).clone()` rendering. Remaining map work is optional
+element view changes that still need to be proven by slot facts rather than by
+rendered-expression cleanup.
+
+Latest map/optional argument slice: borrowed optional call targets now use a
+shared `lower_optional_argument_for_borrowed_optional_target` helper before the
+legacy optional-array adapter. The helper preserves native collection carriers
+that already match `Option<&T>` and only asks the slot converter for projection
+when the actual optional storage needs a borrowed-element view. This fixed the
+recurring `values.get(...).as_ref()` over-borrow pattern while still allowing
+`Option<String>` to feed `Option<&str>` through the centralized `as_deref()`
+normalization.
 
 Optional array/slice follow-up: optional array arguments and expression slots
 that target borrowed slice views now enter the shared `OptionalElementBorrow`
@@ -105,9 +220,32 @@ proven clone recovery. Non-self optional receiver field element recovery now
 follows the same split: unwrap the nullable receiver, treat optional field
 storage as an `OptionalElementBorrow` carrier, and let
 `plan_lowered_slot_conversion` choose `.as_ref()`, `.cloned()`, and
-null-receiver unwraps. Remaining field work should convert any non-element
-optional receiver views to explicit carrier/slot plans so clone, unwrap, and
-view choices are selected by facts rather than by local string construction.
+null-receiver unwraps. Latest field-recovery cleanup: reused optional locals
+that came from nullable fields now re-enter the same lowered
+`OptionalElementBorrow` carrier path before owned return/argument recovery,
+instead of formatting `.as_ref().unwrap().clone()` locally. Clone-recovery
+idempotence also recognizes the owned value produced by
+`.cloned().expect("Java null receiver")`, preventing later argument reuse from
+adding a second audited clone. Follow-up cleanup: shared self-field and
+borrowed receiver-field owned recovery now use the shared audited clone
+coercion helper, while optional field element recovery feeds the field carrier
+through `apply_optional_field_borrowed_carrier_to_slot`. Reused owned values
+wrapped back into optional targets now call `construct_optional_value_for_target`
+after clone recovery instead of formatting `Some(value.clone())` locally.
+Reused optional values in string/display slots now call
+`JavaDisplayPlan::OptionalValue` instead of formatting the optional `"null"`
+display map in `lower.rs`, keeping nullable display policy centralized in the
+coercion layer. Clone recovery in lowering now calls the expression-level
+`apply_audited_clone_recovery` helper instead of the render-only
+`render_audited_clone_recovery` API, including varargs, external-into child
+arguments, callback preservation, and deferred constructor field assignments.
+Borrowed owned string-literal temporary hoisting now asks the coercion layer for
+the temporary projection plan, so `lower.rs` no longer parses
+`Some(&"...".to_string())` or `&"...".to_string()` directly when preserving
+borrowed literal lifetimes across stored call results.
+Remaining field work should convert any non-element optional receiver views to
+explicit carrier/slot plans so clone, unwrap, and view choices are selected by
+facts rather than by local string construction.
 
 Typed external field support follow-up: shared support merging now keeps
 associated constants from alias/target facade pairs type-correct. When an
@@ -119,6 +257,24 @@ same name. This preserves the Java-facing alias while avoiding Rust value
 construction from a type alias. Verified with
 `shared_support_merger_preserves_associated_constants` and
 `static_owner_name_does_not_collapse_to_same_named_instance_field`.
+
+JDK collection static projection cleanup: `Arrays.asList`, `Arrays.equals`, and
+`Collections.{emptyList,emptySortedSet,singleton,singletonList,singletonMap,nCopies}`
+lowering now call `coercion` projection helpers. Call lowering still selects the
+native Java collection method and supplies conservative arity fallbacks, while
+coercion owns the Rust expression shapes for vector literals, equality,
+empty collections, singleton sets/lists/maps, and repeated vectors.
+
+Buffer discard projection cleanup: `Buffer.put(...)` lowering now delegates the
+discard-block Rust spelling to `coercion::discard_value_projection`, keeping the
+instance-method dispatcher focused on Java method selection and malformed-arity
+fallbacks.
+
+Erased object boxing cleanup: `new Object(...)` lowering and borrowed facade
+returns now call `coercion::erased_object_box_projection` for the
+`Box<dyn std::any::Any>` handoff shape. This keeps call lowering from owning the
+Rust erased-object ABI spelling directly and gives later facade ABI facts a
+single projection point to replace or specialize.
 
 Inherited source-context import follow-up: inherited method bodies now seed
 static type aliases from support and source-summary context imports before
@@ -155,6 +311,15 @@ charset overloads currently share the lossy byte decoding path used by the
 existing range helper, while the charset argument itself remains a mechanical
 ABI concern handled by the call/constructor argument planner. Verified with
 `byte_array_local_with_spaced_dimensions_feeds_string_range_constructor`.
+
+Corpus cleanup slice: abstract classes that implement interfaces now emit the
+trait impl even when some interface methods are abstract/missing; the generated
+trait method uses the existing panic fallback while the inherent abstract stub
+keeps direct calls compilable. Qualified nested `Builder` types keep their
+owner-qualified Rust struct names and no longer emit an ambiguous top-level
+`pub type Builder` alias. Spark noop boundary tests now accept the explicit
+erased handoff shape while still requiring external-boundary diagnostics and
+rejecting stream-local lowering drift.
 
 Operational rule: do not build a broad handwritten Rust stdlib model in
 `src/stdlib.rs`. Add std/core/alloc coverage as small signature-fact clusters
@@ -254,6 +419,67 @@ Immediate std/core/alloc signature-fact migration queue:
 5. Audit existing std/core/alloc branches after each cluster lands. If a branch
    only re-states a Rust function signature, replace it with the fact-backed
    slot plan and delete or mark the branch as a temporary compatibility bridge.
+
+Current remaining refactor priority from the parallel audit:
+
+1. Extend the new call-boundary receiver ABI plan to optional receivers.
+   Non-optional `ExternalFacadeReceiver` lowering now carries
+   `ReceiverAbi::{BorrowedSelf, MutBorrowedSelf, OwnedSelf, FreeFunction,
+   AssociatedFunction}` through `facade_receiver_slot_plan` and shared slot
+   conversion. Optional call receiver adaptation now passes explicit
+   `OptionalReceiverProjection` variants to `coercion::project_optional_receiver`
+   instead of formatting `.as_ref()/.as_mut()` from string access names. The
+   legacy call-receiver path still uses unchecked `.unwrap()` projection
+   variants to avoid broad output churn; remaining receiver work is to represent
+   these optional receiver carriers directly in the same typed slot plan as
+   facade receiver ABI. Native collection optional receivers now use
+   `coercion::OptionalReceiverProjection::{SharedUnchecked, MutableUnchecked}`
+   rather than formatting local `"as_ref"`/`"as_mut"` access names before
+   unwrap.
+2. Move optional shared/mutable projection decisions out of local rendered
+   suffix checks in `lower.rs`. The next target functions are
+   same-call mutable alias checks and any remaining optional receiver/view
+   branches. Map-key borrowing now delegates projection policy to
+   `coercion::normalize_map_key_borrow_projection`; the replacement pattern
+   should continue to be typed optional-element projection plans consumed by
+   slot conversion.
+   Latest progress: `LoweredType::optional_element_borrow_from_option_shape`
+   now owns optional-element carrier construction in `conversion_plan.rs`;
+   `lower.rs` routes optional argument, field, and reused-optional carriers
+   through that API instead of constructing the enum directly. The older
+   `adapt_optional_shared_borrow_argument`/`adapt_optional_mut_borrow_argument`
+   bridge has also been removed. Same-call mutable alias handling now has an
+   explicit local `SameCallArgumentAliasPlan` that separates AST/use-order
+   detection from applying coercion-owned snapshot rendering; keep this local
+   until global semantic analysis models call argument sequencing.
+3. Keep literal/clone/display compatibility parsing centralized in
+   `coercion.rs` while raw `RustExpr` remains common. The latest slice moved
+   borrowed owned string-literal temporary projection there. Literal slot
+   behavior for borrowed string-view arguments/returns and Java numeric
+   char-code literals now uses `coercion::LiteralSlotPlan`; lowering only
+   extracts literal expressions and asks for the shared plan.
+4. Stream lowering still has a few borrowed-string/rendered fallback helpers.
+   Retire those only after ordinary calls expose the same receiver/argument
+   slot plan to stream lambdas and method references. Latest cleanup:
+   stream borrowed-string argument fallback now uses
+   `coercion::BorrowedStringViewProjection` for already-view detection and
+   local `.as_str()` rendering, leaving stream lowering responsible only for
+   lambda/local binding context. Stream source iteration now maps
+   `StreamSourceIteration` into `coercion::SequenceIterationProjection` and
+   calls `render_sequence_iteration_source`, so optional sequence receiver
+   unwrapping plus `.iter()`/`.into_iter()` spelling is no longer owned by
+   `stream_lowering.rs`. Nested stream subpipeline owned-source iteration now
+   uses the same shared renderer as top-level stream sources. Optional
+   non-null stream filtering now calls
+   `coercion::render_optional_non_null_filter_map`, and lambda collection
+   flat-map source iteration reuses `render_sequence_iteration_source` instead
+   of selecting `.iter()`/`.into_iter()` locally. Borrowed collection
+   method-reference flat-map rendering now calls
+   `coercion::render_borrowed_collection_flat_map`, keeping the `.iter()`
+   spelling outside `stream_lowering.rs`. Stream lambda parameter dereference
+   spelling (`*item`, `**item`, and receiver-parenthesized forms) now goes
+   through `coercion::StreamLambdaParamProjection`, leaving stream lowering to
+   choose the semantic lambda value shape.
 
 Current implementation note, 2026-07-23:
 
@@ -529,7 +755,14 @@ Current implementation note, 2026-07-23:
   Java semantics remain precise: `Map.get` keeps Java null/optional handling,
   `List.addAll` keeps Java collection-extension behavior, and receiver
   generics still provide the semantic Java argument type for optional unwraps
-  and dyn-trait collection elements. Focused evidence now asserts both the
+  and dyn-trait collection elements. The native collection renderer now
+  delegates `size`, `keySet`, `keySet`-to-`Set`, `toArray`, and
+  `iterator` projection spelling to `coercion::{len_i32_projection,
+  owned_map_keys_vec_projection, owned_map_keys_set_projection,
+  owned_collection_to_vec_projection, java_iterator_from_collection_projection}`,
+  keeping `call_lowering.rs`/`lower.rs` focused on selecting the Java collection
+  operation and target collection shape rather than formatting cloned Rust
+  views. Focused evidence now asserts both the
   selected `CallableKey`/`FacadeAbiFact` rows and that generated idioms use
   borrowed `HashMap` string keys like `key.as_str()` without double-borrowing.
 - Commons Math `Localizable` is now represented by built-in external-pack
@@ -2794,6 +3027,255 @@ Current status:
   red in this dirty checkout with 31 unrelated failing in-flight idiom slices,
   so use focused regressions plus corpus evidence until that suite is
   re-baselined.
+- 2026-07-26 indexed projection cleanup: array/vector access lowering now asks
+  `shape_projection::indexed_read_shape_for_access_with_facts` for the element
+  slot shape, including direct sequence receivers and `Optional<Array<T>>`
+  receivers. The remaining borrow-place rendering still lives in `lower.rs`
+  because it depends on the target slot, but type/capability/fact projection for
+  indexed reads is centralized before emission.
+- 2026-07-26 optional receiver slot-plan cleanup: call planning now owns
+  `OptionalReceiverSlotPlan`, carrying the executable
+  `coercion::OptionalReceiverProjection` selected from optional receiver
+  mutability plus the current legacy unchecked policy and mapping to the same
+  borrowed receiver slots used by facade receiver ABI. `lower.rs` still
+  decides whether a receiver expression is actually optional from local/field
+  shape context, but call receiver adaptation now projects the optional carrier,
+  attaches the projected receiver to an explicit `LoweredType` element shape,
+  and applies `plan_lowered_slot_conversion` against the planned receiver slot.
+  A method-autoref gate preserves Rust receiver autoderef for ordinary
+  `String`, `Box<dyn Trait>`, and facade object method calls, so the current
+  checked/unchecked null spelling remains stable while explicit receiver
+  conversions still flow through the shared slot plan instead of a
+  receiver-only formatting branch. Follow-up: nullable `Map.entrySet()` lowering
+  now uses the same optional receiver slot-plan adapter before rendering
+  `.iter()`, and enhanced-for iterable unwrapping does the same before loop
+  rendering. Optional sequence `get(...)` and optional map `get_mut(...)`
+  mutation lowering now use the same adapter before indexing/mutation receiver
+  rendering. Optional receiver field access, including `.length`, now uses the
+  adapter before field/member rendering too. This leaves `lower.rs` with no
+  direct optional receiver projection calls outside the shared adapter while
+  preserving existing iterator/index/mutation/field output.
+- 2026-07-26 optional receiver projection plan cleanup: `OptionalReceiverSlotPlan`
+  now carries the executable `coercion::OptionalReceiverProjection` directly,
+  removing the lowerer-local `optional_receiver_projection_from_plan` bridge.
+  Call planning still selects the projection mode from mutability and legacy
+  null-check policy, but lowering no longer translates a second planning-only
+  enum before calling `project_optional_receiver`.
+- 2026-07-26 parse receiver cleanup: native parse-call lowering now uses
+  `coercion::render_parse_receiver` for the remaining rendered `&arg`
+  compatibility cleanup before emitting `.parse::<T>()`. This keeps the
+  parse-specific borrowed argument spelling beside the other coercion
+  compatibility helpers instead of in `call_lowering.rs`.
+- 2026-07-26 primitive parse projection follow-up: `Integer.parseInt`,
+  `Float.parseFloat`, and `Double.parseDouble` now call
+  `coercion::primitive_parse_projection` for the full Rust
+  `.parse::<T>().unwrap()` expression. Call lowering still owns Java overload
+  arity checks and primitive target selection, while coercion owns the rendered
+  receiver cleanup plus parse-call spelling.
+- 2026-07-26 String.join projection cleanup: Java `String.join` lowering now
+  delegates vararg `.to_string()` idempotence, literal extraction, and delimiter
+  borrowed-string projection to `coercion::render_string_join_vararg_value` and
+  `coercion::string_join_delimiter_projection`. Call lowering still selects the
+  Java join shape, but the rendered Rust compatibility spellings live with the
+  other coercion helpers.
+- 2026-07-26 String.join varargs follow-up: the full Rust
+  `vec![...].join(delimiter)` projection now lives in
+  `coercion::string_join_varargs_projection`; call lowering only groups the Java
+  vararg arguments and delegates the rendered spelling.
+- 2026-07-26 String.format fallback cleanup: non-literal Java `String.format`
+  support calls now render fallback display arguments through
+  `coercion::render_string_format_arg_value` instead of formatting
+  `{}.to_string()` in `call_lowering.rs`. This preserves the current generated
+  Rust while keeping string display compatibility spelling in the coercion
+  layer.
+- 2026-07-26 String.format projection follow-up: `String.format` now delegates
+  empty-argument fallback, non-literal `java_string_format(..., vec![...])`
+  runtime calls, Java-to-Rust literal format conversion, and final `format!(...)`
+  emission to `coercion::string_format_projection`. Call lowering only selects
+  the Java static method target.
+- 2026-07-26 native extend recovery cleanup: borrowed sequence sources feeding
+  native collection `extend` now render recovery iterators through
+  `coercion::borrowed_sequence_extend_arg`. Call lowering still emits the
+  native `extend` call, while borrowed-element recovery spellings such as
+  `.iter().map(|v| v.to_string())`, `.copied()`, and `.cloned()` live with the
+  shared coercion policy.
+- 2026-07-26 Java string helper receiver cleanup: regex/hash/split runtime
+  helper receivers now use `coercion::string_helper_receiver_projection` for
+  the `.as_str()` view spelling. Call lowering still selects the Java runtime
+  helper, while the rendered Rust receiver projection lives with the shared
+  string coercion helpers.
+- 2026-07-26 Java string-view argument cleanup: string helper arguments that
+  need a borrowed string view now call `coercion::render_string_view_argument`
+  instead of a private `call_lowering.rs` helper. `String.indexOf`,
+  `substring`, and compare-style runtime helpers still keep Java arity/helper
+  selection in call lowering, while coercion owns the borrow/idempotence policy
+  for Rust string-view arguments.
+- 2026-07-26 Java string index/substring projection cleanup:
+  `String.indexOf(...)` and `String.substring(...)` lowering now call
+  `coercion::string_index_of_projection` and
+  `coercion::string_substring_projection`. Call lowering still validates Java
+  arity and supplies the default substring end expression, while coercion owns
+  the Rust runtime helper-call shape and string-view argument projection.
+- 2026-07-26 Java string runtime-helper projection cleanup: native
+  `String.hashCode`, regex replace/matches, `split`, and compare-style helpers
+  now call named coercion projections such as
+  `string_hash_code_projection`, `string_matches_projection`,
+  `string_split_projection`, and `string_compare_to_projection`. Call lowering
+  still selects Java overload/arity behavior, while coercion owns the concrete
+  `java_string_*` runtime helper-call shapes.
+- 2026-07-26 Java byte-array String constructor projection cleanup:
+  `new String(byte[])` and byte-range constructor lowering now call
+  `coercion::string_from_bytes_projection` and
+  `coercion::string_from_byte_range_projection`. Constructor lowering still
+  detects the Java `String::new` arity/owner shape, while coercion owns the
+  shared borrow projection and `java_string_from_bytes*` helper-call shapes.
+- 2026-07-26 Java string byte-view cleanup: `String.getBytes()` still lowers as
+  the Java byte-array semantic helper path, but the Rust byte-view expression
+  now lives in `coercion::string_get_bytes_projection` instead of being rendered
+  directly in call lowering.
+- 2026-07-26 boxed primitive value cleanup: boxed numeric value methods still
+  select their Java source/target primitive semantics in call lowering, but the
+  Rust primitive cast spelling now lives in
+  `coercion::primitive_number_value_projection`.
+- 2026-07-26 boxed primitive hash/compare cleanup: boxed primitive
+  `hashCode()` and `compareTo(...)` lowering now calls
+  `coercion::primitive_hash_code_projection` and
+  `coercion::primitive_compare_to_projection`. Call lowering still selects the
+  Java boxed primitive source and validates `compareTo` arity, while coercion
+  owns the Rust primitive hash arithmetic and runtime compare helper spelling.
+- 2026-07-26 math numeric projection cleanup: `Math.log`, `Math.exp`, and
+  `Math.toIntExact` still keep Java method selection and diagnostics in call
+  lowering, while their Rust numeric cast/projection spelling now goes through
+  `coercion::primitive_f64_method_projection` and
+  `coercion::primitive_number_value_projection`.
+- 2026-07-26 JDK math/object projection cleanup: `Math.max`, `Math.min`, and
+  `Objects.{equals,nonNull,isNull}` lowering now call
+  `coercion::{math_max_projection, math_min_projection,
+  objects_equals_projection, objects_non_null_projection,
+  objects_is_null_projection}`. Call lowering still performs Java arity
+  validation and method selection, while coercion owns the Rust expression
+  shapes for `std::cmp` calls, equality, and optional null checks.
+- 2026-07-26 Java length projection cleanup: Java string `length()` and
+  substring default-end lowering now use `coercion::len_i32_projection` for the
+  Rust `len() as i32` spelling. Call lowering still owns Java string method
+  semantics; the integer length projection is shared.
+- 2026-07-26 static numeric projection cleanup: `Double.isNaN`/`Float.isNaN`
+  and `System.exit` still keep Java static-call semantics and diagnostics in
+  call lowering, while Rust `is_nan()` and exit-status integer projection now
+  route through coercion helpers.
+- 2026-07-26 JDK platform projection cleanup: `File.exists`, `System.exit`,
+  and `Thread.sleep` lowering now call
+  `coercion::{file_exists_projection, system_exit_projection,
+  thread_sleep_millis_projection}`. Call lowering still validates Java arity and
+  selects the JDK method, while coercion owns the concrete Rust platform-call
+  spelling and any primitive status projection.
+- 2026-07-26 stream length projection cleanup: stream lambda field-access
+  lowering for Java array/string `.length` now reuses `coercion::len_i32_projection`
+  instead of rendering `len() as i32` locally. Stream lowering still owns lambda
+  binding context and parenthesization.
+- 2026-07-26 lower member-access length follow-up: optional sequence length,
+  static-final array length, nested-slice row length, and optional receiver
+  field length paths in `lower.rs` now also use `coercion::len_i32_projection`.
+  Lowering still owns member-access semantics, but the Rust `len() as i32`
+  spelling is shared across ordinary calls, stream lowering, and expression
+  lowering.
+- 2026-07-26 optional member receiver projection cleanup: member-access
+  lowering still detects optional sequence/ndarray receivers that need Java
+  null-receiver unwrapping, but emitted `.as_ref().expect(...)` spelling now
+  comes from `coercion::project_optional_receiver`.
+- 2026-07-26 ndarray length projection follow-up: `Array2` row/column length
+  rendering now uses `coercion::array2_rows_i32_projection` and
+  `coercion::array2_cols_i32_projection` from both `lower.rs` and
+  `access_lowering.rs`, so ndarray-specific `.nrows() as i32` spelling is
+  centralized with the other length projections.
+- 2026-07-26 static matrix handoff cleanup: static-final two-dimensional Java
+  array handoff into ndarray slots now uses
+  `array_lowering::array2_from_rows_projection`, keeping
+  `ndarray::Array2::from_rows(...)` spelling with array projection helpers
+  instead of inside `lower.rs`.
+- 2026-07-26 ndarray element access cleanup: read/write Java
+  `matrix[row][col]` lowering still selects ndarray vs nested-slice semantics
+  in `lower.rs`, but the emitted `matrix[[row, col]]` projection now comes from
+  `array_lowering::array2_index_projection`.
+- 2026-07-26 ndarray row replacement cleanup: Java `matrix[row] = values`
+  lowering still detects ndarray row assignment in `lower.rs`, but the emitted
+  `row_mut(...).assign(&ndarray::ArrayView1::from(...))` statement now comes
+  from `array_lowering::array2_row_mut_assign_stmt`.
+- 2026-07-26 ragged array creation cleanup: non-ndarray two-dimensional Java
+  array creation still selects ragged `Vec<Vec<_>>` semantics in `lower.rs`,
+  but the emitted `vec![Vec::new(); len]` outer-vector projection now comes
+  from `array_lowering::ragged_array_outer_creation_projection`.
+- 2026-07-26 sequence get projection cleanup: Java sequence `get(index)`
+  lowering still selects indexed sequence semantics and borrowed element shapes
+  in `lower.rs`, but the emitted
+  `.get(index).expect("Java index out of bounds")` projection now comes from
+  `coercion::sequence_get_expect_projection`.
+- 2026-07-26 map get projection cleanup: specialized map lookup paths in
+  `lower.rs` still own Java map semantics, optional-element carriers, primitive
+  unboxing, and collection mutation selection, but raw `.get(...)`,
+  `.get(...).expect(...)`, `.get_mut(...).expect(...)`, and copied-primitive
+  optional unwrap spellings now come from `coercion` projections.
+- 2026-07-26 erased-object borrowed downcast cleanup: exact erased-object cast
+  lowering still decides whether the carrier is optional and whether the target
+  slot is a shared borrow, but the emitted `downcast_ref::<T>().expect(...)`
+  spelling now comes from `coercion::erased_object_borrowed_downcast_ref_projection`.
+- 2026-07-26 native sort projection cleanup: statement planning still selects
+  `Arrays.sort`/`Collections.sort` mutator semantics in `lower.rs`, but plain
+  `.sort()` and comparator-backed `.sort_by(...)` Rust spellings now come from
+  `coercion::{collection_sort_projection, collection_sort_by_comparator_projection}`.
+- 2026-07-26 native array fill projection cleanup: statement planning still
+  selects `Arrays.fill` mutator semantics in `lower.rs`, but emitted
+  `.fill(value)` Rust spelling now comes from
+  `coercion::array_fill_projection`.
+- 2026-07-26 owned sequence projection cleanup: ndarray row recovery and
+  static const array recovery in `lower.rs` now use
+  `coercion::to_owned_sequence_projection` instead of formatting `.to_vec()`
+  locally. Lowering still decides when immutable static data or ndarray rows
+  should become owned Java arrays, while coercion owns the Rust owned-sequence
+  projection and idempotence spelling.
+- 2026-07-26 map-entry iteration cleanup: enhanced-for lowering over
+  `Map.entrySet()` now uses `coercion::render_sequence_iteration_source` for
+  borrowed map iteration instead of formatting `.iter()` locally. Lowering still
+  owns Java map-entry semantics and optional receiver unwrapping, while the
+  Rust sequence iteration spelling is shared with stream/source iteration.
+- 2026-07-26 map-entry next/access cleanup: `Map.Entry` accessor lowering still
+  recognizes Java `entrySet().iterator().next().getKey/getValue` shapes in
+  `lower.rs`, but iterator exhaustion and tuple-field Rust spellings now come
+  from `coercion::{iterator_next_expect_projection, tuple_field_projection}`.
+- 2026-07-26 enhanced-for iterator projection cleanup: enhanced-for lowering
+  still decides when Java loop variables require cloned owned strings or copied
+  primitive/static string elements, but the Rust `.iter().cloned()` /
+  `.iter().copied()` spellings now come from `coercion` sequence projections.
+- 2026-07-26 optional borrowed receiver cleanup: call lowering now represents
+  already-borrowed optional receivers with
+  `coercion::OptionalReceiverProjection::Borrowed` instead of formatting
+  `.expect("Java null receiver")` locally. This keeps Java null-check receiver
+  spelling beside the other optional receiver projections while preserving the
+  lowering-side decision about when a native collection receiver is already an
+  optional element borrow.
+- 2026-07-26 erased-object display cleanup: Java `Object.toString()` fallback
+  lowering and native `Object.toString` call lowering now call
+  `JavaDisplayPlan::ErasedObject` instead of formatting
+  `java_erased_object_to_string(&...)` directly in `lower.rs` or
+  `call_lowering.rs`. The lowerer still decides when a source receiver lacks an
+  overriding `toString`, while the Rust erased-display helper spelling remains
+  centralized with string concat and display segment policy.
+- 2026-07-26 formatted display cleanup: native `DecimalFormat.format(...)`
+  lowering now calls `JavaDisplayPlan::FormatValue` instead of rendering the
+  display operand and appending `.to_string()` in `call_lowering.rs`. The
+  coercion layer owns the arithmetic-display cleanup plus final Rust string
+  projection, while call lowering keeps only the Java overload arity check.
+- 2026-07-26 string char-array projection cleanup: native
+  `String.toCharArray()` lowering now calls
+  `coercion::string_to_char_array_projection` instead of formatting
+  `.chars().collect::<Vec<char>>()` in `call_lowering.rs`. Call lowering still
+  selects Java `String.toCharArray` semantics, while coercion owns the Rust
+  string-to-character-vector projection spelling.
+- 2026-07-26 string char-at projection cleanup: native `String.charAt(...)`
+  lowering now calls `coercion::string_char_at_projection`, which composes the
+  existing `IndexToUsizeProjection::JavaStringCharAt` rule with the Rust
+  `.chars().nth(...).expect(...)` spelling. Call lowering still validates Java
+  arity, while coercion owns the index projection and bounds-panic expression.
 - 2026-07-24 external typed-return follow-up: returned-call usage facts now
   carry arity and resolved call metadata, so signature constraints can prefer
   the resolved external owner key over an erased Rust receiver shape. When an
@@ -2845,6 +3327,11 @@ Current status:
   internal optional-field recovery before slot conversion. The focused
   constructor nested-argument regression now accepts the shared `.as_ref()
   .cloned().expect(...)` spelling and still rejects cloning `__java_self`.
+  Constructor self-temporary compatibility checks now route through
+  `coercion::rust_expr_mentions_constructor_self_temporary` and
+  `coercion::constructor_self_field_replacement`, so `lower.rs` no longer
+  renders expressions to search for `__java_self` or strips `.clone()` from
+  self-field replacement locally.
   Follow-up: move constructor/source-field optional reads fully onto typed
   `LoweredType::OptionalElementBorrow` plus `plan_lowered_slot_conversion`, and
   audit/removal candidates for specialized borrow spelling rules once Rust
@@ -2870,6 +3357,380 @@ Current status:
   the intended semantics under newer shared slot-conversion spelling. Their
   tests now assert the behavior rather than obsolete exact spellings or global
   support-surface substrings.
+- Stream method-reference parity slice: static Java method references inside
+  stream lambdas now reuse `CallTargetPlan` plus `ArgumentLoweringPlan` for
+  single-input known native Java calls. `Integer::parseInt` and
+  `Double::parseDouble` method references lower through the same parse helpers
+  and borrowed string argument slots as ordinary calls, avoiding stream-local
+  `Integer::parse_int(...)`/`Double::parse_double(...)` fallback support calls.
+  Verified with `stream_static_method_references_use_call_target_plan`,
+  `cargo test stream --test fixtures`, `cargo fmt --check`,
+  `cargo check --quiet`, `git diff --check`,
+  `cargo test corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary --test idiom_gaps -- --exact`,
+  `cargo test --test idiom_gaps --quiet` with 499 passing tests in 527.51s, and
+  `cargo build --release --quiet --bin new-java2rust`.
+- Stream unbound String method-reference follow-up: `String::length`,
+  `String::trim`, and `String::isEmpty` stream method references now route
+  rendering and output-shape inference through the ordinary native instance
+  call planner. This keeps `String::trim` as a borrowed string-view result until
+  collection recovery, where shared borrowed-element conversion emits
+  `map(|v| v.to_string())` instead of invalid `.cloned()` recovery. Verified
+  with `stream_string_method_references_use_call_target_plan`,
+  `stream_plan_lowers_method_references_in_map_and_map_to_int`,
+  `cargo test stream --test fixtures`,
+  `cargo test method_reference --test slot_shape_design --quiet`,
+  `cargo fmt --check`, `cargo check --quiet`, `git diff --check`,
+  `cargo test method_reference --test idiom_gaps --quiet`,
+  `cargo test --test idiom_gaps --quiet` with 499 passing tests in 526.48s, and
+  `cargo build --release --quiet --bin new-java2rust`.
+- Boxed primitive method-reference follow-up: `Integer::intValue`,
+  `Double::doubleValue`, and `Float::floatValue` now participate in the same
+  unbound native instance call-plan path as `String` method references for both
+  stream rendering and output-shape inference. The stream receiver adapter
+  dereferences borrowed iterator items before applying the primitive-number
+  target, so `counts.stream().mapToInt(Integer::intValue).sum()` is no longer
+  handled by the legacy method-reference fallback. The follow-up primitive
+  number-value target now retains known source primitive facts, so no-op wrapper
+  unboxing returns the receiver directly while real primitive conversions still
+  emit casts. Verified with
+  `stream_plan_lowers_method_references_in_map_and_map_to_int`,
+  `cargo test method_reference --test slot_shape_design --quiet`,
+  `cargo test method_reference --test idiom_gaps --quiet`,
+  `boxed_primitive_constructors_lower_to_values`, `cargo test primitive --test
+  idiom_gaps --quiet`, and `cargo test stream --test fixtures`.
+- Stream `Object::toString` follow-up: method references such as
+  `names.stream().map(Object::toString)` now probe the ordinary native instance
+  call planner using the stream element's inferred Java type as the receiver.
+  The rendered Rust stays compatible with the previous borrowed-item output
+  (`(*value).to_string()` for borrowed `String` elements), but the stream path
+  no longer needs the generic method-reference fallback when facts/types prove a
+  native receiver call. Verified with
+  `stream_plan_lowers_method_references_in_map_and_map_to_int`,
+  `cargo test method_reference --test slot_shape_design --quiet`, and
+  `cargo test stream --test fixtures`.
+- Method-reference receiver-helper centralization: stream lowering now imports
+  `java_type_for_unbound_method_reference_target` and
+  `object_method_reference_receiver_type` from `method_reference_shape` instead
+  of owning duplicate target-to-Java-type tables for `String`, boxed primitives,
+  and `Object::...`. This keeps stream rendering and output-shape inference on
+  one shared receiver-typing path while ordinary call planning still decides the
+  actual native/static target. Verified with
+  `method_reference_plan_owns_generic_function_adapter_shapes`,
+  `cargo test method_reference --test idiom_gaps --quiet`, and
+  `cargo test stream --test fixtures`.
+- Native string method classification follow-up: `call_plan` now owns
+  `native_java_string_instance_method(name, arity)`, and both typed/resolved
+  native Java receiver planning and stream lambda receiver typing use that
+  helper. Stream lowering no longer carries a separate
+  `stream_native_string_method_requires_string_receiver` method-name table for
+  `length`, `trim`, `split`, `charAt`, and adjacent string calls. Verified with
+  `method_reference_plan_owns_generic_function_adapter_shapes`,
+  `cargo test stream --test fixtures`,
+  `cargo test method_reference --test idiom_gaps --quiet`, and
+  `cargo test string --test idiom_gaps --quiet`.
+- Method-reference accessor fallback boundary: the remaining unbound getter
+  output-shape inference is now isolated as
+  `infer_unbound_accessor_method_reference_fallback_shape`, and the guardrail
+  asserts that `infer_method_reference_output_shape_from_call_plan` stays before
+  the fallback path. This keeps `NameHolder::getName` compatibility explicit
+  while making callable/result facts the preferred method-reference result-shape
+  source. Verified with
+  `method_reference_plan_owns_generic_function_adapter_shapes`,
+  `cargo test method_reference --test idiom_gaps --quiet`, and
+  `cargo test stream --test fixtures`.
+- Batched optional rendering cleanup: optional wrapper rendering now normalizes
+  string-view elements inside `coercion::render_option_some` for structured
+  `SlotConversionPlan::OptionalConstruction`, while `Coercion::WrapOption`
+  preserves its raw-expression ABI through `render_raw_option_some`. `lower.rs`
+  no longer wraps slot conversion results in
+  `normalize_optional_constructed_string_view_expr` or parses `Some(inner)`
+  locally for assignment rewrap; it calls
+  `unwrap_rendered_some_expr` from `coercion.rs` for the remaining legacy raw
+  compatibility boundary. `OptionalShapeCoercionPolicy::MapElement` rendering
+  is also isolated as `render_optional_element_projection`, keeping
+  `.as_ref()`, `.as_deref()`, `.as_deref_mut()`, and `map(|value| ...)`
+  spellings in the coercion layer. Focused verification:
+  `rendered_string_heuristics_have_centralization_guardrails`,
+  `cargo test optional --test type_coercion --quiet`,
+  `cargo test optional_ --test idiom_gaps --quiet`.
+- Optional argument projection cleanup: shared/mutable optional argument
+  projection rendering now lives in `coercion::OptionalArgumentProjection` and
+  `apply_optional_argument_projection`, so `lower.rs` decides only whether a
+  target/actual slot pair needs optional element projection. The same slice
+  moves borrowed method receiver parenthesizing into `coercion.rs`, reducing
+  another rendered-borrow compatibility check in lowering. This is still a
+  migration bridge until nullable carriers expose origins end-to-end, but new
+  optional argument paths should use the shared projection helper instead of
+  adding local `.as_ref()`/`.as_deref()`/`.as_mut()` formatting. Focused
+  verification: `rendered_string_heuristics_have_centralization_guardrails`,
+  `optional_element_borrow_carrier_construction_is_centralized`,
+  `cargo test optional --test type_coercion --quiet`, and
+  `cargo test optional_ --test idiom_gaps --quiet`.
+- Same-call mutable alias cleanup: rendered compatibility checks for prior
+  mutable aliases now live in `coercion::rendered_expr_is_mutable_alias`.
+  `lower.rs` still owns the semantic same-call decision because argument order,
+  source reads, and slot shapes are local to argument lowering, but it no longer
+  owns the raw `&mut`, `.as_mut_slice()`, optional mutable projection, or
+  mutable-slice spelling table. Reborrowed optional mutable arguments now use
+  `coercion::reborrow_optional_mut_projection`, keeping `.as_deref_mut()`
+  idempotence out of lowering as well. Indexed erased-object handoff clone
+  recovery now uses `coercion::clone_erased_object_ref_once`, so idempotence for
+  `java_clone_erased_object_ref`/`java_clone_erased_object_vec_ref` is kept with
+  clone rendering helpers instead of argument lowering. Optional sequence
+  receiver projection now uses `coercion::project_optional_sequence_receiver`,
+  so the `.unwrap()` cleanup plus `as_ref/as_mut().expect("Java null receiver")`
+  spelling is shared for read/write sequence access. Deserialization downcast
+  message rewriting now uses `coercion::rewrite_downcast_expect_message`, so
+  the `.downcast::<...>().expect("invalid Java cast")` rendered replacement is
+  no longer a lowering-local rule. Reused cloned locals feeding borrowed
+  argument slots now use `coercion::normalize_reused_clone_for_borrowed_argument`,
+  keeping `name.as_str()`, `name.as_slice()`, `name.as_mut_slice()`, and
+  `&name` recovery spellings beside clone-recovery idempotence helpers.
+  Borrowed primitive argument dereference now uses
+  `coercion::deref_borrowed_projection`, keeping `*expr` projection rendering
+  with the other coercion helpers. The rendered-string
+  guardrail now enforces zero `rendered.starts_with` checks and lower
+  `rendered.ends_with`/`rendered.contains` ceilings in `lower.rs`. Focused verification:
+  `rendered_string_heuristics_have_centralization_guardrails`,
+  `cargo test alias --test idiom_gaps --quiet`,
+  `cargo test optional_ --test idiom_gaps --quiet`, and
+  `object_output_stream_write_object_clones_indexed_erased_object_handoff`,
+  plus `cargo test sequence --test idiom_gaps --quiet` and
+  `cargo test array --test idiom_gaps --quiet`, and
+  `cargo test object_input_stream_read_object --test idiom_gaps --quiet`,
+  `cargo test clone --test idiom_gaps --quiet`, and
+  `cargo test alias --test idiom_gaps --quiet`, plus
+  `cargo test primitive --test idiom_gaps --quiet`.
+- Stream lambda external result-shape follow-up: stream lambda call-shape
+  inference now asks the shared `external_call_lowered_type` query after native
+  Java call-plan projection. This lets fact-backed external getters and facade
+  returns set stream element result shapes without adding stream-local return
+  tables, while native Java calls still retain precedence. Focused verification:
+  `stream_shape_uses_shared_call_plan_for_lambda_call_results`,
+  `cargo test stream --test fixtures`, and `cargo check --quiet`.
+- Method-reference native receiver typing follow-up:
+  `native_java_unbound_method_reference_receiver_type` now lives in
+  `call_plan`, so stream rendering and method-reference output-shape inference
+  consume the same native receiver classification instead of keeping the
+  `String`/boxed-primitive whitelist in `method_reference_shape`. Focused
+  verification: `method_reference_plan_owns_generic_function_adapter_shapes`,
+  `cargo test method_reference --test idiom_gaps --quiet`, and
+  `cargo test stream --test fixtures`.
+- Stream optional string field argument follow-up: the stream path still maps
+  bare Java field references to `self.field`, but optional string field
+  arguments now use `plan_lowered_slot_conversion` for borrow, unwrap, and
+  string-view rendering instead of formatting `.as_deref().expect(...)`
+  directly. Focused verification: `cargo test stream --test fixtures` and the
+  focused stream-plan fixture covering optional field arguments.
+- Stream borrowed-string parameter follow-up: read-only borrowed string
+  argument facts in stream lambdas now normalize borrowed lambda/local string
+  parameters to string views before generic slot conversion can apply owned
+  copy recovery. This keeps fact-backed calls such as
+  `GenomicsDBUtils.getArrayColumnBounds(workspace, partition)` from rendering
+  invalid `*partition.as_str()` while still letting optional field arguments use
+  shared slot conversion for unwrap and string-view projection. Focused
+  verification: `stream_plan_lowers_flat_map_block_temporary_collection_as_owned_subpipeline`,
+  `cargo test stream --test fixtures`, and
+  `cargo test clone --test idiom_gaps --quiet`.
+- Stream joining delimiter follow-up: `Collectors.joining(delimiter)` no longer
+  appends `.as_str()` directly to arbitrary rendered delimiter expressions. The
+  delimiter expression is rendered once, shaped through `ShapeEnv`, and adapted
+  with `plan_lowered_slot_conversion` to a borrowed string argument slot, so
+  nullable string fields render as
+  `self.delimiter.as_ref().expect("Java null receiver").as_str()`. Focused
+  verification:
+  `stream_joining_delimiter_uses_slot_conversion_for_optional_string_field`,
+  `rendered_string_heuristics_have_centralization_guardrails`, and
+  `cargo test stream --test fixtures`.
+- Constructor/facade result follow-up: deferred constructor self-value result
+  propagation now delegates the uncaught Java exception unwrap rendering to
+  `coercion::unwrap_result_or_panic_uncaught_java_exception`, so `lower.rs` no
+  longer owns the local `strip_suffix('?')` plus panic formatting rule.
+  Rust-crate mapped external constructors now also carry their facade Rust
+  result type through lowered slot conversion when used in return/assignment
+  slots, and method return rendering consults explicit Rust-crate type facts
+  before falling back to local Java support stubs. Stale constructor tests were
+  updated for direct borrowed string literals (`"id"` instead of allocating a
+  temporary string) and the explicit erased HTSJDK `IntervalList.add` boundary.
+  Focused verification:
+  `rendered_string_heuristics_have_centralization_guardrails`,
+  `cargo test constructor --test slot_shape_design --quiet`,
+  `cargo test constructor --test idiom_gaps --quiet`, `cargo check --quiet`,
+  and `cargo fmt --check`.
+
+- Optional receiver projection cleanup: nullable receiver unwrap/projection now
+  uses `coercion::project_optional_receiver` for shared and mutable receiver
+  views, and `project_optional_sequence_receiver` delegates to the same helper.
+  This removes direct `as_ref/as_mut().expect("Java null receiver")` formatting
+  from `lower.rs` for array, map, sequence, enhanced-for, and field receiver
+  paths while keeping the null-receiver policy centralized until optional
+  receivers fully participate in typed slot plans. Focused verification:
+  `rendered_string_heuristics_have_centralization_guardrails`,
+  `cargo test optional_receiver --test idiom_gaps --quiet`,
+  `cargo test optional_receiver --test slot_shape_design --quiet`,
+  `cargo test sequence --test idiom_gaps --quiet`,
+  `cargo test map --test idiom_gaps --quiet`,
+  `cargo test array --test idiom_gaps --quiet`, and
+  `cargo test enhanced_for --test slot_shape_design --quiet`.
+- Map-key borrowing cleanup: the remaining map-key idempotence check for a
+  pre-rendered `&name` borrow now uses
+  `coercion::collapse_redundant_shared_borrow_projection`, so `lower.rs` keeps
+  the semantic shape decision but no longer owns the rendered `&name`
+  compatibility spelling. Focused verification:
+  `rendered_string_heuristics_have_centralization_guardrails` and
+  `cargo test map --test idiom_gaps --quiet`.
+- Direct projection cleanup: forced shared borrows, enum-variant borrowed
+  dyn-trait views, and optional shared-value unwraps now render through
+  `coercion::force_shared_borrow_projection`,
+  `coercion::borrow_as_dyn_trait`, and
+  `coercion::unwrap_optional_shared_value`. The lowerer still decides when a
+  place, enum value, or nullable display branch needs that projection, but it no
+  longer owns the raw `&expr`, `&expr as &dyn Trait`, or
+  `expr.as_ref().unwrap()` spelling. Focused verification:
+  `rendered_string_heuristics_have_centralization_guardrails`,
+  `closed_enum_variant_borrows_as_dyn_trait_parameter`,
+  `indexed_string_array_into_optional_borrowed_string_arg_borrows_element`,
+  `two_dimensional_row_replacement_lowers_to_ndarray_row_mut_assign`, and
+  `cargo test optional_display --test type_coercion --quiet`.
+- Call-boundary borrow cleanup: Java `String(byte[])` and byte-range
+  constructor lowering now uses `coercion::force_shared_borrow_projection`
+  instead of formatting `&bytes` inside `call_lowering.rs`. This keeps the JDK
+  constructor special case focused on Java overload semantics while the borrow
+  spelling stays in the shared coercion layer. Focused verification:
+  `rendered_string_heuristics_have_centralization_guardrails` and
+  `byte_array_local_with_spaced_dimensions_feeds_string_range_constructor`.
+
+Stream lambda actual-shape follow-up: `stream_lambda_arg_actual_shape` no longer
+invents `JavaType::String` for unknown lambda params or block locals. Stream
+argument adaptation now threads the current lambda `param_shape` through call
+argument planning, block-prefix rendering, and borrowed-string recovery, so
+lambda parameters use the inferred stream element shape while locals require
+`ShapeEnv` facts instead of silently assuming `.as_str()` is valid. Untyped
+borrowed-string argument fallback now leaves the rendered expression alone
+instead of appending `.as_str()` without an actual shape. Focused verification:
+`stream_lambda_argument_shapes_do_not_invent_string_fallbacks`,
+`stream_plan_lowers_flat_map_block_temporary_collection_as_owned_subpipeline`,
+`parallel_stream_reduce_uses_shared_stream_lowering`, and
+`cargo test stream --test fixtures`.
+Follow-up: `render_stream_lambda_arg_to_slot_through_plan` now uses a default
+fact set when no stream context facts are attached, so known lambda/local/field
+actual shapes still enter `plan_lowered_slot_conversion` before the final
+borrowed-string fallback. The stream-only optional string field argument helper
+was removed; optional string fields now use the same slot-conversion helper as
+other known stream lambda arguments.
+
+Stream lambda projection cleanup: stream-specific `*item`, `**item`, `(*item)`,
+and `(**item)` renderings now live behind
+`render_stream_lambda_value_expr`, `render_stream_lambda_receiver_expr`, and
+`rendered_stream_lambda_borrowed_item_expr`. Stream lowering still owns these
+iterator-item projections because ordinary call slot facts do not yet model the
+closure binding layer, but the spelling table is no longer duplicated across
+lambda body rendering, method-reference fallback rendering, native instance
+method-reference receivers, and borrowed-parameter move recovery. Focused
+verification: `method_reference_plan_owns_generic_function_adapter_shapes`,
+`stream_plan_lowers_method_references_in_map_and_map_to_int`, and
+`cargo test stream --test fixtures --quiet`.
+Follow-up: stream lowering still decides which lambda/local/field values must be
+cloned because that depends on closure binding context, but the Rust `.clone()`
+projection itself now goes through `coercion::apply_clone_projection` via
+`render_stream_lambda_clone_projection`. This removes the remaining stream-local
+generated-expression `format!("{rendered}.clone()")` /
+`format!("{param}.clone()")` spellings without pretending ordinary call slot
+facts model stream iterator bindings yet.
+
+Index projection cleanup: call and stream lowering now share
+`coercion::render_index_to_usize_projection` with explicit
+`IndexToUsizeProjection::{JavaStringCharAt, StreamLambdaArgument}` modes. This
+keeps the different legacy parenthesization requirements for `String.charAt`
+and stream lambda slot arguments visible as policy, while removing local
+`render_string_char_at_index`/`render_stream_lambda_index_arg` helpers and their
+duplicated `as usize` suffix checks. Focused verification:
+`rendered_string_heuristics_have_centralization_guardrails`,
+`syntax_slot_coercion_policy_owns_index_condition_and_concat_segments`,
+`stdlib_signature_facts_drive_string_index_argument_slot`, and
+`stream_lambda_string_char_at_uses_signature_index_slot`.
+
+Optional borrowed display cleanup: `Map.get(...)` values used in string
+concat/display slots now render through
+`JavaDisplayPlan::OptionalBorrowedValue`, keeping the `Option<&T>` Java-null
+display spelling in `coercion.rs` instead of formatting
+`.map(|value| value.to_string()).unwrap_or_else(...)` in `lower.rs`. This keeps
+stored `Option<T>` display (`OptionalValue`) and borrowed map lookup display as
+separate explicit policies. Focused verification:
+`rendered_string_heuristics_have_centralization_guardrails`,
+`optional_platform_facade_display_segments_use_display_value_policy`, and
+`map_get_string_display_segment_unwraps_optional_borrow`.
+
+Java Optional owned-value projection cleanup: call lowering still selects
+`Optional.get()` and `Optional.orElse(...)` as native Java Optional methods, but
+the Rust `Option<T>` owned-value spelling now lives in
+`coercion::optional_get_owned_value_projection` and
+`coercion::optional_or_else_owned_value_projection`. This keeps
+`.as_ref().map(|value| (*value).clone()).expect(...)` / `unwrap_or(...)`
+compatibility rendering beside the other optional/coercion policies instead of
+inside `call_lowering.rs`.
+
+Optional facade receiver ABI cleanup: explicit `FacadeAbiFact` receiver calls now
+adapt optional receivers through `facade_receiver_slot_plan` and
+`plan_lowered_slot_conversion` instead of falling back to local `.as_ref()` /
+`.as_mut()` branches first. The conversion layer now has a distinct mutable
+optional unwrap projection (`UnwrapOptionMutBorrowed`) and suppresses the
+follow-up ownership borrow that the projection already performs, while still
+allowing element view conversions. Focused verification:
+`optional_owned_to_mutable_borrow_uses_mutable_optional_projection`,
+`optional_external_receiver_call_uses_facade_mapping_after_unwrap`,
+`optional_external_mutating_receiver_call_uses_mutable_unwrap`, and
+`rendered_string_heuristics_have_centralization_guardrails`.
+
+Optional argument projection cleanup: shaped and explicit-slot argument lowering
+now use one `lower_optional_argument_for_borrowed_target` helper for
+`Option<T>` feeding borrowed required targets, borrowed optional targets, and
+optional array/slice targets. The old `adapt_optional_shared_borrow_argument`,
+`adapt_optional_mut_borrow_argument`, `lower_optional_array_argument_for_slice_shape`,
+and `OptionalArgumentProjection` render bridge were removed; optional argument
+projection is now selected by `LoweredType::OptionalElementBorrow` plus
+`plan_lowered_slot_conversion`/borrowed-element slot adapters. Optional
+element carrier projection now delegates the actual `.as_ref()`/`.as_mut()`
+spelling to `coercion::project_optional_element_borrow_carrier`, leaving
+`lower.rs` responsible only for choosing the optional-element lowered type and
+ownership. Focused
+verification: `optional_element_borrow_carrier_construction_is_centralized`,
+`rendered_string_heuristics_have_centralization_guardrails`,
+`cargo test optional --test type_coercion --quiet`, and
+`cargo test optional_ --test idiom_gaps --quiet`.
+
+Map-key borrow projection cleanup: map lookup lowering now gathers only the
+local variable name and inferred key shape, then delegates idempotent map-key
+borrowing to `coercion::normalize_map_key_borrow_projection`. This removes the
+lowering-local `avoid_double_borrowed_map_key_arg` /
+`ensure_borrowed_map_key_arg` split while keeping Java collection key borrowing
+as one shared projection policy.
+
+Varargs borrow projection cleanup: expanded Java varargs packing still happens
+in `lower.rs`, but borrowed varargs parameters now pass the packed vector
+through `coercion::force_shared_borrow_projection` instead of formatting
+`&packed_vec` locally. This keeps the lowering code responsible for Java
+varargs shape and the coercion layer responsible for Rust borrow spelling.
+
+Varargs vector projection follow-up: Java varargs arity/spread selection still
+belongs to `lower.rs`, but the Rust packed-vector literal and spread-extension
+block now render through `coercion::{varargs_packed_vec_projection,
+varargs_spread_extend_projection}`. This keeps `Vec::new()`, `vec![...]`, and
+the `__java_varargs.extend(...)` block beside the other Rust projection
+spellings while preserving the existing Java varargs semantics.
+
+Native collection constructor projection cleanup: `new ArrayList`, `new
+HashSet`, and `new HashMap` lowering still uses `NativeCollectionNewTarget` for
+Java constructor semantics, but Rust constructor spellings now live in
+`coercion::{native_collection_empty_new_projection,
+native_collection_with_capacity_projection,
+native_collection_default_constructor_projection}`. This removes the local
+native collection type-name table from `call_lowering.rs`.
+
+Collection remove-if projection cleanup: Java lambda extraction and predicate
+lowering for `Collection.removeIf(...)` still happen in `call_lowering.rs`, but
+the Rust `retain(|item| !(predicate))` spelling now lives in
+`coercion::collection_remove_if_projection`.
 
 ## Rerun Protocol
 

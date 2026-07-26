@@ -14,15 +14,19 @@ use new_java2rust::call_plan::{
     CallTargetPlan, NativeCollectionMethod, NativeCollectionNewTarget,
     NativeCollectionStaticMethod, NativeJavaInstanceMethod, NativeJavaStaticMethod,
     TrivialAccessorCallPlan, external_call_lowered_type, external_call_returns_rust_result,
-    external_constructor_arg_shapes, native_collection_arg_shapes,
-    native_collection_arg_shapes_with_facts, native_collection_lowered_type, plan_call_arguments,
-    plan_call_arguments_with_facts, plan_call_arguments_with_facts_and_args,
-    plan_call_exception_propagation, plan_call_expr, plan_call_statement, plan_call_target,
-    plan_call_target_with_facts, plan_call_target_with_facts_and_arity, plan_constructor_arguments,
-    plan_new_target, plan_new_target_with_facts, plan_trivial_accessor_call,
-    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
+    external_constructor_arg_shapes, facade_receiver_slot_plan, native_collection_arg_shapes,
+    native_collection_arg_shapes_with_facts, native_collection_lowered_type,
+    optional_receiver_slot_plan, plan_call_arguments, plan_call_arguments_with_facts,
+    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation, plan_call_expr,
+    plan_call_statement, plan_call_target, plan_call_target_with_facts,
+    plan_call_target_with_facts_and_arity, plan_constructor_arguments, plan_new_target,
+    plan_new_target_with_facts, plan_trivial_accessor_call, resolved_call_arg_shapes,
+    resolved_constructor_arg_shapes,
 };
-use new_java2rust::coercion::Coercion;
+use new_java2rust::coercion::{
+    Coercion, OptionalReceiverProjection, borrowed_string_literal_temporary_plan,
+    project_optional_receiver,
+};
 use new_java2rust::constructor_plan::{
     ConstructorDelegationPlan, ConstructorFieldValuePlan, DelegatedConstructorTrailingStmt,
     plan_constructor_delegation, plan_constructor_field_values,
@@ -30,13 +34,15 @@ use new_java2rust::constructor_plan::{
 use new_java2rust::conversion_lowering::{apply_cast_conversion, apply_instanceof};
 use new_java2rust::conversion_plan::{
     AssignmentStatementPlan, CastAndInstanceOfPlanningBoundary, InstanceOfCheck,
-    JavaCastSemanticsPolicy, LoweredType, actual_shape_for_slot_expr_with_slot, argument_slot,
+    JavaCastSemanticsPolicy, LoweredType, RustBorrowedFacadeReturnRecovery, Slot,
+    SlotConversionPlan, actual_shape_for_slot_expr_with_slot, argument_slot,
     assignment_statement_plan_for_target, cast_and_instanceof_planning_boundary, index_slot,
-    plan_cast_conversion, plan_instanceof,
+    plan_cast_conversion, plan_instanceof, plan_lowered_slot_conversion,
 };
 use new_java2rust::dependency_mode::DependencyMode;
 use new_java2rust::diagnostics::Severity;
 use new_java2rust::effective_facts::EffectiveFacts;
+use new_java2rust::emit::emit_expr;
 use new_java2rust::exception_lowering::{
     CatchRenderArm, exception_cause_or_self_if_instance_expr, exception_expr_from_new,
     exception_expr_from_new_with_cause_hint, exception_result_type, external_exception_conversions,
@@ -61,17 +67,17 @@ use new_java2rust::expr_shape::{
 use new_java2rust::external_facts::parse_external_facts;
 use new_java2rust::external_packs::parse_external_pack_manifest;
 use new_java2rust::facts::{
-    AccessorInlinePolicy, CallableKey, CaptureOrigin, CaptureOwnerKind, CaptureSource,
-    ClosedHierarchyFact, ControlFlowFactKind, DispatchRequirementFact, DispatchRequirementKind,
-    ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole,
-    ExternalArgumentAliasPolicy, ExternalConstructorFact, ExternalCrateConstructorMappingFact,
-    ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode, ExternalLibraryPackFact,
-    ExternalRustReturnTypeFact, FacadeAbiFact, FacadeSlot, FactProvenance, FactSet,
-    FieldKey as FactFieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyEdgeFact,
-    HierarchyOverride, HierarchyStrategy, MethodEffectFact, MethodKey as FactMethodKey,
-    NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
-    ReceiverAbi, ReceiverMutabilityFact, RecursionKind, ResultAbi, Staticness, TrivialAccessorFact,
-    TrivialAccessorKind, TypeCapabilityOverride,
+    AccessorInlinePolicy, BorrowedReturnRecovery, CallableKey, CaptureOrigin, CaptureOwnerKind,
+    CaptureSource, ClosedHierarchyFact, ControlFlowFactKind, DispatchRequirementFact,
+    DispatchRequirementKind, ExternalApiArgumentEffectFact, ExternalApiCoverage,
+    ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy, ExternalConstructorFact,
+    ExternalCrateConstructorMappingFact, ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode,
+    ExternalLibraryPackFact, ExternalRustReturnTypeFact, FacadeAbiFact, FacadeSlot, FactProvenance,
+    FactSet, FieldKey as FactFieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
+    HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy, MethodEffectFact,
+    MethodKey as FactMethodKey, NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability,
+    OwnedRecoveryCapabilityFact, ReceiverAbi, ReceiverMutabilityFact, RecursionKind, ResultAbi,
+    Staticness, TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride,
 };
 use new_java2rust::item_assembly::{
     constructor_default_field_value, constructor_function_shell, constructor_return_body,
@@ -141,12 +147,12 @@ use new_java2rust::shape_projection::{
     dispatch_requirement_projection_policy, escaping_role_dispatch_policy,
     indexed_assignment_shape, indexed_assignment_shape_with_effective_facts,
     indexed_assignment_shape_with_facts, indexed_element_projection_policy, indexed_read_shape,
-    indexed_read_shape_with_effective_facts, indexed_read_shape_with_facts,
-    iteration_element_projection_policy, iteration_element_shape, owned_string_value_shape,
-    param_shape_for_java_type, project_java_value_shape, return_shape_for_java_type,
-    sequence_element_projection_policy, shape_projection_capability_policy,
-    shape_projection_capability_policy_with_effective_facts, storage_shape_for_java_type,
-    value_shape_for_java_type,
+    indexed_read_shape_for_access_with_facts, indexed_read_shape_with_effective_facts,
+    indexed_read_shape_with_facts, iteration_element_projection_policy, iteration_element_shape,
+    owned_string_value_shape, param_shape_for_java_type, project_java_value_shape,
+    return_shape_for_java_type, sequence_element_projection_policy,
+    shape_projection_capability_policy, shape_projection_capability_policy_with_effective_facts,
+    storage_shape_for_java_type, value_shape_for_java_type,
 };
 use new_java2rust::signature::{
     BindingBoundaryPolicy, ConstructorKey, ConstructorParamBoundaryPolicy, FieldBoundaryPolicy,
@@ -1590,7 +1596,7 @@ class NativeMapFinalFacadeValueUse {
     );
     assert!(
         translation.rust.contains(
-            "let payload: &ExternalOwnerPayload = payloads.get(&name).expect(\"Java null receiver\");"
+            "let payload: &ExternalOwnerPayload = payloads.get(name.as_str()).expect(\"Java null receiver\");"
         ) && translation.rust.contains("return payload.get_name();")
             && !translation
                 .rust
@@ -7942,21 +7948,14 @@ class ExternalProblem extends UserException {
         }
     );
 
-    let child = resolved
-        .program
-        .types
-        .iter()
-        .find(|ty| ty.name == "Child")
-        .unwrap();
-    let child_ctor = child
-        .members
-        .iter()
-        .find_map(|member| match member {
-            Member::Constructor(ctor) => Some(ctor),
-            _ => None,
-        })
-        .unwrap();
-    let plan = plan_constructor_delegation(child_ctor.body.as_ref().unwrap()).unwrap();
+    let super_body = Block {
+        statements: vec![Stmt::ConstructorInvocation {
+            kind: ConstructorInvocationKind::Super,
+            args: vec![Expr::Literal(Literal::Int(1))],
+            resolved: None,
+        }],
+    };
+    let plan = plan_constructor_delegation(&super_body).unwrap();
     assert!(matches!(
         plan,
         ConstructorDelegationPlan::Unsupported(
@@ -8139,6 +8138,11 @@ class Add implements Expr {}
         shape_projection_source
             .contains("pub fn indexed_element_projection_policy_with_effective_facts")
     );
+    assert!(shape_projection_source.contains("pub fn indexed_read_shape_for_access_with_facts"));
+    assert!(
+        shape_projection_source
+            .contains("pub fn indexed_read_shape_for_access_with_effective_facts")
+    );
     assert!(shape_projection_source.contains("pub fn indexed_read_shape_with_effective_facts"));
     assert!(
         shape_projection_source.contains("pub fn indexed_assignment_shape_with_effective_facts")
@@ -8176,6 +8180,9 @@ class Add implements Expr {}
     assert!(!shape_projection_source.contains(
         "let element_ty = sequence_element_projection_policy(&array_shape.java_ty, facts)"
     ));
+    let lower_source = include_str!("../src/lower.rs");
+    assert!(lower_source.contains("indexed_read_shape_for_access_with_facts(&array_shape"));
+    assert!(!lower_source.contains("let element_ty = array_shape.sequence_element_type().or_else"));
     assert!(!include_str!("../src/expr_shape.rs").contains("pub fn project_java_value_shape"));
 }
 
@@ -9887,6 +9894,7 @@ fn facade_abi_mut_slice_slot_shapes_array_argument_as_mutable_borrow() {
         return_slot: FacadeSlot::Owned,
         result: ResultAbi::Plain,
         borrow_source: None,
+        borrowed_return_recovery: None,
         provenance: FactProvenance::UserOverride,
     });
 
@@ -10046,6 +10054,7 @@ fn facade_abi_fact_selects_receiver_call_shape_before_crate_mapping() {
         return_slot: FacadeSlot::Owned,
         result: ResultAbi::Plain,
         borrow_source: None,
+        borrowed_return_recovery: None,
         provenance: FactProvenance::UserOverride,
     });
 
@@ -10082,6 +10091,138 @@ fn facade_abi_fact_selects_receiver_call_shape_before_crate_mapping() {
                 RustExpr::Var("values".to_string()),
             ],
         }
+    );
+}
+
+#[test]
+fn facade_receiver_abi_maps_to_receiver_slot_shapes() {
+    let facts = FactSet::default();
+    let reader_ty = JavaType::Named {
+        name: "Reader".to_string(),
+        args: Vec::new(),
+    };
+
+    let borrowed = facade_receiver_slot_plan(ReceiverAbi::BorrowedSelf, reader_ty.clone(), &facts);
+    let Some(Slot::Argument(borrowed_shape)) = borrowed.slot else {
+        panic!("borrowed receiver should have an argument slot");
+    };
+    assert_eq!(borrowed_shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(borrowed_shape.java_ty, reader_ty);
+
+    let mutable = facade_receiver_slot_plan(
+        ReceiverAbi::MutBorrowedSelf,
+        JavaType::Named {
+            name: "Reader".to_string(),
+            args: Vec::new(),
+        },
+        &facts,
+    );
+    let Some(Slot::Argument(mutable_shape)) = mutable.slot else {
+        panic!("mutable receiver should have an argument slot");
+    };
+    assert_eq!(mutable_shape.ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(mutable_shape.mutability, MutabilityShape::Mutable);
+
+    let associated = facade_receiver_slot_plan(
+        ReceiverAbi::AssociatedFunction,
+        JavaType::Named {
+            name: "Reader".to_string(),
+            args: Vec::new(),
+        },
+        &facts,
+    );
+    assert_eq!(associated.slot, None);
+}
+
+#[test]
+fn optional_receiver_slot_plan_maps_mutability_and_projection() {
+    let facts = FactSet::default();
+    let reader_ty = JavaType::Named {
+        name: "Reader".to_string(),
+        args: Vec::new(),
+    };
+
+    let shared = optional_receiver_slot_plan(reader_ty.clone(), false, true, &facts);
+    assert_eq!(shared.receiver_abi, ReceiverAbi::BorrowedSelf);
+    assert_eq!(
+        shared.projection,
+        OptionalReceiverProjection::SharedUnchecked
+    );
+    let Slot::Argument(shared_shape) = shared.slot else {
+        panic!("shared optional receiver should have an argument slot");
+    };
+    assert_eq!(shared_shape.java_ty, reader_ty);
+    assert_eq!(shared_shape.ownership, OwnershipShape::SharedBorrow);
+
+    let mutable = optional_receiver_slot_plan(
+        JavaType::Named {
+            name: "Reader".to_string(),
+            args: Vec::new(),
+        },
+        true,
+        false,
+        &facts,
+    );
+    assert_eq!(mutable.receiver_abi, ReceiverAbi::MutBorrowedSelf);
+    assert_eq!(mutable.projection, OptionalReceiverProjection::Mutable);
+    let Slot::Argument(mutable_shape) = mutable.slot else {
+        panic!("mutable optional receiver should have an argument slot");
+    };
+    assert_eq!(mutable_shape.ownership, OwnershipShape::MutableBorrow);
+    assert_eq!(mutable_shape.mutability, MutabilityShape::Mutable);
+}
+
+#[test]
+fn optional_borrow_receiver_projection_uses_null_check_without_reborrow() {
+    assert_eq!(
+        emit_expr(&project_optional_receiver(
+            RustExpr::Raw("values.get(key)".to_string()),
+            OptionalReceiverProjection::Borrowed,
+        )),
+        "values.get(key).expect(\"Java null receiver\")"
+    );
+}
+
+#[test]
+fn facade_borrowed_self_receiver_uses_receiver_slot_conversion() {
+    let mut facts = parse_external_pack_manifest(
+        r#"
+external-pack dep Reader rust-crate-mapping mapped target=reader_facade
+external-pack-object dep Reader concrete
+external-pack-constructor dep Reader 0 mapped rust-type=Reader rust=new
+external-pack-api dep Reader read mapped getter read-only definitely-non-null args=0 return=int rust=read
+"#,
+    )
+    .facts;
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("Reader", "read", Staticness::Unknown, 0),
+        rust_path: "reader_facade::Reader::read".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: Vec::new(),
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        borrowed_return_recovery: None,
+        provenance: FactProvenance::UserOverride,
+    });
+
+    let translation = translate_source_with_facts(
+        r#"
+class FacadeBorrowedSelfReceiver {
+    int run() {
+        Reader reader = new Reader();
+        return reader.read();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation.rust.contains("return reader.read();")
+            && !translation.rust.contains("return (&reader).read();"),
+        "{}",
+        translation.rust
     );
 }
 
@@ -10719,7 +10860,9 @@ class BuiltinHtsjdkIntervalCaller {
         translation.rust
     );
     assert!(
-        translation.rust.contains("output.add(Interval::new_1"),
+        translation
+            .rust
+            .contains("output.add(Box::new(Interval::new_1(locatable)) as Box<dyn std::any::Any>)"),
         "{}",
         translation.rust
     );
@@ -11609,10 +11752,10 @@ class UsesExternalByteArrayReturn {
 
 #[test]
 fn optional_external_receiver_call_uses_facade_mapping_after_unwrap() {
-    let facts = parse_external_pack_manifest(
+    let mut facts = parse_external_pack_manifest(
         r#"
-external-pack external.io Reader rust-crate-mapping mapped target=io_facade
-external-pack external.io Record rust-crate-mapping mapped target=io_facade
+	external-pack external.io Reader rust-crate-mapping mapped target=io_facade
+	external-pack external.io Record rust-crate-mapping mapped target=io_facade
 external-pack-object external.io Reader concrete
 external-pack-object external.io Record concrete
 external-pack-capability external.io Reader clone=true final=true
@@ -11620,9 +11763,20 @@ external-pack-capability external.io Record clone=true final=true
 external-pack-constructor external.io Reader 0 mapped rust-type=Reader rust=new
 external-pack-api external.io Reader read mapped getter mutates-receiver maybe-null args=0 return=Record rust=read
 external-pack-api external.io Record getLength mapped getter read-only definitely-non-null args=0 return=int rust=length
-"#,
+	"#,
     )
     .facts;
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("Record", "getLength", Staticness::Unknown, 0),
+        rust_path: "io_facade::Record::length".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: Vec::new(),
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        borrowed_return_recovery: None,
+        provenance: FactProvenance::UserOverride,
+    });
     let translation = translate_source_with_facts(
         r#"
 class OptionalExternalReceiverCall {
@@ -11639,7 +11793,7 @@ class OptionalExternalReceiverCall {
     assert!(
         translation
             .rust
-            .contains("io_facade::length(record.as_ref().unwrap())"),
+            .contains("record.as_ref().expect(\"Java null receiver\").length()"),
         "{}",
         translation.rust
     );
@@ -11654,10 +11808,10 @@ class OptionalExternalReceiverCall {
 
 #[test]
 fn optional_external_mutating_receiver_call_uses_mutable_unwrap() {
-    let facts = parse_external_pack_manifest(
+    let mut facts = parse_external_pack_manifest(
         r#"
-external-pack external.io Reader rust-crate-mapping mapped target=io_facade
-external-pack external.io Record rust-crate-mapping mapped target=io_facade
+	external-pack external.io Reader rust-crate-mapping mapped target=io_facade
+	external-pack external.io Record rust-crate-mapping mapped target=io_facade
 external-pack-object external.io Reader concrete
 external-pack-object external.io Record concrete
 external-pack-capability external.io Reader clone=true final=true
@@ -11666,9 +11820,53 @@ external-pack-constructor external.io Reader 0 mapped rust-type=Reader rust=new
 external-pack-api external.io Reader read mapped getter mutates-receiver maybe-null args=0 return=Record rust=read
 external-pack-api external.io Record setFlag mapped setter mutates-receiver definitely-non-null args=1 return=void rust=set_flag
 external-pack-argument external.io Record setFlag 0 definitely-non-null read-only no-alias type=boolean
-"#,
+	"#,
     )
     .facts;
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("external.io.Record", "setFlag", Staticness::Unknown, 1),
+        rust_path: "io_facade::Record::set_flag".to_string(),
+        receiver: ReceiverAbi::MutBorrowedSelf,
+        args: vec![FacadeSlot::Owned],
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        borrowed_return_recovery: None,
+        provenance: FactProvenance::UserOverride,
+    });
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("external.io.Record", "set_flag", Staticness::Unknown, 1),
+        rust_path: "io_facade::Record::set_flag".to_string(),
+        receiver: ReceiverAbi::MutBorrowedSelf,
+        args: vec![FacadeSlot::Owned],
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        borrowed_return_recovery: None,
+        provenance: FactProvenance::UserOverride,
+    });
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("Record", "setFlag", Staticness::Unknown, 1),
+        rust_path: "io_facade::Record::set_flag".to_string(),
+        receiver: ReceiverAbi::MutBorrowedSelf,
+        args: vec![FacadeSlot::Owned],
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        borrowed_return_recovery: None,
+        provenance: FactProvenance::UserOverride,
+    });
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("Record", "set_flag", Staticness::Unknown, 1),
+        rust_path: "io_facade::Record::set_flag".to_string(),
+        receiver: ReceiverAbi::MutBorrowedSelf,
+        args: vec![FacadeSlot::Owned],
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        borrowed_return_recovery: None,
+        provenance: FactProvenance::UserOverride,
+    });
     let translation = translate_source_with_facts(
         r#"
 class OptionalExternalMutatingReceiverCall {
@@ -11685,7 +11883,7 @@ class OptionalExternalMutatingReceiverCall {
     assert!(
         translation
             .rust
-            .contains("io_facade::set_flag(record.as_mut().unwrap(), true);"),
+            .contains("record.as_mut().expect(\"Java null receiver\").set_flag(true);"),
         "{}",
         translation.rust
     );
@@ -12924,6 +13122,7 @@ fn coercion_plan_owns_instanceof_fallback_policy() {
 #[test]
 fn coercion_plan_owns_clone_recovery_policy() {
     let source = include_str!("../src/coercion.rs");
+    let lower_source = include_str!("../src/lower.rs");
     let conversion_source = include_str!("../src/conversion_plan.rs");
     let external_packs_source = include_str!("../src/external_packs.rs");
     let facts_source = include_str!("../src/facts.rs");
@@ -12982,6 +13181,61 @@ fn coercion_plan_owns_clone_recovery_policy() {
     assert!(source.contains("unsupported_ownership_coercion"));
     assert!(source.contains("unsupported_borrowed_to_owned_non_cloneable"));
     assert!(source.contains("render_clone_recovery_policy"));
+    assert!(source.contains("pub fn rendered_expr_has_clone_recovery"));
+    assert!(source.contains("pub fn rendered_expr_has_direct_clone_recovery"));
+    assert!(source.contains("pub fn apply_audited_clone_recovery"));
+    assert!(lower_source.contains("enum CloneRecoveryDecision"));
+    assert!(lower_source.contains("ApplyRecoveryCoercion"));
+    assert!(lower_source.contains("coercion: Coercion"));
+    assert!(lower_source.contains("fn clone_recovery_decision_for_argument"));
+    assert!(lower_source.contains("fn clone_recovery_decision_for_value"));
+    assert!(lower_source.contains("fn audited_clone_recovery_decision"));
+    assert!(lower_source.contains("apply_clone_recovery_decision"));
+    assert!(lower_source.contains("Coercion::CloneRecovery"));
+    let unshaped_argument = lower_source
+        .split("fn lower_unshaped_argument")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_current_self_cast_unshaped_argument")
+                .next()
+        })
+        .expect("unshaped argument lowering should exist");
+    assert!(unshaped_argument.contains("apply_clone_recovery_decision"));
+    assert!(!unshaped_argument.contains("apply_audited_clone_recovery"));
+    let preserving_args = lower_source
+        .split("fn lower_unshaped_external_facade_preserving_args")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn external_facade_preserving_arg_needs_clone")
+                .next()
+        })
+        .expect("external facade preserving argument lowering should exist");
+    assert!(preserving_args.contains("apply_clone_recovery_decision"));
+    assert!(!preserving_args.contains("render_audited_clone_recovery"));
+    assert!(lower_source.contains("struct MoveUseContext"));
+    assert!(lower_source.contains("MoveUseContext::new(ctx)"));
+    assert!(!lower_source.contains("render_audited_clone_recovery"));
+    assert!(!lower_source.contains("fn rendered_expr_has_clone_recovery"));
+    assert!(!lower_source.contains("fn rendered_expr_has_direct_clone_recovery"));
+    assert!(!lower_source.contains("fn render_audited_clone_recovery"));
+}
+
+#[test]
+fn coercion_owns_borrowed_string_literal_temporary_projection() {
+    let borrowed = borrowed_string_literal_temporary_plan("&\"actual\".to_string()", "_tmp")
+        .expect("borrowed string literal temporary should be planned");
+    assert_eq!(borrowed.replacement_expr, "&_tmp");
+    assert_eq!(borrowed.initializer_expr, "\"actual\".to_string()");
+
+    let optional = borrowed_string_literal_temporary_plan("Some(&\"actual\".to_string())", "_tmp")
+        .expect("optional borrowed string literal temporary should be planned");
+    assert_eq!(optional.replacement_expr, "Some(&_tmp)");
+    assert_eq!(optional.initializer_expr, "\"actual\".to_string()");
+
+    let lower_source = fs::read_to_string("src/lower.rs").expect("lower source should be readable");
+    assert!(!lower_source.contains("fn string_literal_to_string_expr"));
+    assert!(!lower_source.contains("strip_prefix(\"Some(&\")"));
+    assert!(!lower_source.contains("raw.starts_with('\"') && raw.ends_with(\".to_string()\")"));
 }
 
 #[test]
@@ -13348,7 +13602,7 @@ class Holder {
     assert!(
         translation
             .rust
-            .contains("self.workspace = Some(self.incremental_import_workspace.clone()")
+            .contains("self.workspace = self.incremental_import_workspace.as_ref().cloned();")
             && !translation
                 .rust
                 .contains("self.workspace = self.incremental_import_workspace;"),
@@ -13572,6 +13826,14 @@ class Holder {
 #[test]
 fn optional_self_field_borrowed_option_recovery_uses_slot_plan() {
     let source = fs::read_to_string("src/lower.rs").unwrap();
+    let apply_carrier = source
+        .split("fn apply_optional_field_borrowed_carrier_to_slot")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn borrowed_self_receiver_can_read_fields")
+                .next()
+        })
+        .expect("optional borrowed carrier application should be present");
 
     assert!(
         source.contains("fn lower_optional_self_field_borrowed_option_recovery")
@@ -13579,11 +13841,272 @@ fn optional_self_field_borrowed_option_recovery_uses_slot_plan() {
                 "plan_slot_conversion(actual.clone(), Slot::Return(target.clone()), ctx.facts)"
             )
             && source.contains("fn apply_optional_field_borrowed_carrier_to_slot")
+            && source.contains("fn optional_element_borrow_lowered_expr")
             && source.contains("LoweredType::OptionalElementBorrow")
-            && source.contains("plan_lowered_slot_conversion(&actual, slot, ctx.facts)")
-            && !source.contains("format!(\n        \"{}.as_ref()\""),
-        "{source}"
+            && apply_carrier.contains("optional_element_borrow_lowered_expr")
+            && apply_carrier
+                .contains("plan_lowered_slot_conversion(&lowered.actual, slot, ctx.facts)")
+            && !apply_carrier.contains("format!("),
+        "{apply_carrier}"
     );
+}
+
+#[test]
+fn static_optional_storage_initializers_use_optional_construction_plan() {
+    let source = fs::read_to_string("src/lower.rs").unwrap();
+    let conversion_lowering_source = fs::read_to_string("src/conversion_lowering.rs").unwrap();
+    let static_initializer = source
+        .split("fn static_storage_initial_value_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn static_const_reference_name_for_type").next())
+        .expect("static storage initializer should be present");
+
+    assert!(!source.contains("fn construct_optional_value_for_target"));
+    assert!(conversion_lowering_source.contains("fn construct_optional_value_for_target"));
+    assert!(
+        conversion_lowering_source
+            .contains("SlotConversionPlan::OptionalConstruction(construction)")
+    );
+    let present_optional_helper = source
+        .split("fn lower_present_expr_for_optional_target")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn ternary_condition_non_null_branch_expr")
+                .next()
+        })
+        .expect("present optional target helper should be present");
+    assert!(
+        present_optional_helper.contains("construct_optional_value_for_target"),
+        "{present_optional_helper}"
+    );
+    assert!(
+        !present_optional_helper.contains("LoweredSlotExprConversionPlan {"),
+        "{present_optional_helper}"
+    );
+    let array_access_helper = source
+        .split("fn lower_array_access_expr_for_slot")
+        .nth(1)
+        .and_then(|tail| tail.split("fn indexed_access_needs_borrowed_place").next())
+        .expect("array-access slot helper should be present");
+    assert!(
+        array_access_helper.contains("construct_optional_value_for_target"),
+        "{array_access_helper}"
+    );
+    assert!(
+        !array_access_helper.contains("LoweredSlotExprConversionPlan {"),
+        "{array_access_helper}"
+    );
+    assert!(source.contains("optional_slot_construction_plan_for_actual"));
+    assert!(
+        !static_initializer.contains("format!(\"Some({})\""),
+        "{static_initializer}"
+    );
+}
+
+#[test]
+fn optional_erased_handoff_arguments_use_optional_construction_plan() {
+    let source = fs::read_to_string("src/lower.rs").unwrap();
+    let conversion_lowering_source = fs::read_to_string("src/conversion_lowering.rs").unwrap();
+    let wrapper = source
+        .split("fn wrap_erased_handoff_arg_for_optional_target")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn clone_indexed_erased_handoff_arg_if_needed")
+                .next()
+        })
+        .expect("optional erased handoff wrapper should be present");
+
+    assert!(wrapper.contains("construct_optional_value_for_target"));
+    assert!(
+        conversion_lowering_source.contains("fn construct_preconverted_optional_value_for_target")
+    );
+    assert!(!wrapper.contains("format!(\"Some({})\""), "{wrapper}");
+}
+
+#[test]
+fn optional_assignment_rewrap_uses_optional_construction_plan() {
+    let source = fs::read_to_string("src/lower.rs").unwrap();
+    let conversion_lowering_source = fs::read_to_string("src/conversion_lowering.rs").unwrap();
+    let wrapper = source
+        .split("fn wrap_optional_assignment_value_if_needed")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn optional_field_access_actual_shape_for_slot")
+                .next()
+        })
+        .expect("optional assignment wrapper should be present");
+
+    assert!(wrapper.contains("adapt_optional_assignment_value_for_target"));
+    assert!(!wrapper.contains("unwrap_rendered_some_expr"));
+    assert!(
+        conversion_lowering_source.contains("construct_preconverted_optional_value_for_target")
+    );
+    assert!(conversion_lowering_source.contains("unwrap_rendered_some_expr"));
+    assert!(!source.contains("SlotConversionPlan::OptionalConstruction"));
+    assert!(conversion_lowering_source.contains("SlotConversionPlan::OptionalConstruction"));
+    assert!(!wrapper.contains("format!(\"Some({})\""), "{wrapper}");
+}
+
+#[test]
+fn optional_element_borrow_carrier_construction_is_centralized() {
+    let source = fs::read_to_string("src/lower.rs").unwrap();
+    let coercion_source = fs::read_to_string("src/coercion.rs").unwrap();
+    let conversion_source = fs::read_to_string("src/conversion_plan.rs").unwrap();
+
+    assert!(source.contains("fn optional_element_borrow_lowered_type"));
+    assert!(source.contains("fn optional_element_borrow_lowered_expr"));
+    assert!(coercion_source.contains("pub fn project_optional_element_borrow_carrier"));
+    assert!(conversion_source.contains("pub fn optional_element_borrow_from_option_shape"));
+    assert!(source.contains("fn lower_optional_argument_for_borrowed_target"));
+    assert!(source.contains("LoweredType::optional_element_borrow_from_option_shape"));
+    assert!(!source.contains("return Some(LoweredType::OptionalElementBorrow {"));
+    assert!(!source.contains("actual: LoweredType::OptionalElementBorrow {"));
+    assert!(conversion_source.contains("Self::OptionalElementBorrow {"));
+    let expr_helper = source
+        .split("fn optional_element_borrow_lowered_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn adapt_reused_owned_argument").next())
+        .expect("optional borrowed expression helper should be present");
+    assert!(expr_helper.contains("project_optional_element_borrow_carrier"));
+    assert!(!expr_helper.contains("as_ref"));
+    assert!(!expr_helper.contains("as_mut"));
+    assert!(!expr_helper.contains("format!"));
+    assert_eq!(
+        expr_helper
+            .matches("    Some(crate::coercion::LoweredExpr {")
+            .count(),
+        1
+    );
+    assert!(source.contains("optional_array_lowered_type_for_slice_slot"));
+    assert!(source.contains("lower_optional_argument_for_borrowed_target"));
+    assert!(!source.contains("fn lower_optional_argument_for_borrowed_optional_target"));
+    assert!(!source.contains("fn lower_optional_array_argument_for_slice_shape"));
+    assert!(!source.contains("fn adapt_optional_shared_borrow_argument"));
+    assert!(!source.contains("fn adapt_optional_mut_borrow_argument"));
+    assert!(source.contains("apply_optional_field_borrowed_carrier_to_slot"));
+    assert!(source.contains("source_field_getter_lowered_type"));
+    assert!(source.contains("optional_borrow_slot_lowered_type"));
+    assert!(source.contains("fn reused_optional_unwrap_lowered_expr"));
+    assert!(
+        source.contains("plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts)")
+    );
+    let reused_optional_unwrap_helper = source
+        .split("fn lower_reused_optional_unwrap_for_slot")
+        .nth(1)
+        .and_then(|tail| tail.split("fn reused_optional_unwrap_lowered_expr").next())
+        .expect("reused optional unwrap helper should be present");
+    assert!(!reused_optional_unwrap_helper.contains(".as_ref().unwrap().clone()"));
+    assert!(!reused_optional_unwrap_helper.contains(".map(|value| (**value).clone())"));
+    let borrowed_receiver_field_helper = source
+        .split("fn lower_borrowed_receiver_field_owned_recovery_for_slot")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_optional_self_field_owned_option_recovery")
+                .next()
+        })
+        .expect("borrowed receiver field recovery helper should be present");
+    assert!(
+        borrowed_receiver_field_helper.contains("apply_optional_field_borrowed_carrier_to_slot")
+    );
+    assert!(
+        !borrowed_receiver_field_helper
+            .contains(".as_ref().expect(\"Java null receiver\").clone()")
+    );
+    let optional_receiver_field_helper = source
+        .split("fn lower_optional_receiver_field_access_for_slot")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn optional_receiver_field_actual_shape_for_slot")
+                .next()
+        })
+        .expect("optional receiver field access helper should be present");
+    assert!(
+        optional_receiver_field_helper.contains("adapt_optional_instance_receiver_with_slot_plan")
+    );
+    assert!(!optional_receiver_field_helper.contains("project_optional_receiver"));
+    let reused_optional_wrap_helper = source
+        .split("fn lower_reused_optional_wrap_for_slot")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_map_entry_accessor_expr_for_slot")
+                .next()
+        })
+        .expect("reused optional wrap helper should be present");
+    assert!(reused_optional_wrap_helper.contains("construct_optional_value_for_target"));
+    assert!(!reused_optional_wrap_helper.contains("Some({}.clone()"));
+    let map_entry_set_helper = source
+        .split("fn lower_map_entry_set_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn map_type_args_from_expr_shape").next())
+        .expect("map entry set helper should be present");
+    assert!(map_entry_set_helper.contains("adapt_optional_instance_receiver_with_slot_plan"));
+    assert!(!map_entry_set_helper.contains("project_optional_receiver"));
+    let enhanced_for_iterable_helper = source
+        .split("fn lower_enhanced_for_iterable_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn enhanced_for_iterable_needs_optional_unwrap")
+                .next()
+        })
+        .expect("enhanced-for iterable helper should be present");
+    assert!(
+        enhanced_for_iterable_helper.contains("adapt_optional_instance_receiver_with_slot_plan")
+    );
+    assert!(!enhanced_for_iterable_helper.contains("project_optional_receiver"));
+    let sequence_get_array_helper = source
+        .split("fn lower_sequence_get_array_access_receiver")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_array2_row_replacement_stmt").next())
+        .expect("sequence get array-access helper should be present");
+    assert!(sequence_get_array_helper.contains("adapt_optional_instance_receiver_with_slot_plan"));
+    assert!(!sequence_get_array_helper.contains("project_optional_receiver"));
+    let sequence_get_slot_helper = source
+        .split("fn lower_sequence_get_call_expr_for_slot")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_borrowed_sequence_expr_for_slot")
+                .next()
+        })
+        .expect("sequence get slot helper should be present");
+    assert!(sequence_get_slot_helper.contains("adapt_optional_instance_receiver_with_slot_plan"));
+    assert!(!sequence_get_slot_helper.contains("project_optional_receiver"));
+    let map_get_mut_helper = source
+        .split("fn lower_map_get_collection_mutation_call")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_map_key_arg_borrow_projection").next())
+        .expect("map get collection mutation helper should be present");
+    assert!(map_get_mut_helper.contains("adapt_optional_instance_receiver_with_slot_plan"));
+    assert!(!map_get_mut_helper.contains("project_optional_receiver"));
+    let map_get_to_array_helper = source
+        .split("fn lower_map_get_to_array_call_expr_for_slot")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_map_get_collection_mutation_call")
+                .next()
+        })
+        .expect("map get toArray helper should be present");
+    assert!(map_get_to_array_helper.contains("LoweredType::optional_element_borrow_shape"));
+    assert!(map_get_to_array_helper.contains("plan_lowered_slot_conversion"));
+    assert!(!map_get_to_array_helper.contains("expect(\\\"Java null receiver\\\").clone()"));
+    let native_collection_receiver_helper = source
+        .split("fn adapt_native_collection_receiver")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_java_equality_call_expr").next())
+        .expect("native collection receiver helper should be present");
+    assert!(native_collection_receiver_helper.contains("project_optional_receiver"));
+    assert!(native_collection_receiver_helper.contains("MutableUnchecked"));
+    assert!(native_collection_receiver_helper.contains("SharedUnchecked"));
+    assert!(!native_collection_receiver_helper.contains("\"as_ref\""));
+    assert!(!native_collection_receiver_helper.contains("\"as_mut\""));
+    assert!(!native_collection_receiver_helper.contains(".{access}().unwrap()"));
+    let shaped_args = source
+        .split("fn lower_args_with_plan")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_constructor_args_with_plan").next())
+        .expect("argument lowering should be present");
+    assert!(shaped_args.contains("lower_optional_argument_for_borrowed_target"));
+    assert!(!shaped_args.contains("adapt_optional_shared_borrow_argument"));
+    assert!(!shaped_args.contains("adapt_optional_mut_borrow_argument"));
 }
 
 #[test]
@@ -13607,9 +14130,9 @@ class Holder {
             .rust
             .contains("let tmp: Option<Cursor> = self.query.as_ref().cloned()")
             && translation.rust.contains("self.query.take();")
-            && translation.rust.contains(
-                "return tmp.as_ref().unwrap().clone()/* TODO(translation): validate added clone */;"
-            )
+            && translation
+                .rust
+                .contains("return tmp.expect(\"Java null receiver\");")
             && !translation.rust.contains(
                 "self.query.as_ref().cloned()/* TODO(translation): validate added clone */.clone()"
             )
@@ -14261,6 +14784,7 @@ fn facade_abi_borrowed_return_shape_does_not_require_rust_type_string_heuristic(
         return_slot: FacadeSlot::Borrowed,
         result: ResultAbi::Plain,
         borrow_source: None,
+        borrowed_return_recovery: None,
         provenance: FactProvenance::UserOverride,
     });
     let mut types = TypeEnv::new();
@@ -14284,7 +14808,11 @@ fn facade_abi_borrowed_return_shape_does_not_require_rust_type_string_heuristic(
 
     assert_eq!(
         actual,
-        LoweredType::rust_borrowed_return(JavaType::String, "external_facade::name".to_string())
+        LoweredType::rust_borrowed_return(
+            JavaType::String,
+            "external_facade::name".to_string(),
+            None,
+        )
     );
 }
 
@@ -14310,6 +14838,7 @@ fn legacy_rust_return_shape_uses_explicit_slot_not_type_string_heuristic() {
             arg_count: Some(0),
             rust_type_name: "&str".to_string(),
             return_slot: FacadeSlot::Owned,
+            borrowed_return_recovery: None,
             provenance: FactProvenance::UserOverride,
         });
     let mut types = TypeEnv::new();
@@ -14362,6 +14891,7 @@ fn facade_abi_byte_array_return_shape_does_not_require_rust_type_string_heuristi
         return_slot: FacadeSlot::Optional(Box::new(FacadeSlot::Owned)),
         result: ResultAbi::OptionWrapped,
         borrow_source: None,
+        borrowed_return_recovery: None,
         provenance: FactProvenance::UserOverride,
     });
     let mut types = TypeEnv::new();
@@ -14414,6 +14944,7 @@ fn facade_abi_result_shape_drives_external_call_fallibility() {
         return_slot: FacadeSlot::Owned,
         result: ResultAbi::ResultWrapped,
         borrow_source: None,
+        borrowed_return_recovery: None,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     let mut types = TypeEnv::new();
@@ -14460,6 +14991,7 @@ fn facade_abi_plain_result_overrides_thrown_exception_guess() {
         return_slot: FacadeSlot::Owned,
         result: ResultAbi::Plain,
         borrow_source: None,
+        borrowed_return_recovery: None,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     let mut types = TypeEnv::new();
@@ -24675,6 +25207,34 @@ fn indexed_shape_projects_owned_container_non_copy_reads_as_borrows() {
 }
 
 #[test]
+fn indexed_access_shape_projects_optional_array_receivers() {
+    let values_shape = RustSlotShape::conservative(optional_java_type(JavaType::Array(Box::new(
+        JavaType::String,
+    ))));
+    let projected_shape =
+        indexed_read_shape_for_access_with_facts(&values_shape, &FactSet::default()).unwrap();
+
+    assert_eq!(projected_shape.java_ty, JavaType::String);
+    assert_eq!(projected_shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(projected_shape.view, ViewShape::Native);
+}
+
+#[test]
+fn indexed_shape_projects_nested_array_rows_as_slices() {
+    let values_shape = RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::Array(
+        Box::new(JavaType::Primitive(PrimitiveType::Double)),
+    ))));
+    let projected_shape = indexed_read_shape_with_facts(&values_shape, &FactSet::default());
+
+    assert_eq!(
+        projected_shape.java_ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Double)))
+    );
+    assert_eq!(projected_shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(projected_shape.view, ViewShape::Slice);
+}
+
+#[test]
 fn indexed_assignment_target_shape_projects_storage_element_shape() {
     let mut env = ShapeEnv::new();
     let mut values_shape = RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::String)));
@@ -25553,7 +26113,7 @@ class UsesArrowConstructorArgumentFacts {
     assert!(
         translation
             .rust
-            .contains("arrow_facade::IntVector::new(\"id\".to_string().as_str(), &allocator)"),
+            .contains("arrow_facade::IntVector::new(\"id\", &allocator)"),
         "{}",
         translation.rust
     );
@@ -25766,7 +26326,7 @@ class UsesArrowConstructorUnknownNullability {
     assert!(
         translation
             .rust
-            .contains("arrow_facade::IntVector::new(\"id\".to_string().as_str(), &allocator)"),
+            .contains("arrow_facade::IntVector::new(\"id\", &allocator)"),
         "{}",
         translation.rust
     );
@@ -25775,8 +26335,7 @@ class UsesArrowConstructorUnknownNullability {
             && !translation.rust.contains("IntVector::new(None")
             && !translation
                 .rust
-                .contains("Option<arrow_facade::RootAllocator>")
-            && !translation.rust.contains("Option<String>"),
+                .contains("Option<arrow_facade::RootAllocator>"),
         "{}",
         translation.rust
     );
@@ -26158,6 +26717,7 @@ external-pack-api dep Reader getSchema mapped getter read-only maybe-null args=0
         return_slot: FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed)),
         result: ResultAbi::OptionWrapped,
         borrow_source: None,
+        borrowed_return_recovery: None,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     let translation = translate_source_with_facts(
@@ -26682,6 +27242,9 @@ class NonNullExternalObjectInitializer {
 
 #[test]
 fn borrowed_path_facade_return_recovers_owned_path_before_erasure() {
+    let conversion_source = include_str!("../src/conversion_plan.rs");
+    let coercion_source = include_str!("../src/coercion.rs");
+    let facts_source = include_str!("../src/facts.rs");
     let facts = parse_external_pack_manifest(
         r#"
 external-pack hdf5 HDF5File rust-crate-mapping mapped target=hdf5_facade
@@ -26712,6 +27275,71 @@ class BorrowedPathFacadeReturn {
         "{}",
         translation.rust
     );
+    assert!(conversion_source.contains("pub enum RustBorrowedFacadeReturnRecovery"));
+    assert!(facts_source.contains("borrowed_return_recovery: Option<BorrowedReturnRecovery>"));
+    assert!(conversion_source.contains("unwrap_or_else(|| rust_borrowed_facade_return_recovery"));
+    assert!(coercion_source.contains("RustBorrowedFacadeReturnRecovery::ToPathBuf"));
+    assert!(!coercion_source.contains("rust_borrowed_return_is_path_like"));
+}
+
+#[test]
+fn facade_abi_fact_owns_borrowed_return_recovery_policy() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getFile".to_string(),
+        receiver_type: Some("HDF5File".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "File".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("HDF5File", "getFile", Staticness::Unknown, 0),
+        rust_path: "hdf5_facade::get_file".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: Vec::new(),
+        return_slot: FacadeSlot::Borrowed,
+        result: ResultAbi::Plain,
+        borrow_source: Some(new_java2rust::facts::BorrowSource::Receiver),
+        borrowed_return_recovery: Some(BorrowedReturnRecovery::ToPathBuf),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "reader",
+        JavaType::Named {
+            name: "HDF5File".to_string(),
+            args: Vec::new(),
+        },
+    );
+    let lowered = external_call_lowered_type(
+        Some(&Expr::Var("reader".to_string())),
+        "getFile",
+        0,
+        &facts,
+        &types,
+        Some("Owner"),
+    )
+    .expect("facade ABI should select a borrowed return shape");
+
+    let mut erased_target = RustSlotShape::conservative(JavaType::Named {
+        name: "Object".to_string(),
+        args: Vec::new(),
+    });
+    erased_target.dispatch = DispatchShape::ErasedObject;
+    let plan = plan_lowered_slot_conversion(&lowered, Slot::Return(erased_target), &facts);
+
+    assert!(matches!(
+        plan.conversion,
+        SlotConversionPlan::RustBorrowedFacadeReturn(policy)
+            if policy.recovery == RustBorrowedFacadeReturnRecovery::ToPathBuf
+    ));
 }
 
 #[test]
@@ -26771,6 +27399,452 @@ fn semantic_facts_own_nullability_and_external_api_heuristics_before_lowering() 
     assert!(!lower_source.contains("external_api_effect_for"));
     assert!(!lower_source.contains("starts_with(\"set\")"));
     assert!(!lower_source.contains("starts_with(\"get\")"));
+}
+
+#[test]
+fn rendered_string_heuristics_have_centralization_guardrails() {
+    let coercion_source = include_str!("../src/coercion.rs");
+    let lower_source = include_str!("../src/lower.rs");
+    let call_source = include_str!("../src/call_lowering.rs");
+    let call_plan_source = include_str!("../src/call_plan.rs");
+    let stream_source = include_str!("../src/stream_lowering.rs");
+    let access_source = include_str!("../src/access_lowering.rs");
+    let array_source = include_str!("../src/array_lowering.rs");
+
+    assert!(coercion_source.contains("pub fn ensure_borrow_projection"));
+    assert!(coercion_source.contains("pub fn rendered_expr_has_clone_recovery"));
+    assert!(coercion_source.contains("pub fn rendered_expr_has_direct_clone_recovery"));
+    assert!(coercion_source.contains("pub fn render_java_display_operand"));
+    assert!(coercion_source.contains("FormatValue"));
+    assert!(coercion_source.contains("OptionalBorrowedValue"));
+    assert!(
+        coercion_source
+            .contains(".as_ref().map(|value| value.to_string()).unwrap_or_else(|| \\\"null\\\"")
+    );
+    assert!(coercion_source.contains("pub fn normalize_optional_constructed_string_view_expr"));
+    assert!(coercion_source.contains("fn render_option_some"));
+    assert!(coercion_source.contains("fn render_raw_option_some"));
+    assert!(coercion_source.contains("pub fn unwrap_rendered_some_expr"));
+    assert!(!coercion_source.contains("pub enum OptionalArgumentProjection"));
+    assert!(!coercion_source.contains("pub fn apply_optional_argument_projection"));
+    assert!(coercion_source.contains("pub enum OptionalReceiverProjection"));
+    assert!(coercion_source.contains("Borrowed"));
+    assert!(coercion_source.contains("pub fn project_optional_receiver"));
+    assert!(coercion_source.contains("UnwrapOptionMutBorrowed"));
+    assert!(coercion_source.contains("SharedUnchecked"));
+    assert!(coercion_source.contains("MutableUnchecked"));
+    assert!(coercion_source.contains("pub enum OptionalSequenceReceiverProjection"));
+    assert!(coercion_source.contains("pub fn project_optional_sequence_receiver"));
+    assert!(coercion_source.contains("pub enum SequenceIterationProjection"));
+    assert!(coercion_source.contains("pub fn render_sequence_iteration_source"));
+    assert!(coercion_source.contains("pub fn render_optional_non_null_filter_map"));
+    assert!(coercion_source.contains("pub fn render_borrowed_collection_flat_map"));
+    assert!(coercion_source.contains("pub enum StreamLambdaParamProjection"));
+    assert!(coercion_source.contains("pub fn render_stream_lambda_param_projection"));
+    assert!(coercion_source.contains("pub fn parenthesize_borrowed_method_receiver"));
+    assert!(coercion_source.contains("pub fn force_shared_borrow_projection"));
+    assert!(coercion_source.contains("pub fn borrow_as_dyn_trait"));
+    assert!(coercion_source.contains("pub fn unwrap_optional_shared_value"));
+    assert!(coercion_source.contains("pub fn optional_get_owned_value_projection"));
+    assert!(coercion_source.contains("pub fn optional_or_else_owned_value_projection"));
+    assert!(coercion_source.contains("pub fn rust_expr_mentions_constructor_self_temporary"));
+    assert!(coercion_source.contains("pub fn constructor_self_field_replacement"));
+    assert!(coercion_source.contains("pub fn render_parse_receiver"));
+    assert!(coercion_source.contains("pub fn primitive_parse_projection"));
+    assert!(coercion_source.contains("pub fn render_string_join_vararg_value"));
+    assert!(coercion_source.contains("pub fn render_string_view_argument"));
+    assert!(coercion_source.contains("pub fn string_join_delimiter_projection"));
+    assert!(coercion_source.contains("pub fn string_join_varargs_projection"));
+    assert!(coercion_source.contains("pub fn string_helper_receiver_projection"));
+    assert!(coercion_source.contains("pub fn string_hash_code_projection"));
+    assert!(coercion_source.contains("pub fn string_replace_first_projection"));
+    assert!(coercion_source.contains("pub fn string_replace_all_projection"));
+    assert!(coercion_source.contains("pub fn string_matches_projection"));
+    assert!(coercion_source.contains("pub fn string_split_projection"));
+    assert!(coercion_source.contains("pub fn string_from_bytes_projection"));
+    assert!(coercion_source.contains("pub fn string_from_byte_range_projection"));
+    assert!(coercion_source.contains("pub fn string_compare_to_projection"));
+    assert!(coercion_source.contains("pub fn string_compare_to_ignore_case_projection"));
+    assert!(coercion_source.contains("pub fn string_equals_ignore_case_projection"));
+    assert!(coercion_source.contains("pub fn string_get_bytes_projection"));
+    assert!(coercion_source.contains("pub fn string_to_char_array_projection"));
+    assert!(coercion_source.contains("pub fn string_char_at_projection"));
+    assert!(coercion_source.contains("pub fn string_index_of_projection"));
+    assert!(coercion_source.contains("pub fn string_substring_projection"));
+    assert!(coercion_source.contains("pub fn primitive_number_value_projection"));
+    assert!(coercion_source.contains("pub fn primitive_hash_code_projection"));
+    assert!(coercion_source.contains("pub fn primitive_compare_to_projection"));
+    assert!(coercion_source.contains("pub fn primitive_f64_method_projection"));
+    assert!(coercion_source.contains("pub fn len_i32_projection"));
+    assert!(coercion_source.contains("pub fn array2_rows_i32_projection"));
+    assert!(coercion_source.contains("pub fn array2_cols_i32_projection"));
+    assert!(coercion_source.contains("pub fn file_exists_projection"));
+    assert!(coercion_source.contains("pub fn system_exit_projection"));
+    assert!(coercion_source.contains("pub fn thread_sleep_millis_projection"));
+    assert!(coercion_source.contains("pub fn math_max_projection"));
+    assert!(coercion_source.contains("pub fn math_min_projection"));
+    assert!(coercion_source.contains("pub fn objects_equals_projection"));
+    assert!(coercion_source.contains("pub fn objects_non_null_projection"));
+    assert!(coercion_source.contains("pub fn objects_is_null_projection"));
+    assert!(coercion_source.contains("pub fn owned_map_keys_vec_projection"));
+    assert!(coercion_source.contains("pub fn owned_map_keys_set_projection"));
+    assert!(coercion_source.contains("pub fn owned_collection_to_vec_projection"));
+    assert!(coercion_source.contains("pub fn to_owned_sequence_projection"));
+    assert!(coercion_source.contains("pub fn java_iterator_from_collection_projection"));
+    assert!(coercion_source.contains("pub fn sequence_iter_cloned_projection"));
+    assert!(coercion_source.contains("pub fn sequence_iter_copied_projection"));
+    assert!(coercion_source.contains("pub fn iterator_next_expect_projection"));
+    assert!(coercion_source.contains("pub fn tuple_field_projection"));
+    assert!(coercion_source.contains("pub fn primitive_is_nan_projection"));
+    assert!(coercion_source.contains("pub fn render_string_format_arg_value"));
+    assert!(coercion_source.contains("pub fn string_format_projection"));
+    assert!(coercion_source.contains("pub fn borrowed_sequence_extend_arg"));
+    assert!(coercion_source.contains("pub enum LiteralSlotPlan"));
+    assert!(coercion_source.contains("pub fn literal_slot_plan"));
+    assert!(coercion_source.contains("pub fn apply_literal_slot_plan"));
+    assert!(coercion_source.contains("pub fn java_integral_literal_char"));
+    assert!(coercion_source.contains("pub enum BorrowedStringViewProjection"));
+    assert!(coercion_source.contains("pub fn borrowed_string_view_projection"));
+    assert!(coercion_source.contains("pub fn apply_borrowed_string_view_projection"));
+    assert!(coercion_source.contains("pub fn collapse_redundant_shared_borrow_projection"));
+    assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
+    assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));
+    assert!(coercion_source.contains("pub fn render_index_to_usize_projection"));
+    assert!(coercion_source.contains("pub fn rendered_expr_is_mutable_alias"));
+    assert!(coercion_source.contains("pub fn reborrow_optional_mut_projection"));
+    assert!(coercion_source.contains("pub fn clone_erased_object_ref_once"));
+    assert!(coercion_source.contains("pub fn apply_clone_projection"));
+    assert!(coercion_source.contains("pub fn rewrite_downcast_expect_message"));
+    assert!(coercion_source.contains("pub fn deref_borrowed_projection"));
+    assert!(coercion_source.contains("pub fn unwrap_result_or_panic_uncaught_java_exception"));
+    assert!(coercion_source.contains("pub fn normalize_reused_clone_for_borrowed_argument"));
+    assert!(coercion_source.contains("fn render_optional_element_projection"));
+    assert!(coercion_source.contains("pub fn project_optional_element_borrow_carrier"));
+    assert!(coercion_source.contains("pub fn collection_sort_projection"));
+    assert!(coercion_source.contains("pub fn collection_sort_by_comparator_projection"));
+    assert!(coercion_source.contains("pub fn array_fill_projection"));
+    assert!(coercion_source.contains("pub fn sequence_get_expect_projection"));
+    assert!(coercion_source.contains("pub fn map_get_projection"));
+    assert!(coercion_source.contains("pub fn map_get_expect_projection"));
+    assert!(coercion_source.contains("pub fn map_get_mut_expect_projection"));
+    assert!(coercion_source.contains("pub fn optional_copied_expect_projection"));
+    assert!(coercion_source.contains("pub fn erased_object_borrowed_downcast_ref_projection"));
+    assert!(coercion_source.contains("pub fn snapshot_rendered_shared_borrow_argument"));
+    assert!(array_source.contains("pub fn array2_from_rows_projection"));
+    assert!(array_source.contains("pub fn array2_index_projection"));
+    assert!(array_source.contains("pub fn array2_row_mut_assign_stmt"));
+    assert!(array_source.contains("pub fn ragged_array_outer_creation_projection"));
+    assert!(coercion_source.contains("validate same-call alias snapshot"));
+    assert!(lower_source.contains("MoveUseContext"));
+    assert!(lower_source.contains("Coercion::CloneRecovery"));
+    assert!(lower_source.contains("enum SameCallArgumentAliasPlan"));
+    assert!(lower_source.contains("fn plan_same_call_later_read_alias"));
+    assert!(lower_source.contains("fn plan_same_call_shared_read_alias"));
+    assert!(!lower_source.contains("fn snapshot_rendered_shared_borrow_argument"));
+    assert!(!lower_source.contains("validate same-call alias snapshot"));
+    assert!(!lower_source.contains("fn normalize_optional_borrowed_as_str_expr"));
+    assert!(!lower_source.contains("normalize_optional_constructed_string_view_expr"));
+    assert!(!lower_source.contains("fn render_optional_shared_array_element_to_slice"));
+    assert!(!lower_source.contains("fn render_optional_mut_element_to_slice"));
+    assert!(!lower_source.contains("as_ref().expect(\"Java null receiver\")"));
+    assert!(!lower_source.contains("as_mut().expect(\"Java null receiver\")"));
+    assert!(!lower_source.contains(".expect(\"Java null receiver\")"));
+    assert!(!access_source.contains("as_ref().expect(\"Java null receiver\")"));
+    assert!(!lower_source.contains("strip_suffix(\".unwrap()\")"));
+    assert!(!lower_source.contains("rendered.contains(\"__java_self\")"));
+    assert!(!lower_source.contains("strip_suffix(\".clone()\")"));
+    assert!(!lower_source.contains("fn self_field_replacement"));
+    assert!(!lower_source.contains("fn parenthesize_borrowed_method_receiver"));
+    assert!(
+        !lower_source
+            .contains("actual_shape.optional_element_type().is_some() {\n        return None;")
+    );
+    assert!(!lower_source.contains("format!(\"&{}\""));
+    assert!(!lower_source.contains("format!(\"&{packed_vec}\")"));
+    assert!(!lower_source.contains("format!(\"&{rendered} as &dyn"));
+    assert!(!lower_source.contains("format!(\"{}.as_ref().unwrap()\""));
+    assert!(!lower_source.contains("format!(\"&{name}\")"));
+    assert!(!lower_source.contains("self.clone()/* TODO(translation): validate added clone */"));
+    assert!(!lower_source.contains(".clone()/* TODO(translation): validate added clone */\","));
+    assert!(!lower_source.contains("fn rendered_arg_is_mutable_alias"));
+    assert!(!lower_source.contains("as_deref_mut()\") {\n        return None;"));
+    assert!(!lower_source.contains("java_clone_erased_object_ref("));
+    assert!(!lower_source.contains(".downcast::<\") && rendered.contains"));
+    assert!(!lower_source.contains("downcast_ref::<{rust_type}>().expect(\"invalid Java cast\")"));
+    assert!(lower_source.contains("erased_object_borrowed_downcast_ref_projection("));
+    assert!(!lower_source.contains("format!(\"{name}.as_str()\")"));
+    assert!(!lower_source.contains("format!(\"{name}.as_mut_slice()\")"));
+    assert!(!lower_source.contains("format!(\"{name}.as_slice()\")"));
+    assert!(!lower_source.contains("format!(\"*{rendered}\")"));
+    assert!(!lower_source.contains("strip_suffix('?')"));
+    assert!(!lower_source.contains("panic!(\\\"uncaught Java exception"));
+    assert!(!lower_source.contains(".strip_prefix(\"Some(\")"));
+    assert!(!lower_source.contains("fn avoid_double_borrowed_map_key_arg"));
+    assert!(!lower_source.contains("fn ensure_borrowed_map_key_arg"));
+    assert!(!lower_source.contains("keys().cloned().collect::<std::collections::HashSet<_>>()"));
+    assert!(!lower_source.contains("fn lower_borrowed_string_literal_for_slot"));
+    assert!(!lower_source.contains("fn lower_integral_literal_for_char_slot"));
+    assert!(!lower_source.contains("fn java_char_expr_from_integral_literal"));
+    assert!(!lower_source.contains("java_erased_object_to_string(&{})"));
+    assert!(!call_source.contains("java_erased_object_to_string(&{})"));
+    assert!(lower_source.contains("len_i32_projection"));
+    assert!(!lower_source.contains("format!(\"{rendered_receiver}.len() as i32\")"));
+    assert!(!lower_source.contains("format!(\"{}.len() as i32\""));
+    assert!(!lower_source.contains("format!(\"{unwrapped_receiver}.len() as i32\")"));
+    assert!(!lower_source.contains(".nrows() as i32"));
+    assert!(!access_source.contains(".nrows() as i32"));
+    assert!(lower_source.contains("array2_rows_i32_projection"));
+    assert!(access_source.contains("array2_rows_i32_projection"));
+    assert!(access_source.contains("array2_cols_i32_projection"));
+    assert!(lower_source.contains("to_owned_sequence_projection"));
+    assert!(!lower_source.contains("format!(\"{rendered}.to_vec()\")"));
+    assert!(!lower_source.contains(".row({}).to_vec()"));
+    assert!(!lower_source.contains("Array2::from_rows({rendered})"));
+    assert!(lower_source.contains("array2_from_rows_projection(lowered, target.ownership)"));
+    assert!(!lower_source.contains("{}[[{}, {}]]"));
+    assert!(lower_source.contains("array2_index_projection("));
+    assert!(
+        !lower_source.contains(".row_mut({index}).assign(&ndarray::ArrayView1::from({value}));")
+    );
+    assert!(lower_source.contains("array2_row_mut_assign_stmt("));
+    assert!(!lower_source.contains("vec![Vec::new(); {}]"));
+    assert!(lower_source.contains("ragged_array_outer_creation_projection(len)"));
+    assert!(!lower_source.contains(".get({}).expect(\"Java index out of bounds\")"));
+    assert!(lower_source.contains("sequence_get_expect_projection(receiver_expr, index_expr)"));
+    assert!(!lower_source.contains(".get({}).expect(\"Java null receiver\")"));
+    assert!(!lower_source.contains(".get_mut({}).expect(\"Java null receiver\")"));
+    assert!(!lower_source.contains(".copied().expect(\"Java null receiver\")"));
+    assert!(lower_source.contains("map_get_projection("));
+    assert!(lower_source.contains("map_get_expect_projection("));
+    assert!(lower_source.contains("map_get_mut_expect_projection("));
+    assert!(lower_source.contains("optional_copied_expect_projection("));
+    assert!(!lower_source.contains("format!(\"{}.sort()\""));
+    assert!(!lower_source.contains(".sort_by(|a, b| __java_comparator.compare"));
+    assert!(lower_source.contains("collection_sort_projection(lower_expr("));
+    assert!(lower_source.contains("collection_sort_by_comparator_projection("));
+    assert!(!lower_source.contains("format!(\"{}.fill({})\""));
+    assert!(lower_source.contains("array_fill_projection("));
+    assert!(!lower_source.contains("format!(\"{}.iter()\""));
+    assert!(!lower_source.contains("format!(\"{}.iter().cloned()\""));
+    assert!(!lower_source.contains("format!(\"{}.iter().copied()\""));
+    assert!(lower_source.contains("sequence_iter_cloned_projection("));
+    assert!(lower_source.contains("sequence_iter_copied_projection("));
+    assert!(!lower_source.contains(".next().expect(\"Java iterator exhausted\")"));
+    assert!(lower_source.contains("iterator_next_expect_projection(iter_expr)"));
+    assert!(lower_source.contains("tuple_field_projection(next_expr, field_index)"));
+    assert!(lower_source.contains("render_sequence_iteration_source"));
+    assert!(!lower_source.contains("fn adapt_optional_instance_receiver_with_access"));
+    assert!(!lower_source.contains("fn adapt_optional_instance_receiver_with_projection"));
+    assert!(lower_source.contains("fn adapt_optional_instance_receiver_with_slot_plan"));
+    assert!(
+        lower_source.contains("force_shared_borrow_projection(packed)")
+            || lower_source.contains("force_shared_borrow_projection(packed_vec)")
+    );
+    assert!(
+        lower_source
+            .contains("let conversion_plan = plan_lowered_slot_conversion(&projected.actual, plan.slot, ctx.facts);")
+    );
+    assert!(lower_source.contains("fn optional_receiver_method_autoref_satisfies_slot"));
+    assert!(lower_source.contains("actual: LoweredType::Slot(element_shape)"));
+    assert!(call_plan_source.contains("pub struct OptionalReceiverSlotPlan"));
+    assert!(!call_plan_source.contains("pub enum OptionalReceiverProjectionPlan"));
+    assert!(!lower_source.contains("fn optional_receiver_projection_from_plan"));
+    assert!(call_plan_source.contains("pub fn optional_receiver_slot_plan"));
+    assert!(
+        !lower_source
+            .contains(".as_ref().map(|value| value.to_string()).unwrap_or_else(|| \\\"null\\\"")
+    );
+    assert!(!lower_source.contains(".map(|value| value.to_string()).unwrap_or_else(|| \"null\""));
+
+    assert!(lower_source.matches("rendered.ends_with").count() <= 13);
+    assert!(lower_source.matches("rendered.starts_with").count() == 0);
+    assert!(lower_source.matches("rendered.contains").count() <= 3);
+    assert!(call_source.matches("rendered.ends_with").count() <= 2);
+    assert!(call_source.matches("rendered.starts_with").count() == 0);
+    assert!(call_source.matches("rendered.contains").count() == 0);
+    assert!(!call_source.contains("strip_prefix('&')"));
+    assert!(!call_source.contains("fn string_join_vararg_value"));
+    assert!(!call_source.contains("fn string_join_delimiter_arg"));
+    assert!(!call_source.contains("vec![{values}].join"));
+    assert!(call_source.contains("string_join_varargs_projection(delimiter, varargs)"));
+    assert!(!call_source.contains("fn render_string_view_argument"));
+    assert!(!call_source.contains("BorrowProjectionUse::StringView"));
+    assert!(!call_source.contains("ensure_borrow_projection_rendered"));
+    assert!(!call_source.contains("render_parse_receiver"));
+    assert!(!call_source.contains("parse::<i32>().unwrap()"));
+    assert!(!call_source.contains("parse::<f32>().unwrap()"));
+    assert!(!call_source.contains("parse::<f64>().unwrap()"));
+    assert!(!call_source.contains("format!(\"{}.to_string()\""));
+    assert!(!call_source.contains("format!(\"{value}.to_string()\""));
+    assert!(!call_source.contains("String::new()"));
+    assert!(!call_source.contains("java_string_format"));
+    assert!(!call_source.contains("fn java_format_to_rust_format"));
+    assert!(
+        call_source
+            .contains("NativeJavaStaticMethod::StringFormat => string_format_projection(args)")
+    );
+    assert!(!call_source.contains("render_java_display_operand"));
+    assert!(!call_source.contains("format!(\"{}.as_str()\""));
+    assert!(!call_source.contains("as_bytes().iter().map(|byte| *byte as i8)"));
+    assert!(!call_source.contains("chars().collect::<Vec<char>>()"));
+    assert!(!call_source.contains("chars().nth({}).expect"));
+    assert!(!call_source.contains("Java string index out of bounds"));
+    assert!(!call_source.contains("java_string_index_of_from"));
+    assert!(!call_source.contains("java_string_index_of({receiver}"));
+    assert!(!call_source.contains("java_string_substring"));
+    assert!(!call_source.contains("java_string_hash_code"));
+    assert!(!call_source.contains("java_string_replace_first"));
+    assert!(!call_source.contains("java_string_replace_all"));
+    assert!(!call_source.contains("java_string_matches"));
+    assert!(!call_source.contains("java_string_split"));
+    assert!(!call_source.contains("java_string_from_bytes"));
+    assert!(!call_source.contains("java_string_from_byte_range"));
+    assert!(!call_source.contains("java_string_compare_to"));
+    assert!(!call_source.contains("java_string_compare_to_ignore_case"));
+    assert!(!call_source.contains("java_string_equals_ignore_case"));
+    assert!(!call_source.contains("PrimitiveType::Double => RustExpr::Raw(format!(\"{} as f64\""));
+    assert!(!call_source.contains("if {rendered} {{ 1231 }} else {{ 1237 }}"));
+    assert!(!call_source.contains("java_primitive_compare_to({}, {})"));
+    assert!(!call_source.contains("format!(\"({} as f64).ln()\""));
+    assert!(!call_source.contains("format!(\"({} as f64).exp()\""));
+    assert!(!call_source.contains("format!(\"{}.len() as i32\""));
+    assert!(!call_source.contains("keys().cloned().collect::<Vec<_>>()"));
+    assert!(!call_source.contains("iter().cloned().collect::<Vec<_>>()"));
+    assert!(!call_source.contains("JavaIterator::new({}.iter().cloned())"));
+    assert!(!call_source.contains("format!(\"({receiver_for_len}).len() as i32\""));
+    assert!(!call_source.contains("as_ref().map(|value| (*value).clone())"));
+    assert!(!call_source.contains("format!(\"{}.is_nan()\""));
+    assert!(!call_source.contains("std::process::exit({} as i32)"));
+    assert!(!call_source.contains("std::process::exit({})"));
+    assert!(!call_source.contains("std::thread::sleep(std::time::Duration::from_millis"));
+    assert!(!call_source.contains("std::path::Path::new"));
+    assert!(!call_source.contains("std::cmp::max"));
+    assert!(!call_source.contains("std::cmp::min"));
+    assert!(call_source.contains("objects_equals_projection(left, right)"));
+    assert!(call_source.contains("objects_non_null_projection(arg)"));
+    assert!(call_source.contains("objects_is_null_projection(arg)"));
+    let native_collection_static_source = call_source
+        .split("fn apply_native_collection_static_method")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn apply_collection_remove_if").next())
+        .expect("native collection static lowering should remain discoverable");
+    assert!(!native_collection_static_source.contains("std::collections::HashSet::from"));
+    assert!(!native_collection_static_source.contains("std::collections::HashMap::from"));
+    assert!(!native_collection_static_source.contains("std::collections::BTreeSet::new"));
+    assert!(!native_collection_static_source.contains("Vec::new()"));
+    assert!(!native_collection_static_source.contains("vec![{}]"));
+    assert!(!native_collection_static_source.contains("vec![{value}]"));
+    assert!(!native_collection_static_source.contains("vec![{value}; {count} as usize]"));
+    assert!(call_source.contains("arrays_as_list_projection(args)"));
+    assert!(call_source.contains("arrays_equals_projection(left, right)"));
+    assert!(call_source.contains("collections_singleton_map_projection(key, value)"));
+    assert!(coercion_source.contains("pub fn collections_n_copies_projection"));
+    assert!(!call_source.contains("{{ let _ = {}; }}"));
+    assert!(call_source.contains("discard_value_projection(arg)"));
+    assert!(coercion_source.contains("pub fn discard_value_projection"));
+    let erased_object_new_source = call_source
+        .split("fn erased_object_new_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn apply_native_collection_new_target").next())
+        .expect("erased Object constructor lowering should remain discoverable");
+    assert!(!erased_object_new_source.contains("as Box<dyn std::any::Any>"));
+    assert!(erased_object_new_source.contains("erased_object_box_projection(value)"));
+    assert!(coercion_source.contains("pub fn erased_object_box_projection"));
+    let native_collection_new_source = call_source
+        .split("fn apply_native_collection_new_target")
+        .nth(1)
+        .expect("native collection constructor lowering should remain discoverable");
+    assert!(!native_collection_new_source.contains("fn native_collection_type_name"));
+    assert!(!native_collection_new_source.contains("::with_capacity({} as usize)"));
+    assert!(!native_collection_new_source.contains("::new()"));
+    assert!(native_collection_new_source.contains("native_collection_empty_new_projection(kind)"));
+    assert!(
+        native_collection_new_source
+            .contains("native_collection_with_capacity_projection(kind, capacity)")
+    );
+    assert!(
+        native_collection_new_source
+            .contains("native_collection_default_constructor_projection(kind)")
+    );
+    assert!(coercion_source.contains("pub fn native_collection_empty_new_projection"));
+    assert!(coercion_source.contains("pub fn native_collection_with_capacity_projection"));
+    assert!(coercion_source.contains("pub fn native_collection_default_constructor_projection"));
+    let collection_remove_if_source = call_source
+        .split("pub fn apply_collection_remove_if")
+        .nth(1)
+        .and_then(|tail| tail.split("fn apply_native_collection_method").next())
+        .expect("collection removeIf lowering should remain discoverable");
+    assert!(!collection_remove_if_source.contains(".retain(|{}|"));
+    assert!(!collection_remove_if_source.contains("!({})"));
+    assert!(collection_remove_if_source.contains("collection_remove_if_projection"));
+    assert!(coercion_source.contains("pub fn collection_remove_if_projection"));
+    let lower_varargs_source = lower_source
+        .split("fn lower_varargs_call_args_from_params")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_fixed_varargs_prefix_args").next())
+        .expect("varargs lowering should remain discoverable");
+    assert!(!lower_varargs_source.contains("\"Vec::new()\""));
+    assert!(!lower_varargs_source.contains("format!(\"vec![{}]\""));
+    assert!(!lower_varargs_source.contains("let mut __java_varargs = {packed_vec}"));
+    assert!(lower_varargs_source.contains("varargs_packed_vec_projection(varargs)"));
+    assert!(lower_varargs_source.contains("varargs_spread_extend_projection(packed_vec, tail)"));
+    assert!(coercion_source.contains("pub fn varargs_packed_vec_projection"));
+    assert!(coercion_source.contains("pub fn varargs_spread_extend_projection"));
+    assert!(!call_source.contains("unsupported borrowed element recovery for extend"));
+    assert!(!call_source.contains("iter().map(|v| v.to_string())"));
+    assert!(!call_source.contains("format!(\"&{}\""));
+    assert!(!call_source.contains("fn render_string_char_at_index"));
+    assert!(stream_source.matches("rendered.ends_with").count() <= 1);
+    assert!(stream_source.matches("rendered.starts_with").count() <= 1);
+    assert!(stream_source.matches("rendered.contains").count() <= 1);
+    assert!(stream_source.contains("len_i32_projection"));
+    assert!(!stream_source.contains("fn render_stream_lambda_index_arg"));
+    assert!(!stream_source.contains("rendered_expr_is_already_string_view"));
+    assert!(!stream_source.contains("format!(\"{}.as_str()\""));
+    assert!(!stream_source.contains("format!(\"{receiver}.len() as i32\")"));
+    assert!(!stream_source.contains("format!(\"{rendered}.clone()\")"));
+    assert!(!stream_source.contains("format!(\"{param}.clone()\")"));
+    assert!(!stream_source.contains(".as_ref().unwrap().iter()"));
+    assert!(!stream_source.contains(".unwrap().into_iter()"));
+    assert!(!stream_source.contains(".filter_map(|item| item.as_ref())"));
+    assert!(!stream_source.contains(".filter_map(|item| item)"));
+    assert!(!stream_source.contains(".flat_map(|{param_name}| {param_name}.iter())"));
+    assert!(stream_source.contains("render_sequence_iteration_source"));
+    assert!(stream_source.contains("render_optional_non_null_filter_map"));
+    assert!(stream_source.contains("render_borrowed_collection_flat_map"));
+    assert!(stream_source.contains("render_stream_lambda_param_projection"));
+    assert!(stream_source.contains("fn render_stream_lambda_clone_projection"));
+    assert!(stream_source.contains("apply_clone_projection(RustExpr::Raw"));
+}
+
+#[test]
+fn stdlib_does_not_grow_non_jdk_domain_package_knowledge() {
+    let stdlib_source = include_str!("../src/stdlib.rs");
+    for forbidden in [
+        "htsjdk",
+        "gatk",
+        "hellbender",
+        "hdf5",
+        "sqlite",
+        "arrow",
+        "spark",
+        "genomicsdb",
+        "disq",
+        "picard",
+        "barclay",
+        "broadinstitute",
+        "org.apache",
+        "org.disq",
+        "com.intel",
+    ] {
+        assert!(
+            !stdlib_source.contains(forbidden),
+            "non-JDK package knowledge belongs in javalibs or external packs, not stdlib.rs: {forbidden}"
+        );
+    }
+
+    assert_eq!(stdlib_source.matches("cloud_storage_").count(), 2);
+    assert_eq!(stdlib_source.matches("CloudStorage").count(), 2);
 }
 
 #[test]
@@ -27432,6 +28506,7 @@ fn lowering_diagnostics_only_report_unimplemented_control_flow_rewrites() {
 
 #[test]
 fn stream_shape_owns_lambda_body_borrowed_string_views() {
+    let stream_lowering_source = include_str!("../src/stream_lowering.rs");
     let default = RustSlotShape::conservative(JavaType::String);
     let shape = infer_stream_lambda_body_shape(&parse_expr("value.trim()"), &default);
 
@@ -27439,6 +28514,9 @@ fn stream_shape_owns_lambda_body_borrowed_string_views() {
 
     let owned_shape = infer_stream_lambda_body_shape(&parse_expr("value.toLowerCase()"), &default);
     assert_eq!(owned_shape, owned_string_value_shape());
+    assert!(stream_lowering_source.contains("ensure_borrow_projection_rendered"));
+    assert!(stream_lowering_source.contains("BorrowProjectionUse::StringView"));
+    assert!(!stream_lowering_source.contains("format!(\"{rendered}.as_str()\")"));
 }
 
 #[test]
@@ -27465,6 +28543,40 @@ fn stream_shape_uses_shared_call_plan_for_lambda_call_results() {
     assert_eq!(
         length_shape.java_ty,
         JavaType::Primitive(PrimitiveType::Int)
+    );
+
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getName".to_string(),
+        receiver_type: Some("ExternalRecord".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::MaybeNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+    let mut env = TypeEnv::new();
+    env.insert_local(
+        "value",
+        JavaType::Named {
+            name: "ExternalRecord".to_string(),
+            args: Vec::new(),
+        },
+    );
+    let external_shape = infer_stream_lambda_body_shape_with_facts(
+        &parse_expr("value.getName()"),
+        &RustSlotShape::conservative(JavaType::Named {
+            name: "ExternalRecord".to_string(),
+            args: Vec::new(),
+        }),
+        &env,
+        &facts,
+    );
+    assert_eq!(
+        external_shape.java_ty,
+        new_java2rust::types::optional_java_type(JavaType::String)
     );
 }
 
@@ -27588,6 +28700,7 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert!(!stream_shape_source.contains("StringToLowercase"));
     assert!(!stream_shape_source.contains("StringSplit"));
     assert!(stream_shape_source.contains("native_java_call_lowered_type"));
+    assert!(stream_shape_source.contains("external_call_lowered_type"));
     assert!(expr_shape_source.contains("native_java_call_expr_shape"));
     assert!(expr_shape_source.contains("native_java_call_lowered_type"));
     assert!(!lower_source.contains("fn lower_string_pattern_args"));
@@ -29730,10 +30843,46 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(lowering_source.contains("pub fn render_method_reference"));
     assert!(lowering_source.contains("pub fn render_single_input_method_reference_body"));
     assert!(shape_source.contains("pub fn infer_single_input_method_reference_output_shape"));
+    assert!(shape_source.contains("infer_method_reference_output_shape_from_call_plan"));
+    assert!(
+        shape_source.find("infer_method_reference_output_shape_from_call_plan")
+            < shape_source.find("infer_method_reference_output_shape_for_plan")
+    );
     assert!(shape_source.contains("infer_method_reference_output_shape_for_plan"));
+    assert!(shape_source.contains("infer_unbound_accessor_method_reference_fallback_shape"));
+    assert!(shape_source.contains("is_java_accessor_method_reference_fallback"));
     assert!(stream_source.contains("infer_single_input_method_reference_output_shape"));
     assert!(!stream_source.contains("fn infer_stream_method_reference_output_shape"));
     assert!(stream_lowering_source.contains("render_single_input_method_reference_body"));
+    assert!(stream_lowering_source.contains("fn render_stream_lambda_value_expr"));
+    assert!(stream_lowering_source.contains("fn render_stream_lambda_receiver_expr"));
+    assert!(stream_lowering_source.contains("fn rendered_stream_lambda_borrowed_item_expr"));
+    assert!(stream_lowering_source.contains("fn stream_lambda_param_projection"));
+    assert!(stream_lowering_source.contains("render_stream_lambda_param_projection"));
+    assert!(!stream_lowering_source.contains("format!(\"**{param}\")"));
+    assert!(!stream_lowering_source.contains("format!(\"*{param}\")"));
+    assert!(!stream_lowering_source.contains("format!(\"(**{param})\")"));
+    assert!(!stream_lowering_source.contains("format!(\"(*{param})\")"));
+    assert!(stream_lowering_source.contains("object_method_reference_receiver_type"));
+    assert!(!stream_lowering_source.contains("fn object_method_reference_receiver_type"));
+    assert!(!stream_lowering_source.contains("fn java_type_for_unbound_method_reference_target"));
+    assert!(stream_lowering_source.contains("native_java_unbound_method_reference_receiver_type"));
+    assert!(stream_lowering_source.contains("plan_lowered_slot_conversion"));
+    assert!(
+        !stream_lowering_source.contains("fn stream_native_string_method_requires_string_receiver")
+    );
+    assert!(stream_lowering_source.contains("native_java_string_instance_method"));
+    assert!(
+        include_str!("../src/call_plan.rs").contains("pub fn native_java_string_instance_method")
+    );
+    assert!(shape_source.contains("object_method_reference_receiver_type"));
+    assert!(shape_source.contains("pub fn object_method_reference_receiver_type"));
+    assert!(!shape_source.contains("fn java_type_for_unbound_method_reference_target"));
+    assert!(shape_source.contains("native_java_unbound_method_reference_receiver_type"));
+    assert!(
+        include_str!("../src/call_plan.rs")
+            .contains("pub fn native_java_unbound_method_reference_receiver_type")
+    );
     assert!(!stream_lowering_source.contains("\"Integer\", \"intValue\""));
     assert!(!stream_lowering_source.contains("\"Object\", \"toString\""));
     assert!(!stream_lowering_source.contains("fn is_scala_tuple_accessor"));
@@ -30560,7 +31709,8 @@ fn stream_plan_lowers_arrays_stream_to_array_and_all_match_terminals() {
     assert_eq!(
         to_array_lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value| value.len() as i32).collect::<Vec<_>>()".to_string()
+            "values.iter().map(|value: &String| value.len() as i32).collect::<Vec<_>>()"
+                .to_string()
         )
     );
 
@@ -30646,6 +31796,79 @@ fn stream_plan_lowers_collectors_joining_terminal() {
                 .to_string()
         )
     );
+}
+
+#[test]
+fn stream_joining_delimiter_uses_slot_conversion_for_optional_string_field() {
+    let mut env = TypeEnv::new();
+    env.insert_local("names", list_java_type(JavaType::String));
+    env.insert_field("delimiter", JavaType::String);
+    let expr = parse_expr("names.stream().collect(Collectors.joining(delimiter))");
+
+    let plan = build_stream_plan(&expr, &env, &FactSet::default()).unwrap();
+    let mut shape_env = ShapeEnv::new();
+    shape_env.insert_local_shape(
+        "names",
+        RustSlotShape::conservative(list_java_type(JavaType::String)),
+    );
+    shape_env.insert_field_shape(
+        "delimiter",
+        RustSlotShape::conservative(optional_java_type(JavaType::String)),
+    );
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("names".to_string()),
+        StreamRenderContext::new_with_facts(&shape_env, &FactSet::default()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw(
+            "names.iter().map(|item| item.to_string()).collect::<Vec<_>>().join(self.delimiter.as_ref().expect(\"Java null receiver\").as_str())"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
+    let source = fs::read_to_string("src/stream_lowering.rs").unwrap();
+    let actual_shape = source
+        .split("fn stream_lambda_arg_actual_shape")
+        .nth(1)
+        .and_then(|tail| tail.split("fn render_stream_lambda_owned_arg").next())
+        .expect("stream lambda argument actual-shape helper should be present");
+    let borrowed_arg = source
+        .split("fn render_stream_lambda_borrowed_str_arg")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn render_stream_lambda_borrowed_string_param_arg")
+                .next()
+        })
+        .expect("stream borrowed string arg helper should be present");
+
+    assert!(actual_shape.contains("param_shape.cloned()"));
+    assert!(
+        !actual_shape.contains("RustSlotShape::conservative(JavaType::String)"),
+        "{actual_shape}"
+    );
+    assert!(
+        borrowed_arg.contains("let Some(actual) = actual else"),
+        "{borrowed_arg}"
+    );
+    assert!(
+        !borrowed_arg.contains("ensure_borrow_projection_rendered(\n        RustExpr::Raw(rendered),\n        actual.as_ref()"),
+        "{borrowed_arg}"
+    );
+    let slot_projection = source
+        .split("fn render_stream_lambda_arg_to_slot_through_plan")
+        .nth(1)
+        .and_then(|tail| tail.split("fn stream_lambda_arg_actual_shape").next())
+        .expect("stream lambda slot projection helper should be present");
+    assert!(slot_projection.contains("let default_facts;"));
+    assert!(!slot_projection.contains("let facts = ctx.facts?;"));
+    assert!(!source.contains("fn render_stream_lambda_optional_string_field_arg"));
 }
 
 #[test]
@@ -30925,7 +32148,7 @@ fn stream_plan_lowers_flat_map_block_temporary_collection_as_owned_subpipeline()
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "partitions.iter().flat_map(|partition| { let bounds = OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace.as_deref().expect(\"Java null receiver\"), partition.as_str()); let names = Default::default(); names.into_iter().filter(move |name| (name.len() as i32) >= bounds[0 as usize]).map(|name| name.trim()) }).collect::<Vec<_>>()"
+            "partitions.iter().flat_map(|partition| { let bounds = OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace.as_ref().expect(\"Java null receiver\").as_str(), partition.as_str()); let names = Default::default(); names.into_iter().filter(move |name| (name.len() as i32) >= bounds[0 as usize]).map(|name: &String| name.trim()) }).collect::<Vec<_>>()"
                 .to_string()
         )
     );
@@ -31023,7 +32246,7 @@ fn stream_plan_unwraps_optional_sequence_sources_before_iteration() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.as_ref().unwrap().iter().map(|value| value.trim()).collect::<Vec<_>>()"
+            "values.as_ref().unwrap().iter().map(|value: &String| value.trim()).collect::<Vec<_>>()"
                 .to_string()
         )
     );
@@ -31456,9 +32679,9 @@ class Caller {
     );
 
     assert_eq!(shape.java_ty, JavaType::String);
-    assert_eq!(shape.ownership, OwnershipShape::Owned);
-    assert_eq!(shape.view, ViewShape::Native);
-    assert_eq!(shape.mutability, MutabilityShape::Mutable);
+    assert_eq!(shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(shape.view, ViewShape::Str);
+    assert_eq!(shape.mutability, MutabilityShape::Immutable);
 }
 
 #[test]
@@ -31501,9 +32724,9 @@ class Caller {
     .unwrap();
 
     assert_eq!(shape.java_ty, JavaType::String);
-    assert_eq!(shape.ownership, OwnershipShape::Owned);
-    assert_eq!(shape.view, ViewShape::Native);
-    assert_eq!(shape.mutability, MutabilityShape::Mutable);
+    assert_eq!(shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(shape.view, ViewShape::Str);
+    assert_eq!(shape.mutability, MutabilityShape::Immutable);
 }
 
 #[test]

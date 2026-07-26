@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::access_lowering::{lower_bare_name, lower_field_access_with_facts};
-use crate::array_lowering::{borrowed_array2_temporary_for_slot, render_array_expr};
+use crate::array_lowering::{
+    array2_from_rows_projection, array2_index_projection, array2_row_mut_assign_stmt,
+    borrowed_array2_temporary_for_slot, ragged_array_outer_creation_projection, render_array_expr,
+};
 use crate::array_plan::plan_array_expr;
 use crate::call_lowering::{
     apply_call_target, apply_class_literal_token, apply_collection_remove_if,
-    apply_native_collection_extend, apply_new_target_with_facts, borrowed_sequence_extend_arg,
-    propagate_result_expr,
+    apply_native_collection_extend, apply_new_target_with_facts, propagate_result_expr,
 };
 use crate::call_plan::{
     ArgumentLoweringPlan, CallExceptionPropagationPlan, CallExprPlan, CallStatementPlan,
@@ -16,10 +18,36 @@ use crate::call_plan::{
     apply_fallback_static_owner_rust_name, external_call_lowered_type_with_external_index,
     external_call_returns_rust_result_with_external_index,
     external_constructor_arg_shapes_with_args, external_constructor_returns_rust_result,
-    native_collection_lowered_type, plan_call_arguments, plan_call_arguments_with_facts_and_args,
+    facade_receiver_slot_plan, native_collection_lowered_type, optional_receiver_slot_plan,
+    plan_call_arguments, plan_call_arguments_with_facts_and_args,
     plan_call_exception_propagation_with_external_index, plan_call_expr_with_external_index,
     plan_call_statement, plan_constructor_arguments, plan_native_collection_extend_arg,
     plan_new_target_for_args_with_facts,
+};
+use crate::coercion::{
+    BorrowProjectionUse, Coercion, JavaDisplayPlan, OptionalSequenceReceiverProjection,
+    SequenceIterationProjection, apply_audited_clone_recovery, apply_coercions,
+    apply_java_display_plan, apply_literal_slot_plan, array_fill_projection,
+    array2_rows_i32_projection, borrow_as_dyn_trait, borrowed_sequence_extend_arg,
+    borrowed_string_literal_temporary_plan, clone_erased_object_ref_once,
+    collection_sort_by_comparator_projection, collection_sort_projection,
+    constructor_self_field_replacement, deref_borrowed_projection, ensure_borrow_projection,
+    erased_object_borrowed_downcast_ref_projection, force_shared_borrow_projection,
+    iterator_next_expect_projection, java_integral_literal_char, len_i32_projection,
+    literal_slot_plan, map_get_expect_projection, map_get_mut_expect_projection,
+    map_get_projection, normalize_map_key_borrow_projection,
+    normalize_reused_clone_for_borrowed_argument, optional_copied_expect_projection,
+    owned_map_keys_set_projection, parenthesize_borrowed_method_receiver,
+    project_optional_element_borrow_carrier, project_optional_receiver,
+    project_optional_sequence_receiver, reborrow_optional_mut_projection,
+    render_sequence_iteration_source, rendered_expr_has_clone_recovery,
+    rendered_expr_has_direct_clone_recovery, rendered_expr_is_mutable_alias,
+    rewrite_downcast_expect_message, rust_expr_mentions_constructor_self_temporary,
+    sequence_get_expect_projection, sequence_iter_cloned_projection,
+    sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
+    to_owned_sequence_projection, tuple_field_projection, unwrap_optional_shared_value,
+    unwrap_result_or_panic_uncaught_java_exception, varargs_packed_vec_projection,
+    varargs_spread_extend_projection,
 };
 use crate::constructor_plan::{
     ConstructorDelegationPlan, ConstructorFieldValuePlan, DelegatedConstructorTrailingStmt,
@@ -27,14 +55,16 @@ use crate::constructor_plan::{
 };
 use crate::control_flow_lowering::{TailRecursiveLoopRender, render_tail_recursive_loop_body};
 use crate::conversion_lowering::{
-    apply_cast_conversion, apply_instanceof, apply_lowered_slot_expr_conversion,
-    apply_slot_expr_conversion,
+    adapt_optional_assignment_value_for_target, apply_cast_conversion, apply_instanceof,
+    apply_lowered_slot_expr_conversion, apply_slot_expr_conversion,
+    construct_optional_value_for_target,
 };
 use crate::conversion_plan::{
-    DispatchCoercionPolicy, LoweredType, ReturnValuePlan, Slot, SlotConversionPlan,
-    actual_shape_for_slot_expr, actual_shape_for_slot_expr_with_slot, argument_slot,
-    assignment_statement_plan_for_target, assignment_value_plan_for_shape,
-    assignment_value_plan_for_target, condition_slot, index_slot,
+    CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredSlotExprConversionPlan, LoweredType,
+    OptionalShapeCoercionPolicy, OwnershipCoercionPolicy, ReturnValuePlan, Slot,
+    SlotConversionPlan, ViewCoercionPolicy, actual_shape_for_slot_expr,
+    actual_shape_for_slot_expr_with_slot, argument_slot, assignment_statement_plan_for_target,
+    assignment_value_plan_for_shape, assignment_value_plan_for_target, condition_slot, index_slot,
     optional_slot_construction_plan_for_actual, plan_cast_conversion_from_actual, plan_instanceof,
     plan_lowered_slot_conversion, plan_slot_conversion, return_value_plan,
 };
@@ -91,9 +121,10 @@ use crate::operator_lowering::{lower_null_comparison_expr, lower_unary_expr};
 use crate::rewrite::{MethodControlFlowPlan, method_has_tail_recursive_loop_rewrite};
 use crate::rust_ir::*;
 use crate::shape_projection::{
-    borrowed_sequence_element_shape, borrowed_string_content_shape, project_java_value_shape,
-    shape_is_concrete_native, shape_is_erased_object_boundary, shape_is_owned,
-    shape_is_owned_non_erased, storage_shape, value_shape,
+    borrowed_sequence_element_shape, borrowed_string_content_shape,
+    indexed_read_shape_for_access_with_facts, project_java_value_shape, shape_is_concrete_native,
+    shape_is_erased_object_boundary, shape_is_owned, shape_is_owned_non_erased, storage_shape,
+    value_shape,
 };
 use crate::signature::{
     LocalPlan, ReceiverPlan, SignatureConstraint, SignaturePlan, SolvedSlotShape,
@@ -819,8 +850,13 @@ fn static_storage_initial_value_expr(
         }
         _ => crate::slot_render::default_expr_for_slot_with_facts(shape, ctx.facts),
     };
-    if shape.optional_element_type().is_some() {
-        RustExpr::Raw(format!("Some({})", emit::emit_expr(&value)))
+    if let Some(element_ty) = shape.optional_element_type() {
+        construct_optional_value_for_target(
+            value,
+            RustSlotShape::conservative(element_ty),
+            shape,
+            ctx.facts,
+        )
     } else {
         value
     }
@@ -1033,6 +1069,9 @@ fn lower_find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a
 fn nested_type_simple_alias_item(nested: &TypeDecl) -> Option<String> {
     let simple = nested.name.rsplit('.').next().unwrap_or(&nested.name);
     let alias = upper_camel_type_name_from_static_receiver(simple);
+    if alias == "Builder" {
+        return None;
+    }
     let target = crate::slot_render::rust_name_for_java_named_type(&nested.name);
     let target = if nested.kind == TypeKind::Interface {
         format!("dyn {target}")
@@ -1768,8 +1807,7 @@ fn constructor_self_temporary_seed_field_value(
     let lowered = lower_expr_for_slot(value, env, slot.clone(), ctx);
     let lowered = wrap_optional_assignment_value_if_needed(value, env, slot, lowered, ctx);
     let lowered = constructor_self_value_expr(lowered, value, env, ctx);
-    let rendered = emit::emit_expr(&lowered);
-    if rendered.contains("__java_self") {
+    if rust_expr_mentions_constructor_self_temporary(&lowered) {
         return None;
     }
     Some((field_name.clone(), lowered))
@@ -1839,12 +1877,7 @@ fn constructor_self_value_expr(
 ) -> RustExpr {
     let expr = replace_self_receiver(expr, "__java_self.clone()");
     if slot_expr_needs_result_propagation(source, env, ctx) {
-        let rendered = emit::emit_expr(&expr);
-        let rendered = rendered.strip_suffix('?').unwrap_or(&rendered);
-        return RustExpr::Raw(format!(
-            "{}.unwrap_or_else(|ex| panic!(\"uncaught Java exception: {{:?}}\", ex))",
-            rendered
-        ));
+        return unwrap_result_or_panic_uncaught_java_exception(expr);
     }
     expr
 }
@@ -1854,7 +1887,7 @@ fn replace_self_receiver(expr: RustExpr, replacement: &str) -> RustExpr {
         RustExpr::Var(name) if name == "self" => self_replacement_expr(replacement),
         RustExpr::Field(receiver, field) => {
             let receiver = if matches!(receiver.as_ref(), RustExpr::Var(name) if name == "self") {
-                self_field_replacement_expr(replacement)
+                constructor_self_field_replacement_expr(replacement)
             } else {
                 replace_self_receiver(*receiver, replacement)
             };
@@ -1914,18 +1947,14 @@ fn replace_self_receiver(expr: RustExpr, replacement: &str) -> RustExpr {
         },
         RustExpr::Raw(text) => RustExpr::Raw(text.replace(
             "self.",
-            &format!("{}.", self_field_replacement(replacement)),
+            &format!("{}.", constructor_self_field_replacement(replacement)),
         )),
         other => other,
     }
 }
 
-fn self_field_replacement(replacement: &str) -> &str {
-    replacement.strip_suffix(".clone()").unwrap_or(replacement)
-}
-
-fn self_field_replacement_expr(replacement: &str) -> RustExpr {
-    self_replacement_expr(self_field_replacement(replacement))
+fn constructor_self_field_replacement_expr(replacement: &str) -> RustExpr {
+    self_replacement_expr(&constructor_self_field_replacement(replacement))
 }
 
 fn self_replacement_expr(replacement: &str) -> RustExpr {
@@ -2291,12 +2320,7 @@ fn lower_constructor_field_value_plan_with_future_reads(
                     && (known_named_clone_recovery(&shape)
                         || known_owned_argument_clone_recovery_with_facts(&shape, ctx.facts))
                 {
-                    let rendered = emit::emit_expr(&lowered);
-                    if rendered_has_audited_clone_recovery(&rendered) {
-                        lowered
-                    } else {
-                        RustExpr::Raw(render_audited_clone_recovery(&rendered))
-                    }
+                    apply_audited_clone_recovery(lowered)
                 } else {
                     lowered
                 }
@@ -3600,36 +3624,16 @@ fn wrap_optional_assignment_value_if_needed(
         .unwrap_or_else(|| actual_shape_for_slot_expr(value, env, shape_ctx));
     let planned_actual = preferred_planned_or_external_call_result_shape(value, env, ctx);
     let actual = planned_actual.unwrap_or(inferred_actual);
-    let rendered = emit::emit_expr(&lowered_value);
-    if actual.optional_element_type().is_some()
-        || known_external_call_result_shape_from_syntax(value, ctx)
-            .is_some_and(|shape| shape.optional_element_type().is_some())
-    {
-        if let Some(inner) = rendered
-            .strip_prefix("Some(")
-            .and_then(|inner| inner.strip_suffix(')'))
-        {
-            return RustExpr::Raw(inner.to_string());
-        }
-    }
-    if actual.optional_element_type().is_some() {
-        return lowered_value;
-    }
-    if rendered == "None" {
-        return lowered_value;
-    }
-    if let Some(inner) = rendered
-        .strip_prefix("Some(")
-        .and_then(|inner| inner.strip_suffix(')'))
-    {
-        let mut target_element = target.clone();
-        target_element.java_ty = actual.java_ty.clone();
-        let element_plan = plan_slot_conversion(actual, argument_slot(target_element), ctx.facts);
-        let converted = apply_slot_expr_conversion(RustExpr::Raw(inner.to_string()), &element_plan);
-        return RustExpr::Raw(format!("Some({})", emit::emit_expr(&converted)));
-    }
-    let plan = plan_slot_conversion(actual, slot, ctx.facts);
-    apply_slot_expr_conversion(lowered_value, &plan)
+    let already_optional_result = known_external_call_result_shape_from_syntax(value, ctx)
+        .is_some_and(|shape| shape.optional_element_type().is_some());
+    adapt_optional_assignment_value_for_target(
+        lowered_value,
+        actual,
+        slot.clone(),
+        &target,
+        already_optional_result,
+        ctx.facts,
+    )
 }
 
 fn optional_field_access_actual_shape_for_slot(
@@ -4020,11 +4024,8 @@ fn lower_optional_sequence_length_access(
         ctx.facts,
     )?;
     let lowered_receiver = lower_read_sequence_receiver(receiver, env, ctx, refinements);
-    let rendered_receiver = emit::emit_expr(&lowered_receiver);
     Some(match plan.op {
-        crate::member_access_plan::MemberAccessOp::LenAsI32 => {
-            RustExpr::Raw(format!("{rendered_receiver}.len() as i32"))
-        }
+        crate::member_access_plan::MemberAccessOp::LenAsI32 => len_i32_projection(lowered_receiver),
         crate::member_access_plan::MemberAccessOp::Array2RowsAsI32
             if two_dimensional_array_expr_uses_nested_slice(
                 receiver_expr_for_length_plan(receiver),
@@ -4032,13 +4033,13 @@ fn lower_optional_sequence_length_access(
                 ctx,
             ) =>
         {
-            RustExpr::Raw(format!("{rendered_receiver}.len() as i32"))
+            len_i32_projection(lowered_receiver)
         }
         crate::member_access_plan::MemberAccessOp::Array2RowsAsI32 => {
-            RustExpr::Raw(format!("{rendered_receiver}.nrows() as i32"))
+            array2_rows_i32_projection(lowered_receiver)
         }
         crate::member_access_plan::MemberAccessOp::Array2ColsAsI32 => {
-            RustExpr::Raw(format!("{rendered_receiver}.len() as i32"))
+            len_i32_projection(lowered_receiver)
         }
         _ => return None,
     })
@@ -4129,37 +4130,16 @@ fn borrowed_owned_string_literal_temporary(
     local_name: &str,
     counter: usize,
 ) -> Option<(BorrowedStringTemporary, String)> {
-    if let Some(inner) = raw
-        .strip_prefix("Some(&")
-        .and_then(|rest| rest.strip_suffix(')'))
-        && string_literal_to_string_expr(inner)
-    {
-        let name = borrowed_string_temporary_name(local_name, counter);
-        return Some((
+    let name = borrowed_string_temporary_name(local_name, counter);
+    borrowed_string_literal_temporary_plan(raw, &name).map(|plan| {
+        (
             BorrowedStringTemporary {
-                name: name.clone(),
-                expr: format!("Some(&{name})"),
+                name,
+                expr: plan.replacement_expr,
             },
-            inner.to_string(),
-        ));
-    }
-    if let Some(inner) = raw.strip_prefix('&')
-        && string_literal_to_string_expr(inner)
-    {
-        let name = borrowed_string_temporary_name(local_name, counter);
-        return Some((
-            BorrowedStringTemporary {
-                name: name.clone(),
-                expr: format!("&{name}"),
-            },
-            inner.to_string(),
-        ));
-    }
-    None
-}
-
-fn string_literal_to_string_expr(raw: &str) -> bool {
-    raw.starts_with('"') && raw.ends_with(".to_string()")
+            plan.initializer_expr,
+        )
+    })
 }
 
 fn borrowed_string_temporary_name(local_name: &str, counter: usize) -> String {
@@ -4424,7 +4404,8 @@ fn local_shape_can_inherit_optional_initializer_shape(
     local: &RustSlotShape,
     initializer: &RustSlotShape,
 ) -> bool {
-    local.optional_element_type().is_none()
+    local.ownership == OwnershipShape::Owned
+        && local.optional_element_type().is_none()
         && initializer
             .optional_element_type()
             .is_some_and(|element_ty| element_ty == local.java_ty)
@@ -4912,7 +4893,7 @@ fn switch_match_pattern(
     if matches!(
         selector_ty,
         JavaType::Primitive(crate::java_ir::PrimitiveType::Char)
-    ) && let Some(label) = java_char_expr_from_integral_literal(expr)
+    ) && let Some(label) = char_literal_expr_from_integral_expr(expr)
     {
         return Some(switch_match_pattern_expr(label));
     }
@@ -4956,7 +4937,7 @@ fn lower_switch_case_label_expr(
     if matches!(
         selector_ty,
         JavaType::Primitive(crate::java_ir::PrimitiveType::Char)
-    ) && let Some(label) = java_char_expr_from_integral_literal(expr)
+    ) && let Some(label) = char_literal_expr_from_integral_expr(expr)
     {
         return label;
     }
@@ -5060,7 +5041,7 @@ fn lower_java_enum_static_field_access_for_slot(
                 .reaches
                 || source_enum_directly_implements_rust_trait_name(&owner, trait_name, ctx) =>
         {
-            Some(RustExpr::Raw(format!("&{rendered} as &dyn {trait_name}")))
+            Some(borrow_as_dyn_trait(lowered, trait_name))
         }
         _ if target.view == ViewShape::DynTraitView
             && enum_owner_reaches_interface_target(&owner, &target.java_ty, ctx) =>
@@ -5068,7 +5049,7 @@ fn lower_java_enum_static_field_access_for_slot(
             let trait_name = crate::slot_render::rust_name_for_java_named_type(
                 concrete_java_type_name(&target.java_ty)?,
             );
-            Some(RustExpr::Raw(format!("&{rendered} as &dyn {trait_name}")))
+            Some(borrow_as_dyn_trait(lowered, &trait_name))
         }
         _ if target.ownership == OwnershipShape::SharedBorrow
             && concrete_java_type_name(&target.java_ty)
@@ -5088,13 +5069,13 @@ fn lower_java_enum_static_field_access_for_slot(
             let trait_name = crate::slot_render::rust_name_for_java_named_type(
                 concrete_java_type_name(&target.java_ty)?,
             );
-            Some(RustExpr::Raw(format!("&{rendered} as &dyn {trait_name}")))
+            Some(borrow_as_dyn_trait(lowered, &trait_name))
         }
         _ if source_interface_trait_name.is_some() => {
             let trait_name = source_interface_trait_name
                 .as_deref()
                 .expect("source interface trait name was checked");
-            Some(RustExpr::Raw(format!("&{rendered} as &dyn {trait_name}")))
+            Some(borrow_as_dyn_trait(lowered, trait_name))
         }
         _ => None,
     }
@@ -6596,29 +6577,23 @@ fn lower_planned_call_expr_stmt(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> O
             param_names,
             body,
         } => lower_iterable_for_each_stmt(receiver, &param_names, body, env, ctx),
-        CallStatementPlan::NativeArraysSort { target } => Some(RustStmt::Expr(RustExpr::Raw(
-            format!("{}.sort()", emit::emit_expr(&lower_expr(target, env, ctx))),
-        ))),
+        CallStatementPlan::NativeArraysSort { target } => Some(RustStmt::Expr(
+            collection_sort_projection(lower_expr(target, env, ctx)),
+        )),
         CallStatementPlan::NativeCollectionsSort { target, comparator } => {
-            let lowered_target = emit::emit_expr(&lower_expr(target, env, ctx));
             let expr = if let Some(comparator) = comparator {
-                let lowered_comparator = emit::emit_expr(&lower_expr(comparator, env, ctx));
-                RustExpr::Raw(format!(
-                    "{{ let __java_comparator = {}; {}.sort_by(|a, b| __java_comparator.compare(a.clone(), b.clone()).cmp(&0)); }}",
-                    lowered_comparator, lowered_target
-                ))
+                collection_sort_by_comparator_projection(
+                    lower_expr(target, env, ctx),
+                    lower_expr(comparator, env, ctx),
+                )
             } else {
-                RustExpr::Raw(format!("{}.sort()", lowered_target))
+                collection_sort_projection(lower_expr(target, env, ctx))
             };
             Some(RustStmt::Expr(expr))
         }
-        CallStatementPlan::NativeArraysFill { target, value } => {
-            Some(RustStmt::Expr(RustExpr::Raw(format!(
-                "{}.fill({})",
-                emit::emit_expr(&lower_expr(target, env, ctx)),
-                emit::emit_expr(&lower_expr(value, env, ctx))
-            ))))
-        }
+        CallStatementPlan::NativeArraysFill { target, value } => Some(RustStmt::Expr(
+            array_fill_projection(lower_expr(target, env, ctx), lower_expr(value, env, ctx)),
+        )),
         CallStatementPlan::NativeSystemPrintStream {
             stream,
             method,
@@ -6756,10 +6731,8 @@ fn lower_enhanced_for_stmt(
     let var_is_assigned = enhanced_for_var_is_assigned(var_name, body);
     if var_is_assigned && matches!(var_type, JavaType::String) {
         loop_env.insert_local_shape(var_name.to_string(), value_shape(JavaType::String));
-        let iterator = RustExpr::Raw(format!(
-            "{}.iter().cloned()",
-            emit::emit_expr(&lower_enhanced_for_iterable_expr(iterable, env, ctx))
-        ));
+        let iterator =
+            sequence_iter_cloned_projection(lower_enhanced_for_iterable_expr(iterable, env, ctx));
         return render_enhanced_for_iterator(
             &format!("mut {var_name}"),
             &iterator,
@@ -6768,10 +6741,8 @@ fn lower_enhanced_for_stmt(
     }
     if static_string_sequence_field_iterable(iterable, env, ctx) {
         loop_env.insert_local_shape(var_name.to_string(), borrowed_string_content_shape());
-        let iterator = RustExpr::Raw(format!(
-            "{}.iter().copied()",
-            emit::emit_expr(&lower_enhanced_for_iterable_expr(iterable, env, ctx))
-        ));
+        let iterator =
+            sequence_iter_copied_projection(lower_enhanced_for_iterable_expr(iterable, env, ctx));
         return render_enhanced_for_iterator(
             var_name,
             &iterator,
@@ -6783,10 +6754,8 @@ fn lower_enhanced_for_stmt(
             .is_some_and(|element_ty| matches!(element_ty, JavaType::Primitive(_)))
     {
         loop_env.insert_local_shape(var_name.to_string(), value_shape(var_type.clone()));
-        let iterator = RustExpr::Raw(format!(
-            "{}.iter().copied()",
-            emit::emit_expr(&lower_enhanced_for_iterable_expr(iterable, env, ctx))
-        ));
+        let iterator =
+            sequence_iter_copied_projection(lower_enhanced_for_iterable_expr(iterable, env, ctx));
         let pattern = if var_is_assigned {
             format!("mut {var_name}")
         } else {
@@ -6891,10 +6860,7 @@ fn java_type_is_string_sequence(java_ty: &JavaType) -> bool {
 fn lower_enhanced_for_iterable_expr(iterable: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
     let lowered = lower_expr(iterable, env, ctx);
     if enhanced_for_iterable_needs_optional_unwrap(iterable, env, ctx) {
-        RustExpr::Raw(format!(
-            "{}.as_ref().expect(\"Java null receiver\")",
-            emit::emit_expr(&lowered)
-        ))
+        adapt_optional_instance_receiver_with_slot_plan(iterable, lowered, env, ctx, false, false)
     } else {
         lowered
     }
@@ -7073,26 +7039,20 @@ fn lower_expr_with_refinements(
                 return enum_variant;
             }
             if field == "length" && static_final_const_array_field_type(receiver, ctx).is_some() {
-                return RustExpr::Raw(format!(
-                    "{}.len() as i32",
-                    emit::emit_expr(&lower_expr_with_refinements(
-                        receiver,
-                        env,
-                        ctx,
-                        refinements
-                    ))
+                return len_i32_projection(lower_expr_with_refinements(
+                    receiver,
+                    env,
+                    ctx,
+                    refinements,
                 ));
             }
             if field == "length" && two_dimensional_array_expr_uses_nested_slice(receiver, env, ctx)
             {
-                return RustExpr::Raw(format!(
-                    "{}.len() as i32",
-                    emit::emit_expr(&lower_expr_with_refinements(
-                        receiver,
-                        env,
-                        ctx,
-                        refinements
-                    ))
+                return len_i32_projection(lower_expr_with_refinements(
+                    receiver,
+                    env,
+                    ctx,
+                    refinements,
                 ));
             }
             if field == "length"
@@ -8087,17 +8047,11 @@ fn lower_array_assignment_target_expr(
         ))
         .is_some()
     {
-        return RustExpr::Raw(format!(
-            "{}[[{}, {}]]",
-            emit::emit_expr(&lower_write_sequence_receiver(
-                outer_array,
-                env,
-                ctx,
-                refinements
-            )),
-            emit::emit_expr(&lower_expr_for_slot(outer_index, env, index_slot(), ctx)),
-            emit::emit_expr(&lower_expr_for_slot(index, env, index_slot(), ctx)),
-        ));
+        return array2_index_projection(
+            lower_write_sequence_receiver(outer_array, env, ctx, refinements),
+            lower_expr_for_slot(outer_index, env, index_slot(), ctx),
+            lower_expr_for_slot(index, env, index_slot(), ctx),
+        );
     }
     indexed_expr(
         lower_write_sequence_receiver(array, env, ctx, refinements),
@@ -8126,11 +8080,7 @@ fn lower_write_sequence_receiver(
     {
         return lowered;
     }
-    let rendered = emit::emit_expr(&lowered);
-    let receiver = rendered.strip_suffix(".unwrap()").unwrap_or(&rendered);
-    RustExpr::Raw(format!(
-        "{receiver}.as_mut().expect(\"Java null receiver\")"
-    ))
+    project_optional_sequence_receiver(lowered, OptionalSequenceReceiverProjection::Mutable)
 }
 
 fn lower_local_assignment_value_expr(
@@ -8579,10 +8529,7 @@ fn lower_map_get_primitive_arithmetic_operand_info(
     let lowered_expr =
         apply_call_target_with_lower_context(&target, lowered_receiver, rust_args, ctx);
     Some(MapGetPrimitiveArithmeticOperand {
-        lowered: RustExpr::Raw(format!(
-            "{}.copied().expect(\"Java null receiver\")",
-            emit::emit_expr(&lowered_expr)
-        )),
+        lowered: optional_copied_expect_projection(lowered_expr),
         value_ty,
     })
 }
@@ -9088,7 +9035,7 @@ fn lower_args_with_plan(
                 .enumerate()
                 .map(|(index, (arg, shape))| {
                     let actual_shape = &actual_shapes[index];
-                    let lowered = lower_optional_array_argument_for_slice_shape(
+                    let lowered = lower_optional_argument_for_borrowed_target(
                         arg,
                         env,
                         shape,
@@ -9098,16 +9045,8 @@ fn lower_args_with_plan(
                     .unwrap_or_else(|| {
                         lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx)
                     });
-                    let lowered = normalize_optional_borrowed_as_str_expr(lowered);
                     let lowered =
                         adapt_owned_native_borrow_argument(lowered, arg, shape, actual_shape);
-                    let lowered =
-                        if optional_borrowed_expr_already_matches_target(arg, shape, env, ctx) {
-                            lowered
-                        } else {
-                            adapt_optional_shared_borrow_argument(lowered, shape, actual_shape)
-                        };
-                    let lowered = adapt_optional_mut_borrow_argument(lowered, &shape, actual_shape);
                     let lowered = snapshot_same_call_shared_read_before_mut_borrow(
                         lowered, arg, shape, index, args, &shapes,
                     );
@@ -9154,13 +9093,19 @@ fn adapt_owned_native_borrow_argument(
     if lowered_expr_is_constructed_optional_value(&lowered) {
         return lowered;
     }
-    let rendered = emit::emit_expr(&lowered);
-    if rendered.starts_with('&') {
-        return lowered;
-    }
     match target_shape.ownership {
-        OwnershipShape::SharedBorrow => RustExpr::Raw(format!("&{rendered}")),
-        OwnershipShape::MutableBorrow => RustExpr::Raw(format!("&mut {rendered}")),
+        OwnershipShape::SharedBorrow => ensure_borrow_projection(
+            lowered,
+            Some(actual_shape),
+            Some(target_shape),
+            BorrowProjectionUse::Argument,
+        ),
+        OwnershipShape::MutableBorrow => ensure_borrow_projection(
+            lowered,
+            Some(actual_shape),
+            Some(target_shape),
+            BorrowProjectionUse::MutableSliceView,
+        ),
         _ => lowered,
     }
 }
@@ -9252,6 +9197,13 @@ fn lower_args_for_call_target_with_temporaries(
     introduce_same_call_later_read_temporaries(args, shapes.as_slice(), rust_args)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SameCallArgumentAliasPlan {
+    Keep,
+    SnapshotSharedRead { local_name: String },
+    TemporaryForLaterRead { temp_name: String },
+}
+
 fn introduce_same_call_later_read_temporaries(
     args: &[Expr],
     shapes: &[RustSlotShape],
@@ -9259,26 +9211,39 @@ fn introduce_same_call_later_read_temporaries(
 ) -> LoweredCallArgs {
     let mut temporaries = Vec::new();
     for index in 0..args.len() {
-        if shapes
-            .get(index)
-            .is_some_and(|shape| shape.ownership == OwnershipShape::MutableBorrow)
+        if let SameCallArgumentAliasPlan::TemporaryForLaterRead { temp_name } =
+            plan_same_call_later_read_alias(index, args, shapes, &rust_args)
+            && let Some(lowered) = rust_args.get_mut(index)
         {
-            continue;
+            let value = lowered.clone();
+            *lowered = RustExpr::Var(temp_name.clone());
+            temporaries.push((temp_name, value));
         }
-        if !later_arg_reads_prior_mutable_alias(index, args, shapes, &rust_args) {
-            continue;
-        }
-        let Some(lowered) = rust_args.get_mut(index) else {
-            continue;
-        };
-        let temp_name = format!("__java_arg{index}");
-        let value = lowered.clone();
-        *lowered = RustExpr::Var(temp_name.clone());
-        temporaries.push((temp_name, value));
     }
     LoweredCallArgs {
         args: rust_args,
         temporaries,
+    }
+}
+
+fn plan_same_call_later_read_alias(
+    index: usize,
+    args: &[Expr],
+    shapes: &[RustSlotShape],
+    rust_args: &[RustExpr],
+) -> SameCallArgumentAliasPlan {
+    if shapes
+        .get(index)
+        .is_some_and(|shape| shape.ownership == OwnershipShape::MutableBorrow)
+    {
+        return SameCallArgumentAliasPlan::Keep;
+    }
+    if later_arg_reads_prior_mutable_alias(index, args, shapes, rust_args) {
+        SameCallArgumentAliasPlan::TemporaryForLaterRead {
+            temp_name: format!("__java_arg{index}"),
+        }
+    } else {
+        SameCallArgumentAliasPlan::Keep
     }
 }
 
@@ -9303,19 +9268,9 @@ fn later_arg_reads_prior_mutable_alias(
                 .is_some_and(|shape| shape.ownership == OwnershipShape::MutableBorrow);
             let rendered_is_mutable = rust_args
                 .get(prior_index)
-                .is_some_and(|arg| rendered_arg_is_mutable_alias(arg, &base));
+                .is_some_and(|arg| rendered_expr_is_mutable_alias(arg, &base));
             (shape_is_mutable || rendered_is_mutable) && expr_reads_local_name(source, &base)
         })
-}
-
-fn rendered_arg_is_mutable_alias(arg: &RustExpr, base: &str) -> bool {
-    let rendered = emit::emit_expr(arg);
-    rendered == format!("&mut {base}")
-        || rendered == format!("{base}.as_mut_slice()")
-        || (rendered.starts_with(&format!("{base}."))
-            && (rendered.contains(".as_mut().expect(\"Java null receiver\")")
-                || rendered.contains(".as_deref_mut()")
-                || rendered.ends_with(".as_mut_slice()")))
 }
 
 fn mutable_alias_base_name(expr: &Expr) -> Option<String> {
@@ -9407,11 +9362,27 @@ fn snapshot_same_call_shared_read_before_mut_borrow(
     args: &[Expr],
     shapes: &[RustSlotShape],
 ) -> RustExpr {
+    match plan_same_call_shared_read_alias(source, target_shape, index, args, shapes) {
+        SameCallArgumentAliasPlan::SnapshotSharedRead { local_name } => {
+            snapshot_rendered_shared_borrow_argument(lowered, &local_name)
+        }
+        SameCallArgumentAliasPlan::Keep
+        | SameCallArgumentAliasPlan::TemporaryForLaterRead { .. } => lowered,
+    }
+}
+
+fn plan_same_call_shared_read_alias(
+    source: &Expr,
+    target_shape: &RustSlotShape,
+    index: usize,
+    args: &[Expr],
+    shapes: &[RustSlotShape],
+) -> SameCallArgumentAliasPlan {
     let Expr::Var(name) = source else {
-        return lowered;
+        return SameCallArgumentAliasPlan::Keep;
     };
     if target_shape.ownership != OwnershipShape::SharedBorrow {
-        return lowered;
+        return SameCallArgumentAliasPlan::Keep;
     }
     if !args
         .iter()
@@ -9423,55 +9394,11 @@ fn snapshot_same_call_shared_read_before_mut_borrow(
                 && matches!(arg, Expr::Var(other_name) if other_name == name)
         })
     {
-        return lowered;
+        return SameCallArgumentAliasPlan::Keep;
     }
-    snapshot_rendered_shared_borrow_argument(lowered, name)
-}
-
-fn snapshot_rendered_shared_borrow_argument(lowered: RustExpr, name: &str) -> RustExpr {
-    let rendered = emit::emit_expr(&lowered);
-    let replacements = [
-        (
-            format!("Some(&{name})"),
-            format!(
-                "Some(&{name}.clone()/* TODO(translation): validate same-call alias snapshot */)"
-            ),
-        ),
-        (
-            format!("&{name}"),
-            format!("&{name}.clone()/* TODO(translation): validate same-call alias snapshot */"),
-        ),
-        (
-            format!("{name}.as_slice()"),
-            format!(
-                "{name}.clone()/* TODO(translation): validate same-call alias snapshot */.as_slice()"
-            ),
-        ),
-        (
-            format!("Some({name}.as_slice())"),
-            format!(
-                "Some({name}.clone()/* TODO(translation): validate same-call alias snapshot */.as_slice())"
-            ),
-        ),
-        (
-            format!("{name}.as_str()"),
-            format!(
-                "{name}.clone()/* TODO(translation): validate same-call alias snapshot */.as_str()"
-            ),
-        ),
-        (
-            format!("Some({name}.as_str())"),
-            format!(
-                "Some({name}.clone()/* TODO(translation): validate same-call alias snapshot */.as_str())"
-            ),
-        ),
-    ];
-    for (from, to) in replacements {
-        if rendered == from {
-            return RustExpr::Raw(to);
-        }
+    SameCallArgumentAliasPlan::SnapshotSharedRead {
+        local_name: name.clone(),
     }
-    lowered
 }
 
 fn lower_argument_for_explicit_slot(
@@ -9491,17 +9418,10 @@ fn lower_argument_for_explicit_slot(
             },
         );
         let lowered =
-            lower_optional_array_argument_for_slice_shape(arg, env, &shape, &actual_shape, ctx)
+            lower_optional_argument_for_borrowed_target(arg, env, &shape, &actual_shape, ctx)
                 .unwrap_or_else(|| {
                     lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx)
                 });
-        let lowered = normalize_optional_borrowed_as_str_expr(lowered);
-        let lowered = if optional_borrowed_expr_already_matches_target(arg, &shape, env, ctx) {
-            lowered
-        } else {
-            adapt_optional_shared_borrow_argument(lowered, &shape, &actual_shape)
-        };
-        let lowered = adapt_optional_mut_borrow_argument(lowered, &shape, &actual_shape);
         return adapt_reused_owned_argument(lowered, arg, &shape, Some(&actual_shape), ctx);
     }
     lower_expr_for_slot(arg, env, slot, ctx)
@@ -9612,19 +9532,24 @@ fn lower_unshaped_argument(arg: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExp
         && !matches!(shape.java_ty, JavaType::Primitive(_))
         && known_owned_argument_clone_recovery_with_facts(&shape, ctx.facts)
     {
-        return RustExpr::Raw(render_audited_clone_recovery(&emit::emit_expr(&lowered)));
+        return apply_clone_recovery_decision(
+            lowered,
+            audited_clone_recovery_decision(CloneRecoveryIdempotence::AnyCloneRecovery),
+        );
     }
     if reused_owned_argument_needs_clone(arg, &shape, Some(&shape), ctx) {
-        return RustExpr::Raw(render_audited_clone_recovery(&emit::emit_expr(&lowered)));
+        return apply_clone_recovery_decision(
+            lowered,
+            audited_clone_recovery_decision(CloneRecoveryIdempotence::AnyCloneRecovery),
+        );
     }
     if matches!(arg, Expr::ArrayAccess(_, _)) && indexed_access_needs_borrowed_place(&shape) {
-        return RustExpr::Raw(format!("&{}", emit::emit_expr(&lowered)));
+        return force_shared_borrow_projection(lowered);
     }
     if matches!(shape.java_ty, JavaType::Primitive(_))
         && shape.ownership == OwnershipShape::SharedBorrow
     {
-        let rendered = emit::emit_expr(&lowered);
-        return RustExpr::Raw(format!("*{rendered}"));
+        return deref_borrowed_projection(lowered);
     }
     lowered
 }
@@ -9640,9 +9565,7 @@ fn lower_current_self_cast_unshaped_argument(arg: &Expr, ctx: LowerCtx) -> Optio
         ctx.current_receiver,
         Some(ReceiverPlan::Shared | ReceiverPlan::Mutable)
     ) {
-        return Some(RustExpr::Raw(
-            "self.clone()/* TODO(translation): validate added clone */".to_string(),
-        ));
+        return Some(apply_audited_clone_recovery(this_expr()));
     }
     Some(this_expr())
 }
@@ -9686,20 +9609,19 @@ fn lower_current_self_cast_for_slot(expr: &Expr, slot: &Slot, ctx: LowerCtx) -> 
         )
     {
         if implemented_target && matches!(target.dispatch, DispatchShape::ErasedObject) {
-            return Some(RustExpr::Raw(
-                "Box::new(self.clone()/* TODO(translation): validate added clone */) as Box<dyn std::any::Any>"
-                    .to_string(),
-            ));
+            let cloned_self = emit::emit_expr(&apply_audited_clone_recovery(this_expr()));
+            return Some(RustExpr::Raw(format!(
+                "Box::new({cloned_self}) as Box<dyn std::any::Any>"
+            )));
         }
         if implemented_target && let DispatchShape::BoxedDynTrait { trait_name } = &target.dispatch
         {
+            let cloned_self = emit::emit_expr(&apply_audited_clone_recovery(this_expr()));
             return Some(RustExpr::Raw(format!(
-                "Box::new(self.clone()/* TODO(translation): validate added clone */) as Box<dyn {trait_name}>"
+                "Box::new({cloned_self}) as Box<dyn {trait_name}>"
             )));
         }
-        return Some(RustExpr::Raw(
-            "self.clone()/* TODO(translation): validate added clone */".to_string(),
-        ));
+        return Some(apply_audited_clone_recovery(this_expr()));
     }
     Some(this_expr())
 }
@@ -9892,14 +9814,11 @@ fn lower_exact_erased_object_cast_for_slot(
     }
     let rust_type =
         crate::slot_render::rust_name_for_java_named_type(concrete_java_type_name(cast_ty)?);
-    let object_expr = if exact_erased_object_local_is_optional(local_name, env, ctx) {
-        format!(
-            "{local_name}.as_ref().and_then(|value| value.downcast_ref::<{rust_type}>()).expect(\"invalid Java cast\")"
-        )
-    } else {
-        format!("{local_name}.downcast_ref::<{rust_type}>().expect(\"invalid Java cast\")")
-    };
-    Some(RustExpr::Raw(object_expr))
+    Some(erased_object_borrowed_downcast_ref_projection(
+        RustExpr::Var(local_name.to_string()),
+        &rust_type,
+        exact_erased_object_local_is_optional(local_name, env, ctx),
+    ))
 }
 
 fn exact_erased_object_cast_parts(expr: &Expr) -> Option<(&JavaType, &str)> {
@@ -10250,14 +10169,10 @@ fn lower_unshaped_external_facade_preserving_args(
                 })
                 .unwrap_or_else(|| lower_unshaped_argument(arg, env, ctx));
             if index == 0 && external_facade_preserving_arg_needs_clone(arg, env, ctx) {
-                let rendered = emit::emit_expr(&lowered);
-                if rendered.ends_with(".clone()")
-                    || rendered.ends_with(".clone()/* TODO(translation): validate added clone */")
-                {
-                    lowered
-                } else {
-                    RustExpr::Raw(render_audited_clone_recovery(&rendered))
-                }
+                apply_clone_recovery_decision(
+                    lowered,
+                    audited_clone_recovery_decision(CloneRecoveryIdempotence::DirectClone),
+                )
             } else {
                 lowered
             }
@@ -10432,33 +10347,22 @@ fn lower_varargs_call_args_from_params(
         .iter()
         .skip(fixed_count)
         .take(vararg_value_count.saturating_sub(fixed_count))
-        .map(|arg| emit::emit_expr(&lower_varargs_element_expr(arg, env, &element_shape, ctx)))
+        .map(|arg| lower_varargs_element_expr(arg, env, &element_shape, ctx))
         .collect::<Vec<_>>();
-    let packed_vec = if varargs.is_empty() {
-        "Vec::new()".to_string()
-    } else {
-        format!("vec![{}]", varargs.join(", "))
-    };
+    let packed_vec = varargs_packed_vec_projection(varargs);
     let packed_vec = if spread_tail.is_some() {
         let tail = args.last()?;
-        let tail = emit::emit_expr(&lower_expr_for_slot(
-            tail,
-            env,
-            argument_slot(varargs_param.shape.clone()),
-            ctx,
-        ));
-        format!(
-            "{{ let mut __java_varargs = {packed_vec}; __java_varargs.extend({tail}); __java_varargs }}"
-        )
+        let tail = lower_expr_for_slot(tail, env, argument_slot(varargs_param.shape.clone()), ctx);
+        varargs_spread_extend_projection(packed_vec, tail)
     } else {
         packed_vec
     };
     let packed = if varargs_param.shape.ownership == OwnershipShape::SharedBorrow {
-        format!("&{packed_vec}")
+        force_shared_borrow_projection(packed_vec)
     } else {
         packed_vec
     };
-    lowered.push(RustExpr::Raw(packed));
+    lowered.push(packed);
     Some(lowered)
 }
 
@@ -10513,17 +10417,14 @@ fn lower_varargs_element_expr(
     if matches!(element_shape.dispatch, DispatchShape::ErasedObject)
         && reused_owned_argument_needs_clone(arg, &actual_shape, Some(&actual_shape), ctx)
     {
-        let rendered = emit::emit_expr(&lowered);
-        if !rendered_has_audited_clone_recovery(&rendered) {
-            lowered = RustExpr::Raw(render_audited_clone_recovery(&rendered));
-        }
+        lowered = apply_audited_clone_recovery(lowered);
     }
     if actual_shape.ownership == OwnershipShape::SharedBorrow
         && shape_is_owned_non_erased(element_shape)
         && known_owned_argument_clone_recovery_with_facts(&actual_shape, ctx.facts)
         && slot_conversion_plan_contains_external_into(&plan.conversion)
     {
-        let cloned = RustExpr::Raw(format!("{}.clone()", emit::emit_expr(&lowered)));
+        let cloned = apply_audited_clone_recovery(lowered);
         return apply_slot_expr_conversion(cloned, &plan);
     }
     apply_slot_expr_conversion(lowered, &plan)
@@ -10722,14 +10623,7 @@ fn preserve_local_callback_argument(
     if ctx.facts.is_copy_type(&shape.java_ty) {
         return lowered;
     }
-    let rendered = emit::emit_expr(&lowered);
-    if rendered.ends_with(".clone()")
-        || rendered.ends_with(".clone()/* TODO(translation): validate added clone */")
-    {
-        lowered
-    } else {
-        RustExpr::Raw(render_audited_clone_recovery(&rendered))
-    }
+    apply_audited_clone_recovery(lowered)
 }
 
 fn functional_interface_input_shapes_for_method(
@@ -11680,6 +11574,7 @@ fn lower_external_generic_facade_args_with_actual_shapes(
                         lowered,
                         &original_shape,
                         &actual_shape,
+                        ctx.facts,
                     );
                     adapt_reused_owned_argument(
                         lowered,
@@ -11698,7 +11593,7 @@ fn lower_external_generic_facade_args_with_actual_shapes(
                             facts: Some(ctx.facts),
                         },
                     );
-                    let lowered = lower_optional_array_argument_for_slice_shape(
+                    let lowered = lower_optional_argument_for_borrowed_target(
                         arg,
                         env,
                         &original_shape,
@@ -11706,22 +11601,6 @@ fn lower_external_generic_facade_args_with_actual_shapes(
                         ctx,
                     )
                     .unwrap_or_else(|| lower_expr_for_slot(arg, env, argument_slot(shape), ctx));
-                    let lowered = if optional_borrowed_expr_already_matches_target(
-                        arg,
-                        &original_shape,
-                        env,
-                        ctx,
-                    ) {
-                        lowered
-                    } else {
-                        adapt_optional_shared_borrow_argument(
-                            lowered,
-                            &original_shape,
-                            &actual_shape,
-                        )
-                    };
-                    let lowered =
-                        adapt_optional_mut_borrow_argument(lowered, &original_shape, &actual_shape);
                     adapt_reused_owned_argument(
                         lowered,
                         arg,
@@ -11776,11 +11655,12 @@ fn wrap_erased_handoff_arg_for_optional_target(
     lowered: RustExpr,
     target_shape: &RustSlotShape,
     actual_shape: &RustSlotShape,
+    facts: &FactSet,
 ) -> RustExpr {
     if target_shape.optional_element_type().is_some()
         && actual_shape.optional_element_type().is_none()
     {
-        RustExpr::Raw(format!("Some({})", emit::emit_expr(&lowered)))
+        construct_optional_value_for_target(lowered, actual_shape.clone(), target_shape, facts)
     } else {
         lowered
     }
@@ -11800,13 +11680,7 @@ fn clone_indexed_erased_handoff_arg_if_needed(
     {
         return lowered;
     }
-    let rendered = emit::emit_expr(&lowered);
-    if rendered.contains("java_clone_erased_object_ref(")
-        || rendered.contains("java_clone_erased_object_vec_ref(")
-    {
-        return lowered;
-    }
-    RustExpr::Raw(format!("java_clone_erased_object_ref(&{rendered})"))
+    clone_erased_object_ref_once(lowered)
 }
 
 fn lower_map_insert_args(
@@ -11838,92 +11712,32 @@ fn lower_map_insert_args(
     }
 }
 
-fn adapt_optional_shared_borrow_argument(
-    lowered: RustExpr,
-    target_shape: &RustSlotShape,
-    actual_shape: &RustSlotShape,
-) -> RustExpr {
-    if target_shape.ownership != OwnershipShape::SharedBorrow {
-        return lowered;
-    }
-    if let Some(actual_element) = actual_shape.optional_element_type()
-        && matches!(actual_element, JavaType::Array(_))
-    {
-        let rendered = emit::emit_expr(&lowered);
-        if rendered.ends_with(".as_slice()") {
-            return lowered;
-        }
-        if rendered.ends_with(".as_ref()") {
-            return RustExpr::Raw(format!(
-                "{rendered}.expect(\"Java null receiver\").as_slice()"
-            ));
-        }
-    }
-    if let Some(actual_element) = actual_shape.optional_element_type()
-        && same_concrete_java_type(&actual_element, &target_shape.java_ty)
-    {
-        let rendered = emit::emit_expr(&lowered);
-        return match target_shape.view {
-            ViewShape::Slice if matches!(target_shape.java_ty, JavaType::Array(_)) => {
-                if rendered.ends_with(".as_slice()") {
-                    return lowered;
-                }
-                if rendered.ends_with(".as_ref()") {
-                    RustExpr::Raw(format!(
-                        "{rendered}.expect(\"Java null receiver\").as_slice()"
-                    ))
-                } else {
-                    RustExpr::Raw(format!(
-                        "{rendered}.as_ref().expect(\"Java null receiver\").as_slice()"
-                    ))
-                }
-            }
-            _ => lowered,
-        };
-    }
-    let Some(target_element) = target_shape.optional_element_type() else {
-        return lowered;
-    };
-    let Some(actual_element) = actual_shape.optional_element_type() else {
-        return lowered;
-    };
-    if !same_concrete_java_type(&actual_element, &target_element) {
-        return lowered;
-    }
-    let rendered = emit::emit_expr(&lowered);
-    if rendered.ends_with(".as_ref()") {
-        return lowered;
-    }
-    match target_shape.view {
-        ViewShape::Slice if matches!(target_element, JavaType::Array(_)) => {
-            if rendered.ends_with(".as_deref()") || rendered.ends_with(".as_deref_mut()") {
-                return lowered;
-            }
-            RustExpr::Raw(format!("{rendered}.as_deref()"))
-        }
-        ViewShape::Native => RustExpr::Raw(format!("{rendered}.as_ref()")),
-        _ => lowered,
-    }
-}
-
-fn lower_optional_array_argument_for_slice_shape(
+fn lower_optional_argument_for_borrowed_target(
     arg: &Expr,
     env: &ShapeEnv,
     target_shape: &RustSlotShape,
     actual_shape: &RustSlotShape,
     ctx: LowerCtx,
 ) -> Option<RustExpr> {
-    let target_ty = crate::types::optional_element_type(&target_shape.java_ty)
-        .unwrap_or_else(|| target_shape.java_ty.clone());
-    if target_shape.view != ViewShape::Slice || !matches!(target_ty, JavaType::Array(_)) {
+    if !matches!(
+        target_shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) {
         return None;
     }
+    let target_element = target_shape
+        .optional_element_type()
+        .unwrap_or_else(|| target_shape.java_ty.clone());
     let actual_element = actual_shape.optional_element_type()?;
-    if !same_concrete_java_type(&actual_element, &target_ty) {
+    if !same_concrete_java_type(&actual_element, &target_element) {
         return None;
     }
     let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());
-    let lowered_type = optional_array_lowered_type_for_slice_slot(actual_shape, target_shape)?;
+    if optional_borrowed_expr_already_matches_target(arg, target_shape, env, ctx) {
+        return Some(lowered);
+    }
+    let lowered_type =
+        optional_element_borrow_lowered_type(actual_shape.clone(), actual_element, None)?;
     let plan = plan_lowered_slot_conversion(
         &lowered_type,
         Slot::Argument(target_shape.clone()),
@@ -11951,56 +11765,34 @@ fn optional_array_lowered_type_for_slice_slot(
     if !same_concrete_java_type(&actual_element, &target_ty) {
         return None;
     }
-    let element_shape =
-        crate::conversion_plan::optional_element_slot_shape(actual_shape, actual_element);
-    Some(LoweredType::OptionalElementBorrow {
-        option_shape: Box::new(actual_shape.clone()),
-        element_shape: Box::new(element_shape),
-    })
+    optional_element_borrow_lowered_type(actual_shape.clone(), actual_element, None)
 }
 
-fn adapt_optional_mut_borrow_argument(
-    lowered: RustExpr,
-    target_shape: &RustSlotShape,
-    actual_shape: &RustSlotShape,
-) -> RustExpr {
-    if target_shape.ownership != OwnershipShape::MutableBorrow {
-        return lowered;
-    }
-    let Some(actual_element) = actual_shape.optional_element_type() else {
-        return lowered;
-    };
-    if !same_concrete_java_type(&actual_element, &target_shape.java_ty) {
-        return lowered;
-    }
-    let rendered = emit::emit_expr(&lowered);
-    if rendered.ends_with(".as_mut().expect(\"Java null receiver\").as_mut_slice()") {
-        return lowered;
-    }
-    let rendered = rendered
-        .strip_prefix("&mut ")
-        .unwrap_or(rendered.as_str())
-        .to_string();
-    if matches!(target_shape.view, ViewShape::Slice)
-        && matches!(target_shape.java_ty, JavaType::Array(_))
-        && let Some(base) = rendered.strip_suffix(".unwrap().as_mut_slice()")
-    {
-        return RustExpr::Raw(format!(
-            "{base}.as_mut().expect(\"Java null receiver\").as_mut_slice()"
-        ));
-    }
-    let base = rendered
-        .strip_suffix(".unwrap()")
-        .unwrap_or(rendered.as_str());
-    match target_shape.view {
-        ViewShape::Slice if matches!(target_shape.java_ty, JavaType::Array(_)) => RustExpr::Raw(
-            format!("{base}.as_mut().expect(\"Java null receiver\").as_mut_slice()"),
-        ),
-        ViewShape::Native => {
-            RustExpr::Raw(format!("{base}.as_mut().expect(\"Java null receiver\")"))
-        }
-        _ => lowered,
-    }
+fn optional_element_borrow_lowered_type(
+    option_shape: RustSlotShape,
+    element_ty: JavaType,
+    element_ownership: Option<OwnershipShape>,
+) -> Option<LoweredType> {
+    LoweredType::optional_element_borrow_from_option_shape(
+        option_shape,
+        element_ty,
+        element_ownership,
+    )
+}
+
+fn optional_element_borrow_lowered_expr(
+    option_expr: RustExpr,
+    option_shape: &RustSlotShape,
+    element_ty: JavaType,
+    element_ownership: OwnershipShape,
+) -> Option<crate::coercion::LoweredExpr> {
+    let actual = optional_element_borrow_lowered_type(
+        option_shape.clone(),
+        element_ty,
+        Some(element_ownership),
+    )?;
+    let expr = project_optional_element_borrow_carrier(option_expr, element_ownership)?;
+    Some(crate::coercion::LoweredExpr { expr, actual })
 }
 
 fn adapt_reused_owned_argument(
@@ -12024,24 +11816,135 @@ fn adapt_reused_owned_argument(
     {
         return borrowed;
     }
+    apply_clone_recovery_decision(
+        lowered,
+        clone_recovery_decision_for_argument(source, target_shape, actual_shape, ctx),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CloneRecoveryDecision {
+    NoRecovery,
+    ApplyRecoveryCoercion {
+        coercion: Coercion,
+        idempotence: CloneRecoveryIdempotence,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloneRecoveryIdempotence {
+    DirectClone,
+    AnyCloneRecovery,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MoveUseContext<'a> {
+    ctx: LowerCtx<'a>,
+}
+
+impl<'a> MoveUseContext<'a> {
+    fn new(ctx: LowerCtx<'a>) -> Self {
+        Self { ctx }
+    }
+
+    fn has_later_read(&self, name: &str) -> bool {
+        self.ctx
+            .later_read_names
+            .is_some_and(|later_reads| later_reads.contains(name))
+    }
+
+    fn has_catch_future_use(&self, name: &str) -> bool {
+        self.ctx
+            .catch_future_use_names
+            .is_some_and(|future_uses| future_uses.contains(name))
+    }
+
+    fn has_exclusive_terminal_branch_read(&self, name: &str) -> bool {
+        self.ctx
+            .exclusive_terminal_branch_read_names
+            .is_some_and(|exclusive_reads| exclusive_reads.contains(name))
+    }
+
+    fn current_stmt_read_count(&self, name: &str) -> Option<usize> {
+        self.ctx
+            .current_stmt_read_counts
+            .and_then(|current_counts| current_counts.get(name).copied())
+    }
+
+    fn has_repeated_current_stmt_read(&self, name: &str) -> bool {
+        self.current_stmt_read_count(name)
+            .is_some_and(|count| count > 1)
+    }
+
+    fn has_later_or_repeated_current_read(&self, name: &str) -> bool {
+        self.has_later_read(name) || self.has_repeated_current_stmt_read(name)
+    }
+
+    fn has_later_read_facts(&self) -> bool {
+        self.ctx.later_read_names.is_some()
+    }
+
+    fn binding_use_count(&self, name: &str) -> Option<usize> {
+        current_callable_binding_use_count(name, self.ctx)
+    }
+}
+
+fn clone_recovery_decision_for_argument(
+    source: &Expr,
+    target_shape: &RustSlotShape,
+    actual_shape: Option<&RustSlotShape>,
+    ctx: LowerCtx,
+) -> CloneRecoveryDecision {
     if shared_borrow_argument_needs_owned_clone(target_shape, actual_shape, ctx) {
-        let rendered = emit::emit_expr(&lowered);
-        if rendered.ends_with(".clone()")
-            || rendered.ends_with(".clone_box()")
-            || rendered.ends_with(".clone()/* TODO(translation): validate added clone */")
-        {
-            return lowered;
-        }
-        return RustExpr::Raw(render_audited_clone_recovery(&rendered));
+        return CloneRecoveryDecision::ApplyRecoveryCoercion {
+            coercion: Coercion::CloneRecovery {
+                policy: CloneRecoveryPolicy::AuditRequired,
+            },
+            idempotence: CloneRecoveryIdempotence::DirectClone,
+        };
     }
     if reused_owned_argument_needs_clone(source, target_shape, actual_shape, ctx) {
-        let rendered = emit::emit_expr(&lowered);
-        if rendered_has_audited_clone_recovery(&rendered) {
-            return lowered;
-        }
-        RustExpr::Raw(render_audited_clone_recovery(&rendered))
-    } else {
-        lowered
+        return CloneRecoveryDecision::ApplyRecoveryCoercion {
+            coercion: Coercion::CloneRecovery {
+                policy: CloneRecoveryPolicy::AuditRequired,
+            },
+            idempotence: CloneRecoveryIdempotence::AnyCloneRecovery,
+        };
+    }
+    CloneRecoveryDecision::NoRecovery
+}
+
+fn audited_clone_recovery_decision(idempotence: CloneRecoveryIdempotence) -> CloneRecoveryDecision {
+    CloneRecoveryDecision::ApplyRecoveryCoercion {
+        coercion: Coercion::CloneRecovery {
+            policy: CloneRecoveryPolicy::AuditRequired,
+        },
+        idempotence,
+    }
+}
+
+fn apply_clone_recovery_decision(lowered: RustExpr, decision: CloneRecoveryDecision) -> RustExpr {
+    let CloneRecoveryDecision::ApplyRecoveryCoercion {
+        coercion,
+        idempotence,
+    } = decision
+    else {
+        return lowered;
+    };
+    let rendered = emit::emit_expr(&lowered);
+    if clone_recovery_idempotence_matches(&rendered, idempotence) {
+        return lowered;
+    }
+    apply_coercions(lowered, &[coercion])
+}
+
+fn clone_recovery_idempotence_matches(
+    rendered: &str,
+    idempotence: CloneRecoveryIdempotence,
+) -> bool {
+    match idempotence {
+        CloneRecoveryIdempotence::DirectClone => rendered_expr_has_direct_clone_recovery(rendered),
+        CloneRecoveryIdempotence::AnyCloneRecovery => rendered_expr_has_clone_recovery(rendered),
     }
 }
 
@@ -12065,11 +11968,7 @@ fn reborrow_reused_optional_mut_borrow_argument(
     {
         return None;
     }
-    let rendered = emit::emit_expr(lowered);
-    if rendered.ends_with(".as_deref_mut()") {
-        return None;
-    }
-    Some(RustExpr::Raw(format!("{rendered}.as_deref_mut()")))
+    reborrow_optional_mut_projection(lowered)
 }
 
 fn normalize_reused_local_clone_for_borrowed_argument(
@@ -12080,33 +11979,7 @@ fn normalize_reused_local_clone_for_borrowed_argument(
     let Expr::Var(name) = source else {
         return None;
     };
-    if !matches!(
-        target_shape.ownership,
-        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
-    ) {
-        return None;
-    }
-    let rendered = emit::emit_expr(lowered);
-    if !rendered_has_audited_clone_recovery(&rendered) {
-        return None;
-    }
-    match (
-        &target_shape.java_ty,
-        &target_shape.view,
-        target_shape.ownership,
-    ) {
-        (JavaType::String, ViewShape::Str, OwnershipShape::SharedBorrow) => {
-            Some(RustExpr::Raw(format!("{name}.as_str()")))
-        }
-        (JavaType::Array(_), ViewShape::Slice, OwnershipShape::MutableBorrow) => {
-            Some(RustExpr::Raw(format!("{name}.as_mut_slice()")))
-        }
-        (JavaType::Array(_), ViewShape::Slice, OwnershipShape::SharedBorrow) => {
-            Some(RustExpr::Raw(format!("{name}.as_slice()")))
-        }
-        (_, _, OwnershipShape::SharedBorrow) => Some(RustExpr::Raw(format!("&{name}"))),
-        _ => None,
-    }
+    normalize_reused_clone_for_borrowed_argument(lowered, name, target_shape)
 }
 
 fn adapt_reused_owned_value_for_slot(
@@ -12119,14 +11992,29 @@ fn adapt_reused_owned_value_for_slot(
     let Some(target_shape) = slot_target_shape(slot) else {
         return lowered;
     };
-    if !reused_owned_value_needs_clone(source, target_shape, env, slot, ctx) {
-        return lowered;
+    apply_clone_recovery_decision(
+        lowered,
+        clone_recovery_decision_for_value(source, target_shape, env, slot, ctx),
+    )
+}
+
+fn clone_recovery_decision_for_value(
+    source: &Expr,
+    target_shape: &RustSlotShape,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+) -> CloneRecoveryDecision {
+    if reused_owned_value_needs_clone(source, target_shape, env, slot, ctx) {
+        CloneRecoveryDecision::ApplyRecoveryCoercion {
+            coercion: Coercion::CloneRecovery {
+                policy: CloneRecoveryPolicy::AuditRequired,
+            },
+            idempotence: CloneRecoveryIdempotence::AnyCloneRecovery,
+        }
+    } else {
+        CloneRecoveryDecision::NoRecovery
     }
-    let rendered = emit::emit_expr(&lowered);
-    if rendered_has_audited_clone_recovery(&rendered) {
-        return lowered;
-    }
-    RustExpr::Raw(render_audited_clone_recovery(&rendered))
 }
 
 fn reused_owned_value_needs_clone(
@@ -12139,6 +12027,7 @@ fn reused_owned_value_needs_clone(
     let Expr::Var(name) = source else {
         return false;
     };
+    let move_use = MoveUseContext::new(ctx);
     if !shape_is_owned_non_erased(target_shape) {
         return false;
     }
@@ -12165,40 +12054,10 @@ fn reused_owned_value_needs_clone(
     {
         return false;
     }
-    if ctx
-        .later_read_names
-        .is_some_and(|later_reads| later_reads.contains(name))
-    {
+    if move_use.has_later_read(name) {
         return true;
     }
-    ctx.current_stmt_read_counts
-        .and_then(|counts| counts.get(name).copied())
-        .is_some_and(|count| count > 1)
-}
-
-fn rendered_has_audited_clone_recovery(rendered: &str) -> bool {
-    rendered.ends_with(".clone()")
-        || rendered.ends_with(".clone_box()")
-        || rendered.ends_with(".cloned()")
-        || rendered.ends_with(".cloned()/* TODO(translation): validate added clone */")
-        || rendered.ends_with(".clone()/* TODO(translation): validate added clone */")
-        || rendered.contains(".clone()/* TODO(translation): validate added clone */.into()")
-}
-
-fn render_audited_clone_recovery(rendered: &str) -> String {
-    if let Some(receiver) = rendered.strip_suffix(".into()") {
-        return format!("{receiver}.clone()/* TODO(translation): validate added clone */.into()");
-    }
-    let receiver = if rust_method_receiver_needs_parentheses(rendered) {
-        format!("({rendered})")
-    } else {
-        rendered.to_string()
-    };
-    format!("{receiver}.clone()/* TODO(translation): validate added clone */")
-}
-
-fn rust_method_receiver_needs_parentheses(rendered: &str) -> bool {
-    rendered.contains(" as ")
+    move_use.has_repeated_current_stmt_read(name)
 }
 
 fn shared_borrow_argument_needs_owned_clone(
@@ -12227,15 +12086,13 @@ fn reused_owned_argument_needs_clone(
         && target_shape.ownership == OwnershipShape::Owned
         && actual_shape.is_some_and(|actual_shape| actual_shape == target_shape)
     {
+        let move_use = MoveUseContext::new(ctx);
         return optional_owned_argument_clone_recovery(target_shape, ctx.facts)
             && matches!(arg, Expr::Var(_))
-            && current_callable_binding_has_later_read(
-                match arg {
-                    Expr::Var(name) => name,
-                    _ => unreachable!("checked above"),
-                },
-                ctx,
-            );
+            && move_use.has_later_read(match arg {
+                Expr::Var(name) => name,
+                _ => unreachable!("checked above"),
+            });
     }
     if actual_shape
         .is_some_and(|actual_shape| actual_shape.ownership == OwnershipShape::SharedBorrow)
@@ -12249,19 +12106,11 @@ fn reused_owned_argument_needs_clone(
         let Expr::Var(name) = arg else {
             return false;
         };
-        if ctx
-            .catch_future_use_names
-            .is_some_and(|future_uses| future_uses.contains(name))
-        {
+        let move_use = MoveUseContext::new(ctx);
+        if move_use.has_catch_future_use(name) {
             return true;
         }
-        return ctx
-            .later_read_names
-            .is_some_and(|later_reads| later_reads.contains(name))
-            || ctx
-                .current_stmt_read_counts
-                .and_then(|current_counts| current_counts.get(name).copied())
-                .is_some_and(|count| count > 1);
+        return move_use.has_later_or_repeated_current_read(name);
     }
     if !shape_is_owned_non_erased(target_shape) {
         return false;
@@ -12276,36 +12125,25 @@ fn reused_owned_argument_needs_clone(
     let Expr::Var(name) = arg else {
         return false;
     };
-    if ctx
-        .catch_future_use_names
-        .is_some_and(|future_uses| future_uses.contains(name))
-    {
+    let move_use = MoveUseContext::new(ctx);
+    if move_use.has_catch_future_use(name) {
         return true;
     }
-    if ctx
-        .exclusive_terminal_branch_read_names
-        .is_some_and(|exclusive_reads| exclusive_reads.contains(name))
-        && !current_callable_binding_has_later_read(name, ctx)
-    {
+    if move_use.has_exclusive_terminal_branch_read(name) && !move_use.has_later_read(name) {
         return false;
     }
-    if let Some(later_reads) = ctx.later_read_names {
-        return later_reads.contains(name)
-            || ctx
-                .current_stmt_read_counts
-                .and_then(|current_counts| current_counts.get(name).copied())
-                .is_some_and(|count| count > 1);
+    if move_use.has_later_read_facts() {
+        return move_use.has_later_or_repeated_current_read(name);
     }
     if shape_is_erased_object_sequence_like(target_shape) {
-        return ctx
-            .current_stmt_read_counts
-            .and_then(|current_counts| current_counts.get(name).copied())
-            .is_some_and(|count| count > 1);
+        return move_use.has_repeated_current_stmt_read(name);
     }
-    if let Some(current_counts) = ctx.current_stmt_read_counts {
-        return current_counts.get(name).copied().unwrap_or(0) > 1;
+    if let Some(current_count) = move_use.current_stmt_read_count(name) {
+        return current_count > 1;
     }
-    current_callable_binding_use_count(name, ctx).is_some_and(|use_count| use_count > 1)
+    move_use
+        .binding_use_count(name)
+        .is_some_and(|use_count| use_count > 1)
 }
 
 fn shape_is_erased_object_sequence_like(shape: &RustSlotShape) -> bool {
@@ -12509,6 +12347,11 @@ fn adapt_call_target_receiver(
     {
         return cast_receiver;
     }
+    if let Some(lowered) =
+        adapt_external_facade_receiver_slot(target, receiver, lowered.clone(), env, ctx)
+    {
+        return lowered;
+    }
     match target {
         CallTargetPlan::NativeCollectionMethod { method, .. } => {
             adapt_native_collection_receiver(receiver, lowered, *method, env, ctx)
@@ -12523,15 +12366,79 @@ fn adapt_call_target_receiver(
         _ if refined_non_null_receiver(receiver, refinements) => lowered,
         _ if target.adapts_optional_instance_receiver() => {
             if lowered_receiver_is_optional_borrow(receiver, env, ctx) {
-                return RustExpr::Raw(format!(
-                    "{}.expect(\"Java null receiver\")",
-                    emit::emit_expr(&lowered)
-                ));
+                return project_optional_receiver(
+                    lowered,
+                    crate::coercion::OptionalReceiverProjection::Borrowed,
+                );
             }
             adapt_optional_instance_receiver(receiver, lowered, env, ctx)
         }
         _ => lowered,
     }
+}
+
+fn adapt_external_facade_receiver_slot(
+    target: &CallTargetPlan<'_>,
+    receiver: &Expr,
+    lowered: RustExpr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let CallTargetPlan::ExternalFacadeReceiver { receiver_abi, .. } = target else {
+        return None;
+    };
+    let actual_shape = infer_expr_shape_with_context(
+        receiver,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    let receiver_slot_ty = actual_shape
+        .optional_element_type()
+        .unwrap_or_else(|| actual_shape.java_ty.clone());
+    let slot_plan = facade_receiver_slot_plan(*receiver_abi, receiver_slot_ty, ctx.facts);
+    let slot = slot_plan.slot?;
+    let lowered = crate::coercion::LoweredExpr {
+        expr: lowered,
+        actual: LoweredType::Slot(Box::new(actual_shape)),
+    };
+    let plan = plan_lowered_slot_conversion(&lowered.actual, slot, ctx.facts);
+    if receiver_method_autoref_satisfies_facade_slot(*receiver_abi, &plan) {
+        return None;
+    }
+    Some(parenthesize_borrowed_method_receiver(
+        apply_lowered_slot_expr_conversion(lowered, &plan),
+    ))
+}
+
+fn receiver_method_autoref_satisfies_facade_slot(
+    receiver_abi: crate::facts::ReceiverAbi,
+    plan: &LoweredSlotExprConversionPlan,
+) -> bool {
+    let SlotConversionPlan::Shape(shape_plan) = &plan.conversion else {
+        return false;
+    };
+    matches!(
+        (&shape_plan.dispatch, &shape_plan.view, &shape_plan.optional),
+        (
+            DispatchCoercionPolicy::NoDispatchChange,
+            ViewCoercionPolicy::NoViewChange,
+            OptionalShapeCoercionPolicy::NoChange
+        )
+    ) && shape_plan.primitive_widening.is_none()
+        && matches!(
+            (receiver_abi, &shape_plan.ownership),
+            (
+                crate::facts::ReceiverAbi::BorrowedSelf,
+                OwnershipCoercionPolicy::BorrowOwnedValue
+            ) | (
+                crate::facts::ReceiverAbi::MutBorrowedSelf,
+                OwnershipCoercionPolicy::BorrowOwnedMutably
+            )
+        )
 }
 
 fn adapt_call_target_receiver_with_signature(
@@ -12543,20 +12450,25 @@ fn adapt_call_target_receiver_with_signature(
     refinements: &ExprRefinements,
     fallback_signature: Option<&crate::signature::MethodSignaturePlan>,
 ) -> RustExpr {
+    if let Some(cast_receiver) =
+        lower_explicit_external_facade_cast_receiver(target, receiver, env, ctx, refinements)
+    {
+        return cast_receiver;
+    }
+    if let Some(lowered) =
+        adapt_external_facade_receiver_slot(target, receiver, lowered.clone(), env, ctx)
+    {
+        return lowered;
+    }
     if refined_non_null_receiver(receiver, refinements) {
         if target.adapts_optional_instance_receiver() {
-            let access = if fallback_signature.is_some_and(|signature| {
+            let mutable = fallback_signature.is_some_and(|signature| {
                 matches!(signature.receiver, crate::signature::ReceiverPlan::Mutable)
-            }) || target.mutates_receiver()
-            {
-                "as_mut"
-            } else {
-                "as_ref"
-            };
+            }) || target.mutates_receiver();
             let lowered =
                 lower_expr_with_refinements(receiver, env, ctx, &ExprRefinements::default());
-            return adapt_optional_instance_receiver_with_access(
-                receiver, lowered, env, ctx, access,
+            return adapt_optional_instance_receiver_with_slot_plan(
+                receiver, lowered, env, ctx, mutable, true,
             );
         }
         return lowered;
@@ -12566,10 +12478,14 @@ fn adapt_call_target_receiver_with_signature(
             matches!(signature.receiver, crate::signature::ReceiverPlan::Mutable)
         })
     {
-        return adapt_optional_instance_receiver_with_access(receiver, lowered, env, ctx, "as_mut");
+        return adapt_optional_instance_receiver_with_slot_plan(
+            receiver, lowered, env, ctx, true, true,
+        );
     }
     if target.adapts_optional_instance_receiver() && target.mutates_receiver() {
-        return adapt_optional_instance_receiver_with_access(receiver, lowered, env, ctx, "as_mut");
+        return adapt_optional_instance_receiver_with_slot_plan(
+            receiver, lowered, env, ctx, true, true,
+        );
     }
     adapt_call_target_receiver(target, receiver, lowered, env, ctx, refinements)
 }
@@ -12754,7 +12670,7 @@ fn adapt_optional_instance_receiver(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> RustExpr {
-    adapt_optional_instance_receiver_with_access(receiver, lowered, env, ctx, "as_ref")
+    adapt_optional_instance_receiver_with_slot_plan(receiver, lowered, env, ctx, false, true)
 }
 
 fn retarget_static_owner_call_for_instance_field_receiver<'a>(
@@ -12812,12 +12728,13 @@ fn receiver_is_instance_or_outer_field(receiver: &Expr, env: &ShapeEnv, ctx: Low
     env.field_type(name).is_some() || lower_outer_this_field_name(name, env, ctx).is_some()
 }
 
-fn adapt_optional_instance_receiver_with_access(
+fn adapt_optional_instance_receiver_with_slot_plan(
     receiver: &Expr,
     lowered: RustExpr,
     env: &ShapeEnv,
     ctx: LowerCtx,
-    access: &str,
+    mutable: bool,
+    legacy_unchecked: bool,
 ) -> RustExpr {
     let shape_ctx = ExprShapeContext {
         signatures: Some(ctx.signatures),
@@ -12825,13 +12742,63 @@ fn adapt_optional_instance_receiver_with_access(
         facts: Some(ctx.facts),
     };
     let inferred_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
-    let receiver_is_optional = std::iter::once(inferred_shape)
-        .chain(current_instance_field_shape_with_env(receiver, env, ctx))
-        .any(|shape| shape.optional_element_type().is_some());
-    if !receiver_is_optional {
-        return lowered;
+    let mut receiver_shapes = vec![inferred_shape];
+    if let Some(field_shape) = current_instance_field_shape_with_env(receiver, env, ctx) {
+        receiver_shapes.push(field_shape);
     }
-    RustExpr::Raw(format!("{}.{access}().unwrap()", emit::emit_expr(&lowered)))
+    let Some(receiver_ty) = receiver_shapes
+        .iter()
+        .find_map(RustSlotShape::optional_element_type)
+    else {
+        return lowered;
+    };
+    let option_shape = receiver_shapes
+        .into_iter()
+        .find(|shape| {
+            shape
+                .optional_element_type()
+                .is_some_and(|ty| ty == receiver_ty)
+        })
+        .expect("receiver type was selected from receiver_shapes");
+    let plan = optional_receiver_slot_plan(receiver_ty, mutable, legacy_unchecked, ctx.facts);
+    let projected = project_optional_receiver(lowered, plan.projection);
+    let Some(target_shape) = slot_target_shape(&plan.slot) else {
+        return projected;
+    };
+    let Some(actual) = LoweredType::optional_element_borrow_from_option_shape(
+        option_shape,
+        target_shape.java_ty.clone(),
+        Some(if mutable {
+            OwnershipShape::MutableBorrow
+        } else {
+            OwnershipShape::SharedBorrow
+        }),
+    ) else {
+        return projected;
+    };
+    let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {
+        return projected;
+    };
+    let projected = crate::coercion::LoweredExpr {
+        expr: projected,
+        actual: LoweredType::Slot(element_shape),
+    };
+    let conversion_plan = plan_lowered_slot_conversion(&projected.actual, plan.slot, ctx.facts);
+    if optional_receiver_method_autoref_satisfies_slot(&conversion_plan) {
+        return projected.expr;
+    }
+    apply_lowered_slot_expr_conversion(projected, &conversion_plan)
+}
+
+fn optional_receiver_method_autoref_satisfies_slot(plan: &LoweredSlotExprConversionPlan) -> bool {
+    let SlotConversionPlan::Shape(shape_plan) = &plan.conversion else {
+        return false;
+    };
+    matches!(
+        shape_plan.ownership,
+        OwnershipCoercionPolicy::NoOwnershipChange
+    ) && matches!(shape_plan.optional, OptionalShapeCoercionPolicy::NoChange)
+        && shape_plan.primitive_widening.is_none()
 }
 
 fn adapt_native_collection_receiver(
@@ -12853,12 +12820,13 @@ fn adapt_native_collection_receiver(
     if crate::stdlib::java_collection_kind_for_type(&element_ty).is_none() {
         return lowered;
     }
-    let receiver = emit::emit_expr(&lowered);
-    let access = match method {
+    let projection = match method {
         NativeCollectionMethod::ListPush
         | NativeCollectionMethod::SetInsert
         | NativeCollectionMethod::Extend
-        | NativeCollectionMethod::MapInsert => "as_mut",
+        | NativeCollectionMethod::MapInsert => {
+            crate::coercion::OptionalReceiverProjection::MutableUnchecked
+        }
         NativeCollectionMethod::Len
         | NativeCollectionMethod::IsEmpty
         | NativeCollectionMethod::ListGet
@@ -12867,9 +12835,11 @@ fn adapt_native_collection_receiver(
         | NativeCollectionMethod::MapKeys
         | NativeCollectionMethod::MapIter
         | NativeCollectionMethod::Iterator
-        | NativeCollectionMethod::ToArray => "as_ref",
+        | NativeCollectionMethod::ToArray => {
+            crate::coercion::OptionalReceiverProjection::SharedUnchecked
+        }
     };
-    RustExpr::Raw(format!("{receiver}.{access}().unwrap()"))
+    project_optional_receiver(lowered, projection)
 }
 
 fn lower_java_equality_call_expr(
@@ -13131,10 +13101,7 @@ fn lower_expr_for_slot_with_refinements(
     {
         return lower_expr_with_refinements(expr, env, ctx, refinements);
     }
-    if let Some(expr) = lower_integral_literal_for_char_slot(expr, &slot) {
-        return expr;
-    }
-    if let Some(expr) = lower_borrowed_string_literal_for_slot(expr, &slot) {
+    if let Some(expr) = lower_literal_for_slot(expr, &slot) {
         return expr;
     }
     if let Some(expr) = lower_anonymous_class_new_for_boxed_dyn_slot(expr, &slot, ctx) {
@@ -13274,6 +13241,11 @@ fn lower_expr_for_slot_with_refinements(
         };
     }
     if let Some(constructor_expr) =
+        lower_external_crate_constructor_expr_for_slot(expr, env, &slot, ctx, refinements)
+    {
+        return constructor_expr;
+    }
+    if let Some(constructor_expr) =
         lower_external_constructor_expr_for_concrete_slot(expr, env, &slot, ctx, refinements)
     {
         return constructor_expr;
@@ -13398,6 +13370,11 @@ fn lower_expr_for_slot_with_refinements(
     if slot_expr_needs_result_propagation(expr, env, ctx) {
         lowered_expr = propagate_result_expr(lowered_expr);
     }
+    if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment)
+        && matches!(expr, Expr::Var(name) if refinements.non_null_locals.contains(name))
+    {
+        return apply_java_display_plan(lowered_expr, JavaDisplayPlan::ConcatValue);
+    }
     if let Some(upcast) = lower_source_subtype_to_supertype_slot(&lowered_expr, &actual, &slot, ctx)
     {
         return upcast;
@@ -13408,7 +13385,44 @@ fn lower_expr_for_slot_with_refinements(
         return unwrapped;
     }
     let plan = plan_slot_conversion(actual, slot, ctx.facts);
-    normalize_optional_borrowed_as_str_expr(apply_slot_expr_conversion(lowered_expr, &plan))
+    apply_slot_expr_conversion(lowered_expr, &plan)
+}
+
+fn lower_external_crate_constructor_expr_for_slot(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::New {
+        ty, args, resolved, ..
+    } = expr
+    else {
+        return None;
+    };
+    let target = plan_new_target_for_args_with_facts(
+        ty,
+        resolved.as_ref(),
+        ctx.representations,
+        ctx.facts,
+        args,
+        env.type_env(),
+    );
+    let external = target.external_crate?;
+    let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+    let actual = LoweredType::rust_scalar_return(
+        ty.clone(),
+        format!("{}::{}", external.crate_name, external.type_name),
+    );
+    let plan = plan_lowered_slot_conversion(&actual, slot.clone(), ctx.facts);
+    Some(apply_lowered_slot_expr_conversion(
+        crate::coercion::LoweredExpr {
+            expr: lowered,
+            actual,
+        },
+        &plan,
+    ))
 }
 
 fn lower_source_subtype_to_supertype_slot(
@@ -13573,24 +13587,28 @@ fn lower_optional_receiver_field_access_for_slot(
             ctx.facts,
         )
     {
-        let unwrapped_receiver = format!(
-            "{}.as_ref().expect(\"Java null receiver\")",
-            emit::emit_expr(&lowered_receiver)
-        );
+        let unwrapped_receiver = emit::emit_expr(&adapt_optional_instance_receiver_with_slot_plan(
+            receiver,
+            lowered_receiver.clone(),
+            env,
+            ctx,
+            false,
+            false,
+        ));
         let lowered = match plan.op {
             crate::member_access_plan::MemberAccessOp::LenAsI32 => {
-                RustExpr::Raw(format!("{unwrapped_receiver}.len() as i32"))
+                len_i32_projection(RustExpr::Raw(unwrapped_receiver.clone()))
             }
             crate::member_access_plan::MemberAccessOp::Array2RowsAsI32
                 if two_dimensional_array_expr_uses_nested_slice(receiver, env, ctx) =>
             {
-                RustExpr::Raw(format!("{unwrapped_receiver}.len() as i32"))
+                len_i32_projection(RustExpr::Raw(unwrapped_receiver.clone()))
             }
             crate::member_access_plan::MemberAccessOp::Array2RowsAsI32 => {
-                RustExpr::Raw(format!("{unwrapped_receiver}.nrows() as i32"))
+                array2_rows_i32_projection(RustExpr::Raw(unwrapped_receiver.clone()))
             }
             crate::member_access_plan::MemberAccessOp::Array2ColsAsI32 => {
-                RustExpr::Raw(format!("{unwrapped_receiver}.len() as i32"))
+                len_i32_projection(RustExpr::Raw(unwrapped_receiver.clone()))
             }
             _ => RustExpr::Raw(format!(
                 "{unwrapped_receiver}.{}",
@@ -13615,10 +13633,17 @@ fn lower_optional_receiver_field_access_for_slot(
     )
     .or_else(|| field_shape.clone())
     .unwrap_or_else(|| actual.clone());
+    let lowered_receiver = adapt_optional_instance_receiver_with_slot_plan(
+        receiver,
+        lowered_receiver,
+        env,
+        ctx,
+        false,
+        false,
+    );
     let mut lowered = RustExpr::Raw(format!(
-        "{}.as_ref().expect(\"Java null receiver\").{}",
-        emit::emit_expr(&lowered_receiver),
-        field_name
+        "{}.{field_name}",
+        emit::emit_expr(&lowered_receiver)
     ));
     if let Some(field_shape) = field_shape.as_ref()
         && field_shape.optional_element_type().is_some()
@@ -13632,10 +13657,7 @@ fn lower_optional_receiver_field_access_for_slot(
         );
     }
     if shape_is_owned(&actual) && !matches!(actual.java_ty, JavaType::Primitive(_)) {
-        lowered = RustExpr::Raw(format!(
-            "{}.clone()/* TODO(translation): validate added clone */",
-            emit::emit_expr(&lowered)
-        ));
+        lowered = apply_audited_clone_recovery(lowered);
     }
     Some(apply_expr_to_slot_via_plan(
         lowered, actual, slot, ctx.facts,
@@ -13986,10 +14008,7 @@ fn lower_ragged_array_creation_for_slot(
         return None;
     }
     let len = lower_expr_for_slot(&dimensions[0], env, index_slot(), ctx);
-    Some(RustExpr::Raw(format!(
-        "vec![Vec::new(); {}]",
-        emit::emit_expr(&len)
-    )))
+    Some(ragged_array_outer_creation_projection(len))
 }
 
 fn lower_array_access_expr(
@@ -14015,21 +14034,15 @@ fn lower_array_access_expr(
                 lower_expr_for_slot(index, env, index_slot(), ctx),
             );
         }
-        return RustExpr::Raw(format!(
-            "{}[[{}, {}]]",
-            emit::emit_expr(&lower_read_sequence_receiver(
-                outer_array,
-                env,
-                ctx,
-                refinements
-            )),
-            emit::emit_expr(&lower_expr_for_slot(outer_index, env, index_slot(), ctx)),
-            emit::emit_expr(&lower_expr_for_slot(index, env, index_slot(), ctx)),
-        ));
+        return array2_index_projection(
+            lower_read_sequence_receiver(outer_array, env, ctx, refinements),
+            lower_expr_for_slot(outer_index, env, index_slot(), ctx),
+            lower_expr_for_slot(index, env, index_slot(), ctx),
+        );
     }
 
-    if ndarray_element_type_after_optional(&crate::types::infer_expr_type(array, env.type_env()))
-        .is_some()
+    if let Some(row_element_ty) =
+        ndarray_element_type_after_optional(&crate::types::infer_expr_type(array, env.type_env()))
     {
         if two_dimensional_array_expr_uses_nested_slice(array, env, ctx) {
             return indexed_expr(
@@ -14037,11 +14050,17 @@ fn lower_array_access_expr(
                 lower_expr_for_slot(index, env, index_slot(), ctx),
             );
         }
-        return RustExpr::Raw(format!(
-            "{}.row({}).to_vec()",
-            emit::emit_expr(&lower_read_sequence_receiver(array, env, ctx, refinements)),
-            emit::emit_expr(&lower_expr_for_slot(index, env, index_slot(), ctx)),
-        ));
+        let row_expr = RustExpr::MethodCall {
+            receiver: Box::new(lower_read_sequence_receiver(array, env, ctx, refinements)),
+            method: "row".to_string(),
+            args: vec![lower_expr_for_slot(index, env, index_slot(), ctx)],
+        };
+        return to_owned_sequence_projection(
+            row_expr,
+            &CloneRecoveryPolicy::ProvenCloneCapability {
+                java_ty: JavaType::Array(Box::new(row_element_ty)),
+            },
+        );
     }
 
     let lowered_array = lower_sequence_get_array_access_receiver(array, env, ctx, refinements)
@@ -14148,21 +14167,18 @@ fn lower_static_final_const_array_for_slice_slot(
         return None;
     }
     let lowered = lower_expr(expr, env, ctx);
-    let rendered = emit::emit_expr(&lowered);
     if two_dimensional_element_type_after_optional(&const_ty).is_some() {
-        return match target.ownership {
-            OwnershipShape::SharedBorrow => Some(RustExpr::Raw(format!(
-                "&ndarray::Array2::from_rows({rendered})"
-            ))),
-            OwnershipShape::Owned => Some(RustExpr::Raw(format!(
-                "ndarray::Array2::from_rows({rendered})"
-            ))),
-            OwnershipShape::MutableBorrow | OwnershipShape::CopyValue => None,
-        };
+        return array2_from_rows_projection(lowered, target.ownership);
     }
+    let rendered = emit::emit_expr(&lowered);
     match target.ownership {
         OwnershipShape::SharedBorrow if target.view == ViewShape::Slice => Some(lowered),
-        OwnershipShape::Owned => Some(RustExpr::Raw(format!("{rendered}.to_vec()"))),
+        OwnershipShape::Owned => Some(to_owned_sequence_projection(
+            RustExpr::Raw(rendered),
+            &CloneRecoveryPolicy::ProvenCloneCapability {
+                java_ty: const_ty.clone(),
+            },
+        )),
         OwnershipShape::MutableBorrow
         | OwnershipShape::CopyValue
         | OwnershipShape::SharedBorrow => None,
@@ -14242,11 +14258,7 @@ fn lower_read_sequence_receiver(
     {
         return lowered;
     }
-    let rendered = emit::emit_expr(&lowered);
-    let receiver = rendered.strip_suffix(".unwrap()").unwrap_or(&rendered);
-    RustExpr::Raw(format!(
-        "{receiver}.as_ref().expect(\"Java null receiver\")"
-    ))
+    project_optional_sequence_receiver(lowered, OptionalSequenceReceiverProjection::Shared)
 }
 
 fn lower_sequence_get_array_access_receiver(
@@ -14284,17 +14296,17 @@ fn lower_sequence_get_array_access_receiver(
 
     let mut receiver_expr = lower_expr_with_refinements(receiver, env, ctx, refinements);
     if optional_sequence_ty.is_some() {
-        receiver_expr = RustExpr::Raw(format!(
-            "{}.as_ref().expect(\"Java null receiver\")",
-            emit::emit_expr(&receiver_expr)
-        ));
+        receiver_expr = adapt_optional_instance_receiver_with_slot_plan(
+            receiver,
+            receiver_expr,
+            env,
+            ctx,
+            false,
+            false,
+        );
     }
     let index_expr = lower_expr_for_slot(&args[0], env, index_slot(), ctx);
-    Some(RustExpr::Raw(format!(
-        "{}.get({}).expect(\"Java index out of bounds\")",
-        emit::emit_expr(&receiver_expr),
-        emit::emit_expr(&index_expr)
-    )))
+    Some(sequence_get_expect_projection(receiver_expr, index_expr))
 }
 
 fn lower_array2_row_replacement_stmt(
@@ -14310,12 +14322,11 @@ fn lower_array2_row_replacement_stmt(
         array,
         env.type_env(),
     ))?;
-    let array = emit::emit_expr(&lower_expr(array, env, ctx));
-    let index = emit::emit_expr(&lower_expr_for_slot(index, env, index_slot(), ctx));
-    let value = emit::emit_expr(&lower_array2_row_replacement_value_expr(value, env, ctx));
-    Some(raw_stmt(format!(
-        "{array}.row_mut({index}).assign(&ndarray::ArrayView1::from({value}));"
-    )))
+    Some(array2_row_mut_assign_stmt(
+        lower_expr(array, env, ctx),
+        lower_expr_for_slot(index, env, index_slot(), ctx),
+        lower_array2_row_replacement_value_expr(value, env, ctx),
+    ))
 }
 
 fn lower_array2_row_replacement_value_expr(
@@ -14331,7 +14342,7 @@ fn lower_array2_row_replacement_value_expr(
             ..
         } | Expr::ArrayInitializer(_)
     ) {
-        return RustExpr::Raw(format!("&{}", emit::emit_expr(&lowered)));
+        return force_shared_borrow_projection(lowered);
     }
     lowered
 }
@@ -14371,7 +14382,7 @@ fn lower_reused_external_into_array_child(
         return None;
     }
     let lowered = lower_expr_with_refinements(child, env, ctx, refinements);
-    let cloned = RustExpr::Raw(format!("{}.clone()", emit::emit_expr(&lowered)));
+    let cloned = apply_audited_clone_recovery(lowered);
     Some(apply_slot_expr_conversion(cloned, &plan))
 }
 
@@ -14738,15 +14749,7 @@ fn expr_is_object_input_stream_read_object_call(expr: &Expr) -> bool {
 }
 
 fn rewrite_deserialization_downcast_message(expr: RustExpr) -> RustExpr {
-    let rendered = emit::emit_expr(&expr);
-    if rendered.contains(".downcast::<") && rendered.contains(".expect(\"invalid Java cast\")") {
-        RustExpr::Raw(rendered.replace(
-            ".expect(\"invalid Java cast\")",
-            ".expect(\"Java deserialization type mismatch\")",
-        ))
-    } else {
-        expr
-    }
+    rewrite_downcast_expect_message(expr, "Java deserialization type mismatch")
 }
 
 fn erased_external_call_trait_object_cast_handoff(
@@ -14862,12 +14865,11 @@ fn lower_raw_erasure_cast_source_for_slot(
         return Some(lower_expr_with_refinements(inner, env, ctx, refinements));
     }
     if target.optional_element_type().is_some() {
-        let mut element_shape = target.clone();
-        element_shape.java_ty = target_ty;
-        return Some(lower_expr_for_slot_with_refinements(
+        return Some(lower_present_expr_for_optional_target(
             inner,
             env,
-            Slot::Assignment(element_shape),
+            target,
+            target_ty,
             ctx,
             refinements,
         ));
@@ -15208,8 +15210,7 @@ fn lower_shared_self_field_owned_recovery_for_slot(
             let plan = plan_slot_conversion(actual.clone(), slot.clone(), ctx.facts);
             if slot_conversion_plan_contains_external_into(&plan.conversion) {
                 let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
-                let recovered =
-                    RustExpr::Raw(render_audited_clone_recovery(&emit::emit_expr(&lowered)));
+                let recovered = apply_audited_clone_recovery(lowered);
                 return Some(apply_slot_expr_conversion(recovered, &plan));
             }
         }
@@ -15224,10 +15225,7 @@ fn lower_shared_self_field_owned_recovery_for_slot(
                 return None;
             }
             let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
-            let recovered = RustExpr::Raw(format!(
-                "{}.clone()/* TODO(translation): validate added clone */",
-                emit::emit_expr(&lowered)
-            ));
+            let recovered = apply_audited_clone_recovery(lowered);
             return Some(apply_expr_to_slot_via_plan(
                 recovered,
                 element_shape,
@@ -15242,7 +15240,7 @@ fn lower_shared_self_field_owned_recovery_for_slot(
     }
     shared_self_field_read_name_with_ctx(expr, env, ctx)?;
     let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
-    let recovered = RustExpr::Raw(format!("{}.clone()", emit::emit_expr(&lowered)));
+    let recovered = apply_audited_clone_recovery(lowered);
     Some(apply_expr_to_slot_via_plan(
         recovered,
         target.clone(),
@@ -15293,16 +15291,12 @@ fn lower_borrowed_receiver_field_owned_recovery_for_slot(
             return None;
         }
         let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
-        let recovered = RustExpr::Raw(format!(
-            "{}.as_ref().expect(\"Java null receiver\").clone()/* TODO(translation): validate added clone */",
-            emit::emit_expr(&lowered)
-        ));
-        return Some(apply_expr_to_slot_via_plan(
-            recovered,
-            target.clone(),
-            slot,
-            ctx.facts,
-        ));
+        return apply_optional_field_borrowed_carrier_to_slot(
+            lowered,
+            &field_actual,
+            slot.clone(),
+            ctx,
+        );
     }
     if field_actual.java_ty != target.java_ty
         || (!known_owned_argument_clone_recovery_with_facts(&field_actual, ctx.facts)
@@ -15311,10 +15305,7 @@ fn lower_borrowed_receiver_field_owned_recovery_for_slot(
         return None;
     }
     let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
-    let recovered = RustExpr::Raw(format!(
-        "{}.clone()/* TODO(translation): validate added clone */",
-        emit::emit_expr(&lowered)
-    ));
+    let recovered = apply_audited_clone_recovery(lowered);
     Some(apply_expr_to_slot_via_plan(
         recovered,
         target.clone(),
@@ -15457,22 +15448,14 @@ fn apply_optional_field_borrowed_carrier_to_slot(
     ctx: LowerCtx,
 ) -> Option<RustExpr> {
     let element_ty = option_shape.optional_element_type()?;
-    let mut element_shape =
-        crate::conversion_plan::optional_element_slot_shape(option_shape, element_ty);
-    element_shape.ownership = OwnershipShape::SharedBorrow;
-    let borrowed_carrier = RustExpr::Raw(format!("{}.as_ref()", emit::emit_expr(&option_expr)));
-    let actual = LoweredType::OptionalElementBorrow {
-        option_shape: Box::new(option_shape.clone()),
-        element_shape: Box::new(element_shape),
-    };
-    let plan = plan_lowered_slot_conversion(&actual, slot, ctx.facts);
-    Some(apply_lowered_slot_expr_conversion(
-        crate::coercion::LoweredExpr {
-            expr: borrowed_carrier,
-            actual: plan.actual.clone(),
-        },
-        &plan,
-    ))
+    let lowered = optional_element_borrow_lowered_expr(
+        option_expr,
+        option_shape,
+        element_ty,
+        OwnershipShape::SharedBorrow,
+    )?;
+    let plan = plan_lowered_slot_conversion(&lowered.actual, slot, ctx.facts);
+    Some(apply_lowered_slot_expr_conversion(lowered, &plan))
 }
 
 fn borrowed_self_receiver_can_read_fields(ctx: LowerCtx) -> bool {
@@ -15619,42 +15602,18 @@ fn receiver_shape_java_type<'a>(receiver: &Expr, env: &'a ShapeEnv) -> Option<&'
     }
 }
 
-fn lower_borrowed_string_literal_for_slot(expr: &Expr, slot: &Slot) -> Option<RustExpr> {
-    let Expr::Literal(Literal::String(value)) = expr else {
+fn lower_literal_for_slot(expr: &Expr, slot: &Slot) -> Option<RustExpr> {
+    let Expr::Literal(literal) = expr else {
         return None;
     };
-    let target = slot_target_shape(slot)?;
-    if target.java_ty == JavaType::String
-        && target.view == ViewShape::Str
-        && target.ownership == OwnershipShape::SharedBorrow
-    {
-        return Some(RustExpr::Literal(format!("{value:?}")));
-    }
-    None
+    literal_slot_plan(literal, slot).map(|plan| apply_literal_slot_plan(&plan))
 }
 
-fn lower_integral_literal_for_char_slot(expr: &Expr, slot: &Slot) -> Option<RustExpr> {
-    let target = slot_target_shape(slot)?;
-    if !matches!(
-        target.java_ty,
-        JavaType::Primitive(crate::java_ir::PrimitiveType::Char)
-    ) {
+fn char_literal_expr_from_integral_expr(expr: &Expr) -> Option<RustExpr> {
+    let Expr::Literal(literal) = expr else {
         return None;
-    }
-    java_char_expr_from_integral_literal(expr)
-}
-
-fn java_char_expr_from_integral_literal(expr: &Expr) -> Option<RustExpr> {
-    let value = match expr {
-        Expr::Literal(Literal::Int(value)) => i64::from(*value),
-        Expr::Literal(Literal::Long(value)) => *value,
-        _ => return None,
     };
-    let value = u32::try_from(value).ok()?;
-    if (0xd800..=0xdfff).contains(&value) {
-        return None;
-    }
-    char::from_u32(value).map(|ch| RustExpr::Literal(format!("{ch:?}")))
+    java_integral_literal_char(literal).map(|ch| RustExpr::Literal(format!("{ch:?}")))
 }
 
 fn external_receiver_name_from_shape_type(java_ty: &JavaType) -> Option<&str> {
@@ -15708,16 +15667,50 @@ fn lower_reused_optional_unwrap_for_slot(
         return None;
     }
     let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
-    let rendered = emit::emit_expr(&lowered);
-    if actual.ownership == OwnershipShape::SharedBorrow {
-        return Some(RustExpr::Raw(format!(
-            "{}.as_ref().map(|value| (**value).clone()).unwrap()/* TODO(translation): validate added clone */",
-            rendered
-        )));
+    let lowered = reused_optional_unwrap_lowered_expr(
+        lowered,
+        actual,
+        element_ty,
+        matches!(slot, Slot::Return(_)),
+    )?;
+    let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
+    Some(apply_lowered_slot_expr_conversion(lowered, &plan))
+}
+
+fn reused_optional_unwrap_lowered_expr(
+    option_expr: RustExpr,
+    option_shape: &RustSlotShape,
+    element_ty: JavaType,
+    move_owned_carrier: bool,
+) -> Option<crate::coercion::LoweredExpr> {
+    if option_shape.ownership == OwnershipShape::SharedBorrow {
+        let actual = optional_element_borrow_lowered_type(
+            option_shape.clone(),
+            element_ty,
+            Some(OwnershipShape::SharedBorrow),
+        )?;
+        return Some(crate::coercion::LoweredExpr {
+            expr: option_expr,
+            actual,
+        });
     }
-    Some(RustExpr::Raw(format!(
-        "{rendered}.as_ref().unwrap().clone()/* TODO(translation): validate added clone */"
-    )))
+    if move_owned_carrier && option_shape.ownership == OwnershipShape::Owned {
+        let actual = optional_element_borrow_lowered_type(
+            option_shape.clone(),
+            element_ty,
+            Some(OwnershipShape::Owned),
+        )?;
+        return Some(crate::coercion::LoweredExpr {
+            expr: option_expr,
+            actual,
+        });
+    }
+    optional_element_borrow_lowered_expr(
+        option_expr,
+        option_shape,
+        element_ty,
+        OwnershipShape::SharedBorrow,
+    )
 }
 
 fn lower_reused_optional_display_for_slot(
@@ -15738,10 +15731,10 @@ fn lower_reused_optional_display_for_slot(
         return None;
     }
     let lowered = lower_expr_with_refinements(expr, env, ctx, &ExprRefinements::default());
-    Some(RustExpr::Raw(format!(
-        "{}.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())",
-        emit::emit_expr(&lowered)
-    )))
+    Some(apply_java_display_plan(
+        lowered,
+        JavaDisplayPlan::OptionalValue,
+    ))
 }
 
 fn lower_reused_optional_wrap_for_slot(
@@ -15782,10 +15775,13 @@ fn lower_reused_optional_wrap_for_slot(
         return None;
     }
     let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
-    Some(RustExpr::Raw(format!(
-        "Some({}.clone()/* TODO(translation): validate added clone */)",
-        emit::emit_expr(&lowered)
-    )))
+    let recovered = apply_audited_clone_recovery(lowered);
+    Some(construct_optional_value_for_target(
+        recovered,
+        actual.clone(),
+        target,
+        ctx.facts,
+    ))
 }
 
 fn lower_map_entry_accessor_expr_for_slot(
@@ -15810,17 +15806,17 @@ fn lower_map_entry_accessor_expr_for_slot(
     let receiver = receiver.as_deref()?;
     let (next_expr, key_ty, value_ty) = lower_map_entry_next_expr(receiver, env, ctx, refinements)?;
     const MAP_ENTRY_VALUE_ACCESSOR: &str = concat!("get", "Value");
-    let (field, actual_ty) = match name.as_str() {
+    let (field_index, actual_ty) = match name.as_str() {
         "getKey" | "get_key" => (
-            "0",
+            0,
             map_entry_accessor_type_or_slot_target(&key_ty, slot).unwrap_or(key_ty),
         ),
         accessor if accessor == MAP_ENTRY_VALUE_ACCESSOR || accessor == "get_value" => {
-            ("1", value_ty)
+            (1, value_ty)
         }
         _ => return None,
     };
-    let entry_access = RustExpr::Raw(format!("{}.{}", emit::emit_expr(&next_expr), field));
+    let entry_access = tuple_field_projection(next_expr, field_index);
     let actual = crate::shape_projection::borrowed_sequence_element_shape(actual_ty);
     Some(apply_expr_to_slot_via_plan(
         entry_access,
@@ -15867,14 +15863,7 @@ fn lower_map_entry_next_expr(
     let receiver = receiver.as_deref()?;
     let (iter_expr, key_ty, value_ty) =
         lower_map_entry_iterator_expr(receiver, env, ctx, refinements)?;
-    Some((
-        RustExpr::Raw(format!(
-            "{}.next().expect(\"Java iterator exhausted\")",
-            emit::emit_expr(&iter_expr)
-        )),
-        key_ty,
-        value_ty,
-    ))
+    Some((iterator_next_expect_projection(iter_expr), key_ty, value_ty))
 }
 
 fn lower_map_entry_iterator_expr(
@@ -15926,13 +15915,21 @@ fn lower_map_entry_set_expr(
         });
     let mut receiver_expr = lower_expr_with_refinements(receiver, env, ctx, refinements);
     if receiver_is_optional_map {
-        receiver_expr = RustExpr::Raw(format!(
-            "{}.as_ref().expect(\"Java null receiver\")",
-            emit::emit_expr(&receiver_expr)
-        ));
+        receiver_expr = adapt_optional_instance_receiver_with_slot_plan(
+            receiver,
+            receiver_expr,
+            env,
+            ctx,
+            false,
+            false,
+        );
     }
     Some((
-        RustExpr::Raw(format!("{}.iter()", emit::emit_expr(&receiver_expr))),
+        RustExpr::Raw(render_sequence_iteration_source(
+            &emit::emit_expr(&receiver_expr),
+            false,
+            SequenceIterationProjection::Borrowed,
+        )),
         key_ty,
         value_ty,
     ))
@@ -16938,17 +16935,17 @@ fn lower_sequence_get_call_expr_for_slot(
     })?;
     let mut receiver_expr = lower_expr_with_refinements(receiver, env, ctx, refinements);
     if optional_sequence_ty.is_some() {
-        receiver_expr = RustExpr::Raw(format!(
-            "{}.as_ref().expect(\"Java null receiver\")",
-            emit::emit_expr(&receiver_expr)
-        ));
+        receiver_expr = adapt_optional_instance_receiver_with_slot_plan(
+            receiver,
+            receiver_expr,
+            env,
+            ctx,
+            false,
+            false,
+        );
     }
     let index_expr = lower_expr_for_slot(&args[0], env, index_slot(), ctx);
-    let get_expr = RustExpr::Raw(format!(
-        "{}.get({}).expect(\"Java index out of bounds\")",
-        emit::emit_expr(&receiver_expr),
-        emit::emit_expr(&index_expr)
-    ));
+    let get_expr = sequence_get_expect_projection(receiver_expr, index_expr);
     let actual = borrowed_sequence_element_shape_with_facts(element_ty, ctx.facts);
     if let Some(adapted) =
         lower_borrowed_sequence_get_subtype_to_concrete_slot(&get_expr, &actual, slot, ctx.facts)
@@ -17032,14 +17029,22 @@ fn lower_array_access_expr_for_slot(
         facts: Some(ctx.facts),
     };
     let array_shape = infer_expr_shape_with_context(array, env, shape_ctx);
-    let element_ty = array_shape.sequence_element_type().or_else(|| {
-        array_shape
-            .optional_element_type()
-            .as_ref()
-            .and_then(crate::types::sequence_element_type)
-    })?;
     let access_expr = lower_array_access_expr(array, index, env, ctx, refinements);
-    let actual = crate::shape_projection::borrowed_sequence_element_shape(element_ty);
+    let actual = indexed_read_shape_for_access_with_facts(&array_shape, ctx.facts)?;
+    if let Some(target) = slot_target_shape(slot)
+        && two_dimensional_array_expr_uses_nested_slice(array, env, ctx)
+        && target.ownership == OwnershipShape::Owned
+        && actual.ownership == OwnershipShape::SharedBorrow
+        && same_concrete_java_type(&actual.java_ty, &target.java_ty)
+        && crate::types::sequence_element_type(&actual.java_ty).is_some()
+    {
+        return Some(to_owned_sequence_projection(
+            access_expr,
+            &CloneRecoveryPolicy::ProvenCloneCapability {
+                java_ty: actual.java_ty.clone(),
+            },
+        ));
+    }
     if let Some(target) = slot_target_shape(slot)
         && target
             .optional_element_type()
@@ -17048,28 +17053,18 @@ fn lower_array_access_expr_for_slot(
         && matches!(target.view, ViewShape::Native)
     {
         let actual_access = RustSlotShape::conservative(actual.java_ty.clone());
-        let construction =
-            optional_slot_construction_plan_for_actual(&actual_access, target, ctx.facts);
-        let plan = crate::conversion_plan::LoweredSlotExprConversionPlan {
-            actual: LoweredType::Slot(Box::new(actual_access)),
-            slot: Slot::Assignment(target.clone()),
-            conversion: SlotConversionPlan::OptionalConstruction(construction),
-        };
-        return Some(normalize_optional_borrowed_as_str_expr(
-            apply_lowered_slot_expr_conversion(
-                crate::coercion::LoweredExpr {
-                    expr: access_expr,
-                    actual: plan.actual.clone(),
-                },
-                &plan,
-            ),
+        return Some(construct_optional_value_for_target(
+            access_expr,
+            actual_access,
+            target,
+            ctx.facts,
         ));
     }
     if indexed_access_needs_borrowed_place(&actual)
         && indexed_access_target_slot_accepts_borrowed_place(slot)
     {
         return Some(apply_expr_to_slot_via_plan(
-            RustExpr::Raw(format!("&{}", emit::emit_expr(&access_expr))),
+            force_shared_borrow_projection(access_expr),
             actual,
             slot,
             ctx.facts,
@@ -17093,17 +17088,6 @@ fn indexed_access_target_slot_accepts_borrowed_place(slot: &Slot) -> bool {
     slot_target_shape(slot)
         .is_some_and(|target| matches!(target.ownership, OwnershipShape::SharedBorrow))
         || matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment)
-}
-
-fn normalize_optional_borrowed_as_str_expr(expr: RustExpr) -> RustExpr {
-    let rendered = emit::emit_expr(&expr);
-    if let Some(inner) = rendered
-        .strip_prefix("Some(&")
-        .and_then(|value| value.strip_suffix(".as_str())"))
-    {
-        return RustExpr::Raw(format!("Some({inner}.as_str())"));
-    }
-    expr
 }
 
 fn lower_map_get_call_expr_for_slot(
@@ -17158,22 +17142,17 @@ fn lower_map_get_call_expr_for_slot(
         None,
     );
     let key = rust_args.into_iter().next()?;
-    let key = avoid_double_borrowed_map_key_arg(key, &args[0], env, ctx);
-    let key = ensure_borrowed_map_key_arg(key, &args[0], env, ctx);
+    let key = lower_map_key_arg_borrow_projection(key, &args[0], env, ctx);
     let lowered_receiver = target.receiver_expr().map(|receiver| {
         let lowered = lower_expr_with_refinements(receiver, env, ctx, refinements);
         adapt_call_target_receiver(&target, receiver, lowered, env, ctx, refinements)
     })?;
     if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment) {
-        let get_expr = RustExpr::Raw(format!(
-            "{}.get({})",
-            emit::emit_expr(&lowered_receiver),
-            emit::emit_expr(&key)
+        let get_expr = map_get_projection(lowered_receiver, key);
+        return Some(apply_java_display_plan(
+            get_expr,
+            JavaDisplayPlan::OptionalBorrowedValue,
         ));
-        return Some(RustExpr::Raw(format!(
-            "{}.map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())",
-            emit::emit_expr(&get_expr)
-        )));
     }
     let actual = crate::shape_projection::borrowed_sequence_element_shape(value_ty);
     let target_shape = slot_target_shape(slot)?;
@@ -17181,11 +17160,7 @@ fn lower_map_get_call_expr_for_slot(
         .optional_element_type()
         .is_some_and(|element_ty| element_ty == actual.java_ty)
     {
-        let get_expr = RustExpr::Raw(format!(
-            "{}.get({})",
-            emit::emit_expr(&lowered_receiver),
-            emit::emit_expr(&key)
-        ));
+        let get_expr = map_get_projection(lowered_receiver, key);
         let actual = LoweredType::optional_element_borrow_shape(actual);
         let plan = plan_lowered_slot_conversion(&actual, slot.clone(), ctx.facts);
         return Some(apply_lowered_slot_expr_conversion(
@@ -17199,11 +17174,7 @@ fn lower_map_get_call_expr_for_slot(
     if target_shape.java_ty != actual.java_ty {
         return None;
     }
-    let get_expr = RustExpr::Raw(format!(
-        "{}.get({}).expect(\"Java null receiver\")",
-        emit::emit_expr(&lowered_receiver),
-        emit::emit_expr(&key)
-    ));
+    let get_expr = map_get_expect_projection(lowered_receiver, key);
     Some(apply_expr_to_slot_via_plan(
         get_expr, actual, slot, ctx.facts,
     ))
@@ -17288,14 +17259,28 @@ fn lower_map_get_to_array_call_expr_for_slot(
         None,
     );
     let key = key_args.into_iter().next()?;
-    let key = avoid_double_borrowed_map_key_arg(key, &get_args[0], env, ctx);
-    let key = ensure_borrowed_map_key_arg(key, &get_args[0], env, ctx);
+    let key = lower_map_key_arg_borrow_projection(key, &get_args[0], env, ctx);
     let lowered_receiver = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
-    Some(RustExpr::Raw(format!(
-        "{}.get({}).expect(\"Java null receiver\").clone()",
-        emit::emit_expr(&lowered_receiver),
-        emit::emit_expr(&key)
-    )))
+    let get_expr = map_get_projection(lowered_receiver, key);
+    let value_shape = RustSlotShape::conservative(value_ty);
+    let actual = LoweredType::optional_element_borrow_shape(borrowed_sequence_element_shape(
+        value_shape.java_ty.clone(),
+    ));
+    let recovery_plan =
+        plan_lowered_slot_conversion(&actual, Slot::Argument(value_shape.clone()), ctx.facts);
+    let recovered = apply_lowered_slot_expr_conversion(
+        crate::coercion::LoweredExpr {
+            expr: get_expr,
+            actual,
+        },
+        &recovery_plan,
+    );
+    Some(apply_expr_to_slot_via_plan(
+        recovered,
+        value_shape,
+        slot,
+        ctx.facts,
+    ))
 }
 
 fn lower_map_get_collection_mutation_call(
@@ -17376,21 +17361,20 @@ fn lower_map_get_collection_mutation_call(
         None,
     );
     let key = key_args.into_iter().next()?;
-    let key = avoid_double_borrowed_map_key_arg(key, &get_args[0], env, ctx);
-    let key = ensure_borrowed_map_key_arg(key, &get_args[0], env, ctx);
+    let key = lower_map_key_arg_borrow_projection(key, &get_args[0], env, ctx);
 
     let mut lowered_map_receiver = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
     if map_receiver_is_optional {
-        lowered_map_receiver = RustExpr::Raw(format!(
-            "{}.as_mut().expect(\"Java null receiver\")",
-            emit::emit_expr(&lowered_map_receiver)
-        ));
+        lowered_map_receiver = adapt_optional_instance_receiver_with_slot_plan(
+            map_receiver,
+            lowered_map_receiver,
+            env,
+            ctx,
+            true,
+            false,
+        );
     }
-    let lowered_value_receiver = RustExpr::Raw(format!(
-        "{}.get_mut({}).expect(\"Java null receiver\")",
-        emit::emit_expr(&lowered_map_receiver),
-        emit::emit_expr(&key)
-    ));
+    let lowered_value_receiver = map_get_mut_expect_projection(lowered_map_receiver, key);
 
     let value_args = lower_args_for_call_target(
         &CallTargetPlan::NativeCollectionMethod {
@@ -17424,83 +17408,29 @@ fn lower_map_get_collection_mutation_call(
     ))
 }
 
-fn avoid_double_borrowed_map_key_arg(
+fn lower_map_key_arg_borrow_projection(
     lowered: RustExpr,
     arg: &Expr,
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> RustExpr {
-    let Expr::Var(name) = arg else {
-        return lowered;
+    let (local_name, actual) = if let Expr::Var(name) = arg {
+        (
+            Some(name.as_str()),
+            Some(infer_expr_shape_with_context(
+                arg,
+                env,
+                ExprShapeContext {
+                    signatures: Some(ctx.signatures),
+                    representations: Some(ctx.representations),
+                    facts: Some(ctx.facts),
+                },
+            )),
+        )
+    } else {
+        (None, None)
     };
-    let shape = infer_expr_shape_with_context(
-        arg,
-        env,
-        ExprShapeContext {
-            signatures: Some(ctx.signatures),
-            representations: Some(ctx.representations),
-            facts: Some(ctx.facts),
-        },
-    );
-    if shape.ownership != OwnershipShape::SharedBorrow {
-        return lowered;
-    }
-    if emit::emit_expr(&lowered) == format!("&{name}") {
-        RustExpr::Var(name.clone())
-    } else {
-        lowered
-    }
-}
-
-fn ensure_borrowed_map_key_arg(
-    lowered: RustExpr,
-    arg: &Expr,
-    env: &ShapeEnv,
-    ctx: LowerCtx,
-) -> RustExpr {
-    let rendered = emit::emit_expr(&lowered);
-    if rendered.trim_start().starts_with('&')
-        || rendered_expr_is_already_borrowed_map_key(&rendered)
-    {
-        return lowered;
-    }
-    if let Expr::Var(name) = arg
-        && rendered == *name
-    {
-        let shape = infer_expr_shape_with_context(
-            arg,
-            env,
-            ExprShapeContext {
-                signatures: Some(ctx.signatures),
-                representations: Some(ctx.representations),
-                facts: Some(ctx.facts),
-            },
-        );
-        if shape.ownership == OwnershipShape::SharedBorrow {
-            return lowered;
-        }
-    }
-    RustExpr::Raw(format!("&{}", rendered_expr_for_prefix_borrow(&rendered)))
-}
-
-fn rendered_expr_is_already_borrowed_map_key(rendered: &str) -> bool {
-    let trimmed = rendered.trim();
-    trimmed.ends_with(".as_str()")
-        || (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || trimmed.starts_with("java_string_")
-}
-
-fn rendered_expr_for_prefix_borrow(rendered: &str) -> String {
-    if rendered
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '.'))
-        || rendered.contains('[')
-        || rendered.ends_with(')')
-    {
-        rendered.to_string()
-    } else {
-        format!("({rendered})")
-    }
+    normalize_map_key_borrow_projection(lowered, local_name, actual.as_ref())
 }
 
 fn apply_expr_to_slot_via_plan(
@@ -17554,10 +17484,7 @@ fn lower_map_key_set_expr_for_set_slot(
         return None;
     }
     let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
-    Some(RustExpr::Raw(format!(
-        "{}.keys().cloned().collect::<std::collections::HashSet<_>>()",
-        emit::emit_expr(&lowered_receiver)
-    )))
+    Some(owned_map_keys_set_projection(lowered_receiver))
 }
 
 fn lower_native_collection_call_expr_for_slot(
@@ -17687,10 +17614,7 @@ fn lower_java_object_to_string_call_expr_for_slot(
     }
     let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
     Some(crate::coercion::LoweredExpr {
-        expr: RustExpr::Raw(format!(
-            "java_erased_object_to_string(&{})",
-            emit::emit_expr(&lowered_receiver)
-        )),
+        expr: apply_java_display_plan(lowered_receiver, JavaDisplayPlan::ErasedObject),
         actual: LoweredType::Slot(Box::new(value_shape(JavaType::String))),
     })
 }
@@ -17961,13 +17885,12 @@ fn source_field_getter_lowered_type(field_shape: &RustSlotShape) -> LoweredType 
         let mut option_shape = field_shape.clone();
         option_shape.ownership = OwnershipShape::Owned;
         option_shape.view = ViewShape::Native;
-        let mut element_shape =
-            crate::conversion_plan::optional_element_slot_shape(field_shape, element_ty);
-        element_shape.ownership = OwnershipShape::SharedBorrow;
-        return LoweredType::OptionalElementBorrow {
-            option_shape: Box::new(option_shape),
-            element_shape: Box::new(element_shape),
-        };
+        return optional_element_borrow_lowered_type(
+            option_shape,
+            element_ty,
+            Some(OwnershipShape::SharedBorrow),
+        )
+        .unwrap_or_else(|| LoweredType::Slot(Box::new(field_shape.clone())));
     }
     let mut actual = field_shape.clone();
     actual.ownership = OwnershipShape::SharedBorrow;
@@ -18173,13 +18096,12 @@ fn optional_borrow_slot_lowered_type(actual: LoweredType) -> LoweredType {
     let mut option_shape = (*shape).clone();
     option_shape.ownership = OwnershipShape::Owned;
     option_shape.view = ViewShape::Native;
-    let mut element_shape =
-        crate::conversion_plan::optional_element_slot_shape(&shape, element_ty.clone());
-    element_shape.ownership = OwnershipShape::SharedBorrow;
-    LoweredType::OptionalElementBorrow {
-        option_shape: Box::new(option_shape),
-        element_shape: Box::new(element_shape),
-    }
+    optional_element_borrow_lowered_type(
+        option_shape,
+        element_ty,
+        Some(OwnershipShape::SharedBorrow),
+    )
+    .unwrap_or_else(|| LoweredType::Slot(shape))
 }
 
 fn java_getter_method_name(name: &str) -> bool {
@@ -18444,24 +18366,38 @@ fn lower_present_expr_for_optional_target(
         && !expr_type_is_optional(else_expr, env)
     {
         let (then_refinements, else_refinements) = branch_refinements(condition, refinements);
-        return ternary_expr(
+        let mut actual_element_shape =
+            crate::conversion_plan::optional_element_slot_shape(target, element_ty.clone());
+        if matches!(then_expr.as_ref(), Expr::ArrayAccess(_, _))
+            || matches!(else_expr.as_ref(), Expr::ArrayAccess(_, _))
+        {
+            actual_element_shape.ownership = OwnershipShape::SharedBorrow;
+        }
+        let construction =
+            optional_slot_construction_plan_for_actual(&actual_element_shape, target, ctx.facts);
+        let branch_slot = Slot::Assignment(construction.element_shape.clone());
+        let branch_value = ternary_expr(
             lower_expr_for_slot(condition, env, condition_slot(), ctx),
-            lower_present_expr_for_optional_target(
+            lower_expr_for_slot_with_refinements(
                 then_expr,
                 env,
-                target,
-                element_ty.clone(),
+                branch_slot.clone(),
                 ctx,
                 &then_refinements,
             ),
-            lower_present_expr_for_optional_target(
+            lower_expr_for_slot_with_refinements(
                 else_expr,
                 env,
-                target,
-                element_ty,
+                branch_slot,
                 ctx,
                 &else_refinements,
             ),
+        );
+        return construct_optional_value_for_target(
+            branch_value,
+            construction.element_shape,
+            target,
+            ctx.facts,
         );
     }
     let mut actual_element_shape = actual_shape_for_slot_expr(
@@ -18473,6 +18409,12 @@ fn lower_present_expr_for_optional_target(
             facts: Some(ctx.facts),
         },
     );
+    if matches!(actual_element_shape.java_ty, JavaType::Unknown(_))
+        || actual_element_shape.optional_element_type().is_some()
+    {
+        actual_element_shape =
+            crate::conversion_plan::optional_element_slot_shape(target, element_ty.clone());
+    }
     let actual_is_indexed_borrow_projection = matches!(expr, Expr::ArrayAccess(_, _))
         && actual_element_shape.ownership == OwnershipShape::SharedBorrow;
     if actual_is_indexed_borrow_projection {
@@ -18487,18 +18429,7 @@ fn lower_present_expr_for_optional_target(
     };
     let lowered_expr =
         lower_expr_for_slot_with_refinements(expr, env, element_lowering_slot, ctx, refinements);
-    let plan = crate::conversion_plan::LoweredSlotExprConversionPlan {
-        actual: LoweredType::Slot(Box::new(construction.element_shape.clone())),
-        slot: Slot::Assignment(construction.target.clone()),
-        conversion: SlotConversionPlan::OptionalConstruction(construction),
-    };
-    normalize_optional_borrowed_as_str_expr(apply_lowered_slot_expr_conversion(
-        crate::coercion::LoweredExpr {
-            expr: lowered_expr,
-            actual: plan.actual.clone(),
-        },
-        &plan,
-    ))
+    construct_optional_value_for_target(lowered_expr, construction.element_shape, target, ctx.facts)
 }
 
 fn ternary_condition_non_null_branch_expr(condition: &Expr) -> Option<(&Expr, bool)> {
@@ -18595,8 +18526,14 @@ fn lower_non_null_optional_display_branch(
     let unwrapped = if non_null_refinements_make_optional_expr_an_element(expr, refinements) {
         lowered
     } else {
-        RustExpr::Raw(format!("{}.as_ref().unwrap()", emit::emit_expr(&lowered)))
+        unwrap_optional_shared_value(lowered)
     };
+    if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment) {
+        return Some(apply_java_display_plan(
+            unwrapped,
+            JavaDisplayPlan::ConcatValue,
+        ));
+    }
     let plan = plan_slot_conversion(element_shape, slot, ctx.facts);
     Some(apply_slot_expr_conversion(unwrapped, &plan))
 }

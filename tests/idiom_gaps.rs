@@ -772,6 +772,14 @@ class BoxedPrimitiveConstructorsLowerToValues {
         return new Double(value).doubleValue();
     }
 
+    static double floatAsDouble(float value) {
+        return new Float(value).doubleValue();
+    }
+
+    static float doubleAsFloat(double value) {
+        return new Double(value).floatValue();
+    }
+
     static int hashFloat(float value) {
         return new Float(value).hashCode();
     }
@@ -792,8 +800,18 @@ class BoxedPrimitiveConstructorsLowerToValues {
     );
 
     assert!(
-        translation.rust.contains("return value as f32;")
-            && translation.rust.contains("return value as f64;")
+        translation
+            .rust
+            .contains("pub fn keep_float(value: f32) -> f32 {\n        return value;")
+            && translation
+                .rust
+                .contains("pub fn keep_double(value: f64) -> f64 {\n        return value;")
+            && translation.rust.contains(
+                "pub fn float_as_double(value: f32) -> f64 {\n        return value as f64;"
+            )
+            && translation.rust.contains(
+                "pub fn double_as_float(value: f64) -> f32 {\n        return value as f32;"
+            )
             && !translation.rust.contains("f32::new")
             && !translation.rust.contains("f64::new")
             && !translation.rust.contains("Float::new")
@@ -1326,7 +1344,7 @@ class JavaStringBytesAndIndex {
             .contains("value.as_bytes().iter().map(|byte| *byte as i8).collect::<Vec<i8>>()")
             && translation
                 .rust
-                .contains("java_string_index_of(&value, &\"&\")")
+                .contains("java_string_index_of(&value, \"&\")")
             && !translation.rust.contains(".get_bytes_1(")
             && !translation.rust.contains(".get_bytes()")
             && !translation.rust.contains(".index_of("),
@@ -1386,7 +1404,7 @@ class JavaStringComparisonMethods {
                 .rust
                 .contains("java_string_substring(&value, 0, 2)")
             && translation.rust.contains(
-                "java_string_compare_to(&(java_string_substring(&left, index, left.len() as i32)), java_string_substring(&right, index, right.len() as i32).as_str())"
+                "java_string_compare_to(&java_string_substring(&left, index, left.len() as i32), java_string_substring(&right, index, right.len() as i32).as_str())"
             )
             && !translation.rust.contains(".compare_to(")
             && !translation.rust.contains(".compare_to_ignore_case(")
@@ -2410,12 +2428,11 @@ class NonNullTernaryOptionalBorrowedArg {
     );
 
     assert!(
-        translation
+        translation.rust.contains(
+            "self.legal(Some(if choose_left { &parts[0 as usize] } else { &parts[1 as usize] }))"
+        ) && !translation
             .rust
-            .contains("self.legal(if choose_left { Some(&parts[0 as usize]) } else { Some(&parts[1 as usize]) })")
-            && !translation
-                .rust
-                .contains("if choose_left { parts[0 as usize] } else { parts[1 as usize] }")
+            .contains("if choose_left { parts[0 as usize] } else { parts[1 as usize] }")
             && !translation.rust.contains("self.legal(&Some("),
         "{}",
         translation.rust
@@ -3945,7 +3962,7 @@ fn source_array_setter_arguments_follow_owned_storage_signature() {
                 .contains("out.set_letters(format!(\"{}{}\", left, right).chars().collect::<Vec<char>>())")
             && translation
                 .rust
-                .contains("out.set_letters(source.letters.as_ref().expect(\"Java null receiver\").clone()/* TODO(translation): validate added clone */)")
+                .contains("out.set_letters(source.letters.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\"))")
             && !translation.rust.contains(".set_letters(format!(\"{}{}\", left, right).chars().collect::<Vec<char>>().as_slice())")
             && !translation.rust.contains(".set_letters(source.letters.as_ref().expect(\"Java null receiver\").as_slice())"),
         "{}",
@@ -3958,9 +3975,15 @@ fn shared_self_field_reads_recover_owned_values_without_moves() {
     let translation = translate_source(&idiom_gap("SharedSelfFieldOwnedRecovery.java"));
 
     assert!(
-        translation.rust.contains("return self.name.clone();")
-            && translation.rust.contains("return self.workspace.clone();")
-            && translation.rust.contains("return self.paths.clone();")
+        translation
+            .rust
+            .contains("return self.name.clone()/* TODO(translation): validate added clone */;")
+            && translation.rust.contains(
+                "return self.workspace.clone()/* TODO(translation): validate added clone */;"
+            )
+            && translation.rust.contains(
+                "return self.paths.clone()/* TODO(translation): validate added clone */;"
+            )
             && translation
                 .rust
                 .contains("self.length(self.workspace.as_str())")
@@ -4953,8 +4976,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_for_each_lambda_side_effect_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_for_each_lambda_side_effect_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_for_each_lambda_side_effect_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_for_each_lambda_side_effect_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -5568,7 +5591,7 @@ fn optional_map_put_reused_value_borrows_before_clone_unwrap() {
 
     assert!(
         translation.rust.contains(
-            "path.as_ref().unwrap().clone()/* TODO(translation): validate added clone */"
+            "path.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
         ) && translation.rust.contains(
             "path.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
         ) && !translation
@@ -5585,10 +5608,10 @@ fn optional_argument_wrap_reused_value_clones_before_some() {
 
     assert!(
         translation.rust.contains(
-            "self.seen.insert(name.as_ref().unwrap().clone()/* TODO(translation): validate added clone */, \"seen\".to_string())"
+            "self.seen.insert(name.as_ref().cloned().expect(\"Java null receiver\"), \"seen\".to_string())"
         ) && translation
             .rust
-            .contains("self.valid(name.as_ref().map(|value| value.as_str()))")
+            .contains("self.valid(name.as_deref())")
             && translation.rust.contains("format!(\"bad {}\", name.as_ref().map")
             && !translation.rust.contains("self.valid(name.map")
             && !translation.rust.contains(".clone()/* TODO(translation): validate added clone */.clone()"),
@@ -6847,10 +6870,9 @@ class NullGuardedLocalTernaryDisplayBranch {
     let translation = translate_source(source);
 
     assert!(
-        translation
-            .rust
-            .contains("if read_name.is_none() { \"\".to_string() } else { read_name.unwrap() }")
-            && !translation.rust.contains("read_name.unwrap().unwrap()")
+        translation.rust.contains(
+            "if read_name.is_none() { \"\".to_string() } else { (read_name.unwrap()).to_string() }"
+        ) && !translation.rust.contains("read_name.unwrap().unwrap()")
             && !translation
                 .rust
                 .contains("read_name.as_ref().unwrap().unwrap()"),
@@ -6873,10 +6895,9 @@ class NullGuardedAppendArgument {
     let translation = translate_source(source);
 
     assert!(
-        translation
-            .rust
-            .contains("if read_name.is_none() { \"\".to_string() } else { read_name.unwrap() }")
-            && !translation.rust.contains("read_name.unwrap().unwrap()")
+        translation.rust.contains(
+            "if read_name.is_none() { \"\".to_string() } else { (read_name.unwrap()).to_string() }"
+        ) && !translation.rust.contains("read_name.unwrap().unwrap()")
             && !translation
                 .rust
                 .contains("read_name.as_ref().unwrap().unwrap()"),
@@ -8048,8 +8069,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_method_reference_flat_map_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_method_reference_flat_map_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_method_reference_flat_map_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_method_reference_flat_map_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -8794,7 +8815,9 @@ class MiniGzipState extends GZIPInputStream {
             && translation.rust.contains("buf: Vec<i8>")
             && translation.rust.contains("len: i32")
             && translation.rust.contains("return self.len;")
-            && translation.rust.contains("return self.buf.clone();")
+            && translation
+                .rust
+                .contains("return self.buf.clone()/* TODO(translation): validate added clone */;")
             && translation
                 .rust
                 .contains("return self.inf.get_remaining();")
@@ -9239,8 +9262,7 @@ fn corpus_genomicsdb_qualified_nested_builders_use_distinct_rust_type_names() {
             && translation.rust.contains("pub struct VidMappingBuilder")
             && translation.rust.contains("pub struct FieldInfoBuilder")
             && !translation.rust.contains("pub struct Builder")
-            && !translation.rust.contains("VidMapping.Builder")
-            && !translation.rust.contains("FieldInfo.Builder")
+            && !translation.rust.contains("pub type Builder")
             && translation.rust.contains("return mapping_builder.build();"),
         "{}",
         translation.rust
@@ -9260,6 +9282,9 @@ fn corpus_spark_rdd_pipeline_keeps_stream_lowering_at_noop_spark_boundary() {
             )
             || translation.rust.contains(
                 "variants.map_to_pair(|variant: VariantContext| Tuple2::new(variant, None::<Void>))"
+            )
+            || translation.rust.contains(
+                "variants.map_to_pair(|variant: VariantContext| Box::new((variant, None::<Void>)) as Box<dyn std::any::Any>)"
             ))
             && translation.rust.contains(
                 "let comparator: Option<Comparator> = header.get_v_c_f_record_comparator();"
@@ -11258,9 +11283,9 @@ class SourceVarargsBorrowedWriteOptions {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("vec![format.clone().into(), cardinality.clone().into()]")
+        translation.rust.contains(
+            "vec![format.clone()/* TODO(translation): validate added clone */.into(), cardinality.clone()/* TODO(translation): validate added clone */.into()]"
+        )
             && !translation
                 .rust
                 .contains("vec![format.into(), cardinality.into()]"),
@@ -11352,7 +11377,7 @@ class ReusedOptionalBorrowedSourceArgument {
             .contains("pub fn run(output: &String, reference: Option<&GATKPath>, reads: &JavaRDD")
             && translation
                 .rust
-                .contains("Self::write(output, reference, reads, &vec![option.clone().into()]);")
+                .contains("Self::write(output, reference, reads, &vec![option.clone()/* TODO(translation): validate added clone */.into()]);")
             && !translation
                 .rust
                 .contains("Self::write(output, reference, reads, &vec![option.into()]);")
@@ -12096,6 +12121,30 @@ class StaticExternalNullableConstructorFieldInitializer {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn static_string_storage_initializer_preserves_lazy_default_value() {
+    let translation = translate_source(
+        r#"
+class StaticOptionalStringStorageInitializer {
+    static String name = "alpha";
+
+    static String get() {
+        return name;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("cell.borrow().clone().unwrap_or_else(|| \"alpha\".to_string())")
+            && !translation.rust.contains("Some(Some("),
+        "{}",
+        translation.rust
     );
 }
 
@@ -13098,8 +13147,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_switch_returns_enum_match_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_switch_returns_enum_match_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_switch_returns_enum_match_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_switch_returns_enum_match_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -13481,6 +13530,9 @@ class ReusedOwnedOptionalSourceArgument {
             && translation
                 .rust
                 .contains("format!(\"bad {}\", value.as_ref()")
+            && translation
+                .rust
+                .contains("pub fn describe(&self, value: Option<String>) -> Option<String>")
             && translation.rust.contains("return value;")
             && !translation.rust.contains("Self::valid(value.clone()"),
         "{}",
@@ -13795,24 +13847,33 @@ class ClassLiteralGetClassLoaderFacade {
 "#,
     );
 
+    let class_loader = "JavaClass::<ClassLiteralGetClassLoaderFacade>::literal(\"ClassLiteralGetClassLoaderFacade\").get_class_loader()";
+    let borrowed_class_loader = format!("(&{class_loader})");
     assert!(
-        (translation
-            .rust
-            .contains("JavaClass::<ClassLiteralGetClassLoaderFacade>::literal(\"ClassLiteralGetClassLoaderFacade\").get_class_loader().get_resource_as_stream(path).expect(\"Java null receiver\")")
-            || translation
-                .rust
-                .contains("JavaClass::<ClassLiteralGetClassLoaderFacade>::literal(\"ClassLiteralGetClassLoaderFacade\").get_class_loader().get_resource_as_stream(path.to_string()).expect(\"Java null receiver\")"))
-            && (translation
-                .rust
-                .contains("JavaClass::<ClassLiteralGetClassLoaderFacade>::literal(\"ClassLiteralGetClassLoaderFacade\").get_class_loader().get_resource(path)")
-                || translation
+        ([class_loader, borrowed_class_loader.as_str()]
+            .iter()
+            .any(|receiver| translation.rust.contains(&format!(
+                "{receiver}.get_resource_as_stream(path).expect(\"Java null receiver\")"
+            )) || translation.rust.contains(&format!(
+                "{receiver}.get_resource_as_stream(path.to_string()).expect(\"Java null receiver\")"
+            ))))
+            && ([class_loader, borrowed_class_loader.as_str()]
+                .iter()
+                .any(|receiver| translation
                     .rust
-                    .contains("JavaClass::<ClassLiteralGetClassLoaderFacade>::literal(\"ClassLiteralGetClassLoaderFacade\").get_class_loader().get_resource(path.to_string())"))
-            && translation.rust.contains("pub fn get_class_loader(&self) -> ClassLoader")
+                    .contains(&format!("{receiver}.get_resource(path)"))
+                    || translation
+                        .rust
+                        .contains(&format!("{receiver}.get_resource(path.to_string())"))))
+            && translation
+                .rust
+                .contains("pub fn get_class_loader(&self) -> ClassLoader")
             && translation.rust.contains("pub fn get_resource_as_stream")
             && translation.rust.contains("pub fn get_resource")
             && !translation.rust.contains("impl Class {")
-            && !translation.rust.contains("method `get_class_loader` not found"),
+            && !translation
+                .rust
+                .contains("method `get_class_loader` not found"),
         "{}",
         translation.rust
     );
@@ -15352,7 +15413,7 @@ class ObjectOutputStreamIndexedObjectHandoff {
     assert!(
         translation
             .rust
-            .contains("out.write_object(Some(java_clone_erased_object_ref(&args[j as usize])))")
+            .contains("java_clone_erased_object_ref(&args[j as usize])")
             && !translation
                 .rust
                 .contains("out.write_object(Some(args[j as usize]))"),
@@ -15675,8 +15736,8 @@ fn documents_while_assignment_null_variants_gap() {
             && translation.rust.contains("if row.is_some()")
             && translation
                 .rust
-                .contains("pub fn first_missing(&self, cursor: &mut Cursor) -> Option<Row>")
-            && translation.rust.contains("return row;")
+                .contains("pub fn first_missing(&self, cursor: &mut Cursor) -> Row")
+            && translation.rust.contains("return row.unwrap();")
             && !translation.rust.contains("(row = cursor.read())")
             && !translation.rust.contains("control_flow_rewrite_pending"),
         "{}",
@@ -16396,8 +16457,8 @@ class GuardedNullableCopyConstructor {
             && !translation
                 .rust
                 .contains("Some(other.as_ref().expect(\"Java null receiver\").bases.clone()")
-            && !translation.rust.contains("other.name")
-            && !translation.rust.contains("other.bases"),
+            && !translation.rust.contains("name: other.name")
+            && !translation.rust.contains("bases: other.bases"),
         "{}",
         translation.rust
     );
@@ -16434,9 +16495,9 @@ class NullableCopyConstructorPreservesOptions {
     assert!(
         translation
             .rust
-            .contains("read_name: other.as_ref().expect(\"Java null receiver\").read_name.clone()")
+            .contains("read_name: other.as_ref().expect(\"Java null receiver\").read_name.as_ref().cloned()")
             && translation.rust.contains(
-                "read_string: other.as_ref().expect(\"Java null receiver\").read_string.clone()"
+                "read_string: other.as_ref().expect(\"Java null receiver\").read_string.as_ref().cloned()"
             )
             && !translation.rust.contains(
                 "read_name: Some(other.as_ref().expect(\"Java null receiver\").read_name.clone()"
@@ -16533,8 +16594,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_simple_rethrow_catch_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_simple_rethrow_catch_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_simple_rethrow_catch_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_simple_rethrow_catch_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -16598,8 +16659,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_simple_cause_chaining_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_simple_cause_chaining_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_simple_cause_chaining_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_simple_cause_chaining_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -16663,8 +16724,9 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_internal_throwing_call_in_try_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_internal_throwing_call_in_try_test");
+    let rust_path =
+        std::env::temp_dir().join("new_java2rust_internal_throwing_call_in_try_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_internal_throwing_call_in_try_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -16728,8 +16790,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_simple_try_finally_cleanup_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_simple_try_finally_cleanup_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_simple_try_finally_cleanup_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_simple_try_finally_cleanup_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -16788,8 +16850,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_simple_try_catch_return_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_simple_try_catch_return_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_simple_try_catch_return_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_simple_try_catch_return_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")

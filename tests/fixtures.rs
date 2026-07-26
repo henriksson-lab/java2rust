@@ -203,7 +203,7 @@ fn translates_stream_nullable_map_then_non_null_filter() {
     assert!(
         translation
             .rust
-            .contains(".map(|value| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"),
+            .contains(".map(|value: &String| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"),
         "{}",
         translation.rust
     );
@@ -225,7 +225,7 @@ fn translates_stream_flat_map_block_pipeline() {
     );
     assert!(
         translation.rust.contains(
-            "groups.iter().flat_map(|group| { let names = group.names(); names.into_iter().filter(move |name| !name.is_empty()).map(|name| name.trim()) }).collect::<Vec<_>>()"
+            "groups.iter().flat_map(|group| { let names = group.names(); names.into_iter().filter(move |name| !name.is_empty()).map(|name: &String| name.trim()) }).collect::<Vec<_>>().into_iter().map(|v| v.to_string()).collect::<Vec<_>>()"
         ),
         "{}",
         translation.rust
@@ -483,8 +483,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_throw_only_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_throw_only_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_throw_only_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_throw_only_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -541,7 +541,7 @@ fn translates_map_get_null_ternary_with_borrowed_optional_carrier() {
     assert!(
         translation
             .rust
-            .contains("let old: Option<i32> = counts.get(name).copied();")
+            .contains("let old: Option<i32> = counts.get(name.as_str()).copied();")
             && translation
                 .rust
                 .contains("if old.is_none() { 1 } else { old.unwrap() + 1 }")
@@ -611,8 +611,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_streams_use_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_streams_use_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_streams_use_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_streams_use_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -667,8 +667,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_stream_captures_local_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_stream_captures_local_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_stream_captures_local_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_stream_captures_local_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -730,8 +730,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_stream_flat_map_lambda_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_stream_flat_map_lambda_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_stream_flat_map_lambda_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_stream_flat_map_lambda_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -765,7 +765,7 @@ fn stream_block_lambda_generated_rust_preserves_behavior() {
     );
     assert!(
         translation.rust.contains(
-            "values.iter().map(|value| { let trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
+            "values.iter().map(|value: &String| { let trimmed = value.trim(); trimmed.to_lowercase() }).collect::<Vec<_>>()"
         ) && !translation.rust.contains("unsupported Java expression: lambda")
             && !translation.rust.contains(".cloned().collect::<Vec<_>>()"),
         "{}",
@@ -790,8 +790,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_stream_block_lambda_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_stream_block_lambda_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_stream_block_lambda_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_stream_block_lambda_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -846,7 +846,7 @@ fn translates_stream_collect_to_list_to_iterator_chain() {
             .contains("pub fn clean(&self, values: Vec<String>) -> Vec<String>")
     );
     assert!(translation.rust.contains(
-        "values.iter().filter(|v| !v.is_empty()).map(|v| v.trim()).collect::<Vec<_>>().into_iter().map(|v| v.to_string()).collect::<Vec<_>>()"
+        "values.iter().filter(|v| !v.is_empty()).map(|v: &String| v.trim()).collect::<Vec<_>>().into_iter().map(|v| v.to_string()).collect::<Vec<_>>()"
     ));
 }
 
@@ -875,8 +875,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_streams_collect_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_streams_collect_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_streams_collect_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_streams_collect_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -895,6 +895,146 @@ mod generated_tests {
     assert!(
         output.status.success(),
         "streams collect behavior test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn stream_static_method_references_use_call_target_plan() {
+    let translation = translate_source(&fixture("06-stdlib/StreamStaticMethodReferences.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("value.as_str().parse::<i32>().unwrap()")
+            && translation
+                .rust
+                .contains("value.as_str().parse::<f64>().unwrap()")
+            && !translation.rust.contains("Integer::parse_int")
+            && !translation.rust.contains("Double::parse_double")
+            && !translation.rust.contains("*value.as_str().parse"),
+        "{}",
+        translation.rust
+    );
+    let test_source = format!(
+        "{}\n{}",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn stream_static_method_references_parse_values() {
+        let streams = StreamStaticMethodReferences {};
+        assert_eq!(
+            streams.parse_ints(vec!["1".to_string(), "2".to_string(), "3".to_string()]),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            streams.parse_doubles(vec!["1.5".to_string(), "2.25".to_string()]),
+            vec![1.5, 2.25]
+        );
+    }
+}
+"#
+    );
+    let rust_path = std::env::temp_dir().join("new_java2rust_stream_static_method_refs_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_stream_static_method_refs_test");
+    fs::write(&rust_path, test_source).unwrap();
+    let output = Command::new("rustc")
+        .arg("--test")
+        .arg(&rust_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stream static method refs test did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "stream static method refs behavior test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn stream_string_method_references_use_call_target_plan() {
+    let translation = translate_source(&fixture("06-stdlib/StreamStringMethodReferences.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("values.iter().map(|value: &String| value.len() as i32).collect::<Vec<_>>()")
+            && translation.rust.contains(
+                "values.iter().map(|value: &String| value.trim()).collect::<Vec<_>>().into_iter().map(|v| v.to_string()).collect::<Vec<_>>()"
+            )
+            && translation
+                .rust
+                .contains("values.iter().any(|value| value.is_empty())")
+            && !translation.rust.contains("String::length")
+            && !translation.rust.contains("String::trim")
+            && !translation.rust.contains(".into_iter().cloned().collect::<Vec<_>>()"),
+        "{}",
+        translation.rust
+    );
+    let test_source = format!(
+        "{}\n{}",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn stream_string_method_references_apply_native_string_calls() {
+        let streams = StreamStringMethodReferences {};
+        let values = vec![" a ".to_string(), "".to_string(), "bc".to_string()];
+        assert_eq!(streams.lengths(values.clone()), vec![3, 0, 2]);
+        assert_eq!(
+            streams.trimmed(values.clone()),
+            vec!["a".to_string(), "".to_string(), "bc".to_string()]
+        );
+        assert!(streams.any_empty(&values));
+    }
+}
+"#
+    );
+    let rust_path = std::env::temp_dir().join("new_java2rust_stream_string_method_refs_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_stream_string_method_refs_test");
+    fs::write(&rust_path, test_source).unwrap();
+    let output = Command::new("rustc")
+        .arg("--test")
+        .arg(&rust_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stream string method refs test did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "stream string method refs behavior test failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -951,8 +1091,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_streams_find_match_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_streams_find_match_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_streams_find_match_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_streams_find_match_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -1003,8 +1143,8 @@ mod generated_tests {
 }
 "#
     );
-    let rust_path = Path::new("/tmp").join("new_java2rust_switch_fallthrough_test.rs");
-    let bin_path = Path::new("/tmp").join("new_java2rust_switch_fallthrough_test");
+    let rust_path = std::env::temp_dir().join("new_java2rust_switch_fallthrough_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_switch_fallthrough_test");
     fs::write(&rust_path, test_source).unwrap();
     let output = Command::new("rustc")
         .arg("--test")
@@ -1086,7 +1226,7 @@ fn stream_block_lambda_static_owner_uses_type_owner() {
         translation.diagnostics
     );
     assert!(translation.rust.contains(
-        "let mut builder = StreamBlockStaticOwnerCoordinatesGenomicsDBColumn::new_builder();"
+        "let mut builder = GenomicsDBColumn::new_builder(); builder.set_name(value.clone());"
     ));
     assert!(!translation.rust.contains("coordinates.genomics_d_b_column"));
 }
@@ -1179,7 +1319,7 @@ fn first_slice_generated_rust_compiles() {
             "{path} diagnostics: {:?}",
             translation.diagnostics
         );
-        let rust_path = Path::new("/tmp").join(format!(
+        let rust_path = std::env::temp_dir().join(format!(
             "new_java2rust_{}.rs",
             path.replace(['/', '.', '-'], "_")
         ));

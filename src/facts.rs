@@ -881,6 +881,12 @@ pub enum BorrowSource {
     Argument(usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorrowedReturnRecovery {
+    Clone,
+    ToPathBuf,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FacadeAbiFact {
     pub key: CallableKey,
@@ -890,6 +896,7 @@ pub struct FacadeAbiFact {
     pub return_slot: FacadeSlot,
     pub result: ResultAbi,
     pub borrow_source: Option<BorrowSource>,
+    pub borrowed_return_recovery: Option<BorrowedReturnRecovery>,
     pub provenance: FactProvenance,
 }
 
@@ -909,6 +916,7 @@ pub struct ExternalRustReturnTypeFact {
     pub arg_count: Option<usize>,
     pub rust_type_name: String,
     pub return_slot: FacadeSlot,
+    pub borrowed_return_recovery: Option<BorrowedReturnRecovery>,
     pub provenance: FactProvenance,
 }
 

@@ -33,15 +33,16 @@ use new_java2rust::external_packs::{
     unsupported_external_api_for_receiver,
 };
 use new_java2rust::facts::{
-    CallableKey, CallableKind, ClosedHierarchyFact, ExceptionFact, ExceptionKind,
-    ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole,
-    ExternalArgumentAliasPolicy, ExternalConstructorFact, ExternalCrateApiMappingFact,
-    ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFieldFact,
-    ExternalFieldKind, ExternalLibraryMode, FacadeAbiFact, FacadeSlot, FactProvenance, FactSet,
-    FieldKey, FieldNullabilityFact, FieldNullabilityProvenance, HierarchyOverride,
-    HierarchyStrategy, NullabilityState, ObjectSafetyFact, ObjectSafetyViolation, ReceiverAbi,
-    ReceiverMutabilityFact, ResultAbi, Staticness, TypeCapabilityOverride,
-    UnsupportedExternalApiFact, UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
+    BorrowedReturnRecovery, CallableKey, CallableKind, ClosedHierarchyFact, ExceptionFact,
+    ExceptionKind, ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact,
+    ExternalApiRole, ExternalArgumentAliasPolicy, ExternalConstructorFact,
+    ExternalCrateApiMappingFact, ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact,
+    ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode, FacadeAbiFact, FacadeSlot,
+    FactProvenance, FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
+    HierarchyOverride, HierarchyStrategy, NullabilityState, ObjectSafetyFact,
+    ObjectSafetyViolation, ReceiverAbi, ReceiverMutabilityFact, ResultAbi, Staticness,
+    TypeCapabilityOverride, UnsupportedExternalApiFact, UnsupportedExternalConstructorFact,
+    UnsupportedExternalFieldFact,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::{parser, resolve, semantic_analysis};
@@ -2624,6 +2625,7 @@ fn facade_abi_lookup_uses_callable_key_and_prefers_user_override() {
         return_slot: FacadeSlot::Owned,
         result: ResultAbi::ResultWrapped,
         borrow_source: None,
+        borrowed_return_recovery: None,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.facade_abi_facts.push(FacadeAbiFact {
@@ -2634,6 +2636,7 @@ fn facade_abi_lookup_uses_callable_key_and_prefers_user_override() {
         return_slot: FacadeSlot::Optional(Box::new(FacadeSlot::Owned)),
         result: ResultAbi::Plain,
         borrow_source: Some(new_java2rust::facts::BorrowSource::Argument(0)),
+        borrowed_return_recovery: None,
         provenance: FactProvenance::UserOverride,
     });
 
@@ -2662,6 +2665,29 @@ fn external_pack_rust_usize_return_declares_index_facade_slot() {
         .expect("rust-return metadata should emit a return type fact");
     assert_eq!(fact.rust_type_name, "usize");
     assert_eq!(fact.return_slot, FacadeSlot::Index);
+}
+
+#[test]
+fn external_pack_rust_borrowed_return_declares_recovery_policy() {
+    let parsed = parse_external_pack_manifest(
+        r#"
+        external-pack dep.path dep.path external-fact-model semantic
+        external-pack-api dep.path dep.path.Reader file semantic getter read-only definitely-non-null args=0 return=dep.path.File rust-return=&std::path::Path borrowed-return-recovery=to-path-buf
+        "#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let fact = parsed
+        .facts
+        .external_rust_return_type_facts
+        .iter()
+        .find(|fact| fact.receiver_type.as_deref() == Some("dep.path.Reader"))
+        .expect("rust-return metadata should emit a return type fact");
+    assert_eq!(fact.return_slot, FacadeSlot::Borrowed);
+    assert_eq!(
+        fact.borrowed_return_recovery,
+        Some(BorrowedReturnRecovery::ToPathBuf)
+    );
 }
 
 #[test]

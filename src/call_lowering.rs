@@ -2,14 +2,34 @@ use crate::call_plan::{
     CallTargetPlan, NativeCollectionMethod, NativeCollectionNewTarget,
     NativeCollectionStaticMethod, NativeJavaInstanceMethod, NativeJavaStaticMethod, NewTargetPlan,
 };
-use crate::conversion_plan::{BorrowedElementRecoveryPolicy, borrowed_element_recovery_policy};
-use crate::emit;
+use crate::coercion::{
+    JavaDisplayPlan, apply_java_display_plan, arrays_as_list_projection, arrays_equals_projection,
+    collection_remove_if_projection, collections_empty_list_projection,
+    collections_empty_sorted_set_projection, collections_n_copies_projection,
+    collections_singleton_list_projection, collections_singleton_map_projection,
+    collections_singleton_projection, discard_value_projection, erased_object_box_projection,
+    file_exists_projection, java_iterator_from_collection_projection, len_i32_projection,
+    math_max_projection, math_min_projection, native_collection_default_constructor_projection,
+    native_collection_empty_new_projection, native_collection_with_capacity_projection,
+    objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
+    optional_get_owned_value_projection, optional_or_else_owned_value_projection,
+    owned_collection_to_vec_projection, owned_map_keys_vec_projection,
+    primitive_compare_to_projection, primitive_f64_method_projection,
+    primitive_hash_code_projection, primitive_is_nan_projection, primitive_number_value_projection,
+    primitive_parse_projection, string_char_at_projection,
+    string_compare_to_ignore_case_projection, string_compare_to_projection,
+    string_equals_ignore_case_projection, string_format_projection,
+    string_from_byte_range_projection, string_from_bytes_projection, string_get_bytes_projection,
+    string_hash_code_projection, string_index_of_projection, string_join_delimiter_projection,
+    string_join_varargs_projection, string_matches_projection, string_replace_all_projection,
+    string_replace_first_projection, string_split_projection, string_substring_projection,
+    string_to_char_array_projection, system_exit_projection, thread_sleep_millis_projection,
+};
 use crate::facts::FactSet;
 use crate::facts::ReceiverAbi;
 use crate::java_ir::{Expr, JavaType, LambdaBody, PrimitiveType};
 use crate::rust_ir::RustExpr;
 use crate::slot_render::rust_type_for_slot_with_facts;
-use crate::slot_shape::RustSlotShape;
 use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body};
 
 pub fn apply_call_target(
@@ -175,10 +195,7 @@ fn apply_native_java_instance_method(
     args: Vec<RustExpr>,
 ) -> RustExpr {
     match method {
-        NativeJavaInstanceMethod::StringLen => RustExpr::Raw(format!(
-            "{}.len() as i32",
-            crate::emit::emit_expr(&receiver)
-        )),
+        NativeJavaInstanceMethod::StringLen => len_i32_projection(receiver),
         NativeJavaInstanceMethod::StringIsEmpty => RustExpr::MethodCall {
             receiver: Box::new(receiver),
             method: "is_empty".to_string(),
@@ -204,10 +221,9 @@ fn apply_native_java_instance_method(
             method: "to_string".to_string(),
             args,
         },
-        NativeJavaInstanceMethod::ObjectToString => RustExpr::Raw(format!(
-            "java_erased_object_to_string(&{})",
-            emit::emit_expr(&receiver)
-        )),
+        NativeJavaInstanceMethod::ObjectToString => {
+            apply_java_display_plan(receiver, JavaDisplayPlan::ErasedObject)
+        }
         NativeJavaInstanceMethod::StringContains => RustExpr::MethodCall {
             receiver: Box::new(receiver),
             method: "contains".to_string(),
@@ -224,80 +240,55 @@ fn apply_native_java_instance_method(
             args,
         },
         NativeJavaInstanceMethod::BitSetGet => RustExpr::Raw("false".to_string()),
-        NativeJavaInstanceMethod::FileExists => RustExpr::Raw(format!(
-            "std::path::Path::new({}.get_path().as_str()).exists()",
-            emit::emit_expr(&receiver)
-        )),
+        NativeJavaInstanceMethod::FileExists => file_exists_projection(receiver),
         NativeJavaInstanceMethod::ReaderReady => RustExpr::Raw("true".to_string()),
         NativeJavaInstanceMethod::BufferPut => {
             let Some(arg) = args.into_iter().next() else {
                 return RustExpr::Raw("{ }".to_string());
             };
-            RustExpr::Raw(format!("{{ let _ = {}; }}", emit::emit_expr(&arg)))
+            discard_value_projection(arg)
         }
         NativeJavaInstanceMethod::StringReplace => RustExpr::MethodCall {
             receiver: Box::new(receiver),
             method: "replace".to_string(),
             args,
         },
-        NativeJavaInstanceMethod::StringReplaceFirst => {
-            apply_string_replace_helper("java_string_replace_first", receiver, args)
-        }
-        NativeJavaInstanceMethod::StringReplaceAll => {
-            apply_string_replace_helper("java_string_replace_all", receiver, args)
-        }
+        NativeJavaInstanceMethod::StringReplaceFirst => apply_string_replace_first(receiver, args),
+        NativeJavaInstanceMethod::StringReplaceAll => apply_string_replace_all(receiver, args),
         NativeJavaInstanceMethod::StringMatches => apply_string_matches_helper(receiver, args),
         NativeJavaInstanceMethod::StringSplit => apply_string_split(receiver, args),
         NativeJavaInstanceMethod::StringSubstring => apply_string_substring(receiver, args),
-        NativeJavaInstanceMethod::StringToCharArray => RustExpr::Raw(format!(
-            "{}.chars().collect::<Vec<char>>()",
-            emit::emit_expr(&receiver)
-        )),
-        NativeJavaInstanceMethod::StringHashCode => RustExpr::Raw(format!(
-            "java_string_hash_code({}.as_str())",
-            emit::emit_expr(&receiver)
-        )),
-        NativeJavaInstanceMethod::StringGetBytes => RustExpr::Raw(format!(
-            "{}.as_bytes().iter().map(|byte| *byte as i8).collect::<Vec<i8>>()",
-            emit::emit_expr(&receiver)
-        )),
+        NativeJavaInstanceMethod::StringToCharArray => string_to_char_array_projection(receiver),
+        NativeJavaInstanceMethod::StringHashCode => string_hash_code_projection(receiver),
+        NativeJavaInstanceMethod::StringGetBytes => string_get_bytes_projection(receiver),
         NativeJavaInstanceMethod::StringIndexOf => apply_string_index_of(receiver, args),
         NativeJavaInstanceMethod::StringCharAt => apply_string_char_at(receiver, args),
-        NativeJavaInstanceMethod::StringCompareTo => {
-            apply_one_arg_string_helper("java_string_compare_to", receiver, args)
-        }
+        NativeJavaInstanceMethod::StringCompareTo => apply_string_compare_to(receiver, args),
         NativeJavaInstanceMethod::StringCompareToIgnoreCase => {
-            apply_one_arg_string_helper("java_string_compare_to_ignore_case", receiver, args)
+            apply_string_compare_to_ignore_case(receiver, args)
         }
         NativeJavaInstanceMethod::StringEqualsIgnoreCase => {
-            apply_one_arg_string_helper("java_string_equals_ignore_case", receiver, args)
+            apply_string_equals_ignore_case(receiver, args)
         }
         NativeJavaInstanceMethod::OptionalIsPresent => RustExpr::MethodCall {
             receiver: Box::new(receiver),
             method: "is_some".to_string(),
             args: Vec::new(),
         },
-        NativeJavaInstanceMethod::OptionalGet => RustExpr::Raw(format!(
-            "{}.as_ref().map(|value| (*value).clone()).expect(\"Java null receiver\")",
-            emit::emit_expr(&receiver)
-        )),
+        NativeJavaInstanceMethod::OptionalGet => optional_get_owned_value_projection(receiver),
         NativeJavaInstanceMethod::OptionalOrElse => {
             let Some(fallback) = args.into_iter().next() else {
                 return RustExpr::Raw(
                     "compile_error!(\"Java Optional.orElse requires one argument\")".to_string(),
                 );
             };
-            RustExpr::Raw(format!(
-                "{}.as_ref().map(|value| (*value).clone()).unwrap_or({})",
-                emit::emit_expr(&receiver),
-                emit::emit_expr(&fallback)
-            ))
+            optional_or_else_owned_value_projection(receiver, fallback)
         }
-        NativeJavaInstanceMethod::PrimitiveNumberValue { target } => {
-            apply_primitive_number_value(receiver, target)
+        NativeJavaInstanceMethod::PrimitiveNumberValue { source, target } => {
+            apply_primitive_number_value(receiver, source, target)
         }
         NativeJavaInstanceMethod::PrimitiveHashCode { source } => {
-            apply_primitive_hash_code(receiver, source)
+            primitive_hash_code_projection(receiver, source)
         }
         NativeJavaInstanceMethod::PrimitiveCompareTo { source } => {
             apply_primitive_compare_to(receiver, args, source)
@@ -309,8 +300,7 @@ fn apply_native_java_instance_method(
                         .to_string(),
                 );
             };
-            let value = strip_arithmetic_operand_display_conversion(&emit::emit_expr(&value));
-            RustExpr::Raw(format!("{value}.to_string()"))
+            apply_java_display_plan(value, JavaDisplayPlan::FormatValue)
         }
         NativeJavaInstanceMethod::MessageFormatFormat => {
             let Some(value) = args.into_iter().next() else {
@@ -340,46 +330,15 @@ fn apply_native_java_instance_method(
     }
 }
 
-fn strip_arithmetic_operand_display_conversion(rendered: &str) -> String {
-    if !(rendered.contains(" * ")
-        || rendered.contains(" / ")
-        || rendered.contains(" - ")
-        || rendered.contains(" + "))
-    {
-        return rendered.to_string();
+fn apply_primitive_number_value(
+    receiver: RustExpr,
+    source: Option<PrimitiveType>,
+    target: PrimitiveType,
+) -> RustExpr {
+    if source == Some(target) {
+        return receiver;
     }
-    rendered.replace(".to_string()", "")
-}
-
-fn apply_primitive_number_value(receiver: RustExpr, target: PrimitiveType) -> RustExpr {
-    match target {
-        PrimitiveType::Byte => RustExpr::Raw(format!("{} as i8", emit::emit_expr(&receiver))),
-        PrimitiveType::Short => RustExpr::Raw(format!("{} as i16", emit::emit_expr(&receiver))),
-        PrimitiveType::Int => RustExpr::Raw(format!("{} as i32", emit::emit_expr(&receiver))),
-        PrimitiveType::Long => RustExpr::Raw(format!("{} as i64", emit::emit_expr(&receiver))),
-        PrimitiveType::Float => RustExpr::Raw(format!("{} as f32", emit::emit_expr(&receiver))),
-        PrimitiveType::Double => RustExpr::Raw(format!("{} as f64", emit::emit_expr(&receiver))),
-        PrimitiveType::Boolean | PrimitiveType::Char => receiver,
-    }
-}
-
-fn apply_primitive_hash_code(receiver: RustExpr, source: PrimitiveType) -> RustExpr {
-    let rendered = emit::emit_expr(&receiver);
-    match source {
-        PrimitiveType::Boolean => {
-            RustExpr::Raw(format!("if {rendered} {{ 1231 }} else {{ 1237 }}"))
-        }
-        PrimitiveType::Byte | PrimitiveType::Short | PrimitiveType::Char | PrimitiveType::Int => {
-            RustExpr::Raw(format!("{rendered} as i32"))
-        }
-        PrimitiveType::Long => RustExpr::Raw(format!(
-            "(({rendered} as i64) ^ (({rendered} as i64) >> 32)) as i32"
-        )),
-        PrimitiveType::Float => RustExpr::Raw(format!("({rendered}).to_bits() as i32")),
-        PrimitiveType::Double => RustExpr::Raw(format!(
-            "(({rendered}).to_bits() ^ (({rendered}).to_bits() >> 32)) as i32"
-        )),
-    }
+    primitive_number_value_projection(receiver, target)
 }
 
 fn apply_primitive_compare_to(
@@ -392,11 +351,7 @@ fn apply_primitive_compare_to(
             "compile_error!(\"Java boxed primitive compareTo requires one argument\")".to_string(),
         );
     };
-    RustExpr::Raw(format!(
-        "java_primitive_compare_to({}, {})",
-        emit::emit_expr(&receiver),
-        emit::emit_expr(&other)
-    ))
+    primitive_compare_to_projection(receiver, other)
 }
 
 fn apply_string_char_at(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
@@ -405,88 +360,41 @@ fn apply_string_char_at(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
             "compile_error!(\"Java String.charAt requires an index\")".to_string(),
         );
     };
-    RustExpr::Raw(format!(
-        "{}.chars().nth({}).expect(\"Java string index out of bounds\")",
-        emit::emit_expr(&receiver),
-        render_string_char_at_index(index)
-    ))
-}
-
-fn render_string_char_at_index(index: RustExpr) -> String {
-    let rendered = emit::emit_expr(&index);
-    if rendered.ends_with(" as usize") {
-        rendered
-    } else if rendered.chars().all(|ch| ch.is_ascii_digit()) {
-        format!("{rendered} as usize")
-    } else {
-        format!("({rendered}) as usize")
-    }
+    string_char_at_projection(receiver, index)
 }
 
 fn apply_string_index_of(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
-    let receiver = render_string_view_argument(receiver);
     let mut args = args.into_iter();
     let Some(needle) = args.next() else {
         return RustExpr::Raw(
             "compile_error!(\"Java String.indexOf requires at least one argument\")".to_string(),
         );
     };
-    let needle = render_string_view_argument(needle);
-    if let Some(from_index) = args.next() {
-        return RustExpr::Raw(format!(
-            "java_string_index_of_from({receiver}, {needle}, {})",
-            emit::emit_expr(&from_index)
-        ));
-    }
-    RustExpr::Raw(format!("java_string_index_of({receiver}, {needle})"))
+    string_index_of_projection(receiver, needle, args.next())
 }
 
-fn render_string_view_argument(expr: RustExpr) -> String {
-    let rendered = emit::emit_expr(&expr);
-    if rendered.starts_with('&') {
-        rendered
-    } else {
-        format!("&{}", parenthesize_string_view_borrow_operand(&rendered))
-    }
-}
-
-fn parenthesize_string_view_borrow_operand(rendered: &str) -> String {
-    let trimmed = rendered.trim();
-    if trimmed
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        || trimmed.starts_with("self.")
-        || trimmed.starts_with('"')
-        || trimmed.starts_with("r#\"")
-        || trimmed.starts_with("r\"")
-    {
-        rendered.to_string()
-    } else {
-        format!("({rendered})")
-    }
-}
-
-fn apply_string_replace_helper(
-    function: &str,
-    receiver: RustExpr,
-    args: Vec<RustExpr>,
-) -> RustExpr {
+fn apply_string_replace_first(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     if args.len() != 2 {
-        return RustExpr::Raw(format!(
-            "compile_error!(\"Java String.{function} requires two arguments\")"
-        ));
+        return RustExpr::Raw(
+            "compile_error!(\"Java String.replaceFirst requires two arguments\")".to_string(),
+        );
     }
     let mut args = args.into_iter();
     let regex = args.next().unwrap();
     let replacement = args.next().unwrap();
-    RustExpr::Call {
-        function: Box::new(RustExpr::Raw(function.to_string())),
-        args: vec![
-            RustExpr::Raw(format!("{}.as_str()", emit::emit_expr(&receiver))),
-            regex,
-            replacement,
-        ],
+    string_replace_first_projection(receiver, regex, replacement)
+}
+
+fn apply_string_replace_all(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 2 {
+        return RustExpr::Raw(
+            "compile_error!(\"Java String.replaceAll requires two arguments\")".to_string(),
+        );
     }
+    let mut args = args.into_iter();
+    let regex = args.next().unwrap();
+    let replacement = args.next().unwrap();
+    string_replace_all_projection(receiver, regex, replacement)
 }
 
 fn apply_string_matches_helper(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
@@ -495,13 +403,7 @@ fn apply_string_matches_helper(receiver: RustExpr, args: Vec<RustExpr>) -> RustE
             "compile_error!(\"Java String.matches requires one argument\")".to_string(),
         );
     }
-    RustExpr::Call {
-        function: Box::new(RustExpr::Raw("java_string_matches".to_string())),
-        args: vec![
-            RustExpr::Raw(format!("{}.as_str()", emit::emit_expr(&receiver))),
-            args.into_iter().next().unwrap(),
-        ],
-    }
+    string_matches_projection(receiver, args.into_iter().next().unwrap())
 }
 
 fn apply_string_substring(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
@@ -512,31 +414,36 @@ fn apply_string_substring(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     }
     let mut args = args.into_iter();
     let begin = args.next().unwrap();
-    let receiver_for_len = emit::emit_expr(&receiver);
-    let receiver = render_string_view_argument(receiver);
-    let end = args
-        .next()
-        .unwrap_or_else(|| RustExpr::Raw(format!("({receiver_for_len}).len() as i32")));
-    RustExpr::Call {
-        function: Box::new(RustExpr::Raw("java_string_substring".to_string())),
-        args: vec![RustExpr::Raw(receiver), begin, end],
-    }
+    let receiver_for_len = len_i32_projection(receiver.clone());
+    let end = args.next().unwrap_or(receiver_for_len);
+    string_substring_projection(receiver, begin, end)
 }
 
-fn apply_one_arg_string_helper(
-    function: &str,
-    receiver: RustExpr,
-    args: Vec<RustExpr>,
-) -> RustExpr {
+fn apply_string_compare_to(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     let Some(other) = args.into_iter().next() else {
-        return RustExpr::Raw(format!(
-            "compile_error!(\"Java String helper {function} requires one argument\")"
-        ));
+        return RustExpr::Raw(
+            "compile_error!(\"Java String.compareTo requires one argument\")".to_string(),
+        );
     };
-    RustExpr::Call {
-        function: Box::new(RustExpr::Raw(function.to_string())),
-        args: vec![RustExpr::Raw(render_string_view_argument(receiver)), other],
-    }
+    string_compare_to_projection(receiver, other)
+}
+
+fn apply_string_compare_to_ignore_case(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
+    let Some(other) = args.into_iter().next() else {
+        return RustExpr::Raw(
+            "compile_error!(\"Java String.compareToIgnoreCase requires one argument\")".to_string(),
+        );
+    };
+    string_compare_to_ignore_case_projection(receiver, other)
+}
+
+fn apply_string_equals_ignore_case(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
+    let Some(other) = args.into_iter().next() else {
+        return RustExpr::Raw(
+            "compile_error!(\"Java String.equalsIgnoreCase requires one argument\")".to_string(),
+        );
+    };
+    string_equals_ignore_case_projection(receiver, other)
 }
 
 fn apply_string_split(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
@@ -549,14 +456,7 @@ fn apply_string_split(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
     let limit = args
         .pop()
         .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
-    RustExpr::Call {
-        function: Box::new(RustExpr::Raw("java_string_split".to_string())),
-        args: vec![
-            RustExpr::Raw(format!("{}.as_str()", crate::emit::emit_expr(&receiver))),
-            regex,
-            limit,
-        ],
-    }
+    string_split_projection(receiver, regex, limit)
 }
 
 fn apply_native_java_static_method(
@@ -576,10 +476,7 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Math.max requires two arguments\")".to_string(),
                 );
             };
-            RustExpr::Call {
-                function: Box::new(RustExpr::Raw("std::cmp::max".to_string())),
-                args: vec![left, right],
-            }
+            math_max_projection(left, right)
         }
         NativeJavaStaticMethod::MathMin => {
             let mut args = args.into_iter();
@@ -593,10 +490,7 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Math.min requires two arguments\")".to_string(),
                 );
             };
-            RustExpr::Call {
-                function: Box::new(RustExpr::Raw("std::cmp::min".to_string())),
-                args: vec![left, right],
-            }
+            math_min_projection(left, right)
         }
         NativeJavaStaticMethod::MathLog => {
             let Some(arg) = args.into_iter().next() else {
@@ -604,7 +498,7 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Math.log requires one argument\")".to_string(),
                 );
             };
-            RustExpr::Raw(format!("({} as f64).ln()", emit::emit_expr(&arg)))
+            primitive_f64_method_projection(arg, "ln")
         }
         NativeJavaStaticMethod::MathExp => {
             let Some(arg) = args.into_iter().next() else {
@@ -612,7 +506,7 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Math.exp requires one argument\")".to_string(),
                 );
             };
-            RustExpr::Raw(format!("({} as f64).exp()", emit::emit_expr(&arg)))
+            primitive_f64_method_projection(arg, "exp")
         }
         NativeJavaStaticMethod::MathToIntExact => {
             let Some(arg) = args.into_iter().next() else {
@@ -620,7 +514,7 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Math.toIntExact requires one argument\")".to_string(),
                 );
             };
-            RustExpr::Raw(format!("{} as i32", crate::emit::emit_expr(&arg)))
+            primitive_number_value_projection(arg, PrimitiveType::Int)
         }
         NativeJavaStaticMethod::IntegerParseInt => {
             let Some(arg) = args.into_iter().next() else {
@@ -629,10 +523,7 @@ fn apply_native_java_static_method(
                         .to_string(),
                 );
             };
-            RustExpr::Raw(format!(
-                "{}.parse::<i32>().unwrap()",
-                render_parse_receiver(arg)
-            ))
+            primitive_parse_projection(arg, PrimitiveType::Int)
         }
         NativeJavaStaticMethod::FloatParseFloat => {
             let Some(arg) = args.into_iter().next() else {
@@ -640,10 +531,7 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Float.parseFloat requires one argument\")".to_string(),
                 );
             };
-            RustExpr::Raw(format!(
-                "{}.parse::<f32>().unwrap()",
-                render_parse_receiver(arg)
-            ))
+            primitive_parse_projection(arg, PrimitiveType::Float)
         }
         NativeJavaStaticMethod::DoubleParseDouble => {
             let Some(arg) = args.into_iter().next() else {
@@ -651,10 +539,7 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Double.parseDouble requires one argument\")".to_string(),
                 );
             };
-            RustExpr::Raw(format!(
-                "{}.parse::<f64>().unwrap()",
-                render_parse_receiver(arg)
-            ))
+            primitive_parse_projection(arg, PrimitiveType::Double)
         }
         NativeJavaStaticMethod::FloatingIsNaN => {
             let Some(arg) = args.into_iter().next() else {
@@ -663,7 +548,7 @@ fn apply_native_java_static_method(
                         .to_string(),
                 );
             };
-            RustExpr::Raw(format!("{}.is_nan()", emit::emit_expr(&arg)))
+            primitive_is_nan_projection(arg)
         }
         NativeJavaStaticMethod::SystemGc => RustExpr::Raw("()".to_string()),
         NativeJavaStaticMethod::SystemExit => {
@@ -672,10 +557,7 @@ fn apply_native_java_static_method(
                     "compile_error!(\"System.exit requires one argument\")".to_string(),
                 );
             };
-            RustExpr::Raw(format!(
-                "std::process::exit({} as i32)",
-                emit::emit_expr(&status)
-            ))
+            system_exit_projection(status)
         }
         NativeJavaStaticMethod::ThreadSleep => {
             let Some(millis) = args.into_iter().next() else {
@@ -683,12 +565,9 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Thread.sleep requires one argument\")".to_string(),
                 );
             };
-            RustExpr::Raw(format!(
-                "std::thread::sleep(std::time::Duration::from_millis({} as u64))",
-                emit::emit_expr(&millis)
-            ))
+            thread_sleep_millis_projection(millis)
         }
-        NativeJavaStaticMethod::StringFormat => apply_string_format(args),
+        NativeJavaStaticMethod::StringFormat => string_format_projection(args),
         NativeJavaStaticMethod::StringJoin => apply_string_join(args),
         NativeJavaStaticMethod::ObjectsEquals => {
             let mut args = args.into_iter();
@@ -702,11 +581,7 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Objects.equals requires two arguments\")".to_string(),
                 );
             };
-            RustExpr::Binary {
-                op: "==".to_string(),
-                left: Box::new(left),
-                right: Box::new(right),
-            }
+            objects_equals_projection(left, right)
         }
         NativeJavaStaticMethod::ObjectsNonNull => {
             let Some(arg) = args.into_iter().next() else {
@@ -714,11 +589,7 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Objects.nonNull requires one argument\")".to_string(),
                 );
             };
-            RustExpr::MethodCall {
-                receiver: Box::new(arg),
-                method: "is_some".to_string(),
-                args: Vec::new(),
-            }
+            objects_non_null_projection(arg)
         }
         NativeJavaStaticMethod::ObjectsIsNull => {
             let Some(arg) = args.into_iter().next() else {
@@ -726,33 +597,8 @@ fn apply_native_java_static_method(
                     "compile_error!(\"Objects.isNull requires one argument\")".to_string(),
                 );
             };
-            RustExpr::MethodCall {
-                receiver: Box::new(arg),
-                method: "is_none".to_string(),
-                args: Vec::new(),
-            }
+            objects_is_null_projection(arg)
         }
-    }
-}
-
-fn render_parse_receiver(arg: RustExpr) -> String {
-    let rendered = crate::emit::emit_expr(&arg);
-    let Some(stripped) = rendered.trim().strip_prefix('&') else {
-        return rendered;
-    };
-    let stripped = stripped.trim();
-    if stripped.starts_with('(') && stripped.ends_with(')') {
-        stripped.to_string()
-    } else if stripped
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        || stripped.starts_with("self.")
-        || stripped.contains(".as_str()")
-        || stripped.contains(".next_token()")
-    {
-        stripped.to_string()
-    } else {
-        format!("({stripped})")
     }
 }
 
@@ -769,142 +615,12 @@ fn apply_string_join(args: Vec<RustExpr>) -> RustExpr {
         let mut varargs = Vec::with_capacity(rest.len() + 1);
         varargs.push(values);
         varargs.extend(rest);
-        let values = varargs
-            .into_iter()
-            .map(string_join_vararg_value)
-            .collect::<Vec<_>>()
-            .join(", ");
-        return RustExpr::Raw(format!(
-            "vec![{values}].join({})",
-            emit::emit_expr(&string_join_delimiter_arg(delimiter))
-        ));
+        return string_join_varargs_projection(delimiter, varargs);
     }
     RustExpr::MethodCall {
         receiver: Box::new(values),
         method: "join".to_string(),
-        args: vec![string_join_delimiter_arg(delimiter)],
-    }
-}
-
-fn string_join_vararg_value(value: RustExpr) -> String {
-    if let Some(literal) = string_literal_source(&value) {
-        return format!("{literal:?}.to_string()");
-    }
-    let rendered = emit::emit_expr(&value);
-    if rendered.ends_with(".to_string()") {
-        rendered
-    } else {
-        format!("({rendered}).to_string()")
-    }
-}
-
-fn string_join_delimiter_arg(delimiter: RustExpr) -> RustExpr {
-    if let Some(literal) = string_literal_source(&delimiter) {
-        RustExpr::Literal(format!("{literal:?}"))
-    } else {
-        RustExpr::Raw(format!("{}.as_str()", crate::emit::emit_expr(&delimiter)))
-    }
-}
-
-fn apply_string_format(mut args: Vec<RustExpr>) -> RustExpr {
-    if args.is_empty() {
-        return RustExpr::Raw("String::new()".to_string());
-    }
-    let format_arg = args.remove(0);
-    let Some(java_format) = string_literal_source(&format_arg) else {
-        return RustExpr::Call {
-            function: Box::new(RustExpr::Raw("java_string_format".to_string())),
-            args: vec![
-                format_arg,
-                RustExpr::Raw(format!(
-                    "vec![{}]",
-                    args.into_iter()
-                        .map(|arg| format!("{}.to_string()", crate::emit::emit_expr(&arg)))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-            ],
-        };
-    };
-    let rust_format = java_format_to_rust_format(&java_format);
-    let mut rendered_args = vec![RustExpr::Literal(format!("{rust_format:?}"))];
-    rendered_args.extend(args);
-    RustExpr::Raw(format!(
-        "format!({})",
-        rendered_args
-            .iter()
-            .map(crate::emit::emit_expr)
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
-}
-
-fn string_literal_source(expr: &RustExpr) -> Option<String> {
-    let raw = crate::emit::emit_expr(expr);
-    let raw = raw.strip_suffix(".to_string()").unwrap_or(&raw);
-    if !(raw.starts_with('"') && raw.ends_with('"')) {
-        return None;
-    }
-    Some(raw[1..raw.len() - 1].to_string())
-}
-
-fn java_format_to_rust_format(format: &str) -> String {
-    let mut out = String::new();
-    let mut chars = format.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '%' {
-            out.push(ch);
-            continue;
-        }
-        if matches!(chars.peek(), Some('%')) {
-            chars.next();
-            out.push('%');
-            continue;
-        }
-
-        let mut spec = String::new();
-        while let Some(next) = chars.peek().copied() {
-            if next.is_ascii_alphabetic() {
-                chars.next();
-                match next {
-                    's' | 'd' | 'b' | 'c' => out.push_str("{}"),
-                    'f' => out.push_str(&rust_float_format(&spec)),
-                    _ => out.push_str("{}"),
-                }
-                break;
-            }
-            spec.push(next);
-            chars.next();
-        }
-    }
-    out
-}
-
-fn rust_float_format(spec: &str) -> String {
-    if let Some(dot) = spec.find('.') {
-        let width = spec[..dot]
-            .chars()
-            .filter(|ch| ch.is_ascii_digit())
-            .collect::<String>();
-        let precision = spec[dot + 1..]
-            .chars()
-            .filter(|ch| ch.is_ascii_digit())
-            .collect::<String>();
-        return match (width.is_empty(), precision.is_empty()) {
-            (true, true) => "{}".to_string(),
-            (true, false) => format!("{{:.{precision}}}"),
-            (false, true) => format!("{{:{width}}}"),
-            (false, false) => format!("{{:{width}.{precision}}}"),
-        };
-    }
-    let width = spec
-        .chars()
-        .filter(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    if width.is_empty() {
-        "{}".to_string()
-    } else {
-        format!("{{:{width}}}")
+        args: vec![string_join_delimiter_projection(delimiter)],
     }
 }
 
@@ -913,67 +629,57 @@ fn apply_native_collection_static_method(
     args: Vec<RustExpr>,
 ) -> RustExpr {
     match method {
-        NativeCollectionStaticMethod::ArraysAsList => RustExpr::Raw(format!(
-            "vec![{}]",
-            args.iter()
-                .map(crate::emit::emit_expr)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
+        NativeCollectionStaticMethod::ArraysAsList => arrays_as_list_projection(args),
         NativeCollectionStaticMethod::ArraysEquals => {
             let left = args
                 .first()
-                .map(crate::emit::emit_expr)
-                .unwrap_or_else(|| "()".to_string());
+                .cloned()
+                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
             let right = args
                 .get(1)
-                .map(crate::emit::emit_expr)
-                .unwrap_or_else(|| "()".to_string());
-            RustExpr::Raw(format!("{left} == {right}"))
+                .cloned()
+                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+            arrays_equals_projection(left, right)
         }
-        NativeCollectionStaticMethod::CollectionsEmptyList => {
-            RustExpr::Raw("Vec::new()".to_string())
-        }
+        NativeCollectionStaticMethod::CollectionsEmptyList => collections_empty_list_projection(),
         NativeCollectionStaticMethod::CollectionsEmptySortedSet => {
-            RustExpr::Raw("std::collections::BTreeSet::new()".to_string())
+            collections_empty_sorted_set_projection()
         }
         NativeCollectionStaticMethod::CollectionsSingleton => {
             let value = args
                 .first()
-                .map(crate::emit::emit_expr)
-                .unwrap_or_else(|| "()".to_string());
-            RustExpr::Raw(format!("std::collections::HashSet::from([{value}])"))
+                .cloned()
+                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+            collections_singleton_projection(value)
         }
         NativeCollectionStaticMethod::CollectionsSingletonList => {
             let value = args
                 .first()
-                .map(crate::emit::emit_expr)
-                .unwrap_or_else(|| "()".to_string());
-            RustExpr::Raw(format!("vec![{value}]"))
+                .cloned()
+                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+            collections_singleton_list_projection(value)
         }
         NativeCollectionStaticMethod::CollectionsSingletonMap => {
             let key = args
                 .first()
-                .map(crate::emit::emit_expr)
-                .unwrap_or_else(|| "()".to_string());
+                .cloned()
+                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
             let value = args
                 .get(1)
-                .map(crate::emit::emit_expr)
-                .unwrap_or_else(|| "()".to_string());
-            RustExpr::Raw(format!(
-                "std::collections::HashMap::from([({key}, {value})])"
-            ))
+                .cloned()
+                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+            collections_singleton_map_projection(key, value)
         }
         NativeCollectionStaticMethod::CollectionsNCopies => {
             let count = args
                 .first()
-                .map(crate::emit::emit_expr)
-                .unwrap_or_else(|| "0".to_string());
+                .cloned()
+                .unwrap_or_else(|| RustExpr::Raw("0".to_string()));
             let value = args
                 .get(1)
-                .map(crate::emit::emit_expr)
-                .unwrap_or_else(|| "()".to_string());
-            RustExpr::Raw(format!("vec![{value}; {count} as usize]"))
+                .cloned()
+                .unwrap_or_else(|| RustExpr::Raw("()".to_string()));
+            collections_n_copies_projection(count, value)
         }
     }
 }
@@ -987,12 +693,7 @@ pub fn apply_collection_remove_if(receiver: RustExpr, predicate: &Expr) -> Optio
         return None;
     };
     let predicate = emit_stream_lambda_body(body, param, StreamLambdaValue::BorrowedItem)?;
-    Some(RustExpr::Raw(format!(
-        "{}.retain(|{}| !({}))",
-        crate::emit::emit_expr(&receiver),
-        param,
-        predicate
-    )))
+    Some(collection_remove_if_projection(receiver, param, &predicate))
 }
 
 fn apply_native_collection_method(
@@ -1001,28 +702,16 @@ fn apply_native_collection_method(
     args: Vec<RustExpr>,
 ) -> RustExpr {
     if matches!(method, NativeCollectionMethod::Len) {
-        return RustExpr::Raw(format!(
-            "{}.len() as i32",
-            crate::emit::emit_expr(&receiver)
-        ));
+        return len_i32_projection(receiver);
     }
     if matches!(method, NativeCollectionMethod::MapKeys) {
-        return RustExpr::Raw(format!(
-            "{}.keys().cloned().collect::<Vec<_>>()",
-            crate::emit::emit_expr(&receiver)
-        ));
+        return owned_map_keys_vec_projection(receiver);
     }
     if matches!(method, NativeCollectionMethod::ToArray) {
-        return RustExpr::Raw(format!(
-            "{}.iter().cloned().collect::<Vec<_>>()",
-            crate::emit::emit_expr(&receiver)
-        ));
+        return owned_collection_to_vec_projection(receiver);
     }
     if matches!(method, NativeCollectionMethod::Iterator) {
-        return RustExpr::Raw(format!(
-            "JavaIterator::new({}.iter().cloned())",
-            crate::emit::emit_expr(&receiver)
-        ));
+        return java_iterator_from_collection_projection(receiver);
     }
     let rust_name = match method {
         NativeCollectionMethod::Len => "len",
@@ -1051,29 +740,6 @@ pub fn apply_native_collection_extend(receiver: RustExpr, arg: RustExpr) -> Rust
         receiver: Box::new(receiver),
         method: "extend".to_string(),
         args: vec![arg],
-    }
-}
-
-pub fn borrowed_sequence_extend_arg(
-    arg: RustExpr,
-    element_shape: &RustSlotShape,
-    facts: &FactSet,
-) -> RustExpr {
-    let arg = emit::emit_expr(&arg);
-    match borrowed_element_recovery_policy(element_shape, facts) {
-        BorrowedElementRecoveryPolicy::BorrowElement => RustExpr::Raw(format!("{arg}.iter()")),
-        BorrowedElementRecoveryPolicy::StringViewToOwned => {
-            RustExpr::Raw(format!("{arg}.iter().map(|v| v.to_string())"))
-        }
-        BorrowedElementRecoveryPolicy::CopyElements => {
-            RustExpr::Raw(format!("{arg}.iter().copied()"))
-        }
-        BorrowedElementRecoveryPolicy::CloneElements { .. } => {
-            RustExpr::Raw(format!("{arg}.iter().cloned()"))
-        }
-        BorrowedElementRecoveryPolicy::Unsupported { .. } => RustExpr::Raw(format!(
-            "{arg}.iter().cloned() /* java2rust: unsupported borrowed element recovery for extend */"
-        )),
     }
 }
 
@@ -1130,10 +796,10 @@ pub fn apply_new_target_with_facts(
         return erased_object_new_expr(args);
     }
     if owner_type == "String" && target.rust_name == "new" && matches!(args.len(), 1 | 2) {
-        return java_string_from_bytes_expr(args);
+        return string_from_bytes_constructor_expr(args);
     }
     if owner_type == "String" && target.rust_name == "new" && matches!(args.len(), 3 | 4) {
-        return java_string_from_byte_range_expr(args);
+        return string_from_byte_range_constructor_expr(args);
     }
     RustExpr::Call {
         function: Box::new(RustExpr::Raw(format!(
@@ -1157,48 +823,35 @@ fn boxed_primitive_constructor_owner(java_ty: &JavaType) -> bool {
     }
 }
 
-fn java_string_from_byte_range_expr(args: Vec<RustExpr>) -> RustExpr {
+fn string_from_byte_range_constructor_expr(args: Vec<RustExpr>) -> RustExpr {
     let mut args = args.into_iter();
     let bytes = args.next().expect("checked Java String constructor arity");
     let offset = args.next().expect("checked Java String constructor arity");
     let len = args.next().expect("checked Java String constructor arity");
-    RustExpr::Call {
-        function: Box::new(RustExpr::Raw("java_string_from_byte_range".to_string())),
-        args: vec![
-            RustExpr::Raw(format!("&{}", crate::emit::emit_expr(&bytes))),
-            offset,
-            len,
-        ],
-    }
+    string_from_byte_range_projection(bytes, offset, len)
 }
 
-fn java_string_from_bytes_expr(args: Vec<RustExpr>) -> RustExpr {
+fn string_from_bytes_constructor_expr(args: Vec<RustExpr>) -> RustExpr {
     let bytes = args
         .into_iter()
         .next()
         .expect("checked Java String constructor arity");
-    RustExpr::Call {
-        function: Box::new(RustExpr::Raw("java_string_from_bytes".to_string())),
-        args: vec![RustExpr::Raw(format!(
-            "&{}",
-            crate::emit::emit_expr(&bytes)
-        ))],
-    }
+    string_from_bytes_projection(bytes)
 }
 
 fn erased_object_new_expr(args: Vec<RustExpr>) -> RustExpr {
     let value = match args.as_slice() {
-        [] => "()".to_string(),
-        [single] => crate::emit::emit_expr(single),
-        _ => format!(
+        [] => RustExpr::Raw("()".to_string()),
+        [single] => single.clone(),
+        _ => RustExpr::Raw(format!(
             "({})",
             args.iter()
                 .map(crate::emit::emit_expr)
                 .collect::<Vec<_>>()
                 .join(", ")
-        ),
+        )),
     };
-    RustExpr::Raw(format!("Box::new({value}) as Box<dyn std::any::Any>"))
+    erased_object_box_projection(value)
 }
 
 fn apply_native_collection_new_target(
@@ -1208,36 +861,18 @@ fn apply_native_collection_new_target(
     _facts: &FactSet,
 ) -> RustExpr {
     match native_collection {
-        NativeCollectionNewTarget::Empty { kind } => RustExpr::Call {
-            function: Box::new(RustExpr::Raw(format!(
-                "{}::new",
-                native_collection_type_name(kind)
-            ))),
-            args: Vec::new(),
-        },
+        NativeCollectionNewTarget::Empty { kind } => native_collection_empty_new_projection(kind),
         NativeCollectionNewTarget::WithCapacity { kind } => {
             let capacity = args
                 .pop()
                 .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
-            RustExpr::Raw(format!(
-                "{}::with_capacity({} as usize)",
-                native_collection_type_name(kind),
-                emit::emit_expr(&capacity)
-            ))
+            native_collection_with_capacity_projection(kind, capacity)
         }
-        NativeCollectionNewTarget::FromSource { kind } => args.pop().unwrap_or_else(|| {
-            RustExpr::Raw(format!("{}::new()", native_collection_type_name(kind)))
-        }),
-        NativeCollectionNewTarget::FromSingleArg { kind } => args.pop().unwrap_or_else(|| {
-            RustExpr::Raw(format!("{}::new()", native_collection_type_name(kind)))
-        }),
-    }
-}
-
-fn native_collection_type_name(kind: crate::stdlib::JavaCollectionKind) -> &'static str {
-    match kind {
-        crate::stdlib::JavaCollectionKind::List => "Vec",
-        crate::stdlib::JavaCollectionKind::Set => "std::collections::HashSet",
-        crate::stdlib::JavaCollectionKind::Map => "std::collections::HashMap",
+        NativeCollectionNewTarget::FromSource { kind } => args
+            .pop()
+            .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
+        NativeCollectionNewTarget::FromSingleArg { kind } => args
+            .pop()
+            .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
     }
 }

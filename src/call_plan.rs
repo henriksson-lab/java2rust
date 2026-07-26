@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use crate::coercion::OptionalReceiverProjection;
 use crate::conversion_plan::{LoweredType, Slot, argument_slot, index_slot};
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::{
@@ -136,6 +137,71 @@ impl<'a> CallTargetPlan<'a> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiverSlotPlan {
+    pub receiver_abi: ReceiverAbi,
+    pub slot: Option<Slot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionalReceiverSlotPlan {
+    pub receiver_abi: ReceiverAbi,
+    pub slot: Slot,
+    pub projection: OptionalReceiverProjection,
+}
+
+pub fn facade_receiver_slot_plan(
+    receiver_abi: ReceiverAbi,
+    java_ty: JavaType,
+    facts: &FactSet,
+) -> ReceiverSlotPlan {
+    let effective_facts = EffectiveFacts::new(facts);
+    let slot = match receiver_abi {
+        ReceiverAbi::BorrowedSelf => Some(argument_slot(rust_slot_shape_from_facade_arg_slot(
+            &FacadeSlot::Borrowed,
+            java_ty,
+            &effective_facts,
+        ))),
+        ReceiverAbi::MutBorrowedSelf => Some(argument_slot(rust_slot_shape_from_facade_arg_slot(
+            &FacadeSlot::MutBorrowed,
+            java_ty,
+            &effective_facts,
+        ))),
+        ReceiverAbi::OwnedSelf | ReceiverAbi::FreeFunction => Some(argument_slot(
+            rust_slot_shape_from_facade_arg_slot(&FacadeSlot::Owned, java_ty, &effective_facts),
+        )),
+        ReceiverAbi::AssociatedFunction => None,
+    };
+    ReceiverSlotPlan { receiver_abi, slot }
+}
+
+pub fn optional_receiver_slot_plan(
+    java_ty: JavaType,
+    mutable: bool,
+    legacy_unchecked: bool,
+    facts: &FactSet,
+) -> OptionalReceiverSlotPlan {
+    let receiver_abi = if mutable {
+        ReceiverAbi::MutBorrowedSelf
+    } else {
+        ReceiverAbi::BorrowedSelf
+    };
+    let slot = facade_receiver_slot_plan(receiver_abi, java_ty, facts)
+        .slot
+        .expect("borrowed receiver ABI has a receiver slot");
+    let projection = match (mutable, legacy_unchecked) {
+        (false, false) => OptionalReceiverProjection::Shared,
+        (true, false) => OptionalReceiverProjection::Mutable,
+        (false, true) => OptionalReceiverProjection::SharedUnchecked,
+        (true, true) => OptionalReceiverProjection::MutableUnchecked,
+    };
+    OptionalReceiverSlotPlan {
+        receiver_abi,
+        slot,
+        projection,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeCollectionMethod {
     Len,
@@ -204,9 +270,16 @@ pub enum NativeJavaInstanceMethod {
     OptionalIsPresent,
     OptionalGet,
     OptionalOrElse,
-    PrimitiveNumberValue { target: PrimitiveType },
-    PrimitiveHashCode { source: PrimitiveType },
-    PrimitiveCompareTo { source: PrimitiveType },
+    PrimitiveNumberValue {
+        source: Option<PrimitiveType>,
+        target: PrimitiveType,
+    },
+    PrimitiveHashCode {
+        source: PrimitiveType,
+    },
+    PrimitiveCompareTo {
+        source: PrimitiveType,
+    },
     DecimalFormatFormat,
     MessageFormatFormat,
     Equals,
@@ -547,6 +620,7 @@ pub fn external_call_lowered_type_with_external_index(
             return Some(LoweredType::rust_borrowed_return(
                 java_ty.clone(),
                 rust_return_type.rust_type_name.clone(),
+                rust_return_type.borrowed_return_recovery.map(Into::into),
             ));
         }
         if matches!(java_ty, JavaType::Primitive(_)) {
@@ -636,6 +710,7 @@ fn lowered_type_for_facade_abi(abi: &FacadeAbiFact, return_ty: &JavaType) -> Opt
             Some(LoweredType::rust_borrowed_return(
                 return_ty.clone(),
                 abi.rust_path.clone(),
+                abi.borrowed_return_recovery.map(Into::into),
             ))
         }
         FacadeSlot::Owned
@@ -2270,16 +2345,12 @@ fn plan_native_java_receiver_call<'a>(
     }
     let effective_receiver_ty =
         crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+    if matches!(effective_receiver_ty, JavaType::String)
+        && let Some(method) = native_java_string_instance_method(name, arg_count)
+    {
+        return Some(CallTargetPlan::NativeJavaInstance { receiver, method });
+    }
     let method = match (&effective_receiver_ty, name) {
-        (JavaType::String, "length") => NativeJavaInstanceMethod::StringLen,
-        (JavaType::String, "isEmpty") => NativeJavaInstanceMethod::StringIsEmpty,
-        (JavaType::String, "trim") => NativeJavaInstanceMethod::StringTrim,
-        (JavaType::String, "toLowerCase") => NativeJavaInstanceMethod::StringToLowercase,
-        (JavaType::String, "toUpperCase") => NativeJavaInstanceMethod::StringToUppercase,
-        (JavaType::String, "toString") => NativeJavaInstanceMethod::StringToString,
-        (JavaType::String, "contains") => NativeJavaInstanceMethod::StringContains,
-        (JavaType::String, "startsWith") => NativeJavaInstanceMethod::StringStartsWith,
-        (JavaType::String, "endsWith") => NativeJavaInstanceMethod::StringEndsWith,
         (JavaType::Named { name, .. }, "get") if arg_count == 1 && is_bitset_receiver(name) => {
             NativeJavaInstanceMethod::BitSetGet
         }
@@ -2292,69 +2363,39 @@ fn plan_native_java_receiver_call<'a>(
         (JavaType::Named { name, .. }, "put") if arg_count == 1 && is_buffer_receiver(name) => {
             NativeJavaInstanceMethod::BufferPut
         }
-        (JavaType::String, "replace") if arg_count == 2 => NativeJavaInstanceMethod::StringReplace,
-        (JavaType::String, "replaceFirst" | "replace_first") if arg_count == 2 => {
-            NativeJavaInstanceMethod::StringReplaceFirst
-        }
-        (JavaType::String, "replaceAll" | "replace_all") if arg_count == 2 => {
-            NativeJavaInstanceMethod::StringReplaceAll
-        }
-        (JavaType::String, "matches") if arg_count == 1 => NativeJavaInstanceMethod::StringMatches,
-        (JavaType::String, "split") => NativeJavaInstanceMethod::StringSplit,
-        (JavaType::String, "substring") if matches!(arg_count, 1 | 2) => {
-            NativeJavaInstanceMethod::StringSubstring
-        }
-        (JavaType::String, "toCharArray" | "to_char_array") if arg_count == 0 => {
-            NativeJavaInstanceMethod::StringToCharArray
-        }
-        (JavaType::String, "hashCode" | "hash_code") if arg_count == 0 => {
-            NativeJavaInstanceMethod::StringHashCode
-        }
-        (JavaType::String, "getBytes" | "get_bytes") if matches!(arg_count, 0 | 1) => {
-            NativeJavaInstanceMethod::StringGetBytes
-        }
-        (JavaType::String, "indexOf" | "index_of") if matches!(arg_count, 1 | 2) => {
-            NativeJavaInstanceMethod::StringIndexOf
-        }
-        (JavaType::String, "charAt" | "char_at") if arg_count == 1 => {
-            NativeJavaInstanceMethod::StringCharAt
-        }
-        (JavaType::String, "compareTo" | "compare_to") if arg_count == 1 => {
-            NativeJavaInstanceMethod::StringCompareTo
-        }
-        (JavaType::String, "compareToIgnoreCase" | "compare_to_ignore_case") if arg_count == 1 => {
-            NativeJavaInstanceMethod::StringCompareToIgnoreCase
-        }
-        (JavaType::String, "equalsIgnoreCase" | "equals_ignore_case") if arg_count == 1 => {
-            NativeJavaInstanceMethod::StringEqualsIgnoreCase
-        }
-        (JavaType::Primitive(_), "byteValue" | "byte_value") if arg_count == 0 => {
+        (JavaType::Primitive(source), "byteValue" | "byte_value") if arg_count == 0 => {
             NativeJavaInstanceMethod::PrimitiveNumberValue {
+                source: Some(*source),
                 target: PrimitiveType::Byte,
             }
         }
-        (JavaType::Primitive(_), "shortValue" | "short_value") if arg_count == 0 => {
+        (JavaType::Primitive(source), "shortValue" | "short_value") if arg_count == 0 => {
             NativeJavaInstanceMethod::PrimitiveNumberValue {
+                source: Some(*source),
                 target: PrimitiveType::Short,
             }
         }
-        (JavaType::Primitive(_), "intValue" | "int_value") if arg_count == 0 => {
+        (JavaType::Primitive(source), "intValue" | "int_value") if arg_count == 0 => {
             NativeJavaInstanceMethod::PrimitiveNumberValue {
+                source: Some(*source),
                 target: PrimitiveType::Int,
             }
         }
-        (JavaType::Primitive(_), "longValue" | "long_value") if arg_count == 0 => {
+        (JavaType::Primitive(source), "longValue" | "long_value") if arg_count == 0 => {
             NativeJavaInstanceMethod::PrimitiveNumberValue {
+                source: Some(*source),
                 target: PrimitiveType::Long,
             }
         }
-        (JavaType::Primitive(_), "floatValue" | "float_value") if arg_count == 0 => {
+        (JavaType::Primitive(source), "floatValue" | "float_value") if arg_count == 0 => {
             NativeJavaInstanceMethod::PrimitiveNumberValue {
+                source: Some(*source),
                 target: PrimitiveType::Float,
             }
         }
-        (JavaType::Primitive(_), "doubleValue" | "double_value") if arg_count == 0 => {
+        (JavaType::Primitive(source), "doubleValue" | "double_value") if arg_count == 0 => {
             NativeJavaInstanceMethod::PrimitiveNumberValue {
+                source: Some(*source),
                 target: PrimitiveType::Double,
             }
         }
@@ -2370,7 +2411,10 @@ fn plan_native_java_receiver_call<'a>(
                     .is_some()
                 && primitive_value_method_target(method).is_some() =>
         {
+            let source =
+                crate::stdlib::boxed_primitive_type(name.rsplit('.').next().unwrap_or(name));
             NativeJavaInstanceMethod::PrimitiveNumberValue {
+                source,
                 target: primitive_value_method_target(method)
                     .expect("checked primitive value method target"),
             }
@@ -2444,7 +2488,15 @@ fn plan_resolved_native_java_receiver_call<'a>(
     if call.kind != CallKind::Instance || !is_string_receiver(&call.declaring_type) {
         return None;
     }
-    let method = match (name, arg_count) {
+    let method = native_java_string_instance_method(name, arg_count)?;
+    Some(CallTargetPlan::NativeJavaInstance { receiver, method })
+}
+
+pub fn native_java_string_instance_method(
+    name: &str,
+    arg_count: usize,
+) -> Option<NativeJavaInstanceMethod> {
+    Some(match (name, arg_count) {
         ("length", 0) => NativeJavaInstanceMethod::StringLen,
         ("isEmpty", 0) => NativeJavaInstanceMethod::StringIsEmpty,
         ("trim", 0) => NativeJavaInstanceMethod::StringTrim,
@@ -2473,8 +2525,26 @@ fn plan_resolved_native_java_receiver_call<'a>(
             NativeJavaInstanceMethod::StringEqualsIgnoreCase
         }
         _ => return None,
-    };
-    Some(CallTargetPlan::NativeJavaInstance { receiver, method })
+    })
+}
+
+pub fn native_java_unbound_method_reference_receiver_type(target: &str) -> Option<JavaType> {
+    match crate::stdlib::canonical_external_receiver_type_key(target).as_str() {
+        "String" => Some(JavaType::String),
+        "Integer" => Some(JavaType::Named {
+            name: "Integer".to_string(),
+            args: Vec::new(),
+        }),
+        "Double" => Some(JavaType::Named {
+            name: "Double".to_string(),
+            args: Vec::new(),
+        }),
+        "Float" => Some(JavaType::Named {
+            name: "Float".to_string(),
+            args: Vec::new(),
+        }),
+        _ => None,
+    }
 }
 
 fn is_string_receiver(name: &str) -> bool {
@@ -2579,10 +2649,10 @@ fn plan_native_java_static_call<'a>(
         ("Math", "min") => NativeJavaStaticMethod::MathMin,
         ("Math", "log") => NativeJavaStaticMethod::MathLog,
         ("Math", "exp") => NativeJavaStaticMethod::MathExp,
-        ("Math", "toIntExact") => NativeJavaStaticMethod::MathToIntExact,
-        ("Integer", "parseInt") => NativeJavaStaticMethod::IntegerParseInt,
+        ("Math", "toIntExact" | "to_int_exact") => NativeJavaStaticMethod::MathToIntExact,
+        ("Integer", "parseInt" | "parse_int") => NativeJavaStaticMethod::IntegerParseInt,
         ("Float", "parseFloat" | "parse_float") => NativeJavaStaticMethod::FloatParseFloat,
-        ("Double", "parseDouble") => NativeJavaStaticMethod::DoubleParseDouble,
+        ("Double", "parseDouble" | "parse_double") => NativeJavaStaticMethod::DoubleParseDouble,
         ("Double" | "Float", "isNaN" | "is_na_n") => NativeJavaStaticMethod::FloatingIsNaN,
         ("System", "gc") => NativeJavaStaticMethod::SystemGc,
         ("System", "exit") => NativeJavaStaticMethod::SystemExit,

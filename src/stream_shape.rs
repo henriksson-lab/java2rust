@@ -39,7 +39,8 @@ pub fn infer_stream_lambda_body_shape_with_facts(
     env: &TypeEnv,
     facts: &FactSet,
 ) -> RustSlotShape {
-    if let Some(shape) = infer_stream_lambda_call_shape_from_shared_plan(expr, env, facts) {
+    if let Some(shape) = infer_stream_lambda_call_shape_from_shared_plan(expr, default, env, facts)
+    {
         return shape;
     }
     default.clone()
@@ -80,6 +81,7 @@ pub fn infer_stream_source_element_shape_with_effective_facts(
 
 fn infer_stream_lambda_call_shape_from_shared_plan(
     expr: &Expr,
+    default: &RustSlotShape,
     env: &TypeEnv,
     facts: &FactSet,
 ) -> Option<RustSlotShape> {
@@ -92,6 +94,18 @@ fn infer_stream_lambda_call_shape_from_shared_plan(
     else {
         return None;
     };
+    let mut lambda_env;
+    let env = if let Expr::Var(receiver_name) = receiver.as_ref() {
+        if env.local_type(receiver_name).is_none() {
+            lambda_env = env.clone();
+            lambda_env.insert_local(receiver_name.clone(), default.java_ty.clone());
+            &lambda_env
+        } else {
+            env
+        }
+    } else {
+        env
+    };
     let target = crate::call_plan::plan_call_target_with_facts_and_arity(
         Some(receiver),
         name,
@@ -100,7 +114,10 @@ fn infer_stream_lambda_call_shape_from_shared_plan(
         facts,
         env,
     );
-    crate::call_plan::native_java_call_lowered_type(&target)
+    if let Some(lowered) = crate::call_plan::native_java_call_lowered_type(&target) {
+        return Some(lowered.into_slot_shape());
+    }
+    crate::call_plan::external_call_lowered_type(Some(receiver), name, args.len(), facts, env, None)
         .map(|lowered| lowered.into_slot_shape())
 }
 

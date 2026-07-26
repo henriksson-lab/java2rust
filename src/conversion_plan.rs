@@ -4,7 +4,8 @@ use crate::expr_shape::{
     infer_expr_shape_with_context,
 };
 use crate::facts::{
-    ExternalConversionAdapterKind, FactSet, HierarchyStrategy, OwnedRecoveryCapability,
+    BorrowedReturnRecovery, ExternalConversionAdapterKind, FactSet, HierarchyStrategy,
+    OwnedRecoveryCapability,
 };
 use crate::java_ir::{Expr, JavaCoercionEvidence, JavaCoercionKind, JavaType, PrimitiveType};
 use crate::shape_projection::{borrowed_sequence_element_shape, project_java_value_shape};
@@ -758,6 +759,7 @@ pub enum LoweredType {
     RustBorrowed {
         java_shape: Box<RustSlotShape>,
         rust_type_name: String,
+        recovery: Option<RustBorrowedFacadeReturnRecovery>,
     },
     RustUnsignedByteArray {
         java_shape: Box<RustSlotShape>,
@@ -789,12 +791,17 @@ impl LoweredType {
         }
     }
 
-    pub fn rust_borrowed_return(java_ty: JavaType, rust_type_name: String) -> Self {
+    pub fn rust_borrowed_return(
+        java_ty: JavaType,
+        rust_type_name: String,
+        recovery: Option<RustBorrowedFacadeReturnRecovery>,
+    ) -> Self {
         let mut java_shape = RustSlotShape::conservative(java_ty);
         java_shape.ownership = OwnershipShape::SharedBorrow;
         Self::RustBorrowed {
             java_shape: Box::new(java_shape),
             rust_type_name,
+            recovery,
         }
     }
 
@@ -816,6 +823,24 @@ impl LoweredType {
             option_shape: Box::new(option_shape),
             element_shape: Box::new(element_shape),
         }
+    }
+
+    pub fn optional_element_borrow_from_option_shape(
+        option_shape: RustSlotShape,
+        element_ty: JavaType,
+        element_ownership: Option<OwnershipShape>,
+    ) -> Option<Self> {
+        if option_shape.optional_element_type() != Some(element_ty.clone()) {
+            return None;
+        }
+        let mut element_shape = optional_element_slot_shape(&option_shape, element_ty);
+        if let Some(element_ownership) = element_ownership {
+            element_shape.ownership = element_ownership;
+        }
+        Some(Self::OptionalElementBorrow {
+            option_shape: Box::new(option_shape),
+            element_shape: Box::new(element_shape),
+        })
     }
 
     pub fn vec_element_borrow(element_shape: RustSlotShape) -> Self {
@@ -905,6 +930,22 @@ pub struct RustBorrowedFacadeReturnPolicy {
     pub rust_type_name: String,
     pub java_semantic_shape: RustSlotShape,
     pub target: RustSlotShape,
+    pub recovery: RustBorrowedFacadeReturnRecovery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RustBorrowedFacadeReturnRecovery {
+    Clone,
+    ToPathBuf,
+}
+
+impl From<BorrowedReturnRecovery> for RustBorrowedFacadeReturnRecovery {
+    fn from(recovery: BorrowedReturnRecovery) -> Self {
+        match recovery {
+            BorrowedReturnRecovery::Clone => Self::Clone,
+            BorrowedReturnRecovery::ToPathBuf => Self::ToPathBuf,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2956,6 +2997,7 @@ pub fn lowered_slot_conversion_plan_with_facts(
             LoweredType::RustBorrowed {
                 java_shape,
                 rust_type_name,
+                recovery,
             },
             Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
         ) if slot_or_optional_element_targets_erased_object(target) => {
@@ -2963,6 +3005,8 @@ pub fn lowered_slot_conversion_plan_with_facts(
                 rust_type_name: rust_type_name.clone(),
                 java_semantic_shape: (**java_shape).clone(),
                 target: target.clone(),
+                recovery: recovery
+                    .unwrap_or_else(|| rust_borrowed_facade_return_recovery(rust_type_name)),
             })
         }
         (
@@ -3135,6 +3179,15 @@ fn slot_or_optional_element_targets_erased_object(target: &RustSlotShape) -> boo
             DispatchShape::ErasedObject
         ) || java_type_is_erased_object_like(&element_ty)
     })
+}
+
+fn rust_borrowed_facade_return_recovery(rust_type_name: &str) -> RustBorrowedFacadeReturnRecovery {
+    match rust_type_name.trim_start_matches('&').trim() {
+        "Path" | "std::path::Path" | "std::path::PathBuf" | "PathBuf" => {
+            RustBorrowedFacadeReturnRecovery::ToPathBuf
+        }
+        _ => RustBorrowedFacadeReturnRecovery::Clone,
+    }
 }
 
 fn java_type_is_erased_object_like(java_ty: &JavaType) -> bool {

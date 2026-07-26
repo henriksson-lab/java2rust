@@ -3,7 +3,7 @@ use crate::facts::{DispatchRequirementKind, FactSet};
 use crate::java_ir::JavaType;
 use crate::representation::RepresentationPlan;
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
-use crate::types::sequence_element_type;
+use crate::types::{optional_element_type, sequence_element_type};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchProjectionPolicy {
@@ -347,6 +347,37 @@ pub fn indexed_read_shape_with_facts(
     indexed_read_shape_with_effective_facts(array_shape, &effective_facts)
 }
 
+pub fn indexed_read_shape_for_access_with_facts(
+    array_shape: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<RustSlotShape> {
+    let effective_facts = EffectiveFacts::new(facts);
+    indexed_read_shape_for_access_with_effective_facts(array_shape, &effective_facts)
+}
+
+pub fn indexed_read_shape_for_access_with_effective_facts(
+    array_shape: &RustSlotShape,
+    facts: &EffectiveFacts,
+) -> Option<RustSlotShape> {
+    if sequence_element_projection_policy_with_effective_facts(&array_shape.java_ty, facts)
+        .element_ty
+        .is_some()
+    {
+        return Some(indexed_read_shape_with_effective_facts(array_shape, facts));
+    }
+
+    let inner_ty = optional_element_type(&array_shape.java_ty)?;
+    if sequence_element_projection_policy_with_effective_facts(&inner_ty, facts)
+        .element_ty
+        .is_none()
+    {
+        return None;
+    }
+    let mut inner_shape = array_shape.clone();
+    inner_shape.java_ty = inner_ty;
+    Some(indexed_read_shape_with_effective_facts(&inner_shape, facts))
+}
+
 pub fn indexed_read_shape_with_effective_facts(
     array_shape: &RustSlotShape,
     facts: &EffectiveFacts,
@@ -363,6 +394,9 @@ pub fn indexed_read_shape_with_effective_facts(
     );
     let mut element_shape = RustSlotShape::conservative(policy.element_ty);
     element_shape.ownership = policy.ownership;
+    if matches!(element_shape.java_ty, JavaType::Array(_)) {
+        apply_required_view(&mut element_shape, ViewShape::Slice);
+    }
 
     element_shape
 }

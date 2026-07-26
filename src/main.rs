@@ -1344,6 +1344,7 @@ fn append_facade_method_abi_facts(
                 arg_count: effect.arg_count,
                 rust_type_name: unwrapped,
                 return_slot: facade_return_slot_for_rust_type(return_type),
+                borrowed_return_recovery: None,
                 provenance: new_java2rust::facts::FactProvenance::ExternalLibraryPack,
             },
         );
@@ -1403,6 +1404,7 @@ fn append_facade_structured_method_abi_fact(
             return_slot,
             result: facade_result_abi(return_type),
             borrow_source,
+            borrowed_return_recovery: None,
             provenance: new_java2rust::facts::FactProvenance::ExternalLibraryPack,
         });
 }

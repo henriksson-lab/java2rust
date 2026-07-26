@@ -1562,6 +1562,7 @@ fn rust_stdlib_method_abi(
         return_slot,
         result: ResultAbi::Plain,
         borrow_source,
+        borrowed_return_recovery: None,
         provenance: FactProvenance::BuiltinExternalModel,
     }
 }
@@ -1587,6 +1588,7 @@ fn rust_stdlib_static_abi(
         return_slot,
         result: ResultAbi::Plain,
         borrow_source: None,
+        borrowed_return_recovery: None,
         provenance: FactProvenance::BuiltinExternalModel,
     }
 }
@@ -10220,28 +10222,43 @@ fn external_facade_method_return_type_with_facts(
     java_type: &JavaType,
     nullability: NullabilityState,
 ) -> String {
-    if let Some(return_type) = external_facade_method_abi_return_type_with_facts(
+    let rendered = if let Some(return_type) = external_facade_method_abi_return_type_with_facts(
         facts,
         receiver_type,
         method_name,
         arg_count,
         java_type,
     ) {
-        return normalize_external_facade_return_type_text(&return_type);
-    }
-    if let Some(rust_return) =
+        normalize_external_facade_return_type_text(&return_type)
+    } else if let Some(rust_return) =
         facts.external_rust_return_type_for_receiver(receiver_type, method_name, arg_count)
     {
-        return normalize_external_facade_return_type_text(&rust_return.rust_type_name);
-    }
-    let rendered = normalize_external_facade_return_type_text(
-        &external_facade_return_type_with_facts_and_nullability(facts, java_type, nullability),
-    );
-    if facts
+        normalize_external_facade_return_type_text(&rust_return.rust_type_name)
+    } else {
+        normalize_external_facade_return_type_text(
+            &external_facade_return_type_with_facts_and_nullability(facts, java_type, nullability),
+        )
+    };
+    external_facade_wrap_result_for_effects(facts, receiver_type, method_name, arg_count, rendered)
+}
+
+fn external_facade_wrap_result_for_effects(
+    facts: &FactSet,
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_count: Option<usize>,
+    rendered: String,
+) -> String {
+    let user_effect_throws = facts
         .external_api_effect_for_receiver_with_arity(receiver_type, method_name, arg_count)
-        .is_some_and(|effect| !effect.thrown.is_empty())
-        && !rendered.starts_with("Result<")
-    {
+        .is_some_and(|effect| !effect.thrown.is_empty());
+    let builtin_effect_throws = crate::external_packs::external_api_effect_for_receiver_with_arity(
+        receiver_type,
+        method_name,
+        arg_count,
+    )
+    .is_some_and(|effect| !effect.thrown.is_empty());
+    if (user_effect_throws || builtin_effect_throws) && !rendered.starts_with("Result<") {
         format!("Result<{rendered}, JavaException>")
     } else {
         rendered

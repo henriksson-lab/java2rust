@@ -1,11 +1,15 @@
 use new_java2rust::coercion::{
-    Coercion, CoercionDiagnostic, LoweredExpr, RustPrimitiveTypeNamePolicy, apply_coercions,
-    apply_expr_to_slot, apply_expr_to_slot_with_facts, apply_instanceof_check,
-    apply_lowered_expr_to_slot, apply_lowered_expr_to_slot_with_facts, apply_shape_coercion_plan,
-    apply_slot_conversion_plan, apply_syntax_coercion_plan,
-    borrowed_element_recovery_fallback_message_policy, dispatch_coercion_fallback_message_policy,
-    instanceof_fallback_message_policy, ownership_coercion_fallback_message_policy, plan_coercion,
-    plan_coercion_with_facts, plan_shape_coercion, plan_shape_coercion_with_facts,
+    BorrowedStringViewProjection, Coercion, CoercionDiagnostic, IndexToUsizeProjection,
+    JavaDisplayPlan, LiteralSlotPlan, LoweredExpr, RustPrimitiveTypeNamePolicy,
+    apply_borrowed_string_view_projection, apply_coercions, apply_expr_to_slot,
+    apply_expr_to_slot_with_facts, apply_instanceof_check, apply_java_display_plan,
+    apply_literal_slot_plan, apply_lowered_expr_to_slot, apply_lowered_expr_to_slot_with_facts,
+    apply_shape_coercion_plan, apply_slot_conversion_plan, apply_syntax_coercion_plan,
+    borrowed_element_recovery_fallback_message_policy, borrowed_string_view_projection,
+    dispatch_coercion_fallback_message_policy, instanceof_fallback_message_policy,
+    java_integral_literal_char, literal_slot_plan, normalize_map_key_borrow_projection,
+    ownership_coercion_fallback_message_policy, plan_coercion, plan_coercion_with_facts,
+    plan_shape_coercion, plan_shape_coercion_with_facts, render_index_to_usize_projection,
     render_instanceof_check, rust_primitive_type_name_policy,
 };
 use new_java2rust::conversion_lowering::{
@@ -61,7 +65,9 @@ use new_java2rust::facts::{
     ExternalConversionAdapterFact, ExternalConversionAdapterKind, FactProvenance, FactSet,
     OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, TypeCapabilityOverride,
 };
-use new_java2rust::java_ir::{JavaCoercionEvidence, JavaCoercionKind, JavaType, PrimitiveType};
+use new_java2rust::java_ir::{
+    JavaCoercionEvidence, JavaCoercionKind, JavaType, Literal, PrimitiveType,
+};
 use new_java2rust::lowering_diagnostics::lowering_diagnostic_from_conversion_diagnostic;
 use new_java2rust::member_access_plan::{
     JavaMemberAccessKind, JavaMemberAccessPolicy, MemberAccessOp, java_member_access_policy,
@@ -737,7 +743,8 @@ fn string_concat_semantics_do_not_render_rust() {
     assert!(!render_source.contains("analyze_string_concat"));
     assert!(!render_source.contains("build_string_concat_plan"));
     assert!(render_source.contains("format!("));
-    assert!(render_source.contains("emit::emit_expr"));
+    assert!(render_source.contains("render_java_display_operand"));
+    assert!(!render_source.contains("strip_arithmetic_display_conversion"));
 }
 
 #[test]
@@ -777,6 +784,100 @@ fn borrowed_native_string_can_coerce_to_string_view() {
         ),
         RustExpr::Raw("parts[0].as_str()".to_string())
     );
+}
+
+#[test]
+fn map_key_borrow_projection_is_centralized_and_idempotent() {
+    let owned = RustSlotShape::conservative(JavaType::String);
+    assert_eq!(
+        normalize_map_key_borrow_projection(
+            RustExpr::Var("key".to_string()),
+            Some("key"),
+            Some(&owned)
+        ),
+        RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(RustExpr::Var("key".to_string())),
+        }
+    );
+
+    let mut shared = RustSlotShape::conservative(JavaType::String);
+    shared.ownership = OwnershipShape::SharedBorrow;
+    assert_eq!(
+        normalize_map_key_borrow_projection(
+            RustExpr::Raw("&key".to_string()),
+            Some("key"),
+            Some(&shared)
+        ),
+        RustExpr::Var("key".to_string())
+    );
+
+    assert_eq!(
+        normalize_map_key_borrow_projection(
+            RustExpr::Raw("java_string_substring(name.as_str(), 0, 1)".to_string()),
+            None,
+            None,
+        ),
+        RustExpr::Raw("java_string_substring(name.as_str(), 0, 1)".to_string())
+    );
+}
+
+#[test]
+fn literal_slot_plan_owns_borrowed_string_and_numeric_char_adaptation() {
+    let mut borrowed_str = RustSlotShape::conservative(JavaType::String);
+    borrowed_str.ownership = OwnershipShape::SharedBorrow;
+    borrowed_str.view = ViewShape::Str;
+    let borrowed_plan = literal_slot_plan(
+        &Literal::String("id".to_string()),
+        &argument_slot(borrowed_str),
+    )
+    .unwrap();
+    assert_eq!(
+        borrowed_plan,
+        LiteralSlotPlan::BorrowedStringView {
+            value: "id".to_string()
+        }
+    );
+    assert_eq!(
+        apply_literal_slot_plan(&borrowed_plan),
+        RustExpr::Literal("\"id\"".to_string())
+    );
+
+    let char_slot = argument_slot(RustSlotShape::conservative(JavaType::Primitive(
+        PrimitiveType::Char,
+    )));
+    let char_plan = literal_slot_plan(&Literal::Int(9), &char_slot).unwrap();
+    assert_eq!(char_plan, LiteralSlotPlan::NumericCharCode { ch: '\t' });
+    assert_eq!(
+        apply_literal_slot_plan(&char_plan),
+        RustExpr::Literal("'\\t'".to_string())
+    );
+    assert_eq!(java_integral_literal_char(&Literal::Long(32)), Some(' '));
+    assert_eq!(java_integral_literal_char(&Literal::Int(0xd800)), None);
+}
+
+#[test]
+fn borrowed_string_view_projection_owns_rendered_view_compatibility() {
+    let existing = borrowed_string_view_projection("*value.as_str()", Some("value")).unwrap();
+    assert_eq!(existing, BorrowedStringViewProjection::AlreadyStringView);
+    assert_eq!(
+        apply_borrowed_string_view_projection("*value.as_str()", &existing),
+        "value.as_str()"
+    );
+
+    let local = borrowed_string_view_projection("*value", Some("value")).unwrap();
+    assert_eq!(
+        local,
+        BorrowedStringViewProjection::LocalStringValue {
+            rust_name: "value".to_string()
+        }
+    );
+    assert_eq!(
+        apply_borrowed_string_view_projection("*value", &local),
+        "value.as_str()"
+    );
+
+    assert_eq!(borrowed_string_view_projection("*value", None), None);
 }
 
 #[test]
@@ -865,6 +966,25 @@ fn owned_to_mutable_borrow_is_an_ownership_coercion() {
 }
 
 #[test]
+fn optional_owned_to_mutable_borrow_uses_mutable_optional_projection() {
+    let config_ty = JavaType::Named {
+        name: "ExternalMutableConfig".to_string(),
+        args: Vec::new(),
+    };
+    let actual = RustSlotShape::conservative(optional_java_type(config_ty.clone()));
+    let mut target = RustSlotShape::conservative(config_ty);
+    target.ownership = OwnershipShape::MutableBorrow;
+
+    let plan = shape_coercion_plan(&actual, &target);
+
+    assert_eq!(plan.coercions(), vec![Coercion::UnwrapOptionMutBorrowed]);
+    assert_eq!(
+        apply_shape_coercion_plan(RustExpr::Var("config".to_string()), &plan),
+        RustExpr::Raw("config.as_mut().expect(\"Java null receiver\")".to_string())
+    );
+}
+
+#[test]
 fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
     let external_id = JavaType::Named {
         name: "ExternalId".to_string(),
@@ -939,6 +1059,22 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
             &syntax_coercion_plan(&JavaType::Primitive(PrimitiveType::Long), &Slot::Index),
         ),
         RustExpr::Raw("((bits & 4499201580859392i64) >> 42) as usize".to_string())
+    );
+    assert_eq!(
+        render_index_to_usize_projection("0", IndexToUsizeProjection::JavaStringCharAt),
+        "0 as usize"
+    );
+    assert_eq!(
+        render_index_to_usize_projection("index", IndexToUsizeProjection::JavaStringCharAt),
+        "(index) as usize"
+    );
+    assert_eq!(
+        render_index_to_usize_projection("index", IndexToUsizeProjection::StreamLambdaArgument),
+        "index as usize"
+    );
+    assert_eq!(
+        render_index_to_usize_projection("*value", IndexToUsizeProjection::StreamLambdaArgument),
+        "(*value) as usize"
     );
     assert_eq!(
         apply_coercions(
@@ -2229,6 +2365,16 @@ fn optional_platform_facade_display_segments_use_display_value_policy() {
         ),
         RustExpr::Raw(
             "uri.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
+                .to_string(),
+        )
+    );
+    assert_eq!(
+        apply_java_display_plan(
+            RustExpr::Raw("values.get(key.as_str())".to_string()),
+            JavaDisplayPlan::OptionalBorrowedValue,
+        ),
+        RustExpr::Raw(
+            "values.get(key.as_str()).map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
                 .to_string(),
         )
     );

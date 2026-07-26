@@ -296,8 +296,60 @@ pub fn method_return_type_with_facts(
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> Option<RustType> {
-    method_return_shape(ty, method, signatures)
-        .map(|shape| rust_type_for_slot_with_facts(&shape, facts))
+    if let Some(ty) = rust_crate_mapped_external_rust_type(&method.return_type, facts) {
+        return Some(ty);
+    }
+    if rust_crate_mapped_external_java_type(&method.return_type, facts) {
+        return Some(rust_type_for_java_type_with_facts(
+            &method.return_type,
+            facts,
+        ));
+    }
+    method_return_shape(ty, method, signatures).map(|shape| {
+        if let Some(ty) = rust_crate_mapped_external_rust_type(&shape.java_ty, facts) {
+            return ty;
+        }
+        if rust_crate_mapped_external_java_type(&shape.java_ty, facts) {
+            rust_type_for_java_type_with_facts(&shape.java_ty, facts)
+        } else {
+            rust_type_for_slot_with_facts(&shape, facts)
+        }
+    })
+}
+
+fn rust_crate_mapped_external_rust_type(java_ty: &JavaType, facts: &FactSet) -> Option<RustType> {
+    let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = java_ty else {
+        return None;
+    };
+    let rust_type_name = facts.external_crate_rust_type_name_for(name)?;
+    let pack = facts.external_library_packs.iter().rev().find(|pack| {
+        pack.mode == crate::facts::ExternalLibraryMode::RustCrateMapping
+            && (pack.package_prefix == *name
+                || crate::facts::external_type_name_matches(&pack.package_prefix, name))
+    })?;
+    let crate_name = pack.rust_target.as_deref()?;
+    if let JavaType::Named { args, .. } = java_ty
+        && !args.is_empty()
+    {
+        let args = args
+            .iter()
+            .map(|arg| crate::emit::emit_type(&rust_type_for_java_type_with_facts(arg, facts)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(RustType::Raw(format!(
+            "{crate_name}::{rust_type_name}<{args}>"
+        )));
+    }
+    Some(RustType::Raw(format!("{crate_name}::{rust_type_name}")))
+}
+
+fn rust_crate_mapped_external_java_type(java_ty: &JavaType, facts: &FactSet) -> bool {
+    let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = java_ty else {
+        return false;
+    };
+    facts
+        .external_library_pack_for_type(name)
+        .is_some_and(|pack| pack.mode == crate::facts::ExternalLibraryMode::RustCrateMapping)
 }
 
 fn struct_fields_for_type(

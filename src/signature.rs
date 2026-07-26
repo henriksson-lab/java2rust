@@ -8142,17 +8142,17 @@ fn source_return_expr_nullability_state(
     refinements: &HashSet<String>,
 ) -> NullabilityState {
     match expr {
-        Expr::Var(name) => binding_states
-            .get(name)
-            .copied()
-            .or_else(|| ctx.and_then(|ctx| ctx.field_nullability_for_expr(expr)))
-            .unwrap_or_else(|| {
-                if refinements.contains(name) {
-                    NullabilityState::DefinitelyNonNull
-                } else {
-                    NullabilityState::Unknown
-                }
-            }),
+        Expr::Var(name) => {
+            if refinements.contains(name) {
+                NullabilityState::DefinitelyNonNull
+            } else {
+                binding_states
+                    .get(name)
+                    .copied()
+                    .or_else(|| ctx.and_then(|ctx| ctx.field_nullability_for_expr(expr)))
+                    .unwrap_or(NullabilityState::Unknown)
+            }
+        }
         Expr::FieldAccess(_, _) => ctx
             .and_then(|ctx| ctx.field_nullability_for_expr(expr))
             .unwrap_or_else(|| {
@@ -11114,15 +11114,20 @@ pub fn method_return_shape_constraints(
             )],
         );
     }
-    let mut source_return_nullability =
+    let flow_return_nullability =
         typed_source_method_return_nullability_constraints(ty, method, facts);
+    let flow_proves_non_null_return =
+        signature_constraints_prove_non_null_storage(&flow_return_nullability);
+    let mut source_return_nullability = flow_return_nullability;
     push_unique_signature_constraints(
         &mut source_return_nullability,
         &returned_local_initializer_source_call_nullability_constraints(ty, method, facts),
     );
-    if source_return_nullability.contains(&SignatureConstraint::RequiredStorageNullability(
-        NullabilityState::DefinitelyNonNull,
-    )) {
+    if flow_proves_non_null_return {
+        retain_only_storage_nullability(
+            &mut source_return_nullability,
+            NullabilityState::DefinitelyNonNull,
+        );
         constraints.retain(|constraint| {
             !matches!(
                 constraint,
@@ -11145,11 +11150,13 @@ pub fn method_return_shape_constraints(
         .is_some_and(|method_usage| !method_usage.returned_call_results.is_empty());
     if borrowed_return_content_policy.is_none()
         && !returns_call_result
+        && !borrowed_object_return
         && declared_return_should_use_concrete_shape(
             method,
             method_effect_nullability,
             &source_return_nullability,
             &external_return_constraints,
+            facts,
         )
     {
         constraints.retain(|constraint| {
@@ -11295,12 +11302,38 @@ fn declared_return_should_use_concrete_shape(
     _method_effect_nullability: Option<NullabilityState>,
     source_return_constraints: &[SignatureConstraint],
     external_return_constraints: &[SignatureConstraint],
+    facts: &FactSet,
 ) -> bool {
     if matches!(method.return_type, JavaType::Void | JavaType::Primitive(_)) {
         return false;
     }
+    if declared_return_has_non_concrete_representation(&method.return_type, facts) {
+        return false;
+    }
     !constraints_require_nullable_storage(source_return_constraints)
         && !constraints_require_nullable_storage(external_return_constraints)
+}
+
+fn declared_return_has_non_concrete_representation(java_ty: &JavaType, facts: &FactSet) -> bool {
+    if declared_return_is_jdk_structural_interface(java_ty) {
+        return true;
+    }
+    let effective_facts = EffectiveFacts::new(facts);
+    matches!(
+        effective_facts.object_representation_override_strategy_for(java_ty),
+        Some(HierarchyStrategy::DynTrait { .. } | HierarchyStrategy::ErasedObject)
+    ) || facts.object_safe_trait_fact_for(java_ty) == Some(true)
+}
+
+fn declared_return_is_jdk_structural_interface(java_ty: &JavaType) -> bool {
+    let name = match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        _ => return false,
+    };
+    matches!(
+        crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+        "Iterable" | "Iterator" | "JavaIterator" | "ListIterator" | "Spliterator" | "Enumeration"
+    )
 }
 
 fn constraints_require_nullable_storage(constraints: &[SignatureConstraint]) -> bool {
@@ -11312,6 +11345,22 @@ fn constraints_require_nullable_storage(constraints: &[SignatureConstraint]) -> 
             )
         )
     })
+}
+
+fn signature_constraints_prove_non_null_storage(constraints: &[SignatureConstraint]) -> bool {
+    constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+        NullabilityState::DefinitelyNonNull,
+    ))
+}
+
+fn retain_only_storage_nullability(
+    constraints: &mut Vec<SignatureConstraint>,
+    nullability: NullabilityState,
+) {
+    constraints.retain(|constraint| match constraint {
+        SignatureConstraint::RequiredStorageNullability(candidate) => *candidate == nullability,
+        _ => true,
+    });
 }
 
 fn anonymous_declared_return_constraints(
@@ -11682,7 +11731,8 @@ fn constrained_return_shape(
 ) -> Option<RustSlotShape> {
     let return_type = method_return_type_for_signature(method).unwrap_or(&method.return_type);
     if !java_type_is_erased_object_boundary(return_type)
-        && return_constraints_select_concrete_declared_value(constraints)
+        && !java_type_is_rust_crate_mapped_external(return_type, facts)
+        && return_constraints_select_concrete_declared_value(ty, method, constraints, facts)
     {
         let constraints = constraints
             .iter()
@@ -11955,10 +12005,36 @@ fn java_type_is_erased_object_boundary(java_ty: &JavaType) -> bool {
     ) || matches!(java_ty, JavaType::Wildcard(_))
 }
 
-fn return_constraints_select_concrete_declared_value(constraints: &[SignatureConstraint]) -> bool {
-    constraints.contains(&SignatureConstraint::RequiredDispatch(
+fn java_type_is_rust_crate_mapped_external(java_ty: &JavaType, facts: &FactSet) -> bool {
+    let Some(name) = java_type_name(java_ty) else {
+        return false;
+    };
+    facts
+        .external_library_pack_for_type(name)
+        .is_some_and(|pack| pack.mode == crate::facts::ExternalLibraryMode::RustCrateMapping)
+        || crate::external_packs::external_library_pack_for_type(name)
+            .is_some_and(|pack| pack.mode == crate::facts::ExternalLibraryMode::RustCrateMapping)
+}
+
+fn return_constraints_select_concrete_declared_value(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    constraints: &[SignatureConstraint],
+    facts: &FactSet,
+) -> bool {
+    let explicit_concrete_dispatch = constraints.contains(&SignatureConstraint::RequiredDispatch(
         DispatchShape::Concrete,
-    )) && constraints.contains(&SignatureConstraint::RequiredView(ViewShape::Native))
+    ));
+    let flow_proves_non_null_return = constraints.contains(
+        &SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull),
+    ) && typed_source_method_return_nullability_constraints(
+        ty, method, facts,
+    ) == vec![
+        SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull),
+    ];
+
+    (explicit_concrete_dispatch || flow_proves_non_null_return)
+        && constraints.contains(&SignatureConstraint::RequiredView(ViewShape::Native))
         && constraints.contains(&SignatureConstraint::RequiredOwnership(
             OwnershipShape::Owned,
         ))

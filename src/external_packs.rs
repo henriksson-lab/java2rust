@@ -3,10 +3,10 @@ use std::sync::OnceLock;
 
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
-    CallableKey, CallableKind, ClosedHierarchyFact, ExceptionFact, ExceptionKind,
-    ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole,
-    ExternalArgumentAliasPolicy, ExternalConstructorArgumentEffectFact, ExternalConstructorFact,
-    ExternalConstructorRustResultFact, ExternalConversionAdapterFact,
+    BorrowedReturnRecovery, CallableKey, CallableKind, ClosedHierarchyFact, ExceptionFact,
+    ExceptionKind, ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact,
+    ExternalApiRole, ExternalArgumentAliasPolicy, ExternalConstructorArgumentEffectFact,
+    ExternalConstructorFact, ExternalConstructorRustResultFact, ExternalConversionAdapterFact,
     ExternalConversionAdapterKind, ExternalCrateApiMappingFact,
     ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFfiHandoverFact,
     ExternalFfiHandoverSlot, ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode,
@@ -2149,6 +2149,7 @@ fn push_external_pack_api_fact(
                 arg_count: parsed_metadata.arg_count,
                 rust_type_name,
                 return_slot,
+                borrowed_return_recovery: parsed_metadata.borrowed_return_recovery,
                 provenance: FactProvenance::ExternalLibraryPack,
             });
     }
@@ -3978,6 +3979,7 @@ struct ExternalApiMetadata {
     rust_name: Option<String>,
     rust_result: Option<bool>,
     rust_return_type: Option<String>,
+    borrowed_return_recovery: Option<BorrowedReturnRecovery>,
 }
 
 fn facade_slot_for_manifest_rust_type(ty: &str) -> FacadeSlot {
@@ -4095,16 +4097,34 @@ fn parse_external_api_metadata(
                 return None;
             }
             parsed.rust_return_type = Some(rust_return_type.to_string());
+        } else if let Some(recovery) = token.strip_prefix("borrowed-return-recovery=") {
+            let Some(recovery) = parse_borrowed_return_recovery(recovery) else {
+                push_external_pack_parse_error(
+                    diagnostics,
+                    line_index,
+                    "external-pack-api borrowed-return-recovery metadata must be clone or to-path-buf",
+                );
+                return None;
+            };
+            parsed.borrowed_return_recovery = Some(recovery);
         } else {
             push_external_pack_parse_error(
                 diagnostics,
                 line_index,
-                "unrecognized external-pack-api metadata; expected args=N, return=Type, throws=TypeA,TypeB, rust=facade_name, rust-result=true|false or rust-return=RustType",
+                "unrecognized external-pack-api metadata; expected args=N, return=Type, throws=TypeA,TypeB, rust=facade_name, rust-result=true|false, rust-return=RustType or borrowed-return-recovery=clone|to-path-buf",
             );
             return None;
         }
     }
     Some(parsed)
+}
+
+fn parse_borrowed_return_recovery(value: &str) -> Option<BorrowedReturnRecovery> {
+    match value {
+        "clone" => Some(BorrowedReturnRecovery::Clone),
+        "to-path-buf" => Some(BorrowedReturnRecovery::ToPathBuf),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28482,7 +28502,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
                 PrimitiveType::Byte,
             )))),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
-            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            argument_mutability: ReceiverMutabilityFact::MutatesReceiver,
             alias_policy: ExternalArgumentAliasPolicy::Borrowed,
             provenance: FactProvenance::BuiltinExternalModel,
         });
