@@ -3772,6 +3772,14 @@ unwrap_java_null_receiver_projection}`. Lowering still decides when those Java
 boundary cases apply, but their Rust spelling no longer lives in local raw
 `format!` branches.
 
+Trait-object boundary projection cleanup: current-self recovery into erased
+object or boxed dyn-trait slots now reuses `coercion::{erased_object_box_projection,
+boxed_dyn_trait_projection}` after applying the shared audited clone recovery.
+Unsupported Java deserialization interface casts now use
+`coercion::unsupported_deserialization_cast_handoff_projection`, keeping the
+handoff marker in the projection layer while preserving the existing explicit
+serialization-facade TODO behavior.
+
 ## Rerun Protocol
 
 After each fix:

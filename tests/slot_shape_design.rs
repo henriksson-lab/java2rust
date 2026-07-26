@@ -27509,6 +27509,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn anonymous_dyn_trait_projection"));
     assert!(coercion_source.contains("pub fn unwrap_java_null_receiver_projection"));
     assert!(coercion_source.contains("pub fn typed_none_projection"));
+    assert!(coercion_source.contains("pub fn boxed_dyn_trait_projection"));
+    assert!(coercion_source.contains("pub fn unsupported_deserialization_cast_handoff_projection"));
     assert!(coercion_source.contains("pub fn collapse_redundant_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));
@@ -27581,6 +27583,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("format!(\"&{name}\")"));
     assert!(!lower_source.contains("self.clone()/* TODO(translation): validate added clone */"));
     assert!(!lower_source.contains(".clone()/* TODO(translation): validate added clone */\","));
+    assert!(!lower_source.contains("Box::new({cloned_self}) as Box<dyn"));
+    assert!(lower_source.contains("boxed_dyn_trait_projection("));
+    assert!(lower_source.contains("erased_object_box_projection(apply_audited_clone_recovery("));
+    assert!(!lower_source.contains("unsupported Java deserialization cast to {java_name}"));
+    assert!(lower_source.contains("unsupported_deserialization_cast_handoff_projection("));
     assert!(!lower_source.contains("fn rendered_arg_is_mutable_alias"));
     assert!(!lower_source.contains("as_deref_mut()\") {\n        return None;"));
     assert!(!lower_source.contains("java_clone_erased_object_ref("));

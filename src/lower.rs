@@ -29,11 +29,11 @@ use crate::coercion::{
     SequenceIterationProjection, anonymous_dyn_trait_projection, apply_audited_clone_recovery,
     apply_coercions, apply_java_display_plan, apply_literal_slot_plan, array_fill_projection,
     array2_rows_i32_projection, borrow_as_dyn_trait, borrowed_sequence_extend_arg,
-    borrowed_string_literal_temporary_plan, clone_erased_object_ref_once,
-    collection_sort_by_comparator_projection, collection_sort_projection,
-    constructor_self_field_replacement, deref_borrowed_projection, ensure_borrow_projection,
-    erased_object_borrowed_downcast_ref_projection,
-    exception_self_as_supertype_facade_boundary_projection,
+    borrowed_string_literal_temporary_plan, boxed_dyn_trait_projection,
+    clone_erased_object_ref_once, collection_sort_by_comparator_projection,
+    collection_sort_projection, constructor_self_field_replacement, deref_borrowed_projection,
+    ensure_borrow_projection, erased_object_borrowed_downcast_ref_projection,
+    erased_object_box_projection, exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
     iterator_next_expect_projection, java_integral_literal_char, len_i32_projection,
     literal_slot_plan, map_get_expect_projection, map_get_mut_expect_projection,
@@ -48,7 +48,8 @@ use crate::coercion::{
     sequence_get_expect_projection, sequence_iter_cloned_projection,
     sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
     subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
-    tuple_field_projection, typed_none_projection, unwrap_java_null_receiver_projection,
+    tuple_field_projection, typed_none_projection,
+    unsupported_deserialization_cast_handoff_projection, unwrap_java_null_receiver_projection,
     unwrap_optional_shared_value, unwrap_result_or_panic_uncaught_java_exception,
     varargs_packed_vec_projection, varargs_spread_extend_projection,
 };
@@ -9609,17 +9610,16 @@ fn lower_current_self_cast_for_slot(expr: &Expr, slot: &Slot, ctx: LowerCtx) -> 
         )
     {
         if implemented_target && matches!(target.dispatch, DispatchShape::ErasedObject) {
-            let cloned_self = emit::emit_expr(&apply_audited_clone_recovery(this_expr()));
-            return Some(RustExpr::Raw(format!(
-                "Box::new({cloned_self}) as Box<dyn std::any::Any>"
+            return Some(erased_object_box_projection(apply_audited_clone_recovery(
+                this_expr(),
             )));
         }
         if implemented_target && let DispatchShape::BoxedDynTrait { trait_name } = &target.dispatch
         {
-            let cloned_self = emit::emit_expr(&apply_audited_clone_recovery(this_expr()));
-            return Some(RustExpr::Raw(format!(
-                "Box::new({cloned_self}) as Box<dyn {trait_name}>"
-            )));
+            return Some(boxed_dyn_trait_projection(
+                apply_audited_clone_recovery(this_expr()),
+                trait_name,
+            ));
         }
         return Some(apply_audited_clone_recovery(this_expr()));
     }
@@ -14764,10 +14764,9 @@ fn erased_external_call_trait_object_cast_handoff(
         JavaType::Named { name, .. } | JavaType::Unknown(name) => name.as_str(),
         _ => trait_name.as_str(),
     };
-    Some(RustExpr::Raw(format!(
-        "{{ let _java_deserialized = {}; panic!(\"unsupported Java deserialization cast to {java_name}; provide a typed serialization facade\") }}",
-        emit::emit_expr(&lowered)
-    )))
+    Some(unsupported_deserialization_cast_handoff_projection(
+        lowered, java_name,
+    ))
 }
 
 fn target_typed_call_cast_actual_shape(

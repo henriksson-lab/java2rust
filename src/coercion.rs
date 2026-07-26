@@ -1936,6 +1936,23 @@ pub fn erased_object_box_projection(value: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("Box::new({value}) as Box<dyn std::any::Any>"))
 }
 
+pub fn boxed_dyn_trait_projection(value: RustExpr, trait_name: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "Box::new({}) as Box<dyn {trait_name}>",
+        emit::emit_expr(&value)
+    ))
+}
+
+pub fn unsupported_deserialization_cast_handoff_projection(
+    value: RustExpr,
+    java_name: &str,
+) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ let _java_deserialized = {}; panic!(\"unsupported Java deserialization cast to {java_name}; provide a typed serialization facade\") }}",
+        emit::emit_expr(&value)
+    ))
+}
+
 fn raw_contains_top_level_comma(raw: &str) -> bool {
     let mut paren_depth = 0usize;
     let mut bracket_depth = 0usize;
@@ -3712,6 +3729,20 @@ mod tests {
                 "(variant, None::<Void>)".to_string()
             ))),
             "Box::new((variant, None::<Void>)) as Box<dyn std::any::Any>"
+        );
+        assert_eq!(
+            emit::emit_expr(&boxed_dyn_trait_projection(
+                RustExpr::Var("value".to_string()),
+                "Writer",
+            )),
+            "Box::new(value) as Box<dyn Writer>"
+        );
+        assert_eq!(
+            emit::emit_expr(&unsupported_deserialization_cast_handoff_projection(
+                RustExpr::Raw("r#in.read_object()?".to_string()),
+                "Localizable",
+            )),
+            "{ let _java_deserialized = r#in.read_object()?; panic!(\"unsupported Java deserialization cast to Localizable; provide a typed serialization facade\") }"
         );
         assert_eq!(
             emit::emit_expr(&varargs_packed_vec_projection(Vec::new())),
