@@ -3823,6 +3823,13 @@ borrow projection helper instead of formatting `&...`/`&mut ...` in
 borrowed ABI surfaces through slot/projection facts rather than local rendered
 string choices.
 
+Rendered parser helper cleanup: raw Rust generic type argument parsing moved
+from `item_assembly.rs` into `types.rs`, and rendered `vec![...]` body
+extraction moved from `array_lowering.rs` into `coercion.rs`. These remain
+compatibility helpers while raw `RustExpr`/`RustType` strings are still common,
+but their parsing behavior is no longer owned by local lowering/assembly
+modules.
+
 ## Rerun Protocol
 
 After each fix:

@@ -893,6 +893,14 @@ pub fn typed_single_input_callback_projection(param_type: &str, body: &str) -> R
     RustExpr::Raw(format!("|value: {param_type}| {body}"))
 }
 
+pub fn rendered_vec_macro_body(rendered: &str) -> Option<String> {
+    let trimmed = rendered.trim();
+    trimmed
+        .strip_prefix("vec![")
+        .and_then(|body| body.strip_suffix(']'))
+        .map(str::to_string)
+}
+
 pub fn borrow_as_dyn_trait(expr: RustExpr, trait_name: &str) -> RustExpr {
     RustExpr::Raw(format!("&{} as &dyn {trait_name}", emit::emit_expr(&expr)))
 }
@@ -3791,6 +3799,11 @@ mod tests {
             )),
             "|value: String| value.trim()"
         );
+        assert_eq!(
+            rendered_vec_macro_body(" vec![1, f(2, 3), vec![4]] "),
+            Some("1, f(2, 3), vec![4]".to_string())
+        );
+        assert_eq!(rendered_vec_macro_body("[1, 2]"), None);
         assert_eq!(
             emit::emit_expr(&logical_not_projection(RustExpr::Var("ready".to_string()))),
             "!(ready)"

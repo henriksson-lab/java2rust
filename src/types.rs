@@ -413,6 +413,32 @@ pub fn is_raw_generic_counterpart(actual: &JavaType, target: &JavaType) -> bool 
     }
 }
 
+pub fn raw_rust_generic_args<'a>(raw: &'a str, head: &str) -> Option<Vec<&'a str>> {
+    let raw = raw.trim();
+    let rest = raw.strip_prefix(head)?.strip_prefix('<')?;
+    let inner = rest.strip_suffix('>')?;
+    Some(split_top_level_rust_type_args(inner))
+}
+
+pub fn split_top_level_rust_type_args(args: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0usize;
+    for (idx, ch) in args.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(args[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(args[start..].trim());
+    parts
+}
+
 pub fn is_known_raw_generic_type(java_ty: &JavaType) -> bool {
     matches!(
         java_ty,

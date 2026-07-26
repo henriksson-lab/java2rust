@@ -19,7 +19,8 @@ use crate::slot_render::{
 };
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 use crate::types::{
-    optional_element_type, sequence_element_type, two_dimensional_array_element_type,
+    optional_element_type, raw_rust_generic_args, sequence_element_type,
+    two_dimensional_array_element_type,
 };
 
 pub fn struct_item_for_type(ty: &TypeDecl, signatures: &SignaturePlan) -> RustItem {
@@ -610,7 +611,7 @@ fn raw_rust_type_supports_derive_clone(
     if raw.starts_with("Box<dyn ") && raw.ends_with('>') {
         return true;
     }
-    if let Some(args) = raw_generic_args(raw, "std::collections::HashMap")
+    if let Some(args) = raw_rust_generic_args(raw, "std::collections::HashMap")
         && args.len() == 2
     {
         return args.iter().all(|arg| {
@@ -629,17 +630,19 @@ fn raw_type_arg_supports_derive_clone(
 ) -> bool {
     match arg.trim() {
         "String" | "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "f32" | "f64" => true,
-        raw if raw.starts_with("Option<") => raw_generic_args(raw, "Option").is_some_and(|args| {
-            args.len() == 1
-                && raw_type_arg_supports_derive_clone(
-                    args[0],
-                    signatures,
-                    facts,
-                    support_program,
-                    visiting,
-                )
-        }),
-        raw if raw.starts_with("Vec<") => raw_generic_args(raw, "Vec").is_some_and(|args| {
+        raw if raw.starts_with("Option<") => {
+            raw_rust_generic_args(raw, "Option").is_some_and(|args| {
+                args.len() == 1
+                    && raw_type_arg_supports_derive_clone(
+                        args[0],
+                        signatures,
+                        facts,
+                        support_program,
+                        visiting,
+                    )
+            })
+        }
+        raw if raw.starts_with("Vec<") => raw_rust_generic_args(raw, "Vec").is_some_and(|args| {
             args.len() == 1
                 && raw_type_arg_supports_derive_clone(
                     args[0],
@@ -661,32 +664,6 @@ fn raw_type_arg_supports_derive_clone(
             visiting,
         ),
     }
-}
-
-fn raw_generic_args<'a>(raw: &'a str, head: &str) -> Option<Vec<&'a str>> {
-    let raw = raw.trim();
-    let rest = raw.strip_prefix(head)?.strip_prefix('<')?;
-    let inner = rest.strip_suffix('>')?;
-    Some(split_top_level_type_args(inner))
-}
-
-fn split_top_level_type_args(args: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut depth = 0usize;
-    for (idx, ch) in args.char_indices() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                parts.push(args[start..idx].trim());
-                start = idx + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    parts.push(args[start..].trim());
-    parts
 }
 
 fn rust_named_type_supports_struct_derive_clone(

@@ -1,5 +1,5 @@
 use crate::array_plan::ArrayExprPlan;
-use crate::coercion::{BorrowProjectionUse, ensure_borrow_projection};
+use crate::coercion::{BorrowProjectionUse, ensure_borrow_projection, rendered_vec_macro_body};
 use crate::emit::emit_expr;
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::rust_ir::{RustExpr, RustStmt};
@@ -166,7 +166,7 @@ fn render_array2_initializer(children: &[RustExpr]) -> Option<RustExpr> {
     }
     let rows = children
         .iter()
-        .map(|child| vec_macro_body(&emit_expr(child)))
+        .map(|child| rendered_vec_macro_body(&emit_expr(child)))
         .collect::<Option<Vec<_>>>()?;
     let width = split_top_level_commas(rows.first()?).len();
     if width == 0
@@ -186,14 +186,6 @@ fn render_array2_initializer(children: &[RustExpr]) -> Option<RustExpr> {
 
 fn is_comment_only_expr(expr: &RustExpr) -> bool {
     emit_expr(expr).trim_start().starts_with("//")
-}
-
-fn vec_macro_body(rendered: &str) -> Option<String> {
-    let trimmed = rendered.trim();
-    trimmed
-        .strip_prefix("vec![")
-        .and_then(|body| body.strip_suffix(']'))
-        .map(str::to_string)
 }
 
 fn split_top_level_commas(input: &str) -> Vec<&str> {

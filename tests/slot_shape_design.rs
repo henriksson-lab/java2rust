@@ -27411,6 +27411,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let access_source = include_str!("../src/access_lowering.rs");
     let array_source = include_str!("../src/array_lowering.rs");
     let item_assembly_source = include_str!("../src/item_assembly.rs");
+    let types_source = include_str!("../src/types.rs");
 
     assert!(coercion_source.contains("pub fn ensure_borrow_projection"));
     assert!(coercion_source.contains("pub fn rendered_expr_has_clone_recovery"));
@@ -27528,6 +27529,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn unbound_method_call_projection"));
     assert!(coercion_source.contains("pub fn current_receiver_method_call_projection"));
     assert!(coercion_source.contains("pub fn typed_single_input_callback_projection"));
+    assert!(coercion_source.contains("pub fn rendered_vec_macro_body"));
+    assert!(types_source.contains("pub fn raw_rust_generic_args"));
+    assert!(types_source.contains("pub fn split_top_level_rust_type_args"));
     assert!(coercion_source.contains("pub fn collapse_redundant_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));
@@ -27625,6 +27629,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"{rust_name}::new"));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"{owner}::{field}\""));
     assert!(!item_assembly_source.contains("RustExpr::Raw(format!(\"Self::{rust_name}\""));
+    assert!(!item_assembly_source.contains("fn raw_generic_args"));
+    assert!(!item_assembly_source.contains("fn split_top_level_type_args"));
+    assert!(item_assembly_source.contains("raw_rust_generic_args("));
     assert!(lower_source.contains("self_associated_path_projection("));
     assert!(lower_source.contains("owner_associated_path_projection("));
     assert!(item_assembly_source.contains("self_associated_path_projection("));
@@ -31266,8 +31273,10 @@ fn array_plan_and_lowering_own_java_array_shape_before_orchestrator() {
     assert!(lowering_source.contains("ensure_borrow_projection("));
     assert!(lowering_source.contains("BorrowProjectionUse::Argument"));
     assert!(lowering_source.contains("BorrowProjectionUse::MutableSliceView"));
+    assert!(lowering_source.contains("rendered_vec_macro_body("));
     assert!(!lowering_source.contains("format!(\"&{}\""));
     assert!(!lowering_source.contains("format!(\"&mut {}\""));
+    assert!(!lowering_source.contains("strip_suffix(']')"));
     assert!(lower_source.contains("plan_array_expr"));
     assert!(lower_source.contains("render_array_expr"));
     assert!(!lower_source.contains("crate::emit::emit_expr"));
