@@ -3787,6 +3787,17 @@ logical_not_projection, java_update_expression_projection, into_projection}`.
 Lowering still selects the Java statement/expression semantics, but these
 mechanical Rust spellings are no longer embedded in local raw `format!` arms.
 
+Call/member path projection cleanup: ordinary call-target lowering and member
+access lowering now use shared `coercion` path helpers for `Self::member`,
+`Owner::member`, `JavaClass::<()>::member`, external crate functions,
+external crate associated constructors, static storage accessors, and associated
+constants. Planning still decides the Java owner/receiver semantics, while the
+Rust path spelling now has one projection surface that later callable-key and
+facade ABI work can replace or enrich. The same slice tightened member-access
+planning so untyped lowercase receivers with lowercase fields no longer match
+procedural external/static field guesses; static fallback now requires a
+static-looking member or a receiver that is already shaped like a type name.
+
 ## Rerun Protocol
 
 After each fix:

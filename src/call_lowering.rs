@@ -8,17 +8,19 @@ use crate::coercion::{
     collections_empty_sorted_set_projection, collections_n_copies_projection,
     collections_singleton_list_projection, collections_singleton_map_projection,
     collections_singleton_projection, discard_value_projection, erased_object_box_projection,
-    file_exists_projection, java_iterator_from_collection_projection, len_i32_projection,
-    math_max_projection, math_min_projection, native_collection_default_constructor_projection,
+    external_crate_associated_path_projection, external_crate_path_projection,
+    file_exists_projection, java_class_static_path_projection,
+    java_iterator_from_collection_projection, len_i32_projection, math_max_projection,
+    math_min_projection, native_collection_default_constructor_projection,
     native_collection_empty_new_projection, native_collection_with_capacity_projection,
     objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
     optional_get_owned_value_projection, optional_or_else_owned_value_projection,
     owned_collection_to_vec_projection, owned_map_keys_vec_projection,
-    primitive_compare_to_projection, primitive_f64_method_projection,
-    primitive_hash_code_projection, primitive_is_nan_projection, primitive_number_value_projection,
-    primitive_parse_projection, string_char_at_projection,
-    string_compare_to_ignore_case_projection, string_compare_to_projection,
-    string_equals_ignore_case_projection, string_format_projection,
+    owner_associated_path_projection, primitive_compare_to_projection,
+    primitive_f64_method_projection, primitive_hash_code_projection, primitive_is_nan_projection,
+    primitive_number_value_projection, primitive_parse_projection, self_associated_path_projection,
+    string_char_at_projection, string_compare_to_ignore_case_projection,
+    string_compare_to_projection, string_equals_ignore_case_projection, string_format_projection,
     string_from_byte_range_projection, string_from_bytes_projection, string_get_bytes_projection,
     string_hash_code_projection, string_index_of_projection, string_join_delimiter_projection,
     string_join_varargs_projection, string_matches_projection, string_replace_all_projection,
@@ -39,7 +41,7 @@ pub fn apply_call_target(
 ) -> RustExpr {
     match target {
         CallTargetPlan::StaticSelf { rust_name } => RustExpr::Call {
-            function: Box::new(RustExpr::Raw(format!("Self::{rust_name}"))),
+            function: Box::new(self_associated_path_projection(rust_name)),
             args,
         },
         CallTargetPlan::StaticOwner { owner, rust_name }
@@ -52,7 +54,7 @@ pub fn apply_call_target(
                 .expect("String.valueOf target checked one argument")
         }
         CallTargetPlan::StaticOwner { owner, rust_name } => RustExpr::Call {
-            function: Box::new(RustExpr::Raw(format!("{owner}::{rust_name}"))),
+            function: Box::new(owner_associated_path_projection(owner, rust_name)),
             args,
         },
         CallTargetPlan::InstanceReceiver { rust_name, .. } => RustExpr::MethodCall {
@@ -84,7 +86,7 @@ pub fn apply_call_target(
             args,
         },
         CallTargetPlan::JavaClassStatic { rust_name } => RustExpr::Call {
-            function: Box::new(RustExpr::Raw(format!("JavaClass::<()>::{rust_name}"))),
+            function: Box::new(java_class_static_path_projection(rust_name)),
             args,
         },
         CallTargetPlan::NativeCollectionMethod { method, .. } => apply_native_collection_method(
@@ -114,7 +116,7 @@ pub fn apply_call_target(
             );
             all_args.extend(args);
             RustExpr::Call {
-                function: Box::new(RustExpr::Raw(format!("{crate_name}::{rust_name}"))),
+                function: Box::new(external_crate_path_projection(crate_name, rust_name)),
                 args: all_args,
             }
         }
@@ -768,10 +770,11 @@ pub fn apply_new_target_with_facts(
     }
     if let Some(external_crate) = &target.external_crate {
         return RustExpr::Call {
-            function: Box::new(RustExpr::Raw(format!(
-                "{}::{}::{}",
-                external_crate.crate_name, external_crate.type_name, external_crate.rust_name
-            ))),
+            function: Box::new(external_crate_associated_path_projection(
+                &external_crate.crate_name,
+                &external_crate.type_name,
+                &external_crate.rust_name,
+            )),
             args,
         };
     }
@@ -802,10 +805,10 @@ pub fn apply_new_target_with_facts(
         return string_from_byte_range_constructor_expr(args);
     }
     RustExpr::Call {
-        function: Box::new(RustExpr::Raw(format!(
-            "{}::{}",
-            owner_type, target.rust_name
-        ))),
+        function: Box::new(owner_associated_path_projection(
+            &owner_type,
+            &target.rust_name,
+        )),
         args,
     }
 }

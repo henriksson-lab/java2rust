@@ -53,7 +53,9 @@ pub fn java_member_access_policy_with_facts(
     facts: &FactSet,
 ) -> Option<JavaMemberAccessPolicy> {
     if member != "length" {
-        if let Some(java_ty) = external_static_constant_type(receiver, member, facts) {
+        if (is_static_constant_member(member) || receiver_is_static_type_name(receiver))
+            && let Some(java_ty) = external_static_constant_type(receiver, member, facts)
+        {
             return Some(JavaMemberAccessPolicy {
                 member: member.to_string(),
                 java_ty,
@@ -94,6 +96,10 @@ pub fn java_member_access_policy_with_facts(
         java_ty,
         kind: JavaMemberAccessKind::ArrayLength,
     })
+}
+
+fn receiver_is_static_type_name(receiver: &Expr) -> bool {
+    matches!(receiver, Expr::Var(owner) if owner.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()))
 }
 
 pub fn plan_member_access(

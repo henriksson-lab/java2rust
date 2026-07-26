@@ -3,6 +3,13 @@ use crate::java_ir::Expr;
 use crate::member_access_plan::{MemberAccessOp, MemberAccessPlan};
 use crate::rust_ir::RustExpr;
 use crate::types::TypeEnv;
+use crate::{
+    coercion::{
+        associated_const_projection, self_associated_path_projection,
+        static_storage_accessor_projection,
+    },
+    emit,
+};
 
 pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
     if env.local_type(name).is_none()
@@ -16,14 +23,11 @@ pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_storage_field_access_name(name)
     {
-        RustExpr::Raw(format!(
-            "Self::__static_{}()",
-            crate::parser::to_snake_case(static_name)
-        ))
+        static_storage_accessor_projection(static_name)
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
-        RustExpr::Raw(format!("Self::{static_name}"))
+        self_associated_path_projection(static_name)
     } else {
         RustExpr::Var(crate::parser::to_snake_case(name))
     }
@@ -38,14 +42,11 @@ pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_storage_field_access_name(name)
     {
-        format!(
-            "Self::__static_{}()",
-            crate::parser::to_snake_case(static_name)
-        )
+        emit::emit_expr(&static_storage_accessor_projection(static_name))
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
-        format!("Self::{static_name}")
+        emit::emit_expr(&self_associated_path_projection(static_name))
     } else {
         crate::parser::to_snake_case(name)
     }
@@ -124,10 +125,9 @@ fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> Rust
         MemberAccessOp::LenAsI32 => crate::coercion::len_i32_projection(receiver),
         MemberAccessOp::Array2RowsAsI32 => crate::coercion::array2_rows_i32_projection(receiver),
         MemberAccessOp::Array2ColsAsI32 => crate::coercion::array2_cols_i32_projection(receiver),
-        MemberAccessOp::StaticConstant { owner } => RustExpr::Raw(format!(
-            "{owner}::{}",
-            rust_associated_const_ident(&plan.member)
-        )),
+        MemberAccessOp::StaticConstant { owner } => {
+            associated_const_projection(owner, &rust_associated_const_ident(&plan.member))
+        }
         MemberAccessOp::RustField { rust_name } => {
             RustExpr::Field(Box::new(receiver), rust_name.clone())
         }

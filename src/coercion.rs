@@ -817,6 +817,41 @@ pub fn force_shared_borrow_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("&{}", emit::emit_expr(&expr)))
 }
 
+pub fn self_associated_path_projection(member: &str) -> RustExpr {
+    RustExpr::Raw(format!("Self::{member}"))
+}
+
+pub fn owner_associated_path_projection(owner: &str, member: &str) -> RustExpr {
+    RustExpr::Raw(format!("{owner}::{member}"))
+}
+
+pub fn java_class_static_path_projection(member: &str) -> RustExpr {
+    RustExpr::Raw(format!("JavaClass::<()>::{member}"))
+}
+
+pub fn external_crate_path_projection(crate_name: &str, member: &str) -> RustExpr {
+    RustExpr::Raw(format!("{crate_name}::{member}"))
+}
+
+pub fn external_crate_associated_path_projection(
+    crate_name: &str,
+    type_name: &str,
+    member: &str,
+) -> RustExpr {
+    RustExpr::Raw(format!("{crate_name}::{type_name}::{member}"))
+}
+
+pub fn static_storage_accessor_projection(static_name: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "Self::__static_{}()",
+        crate::parser::to_snake_case(static_name)
+    ))
+}
+
+pub fn associated_const_projection(owner: &str, member: &str) -> RustExpr {
+    RustExpr::Raw(format!("{owner}::{member}"))
+}
+
 pub fn borrow_as_dyn_trait(expr: RustExpr, trait_name: &str) -> RustExpr {
     RustExpr::Raw(format!("&{} as &dyn {trait_name}", emit::emit_expr(&expr)))
 }
@@ -3653,6 +3688,38 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&typed_none_projection("Box<dyn std::any::Any>")),
             "None::<Box<dyn std::any::Any>>"
+        );
+        assert_eq!(
+            emit::emit_expr(&self_associated_path_projection("build")),
+            "Self::build"
+        );
+        assert_eq!(
+            emit::emit_expr(&owner_associated_path_projection("Owner", "build")),
+            "Owner::build"
+        );
+        assert_eq!(
+            emit::emit_expr(&java_class_static_path_projection("for_name")),
+            "JavaClass::<()>::for_name"
+        );
+        assert_eq!(
+            emit::emit_expr(&external_crate_path_projection("hdf5", "flush")),
+            "hdf5::flush"
+        );
+        assert_eq!(
+            emit::emit_expr(&external_crate_associated_path_projection(
+                "sqlite",
+                "SQLiteConfig",
+                "new",
+            )),
+            "sqlite::SQLiteConfig::new"
+        );
+        assert_eq!(
+            emit::emit_expr(&static_storage_accessor_projection("VALUES")),
+            "Self::__static_v_a_l_u_e_s()"
+        );
+        assert_eq!(
+            emit::emit_expr(&associated_const_projection("Owner", "VALUE")),
+            "Owner::VALUE"
         );
         assert_eq!(
             emit::emit_expr(&logical_not_projection(RustExpr::Var("ready".to_string()))),
