@@ -50,8 +50,7 @@ fn infer_method_reference_output_shape_from_call_plan(
         input_shape.java_ty.clone(),
     );
     if let Some(receiver_ty) =
-        crate::call_plan::native_java_unbound_method_reference_receiver_type(target)
-            .or_else(|| object_method_reference_receiver_type(target, input_shape))
+        method_reference_receiver_type_for_call_plan(target, Some(input_shape))
     {
         lambda_env.insert_local("__java_method_ref_value".to_string(), receiver_ty);
         let receiver = Expr::Var("__java_method_ref_value".to_string());
@@ -88,6 +87,15 @@ fn infer_method_reference_output_shape_from_call_plan(
             .map(|lowered| lowered.into_slot_shape());
     }
     None
+}
+
+pub fn method_reference_receiver_type_for_call_plan(
+    target: &str,
+    input_shape: Option<&RustSlotShape>,
+) -> Option<JavaType> {
+    crate::call_plan::native_java_unbound_method_reference_receiver_type(target).or_else(|| {
+        input_shape.and_then(|shape| object_method_reference_receiver_type(target, shape))
+    })
 }
 
 pub fn object_method_reference_receiver_type(

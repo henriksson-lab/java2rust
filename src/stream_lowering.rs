@@ -13,7 +13,7 @@ use crate::expr_shape::ShapeEnv;
 use crate::facts::{ExternalFactLookupIndex, FactSet, ReceiverMutabilityFact};
 use crate::java_ir::{BinaryOp, CallKind, Expr, JavaType, Literal, Stmt, UnaryOp};
 use crate::literal_lowering::literal_to_rust;
-use crate::method_reference_shape::object_method_reference_receiver_type;
+use crate::method_reference_shape::method_reference_receiver_type_for_call_plan;
 use crate::operator_lowering::{binary_op_to_rust, stream_unary_prefix};
 use crate::rust_ir::RustExpr;
 use crate::shape_projection::{
@@ -1291,10 +1291,7 @@ fn emit_stream_instance_method_reference_body_through_call_plan(
     facts: &FactSet,
     typed_lambda_env: &crate::types::TypeEnv,
 ) -> Option<String> {
-    let receiver_ty = crate::call_plan::native_java_unbound_method_reference_receiver_type(target)
-        .or_else(|| {
-            param_shape.and_then(|shape| object_method_reference_receiver_type(target, shape))
-        })?;
+    let receiver_ty = method_reference_receiver_type_for_call_plan(target, param_shape)?;
     let mut typed_lambda_env = typed_lambda_env.clone();
     typed_lambda_env.insert_local(param.to_string(), receiver_ty);
     let receiver_expr = Expr::Var(param.to_string());

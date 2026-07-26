@@ -102,7 +102,9 @@ use new_java2rust::lower::{lower_program_with_facts, lower_program_with_plans};
 use new_java2rust::lowering_diagnostics::collect_lowering_diagnostic_plans;
 use new_java2rust::method_reference_lowering::render_method_reference;
 use new_java2rust::method_reference_plan::{MethodReferencePlan, plan_method_reference};
-use new_java2rust::method_reference_shape::infer_single_input_method_reference_output_shape;
+use new_java2rust::method_reference_shape::{
+    infer_single_input_method_reference_output_shape, method_reference_receiver_type_for_call_plan,
+};
 use new_java2rust::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
 use new_java2rust::object_model::rust_enum_variant_name_from_parsed_constant;
 use new_java2rust::operator_lowering::{
@@ -30924,6 +30926,22 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         Some(JavaType::Unknown("get_name".to_string()))
     );
     assert_eq!(
+        method_reference_receiver_type_for_call_plan(
+            "String",
+            Some(&RustSlotShape::for_storage(JavaType::String)),
+        ),
+        Some(JavaType::String)
+    );
+    assert_eq!(
+        method_reference_receiver_type_for_call_plan(
+            "Object",
+            Some(&RustSlotShape::for_storage(JavaType::Unknown(
+                "NameHolder".to_string()
+            ))),
+        ),
+        Some(JavaType::Unknown("NameHolder".to_string()))
+    );
+    assert_eq!(
         render_method_reference(&MethodReferencePlan::CurrentReceiverMethod {
             method: "emit".to_string(),
             arity: Some(3),
@@ -30973,10 +30991,11 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(!stream_lowering_source.contains("format!(\"*{param}\")"));
     assert!(!stream_lowering_source.contains("format!(\"(**{param})\")"));
     assert!(!stream_lowering_source.contains("format!(\"(*{param})\")"));
-    assert!(stream_lowering_source.contains("object_method_reference_receiver_type"));
+    assert!(stream_lowering_source.contains("method_reference_receiver_type_for_call_plan"));
+    assert!(!stream_lowering_source.contains("object_method_reference_receiver_type"));
     assert!(!stream_lowering_source.contains("fn object_method_reference_receiver_type"));
     assert!(!stream_lowering_source.contains("fn java_type_for_unbound_method_reference_target"));
-    assert!(stream_lowering_source.contains("native_java_unbound_method_reference_receiver_type"));
+    assert!(!stream_lowering_source.contains("native_java_unbound_method_reference_receiver_type"));
     assert!(stream_lowering_source.contains("plan_lowered_slot_conversion"));
     assert!(
         !stream_lowering_source.contains("fn stream_native_string_method_requires_string_receiver")
@@ -30991,6 +31010,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
             .contains("pub fn native_java_instance_receiver_type_hint")
     );
     assert!(shape_source.contains("object_method_reference_receiver_type"));
+    assert!(shape_source.contains("method_reference_receiver_type_for_call_plan"));
     assert!(shape_source.contains("pub fn object_method_reference_receiver_type"));
     assert!(!shape_source.contains("fn java_type_for_unbound_method_reference_target"));
     assert!(shape_source.contains("native_java_unbound_method_reference_receiver_type"));

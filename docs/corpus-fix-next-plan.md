@@ -3837,6 +3837,13 @@ string-method table directly. This keeps the remaining stream fallback path
 aligned with ordinary call planning while full stream lambda ABI planning is
 still being migrated.
 
+Method-reference receiver inference cleanup: unbound method-reference receiver
+typing now goes through
+`method_reference_shape::method_reference_receiver_type_for_call_plan`. Stream
+lowering no longer composes native method-reference receiver hints with the
+`Object::...` fallback locally; it asks the shared method-reference shape layer
+before planning the call target.
+
 ## Rerun Protocol
 
 After each fix:
