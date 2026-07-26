@@ -27506,6 +27506,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub enum BorrowedStringViewProjection"));
     assert!(coercion_source.contains("pub fn borrowed_string_view_projection"));
     assert!(coercion_source.contains("pub fn apply_borrowed_string_view_projection"));
+    assert!(coercion_source.contains("pub fn anonymous_dyn_trait_projection"));
+    assert!(coercion_source.contains("pub fn unwrap_java_null_receiver_projection"));
+    assert!(coercion_source.contains("pub fn typed_none_projection"));
     assert!(coercion_source.contains("pub fn collapse_redundant_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));
@@ -27567,6 +27570,13 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("format!(\"&{}\""));
     assert!(!lower_source.contains("format!(\"&{packed_vec}\")"));
     assert!(!lower_source.contains("format!(\"&{rendered} as &dyn"));
+    assert!(!lower_source.contains("<dyn {trait_name}>::anonymous()"));
+    assert!(lower_source.contains("anonymous_dyn_trait_projection("));
+    assert!(!lower_source.contains("format!(\"None::<{rust_ty}>\")"));
+    assert!(!lower_source.contains("None::<Box<dyn std::any::Any>>"));
+    assert!(lower_source.contains("typed_none_projection("));
+    assert!(!lower_source.contains("{}.expect(\"Java null receiver\")"));
+    assert!(lower_source.contains("unwrap_java_null_receiver_projection("));
     assert!(!lower_source.contains("format!(\"{}.as_ref().unwrap()\""));
     assert!(!lower_source.contains("format!(\"&{name}\")"));
     assert!(!lower_source.contains("self.clone()/* TODO(translation): validate added clone */"));

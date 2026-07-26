@@ -26,8 +26,8 @@ use crate::call_plan::{
 };
 use crate::coercion::{
     BorrowProjectionUse, Coercion, JavaDisplayPlan, OptionalSequenceReceiverProjection,
-    SequenceIterationProjection, apply_audited_clone_recovery, apply_coercions,
-    apply_java_display_plan, apply_literal_slot_plan, array_fill_projection,
+    SequenceIterationProjection, anonymous_dyn_trait_projection, apply_audited_clone_recovery,
+    apply_coercions, apply_java_display_plan, apply_literal_slot_plan, array_fill_projection,
     array2_rows_i32_projection, borrow_as_dyn_trait, borrowed_sequence_extend_arg,
     borrowed_string_literal_temporary_plan, clone_erased_object_ref_once,
     collection_sort_by_comparator_projection, collection_sort_projection,
@@ -48,9 +48,9 @@ use crate::coercion::{
     sequence_get_expect_projection, sequence_iter_cloned_projection,
     sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
     subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
-    tuple_field_projection, unwrap_optional_shared_value,
-    unwrap_result_or_panic_uncaught_java_exception, varargs_packed_vec_projection,
-    varargs_spread_extend_projection,
+    tuple_field_projection, typed_none_projection, unwrap_java_null_receiver_projection,
+    unwrap_optional_shared_value, unwrap_result_or_panic_uncaught_java_exception,
+    varargs_packed_vec_projection, varargs_spread_extend_projection,
 };
 use crate::constructor_plan::{
     ConstructorDelegationPlan, ConstructorFieldValuePlan, DelegatedConstructorTrailingStmt,
@@ -12996,7 +12996,7 @@ fn lower_int_stream_range_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Op
 
 fn typed_none_for_java_type(ty: &JavaType, facts: &FactSet) -> RustExpr {
     let rust_ty = emit::emit_type(&rust_type_for_java_type_with_facts(ty, facts));
-    RustExpr::Raw(format!("None::<{rust_ty}>"))
+    typed_none_projection(&rust_ty)
 }
 
 fn lower_anonymous_class_new_for_boxed_dyn_slot(
@@ -13033,7 +13033,7 @@ fn lower_anonymous_class_new_for_boxed_dyn_slot(
     {
         return None;
     }
-    Some(RustExpr::Raw(format!("<dyn {trait_name}>::anonymous()")))
+    Some(anonymous_dyn_trait_projection(trait_name))
 }
 
 fn lower_anonymous_interface_new_expr(
@@ -13051,12 +13051,12 @@ fn lower_anonymous_interface_new_expr(
     {
         let trait_name =
             crate::slot_render::rust_name_for_java_named_type(&resolved.declaring_type);
-        return Some(RustExpr::Raw(format!("<dyn {trait_name}>::anonymous()")));
+        return Some(anonymous_dyn_trait_projection(&trait_name));
     }
     body?;
     let constructed_name = concrete_java_type_name(ty)?;
     let trait_name = anonymous_class_trait_name(constructed_name, ctx)?;
-    Some(RustExpr::Raw(format!("<dyn {trait_name}>::anonymous()")))
+    Some(anonymous_dyn_trait_projection(&trait_name))
 }
 
 fn anonymous_class_trait_name(constructed_name: &str, ctx: LowerCtx) -> Option<String> {
@@ -13496,10 +13496,7 @@ fn lower_nullable_resource_stream_call_for_concrete_slot(
     {
         return None;
     }
-    Some(RustExpr::Raw(format!(
-        "{}.expect(\"Java null receiver\")",
-        emit::emit_expr(lowered_expr)
-    )))
+    Some(unwrap_java_null_receiver_projection(lowered_expr.clone()))
 }
 
 fn optional_getter_actual_shape_for_slot(expr: &Expr, slot: &Slot) -> Option<RustSlotShape> {
@@ -13929,7 +13926,7 @@ fn typed_none_for_slot(slot: &Slot) -> Option<RustExpr> {
     {
         return None;
     }
-    Some(RustExpr::Raw("None::<Box<dyn std::any::Any>>".to_string()))
+    Some(typed_none_projection("Box<dyn std::any::Any>"))
 }
 
 fn lower_array_expr_for_slot(

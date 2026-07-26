@@ -3765,6 +3765,13 @@ Rust constructor/default/cast placeholder spellings now live in `coercion`
 projection helpers. This keeps another set of generated-Rust templates out of
 expression lowering while preserving current conservative TODO markers.
 
+Optional/dyn boundary projection cleanup: typed erased-object `None`, anonymous
+dyn-trait construction, and nullable Java resource-stream unwraps now render
+through `coercion::{typed_none_projection, anonymous_dyn_trait_projection,
+unwrap_java_null_receiver_projection}`. Lowering still decides when those Java
+boundary cases apply, but their Rust spelling no longer lives in local raw
+`format!` branches.
+
 ## Rerun Protocol
 
 After each fix:

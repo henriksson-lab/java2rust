@@ -821,8 +821,23 @@ pub fn borrow_as_dyn_trait(expr: RustExpr, trait_name: &str) -> RustExpr {
     RustExpr::Raw(format!("&{} as &dyn {trait_name}", emit::emit_expr(&expr)))
 }
 
+pub fn anonymous_dyn_trait_projection(trait_name: &str) -> RustExpr {
+    RustExpr::Raw(format!("<dyn {trait_name}>::anonymous()"))
+}
+
 pub fn unwrap_optional_shared_value(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("{}.as_ref().unwrap()", emit::emit_expr(&expr)))
+}
+
+pub fn unwrap_java_null_receiver_projection(expr: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{}.expect(\"Java null receiver\")",
+        emit::emit_expr(&expr)
+    ))
+}
+
+pub fn typed_none_projection(rust_ty: &str) -> RustExpr {
+    RustExpr::Raw(format!("None::<{rust_ty}>"))
 }
 
 pub fn optional_get_owned_value_projection(receiver: RustExpr) -> RustExpr {
@@ -3563,6 +3578,20 @@ mod tests {
                 "value".to_string()
             ))),
             "value.is_none()"
+        );
+        assert_eq!(
+            emit::emit_expr(&anonymous_dyn_trait_projection("Callback")),
+            "<dyn Callback>::anonymous()"
+        );
+        assert_eq!(
+            emit::emit_expr(&unwrap_java_null_receiver_projection(RustExpr::Var(
+                "stream".to_string()
+            ))),
+            "stream.expect(\"Java null receiver\")"
+        );
+        assert_eq!(
+            emit::emit_expr(&typed_none_projection("Box<dyn std::any::Any>")),
+            "None::<Box<dyn std::any::Any>>"
         );
     }
 
