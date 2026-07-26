@@ -32,7 +32,9 @@ use crate::coercion::{
     borrowed_string_literal_temporary_plan, clone_erased_object_ref_once,
     collection_sort_by_comparator_projection, collection_sort_projection,
     constructor_self_field_replacement, deref_borrowed_projection, ensure_borrow_projection,
-    erased_object_borrowed_downcast_ref_projection, force_shared_borrow_projection,
+    erased_object_borrowed_downcast_ref_projection,
+    exception_self_as_supertype_facade_boundary_projection,
+    explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
     iterator_next_expect_projection, java_integral_literal_char, len_i32_projection,
     literal_slot_plan, map_get_expect_projection, map_get_mut_expect_projection,
     map_get_projection, normalize_map_key_borrow_projection,
@@ -45,7 +47,8 @@ use crate::coercion::{
     rewrite_downcast_expect_message, rust_expr_mentions_constructor_self_temporary,
     sequence_get_expect_projection, sequence_iter_cloned_projection,
     sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
-    to_owned_sequence_projection, tuple_field_projection, unwrap_optional_shared_value,
+    subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
+    tuple_field_projection, unwrap_optional_shared_value,
     unwrap_result_or_panic_uncaught_java_exception, varargs_packed_vec_projection,
     varargs_spread_extend_projection,
 };
@@ -9597,10 +9600,7 @@ fn lower_current_self_cast_for_slot(expr: &Expr, slot: &Slot, ctx: LowerCtx) -> 
         return None;
     }
     if known_exception_supertype {
-        return Some(RustExpr::Raw(
-            "Default::default()/* TODO(translation): Java exception self-as-supertype facade boundary */"
-                .to_string(),
-        ));
+        return Some(exception_self_as_supertype_facade_boundary_projection());
     }
     if target.ownership == OwnershipShape::Owned
         && matches!(
@@ -12507,10 +12507,10 @@ fn lower_explicit_external_facade_cast_receiver(
     let cast_type = crate::stdlib::canonical_external_receiver_type_key(cast_type);
     let rust_type = crate::slot_render::rust_name_for_java_named_type(&cast_type);
     let lowered_inner = lower_expr_with_refinements(inner, env, ctx, refinements);
-    Some(RustExpr::Raw(format!(
-        "{{ let _java_facade_cast_source = &({}); {rust_type}::default() }}/* TODO(translation): validate explicit Java facade cast */",
-        emit::emit_expr(&lowered_inner)
-    )))
+    Some(explicit_java_facade_cast_placeholder_projection(
+        lowered_inner,
+        &rust_type,
+    ))
 }
 
 fn lower_jdk_input_stream_super_read_call(
@@ -16995,10 +16995,10 @@ fn lower_borrowed_sequence_get_subtype_to_concrete_slot(
         return None;
     }
     let target_ty = emit::emit_type(&rust_type_for_slot_with_facts(target, facts));
-    Some(RustExpr::Raw(format!(
-        "{target_ty}::new_1({}.clone())",
-        emit::emit_expr(get_expr)
-    )))
+    Some(subtype_owned_constructor_from_borrowed_projection(
+        &target_ty,
+        get_expr.clone(),
+    ))
 }
 
 fn javalibs_known_java_subtype(actual: &JavaType, target: &JavaType) -> bool {

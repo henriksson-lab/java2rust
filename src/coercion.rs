@@ -1362,6 +1362,16 @@ pub fn tuple_field_projection(tuple: RustExpr, field_index: usize) -> RustExpr {
     RustExpr::Raw(format!("{}.{}", emit::emit_expr(&tuple), field_index))
 }
 
+pub fn subtype_owned_constructor_from_borrowed_projection(
+    target_ty: &str,
+    borrowed: RustExpr,
+) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{target_ty}::new_1({}.clone())",
+        emit::emit_expr(&borrowed)
+    ))
+}
+
 pub fn primitive_is_nan_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("{}.is_nan()", emit::emit_expr(&expr)))
 }
@@ -2247,6 +2257,23 @@ pub fn apply_audited_clone_recovery(expr: RustExpr) -> RustExpr {
 
 pub fn apply_clone_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("{}.clone()", emit::emit_expr(&expr)))
+}
+
+pub fn exception_self_as_supertype_facade_boundary_projection() -> RustExpr {
+    RustExpr::Raw(
+        "Default::default()/* TODO(translation): Java exception self-as-supertype facade boundary */"
+            .to_string(),
+    )
+}
+
+pub fn explicit_java_facade_cast_placeholder_projection(
+    source: RustExpr,
+    rust_type: &str,
+) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ let _java_facade_cast_source = &({}); {rust_type}::default() }}/* TODO(translation): validate explicit Java facade cast */",
+        emit::emit_expr(&source)
+    ))
 }
 
 pub fn render_audited_clone_recovery(rendered: &str) -> String {
@@ -3736,6 +3763,24 @@ mod tests {
                 "values.get(key)".to_string()
             ))),
             "values.get(key).copied().expect(\"Java null receiver\")"
+        );
+        assert_eq!(
+            emit::emit_expr(&subtype_owned_constructor_from_borrowed_projection(
+                "Locatable",
+                RustExpr::Var("value".to_string()),
+            )),
+            "Locatable::new_1(value.clone())"
+        );
+        assert_eq!(
+            emit::emit_expr(&exception_self_as_supertype_facade_boundary_projection()),
+            "Default::default()/* TODO(translation): Java exception self-as-supertype facade boundary */"
+        );
+        assert_eq!(
+            emit::emit_expr(&explicit_java_facade_cast_placeholder_projection(
+                RustExpr::Var("graphics".to_string()),
+                "Graphics2D",
+            )),
+            "{ let _java_facade_cast_source = &(graphics); Graphics2D::default() }/* TODO(translation): validate explicit Java facade cast */"
         );
         assert_eq!(
             emit::emit_expr(&erased_object_borrowed_downcast_ref_projection(

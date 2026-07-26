@@ -27528,6 +27528,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn map_get_expect_projection"));
     assert!(coercion_source.contains("pub fn map_get_mut_expect_projection"));
     assert!(coercion_source.contains("pub fn optional_copied_expect_projection"));
+    assert!(coercion_source.contains("pub fn subtype_owned_constructor_from_borrowed_projection"));
+    assert!(
+        coercion_source.contains("pub fn exception_self_as_supertype_facade_boundary_projection")
+    );
+    assert!(coercion_source.contains("pub fn explicit_java_facade_cast_placeholder_projection"));
     assert!(coercion_source.contains("pub fn erased_object_borrowed_downcast_ref_projection"));
     assert!(coercion_source.contains("pub fn snapshot_rendered_shared_borrow_argument"));
     assert!(array_source.contains("pub fn array2_from_rows_projection"));
@@ -27572,6 +27577,15 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains(".downcast::<\") && rendered.contains"));
     assert!(!lower_source.contains("downcast_ref::<{rust_type}>().expect(\"invalid Java cast\")"));
     assert!(lower_source.contains("erased_object_borrowed_downcast_ref_projection("));
+    assert!(!lower_source.contains("{target_ty}::new_1({}.clone())"));
+    assert!(lower_source.contains("subtype_owned_constructor_from_borrowed_projection("));
+    assert!(
+        !lower_source
+            .contains("Default::default()/* TODO(translation): Java exception self-as-supertype facade boundary */")
+    );
+    assert!(lower_source.contains("exception_self_as_supertype_facade_boundary_projection()"));
+    assert!(!lower_source.contains("/* TODO(translation): validate explicit Java facade cast */"));
+    assert!(lower_source.contains("explicit_java_facade_cast_placeholder_projection("));
     assert!(!lower_source.contains("format!(\"{name}.as_str()\")"));
     assert!(!lower_source.contains("format!(\"{name}.as_mut_slice()\")"));
     assert!(!lower_source.contains("format!(\"{name}.as_slice()\")"));

@@ -12,6 +12,32 @@ clone, optional-carrier, stream, and facade ABI special cases with shared facts,
 plans, or helpers. Use that plan when choosing between a new local idiom fix and
 a broader fact/policy extraction.
 
+## Batched Execution Mode
+
+The current implementation mode is batched. Prefer coordinated slices that move
+several related rendered Rust spellings or local compatibility rules into shared
+facts, slot plans, or projection helpers before running the expensive full
+corpus gate. Inside a batch, use focused unit/idiom tests and cheap compile
+checks to catch local drift; run the full `idiom_gaps` suite and corpus reruns
+at batch boundaries.
+
+Batching should not weaken the semantic direction of this plan. The default
+tradeoff is to accept a temporary increase in local error count when it removes
+specialized rules, makes Rust ABI/borrow behavior fact-driven, or positions the
+translator for global semantic analysis. Do not make algorithmic shortcuts that
+would block later whole-program/source-summary analysis; prefer indices,
+memoization, and reusable plans over narrowing analysis scope.
+
+Current default batch size: group roughly 3-5 low-risk projection/fact cleanups,
+or one larger semantic refactor, then run a full gate. Use up to 10 parallel
+workers for independent investigation or corpus triage, but keep final edits in
+this checkout when they touch shared translator or `javalibs` behavior.
+
+Checkpoint policy: the user has granted permission to create git commits in
+their name at good checkpoints. Use this after coherent batches with meaningful
+verification, so larger edits have clean rollback points. Commit messages should
+name the completed slice and avoid bundling unrelated working-tree changes.
+
 ## Top Design Priority: Infer Rust Facade ABI Slots
 
 Repeated corpus failures around missing `&`, `&mut`, clones, slices, optional
@@ -3731,6 +3757,13 @@ Collection remove-if projection cleanup: Java lambda extraction and predicate
 lowering for `Collection.removeIf(...)` still happen in `call_lowering.rs`, but
 the Rust `retain(|item| !(predicate))` spelling now lives in
 `coercion::collection_remove_if_projection`.
+
+Boundary projection cleanup: borrowed-sequence subtype recovery, exception
+self-as-supertype facade fallback, and explicit Java facade-cast placeholder
+lowering still make their semantic selection decisions in `lower.rs`, but their
+Rust constructor/default/cast placeholder spellings now live in `coercion`
+projection helpers. This keeps another set of generated-Rust templates out of
+expression lowering while preserving current conservative TODO markers.
 
 ## Rerun Protocol
 
