@@ -3780,6 +3780,13 @@ Unsupported Java deserialization interface casts now use
 handoff marker in the projection layer while preserving the existing explicit
 serialization-facade TODO behavior.
 
+Expression projection cleanup: native print stream macros, do-while condition
+negation, Java pre/post increment expression blocks, and source-subtype
+`.into()` recovery now render through `coercion::{print_macro_projection,
+logical_not_projection, java_update_expression_projection, into_projection}`.
+Lowering still selects the Java statement/expression semantics, but these
+mechanical Rust spellings are no longer embedded in local raw `format!` arms.
+
 ## Rerun Protocol
 
 After each fix:

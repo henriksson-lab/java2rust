@@ -27511,6 +27511,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn typed_none_projection"));
     assert!(coercion_source.contains("pub fn boxed_dyn_trait_projection"));
     assert!(coercion_source.contains("pub fn unsupported_deserialization_cast_handoff_projection"));
+    assert!(coercion_source.contains("pub fn print_macro_projection"));
+    assert!(coercion_source.contains("pub fn logical_not_projection"));
+    assert!(coercion_source.contains("pub fn java_update_expression_projection"));
+    assert!(coercion_source.contains("pub fn into_projection"));
     assert!(coercion_source.contains("pub fn collapse_redundant_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));
@@ -27579,6 +27583,15 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("typed_none_projection("));
     assert!(!lower_source.contains("{}.expect(\"Java null receiver\")"));
     assert!(lower_source.contains("unwrap_java_null_receiver_projection("));
+    assert!(!lower_source.contains("{macro_name}!()"));
+    assert!(!lower_source.contains("{macro_name}!(\\\"{{}}\\\", {})"));
+    assert!(lower_source.contains("print_macro_projection("));
+    assert!(!lower_source.contains("!({})"));
+    assert!(lower_source.contains("logical_not_projection("));
+    assert!(!lower_source.contains("__java_old_value = {target}"));
+    assert!(lower_source.contains("java_update_expression_projection("));
+    assert!(!lower_source.contains("format!(\"{}.into()\""));
+    assert!(lower_source.contains("into_projection("));
     assert!(!lower_source.contains("format!(\"{}.as_ref().unwrap()\""));
     assert!(!lower_source.contains("format!(\"&{name}\")"));
     assert!(!lower_source.contains("self.clone()/* TODO(translation): validate added clone */"));

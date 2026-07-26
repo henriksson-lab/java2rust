@@ -1415,6 +1415,20 @@ pub fn thread_sleep_millis_projection(millis: RustExpr) -> RustExpr {
     ))
 }
 
+pub fn print_macro_projection(macro_name: &str, arg: Option<RustExpr>) -> RustExpr {
+    match arg {
+        Some(arg) => RustExpr::Raw(format!(
+            "{macro_name}!(\"{{}}\", {})",
+            emit::emit_expr(&arg)
+        )),
+        None => RustExpr::Raw(format!("{macro_name}!()")),
+    }
+}
+
+pub fn logical_not_projection(expr: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!("!({})", emit::emit_expr(&expr)))
+}
+
 pub fn math_max_projection(left: RustExpr, right: RustExpr) -> RustExpr {
     RustExpr::Call {
         function: Box::new(RustExpr::Raw("std::cmp::max".to_string())),
@@ -2289,6 +2303,25 @@ pub fn apply_audited_clone_recovery(expr: RustExpr) -> RustExpr {
 
 pub fn apply_clone_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("{}.clone()", emit::emit_expr(&expr)))
+}
+
+pub fn into_projection(expr: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!("{}.into()", emit::emit_expr(&expr)))
+}
+
+pub fn java_update_expression_projection(
+    target: RustExpr,
+    update_op: &str,
+    prefix: bool,
+) -> RustExpr {
+    let target = emit::emit_expr(&target);
+    if prefix {
+        RustExpr::Raw(format!("{{ {target} {update_op} 1; {target} }}"))
+    } else {
+        RustExpr::Raw(format!(
+            "{{ let __java_old_value = {target}; {target} {update_op} 1; __java_old_value }}"
+        ))
+    }
 }
 
 pub fn exception_self_as_supertype_facade_boundary_projection() -> RustExpr {
@@ -3559,6 +3592,17 @@ mod tests {
             ))),
             "std::thread::sleep(std::time::Duration::from_millis(millis as u64))"
         );
+        assert_eq!(
+            emit::emit_expr(&print_macro_projection(
+                "println",
+                Some(RustExpr::Var("value".to_string()))
+            )),
+            "println!(\"{}\", value)"
+        );
+        assert_eq!(
+            emit::emit_expr(&print_macro_projection("println", None)),
+            "println!()"
+        );
     }
 
     #[test]
@@ -3609,6 +3653,30 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&typed_none_projection("Box<dyn std::any::Any>")),
             "None::<Box<dyn std::any::Any>>"
+        );
+        assert_eq!(
+            emit::emit_expr(&logical_not_projection(RustExpr::Var("ready".to_string()))),
+            "!(ready)"
+        );
+        assert_eq!(
+            emit::emit_expr(&into_projection(RustExpr::Var("value".to_string()))),
+            "value.into()"
+        );
+        assert_eq!(
+            emit::emit_expr(&java_update_expression_projection(
+                RustExpr::Var("i".to_string()),
+                "+=",
+                true,
+            )),
+            "{ i += 1; i }"
+        );
+        assert_eq!(
+            emit::emit_expr(&java_update_expression_projection(
+                RustExpr::Var("i".to_string()),
+                "+=",
+                false,
+            )),
+            "{ let __java_old_value = i; i += 1; __java_old_value }"
         );
     }
 

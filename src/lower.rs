@@ -35,11 +35,12 @@ use crate::coercion::{
     ensure_borrow_projection, erased_object_borrowed_downcast_ref_projection,
     erased_object_box_projection, exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
-    iterator_next_expect_projection, java_integral_literal_char, len_i32_projection,
-    literal_slot_plan, map_get_expect_projection, map_get_mut_expect_projection,
+    into_projection, iterator_next_expect_projection, java_integral_literal_char,
+    java_update_expression_projection, len_i32_projection, literal_slot_plan,
+    logical_not_projection, map_get_expect_projection, map_get_mut_expect_projection,
     map_get_projection, normalize_map_key_borrow_projection,
     normalize_reused_clone_for_borrowed_argument, optional_copied_expect_projection,
-    owned_map_keys_set_projection, parenthesize_borrowed_method_receiver,
+    owned_map_keys_set_projection, parenthesize_borrowed_method_receiver, print_macro_projection,
     project_optional_element_borrow_carrier, project_optional_receiver,
     project_optional_sequence_receiver, reborrow_optional_mut_projection,
     render_sequence_iteration_source, rendered_expr_has_clone_recovery,
@@ -3465,7 +3466,7 @@ fn lower_stmt(
             let mut loop_body = lower_block(body, &mut env.clone(), wrap_returns_in_ok, ctx);
             let lowered_condition = lower_expr_for_slot(condition, env, condition_slot(), ctx);
             loop_body.push(if_stmt(
-                RustExpr::Raw(format!("!({})", emit::emit_expr(&lowered_condition))),
+                logical_not_projection(lowered_condition),
                 vec![break_stmt(None)],
                 Vec::new(),
             ));
@@ -6627,13 +6628,10 @@ fn render_native_system_print_stream_stmt(
         (NativeSystemStream::Err, NativePrintStreamMethod::Println) => "eprintln",
     };
     let Some(arg) = arg else {
-        return RustExpr::Raw(format!("{macro_name}!()"));
+        return print_macro_projection(macro_name, None);
     };
     let lowered = lower_expr_for_slot(arg, env, Slot::DisplaySegment, ctx);
-    RustExpr::Raw(format!(
-        "{macro_name}!(\"{{}}\", {})",
-        emit::emit_expr(&lowered)
-    ))
+    print_macro_projection(macro_name, Some(lowered))
 }
 
 fn lower_throwing_call_expr_stmt(
@@ -8402,7 +8400,6 @@ fn lower_local_update_value_expr(
         return None;
     };
     let target_expr = lower_expr(expr, env, ctx);
-    let target = emit::emit_expr(&target_expr);
     let update_op = match op {
         UnaryOp::PreInc | UnaryOp::PostInc => "+=",
         UnaryOp::PreDec | UnaryOp::PostDec => "-=",
@@ -8410,11 +8407,11 @@ fn lower_local_update_value_expr(
     };
     Some(match op {
         UnaryOp::PreInc | UnaryOp::PreDec => {
-            RustExpr::Raw(format!("{{ {target} {update_op} 1; {target} }}"))
+            java_update_expression_projection(target_expr, update_op, true)
         }
-        UnaryOp::PostInc | UnaryOp::PostDec => RustExpr::Raw(format!(
-            "{{ let __java_old_value = {target}; {target} {update_op} 1; __java_old_value }}"
-        )),
+        UnaryOp::PostInc | UnaryOp::PostDec => {
+            java_update_expression_projection(target_expr, update_op, false)
+        }
         _ => return None,
     })
 }
@@ -13446,10 +13443,7 @@ fn lower_source_subtype_to_supertype_slot(
     if !source_subtype_conversion_available(actual_name, target_name, ctx) {
         return None;
     }
-    Some(RustExpr::Raw(format!(
-        "{}.into()",
-        emit::emit_expr(lowered_expr)
-    )))
+    Some(into_projection(lowered_expr.clone()))
 }
 
 fn source_subtype_conversion_available(
