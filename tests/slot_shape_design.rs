@@ -16,12 +16,12 @@ use new_java2rust::call_plan::{
     TrivialAccessorCallPlan, external_call_lowered_type, external_call_returns_rust_result,
     external_constructor_arg_shapes, facade_receiver_slot_plan, native_collection_arg_shapes,
     native_collection_arg_shapes_with_facts, native_collection_lowered_type,
-    optional_receiver_slot_plan, plan_call_arguments, plan_call_arguments_with_facts,
-    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation, plan_call_expr,
-    plan_call_statement, plan_call_target, plan_call_target_with_facts,
-    plan_call_target_with_facts_and_arity, plan_constructor_arguments, plan_new_target,
-    plan_new_target_with_facts, plan_trivial_accessor_call, resolved_call_arg_shapes,
-    resolved_constructor_arg_shapes,
+    native_java_instance_receiver_type_hint, optional_receiver_slot_plan, plan_call_arguments,
+    plan_call_arguments_with_facts, plan_call_arguments_with_facts_and_args,
+    plan_call_exception_propagation, plan_call_expr, plan_call_statement, plan_call_target,
+    plan_call_target_with_facts, plan_call_target_with_facts_and_arity, plan_constructor_arguments,
+    plan_new_target, plan_new_target_with_facts, plan_trivial_accessor_call,
+    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::{
     Coercion, OptionalReceiverProjection, borrowed_string_literal_temporary_plan,
@@ -28778,6 +28778,11 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert!(is_owned_string_result_method("toLowerCase", 0));
     assert!(is_owned_string_result_method("toUpperCase", 0));
     assert!(!is_owned_string_result_method("toLowerCase", 1));
+    assert_eq!(
+        native_java_instance_receiver_type_hint("trim", 0),
+        Some(JavaType::String)
+    );
+    assert_eq!(native_java_instance_receiver_type_hint("trim", 1), None);
     assert!(!stream_shape_source.contains("name == \"trim\""));
     assert!(!stream_shape_source.contains("toLowerCase"));
     assert!(!stream_shape_source.contains("IntegerParseInt"));
@@ -30976,9 +30981,14 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(
         !stream_lowering_source.contains("fn stream_native_string_method_requires_string_receiver")
     );
-    assert!(stream_lowering_source.contains("native_java_string_instance_method"));
+    assert!(stream_lowering_source.contains("native_java_instance_receiver_type_hint"));
+    assert!(!stream_lowering_source.contains("native_java_string_instance_method"));
     assert!(
         include_str!("../src/call_plan.rs").contains("pub fn native_java_string_instance_method")
+    );
+    assert!(
+        include_str!("../src/call_plan.rs")
+            .contains("pub fn native_java_instance_receiver_type_hint")
     );
     assert!(shape_source.contains("object_method_reference_receiver_type"));
     assert!(shape_source.contains("pub fn object_method_reference_receiver_type"));

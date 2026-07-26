@@ -3830,6 +3830,13 @@ compatibility helpers while raw `RustExpr`/`RustType` strings are still common,
 but their parsing behavior is no longer owned by local lowering/assembly
 modules.
 
+Stream receiver type-hint cleanup: stream lambda lowering now asks
+`call_plan::native_java_instance_receiver_type_hint` for the temporary receiver
+type implied by native Java instance-call planning, instead of checking the
+string-method table directly. This keeps the remaining stream fallback path
+aligned with ordinary call planning while full stream lambda ABI planning is
+still being migrated.
+
 ## Rerun Protocol
 
 After each fix:

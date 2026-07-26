@@ -2528,6 +2528,10 @@ pub fn native_java_string_instance_method(
     })
 }
 
+pub fn native_java_instance_receiver_type_hint(name: &str, arg_count: usize) -> Option<JavaType> {
+    native_java_string_instance_method(name, arg_count).map(|_| JavaType::String)
+}
+
 pub fn native_java_unbound_method_reference_receiver_type(target: &str) -> Option<JavaType> {
     match crate::stdlib::canonical_external_receiver_type_key(target).as_str() {
         "String" => Some(JavaType::String),

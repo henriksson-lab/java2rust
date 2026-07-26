@@ -1,3 +1,4 @@
+use crate::call_plan::native_java_instance_receiver_type_hint;
 use crate::coercion::{
     BorrowProjectionUse, IndexToUsizeProjection, LoweredExpr, SequenceIterationProjection,
     StreamLambdaParamProjection, apply_borrowed_string_view_projection, apply_clone_projection,
@@ -174,18 +175,18 @@ fn emit_stream_lambda_shared_native_call(
             if let Some(param_shape) = param_shape {
                 typed_lambda_env.insert_local(param.to_string(), param_shape.java_ty.clone());
                 &typed_lambda_env
-            } else if crate::call_plan::native_java_string_instance_method(name, args.len())
-                .is_some()
+            } else if let Some(receiver_ty) =
+                native_java_instance_receiver_type_hint(name, args.len())
             {
-                typed_lambda_env.insert_local(param.to_string(), JavaType::String);
+                typed_lambda_env.insert_local(param.to_string(), receiver_ty);
                 &typed_lambda_env
             } else {
                 &typed_lambda_env
             }
         } else if locals.iter().any(|local| *local == receiver_name)
-            && crate::call_plan::native_java_string_instance_method(name, args.len()).is_some()
+            && let Some(receiver_ty) = native_java_instance_receiver_type_hint(name, args.len())
         {
-            typed_lambda_env.insert_local(receiver_name.clone(), JavaType::String);
+            typed_lambda_env.insert_local(receiver_name.clone(), receiver_ty);
             &typed_lambda_env
         } else {
             &typed_lambda_env
