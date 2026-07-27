@@ -18461,6 +18461,49 @@ class ListUse {
 }
 
 #[test]
+fn source_object_varargs_storage_carrier_uses_owned_native_param_shape() {
+    let parsed = parse_java_source(
+        r#"
+class ExceptionContext {
+    private Object[][] stored;
+
+    public void addMessage(Object pattern, Object... arguments) {
+        stored[0] = arguments;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "addMessage" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let params = signatures.method_param_plans(ty, method).unwrap();
+
+    assert!(method.params[1].is_varargs);
+    let constraints =
+        method_param_shape_constraints(ty, method, &method.params[1], &usage, &resolved.facts);
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::Owned
+        )),
+        "{:?}",
+        method.params[1].ty
+    );
+    assert!(constraints.contains(&SignatureConstraint::RequiredView(ViewShape::Native)));
+    assert_eq!(params[1].shape.ownership, OwnershipShape::Owned);
+    assert_eq!(params[1].shape.view, ViewShape::Native);
+}
+
+#[test]
 fn internal_readonly_object_helper_params_and_alias_return_can_borrow() {
     let parsed = parse_java_source(
         r#"

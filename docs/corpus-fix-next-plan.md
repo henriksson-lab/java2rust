@@ -4441,6 +4441,21 @@ the outer method return shape is already optional. Focused guards green:
 `plain_fallthrough_try_with_value_returns_uses_optional_result_carrier`, and
 `optional_argument_wrap_reused_value_clones_before_some`.
 
+Arithmetic rendering and source `Object...` carrier follow-up: the Rust emitter
+now preserves explicit grouping for arithmetic binary children instead of
+treating `+`/`*` as freely associative. This keeps translated Java numeric
+evaluation order stable for constant-backed expressions while still allowing
+logical/bitwise flattening. Source Java `Object...` parameters now keep the
+owned native varargs carrier shape even for public methods, so source methods
+that store, forward, or append erased arguments no longer borrow a temporary
+slice. Focused guards green:
+`source_static_final_primitive_expression_fields_emit_associated_constants`,
+`source_static_final_constants_can_reference_other_source_constants_and_hex_sign_bits`,
+`source_static_final_primitive_array_fields_emit_associated_slice_constants`,
+`source_object_varargs_storage_carrier_uses_owned_native_param_shape`,
+`source_object_varargs_forward_and_append_erased_arguments`, and
+`inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan`.
+
 ## Rerun Protocol
 
 After each fix:

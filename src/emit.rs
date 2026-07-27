@@ -176,35 +176,55 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
 }
 
 pub fn emit_expr(expr: &RustExpr) -> String {
-    emit_expr_prec(expr, 0, false)
+    emit_expr_prec(expr, 0, None, ExprChildSide::None)
 }
 
-fn emit_expr_prec(expr: &RustExpr, parent_prec: u8, right_child: bool) -> String {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExprChildSide {
+    None,
+    Left,
+    Right,
+}
+
+fn emit_expr_prec(
+    expr: &RustExpr,
+    parent_prec: u8,
+    parent_op: Option<&str>,
+    child_side: ExprChildSide,
+) -> String {
     let rendered = match expr {
         RustExpr::Literal(value) => value.clone(),
         RustExpr::Var(name) => rust_ident(name),
         RustExpr::Field(receiver, field) => {
             format!(
                 "{}.{}",
-                emit_expr_prec(receiver, 11, false),
+                emit_expr_prec(receiver, 11, None, ExprChildSide::None),
                 rust_ident(field)
             )
         }
         RustExpr::Index(array, index) => {
             format!(
                 "{}[{}]",
-                emit_expr_prec(array, 11, false),
-                emit_expr_prec(index, 0, false)
+                emit_expr_prec(array, 11, None, ExprChildSide::None),
+                emit_expr_prec(index, 0, None, ExprChildSide::None)
             )
         }
         RustExpr::Binary { op, left, right } => format!(
             "{} {op} {}",
-            emit_expr_prec(left, binary_precedence(op), false),
-            emit_expr_prec(right, binary_precedence(op), true)
+            emit_expr_prec(left, binary_precedence(op), Some(op), ExprChildSide::Left),
+            emit_expr_prec(right, binary_precedence(op), Some(op), ExprChildSide::Right)
         ),
-        RustExpr::Unary { op, expr } => format!("{op}{}", emit_expr_prec(expr, 10, false)),
+        RustExpr::Unary { op, expr } => {
+            format!(
+                "{op}{}",
+                emit_expr_prec(expr, 10, None, ExprChildSide::None)
+            )
+        }
         RustExpr::Cast { expr, ty } => {
-            format!("{} as {ty}", emit_expr_prec(expr, 11, false))
+            format!(
+                "{} as {ty}",
+                emit_expr_prec(expr, 11, None, ExprChildSide::None)
+            )
         }
         RustExpr::If {
             condition,
@@ -212,13 +232,13 @@ fn emit_expr_prec(expr: &RustExpr, parent_prec: u8, right_child: bool) -> String
             else_expr,
         } => format!(
             "if {} {{ {} }} else {{ {} }}",
-            emit_expr_prec(condition, 0, false),
-            emit_expr_prec(then_expr, 0, false),
-            emit_expr_prec(else_expr, 0, false)
+            emit_expr_prec(condition, 0, None, ExprChildSide::None),
+            emit_expr_prec(then_expr, 0, None, ExprChildSide::None),
+            emit_expr_prec(else_expr, 0, None, ExprChildSide::None)
         ),
         RustExpr::Call { function, args } => format!(
             "{}({})",
-            emit_expr_prec(function, 11, false),
+            emit_expr_prec(function, 11, None, ExprChildSide::None),
             args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
         ),
         RustExpr::MethodCall {
@@ -227,7 +247,7 @@ fn emit_expr_prec(expr: &RustExpr, parent_prec: u8, right_child: bool) -> String
             args,
         } => format!(
             "{}.{}({})",
-            emit_expr_prec(receiver, 11, false),
+            emit_expr_prec(receiver, 11, None, ExprChildSide::None),
             rust_ident(method),
             args.iter().map(emit_expr).collect::<Vec<_>>().join(", ")
         ),
@@ -242,7 +262,7 @@ fn emit_expr_prec(expr: &RustExpr, parent_prec: u8, right_child: bool) -> String
         RustExpr::Raw(raw) => normalize_raw_expr_for_context(raw, parent_prec),
     };
 
-    if expr_needs_parentheses(expr, parent_prec, right_child) {
+    if expr_needs_parentheses(expr, parent_prec, parent_op, child_side) {
         format!("({rendered})")
     } else {
         rendered
@@ -325,12 +345,25 @@ fn is_raw_identifier_keyword(name: &str) -> bool {
     )
 }
 
-fn expr_needs_parentheses(expr: &RustExpr, parent_prec: u8, right_child: bool) -> bool {
+fn expr_needs_parentheses(
+    expr: &RustExpr,
+    parent_prec: u8,
+    parent_op: Option<&str>,
+    child_side: ExprChildSide,
+) -> bool {
     let own_prec = expr_precedence(expr);
     own_prec < parent_prec
-        || (right_child
-            && own_prec == parent_prec
-            && matches!(expr, RustExpr::Binary { op, .. } if !is_associative_binary_op(op)))
+        || match (expr, parent_op, child_side) {
+            (RustExpr::Binary { op: child_op, .. }, Some(parent_op), ExprChildSide::Left) => {
+                arithmetic_binary_op(parent_op) && arithmetic_binary_op(child_op)
+            }
+            (RustExpr::Binary { op: child_op, .. }, Some(parent_op), ExprChildSide::Right)
+                if own_prec == parent_prec =>
+            {
+                !is_associative_binary_op(parent_op) || child_op != parent_op
+            }
+            _ => false,
+        }
 }
 
 fn normalize_raw_expr_for_context(raw: &str, parent_prec: u8) -> String {
@@ -481,7 +514,11 @@ fn binary_precedence(op: &str) -> u8 {
 }
 
 fn is_associative_binary_op(op: &str) -> bool {
-    matches!(op, "&&" | "||" | "&" | "|" | "^" | "+" | "*")
+    matches!(op, "&&" | "||" | "&" | "|" | "^")
+}
+
+fn arithmetic_binary_op(op: &str) -> bool {
+    matches!(op, "+" | "-" | "*" | "/" | "%")
 }
 
 #[cfg(test)]
@@ -512,6 +549,22 @@ mod tests {
         let expr = binary("*", binary("+", var("a"), var("b")), var("c"));
 
         assert_eq!(emit_expr(&expr), "(a + b) * c");
+    }
+
+    #[test]
+    fn numeric_binary_chains_preserve_left_grouping() {
+        let add = binary("+", binary("+", var("a"), var("b")), var("c"));
+        let mul = binary("*", binary("*", var("a"), var("b")), var("c"));
+
+        assert_eq!(emit_expr(&add), "(a + b) + c");
+        assert_eq!(emit_expr(&mul), "(a * b) * c");
+    }
+
+    #[test]
+    fn logical_binary_chains_may_flatten() {
+        let expr = binary("&&", binary("&&", var("ready"), var("valid")), var("done"));
+
+        assert_eq!(emit_expr(&expr), "ready && valid && done");
     }
 
     #[test]

@@ -6130,6 +6130,10 @@ pub fn method_param_shape_constraints(
     }
     push_unique_signature_constraints(
         &mut constraints,
+        &source_object_varargs_carrier_constraints(param),
+    );
+    push_unique_signature_constraints(
+        &mut constraints,
         &internal_exact_final_erased_facade_constraints(&param.ty, facts),
     );
     if boundary_kind.is_none() {
@@ -6140,6 +6144,26 @@ pub fn method_param_shape_constraints(
         );
     }
     constraints
+}
+
+fn source_object_varargs_carrier_constraints(param: &Param) -> Vec<SignatureConstraint> {
+    if !param.is_varargs {
+        return Vec::new();
+    }
+    if !java_varargs_erased_object_carrier_type(&param.ty) {
+        return Vec::new();
+    }
+    vec![
+        SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+        SignatureConstraint::RequiredView(ViewShape::Native),
+    ]
+}
+
+fn java_varargs_erased_object_carrier_type(java_ty: &JavaType) -> bool {
+    match java_ty {
+        JavaType::Array(element_ty) => java_type_is_erased_object_boundary(element_ty),
+        _ => java_type_is_erased_object_boundary(java_ty),
+    }
 }
 
 pub fn conservative_boundary_constraints(
