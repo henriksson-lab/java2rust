@@ -277,6 +277,13 @@ impl<'a> EffectiveFacts<'a> {
             .hierarchy_overrides
             .iter()
             .filter(|override_fact| type_name_matches(&override_fact.type_name, type_name))
+            .filter(|override_fact| {
+                !external_simple_erased_override_conflicts_with_parsed_source(
+                    override_fact,
+                    type_name,
+                    self.facts,
+                )
+            })
             .max_by_key(|override_fact| {
                 (
                     fact_precedence_key(override_fact.provenance),
@@ -461,6 +468,20 @@ fn hierarchy_strategy_specificity_rank(strategy: &HierarchyStrategy) -> u8 {
 
 fn type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
     crate::facts::external_type_name_matches(fact_type_name, query_type_name)
+}
+
+fn external_simple_erased_override_conflicts_with_parsed_source(
+    override_fact: &HierarchyOverride,
+    query_type_name: &str,
+    facts: &FactSet,
+) -> bool {
+    override_fact.provenance == FactProvenance::ExternalLibraryPack
+        && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
+        && !override_fact.type_name.contains('.')
+        && facts.type_capability_overrides.iter().any(|capability| {
+            capability.provenance == FactProvenance::ParsedSource
+                && capability.type_name == query_type_name
+        })
 }
 
 fn object_safety_type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {

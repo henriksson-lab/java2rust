@@ -7841,6 +7841,72 @@ class Holder {
 }
 
 #[test]
+fn parsed_source_concrete_type_beats_external_simple_name_erasure() {
+    let parsed = parse_java_source(
+        r#"
+class Matrix {
+    float getScore(char a, char b) { return 1.0f; }
+}
+
+class Alignment {
+    Matrix matrix;
+
+    Matrix getMatrix() {
+        return matrix;
+    }
+
+    float score() {
+        return matrix.getScore('A', 'B');
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "Matrix".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    let representations = plan_representations(&resolved.program, &facts);
+    let usage = analyze_usage(&resolved.program);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+
+    let matrix_field = signatures.required_field_shape("Alignment", "matrix");
+    assert_eq!(matrix_field.dispatch, DispatchShape::Concrete);
+    assert_eq!(matrix_field.view, ViewShape::Native);
+    assert_eq!(
+        matrix_field.java_ty,
+        JavaType::Named {
+            name: "Matrix".to_string(),
+            args: Vec::new(),
+        }
+    );
+    let alignment_ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Alignment")
+        .unwrap();
+    let get_matrix_method = alignment_ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "getMatrix" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let get_matrix = signatures
+        .required_method_signature(alignment_ty, get_matrix_method)
+        .return_shape
+        .as_ref()
+        .expect("getMatrix return shape");
+    assert_eq!(get_matrix.dispatch, DispatchShape::Concrete);
+    assert_eq!(get_matrix.view, ViewShape::Native);
+}
+
+#[test]
 fn constructor_plan_owns_field_value_source_selection() {
     let parsed = parse_java_source(
         r#"
@@ -19414,6 +19480,66 @@ class SourceNullableSlots {
     ));
     assert!(matches!(
         rust_type_for_slot(method_signature.return_shape.as_ref().unwrap()),
+        RustType::Option(_)
+    ));
+}
+
+#[test]
+fn public_source_method_returning_null_uses_optional_concrete_return_shape() {
+    let parsed = parse_java_source(
+        r#"
+public class Alignment {
+    public static Alignment add(Alignment a1, Alignment a2) {
+        if (a1 == null) {
+            if (a2 == null) {
+                return null;
+            }
+            return a2;
+        }
+        return a1;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "add" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        source_method_return_nullability_constraints(method),
+        vec![SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::MaybeNull
+        )]
+    );
+
+    let constraints = method_return_shape_constraints(ty, method, &usage, &resolved.facts);
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::MaybeNull
+        )),
+        "{constraints:?}"
+    );
+
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let return_shape = signatures.method_return_shape(ty, method).unwrap();
+    assert_eq!(
+        return_shape.optional_element_type(),
+        Some(JavaType::Named {
+            name: "Alignment".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert!(matches!(
+        rust_type_for_slot(&return_shape),
         RustType::Option(_)
     ));
 }

@@ -5,7 +5,7 @@ use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
     CaptureOrigin, CaptureSource, DispatchRequirementKind, ExternalApiArgumentEffectFact,
     ExternalArgumentAliasPolicy, FacadeAbiFact, FacadeSlot, FactProvenance, FactSet,
-    HierarchyStrategy, NullabilityState, OwnedRecoveryCapability, ReceiverAbi,
+    HierarchyOverride, HierarchyStrategy, NullabilityState, OwnedRecoveryCapability, ReceiverAbi,
     ReceiverMutabilityFact, external_parameter_nullability_policy,
 };
 use crate::graph::strongly_connected_components;
@@ -6420,19 +6420,27 @@ fn signature_object_representation_fact_constraints_with_effective_facts(
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> Vec<SignatureConstraint> {
-    signature_object_representation_strategy_for(java_ty, facts)
-        .and_then(hierarchy_strategy_signature_dispatch)
+    let Some(override_fact) = signature_object_representation_override_fact_for(java_ty, facts)
+    else {
+        return Vec::new();
+    };
+    if override_fact.provenance == FactProvenance::ParsedSource
+        && matches!(override_fact.strategy, HierarchyStrategy::ConcreteStruct)
+    {
+        return Vec::new();
+    }
+    hierarchy_strategy_signature_dispatch(&override_fact.strategy)
         .map(|dispatch| vec![SignatureConstraint::RequiredDispatch(dispatch)])
         .unwrap_or_default()
 }
 
-fn signature_object_representation_strategy_for<'a>(
+fn signature_object_representation_override_fact_for<'a>(
     java_ty: &JavaType,
     facts: &'a EffectiveFacts<'_>,
-) -> Option<&'a HierarchyStrategy> {
+) -> Option<&'a HierarchyOverride> {
     let type_name = match java_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => name.as_str(),
-        _ => return facts.object_representation_override_strategy_for(java_ty),
+        _ => return None,
     };
     let exact_external_pack_override = facts
         .hierarchy_overrides()
@@ -6445,14 +6453,46 @@ fn signature_object_representation_strategy_for<'a>(
         .max_by_key(|override_fact| {
             signature_hierarchy_strategy_specificity_rank(&override_fact.strategy)
         })
-        .map(|override_fact| &override_fact.strategy);
+        .map(|override_fact| override_fact);
     exact_external_pack_override.or_else(|| {
         facts
-            .object_representation_override_strategy_for(java_ty)
-            .filter(|strategy| {
-                !matches!(strategy, HierarchyStrategy::ErasedObject) || type_name.contains('.')
+            .hierarchy_overrides()
+            .iter()
+            .filter(|override_fact| {
+                signature_hierarchy_override_type_name_matches(&override_fact.type_name, type_name)
+            })
+            .filter(|override_fact| {
+                !matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
+                    || type_name.contains('.')
+            })
+            .max_by_key(|override_fact| {
+                (
+                    signature_fact_precedence_key(override_fact.provenance),
+                    signature_hierarchy_strategy_specificity_rank(&override_fact.strategy),
+                )
             })
     })
+}
+
+fn signature_hierarchy_override_type_name_matches(
+    fact_type_name: &str,
+    query_type_name: &str,
+) -> bool {
+    fact_type_name == query_type_name
+        || fact_type_name
+            .rsplit('.')
+            .next()
+            .is_some_and(|simple_name| simple_name == query_type_name)
+}
+
+fn signature_fact_precedence_key(provenance: FactProvenance) -> u8 {
+    match provenance {
+        FactProvenance::ConservativeFallback => 0,
+        FactProvenance::CorpusAnalysis => 1,
+        FactProvenance::BuiltinExternalModel | FactProvenance::ExternalLibraryPack => 2,
+        FactProvenance::ParsedSource => 3,
+        FactProvenance::UserOverride => 4,
+    }
 }
 
 fn signature_hierarchy_strategy_specificity_rank(strategy: &HierarchyStrategy) -> u8 {
@@ -11276,10 +11316,12 @@ pub fn method_return_shape_constraints(
         })
         .is_some_and(|method_usage| !method_usage.returned_call_results.is_empty());
     let returns_call_result_alias = method_returns_local_initialized_from_call(method);
+    let typed_return_nullability =
+        typed_source_method_return_nullability_constraints(ty, method, facts);
     let flow_return_nullability = if boundary_kind == Some(SignatureBoundaryKind::PublicApi) {
-        Vec::new()
+        nullable_storage_constraints(&typed_return_nullability)
     } else {
-        typed_source_method_return_nullability_constraints(ty, method, facts)
+        typed_return_nullability
     };
     let returned_initializer_nullability = if returns_call_result || returns_call_result_alias {
         Vec::new()
@@ -11631,6 +11673,21 @@ fn signature_constraints_prove_non_null_storage(constraints: &[SignatureConstrai
     constraints.contains(&SignatureConstraint::RequiredStorageNullability(
         NullabilityState::DefinitelyNonNull,
     ))
+}
+
+fn nullable_storage_constraints(constraints: &[SignatureConstraint]) -> Vec<SignatureConstraint> {
+    constraints
+        .iter()
+        .filter(|constraint| {
+            matches!(
+                constraint,
+                SignatureConstraint::RequiredStorageNullability(
+                    NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+                )
+            )
+        })
+        .cloned()
+        .collect()
 }
 
 fn retain_only_storage_nullability(
