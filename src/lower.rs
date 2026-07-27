@@ -4190,6 +4190,12 @@ fn refine_local_plan_from_initializer(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> LocalPlan {
+    if let Some(initializer_shape) =
+        typed_static_constant_initializer_shape(initializer, &local_plan, env, ctx)
+    {
+        local_plan.shape = initializer_shape;
+        return local_plan;
+    }
     local_plan = preserve_declared_erased_object_local_shape(local_plan);
     let Some(initializer) = initializer else {
         return local_plan;
@@ -4269,6 +4275,31 @@ fn refine_local_plan_from_initializer(
     }
     local_plan.shape = initializer_shape;
     local_plan
+}
+
+fn typed_static_constant_initializer_shape(
+    initializer: Option<&Expr>,
+    local_plan: &LocalPlan,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustSlotShape> {
+    let Expr::FieldAccess(receiver, field) = initializer? else {
+        return None;
+    };
+    let plan = crate::member_access_plan::plan_member_access_with_facts(
+        receiver,
+        field,
+        env.type_env(),
+        ctx.facts,
+    )?;
+    if !matches!(
+        plan.op,
+        crate::member_access_plan::MemberAccessOp::StaticConstant { .. }
+    ) || !same_concrete_java_type(&plan.shape.java_ty, &local_plan.java_ty)
+    {
+        return None;
+    }
+    Some(plan.shape)
 }
 
 fn external_crate_constructor_initializer_shape(

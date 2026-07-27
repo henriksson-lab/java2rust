@@ -11283,12 +11283,12 @@ class SourceVarargsBorrowedWriteOptions {
     );
 
     assert!(
-        translation.rust.contains(
-            "vec![format.clone()/* TODO(translation): validate added clone */.into(), cardinality.clone()/* TODO(translation): validate added clone */.into()]"
-        )
-            && !translation
-                .rust
-                .contains("vec![format.into(), cardinality.into()]"),
+        translation
+            .rust
+            .contains("vec![format.into(), cardinality.into()]")
+            && !translation.rust.contains(
+                "vec![format.clone()/* TODO(translation): validate added clone */.into(), cardinality.clone()/* TODO(translation): validate added clone */.into()]"
+            ),
         "{}",
         translation.rust
     );
@@ -11374,13 +11374,14 @@ class ReusedOptionalBorrowedSourceArgument {
     assert!(
         translation
             .rust
-            .contains("pub fn run(output: &String, reference: Option<&GATKPath>, reads: &JavaRDD")
+            .contains("pub fn run(output: String, reference: Option<&GATKPath>, reads: JavaRDD")
+            && translation.rust.contains("Self::write(output.clone()/* TODO(translation): validate added clone */, None, reads.clone()/* TODO(translation): validate added clone */, &vec![option.clone()/* TODO(translation): validate added clone */.into()]);")
             && translation
                 .rust
-                .contains("Self::write(output, reference, reads, &vec![option.clone()/* TODO(translation): validate added clone */.into()]);")
+                .contains("Self::write(output, reference, reads, &vec![option.into()]);")
             && !translation
                 .rust
-                .contains("Self::write(output, reference, reads, &vec![option.into()]);")
+                .contains("Self::write(output, reference, reads, &vec![option.clone()/* TODO(translation): validate added clone */.into()]);")
             && !translation
                 .rust
                 .contains("Some(reference.clone()/* TODO(translation): validate added clone */)"),

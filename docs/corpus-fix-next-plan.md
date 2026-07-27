@@ -4417,12 +4417,18 @@ plan, not only operands that already arrived borrowed. Focused guards green:
 `htsjdk_sam_reader_pack_declares_factory_option_nested_enum`, and
 `htsjdk_variantcontext_pack_models_builder_and_getter_effects`.
 
-Remaining adjacent work: varargs packing now calls the shared reused-owned clone
-decision for each element, but `source_varargs_pack_external_elements_with_explicit_adapter`
-still exposes a real static-field precision gap where typed external constants
-can be erased before the `Into<WriteOption>` adapter is selected. Some varargs
-assertions also need review because they still expect clones for values that are
-consumed exactly once and not read later.
+Varargs/static-constant follow-up: typed external static constants now anchor
+same-typed local declarations before erased-object preservation runs, so
+`ReadsFormatWriteOption.BAM`/`FileCardinalityWriteOption.SINGLE` locals keep
+their precise concrete shapes and varargs packing can select the ordinary
+`Into<WriteOption>` adapter. Varargs element lowering now calls the shared
+reused-owned clone decision, and tests assert the intended move-use policy:
+clone before later reuse, but move when the value is consumed exactly once.
+Focused guards green:
+`source_varargs_pack_external_elements_with_explicit_adapter`,
+`source_varargs_pack_borrowed_external_elements_clones_before_into`,
+`source_overload_prefers_expanded_varargs_over_same_arity_fixed_mismatch`, and
+`reused_optional_borrowed_source_argument_wraps_by_reference`.
 
 ## Rerun Protocol
 
