@@ -4541,11 +4541,16 @@ Next FastQC batch candidates from that rerun:
    exact `java.io.ByteArrayOutputStream.toByteArray()` as a non-throwing
    `Vec<i8>` getter and adds simple/exact byte-array-output-stream conversion
    facts to `java.io.OutputStream`. The previous four missing `to_byte_array`
-   rows are gone and the focused generated-Rust count is 25. The next Base64
-   slice should focus on JDK output-stream `write(int)` ABI, source subclass
-   `Base64OutputStream -> JavaIoOutputStream` adaptation, missing inherited
-   `Base64InputStream.close`, byte-array move recovery, unresolved qualified
-   `java`, ByteBuffer method return facts, and byte/int bitwise coercion.
+   rows are gone and the focused generated-Rust count is 25. The latest Base64
+   slice `.tmp/corpus-fastqc-base64-single-after-query-inherited-close-r1`
+   materializes query-backed inherited JDK method surfaces for source classes
+   extending imported/qualified platform stream supertypes and keeps local
+   simple-name shadows guarded. The two `Base64InputStream.close` missing-method
+   rows are gone and the focused generated-Rust count is 6. The next Base64
+   slice should focus on source subclass `Base64OutputStream ->
+   JavaIoOutputStream` adaptation, `OutputStream.write(byte[])` exact-slot
+   selection, `baos.unwrap()` moving an optional resource before cleanup, and
+   byte-array move recovery for `buffer`/`out_buff`.
 
 Inherited exception-owner follow-up: inherited source method bodies now lower
 with the emitted subclass as the body/field context but use the declaring type

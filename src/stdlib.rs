@@ -6009,7 +6009,9 @@ impl ExternalApiFacadeSupport {
         used_calls: &BTreeMap<String, BTreeSet<usize>>,
     ) {
         for ty in &program.types {
-            self.add_emitted_external_super_method_surfaces_for_type(facts, ty, used_calls);
+            self.add_emitted_external_super_method_surfaces_for_type(
+                facts, ty, program, used_calls,
+            );
         }
     }
 
@@ -6017,6 +6019,7 @@ impl ExternalApiFacadeSupport {
         &mut self,
         facts: &FactSet,
         ty: &TypeDecl,
+        program: &Program,
         used_calls: &BTreeMap<String, BTreeSet<usize>>,
     ) {
         let owner = rust_name_for_java_named_type(&canonical_external_receiver_type_key(&ty.name));
@@ -6049,7 +6052,7 @@ impl ExternalApiFacadeSupport {
                     .map(|return_type| {
                         external_facade_method_return_type_with_facts(
                             facts,
-                            Some(&canonical_external_receiver_type_key(&ty.name)),
+                            Some(&inherited.declaring_type),
                             &inherited.method_name,
                             Some(inherited.arg_count),
                             return_type,
@@ -6062,7 +6065,60 @@ impl ExternalApiFacadeSupport {
                 }
                 let method_body = external_facade_instance_method_with_facts(
                     facts,
-                    &canonical_external_receiver_type_key(&ty.name),
+                    &inherited.declaring_type,
+                    &inherited.method_name,
+                    &inherited.rust_name,
+                    inherited.arg_count,
+                    &return_rust,
+                );
+                if self.has_method_signature(&owner, &inherited.rust_name, inherited.arg_count)
+                    && !self.replace_weak_method_return(
+                        &owner,
+                        &inherited.rust_name,
+                        inherited.arg_count,
+                        &method_body,
+                    )
+                {
+                    continue;
+                }
+                self.add_method(owner.clone(), method_body);
+            }
+            for inherited in
+                query_backed_external_inherited_methods_for_type(facts, ty, program, used_calls)
+            {
+                if source_method_hierarchy_contains(
+                    &Program {
+                        package: None,
+                        imports: Vec::new(),
+                        types: vec![ty.clone()],
+                    },
+                    ty,
+                    &inherited.method_name,
+                    inherited.arg_count,
+                ) {
+                    continue;
+                }
+                let return_rust = inherited
+                    .fact
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| {
+                        external_facade_method_return_type_with_facts(
+                            facts,
+                            Some(&inherited.declaring_type),
+                            &inherited.method_name,
+                            Some(inherited.arg_count),
+                            return_type,
+                            inherited.fact.return_nullability,
+                        )
+                    })
+                    .unwrap_or_else(|| "()".to_string());
+                if let Some(return_type) = &inherited.fact.return_type {
+                    self.add_java_type(return_type);
+                }
+                let method_body = external_facade_instance_method_with_facts(
+                    facts,
+                    &inherited.declaring_type,
                     &inherited.method_name,
                     &inherited.rust_name,
                     inherited.arg_count,
@@ -6083,7 +6139,9 @@ impl ExternalApiFacadeSupport {
         }
         for member in &ty.members {
             if let Member::Type(nested) = member {
-                self.add_emitted_external_super_method_surfaces_for_type(facts, nested, used_calls);
+                self.add_emitted_external_super_method_surfaces_for_type(
+                    facts, nested, program, used_calls,
+                );
             }
         }
     }
@@ -11046,6 +11104,98 @@ fn external_facade_instance_method(name: &str, arg_count: usize, return_type: &s
         external_facade_self_args(arg_count),
         external_facade_default_expr(return_type, Some(name))
     )
+}
+
+fn query_backed_external_inherited_methods_for_type(
+    facts: &FactSet,
+    ty: &TypeDecl,
+    program: &Program,
+    used_calls: &BTreeMap<String, BTreeSet<usize>>,
+) -> Vec<crate::inherited_members::ExternalInheritedInstanceMethod> {
+    let mut methods = Vec::new();
+    let mut seen = BTreeSet::new();
+    for super_name in resolved_external_super_names_for_method_queries(facts, ty, program) {
+        for (rust_name, arities) in used_calls {
+            for arg_count in arities {
+                let Some(fact) = crate::external_packs::external_api_effect_for_receiver_with_arity(
+                    Some(&super_name),
+                    rust_name,
+                    Some(*arg_count),
+                ) else {
+                    continue;
+                };
+                let rust_name = crate::parser::to_snake_case(&fact.method_name);
+                if !seen.insert((rust_name.clone(), *arg_count)) {
+                    continue;
+                }
+                methods.push(crate::inherited_members::ExternalInheritedInstanceMethod {
+                    declaring_type: fact
+                        .receiver_type
+                        .clone()
+                        .unwrap_or_else(|| super_name.clone()),
+                    method_name: fact.method_name.clone(),
+                    rust_name,
+                    arg_count: *arg_count,
+                    fact,
+                });
+            }
+        }
+    }
+    methods
+}
+
+fn resolved_external_super_names_for_method_queries(
+    facts: &FactSet,
+    ty: &TypeDecl,
+    program: &Program,
+) -> Vec<String> {
+    let mut super_names = Vec::new();
+    if let Some(extends) = ty.extends.as_deref() {
+        super_names.extend(resolved_external_type_names_for_simple_or_qualified(
+            extends, program,
+        ));
+    }
+    super_names.extend(
+        facts
+            .reachable_hierarchy_edges_for_type(&JavaType::Named {
+                name: ty.name.clone(),
+                args: Vec::new(),
+            })
+            .into_iter()
+            .flat_map(|edge| {
+                resolved_external_type_names_for_simple_or_qualified(&edge.super_name, program)
+            }),
+    );
+    super_names.sort();
+    super_names.dedup();
+    super_names
+}
+
+fn resolved_external_type_names_for_simple_or_qualified(
+    type_name: &str,
+    program: &Program,
+) -> Vec<String> {
+    let type_name = type_name.trim();
+    if type_name.contains('.') {
+        return vec![type_name.to_string()];
+    }
+
+    let mut out = Vec::new();
+    for import in program.imports.iter().filter(|import| !import.is_static) {
+        if import.is_wildcard {
+            let qualified = format!("{}.{}", import.path.trim_end_matches(".*"), type_name);
+            if is_java_platform_facade_type_name(&qualified) {
+                out.push(qualified);
+            }
+            continue;
+        }
+        if import.path.rsplit('.').next() == Some(type_name) {
+            out.push(import.path.clone());
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn external_facade_instance_method_with_facts(

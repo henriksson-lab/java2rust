@@ -8920,6 +8920,61 @@ class MiniFilterOutput extends FilterOutputStream {
 }
 
 #[test]
+fn emitted_jdk_stream_subclass_gets_query_backed_inherited_close_surface() {
+    let translation = translate_source(
+        r#"
+import java.io.*;
+
+class MiniCloseableFilterInput extends FilterInputStream {
+    MiniCloseableFilterInput(InputStream input) {
+        super(input);
+    }
+
+    void finish() throws IOException {
+        this.close();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("impl MiniCloseableFilterInput")
+            && translation
+                .rust
+                .contains("pub fn close(&self) -> Result<(), JavaException>")
+            && translation.rust.contains("self.close();")
+            && !translation.rust.contains("no method named")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn local_filter_input_stream_shadow_does_not_get_jdk_inherited_close_surface() {
+    let translation = translate_source(
+        r#"
+class FilterInputStream {
+}
+
+class LocalFilterInputShadow extends FilterInputStream {
+    void finish() {
+        this.close();
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .rust
+            .contains("impl LocalFilterInputShadow {\n    pub fn close"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn modeled_external_super_constructor_field_read_defers_until_self_temporary_exists() {
     let translation = translate_source(
         r#"
