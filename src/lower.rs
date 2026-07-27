@@ -32,7 +32,8 @@ use crate::coercion::{
     borrowed_string_literal_temporary_plan, boxed_dyn_trait_projection,
     char_sequence_collect_string_projection, clone_erased_object_ref_once,
     collection_sort_by_comparator_projection, collection_sort_projection,
-    constructor_self_field_replacement, deref_borrowed_projection, ensure_borrow_projection,
+    constructor_self_field_projection, constructor_self_field_replacement,
+    deref_borrowed_projection, ensure_borrow_projection,
     erased_object_borrowed_downcast_ref_projection, erased_object_box_projection,
     exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
@@ -1734,7 +1735,7 @@ fn constructor_field_plans_with_body_local_decls(
         let (field_name, value, shape) = constructor_assigned_field_parts(plan);
         let lowered = lower_self_dependent_constructor_field_value(value, shape, &local_env, ctx);
         lowered_body.push(assignment_stmt(
-            RustExpr::Raw(format!("__java_self.{field_name}")),
+            constructor_self_field_projection(&field_name),
             lowered,
         ));
     }
@@ -1789,7 +1790,7 @@ fn constructor_field_plans_with_trailing_body(
         let (field_name, value, shape) = constructor_assigned_field_parts(plan);
         let lowered = lower_self_dependent_constructor_field_value(value, shape, env, ctx);
         body.push(assignment_stmt(
-            RustExpr::Raw(format!("__java_self.{field_name}")),
+            constructor_self_field_projection(&field_name),
             lowered,
         ));
     }
@@ -2737,7 +2738,7 @@ fn lower_delegated_constructor_trailing_stmt(
             let slot = assignment_value_plan_for_shape(&shape).slot;
             let lowered = lower_expr_for_slot(value, env, slot.clone(), ctx);
             let lowered = wrap_optional_assignment_value_if_needed(value, env, slot, lowered, ctx);
-            assignment_stmt(RustExpr::Raw(format!("__java_self.{field_name}")), lowered)
+            assignment_stmt(constructor_self_field_projection(field_name), lowered)
         }
         DelegatedConstructorTrailingStmt::InstanceCall { resolved, args } => {
             let receiver = Expr::This;

@@ -27454,6 +27454,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn optional_or_else_owned_value_projection"));
     assert!(coercion_source.contains("pub fn rust_expr_mentions_constructor_self_temporary"));
     assert!(coercion_source.contains("pub fn constructor_self_field_replacement"));
+    assert!(coercion_source.contains("pub fn constructor_self_field_projection"));
     assert!(coercion_source.contains("pub fn render_parse_receiver"));
     assert!(coercion_source.contains("pub fn primitive_parse_projection"));
     assert!(coercion_source.contains("pub fn render_string_join_vararg_value"));
@@ -27648,6 +27649,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"Self::{}\""));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"{rust_name}::new"));
     assert!(!lower_source.contains("RustExpr::Raw(format!(\"{owner}::{field}\""));
+    assert!(!lower_source.contains("RustExpr::Raw(format!(\"__java_self.{field_name}\""));
     assert!(!lower_source.contains("self.__outer.borrow().{}"));
     assert!(!lower_source.contains(".iter().collect::<String>()"));
     assert!(!lower_source.contains("Self::__set_static_{}"));

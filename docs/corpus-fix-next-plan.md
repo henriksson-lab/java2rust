@@ -218,6 +218,10 @@ for mutable Java static fields now use coercion projections for the
 thread-local `RefCell<Option<T>>` read/write spellings. Source lowering still
 owns deciding which Java fields need storage accessors and what initial value
 slot to use.
+Constructor self-field projection follow-up: deferred constructor field
+assignments and delegated-constructor trailing field assignments now use a
+shared `__java_self.field` projection helper. Constructor lowering still owns
+sequencing, default seeding, and self-dependent expression recovery.
 
 Landed optional-carrier follow-up: raw-erasure casts into optional targets now
 route through `lower_present_expr_for_optional_target`, so typed optional

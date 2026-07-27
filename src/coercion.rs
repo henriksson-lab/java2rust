@@ -1047,6 +1047,10 @@ pub fn constructor_self_field_replacement(replacement: &str) -> String {
         .to_string()
 }
 
+pub fn constructor_self_field_projection(field_name: &str) -> RustExpr {
+    RustExpr::Raw(format!("__java_self.{field_name}"))
+}
+
 pub fn literal_slot_plan(literal: &Literal, slot: &Slot) -> Option<LiteralSlotPlan> {
     let target = slot_target_shape(slot)?;
     if let Literal::String(value) = literal
