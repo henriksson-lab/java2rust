@@ -20,6 +20,16 @@ pub fn java_accessor_method_reference_fallback_name(name: &str) -> bool {
     name == "get" || name.starts_with("get_")
 }
 
+pub fn rust_name_for_java_named_type(name: &str) -> String {
+    if !name.contains('.') {
+        return name.to_string();
+    }
+    name.split('.')
+        .filter(|part| !part.trim().is_empty())
+        .map(upper_camel_identifier_part)
+        .collect::<String>()
+}
+
 fn java_getter_property_suffix(name: &str) -> Option<&str> {
     name.strip_prefix("get")
         .filter(|rest| !rest.is_empty())
@@ -48,6 +58,22 @@ fn lower_camel_from_snake(name: &str) -> String {
             out.extend(ch.to_uppercase());
             uppercase_next = false;
         } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn upper_camel_identifier_part(part: &str) -> String {
+    let mut out = String::new();
+    let mut uppercase_next = true;
+    for ch in part.chars() {
+        if ch == '_' || ch == '-' || ch == '$' {
+            uppercase_next = true;
+        } else if uppercase_next {
+            out.push(ch.to_ascii_uppercase());
+            uppercase_next = false;
+        } else if ch.is_ascii_alphanumeric() {
             out.push(ch);
         }
     }

@@ -6831,7 +6831,7 @@ fn hierarchy_strategy_signature_dispatch(strategy: &HierarchyStrategy) -> Option
             trait_name: trait_name.clone(),
         }),
         HierarchyStrategy::ClosedEnum { enum_name, .. } => Some(DispatchShape::ClosedEnum {
-            enum_name: crate::slot_render::rust_name_for_java_named_type(enum_name),
+            enum_name: crate::java_naming::rust_name_for_java_named_type(enum_name),
         }),
         HierarchyStrategy::ErasedObject => Some(DispatchShape::ErasedObject),
         HierarchyStrategy::ConcreteStruct => Some(DispatchShape::Concrete),

@@ -896,29 +896,7 @@ fn java_type_variable_name(name: &str) -> bool {
 }
 
 pub fn rust_name_for_java_named_type(name: &str) -> String {
-    if !name.contains('.') {
-        return name.to_string();
-    }
-    name.split('.')
-        .filter(|part| !part.trim().is_empty())
-        .map(upper_camel_identifier_part)
-        .collect::<String>()
-}
-
-fn upper_camel_identifier_part(part: &str) -> String {
-    let mut out = String::new();
-    let mut uppercase_next = true;
-    for ch in part.chars() {
-        if ch == '_' || ch == '-' || ch == '$' {
-            uppercase_next = true;
-        } else if uppercase_next {
-            out.push(ch.to_ascii_uppercase());
-            uppercase_next = false;
-        } else if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-        }
-    }
-    out
+    crate::java_naming::rust_name_for_java_named_type(name)
 }
 
 pub fn render_native_java_rust_type_policy(

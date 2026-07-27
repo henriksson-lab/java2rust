@@ -4116,6 +4116,10 @@ Operator lowering cleanup: numeric binary promotion now keeps structured
 instead of rendering a raw parenthesized string. String equality only uses the
 string-view plan when a borrowed string view is actually present, and optional
 string view projection canonicalizes to `.as_deref()`.
+Signature naming cleanup: Java named-type to Rust identifier normalization now
+lives in neutral `java_naming` with a compatibility wrapper in `slot_render`.
+`signature.rs` no longer depends on `slot_render` for closed-enum dispatch
+requirements, keeping signature planning free of Rust type rendering APIs.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
