@@ -51,13 +51,14 @@ use crate::coercion::{
     reborrow_optional_mut_projection, render_sequence_iteration_source,
     rendered_expr_has_clone_recovery, rendered_expr_has_direct_clone_recovery,
     rendered_expr_is_mutable_alias, rewrite_downcast_expect_message,
-    rust_expr_mentions_constructor_self_temporary, self_associated_path_projection,
-    sequence_get_expect_projection, sequence_iter_cloned_projection,
-    sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
-    static_storage_accessor_projection, static_storage_getter_body_projection,
-    static_storage_setter_body_projection, static_storage_setter_path_projection,
-    subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
-    tuple_field_projection, typed_none_projection, unsupported_constructor_call_handoff_projection,
+    rust_expr_is_constructed_optional_value, rust_expr_mentions_constructor_self_temporary,
+    self_associated_path_projection, sequence_get_expect_projection,
+    sequence_iter_cloned_projection, sequence_iter_copied_projection,
+    snapshot_rendered_shared_borrow_argument, static_storage_accessor_projection,
+    static_storage_getter_body_projection, static_storage_setter_body_projection,
+    static_storage_setter_path_projection, subtype_owned_constructor_from_borrowed_projection,
+    to_owned_sequence_projection, tuple_field_projection, typed_none_projection,
+    unsupported_constructor_call_handoff_projection,
     unsupported_deserialization_cast_handoff_projection,
     unsupported_outer_capture_constructor_projection, unwrap_java_null_receiver_projection,
     unwrap_optional_shared_value, unwrap_result_or_panic_uncaught_java_exception,
@@ -9105,7 +9106,7 @@ fn adapt_owned_native_borrow_argument(
     if target_shape.ownership == OwnershipShape::MutableBorrow && !matches!(source, Expr::Var(_)) {
         return lowered;
     }
-    if lowered_expr_is_constructed_optional_value(&lowered) {
+    if rust_expr_is_constructed_optional_value(&lowered) {
         return lowered;
     }
     match target_shape.ownership {
@@ -9123,29 +9124,6 @@ fn adapt_owned_native_borrow_argument(
         ),
         _ => lowered,
     }
-}
-
-fn lowered_expr_is_constructed_optional_value(expr: &RustExpr) -> bool {
-    match expr {
-        RustExpr::Call { function, .. } => {
-            matches!(function.as_ref(), RustExpr::Var(name) if name == "Some")
-        }
-        RustExpr::If {
-            then_expr,
-            else_expr,
-            ..
-        } => {
-            lowered_expr_is_constructed_optional_value(then_expr)
-                || lowered_expr_is_constructed_optional_value(else_expr)
-        }
-        RustExpr::Raw(raw) => lowered_raw_expr_is_constructed_optional_value(raw),
-        _ => false,
-    }
-}
-
-fn lowered_raw_expr_is_constructed_optional_value(rendered: &str) -> bool {
-    let trimmed = rendered.trim_start();
-    trimmed.starts_with("Some(") || (trimmed.starts_with("if ") && trimmed.contains("{ Some("))
 }
 
 fn borrowed_two_dimensional_array_target_accepts_native_matrix(

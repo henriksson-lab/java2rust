@@ -27711,6 +27711,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("fn render_option_some"));
     assert!(coercion_source.contains("fn render_raw_option_some"));
     assert!(coercion_source.contains("pub fn unwrap_rendered_some_expr"));
+    assert!(coercion_source.contains("pub fn rust_expr_is_constructed_optional_value"));
+    assert!(!lower_source.contains("fn lowered_expr_is_constructed_optional_value"));
+    assert!(!lower_source.contains("fn lowered_raw_expr_is_constructed_optional_value"));
     assert!(!coercion_source.contains("pub enum OptionalArgumentProjection"));
     assert!(!coercion_source.contains("pub fn apply_optional_argument_projection"));
     assert!(coercion_source.contains("pub enum OptionalReceiverProjection"));

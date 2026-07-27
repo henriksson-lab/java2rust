@@ -807,6 +807,29 @@ pub fn unwrap_rendered_some_expr(expr: &RustExpr) -> Option<RustExpr> {
         .map(|inner| RustExpr::Raw(inner.to_string()))
 }
 
+pub fn rust_expr_is_constructed_optional_value(expr: &RustExpr) -> bool {
+    match expr {
+        RustExpr::Call { function, .. } => {
+            matches!(function.as_ref(), RustExpr::Var(name) if name == "Some")
+        }
+        RustExpr::If {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            rust_expr_is_constructed_optional_value(then_expr)
+                || rust_expr_is_constructed_optional_value(else_expr)
+        }
+        RustExpr::Raw(raw) => rendered_expr_is_constructed_optional_value(raw),
+        _ => false,
+    }
+}
+
+fn rendered_expr_is_constructed_optional_value(rendered: &str) -> bool {
+    let trimmed = rendered.trim_start();
+    trimmed.starts_with("Some(") || (trimmed.starts_with("if ") && trimmed.contains("{ Some("))
+}
+
 pub fn parenthesize_borrowed_method_receiver(receiver: RustExpr) -> RustExpr {
     let rendered = emit::emit_expr(&receiver);
     if rendered.starts_with('&') && !(rendered.starts_with("(&") && rendered.ends_with(')')) {

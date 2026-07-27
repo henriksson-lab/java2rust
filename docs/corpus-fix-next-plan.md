@@ -161,6 +161,11 @@ compatibility, `None` idempotence, and fallback slot conversion to
 `conversion_lowering::adapt_optional_assignment_value_for_target`. Lowering
 still chooses the actual expression shape from source/fact context, but it no
 longer parses optional wrapper renderings locally.
+Optional constructed-value detection cleanup: argument borrowing now calls
+`coercion::rust_expr_is_constructed_optional_value` when avoiding accidental
+borrows of already-constructed optional wrappers. The raw `Some(...)`
+compatibility fallback remains centralized beside `unwrap_rendered_some_expr`
+and optional string-view normalization instead of living in `lower.rs`.
 Remaining cleanup should continue replacing nullable call sites that choose
 `.as_ref()`, `.as_deref()`, `Some(...)`, or clone recovery locally with calls
 through these shared conversion helpers or direct slot plans.
