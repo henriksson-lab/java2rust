@@ -232,17 +232,8 @@ fn method_reference_callable_key_candidates(
     input_shape: &RustSlotShape,
     facts: &FactSet,
 ) -> Vec<CallableKey> {
-    let mut methods = vec![method.to_string()];
-    match method {
-        "non_null" => methods.push("nonNull".to_string()),
-        "is_null" => methods.push("isNull".to_string()),
-        "to_string" => methods.push("toString".to_string()),
-        "value_of" => methods.push("valueOf".to_string()),
-        "int_value" => methods.push("intValue".to_string()),
-        _ => {}
-    }
     let mut keys = Vec::new();
-    for method in methods {
+    for method in crate::java_naming::java_method_name_aliases(method) {
         keys.push(CallableKey::method(
             owner.to_string(),
             method.clone(),

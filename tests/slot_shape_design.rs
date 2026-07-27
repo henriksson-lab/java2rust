@@ -31412,6 +31412,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     let plan_source = include_str!("../src/method_reference_plan.rs");
     let lowering_source = include_str!("../src/method_reference_lowering.rs");
     let shape_source = include_str!("../src/method_reference_shape.rs");
+    let java_naming_source = include_str!("../src/java_naming.rs");
     let stream_source = include_str!("../src/stream.rs");
     let stream_lowering_source = include_str!("../src/stream_lowering.rs");
     assert!(lower_source.contains("plan_method_reference"));
@@ -31438,6 +31439,11 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(shape_source.contains("method_reference_receiver_type_for_call_plan_with_facts"));
     assert!(shape_source.contains("external_call_lowered_type"));
     assert!(shape_source.contains("external_api_receiver_type_for_method_reference"));
+    assert!(java_naming_source.contains("pub fn java_method_name_aliases"));
+    assert!(lowering_source.contains("java_method_name_aliases(method)"));
+    assert!(shape_source.contains("java_method_name_aliases(method)"));
+    assert!(!lowering_source.contains("\"non_null\" => methods.push"));
+    assert!(!shape_source.contains("fn method_reference_method_name_candidates"));
     assert!(lowering_source.contains("owner_associated_path_projection"));
     assert!(lowering_source.contains("receiver_method_call_projection"));
     assert!(lowering_source.contains("typed_single_input_callback_projection"));

@@ -156,7 +156,7 @@ fn facade_abi_receiver_type_for_method_reference(
     facts: &FactSet,
 ) -> Option<String> {
     let owner = crate::stdlib::canonical_external_receiver_type_key(target);
-    method_reference_method_name_candidates(method)
+    crate::java_naming::java_method_name_aliases(method)
         .into_iter()
         .find_map(|method| {
             let key = CallableKey::method(owner.clone(), method, Staticness::Unknown, 0);
@@ -181,7 +181,7 @@ fn external_api_receiver_type_for_method_reference(
 ) -> Option<String> {
     let owner = crate::stdlib::canonical_external_receiver_type_key(target);
     let external_index = facts.external_lookup_index();
-    method_reference_method_name_candidates(method)
+    crate::java_naming::java_method_name_aliases(method)
         .into_iter()
         .find_map(|method| {
             external_index
@@ -202,15 +202,6 @@ fn external_api_receiver_type_for_method_reference(
                 })
                 .map(|effect| effect.receiver_type.unwrap_or_else(|| owner.clone()))
         })
-}
-
-fn method_reference_method_name_candidates(method: &str) -> Vec<String> {
-    let snake = crate::parser::to_snake_case(method);
-    if snake == method {
-        vec![method.to_string()]
-    } else {
-        vec![method.to_string(), snake]
-    }
 }
 
 pub fn object_method_reference_receiver_type(

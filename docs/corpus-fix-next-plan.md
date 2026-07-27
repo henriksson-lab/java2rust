@@ -3992,6 +3992,11 @@ lives in `java_naming` instead of `lower.rs`. Lowering still chooses when a
 getter-shaped fallback is semantically allowed, but the Java naming convention
 is centralized for source getters, method-reference fallback, and future fact
 normalization work.
+Method-reference alias follow-up: method-reference callable-key probes and
+output-shape receiver proofs now share `java_naming::java_method_name_aliases`
+instead of keeping separate snake/camel alias lists in lowering and shape
+inference. The aliases are still explicit compatibility candidates; resolved
+owner/type identity remains required before facts are selected.
 
 ## Rerun Protocol
 
