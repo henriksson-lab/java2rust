@@ -27632,6 +27632,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn unbound_method_reference_projection"));
     assert!(coercion_source.contains("pub fn current_receiver_method_reference_projection"));
     assert!(coercion_source.contains("pub fn unbound_method_call_projection"));
+    assert!(coercion_source.contains("pub fn receiver_method_call_projection"));
     assert!(coercion_source.contains("pub fn current_receiver_method_call_projection"));
     assert!(coercion_source.contains("pub fn typed_single_input_callback_projection"));
     assert!(coercion_source.contains("pub fn outer_this_field_projection"));
@@ -28192,6 +28193,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(stream_source.contains("render_borrowed_collection_flat_map"));
     assert!(stream_source.contains("render_stream_lambda_param_projection"));
     assert!(stream_source.contains("owner_associated_path_projection"));
+    assert!(stream_source.contains("receiver_method_call_projection"));
     assert!(stream_source.contains("fn render_stream_static_member_path"));
     assert!(stream_source.contains("fn render_stream_lambda_clone_projection"));
     assert!(stream_source.contains("apply_clone_projection(RustExpr::Raw"));

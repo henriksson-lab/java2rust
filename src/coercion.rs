@@ -924,6 +924,18 @@ pub fn unbound_method_call_projection(receiver: RustExpr, method: &str) -> RustE
     }
 }
 
+pub fn receiver_method_call_projection(
+    receiver: RustExpr,
+    method: &str,
+    args: Vec<RustExpr>,
+) -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(receiver),
+        method: crate::parser::to_snake_case(method),
+        args,
+    }
+}
+
 pub fn current_receiver_method_call_projection(method: &str, args: Vec<RustExpr>) -> RustExpr {
     RustExpr::MethodCall {
         receiver: Box::new(RustExpr::Raw("self".to_string())),

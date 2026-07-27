@@ -3947,6 +3947,10 @@ expression-shape lookup and legacy unchecked projection choice, but it consumes
 `OptionalReceiverSlotPlan::optional_element_borrow_type` instead of
 reconstructing the shared-vs-mutable carrier decision from the local `mutable`
 flag.
+Stream lambda receiver-call fallback still runs only after ordinary
+`CallTargetPlan` handling declines, but the final compatibility rendering now
+uses `coercion::receiver_method_call_projection` instead of locally formatting
+`receiver.method(args)` in `stream_lowering.rs`.
 
 ## Rerun Protocol
 
