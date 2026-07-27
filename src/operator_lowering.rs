@@ -114,12 +114,11 @@ pub fn lower_numeric_binary_expr(
     right: RustExpr,
     plan: NumericBinaryPromotionPlan,
 ) -> RustExpr {
-    let expr = crate::expr_render::binary_expr(
+    crate::expr_render::binary_expr(
         op,
         apply_coercions(left, &plan.left),
         apply_coercions(right, &plan.right),
-    );
-    RustExpr::Raw(format!("({})", crate::emit::emit_expr(&expr)))
+    )
 }
 
 fn promoted_numeric_primitive(
@@ -198,6 +197,7 @@ pub fn plan_equality_comparison_with_facts(
         && right.optional_element_type().is_none()
         && left.java_ty == JavaType::String
         && right.java_ty == JavaType::String
+        && (is_borrowed_string_view(left) || is_borrowed_string_view(right))
     {
         return EqualityComparisonPlan::StringView {
             left_view: string_equality_operand_view(left),

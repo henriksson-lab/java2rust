@@ -1423,10 +1423,7 @@ pub fn render_string_equality_operand_projection(
 }
 
 pub fn optional_string_view_projection(expr: RustExpr) -> RustExpr {
-    RustExpr::Raw(format!(
-        "{}.as_ref().map(|value| value.as_str())",
-        emit::emit_expr(&expr)
-    ))
+    RustExpr::Raw(format!("{}.as_deref()", emit::emit_expr(&expr)))
 }
 
 pub fn string_helper_receiver_projection(receiver: RustExpr) -> RustExpr {
@@ -3410,10 +3407,10 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
                     rust_primitive_type_name_policy(*to).rust_name
                 ));
             }
-            RustExpr::Raw(format!(
-                "{rendered} as {}",
-                rust_primitive_type_name_policy(*to).rust_name
-            ))
+            RustExpr::Cast {
+                expr: Box::new(expr),
+                ty: rust_primitive_type_name_policy(*to).rust_name.to_string(),
+            }
         }
         Coercion::WrapOption => render_raw_option_some(expr),
         Coercion::UnwrapOption => RustExpr::Raw(format!("{}.unwrap()", emit::emit_expr(&expr))),

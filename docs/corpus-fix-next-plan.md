@@ -4111,6 +4111,11 @@ lowering now checks the actual expression-lowering match branch and accepts
 already computed a precise actual shape. Broader lower-side hierarchy queries
 remain tracked as semantic-facts cleanup rather than being conflated with
 cast/instanceof plan rendering.
+Operator lowering cleanup: numeric binary promotion now keeps structured
+`RustExpr::Binary` and primitive widening uses structured `RustExpr::Cast`
+instead of rendering a raw parenthesized string. String equality only uses the
+string-view plan when a borrowed string view is actually present, and optional
+string view projection canonicalizes to `.as_deref()`.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,

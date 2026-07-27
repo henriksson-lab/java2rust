@@ -14191,7 +14191,7 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
                 .next()
         })
         .expect("reused optional wrap helper should be present");
-    assert!(reused_optional_wrap_helper.contains("construct_optional_value_for_target"));
+    assert!(reused_optional_wrap_helper.contains("planned_optional_value_for_target"));
     assert!(!reused_optional_wrap_helper.contains("Some({}.clone()"));
     let map_entry_set_helper = source
         .split("fn lower_map_entry_set_expr")
