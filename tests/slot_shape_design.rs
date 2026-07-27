@@ -27896,6 +27896,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn erased_object_borrowed_downcast_ref_projection"));
     assert!(coercion_source.contains("pub fn snapshot_rendered_shared_borrow_argument"));
     assert!(array_source.contains("pub fn array2_from_rows_projection"));
+    assert!(array_source.contains("pub fn array2_from_elem_projection"));
+    assert!(array_source.contains("pub fn array_from_elem_projection"));
+    assert!(array_source.contains("pub fn java_array_creation_fallback_projection"));
     assert!(array_source.contains("pub fn array2_index_projection"));
     assert!(array_source.contains("pub fn array2_row_mut_assign_stmt"));
     assert!(array_source.contains("pub fn ragged_array_outer_creation_projection"));
@@ -31868,6 +31871,9 @@ fn array_plan_and_lowering_own_java_array_shape_before_orchestrator() {
     assert!(lowering_source.contains("BorrowProjectionUse::Argument"));
     assert!(lowering_source.contains("BorrowProjectionUse::MutableSliceView"));
     assert!(lowering_source.contains("rendered_vec_macro_body("));
+    assert!(lowering_source.contains("array2_from_elem_projection("));
+    assert!(lowering_source.contains("array_from_elem_projection("));
+    assert!(lowering_source.contains("java_array_creation_fallback_projection("));
     assert!(!lowering_source.contains("format!(\"&{}\""));
     assert!(!lowering_source.contains("format!(\"&mut {}\""));
     assert!(!lowering_source.contains("strip_suffix(']')"));

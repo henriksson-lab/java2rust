@@ -3282,6 +3282,12 @@ Current status:
   `array_lowering::array2_from_rows_projection`, keeping
   `ndarray::Array2::from_rows(...)` spelling with array projection helpers
   instead of inside `lower.rs`.
+- Follow-up: Java array creation rendering now delegates sized one-dimensional,
+  sized two-dimensional ndarray, and unsupported creation fallback spellings to
+  `array_lowering::{array_from_elem_projection,array2_from_elem_projection,java_array_creation_fallback_projection}`.
+  `render_array_expr` still owns Java array-shape selection, but the Rust
+  `vec![...]`, `ndarray::Array2::from_elem(...)`, and fallback comment
+  templates are named projection helpers.
 - 2026-07-26 ndarray element access cleanup: read/write Java
   `matrix[row][col]` lowering still selects ndarray vs nested-slice semantics
   in `lower.rs`, but the emitted `matrix[[row, col]]` projection now comes from

@@ -11,31 +11,18 @@ pub fn render_array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> R
             if children.len() == 2
                 && let Some(default) = default_array_element_expr(element_type)
             {
-                return RustExpr::Raw(format!(
-                    "ndarray::Array2::from_elem(({} as usize, {} as usize), {})",
-                    emit_expr(&children[0]),
-                    emit_expr(&children[1]),
+                return array2_from_elem_projection(
+                    children[0].clone(),
+                    children[1].clone(),
                     default,
-                ));
+                );
             }
             if children.len() == 1
                 && let Some(default) = default_array_element_expr(element_type)
             {
-                return RustExpr::Raw(format!(
-                    "vec![{}; {} as usize]",
-                    default,
-                    array_dimension_len_expr(&children[0])
-                ));
+                return array_from_elem_projection(children[0].clone(), default);
             }
-            let dims = children
-                .iter()
-                .map(emit_expr)
-                .collect::<Vec<_>>()
-                .join("][");
-            RustExpr::Raw(format!(
-                "/* Java array creation: {:?}[{dims}] */ Vec::new()",
-                element_type
-            ))
+            java_array_creation_fallback_projection(element_type, &children)
         }
         ArrayExprPlan::TypedInitializer { .. } | ArrayExprPlan::Initializer { .. } => {
             if let Some(expr) = render_array2_initializer(&children) {
@@ -44,6 +31,38 @@ pub fn render_array_expr(plan: &ArrayExprPlan<'_>, children: Vec<RustExpr>) -> R
             render_array_initializer(children)
         }
     }
+}
+
+pub fn array2_from_elem_projection(rows: RustExpr, cols: RustExpr, default: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "ndarray::Array2::from_elem(({} as usize, {} as usize), {})",
+        emit_expr(&rows),
+        emit_expr(&cols),
+        default,
+    ))
+}
+
+pub fn array_from_elem_projection(len: RustExpr, default: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "vec![{}; {} as usize]",
+        default,
+        array_dimension_len_expr(&len)
+    ))
+}
+
+pub fn java_array_creation_fallback_projection(
+    element_type: &JavaType,
+    dimensions: &[RustExpr],
+) -> RustExpr {
+    let dims = dimensions
+        .iter()
+        .map(emit_expr)
+        .collect::<Vec<_>>()
+        .join("][");
+    RustExpr::Raw(format!(
+        "/* Java array creation: {:?}[{dims}] */ Vec::new()",
+        element_type
+    ))
 }
 
 pub fn borrowed_array2_temporary_for_slot(
