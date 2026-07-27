@@ -859,6 +859,27 @@ pub fn static_storage_accessor_projection(static_name: &str) -> RustExpr {
     ))
 }
 
+pub fn static_storage_setter_path_projection(static_name: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "Self::__set_static_{}",
+        crate::parser::to_snake_case(static_name)
+    ))
+}
+
+pub fn qualified_static_storage_accessor_projection(owner: &str, static_name: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{owner}::__static_{}()",
+        crate::parser::to_snake_case(static_name)
+    ))
+}
+
+pub fn qualified_static_storage_setter_path_projection(owner: &str, static_name: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{owner}::__set_static_{}",
+        crate::parser::to_snake_case(static_name)
+    ))
+}
+
 pub fn associated_const_projection(owner: &str, member: &str) -> RustExpr {
     RustExpr::Raw(format!("{owner}::{member}"))
 }
@@ -902,6 +923,20 @@ pub fn current_receiver_method_call_projection(method: &str, args: Vec<RustExpr>
 
 pub fn typed_single_input_callback_projection(param_type: &str, body: &str) -> RustExpr {
     RustExpr::Raw(format!("|value: {param_type}| {body}"))
+}
+
+pub fn outer_this_field_projection(field_name: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "self.__outer.borrow().{}",
+        crate::parser::to_snake_case(field_name)
+    ))
+}
+
+pub fn char_sequence_collect_string_projection(chars: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{}.iter().collect::<String>()",
+        emit::emit_expr(&chars)
+    ))
 }
 
 pub fn rendered_vec_macro_body(rendered: &str) -> Option<String> {

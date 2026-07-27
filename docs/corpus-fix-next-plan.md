@@ -198,6 +198,12 @@ fallible-call `?` wrapping from call lowering. The generic rendered Rust
 projection now lives in `coercion::propagate_result_projection`, keeping
 result-shape spelling with slot/projection helpers while call planning remains
 responsible for deciding when propagation is required.
+Storage/capture/String projection follow-up: static storage setter/getter call
+paths, qualified static storage paths, captured outer-this field access, and
+char-array-to-`String` collection now use coercion projection helpers. Lowering
+still decides when Java static storage, non-static inner capture, or a
+`new String(char[])` special Java semantic applies, but the emitted Rust
+spellings live beside the other shared projections.
 
 Landed optional-carrier follow-up: raw-erasure casts into optional targets now
 route through `lower_present_expr_for_optional_target`, so typed optional

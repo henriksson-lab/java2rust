@@ -30,26 +30,29 @@ use crate::coercion::{
     apply_coercions, apply_java_display_plan, apply_literal_slot_plan, array_fill_projection,
     array2_rows_i32_projection, borrow_as_dyn_trait, borrowed_sequence_extend_arg,
     borrowed_string_literal_temporary_plan, boxed_dyn_trait_projection,
-    clone_erased_object_ref_once, collection_sort_by_comparator_projection,
-    collection_sort_projection, constructor_self_field_replacement, deref_borrowed_projection,
-    ensure_borrow_projection, erased_object_borrowed_downcast_ref_projection,
-    erased_object_box_projection, exception_self_as_supertype_facade_boundary_projection,
+    char_sequence_collect_string_projection, clone_erased_object_ref_once,
+    collection_sort_by_comparator_projection, collection_sort_projection,
+    constructor_self_field_replacement, deref_borrowed_projection, ensure_borrow_projection,
+    erased_object_borrowed_downcast_ref_projection, erased_object_box_projection,
+    exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
     into_projection, iterator_next_expect_projection, java_integral_literal_char,
     java_update_expression_projection, len_i32_projection, literal_slot_plan,
     logical_not_projection, map_get_expect_projection, map_get_mut_expect_projection,
     map_get_projection, normalize_map_key_borrow_projection,
     normalize_reused_clone_for_borrowed_argument, optional_copied_expect_projection,
-    owned_map_keys_set_projection, owner_associated_path_projection,
+    outer_this_field_projection, owned_map_keys_set_projection, owner_associated_path_projection,
     parenthesize_borrowed_method_receiver, print_macro_projection,
     project_optional_element_borrow_carrier, project_optional_receiver,
     project_optional_sequence_receiver, propagate_result_projection,
+    qualified_static_storage_accessor_projection, qualified_static_storage_setter_path_projection,
     reborrow_optional_mut_projection, render_sequence_iteration_source,
     rendered_expr_has_clone_recovery, rendered_expr_has_direct_clone_recovery,
     rendered_expr_is_mutable_alias, rewrite_downcast_expect_message,
     rust_expr_mentions_constructor_self_temporary, self_associated_path_projection,
     sequence_get_expect_projection, sequence_iter_cloned_projection,
     sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
+    static_storage_accessor_projection, static_storage_setter_path_projection,
     subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
     tuple_field_projection, typed_none_projection,
     unsupported_deserialization_cast_handoff_projection, unwrap_java_null_receiver_projection,
@@ -6969,10 +6972,7 @@ fn lower_outer_this_field_name(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> Opt
     let current_type = ctx.current_type?;
     let outer_type = ctx.facts.captures.outer_this_type_for_type(current_type)?;
     signature_field_shape_for_type_aliases(ctx.signatures, outer_type, name)?;
-    Some(RustExpr::Raw(format!(
-        "self.__outer.borrow().{}",
-        crate::parser::to_snake_case(name)
-    )))
+    Some(outer_this_field_projection(name))
 }
 
 fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
@@ -7528,10 +7528,7 @@ fn lower_java_string_constructor_expr(
     target.view = ViewShape::Slice;
     let chars =
         lower_expr_for_slot_with_refinements(arg, env, Slot::Argument(target), ctx, refinements);
-    Some(RustExpr::Raw(format!(
-        "{}.iter().collect::<String>()",
-        emit::emit_expr(&chars)
-    )))
+    Some(char_sequence_collect_string_projection(chars))
 }
 
 fn lower_boxed_primitive_string_constructor_expr(
@@ -8173,10 +8170,7 @@ fn lower_static_storage_assignment_stmt(
     let assigned_value =
         wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx);
     Some(expr_stmt(RustExpr::Call {
-        function: Box::new(RustExpr::Raw(format!(
-            "Self::__set_static_{}",
-            crate::parser::to_snake_case(static_name)
-        ))),
+        function: Box::new(static_storage_setter_path_projection(static_name)),
         args: vec![assigned_value],
     }))
 }
@@ -8199,14 +8193,12 @@ fn lower_static_storage_assignment_value_expr(
         adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
     let assigned_value =
         wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx);
-    let getter = format!(
-        "Self::__static_{}()",
-        crate::parser::to_snake_case(static_name)
-    );
+    let getter = static_storage_accessor_projection(static_name);
     Some(RustExpr::Raw(format!(
-        "{{ Self::__set_static_{}({}); {getter} }}",
-        crate::parser::to_snake_case(static_name),
-        emit::emit_expr(&assigned_value)
+        "{{ {}({}); {} }}",
+        emit::emit_expr(&static_storage_setter_path_projection(static_name)),
+        emit::emit_expr(&assigned_value),
+        emit::emit_expr(&getter)
     )))
 }
 
@@ -8226,11 +8218,10 @@ fn lower_qualified_static_storage_assignment_stmt(
         Slot::Assignment(plan.shape),
     );
     Some(expr_stmt(RustExpr::Call {
-        function: Box::new(RustExpr::Raw(format!(
-            "{}::__set_static_{}",
-            plan.rust_owner,
-            crate::parser::to_snake_case(&plan.field_name)
-        ))),
+        function: Box::new(qualified_static_storage_setter_path_projection(
+            &plan.rust_owner,
+            &plan.field_name,
+        )),
         args: vec![assigned_value],
     }))
 }
@@ -8250,13 +8241,14 @@ fn lower_qualified_static_storage_assignment_value_expr(
         refinements,
         Slot::Assignment(plan.shape),
     );
+    let setter =
+        qualified_static_storage_setter_path_projection(&plan.rust_owner, &plan.field_name);
+    let getter = qualified_static_storage_accessor_projection(&plan.rust_owner, &plan.field_name);
     Some(RustExpr::Raw(format!(
-        "{{ {}::__set_static_{}({}); {}::__static_{}() }}",
-        plan.rust_owner,
-        crate::parser::to_snake_case(&plan.field_name),
+        "{{ {}({}); {} }}",
+        emit::emit_expr(&setter),
         emit::emit_expr(&assigned_value),
-        plan.rust_owner,
-        crate::parser::to_snake_case(&plan.field_name)
+        emit::emit_expr(&getter)
     )))
 }
 
