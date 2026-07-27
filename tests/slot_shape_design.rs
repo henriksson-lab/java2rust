@@ -27533,6 +27533,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn static_storage_setter_path_projection"));
     assert!(coercion_source.contains("pub fn qualified_static_storage_accessor_projection"));
     assert!(coercion_source.contains("pub fn qualified_static_storage_setter_path_projection"));
+    assert!(coercion_source.contains("pub fn static_storage_getter_body_projection"));
+    assert!(coercion_source.contains("pub fn static_storage_setter_body_projection"));
     assert!(coercion_source.contains("pub fn associated_const_projection"));
     assert!(coercion_source.contains("pub fn unbound_method_reference_projection"));
     assert!(coercion_source.contains("pub fn current_receiver_method_reference_projection"));
@@ -27652,6 +27654,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!lower_source.contains("Self::__static_{}()"));
     assert!(!lower_source.contains("{}::__set_static_{}"));
     assert!(!lower_source.contains("{}::__static_{}()"));
+    assert!(!lower_source.contains(".with(|cell| cell.borrow().clone().unwrap_or_else"));
+    assert!(!lower_source.contains(".with(|cell| *cell.borrow_mut() = Some(value));"));
     assert!(!item_assembly_source.contains("RustExpr::Raw(format!(\"Self::{rust_name}\""));
     assert!(!item_assembly_source.contains("fn raw_generic_args"));
     assert!(!item_assembly_source.contains("fn split_top_level_type_args"));

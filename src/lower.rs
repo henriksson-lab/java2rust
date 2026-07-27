@@ -52,7 +52,8 @@ use crate::coercion::{
     rust_expr_mentions_constructor_self_temporary, self_associated_path_projection,
     sequence_get_expect_projection, sequence_iter_cloned_projection,
     sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
-    static_storage_accessor_projection, static_storage_setter_path_projection,
+    static_storage_accessor_projection, static_storage_getter_body_projection,
+    static_storage_setter_body_projection, static_storage_setter_path_projection,
     subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
     tuple_field_projection, typed_none_projection,
     unsupported_deserialization_cast_handoff_projection, unwrap_java_null_receiver_projection,
@@ -801,10 +802,9 @@ fn static_storage_accessors_for_field(
             name: getter_name,
             params: Vec::new(),
             return_type: Some(rust_ty.clone()),
-            body: vec![RustStmt::Return(Some(RustExpr::Raw(format!(
-                "{storage_name}.with(|cell| cell.borrow().clone().unwrap_or_else(|| {}))",
-                emit::emit_expr(&initial)
-            ))))],
+            body: vec![RustStmt::Return(Some(
+                static_storage_getter_body_projection(&storage_name, initial),
+            ))],
             is_pub: !field.modifiers.contains(&Modifier::Private),
             receiver: None,
         },
@@ -815,8 +815,8 @@ fn static_storage_accessors_for_field(
                 ty: rust_ty,
             }],
             return_type: None,
-            body: vec![RustStmt::Raw(format!(
-                "{storage_name}.with(|cell| *cell.borrow_mut() = Some(value));"
+            body: vec![RustStmt::Raw(static_storage_setter_body_projection(
+                &storage_name,
             ))],
             is_pub: !field.modifiers.contains(&Modifier::Private),
             receiver: None,

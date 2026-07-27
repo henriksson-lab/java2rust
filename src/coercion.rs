@@ -880,6 +880,17 @@ pub fn qualified_static_storage_setter_path_projection(owner: &str, static_name:
     ))
 }
 
+pub fn static_storage_getter_body_projection(storage_name: &str, initial: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{storage_name}.with(|cell| cell.borrow().clone().unwrap_or_else(|| {}))",
+        emit::emit_expr(&initial)
+    ))
+}
+
+pub fn static_storage_setter_body_projection(storage_name: &str) -> String {
+    format!("{storage_name}.with(|cell| *cell.borrow_mut() = Some(value));")
+}
+
 pub fn associated_const_projection(owner: &str, member: &str) -> RustExpr {
     RustExpr::Raw(format!("{owner}::{member}"))
 }

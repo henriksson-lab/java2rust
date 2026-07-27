@@ -213,6 +213,11 @@ direct, optional, string-view, and custom-equals comparison shapes, but the
 Rust `.as_str()` and optional string-view projection spellings now live in
 `coercion.rs`. This keeps recurring borrowed string comparison mechanics beside
 the other shared string/facade view helpers.
+Static-storage support-body follow-up: generated getter/setter function bodies
+for mutable Java static fields now use coercion projections for the
+thread-local `RefCell<Option<T>>` read/write spellings. Source lowering still
+owns deciding which Java fields need storage accessors and what initial value
+slot to use.
 
 Landed optional-carrier follow-up: raw-erasure casts into optional targets now
 route through `lower_present_expr_for_optional_target`, so typed optional
