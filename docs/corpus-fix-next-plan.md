@@ -3976,6 +3976,12 @@ fact-backed receiver-type proof for unbound facade receiver methods and asks
 ordinary call planner selects an `ExternalFacadeReceiver`. This lets external
 facade references such as `FacadeValue::label` derive both callback rendering
 and return shape from the same `ExternalApiEffectFact`/`FacadeAbiFact` pair.
+Accessor-shape follow-up: unbound accessor-looking method references now prefer
+typed zero-arg external getter facts before using the legacy `get_...` fallback.
+When an `ExternalApiEffectFact` proves `ExternalRecord::getName -> String`,
+method-reference output-shape inference uses `external_call_lowered_type` to
+derive the precise return shape; the name-shaped `Unknown("get_name")` fallback
+remains only for factless source-shaped references.
 
 ## Rerun Protocol
 

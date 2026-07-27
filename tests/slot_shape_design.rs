@@ -31347,6 +31347,45 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         ),
         RustExpr::Raw("|value: &FacadeValue| value.label_text()".to_string())
     );
+    let mut external_getter_method_ref_facts = FactSet::default();
+    external_getter_method_ref_facts
+        .external_api_effect_facts
+        .push(ExternalApiEffectFact {
+            method_name: "getName".to_string(),
+            receiver_type: Some("ExternalRecord".to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::String),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::UserOverride,
+        });
+    assert_eq!(
+        infer_single_input_method_reference_output_shape_with_context(
+            "ExternalRecord",
+            "getName",
+            &RustSlotShape::for_storage(JavaType::Named {
+                name: "ExternalRecord".to_string(),
+                args: Vec::new(),
+            }),
+            &TypeEnv::new(),
+            &external_getter_method_ref_facts,
+        ),
+        Some(new_java2rust::shape_projection::owned_string_value_shape())
+    );
+    assert_eq!(
+        infer_single_input_method_reference_output_shape(
+            "ExternalRecord",
+            "getName",
+            &RustSlotShape::for_storage(JavaType::Named {
+                name: "ExternalRecord".to_string(),
+                args: Vec::new(),
+            }),
+        )
+        .map(|shape| shape.java_ty),
+        Some(JavaType::Unknown("get_name".to_string()))
+    );
     assert_eq!(
         render_typed_single_input_method_reference_callback_with_facts(
             &plan_method_reference("Objects", "nonNull"),
@@ -31386,6 +31425,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(lowering_source.contains("facade_abi_for_key"));
     assert!(shape_source.contains("method_reference_receiver_type_for_call_plan_with_facts"));
     assert!(shape_source.contains("external_call_lowered_type"));
+    assert!(shape_source.contains("external_api_receiver_type_for_method_reference"));
     assert!(lowering_source.contains("owner_associated_path_projection"));
     assert!(lowering_source.contains("receiver_method_call_projection"));
     assert!(lowering_source.contains("typed_single_input_callback_projection"));

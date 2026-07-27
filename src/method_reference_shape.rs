@@ -1,4 +1,4 @@
-use crate::facts::{CallableKey, FactSet, ReceiverAbi, Staticness};
+use crate::facts::{CallableKey, ExternalApiRole, FactSet, ReceiverAbi, Staticness};
 use crate::java_ir::{Expr, JavaType, PrimitiveType};
 use crate::method_reference_plan::{MethodReferencePlan, plan_method_reference};
 use crate::slot_shape::RustSlotShape;
@@ -114,6 +114,8 @@ fn method_reference_output_shape_from_call_plan(
     if matches!(
         target_plan,
         crate::call_plan::CallTargetPlan::ExternalFacadeReceiver { .. }
+            | crate::call_plan::CallTargetPlan::ExternalCrateReceiver { .. }
+            | crate::call_plan::CallTargetPlan::FallbackReceiver { .. }
     ) {
         return crate::call_plan::external_call_lowered_type(
             receiver, method, arg_count, facts, env, None,
@@ -139,12 +141,12 @@ pub fn method_reference_receiver_type_for_call_plan_with_facts(
     facts: &FactSet,
 ) -> Option<JavaType> {
     method_reference_receiver_type_for_call_plan(target, input_shape).or_else(|| {
-        facade_abi_receiver_type_for_method_reference(target, method, facts).map(|name| {
-            JavaType::Named {
+        facade_abi_receiver_type_for_method_reference(target, method, facts)
+            .or_else(|| external_api_receiver_type_for_method_reference(target, method, facts))
+            .map(|name| JavaType::Named {
                 name,
                 args: Vec::new(),
-            }
-        })
+            })
     })
 }
 
@@ -169,6 +171,36 @@ fn facade_abi_receiver_type_for_method_reference(
                     )
                 })
                 .map(|_| owner.clone())
+        })
+}
+
+fn external_api_receiver_type_for_method_reference(
+    target: &str,
+    method: &str,
+    facts: &FactSet,
+) -> Option<String> {
+    let owner = crate::stdlib::canonical_external_receiver_type_key(target);
+    let external_index = facts.external_lookup_index();
+    method_reference_method_name_candidates(method)
+        .into_iter()
+        .find_map(|method| {
+            external_index
+                .external_api_effect_for_receiver_with_arity(Some(&owner), &method, Some(0))
+                .cloned()
+                .or_else(|| {
+                    crate::external_packs::external_api_effect_for_receiver_with_arity(
+                        Some(&owner),
+                        &method,
+                        Some(0),
+                    )
+                })
+                .filter(|effect| {
+                    matches!(
+                        effect.role,
+                        ExternalApiRole::Getter | ExternalApiRole::BooleanGetter
+                    )
+                })
+                .map(|effect| effect.receiver_type.unwrap_or_else(|| owner.clone()))
         })
 }
 
