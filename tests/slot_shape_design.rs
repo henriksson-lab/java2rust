@@ -12964,6 +12964,25 @@ class Use {
     let usage = analyze_usage(&resolved.program);
     let representations = plan_representations(&resolved.program, &facts);
     let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let use_ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Use")
+        .unwrap();
+    let up_method = use_ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "up" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let up_signature = signatures.required_method_signature(use_ty, up_method);
+    assert_eq!(
+        up_signature.params[0].shape.ownership,
+        OwnershipShape::SharedBorrow
+    );
     let lowered = lower_program_with_plans(
         &resolved.program,
         resolved.diagnostics,
@@ -12976,22 +12995,27 @@ class Use {
 
     assert!(rust.contains("pub enum AnimalValue"), "{rust}");
     assert!(
-        rust.contains("pub fn up(&self, dog: Dog) -> AnimalValue"),
-        "{rust}"
-    );
-    assert!(rust.contains("return AnimalValue::Dog(dog);"), "{rust}");
-    assert!(
-        rust.contains("pub fn down(&self, animal: AnimalValue) -> Dog"),
+        rust.contains("pub fn up(&self, dog: &Dog) -> AnimalValue"),
         "{rust}"
     );
     assert!(
         rust.contains(
-            "return match animal { AnimalValue::Dog(value) => value, _ => panic!(\"invalid Java cast\") };"
+            "return AnimalValue::Dog(dog.clone()/* TODO(translation): validate added clone */);"
         ),
         "{rust}"
     );
     assert!(
-        rust.contains("pub fn is_dog(&self, animal: AnimalValue) -> bool"),
+        rust.contains("pub fn down(&self, animal: &AnimalValue) -> Dog"),
+        "{rust}"
+    );
+    assert!(
+        rust.contains(
+            "return match animal { AnimalValue::Dog(value) => value, _ => panic!(\"invalid Java cast\") }.clone()/* TODO(translation): validate added clone */;"
+        ),
+        "{rust}"
+    );
+    assert!(
+        rust.contains("pub fn is_dog(&self, animal: &AnimalValue) -> bool"),
         "{rust}"
     );
     assert!(
@@ -15680,6 +15704,33 @@ class Dog implements Animal {}
     assert_eq!(
         apply_cast_conversion(RustExpr::Var("dog".to_string()), &cast_plan),
         RustExpr::Raw("AnimalValue::Dog(dog)".to_string())
+    );
+    let mut borrowed_env = ShapeEnv::new();
+    let mut borrowed_dog_shape = value_shape_for_java_type(
+        &representations,
+        JavaType::Named {
+            name: "Dog".to_string(),
+            args: Vec::new(),
+        },
+    );
+    borrowed_dog_shape.ownership = OwnershipShape::SharedBorrow;
+    borrowed_env.insert_local_shape("dog", borrowed_dog_shape);
+    let borrowed_cast_plan =
+        plan_cast_conversion(&parse_expr("dog"), &animal_ty, &borrowed_env, ctx);
+    assert!(
+        borrowed_cast_plan
+            .coercion
+            .coercions()
+            .iter()
+            .any(|coercion| matches!(coercion, Coercion::CloneRecovery { .. })),
+        "{borrowed_cast_plan:?}"
+    );
+    assert_eq!(
+        apply_cast_conversion(RustExpr::Var("dog".to_string()), &borrowed_cast_plan),
+        RustExpr::Raw(
+            "AnimalValue::Dog(dog.clone()/* TODO(translation): validate added clone */)"
+                .to_string()
+        )
     );
 
     let erased_facts = new_java2rust::external_packs::htsjdk_tribble_feature_pack_facts();

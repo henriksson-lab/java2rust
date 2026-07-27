@@ -277,6 +277,19 @@ impl ShapeCoercionPlan {
             plan.extend(self.dispatch.coercions());
             return non_identity_or_identity(plan);
         }
+        if matches!(self.dispatch, DispatchCoercionPolicy::WrapClosedEnum { .. }) {
+            plan.extend(self.ownership.coercions());
+            if matches!(self.ownership, OwnershipCoercionPolicy::NoOwnershipChange)
+                && self.actual.ownership == OwnershipShape::SharedBorrow
+                && self.actual.view == ViewShape::Native
+            {
+                plan.push(Coercion::CloneRecovery {
+                    policy: CloneRecoveryPolicy::AuditRequired,
+                });
+            }
+            plan.extend(self.dispatch.coercions());
+            return non_identity_or_identity(plan);
+        }
         plan.extend(self.dispatch.coercions());
         let view_coercions = self.view.coercions();
         if !view_coercions.is_empty() {

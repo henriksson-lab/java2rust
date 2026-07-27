@@ -4292,6 +4292,19 @@ annotations and rely on Rust inference. A shared `coercion::AsStr` projection
 guard strips the simple borrowed-item spelling (`*value`) before appending
 `.as_str()`, preventing invalid stream outputs such as `*partition.as_str()`
 without adding string-view heuristics back to `stream_lowering.rs`.
+Full design rerun after the stream external-argument batch reached 474 passed /
+35 failed in 341.31s. The removed failures include the stream lambda/method
+reference cluster and the stale semantic/receiver-field/enum representation
+guards. Remaining clusters are closed-enum cast lowering, external byte/array
+and borrowed recovery, external support/static-field/logging behavior,
+dyn-trait representation lowering, and signature-plan structural ownership
+guards.
+Closed-enum cast follow-up: closed-enum wrapping now performs concrete subtype
+ownership recovery before constructing the enum variant. This covers borrowed
+method parameters such as `&Dog` flowing into `(Animal) dog`, producing
+`AnimalValue::Dog(dog.clone()...)` instead of the invalid
+`AnimalValue::Dog(dog)`. Downcasts from borrowed closed-enum values continue to
+clone after extracting the variant payload.
 
 ## Rerun Protocol
 

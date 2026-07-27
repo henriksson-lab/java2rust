@@ -1365,6 +1365,16 @@ pub fn ownership_coercion_policy_with_effective_facts(
             };
         }
         ownership_recovery_policy_from_capability(capability.recovery, actual, target)
+    } else if actual.dispatch == DispatchShape::Concrete
+        && matches!(target.dispatch, DispatchShape::ClosedEnum { .. })
+        && actual.ownership == OwnershipShape::SharedBorrow
+        && target.ownership == OwnershipShape::Owned
+        && actual.view == ViewShape::Native
+        && target.view == ViewShape::Native
+    {
+        let capability =
+            coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
+        ownership_recovery_policy_from_capability(capability.recovery, actual, target)
     } else if actual.ownership == OwnershipShape::SharedBorrow
         && target.ownership == OwnershipShape::Owned
         && matches!(target.dispatch, DispatchShape::ErasedObject)
