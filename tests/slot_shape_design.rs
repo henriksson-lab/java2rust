@@ -27575,7 +27575,16 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(types_source.contains("pub fn raw_rust_generic_args"));
     assert!(types_source.contains("pub fn raw_rust_type_is_result"));
     assert!(types_source.contains("pub fn raw_rust_type_is_option"));
+    assert!(types_source.contains("pub fn raw_rust_result_args"));
+    assert!(types_source.contains("pub fn raw_rust_option_inner"));
     assert!(types_source.contains("pub fn split_top_level_rust_type_args"));
+    let opaque_return_tracker = stdlib_source
+        .split("fn add_external_facade_return_opaque_type")
+        .nth(1)
+        .and_then(|tail| tail.split("fn add_type_alias").next())
+        .expect("facade opaque return tracker should be present");
+    assert!(opaque_return_tracker.contains("raw_rust_option_inner"));
+    assert!(!opaque_return_tracker.contains("strip_prefix(\"Option<\")"));
     let facade_result_wrapper = stdlib_source
         .split("fn external_facade_wrap_result_for_effects")
         .nth(1)
@@ -27603,6 +27612,28 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .expect("facade slot return helper should be present");
     assert!(facade_slot_return.contains("raw_rust_type_is_option"));
     assert!(!facade_slot_return.contains("starts_with(\"Option<\")"));
+    let facade_support_return_normalizer = stdlib_source
+        .split("fn normalize_external_facade_support_return_type")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn external_facade_receiver_crate_return_type")
+                .next()
+        })
+        .expect("facade support return normalizer should be present");
+    assert!(facade_support_return_normalizer.contains("raw_rust_option_inner"));
+    assert!(!facade_support_return_normalizer.contains("strip_prefix(\"Option<\")"));
+    let facade_default_expr = stdlib_source
+        .split("fn external_facade_default_expr")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn external_facade_return_type_requires_explicit_provider")
+                .next()
+        })
+        .expect("facade default expression helper should be present");
+    assert!(facade_default_expr.contains("raw_rust_result_args"));
+    assert!(facade_default_expr.contains("raw_rust_type_is_option"));
+    assert!(!facade_default_expr.contains("strip_prefix(\"Result<\")"));
+    assert!(!facade_default_expr.contains("starts_with(\"Option<\")"));
     assert!(coercion_source.contains("pub fn collapse_redundant_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));

@@ -421,13 +421,28 @@ pub fn raw_rust_generic_args<'a>(raw: &'a str, head: &str) -> Option<Vec<&'a str
 }
 
 pub fn raw_rust_type_is_result(raw: &str) -> bool {
-    raw_rust_generic_args(raw, "Result").is_some()
-        || raw_rust_generic_args(raw, "std::result::Result").is_some()
+    raw_rust_result_args(raw).is_some()
 }
 
 pub fn raw_rust_type_is_option(raw: &str) -> bool {
-    raw_rust_generic_args(raw, "Option").is_some()
-        || raw_rust_generic_args(raw, "std::option::Option").is_some()
+    raw_rust_option_inner(raw).is_some()
+}
+
+pub fn raw_rust_result_args(raw: &str) -> Option<Vec<&str>> {
+    raw_rust_generic_args(raw, "Result")
+        .or_else(|| raw_rust_generic_args(raw, "std::result::Result"))
+}
+
+pub fn raw_rust_option_inner(raw: &str) -> Option<&str> {
+    raw_rust_generic_args(raw, "Option")
+        .or_else(|| raw_rust_generic_args(raw, "std::option::Option"))
+        .and_then(|args| {
+            if args.len() == 1 {
+                args.first().copied()
+            } else {
+                None
+            }
+        })
 }
 
 pub fn split_top_level_rust_type_args(args: &str) -> Vec<&str> {

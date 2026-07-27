@@ -20,7 +20,9 @@ use crate::slot_render::{
     rust_type_for_slot_with_facts,
 };
 use crate::slot_shape::{MutabilityShape, OwnershipShape, RustSlotShape};
-use crate::types::{raw_rust_type_is_option, raw_rust_type_is_result};
+use crate::types::{
+    raw_rust_option_inner, raw_rust_result_args, raw_rust_type_is_option, raw_rust_type_is_result,
+};
 
 pub fn is_known_jdk_shadow_sensitive_owner(name: &str) -> bool {
     matches!(name, "Objects" | "Collections" | "Integer" | "Paths")
@@ -7529,10 +7531,7 @@ impl ExternalApiFacadeSupport {
     }
 
     fn add_external_facade_return_opaque_type(&mut self, return_type: &str) {
-        if let Some(inner) = return_type
-            .strip_prefix("Option<")
-            .and_then(|value| value.strip_suffix('>'))
-        {
+        if let Some(inner) = raw_rust_option_inner(return_type) {
             self.add_opaque_type(inner.to_string());
             return;
         }
@@ -10405,10 +10404,7 @@ fn normalize_external_facade_support_return_type(
     return_type: &str,
 ) -> String {
     let trimmed = return_type.trim();
-    if let Some(inner) = trimmed
-        .strip_prefix("Option<")
-        .and_then(|rest| rest.strip_suffix('>'))
-    {
+    if let Some(inner) = raw_rust_option_inner(trimmed) {
         return format!(
             "Option<{}>",
             normalize_external_facade_support_return_type(facts, receiver_type, inner)
@@ -10991,10 +10987,11 @@ fn external_erased_object_impl_method(method: &ExternalErasedObjectMethod) -> St
 }
 
 fn external_facade_default_expr(return_type: &str, method_name: Option<&str>) -> String {
-    if let Some(ok_type) = return_type
-        .strip_prefix("Result<")
-        .and_then(|rest| rest.strip_suffix(", JavaException>"))
+    if let Some(args) = raw_rust_result_args(return_type)
+        && args.len() == 2
+        && args[1] == "JavaException"
     {
+        let ok_type = args[0];
         if ok_type == "()" {
             "Ok(())".to_string()
         } else if ok_type == "Box<dyn std::any::Any>" {
@@ -11002,7 +10999,7 @@ fn external_facade_default_expr(return_type: &str, method_name: Option<&str>) ->
         } else {
             "Ok(Default::default())".to_string()
         }
-    } else if return_type.starts_with("Option<") {
+    } else if raw_rust_type_is_option(return_type) {
         "None".to_string()
     } else if return_type == "JavaClass<()>" {
         "JavaClass::<()>::for_name(\"java.lang.Object\")".to_string()

@@ -3912,6 +3912,10 @@ classifiers instead of local `starts_with("Result<")`/
 `starts_with("Option<")` checks in the facade return helpers. This is still a
 boundary parser while Rust signatures are not fully structured everywhere, but
 the wrapper decisions are no longer reimplemented at each facade return branch.
+Follow-up cleanup extended the same classifier path to support-facade opaque
+return tracking, nested `Option<T>` return normalization, and default fallback
+expression generation, preserving the previous JavaException-specific
+`Result<T, JavaException>` behavior while avoiding local prefix parsing.
 
 ## Rerun Protocol
 
