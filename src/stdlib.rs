@@ -10788,7 +10788,7 @@ fn external_facade_instance_method_with_facts(
         } else {
             "Self"
         };
-        let return_expr = if return_type.starts_with("Result<") {
+        let return_expr = if raw_rust_type_is_result(return_type) {
             "Ok(self.clone())"
         } else {
             "self.clone()"

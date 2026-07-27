@@ -27439,6 +27439,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let types_source = include_str!("../src/types.rs");
     let stdlib_source = include_str!("../src/stdlib.rs");
     let main_source = include_str!("../src/main.rs");
+    let external_packs_source = include_str!("../src/external_packs.rs");
 
     assert!(coercion_source.contains("pub fn ensure_borrow_projection"));
     assert!(coercion_source.contains("pub fn rendered_expr_has_clone_recovery"));
@@ -27675,6 +27676,24 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(facade_default_expr.contains("raw_rust_type_is_option"));
     assert!(!facade_default_expr.contains("strip_prefix(\"Result<\")"));
     assert!(!facade_default_expr.contains("starts_with(\"Option<\")"));
+    let facade_fluent_method = stdlib_source
+        .split("fn external_facade_instance_method_with_facts")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn external_facade_method_is_self_returning_fluent")
+                .next()
+        })
+        .expect("facade fluent method helper should be present");
+    assert!(facade_fluent_method.contains("raw_rust_type_is_result"));
+    assert!(!facade_fluent_method.contains("starts_with(\"Result<\")"));
+    let manifest_facade_slot_parser = external_packs_source
+        .split("fn facade_slot_for_manifest_rust_type")
+        .nth(1)
+        .and_then(|tail| tail.split("fn parse_external_api_metadata").next())
+        .expect("external pack facade slot parser should be present");
+    assert!(manifest_facade_slot_parser.contains("raw_rust_option_inner"));
+    assert!(!manifest_facade_slot_parser.contains("strip_prefix(\"Option<\")"));
+    assert!(!manifest_facade_slot_parser.contains("strip_prefix(\"std::option::Option<\")"));
     let raw_clone_support = item_assembly_source
         .split("fn raw_rust_type_supports_derive_clone")
         .nth(1)

@@ -19,6 +19,7 @@ use crate::facts::{
 };
 use crate::java_ir::{JavaType, PrimitiveType};
 use crate::parser::parse_type;
+use crate::types::raw_rust_option_inner;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalPackManifestParse {
@@ -3987,14 +3988,7 @@ fn facade_slot_for_manifest_rust_type(ty: &str) -> FacadeSlot {
     if ty == "usize" {
         return FacadeSlot::Index;
     }
-    if let Some(inner) = ty
-        .strip_prefix("Option<")
-        .and_then(|ty| ty.strip_suffix('>'))
-        .or_else(|| {
-            ty.strip_prefix("std::option::Option<")
-                .and_then(|ty| ty.strip_suffix('>'))
-        })
-    {
+    if let Some(inner) = raw_rust_option_inner(ty) {
         return FacadeSlot::Optional(Box::new(facade_slot_for_manifest_rust_type(inner)));
     }
     if let Some(inner) = ty.strip_prefix("&mut ") {

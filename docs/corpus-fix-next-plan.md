@@ -3925,6 +3925,9 @@ generic parsing helpers for `Option<T>`, `Vec<T>`, and `Box<dyn Trait>` instead
 of local prefix/suffix tests. This keeps the remaining raw Rust type parsing
 behind one boundary while typed Rust ABI facts continue to replace these
 compatibility paths.
+External-pack manifest facade slot parsing now uses the shared `Option<T>`
+classifier as well, and fluent self-returning facade support checks `Result`
+through the shared classifier instead of local string prefixes.
 
 ## Rerun Protocol
 
