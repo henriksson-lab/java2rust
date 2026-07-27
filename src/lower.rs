@@ -2850,6 +2850,16 @@ fn lower_method(
     method: &MethodDecl,
     ctx: LowerCtx,
 ) -> RustFunction {
+    lower_method_with_exception_owner(program, ty, method, ty, ctx)
+}
+
+fn lower_method_with_exception_owner(
+    program: &Program,
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    exception_ty: &TypeDecl,
+    ctx: LowerCtx,
+) -> RustFunction {
     let method_signature = ctx.signatures.required_method_signature(ty, method);
     let method_ctx = LowerCtx {
         current_type: Some(&ty.name),
@@ -2873,7 +2883,7 @@ fn lower_method(
         method_ctx.support_local_type_program,
     );
     seed_external_inherited_instance_fields(&mut env, ty, method_ctx.signatures, method_ctx.facts);
-    let exception_plan = method_ctx.exceptions.method_plan(ty, method);
+    let exception_plan = method_ctx.exceptions.method_plan(exception_ty, method);
     let wrap_returns_in_ok = exception_plan.wrap_returns_in_result;
     let mut body = if !wrap_returns_in_ok
         && method_has_tail_recursive_loop_rewrite(
@@ -2939,7 +2949,13 @@ fn lower_inherited_method(
     if inherited.method.body.is_none() {
         lower_method(program, inherited.declaring_ty, inherited.method, ctx)
     } else {
-        lower_method(program, emitted_ty, inherited.method, ctx)
+        lower_method_with_exception_owner(
+            program,
+            emitted_ty,
+            inherited.method,
+            inherited.declaring_ty,
+            ctx,
+        )
     }
 }
 

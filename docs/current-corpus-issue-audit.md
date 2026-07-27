@@ -13,6 +13,7 @@ drift fixes and constructor self-initialization fix. Focused runs used
 |---|---|---|
 | `jaligner` | `.tmp/corpus-rerun-20260727-jaligner-final` | 29/29 translated, 0 invalid-pattern files, `cargo_check=ok`, 0 generated-Rust errors. Simple-name external erasure no longer overrides parsed source `Matrix`, and public source methods that explicitly return `null` select optional return slots. |
 | `fastqc` full corpus | `.tmp/corpus-batch-current-fastqc-refresh-20260727-after-source-erasure` | 156/156 translated, 0 translation failures, 29 invalid-pattern files, 1459 generated-Rust errors. Runtime remains dominated by global analysis/signature work: total 2,110,447 ms, translation 1,650,111 ms, global analysis 1,254,644 ms, signature solve 795,894 ms, signature fixpoint 767,748 ms, semantic analysis 456,896 ms, crate assembly 447,799 ms. |
+| `fastqc` AbstractQCModule subset | `.tmp/corpus-fastqc-abstract-qcmodule-after-inherited-exception-owner-r1` | 8/8 translated, 0 invalid-pattern files, generated Rust reaches two `cannot return value referencing temporary value` rows in `SVGImageSaver`. The inherited `?`/result-shell family is gone after inherited body lowering started using the declaring type's exception plan. |
 
 Current FastQC top families after the 2026-07-27 full rerun:
 

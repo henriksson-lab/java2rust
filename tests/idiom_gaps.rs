@@ -13824,6 +13824,13 @@ class AbstractQCModule {
         "{}",
         translation.rust
     );
+    assert!(
+        translation.rust.contains(
+            "pub fn write_default_image(&self, out: OutputStream, width: i32, height: i32) -> Result<(), JavaException>"
+        ),
+        "{}",
+        translation.rust
+    );
 
     // The minimal fixture does not assemble context-only support types into a
     // crate; the regression here is the inherited body's static-owner spelling.

@@ -4502,6 +4502,23 @@ Next FastQC batch candidates from that rerun:
    shared-support merger/facade-alias rules need another focused fixture before
    another full FastQC sweep.
 
+Inherited exception-owner follow-up: inherited source method bodies now lower
+with the emitted subclass as the body/field context but use the declaring type
+when selecting the method exception plan. This preserves result shells for
+inherited methods that declare `throws` while still allowing subclass-specific
+field/import context. Focused verification:
+`inherited_context_method_body_sees_declaring_static_imports`,
+`inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan`,
+`throwing_call_chain_promotes_caller_result_shells`,
+`method_effect_facts_drive_exception_result_shell_and_return_wrapping`,
+`cargo fmt --check`, `cargo check --quiet`, `git diff --check`,
+`cargo build --release --quiet --bin new-java2rust`, and focused FastQC
+AbstractQCModule rerun
+`.tmp/corpus-fastqc-abstract-qcmodule-after-inherited-exception-owner-r1`.
+That rerun translates 8/8 files with 0 invalid-pattern files and no remaining
+`?`/result-shell rows; the only generated-Rust errors are two
+`cannot return value referencing temporary value` rows in `SVGImageSaver`.
+
 ## Rerun Protocol
 
 After each fix:
