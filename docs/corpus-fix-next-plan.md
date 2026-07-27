@@ -3844,6 +3844,13 @@ lowering no longer composes native method-reference receiver hints with the
 `Object::...` fallback locally; it asks the shared method-reference shape layer
 before planning the call target.
 
+Stream static path projection cleanup: stream lowering still owns stream-local
+static owner detection for lambda/raw expressions, but the final
+`Owner::member` spelling now goes through the shared associated-path projection
+helper. This keeps stream static constant rendering aligned with ordinary
+call/member path projection cleanup while callable-key ownership resolution is
+still being migrated.
+
 ## Rerun Protocol
 
 After each fix:

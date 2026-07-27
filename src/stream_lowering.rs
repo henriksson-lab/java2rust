@@ -3,9 +3,9 @@ use crate::coercion::{
     BorrowProjectionUse, IndexToUsizeProjection, LoweredExpr, SequenceIterationProjection,
     StreamLambdaParamProjection, apply_borrowed_string_view_projection, apply_clone_projection,
     borrowed_string_view_projection, ensure_borrow_projection_rendered, len_i32_projection,
-    render_borrowed_collection_flat_map, render_index_to_usize_projection,
-    render_optional_non_null_filter_map, render_sequence_iteration_source,
-    render_stream_lambda_param_projection,
+    owner_associated_path_projection, render_borrowed_collection_flat_map,
+    render_index_to_usize_projection, render_optional_non_null_filter_map,
+    render_sequence_iteration_source, render_stream_lambda_param_projection,
 };
 use crate::conversion_lowering::apply_lowered_slot_expr_conversion;
 use crate::conversion_plan::{LoweredType, Slot, plan_lowered_slot_conversion};
@@ -125,12 +125,18 @@ impl<'a> StreamRenderContext<'a> {
         if let Some((owner, member)) = name.rsplit_once('.')
             && is_static_constant_member(member)
         {
-            return format!("{}::{member}", stream_static_owner_segment_name(owner));
+            return render_stream_static_member_path(
+                &stream_static_owner_segment_name(owner),
+                member,
+            );
         }
         if let Some((owner, member)) = name.rsplit_once("::")
             && is_static_constant_member(member)
         {
-            return format!("{}::{member}", stream_static_owner_segment_name(owner));
+            return render_stream_static_member_path(
+                &stream_static_owner_segment_name(owner),
+                member,
+            );
         }
         if locals.iter().any(|local| *local == name) {
             return crate::parser::to_snake_case(name);
@@ -366,7 +372,7 @@ fn emit_stream_lambda_body_with_locals_prec(
                     .or_else(|| stream_static_constant_owner_name(receiver, locals, ctx))
             {
                 return parenthesize_stream_expr_if_needed(
-                    format!("{owner}::{field}"),
+                    render_stream_static_member_path(&owner, field),
                     12,
                     parent_prec,
                     right_child,
@@ -615,12 +621,12 @@ fn render_stream_raw_expr(raw: &str) -> String {
     if let Some((owner, member)) = raw.rsplit_once('.')
         && is_static_constant_member(member)
     {
-        return format!("{}::{member}", stream_static_owner_segment_name(owner));
+        return render_stream_static_member_path(&stream_static_owner_segment_name(owner), member);
     }
     if let Some((owner, member)) = raw.rsplit_once("::")
         && is_static_constant_member(member)
     {
-        return format!("{}::{member}", stream_static_owner_segment_name(owner));
+        return render_stream_static_member_path(&stream_static_owner_segment_name(owner), member);
     }
     raw.to_string()
 }
@@ -2401,6 +2407,10 @@ fn stream_static_owner_segment_name(owner: &str) -> String {
         }
     }
     out
+}
+
+fn render_stream_static_member_path(owner: &str, member: &str) -> String {
+    crate::emit::emit_expr(&owner_associated_path_projection(owner, member))
 }
 
 fn stream_static_owner_type_name_with_context(owner: &str, ctx: StreamRenderContext<'_>) -> String {

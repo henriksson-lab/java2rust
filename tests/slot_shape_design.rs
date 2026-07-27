@@ -27893,6 +27893,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!stream_source.contains("format!(\"{receiver}.len() as i32\")"));
     assert!(!stream_source.contains("format!(\"{rendered}.clone()\")"));
     assert!(!stream_source.contains("format!(\"{param}.clone()\")"));
+    assert!(!stream_source.contains("format!(\"{}::{member}\""));
+    assert!(!stream_source.contains("format!(\"{owner}::{field}\""));
     assert!(!stream_source.contains(".as_ref().unwrap().iter()"));
     assert!(!stream_source.contains(".unwrap().into_iter()"));
     assert!(!stream_source.contains(".filter_map(|item| item.as_ref())"));
@@ -27902,6 +27904,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(stream_source.contains("render_optional_non_null_filter_map"));
     assert!(stream_source.contains("render_borrowed_collection_flat_map"));
     assert!(stream_source.contains("render_stream_lambda_param_projection"));
+    assert!(stream_source.contains("owner_associated_path_projection"));
+    assert!(stream_source.contains("fn render_stream_static_member_path"));
     assert!(stream_source.contains("fn render_stream_lambda_clone_projection"));
     assert!(stream_source.contains("apply_clone_projection(RustExpr::Raw"));
 }
