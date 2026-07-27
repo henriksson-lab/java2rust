@@ -4105,6 +4105,12 @@ longer reuse the `assignment_slot_for_target` planner name, preserving the
 separation where `conversion_plan` owns slot policy and invalid-cast runtime
 policy while lowering only asks for a target assignment slot in current-type
 context.
+Cast/instanceof guard cleanup: the design guard for cast and `instanceof`
+lowering now checks the actual expression-lowering match branch and accepts
+`plan_cast_conversion_from_actual`, which is the current API when lowering has
+already computed a precise actual shape. Broader lower-side hierarchy queries
+remain tracked as semantic-facts cleanup rather than being conflated with
+cast/instanceof plan rendering.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,

@@ -15875,6 +15875,11 @@ fn lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_fa
     );
 
     let lower_source = include_str!("../src/lower.rs");
+    let cast_instanceof_branch = lower_source
+        .rsplit("Expr::Cast { ty, expr } =>")
+        .next()
+        .and_then(|tail| tail.split("Expr::ClassLiteral(ty)").next())
+        .expect("cast and instanceof lowering branch should be present");
     let conversion_source = include_str!("../src/conversion_plan.rs");
     let lowering_source = include_str!("../src/conversion_lowering.rs");
 
@@ -15890,25 +15895,27 @@ fn lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_fa
             .contains("java_cast_semantics_policy_with_facts(&actual, &target, &coercion, facts)")
     );
 
-    assert!(lower_source.contains("plan_cast_conversion("));
-    assert!(lower_source.contains("apply_cast_conversion("));
-    assert!(lower_source.contains("plan_instanceof("));
-    assert!(lower_source.contains("apply_instanceof("));
-    assert!(lower_source.contains("lower_expr_with_refinements(expr, env, ctx, refinements)"));
-    assert!(lower_source.contains("representations: Some(ctx.representations)"));
-    assert!(lower_source.contains("facts: Some(ctx.facts)"));
-    assert!(!lower_source.contains("ObjectRepresentation"));
-    assert!(!lower_source.contains("representation_for("));
-    assert!(!lower_source.contains("dispatch_for("));
-    assert!(!lower_source.contains("HierarchyStrategy"));
-    assert!(!lower_source.contains("hierarchy_subtype_policy"));
-    assert!(!lower_source.contains("reachable_hierarchy_edges"));
-    assert!(!lower_source.contains("type_capability_overrides"));
-    assert!(!lower_source.contains("instanceof_target_policy"));
-    assert!(!lower_source.contains("plan_instanceof_check"));
-    assert!(!lower_source.contains("JavaCastSemanticsPolicy"));
-    assert!(!lower_source.contains("java_cast_semantics_policy"));
-    assert!(!lower_source.contains("InvalidCastPolicy"));
+    assert!(cast_instanceof_branch.contains("plan_cast_conversion_from_actual("));
+    assert!(cast_instanceof_branch.contains("apply_cast_conversion("));
+    assert!(cast_instanceof_branch.contains("plan_instanceof("));
+    assert!(cast_instanceof_branch.contains("apply_instanceof("));
+    assert!(
+        cast_instanceof_branch.contains("lower_expr_with_refinements(expr, env, ctx, refinements)")
+    );
+    assert!(cast_instanceof_branch.contains("representations: Some(ctx.representations)"));
+    assert!(cast_instanceof_branch.contains("facts: Some(ctx.facts)"));
+    assert!(!cast_instanceof_branch.contains("ObjectRepresentation"));
+    assert!(!cast_instanceof_branch.contains("representation_for("));
+    assert!(!cast_instanceof_branch.contains("dispatch_for("));
+    assert!(!cast_instanceof_branch.contains("HierarchyStrategy"));
+    assert!(!cast_instanceof_branch.contains("hierarchy_subtype_policy"));
+    assert!(!cast_instanceof_branch.contains("reachable_hierarchy_edges"));
+    assert!(!cast_instanceof_branch.contains("type_capability_overrides"));
+    assert!(!cast_instanceof_branch.contains("instanceof_target_policy"));
+    assert!(!cast_instanceof_branch.contains("plan_instanceof_check"));
+    assert!(!cast_instanceof_branch.contains("JavaCastSemanticsPolicy"));
+    assert!(!cast_instanceof_branch.contains("java_cast_semantics_policy"));
+    assert!(!cast_instanceof_branch.contains("InvalidCastPolicy"));
 
     assert!(lowering_source.contains("apply_shape_coercion_plan(expr, &plan.coercion)"));
     assert!(lowering_source.contains("render_instanceof_check(expr, &plan.check)"));
