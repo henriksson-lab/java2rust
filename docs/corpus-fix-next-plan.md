@@ -4430,6 +4430,17 @@ Focused guards green:
 `source_overload_prefers_expanded_varargs_over_same_arity_fixed_mismatch`, and
 `reused_optional_borrowed_source_argument_wraps_by_reference`.
 
+Nullable fallthrough try follow-up: source return nullability is no longer
+discarded solely because a method returns a call result. This lets explicit
+nullable fallbacks such as `try { return call(); } catch (...) { ... } return
+null;` select an optional return carrier, while the concrete-return shortcut
+remains guarded for call-result methods. Value-producing fallthrough
+try/catch lowering now maps inner `Ok(Some(value))` to `Ok(Some(value))` when
+the outer method return shape is already optional. Focused guards green:
+`try_return_with_fallthrough_catch_uses_outer_fallback_return`,
+`plain_fallthrough_try_with_value_returns_uses_optional_result_carrier`, and
+`optional_argument_wrap_reused_value_clones_before_some`.
+
 ## Rerun Protocol
 
 After each fix:

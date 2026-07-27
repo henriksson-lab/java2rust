@@ -5611,7 +5611,7 @@ fn optional_argument_wrap_reused_value_clones_before_some() {
             "self.seen.insert(name.as_ref().cloned().expect(\"Java null receiver\"), \"seen\".to_string())"
         ) && translation
             .rust
-            .contains("self.valid(name.as_deref())")
+            .contains("self.valid(name.as_ref().map(|value| value.as_str()))")
             && translation.rust.contains("format!(\"bad {}\", name.as_ref().map")
             && !translation.rust.contains("self.valid(name.map")
             && !translation.rust.contains(".clone()/* TODO(translation): validate added clone */.clone()"),

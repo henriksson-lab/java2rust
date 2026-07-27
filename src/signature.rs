@@ -11215,10 +11215,7 @@ pub fn method_return_shape_constraints(
         })
         .is_some_and(|method_usage| !method_usage.returned_call_results.is_empty());
     let returns_call_result_alias = method_returns_local_initialized_from_call(method);
-    let flow_return_nullability = if boundary_kind == Some(SignatureBoundaryKind::PublicApi)
-        || returns_call_result
-        || returns_call_result_alias
-    {
+    let flow_return_nullability = if boundary_kind == Some(SignatureBoundaryKind::PublicApi) {
         Vec::new()
     } else {
         typed_source_method_return_nullability_constraints(ty, method, facts)

@@ -312,6 +312,7 @@ pub fn try_catch_value_fallthrough_stmt(
     try_body: Vec<RustStmt>,
     catches: Vec<CatchRenderArm>,
     outer_returns_result: bool,
+    outer_result_returns_option: bool,
 ) -> RustStmt {
     let option_ok_type = RustType::Option(Box::new(ok_type));
     let rendered_result_type = crate::emit::emit_type(&exception_result_type(option_ok_type));
@@ -326,7 +327,9 @@ pub fn try_catch_value_fallthrough_stmt(
     out.push_str(" {\n");
     out.push_str(&crate::emit::emit_statements(&body_with_fallthrough, 1));
     out.push_str("})() {\n");
-    if outer_returns_result {
+    if outer_returns_result && outer_result_returns_option {
+        out.push_str("    Ok(Some(value)) => return Ok(Some(value)),\n");
+    } else if outer_returns_result {
         out.push_str("    Ok(Some(value)) => return Ok(value),\n");
     } else {
         out.push_str("    Ok(Some(value)) => return value,\n");

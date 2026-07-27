@@ -5670,6 +5670,8 @@ fn lower_try_stmt(
             try_body,
             catch_arms,
             wrap_returns_in_ok,
+            ctx.current_return_shape
+                .is_some_and(|shape| shape.optional_element_type().is_some()),
         );
     }
     try_catch_stmt(
