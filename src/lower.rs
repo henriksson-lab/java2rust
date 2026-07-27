@@ -12805,13 +12805,11 @@ fn adapt_native_collection_receiver(
     if crate::stdlib::java_collection_kind_for_type(&element_ty).is_none() {
         return lowered;
     }
-    let projection = match method {
+    let mutable = match method {
         NativeCollectionMethod::ListPush
         | NativeCollectionMethod::SetInsert
         | NativeCollectionMethod::Extend
-        | NativeCollectionMethod::MapInsert => {
-            crate::coercion::OptionalReceiverProjection::MutableUnchecked
-        }
+        | NativeCollectionMethod::MapInsert => true,
         NativeCollectionMethod::Len
         | NativeCollectionMethod::IsEmpty
         | NativeCollectionMethod::ListGet
@@ -12820,11 +12818,9 @@ fn adapt_native_collection_receiver(
         | NativeCollectionMethod::MapKeys
         | NativeCollectionMethod::MapIter
         | NativeCollectionMethod::Iterator
-        | NativeCollectionMethod::ToArray => {
-            crate::coercion::OptionalReceiverProjection::SharedUnchecked
-        }
+        | NativeCollectionMethod::ToArray => false,
     };
-    project_optional_receiver(lowered, projection)
+    adapt_optional_instance_receiver_with_slot_plan(receiver, lowered, env, ctx, mutable, true)
 }
 
 fn lower_java_equality_call_expr(

@@ -3898,6 +3898,14 @@ helper. This keeps stream static constant rendering aligned with ordinary
 call/member path projection cleanup while callable-key ownership resolution is
 still being migrated.
 
+Native collection optional receiver cleanup: optional Java collection receiver
+adaptation still verifies that the nullable payload is a known Java collection,
+but mutable/shared receiver projection now delegates to
+`adapt_optional_instance_receiver_with_slot_plan`. This removes the native
+collection-specific optional projection table and keeps unchecked legacy unwrap
+behavior behind the same typed slot-plan adapter used by ordinary optional
+receivers.
+
 ## Rerun Protocol
 
 After each fix:

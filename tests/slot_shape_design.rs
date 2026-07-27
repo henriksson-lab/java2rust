@@ -14113,9 +14113,13 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
         .nth(1)
         .and_then(|tail| tail.split("fn lower_java_equality_call_expr").next())
         .expect("native collection receiver helper should be present");
-    assert!(native_collection_receiver_helper.contains("project_optional_receiver"));
-    assert!(native_collection_receiver_helper.contains("MutableUnchecked"));
-    assert!(native_collection_receiver_helper.contains("SharedUnchecked"));
+    assert!(
+        native_collection_receiver_helper
+            .contains("adapt_optional_instance_receiver_with_slot_plan")
+    );
+    assert!(!native_collection_receiver_helper.contains("project_optional_receiver"));
+    assert!(!native_collection_receiver_helper.contains("MutableUnchecked"));
+    assert!(!native_collection_receiver_helper.contains("SharedUnchecked"));
     assert!(!native_collection_receiver_helper.contains("\"as_ref\""));
     assert!(!native_collection_receiver_helper.contains("\"as_mut\""));
     assert!(!native_collection_receiver_helper.contains(".{access}().unwrap()"));
