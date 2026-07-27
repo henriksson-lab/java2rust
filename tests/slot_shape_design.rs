@@ -27835,6 +27835,34 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn unbound_method_call_projection"));
     assert!(coercion_source.contains("pub fn receiver_method_call_projection"));
     assert!(coercion_source.contains("pub fn current_receiver_method_call_projection"));
+    assert!(call_source.contains("receiver_method_call_projection"));
+    let native_instance_method_projection = call_source
+        .split("fn apply_native_java_instance_method")
+        .nth(1)
+        .expect("native Java instance projection helper should exist")
+        .split("fn apply_native_java_static_method")
+        .next()
+        .expect("native Java instance projection helper should be bounded");
+    for method in [
+        "\"is_empty\"",
+        "\"trim\"",
+        "\"to_lowercase\"",
+        "\"to_uppercase\"",
+        "\"to_string\"",
+        "\"contains\"",
+        "\"starts_with\"",
+        "\"ends_with\"",
+        "\"replace\"",
+        "\"is_some\"",
+        "\"format\"",
+    ] {
+        assert!(
+            native_instance_method_projection.contains(&format!(
+                "receiver_method_call_projection(receiver, {method}"
+            )),
+            "native instance method {method} should render through receiver_method_call_projection"
+        );
+    }
     assert!(coercion_source.contains("pub fn typed_single_input_callback_projection"));
     assert!(coercion_source.contains("pub fn outer_this_field_projection"));
     assert!(coercion_source.contains("pub fn self_field_projection"));

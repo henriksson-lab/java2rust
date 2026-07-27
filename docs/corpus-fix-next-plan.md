@@ -3915,6 +3915,11 @@ facade ABI work can replace or enrich. The same slice tightened member-access
 planning so untyped lowercase receivers with lowercase fields no longer match
 procedural external/static field guesses; static fallback now requires a
 static-looking member or a receiver that is already shaped like a type name.
+Follow-up: simple native Java instance methods such as string view/content
+methods, `Optional.isPresent`, and `MessageFormat.format` now also render
+through `coercion::receiver_method_call_projection` instead of constructing
+`RustExpr::MethodCall` directly in `call_lowering.rs`. Focused verification:
+`rendered_string_heuristics_have_centralization_guardrails`.
 Follow-up: bare source instance-field access now uses
 `coercion::self_field_projection` for both structured lowering and rendered
 fallbacks. `access_lowering.rs` still owns local-vs-field-vs-static-name

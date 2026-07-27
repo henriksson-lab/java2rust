@@ -19,9 +19,10 @@ use crate::coercion::{
     owned_collection_to_vec_projection, owned_map_keys_vec_projection,
     owner_associated_path_projection, primitive_compare_to_projection,
     primitive_f64_method_projection, primitive_hash_code_projection, primitive_is_nan_projection,
-    primitive_number_value_projection, primitive_parse_projection, self_associated_path_projection,
-    string_char_at_projection, string_compare_to_ignore_case_projection,
-    string_compare_to_projection, string_equals_ignore_case_projection, string_format_projection,
+    primitive_number_value_projection, primitive_parse_projection, receiver_method_call_projection,
+    self_associated_path_projection, string_char_at_projection,
+    string_compare_to_ignore_case_projection, string_compare_to_projection,
+    string_equals_ignore_case_projection, string_format_projection,
     string_from_byte_range_projection, string_from_bytes_projection, string_get_bytes_projection,
     string_hash_code_projection, string_index_of_projection, string_join_delimiter_projection,
     string_join_varargs_projection, string_matches_projection, string_replace_all_projection,
@@ -181,49 +182,33 @@ fn apply_native_java_instance_method(
 ) -> RustExpr {
     match method {
         NativeJavaInstanceMethod::StringLen => len_i32_projection(receiver),
-        NativeJavaInstanceMethod::StringIsEmpty => RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "is_empty".to_string(),
-            args,
-        },
-        NativeJavaInstanceMethod::StringTrim => RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "trim".to_string(),
-            args,
-        },
-        NativeJavaInstanceMethod::StringToLowercase => RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "to_lowercase".to_string(),
-            args,
-        },
-        NativeJavaInstanceMethod::StringToUppercase => RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "to_uppercase".to_string(),
-            args,
-        },
-        NativeJavaInstanceMethod::StringToString => RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "to_string".to_string(),
-            args,
-        },
+        NativeJavaInstanceMethod::StringIsEmpty => {
+            receiver_method_call_projection(receiver, "is_empty", args)
+        }
+        NativeJavaInstanceMethod::StringTrim => {
+            receiver_method_call_projection(receiver, "trim", args)
+        }
+        NativeJavaInstanceMethod::StringToLowercase => {
+            receiver_method_call_projection(receiver, "to_lowercase", args)
+        }
+        NativeJavaInstanceMethod::StringToUppercase => {
+            receiver_method_call_projection(receiver, "to_uppercase", args)
+        }
+        NativeJavaInstanceMethod::StringToString => {
+            receiver_method_call_projection(receiver, "to_string", args)
+        }
         NativeJavaInstanceMethod::ObjectToString => {
             apply_java_display_plan(receiver, JavaDisplayPlan::ErasedObject)
         }
-        NativeJavaInstanceMethod::StringContains => RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "contains".to_string(),
-            args,
-        },
-        NativeJavaInstanceMethod::StringStartsWith => RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "starts_with".to_string(),
-            args,
-        },
-        NativeJavaInstanceMethod::StringEndsWith => RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "ends_with".to_string(),
-            args,
-        },
+        NativeJavaInstanceMethod::StringContains => {
+            receiver_method_call_projection(receiver, "contains", args)
+        }
+        NativeJavaInstanceMethod::StringStartsWith => {
+            receiver_method_call_projection(receiver, "starts_with", args)
+        }
+        NativeJavaInstanceMethod::StringEndsWith => {
+            receiver_method_call_projection(receiver, "ends_with", args)
+        }
         NativeJavaInstanceMethod::BitSetGet => RustExpr::Raw("false".to_string()),
         NativeJavaInstanceMethod::FileExists => file_exists_projection(receiver),
         NativeJavaInstanceMethod::ReaderReady => RustExpr::Raw("true".to_string()),
@@ -233,11 +218,9 @@ fn apply_native_java_instance_method(
             };
             discard_value_projection(arg)
         }
-        NativeJavaInstanceMethod::StringReplace => RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "replace".to_string(),
-            args,
-        },
+        NativeJavaInstanceMethod::StringReplace => {
+            receiver_method_call_projection(receiver, "replace", args)
+        }
         NativeJavaInstanceMethod::StringReplaceFirst => apply_string_replace_first(receiver, args),
         NativeJavaInstanceMethod::StringReplaceAll => apply_string_replace_all(receiver, args),
         NativeJavaInstanceMethod::StringMatches => apply_string_matches_helper(receiver, args),
@@ -255,11 +238,9 @@ fn apply_native_java_instance_method(
         NativeJavaInstanceMethod::StringEqualsIgnoreCase => {
             apply_string_equals_ignore_case(receiver, args)
         }
-        NativeJavaInstanceMethod::OptionalIsPresent => RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "is_some".to_string(),
-            args: Vec::new(),
-        },
+        NativeJavaInstanceMethod::OptionalIsPresent => {
+            receiver_method_call_projection(receiver, "is_some", Vec::new())
+        }
         NativeJavaInstanceMethod::OptionalGet => optional_get_owned_value_projection(receiver),
         NativeJavaInstanceMethod::OptionalOrElse => {
             let Some(fallback) = args.into_iter().next() else {
@@ -294,11 +275,7 @@ fn apply_native_java_instance_method(
                         .to_string(),
                 );
             };
-            RustExpr::MethodCall {
-                receiver: Box::new(receiver),
-                method: "format".to_string(),
-                args: vec![value],
-            }
+            receiver_method_call_projection(receiver, "format", vec![value])
         }
         NativeJavaInstanceMethod::Equals => {
             let Some(other) = args.into_iter().next() else {
