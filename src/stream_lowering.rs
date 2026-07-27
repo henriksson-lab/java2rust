@@ -2,11 +2,12 @@ use crate::call_plan::native_java_instance_receiver_type_hint;
 use crate::coercion::{
     BorrowProjectionUse, IndexToUsizeProjection, LoweredExpr, SequenceIterationProjection,
     StreamLambdaParamProjection, apply_borrowed_string_view_projection, apply_clone_projection,
-    borrowed_string_view_projection, ensure_borrow_projection_rendered, len_i32_projection,
-    owner_associated_path_projection, receiver_method_call_projection,
-    render_borrowed_collection_flat_map, render_index_to_usize_projection,
-    render_nullable_stream_map_body, render_optional_non_null_filter_map,
-    render_sequence_iteration_source, render_stream_lambda_param_projection,
+    borrowed_string_view_projection, current_receiver_method_call_projection,
+    ensure_borrow_projection_rendered, len_i32_projection, owner_associated_path_projection,
+    receiver_method_call_projection, render_borrowed_collection_flat_map,
+    render_index_to_usize_projection, render_nullable_stream_map_body,
+    render_optional_non_null_filter_map, render_sequence_iteration_source,
+    render_stream_lambda_param_projection, self_associated_path_projection,
 };
 use crate::conversion_lowering::apply_lowered_slot_expr_conversion;
 use crate::conversion_plan::{LoweredType, Slot, plan_lowered_slot_conversion};
@@ -467,13 +468,15 @@ fn emit_stream_lambda_body_with_locals_prec(
                     ctx,
                     param_shape,
                 )?;
+                let rendered = crate::emit::emit_expr(&RustExpr::Call {
+                    function: Box::new(owner_associated_path_projection(
+                        &stream_static_owner_type_name_with_context(&resolved.declaring_type, ctx),
+                        &resolved.rust_name,
+                    )),
+                    args: args.into_iter().map(RustExpr::Raw).collect(),
+                });
                 return parenthesize_stream_expr_if_needed(
-                    format!(
-                        "{}::{}({})",
-                        stream_static_owner_type_name_with_context(&resolved.declaring_type, ctx),
-                        resolved.rust_name,
-                        args.join(", ")
-                    ),
+                    rendered,
                     11,
                     parent_prec,
                     right_child,
@@ -492,13 +495,15 @@ fn emit_stream_lambda_body_with_locals_prec(
                     ctx,
                     param_shape,
                 )?;
+                let rendered = crate::emit::emit_expr(&RustExpr::Call {
+                    function: Box::new(owner_associated_path_projection(
+                        &owner,
+                        &crate::parser::to_snake_case(name),
+                    )),
+                    args: args.into_iter().map(RustExpr::Raw).collect(),
+                });
                 return parenthesize_stream_expr_if_needed(
-                    format!(
-                        "{}::{}({})",
-                        owner,
-                        crate::parser::to_snake_case(name),
-                        args.join(", ")
-                    ),
+                    rendered,
                     11,
                     parent_prec,
                     right_child,
@@ -546,28 +551,28 @@ fn emit_stream_lambda_body_with_locals_prec(
                 locals,
                 ctx,
                 param_shape,
-            )?
-            .join(", ");
+            )?;
             let method_name =
                 stream_receiverless_call_rust_name(name, args.len(), args, param, param_shape, ctx)
                     .or_else(|| resolved.as_ref().map(|resolved| resolved.rust_name.clone()))
                     .unwrap_or_else(|| name.clone());
-            let method = method_name.as_str();
+            let method = crate::parser::to_snake_case(method_name.as_str());
             match resolved.as_ref().map(|resolved| resolved.kind) {
-                Some(CallKind::Instance) => (
-                    format!(
-                        "self.{}({rendered_args})",
-                        crate::parser::to_snake_case(method)
-                    ),
-                    11,
-                ),
-                Some(CallKind::Static) => (
-                    format!(
-                        "Self::{}({rendered_args})",
-                        crate::parser::to_snake_case(method)
-                    ),
-                    11,
-                ),
+                Some(CallKind::Instance) => {
+                    let rendered =
+                        crate::emit::emit_expr(&current_receiver_method_call_projection(
+                            &method,
+                            rendered_args.into_iter().map(RustExpr::Raw).collect(),
+                        ));
+                    (rendered, 11)
+                }
+                Some(CallKind::Static) => {
+                    let rendered = crate::emit::emit_expr(&RustExpr::Call {
+                        function: Box::new(self_associated_path_projection(&method)),
+                        args: rendered_args.into_iter().map(RustExpr::Raw).collect(),
+                    });
+                    (rendered, 11)
+                }
                 None if ctx.self_receiver_available
                     && ctx.env.is_none_or(|env| {
                         env.type_env().static_member_import_owner(name).is_none()
@@ -577,18 +582,14 @@ fn emit_stream_lambda_body_with_locals_prec(
                                 .is_none()
                     }) =>
                 {
-                    (
-                        format!(
-                            "self.{}({rendered_args})",
-                            crate::parser::to_snake_case(method)
-                        ),
-                        11,
-                    )
+                    let rendered =
+                        crate::emit::emit_expr(&current_receiver_method_call_projection(
+                            &method,
+                            rendered_args.into_iter().map(RustExpr::Raw).collect(),
+                        ));
+                    (rendered, 11)
                 }
-                None => (
-                    format!("{}({rendered_args})", crate::parser::to_snake_case(method)),
-                    11,
-                ),
+                None => (format!("{}({})", method, rendered_args.join(", ")), 11),
             }
         }
         Expr::New { ty, args, .. } => {

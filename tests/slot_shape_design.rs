@@ -31528,6 +31528,10 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(!shape_source.contains("fn method_reference_method_name_candidates"));
     assert!(lowering_source.contains("owner_associated_path_projection"));
     assert!(lowering_source.contains("receiver_method_call_projection"));
+    assert!(stream_lowering_source.contains("current_receiver_method_call_projection"));
+    assert!(stream_lowering_source.contains("self_associated_path_projection"));
+    assert!(!stream_lowering_source.contains("\"self.{}({rendered_args})\""));
+    assert!(!stream_lowering_source.contains("\"Self::{}({rendered_args})\""));
     assert!(lowering_source.contains("typed_single_input_callback_projection"));
     assert!(!lowering_source.contains("format!(\"{type_name}::new"));
     assert!(!lowering_source.contains("format!(\"{owner}::{method}"));

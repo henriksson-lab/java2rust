@@ -3936,6 +3936,12 @@ helper. This keeps stream static constant rendering aligned with ordinary
 call/member path projection cleanup while callable-key ownership resolution is
 still being migrated.
 
+Stream lambda fallback call projection cleanup: fallback static/current-receiver
+lambda calls now build `RustExpr::Call`/`MethodCall` through
+`owner_associated_path_projection`, `self_associated_path_projection`, and
+`current_receiver_method_call_projection`. Stream lowering still owns fallback
+selection and lambda context while the emitted Rust call shape is shared.
+
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
 but mutable/shared receiver projection now delegates to
