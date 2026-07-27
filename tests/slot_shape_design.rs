@@ -8972,9 +8972,10 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         }
     ));
     assert!(matches!(
-        plan_call_target_with_facts(
+        plan_call_target_with_facts_and_arity(
             Some(&string_value),
             "contains",
+            1,
             None,
             &FactSet::default(),
             &collection_types,
@@ -8987,9 +8988,10 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     let optional_string_value = Expr::Var("maybe_text".to_string());
     collection_types.insert_local("maybe_text", optional_java_type(JavaType::String));
     assert!(matches!(
-        plan_call_target_with_facts(
+        plan_call_target_with_facts_and_arity(
             Some(&optional_string_value),
             "endsWith",
+            1,
             None,
             &FactSet::default(),
             &collection_types,

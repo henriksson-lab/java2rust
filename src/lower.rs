@@ -18,11 +18,12 @@ use crate::call_plan::{
     apply_fallback_static_owner_rust_name, external_call_lowered_type_with_external_index,
     external_call_returns_rust_result_with_external_index,
     external_constructor_arg_shapes_with_args, external_constructor_returns_rust_result,
-    facade_receiver_slot_plan, native_collection_lowered_type,
+    facade_receiver_slot_plan, native_collection_lowered_type, non_self_trivial_accessor_target,
     optional_borrowed_receiver_slot_plan, optional_receiver_slot_plan, plan_call_arguments,
     plan_call_arguments_with_facts_and_args, plan_call_exception_propagation_with_external_index,
     plan_call_expr_with_external_index, plan_call_statement, plan_constructor_arguments,
     plan_native_collection_extend_arg, plan_new_target_for_args_with_facts,
+    retarget_static_call_to_receiver_if,
 };
 use crate::coercion::{
     BorrowProjectionUse, Coercion, JavaDisplayPlan, OptionalSequenceReceiverProjection,
@@ -7279,13 +7280,12 @@ fn lower_expr_with_refinements(
                     let Some(receiver) = receiver.as_deref() else {
                         unreachable!("current receiver accessors are handled above")
                     };
-                    CallTargetPlan::InstanceReceiver {
-                        receiver,
-                        rust_name: resolved
-                            .as_ref()
-                            .map(|resolved| resolved.rust_name.as_str())
-                            .unwrap_or_else(|| name.as_str()),
-                    }
+                    let rust_name = resolved
+                        .as_ref()
+                        .map(|resolved| resolved.rust_name.as_str())
+                        .unwrap_or_else(|| name.as_str());
+                    non_self_trivial_accessor_target(Some(receiver), rust_name)
+                        .expect("non-self trivial accessor should have receiver")
                 }
                 CallExprPlan::Target(target) => target,
             };
@@ -9944,14 +9944,12 @@ fn call_target_uses_display_arguments(
     ctx: LowerCtx,
 ) -> bool {
     match target {
-        CallTargetPlan::FallbackReceiver { rust_name, .. } => {
-            matches!(rust_name.as_str(), "append")
-                && call_receiver.is_some_and(|receiver| {
-                    receiver_type_uses_java_append_display_arguments(receiver, env)
-                })
-                && args
-                    .iter()
-                    .any(|arg| expr_needs_erased_object_display_argument(arg, env, ctx))
+        target if target.is_fallback_receiver_method("append") => {
+            call_receiver.is_some_and(|receiver| {
+                receiver_type_uses_java_append_display_arguments(receiver, env)
+            }) && args
+                .iter()
+                .any(|arg| expr_needs_erased_object_display_argument(arg, env, ctx))
         }
         CallTargetPlan::ExternalFacadeReceiver {
             rust_path: rust_name,
@@ -10097,18 +10095,8 @@ fn static_call_target_signature_arg_plan(
 }
 
 fn external_facade_preserving_call_clones_leading_arg(target: &CallTargetPlan<'_>) -> bool {
-    let rust_name = match target {
-        CallTargetPlan::InstanceReceiver { rust_name, .. }
-        | CallTargetPlan::InstanceSelf { rust_name }
-        | CallTargetPlan::StaticSelf { rust_name } => *rust_name,
-        CallTargetPlan::FallbackReceiver { rust_name, .. }
-        | CallTargetPlan::FallbackSelf { rust_name }
-        | CallTargetPlan::FallbackFree { rust_name }
-        | CallTargetPlan::StaticOwner { rust_name, .. } => rust_name,
-        CallTargetPlan::ExternalFacadeReceiver { rust_path, .. } => {
-            rust_path.rsplit("::").next().unwrap_or(rust_path)
-        }
-        _ => return false,
+    let Some(rust_name) = target.rust_method_name() else {
+        return false;
     };
     rust_name == "sort_by_key"
         || rust_name
@@ -10451,7 +10439,7 @@ fn call_target_single_callback_input_shape(
 }
 
 fn call_target_is_element_callback(target: &CallTargetPlan<'_>) -> bool {
-    call_target_rust_method_name(target).is_some_and(|rust_name| {
+    target.rust_method_name().is_some_and(|rust_name| {
         matches!(
             rust_name,
             "map" | "map_to_pair" | "filter" | "flat_map" | "map_partitions"
@@ -10460,7 +10448,7 @@ fn call_target_is_element_callback(target: &CallTargetPlan<'_>) -> bool {
 }
 
 fn call_target_is_map_partitions(target: &CallTargetPlan<'_>) -> bool {
-    call_target_rust_method_name(target).is_some_and(|rust_name| {
+    target.rust_method_name().is_some_and(|rust_name| {
         rust_name == "map_partitions"
             || rust_name == "map_partitions_to_pair"
             || rust_name
@@ -10672,22 +10660,6 @@ fn render_unbound_accessor_callback_param_type(shape: &RustSlotShape, ctx: Lower
         }
     }
     render_callback_param_type(shape, ctx)
-}
-
-fn call_target_rust_method_name<'a>(target: &'a CallTargetPlan<'a>) -> Option<&'a str> {
-    match target {
-        CallTargetPlan::InstanceReceiver { rust_name, .. }
-        | CallTargetPlan::InstanceSelf { rust_name }
-        | CallTargetPlan::StaticSelf { rust_name } => Some(*rust_name),
-        CallTargetPlan::FallbackReceiver { rust_name, .. }
-        | CallTargetPlan::FallbackSelf { rust_name }
-        | CallTargetPlan::FallbackFree { rust_name }
-        | CallTargetPlan::StaticOwner { rust_name, .. } => Some(rust_name.as_str()),
-        CallTargetPlan::ExternalFacadeReceiver { rust_path, .. } => {
-            Some(rust_path.rsplit("::").next().unwrap_or(rust_path))
-        }
-        _ => None,
-    }
 }
 
 fn stream_like_receiver_element_shape(
@@ -11443,7 +11415,8 @@ fn external_generic_facade_target_keeps_argument_shapes(
     let Some(receiver) = target.receiver_expr() else {
         return false;
     };
-    if call_target_rust_method_name(target)
+    if target
+        .rust_method_name()
         .is_some_and(|method| matches!(method, "writeObject" | "write_object"))
     {
         let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
@@ -11469,7 +11442,10 @@ fn external_generic_facade_target_borrows_actual_argument_shapes(
     let Some(receiver) = target.receiver_expr() else {
         return false;
     };
-    if !call_target_rust_method_name(target).is_some_and(|method| method == "append") {
+    if !target
+        .rust_method_name()
+        .is_some_and(|method| method == "append")
+    {
         return false;
     }
     let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
@@ -12603,43 +12579,9 @@ fn retarget_static_owner_call_for_instance_field_receiver<'a>(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> CallTargetPlan<'a> {
-    let Some(receiver) = receiver else {
-        return target;
-    };
-    match target {
-        CallTargetPlan::StaticOwner { owner, rust_name } => {
-            if !receiver_is_instance_or_outer_field(receiver, env, ctx) {
-                return CallTargetPlan::StaticOwner { owner, rust_name };
-            }
-            CallTargetPlan::FallbackReceiver {
-                receiver,
-                rust_name,
-            }
-        }
-        CallTargetPlan::ExternalFacadeReceiver {
-            rust_path,
-            receiver_abi: crate::facts::ReceiverAbi::AssociatedFunction,
-            ..
-        } => {
-            if !receiver_is_instance_or_outer_field(receiver, env, ctx) {
-                return CallTargetPlan::ExternalFacadeReceiver {
-                    receiver,
-                    rust_path,
-                    receiver_abi: crate::facts::ReceiverAbi::AssociatedFunction,
-                    mutates_receiver: false,
-                };
-            }
-            CallTargetPlan::FallbackReceiver {
-                receiver,
-                rust_name: rust_path
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(&rust_path)
-                    .to_string(),
-            }
-        }
-        other => other,
-    }
+    let should_retarget =
+        receiver.is_some_and(|receiver| receiver_is_instance_or_outer_field(receiver, env, ctx));
+    retarget_static_call_to_receiver_if(target, receiver, should_retarget)
 }
 
 fn receiver_is_instance_or_outer_field(receiver: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
@@ -14565,13 +14507,7 @@ fn lower_target_typed_external_call_cast_source_for_slot(
     let CallExprPlan::Target(target_plan) = plan else {
         return None;
     };
-    if !matches!(
-        target_plan,
-        CallTargetPlan::FallbackReceiver { .. }
-            | CallTargetPlan::ExternalCrateReceiver { .. }
-            | CallTargetPlan::ExternalFacadeReceiver { .. }
-            | CallTargetPlan::NativeCollectionMethod { .. }
-    ) {
+    if !target_plan.uses_receiver_argument_lowering() {
         return None;
     }
     let rust_args = lower_args_for_call_target(
@@ -17907,14 +17843,11 @@ fn lower_external_call_expr_for_slot(
                 .as_ref()
                 .is_none_or(|receiver| is_this_receiver_expr(receiver)) =>
         {
-            let receiver = receiver?;
-            CallTargetPlan::InstanceReceiver {
-                receiver,
-                rust_name: resolved
-                    .as_ref()
-                    .map(|resolved| resolved.rust_name.as_str())
-                    .unwrap_or(name),
-            }
+            let rust_name = resolved
+                .as_ref()
+                .map(|resolved| resolved.rust_name.as_str())
+                .unwrap_or(name);
+            non_self_trivial_accessor_target(receiver, rust_name)?
         }
         CallExprPlan::TrivialAccessorGetter { .. } => return None,
     };

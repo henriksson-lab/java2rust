@@ -4085,6 +4085,14 @@ still red with 454 passed / 55 failed. The failures span pre-existing broad
 design-drift guards in representation, signature, stream, semantic-analysis,
 and lowering ownership tests, so treat the full design suite as a separate
 cleanup batch rather than a blocker for these committed ABI fact slices.
+Call target ownership cleanup: lower-side `CallTargetPlan::InstanceReceiver` and
+`FallbackReceiver` variant construction/classification has moved behind
+call-plan helpers (`non_self_trivial_accessor_target`,
+`retarget_static_call_to_receiver_if`, `rust_method_name`, and
+`uses_receiver_argument_lowering`). The focused design guard now uses the
+arity-aware call-target planner for argument-bearing Java string methods, which
+matches real lowering and keeps native Java string semantics from depending on a
+zero-arity compatibility path.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,

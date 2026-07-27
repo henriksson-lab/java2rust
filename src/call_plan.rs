@@ -135,6 +135,87 @@ impl<'a> CallTargetPlan<'a> {
             _ => false,
         }
     }
+
+    pub fn rust_method_name(&self) -> Option<&str> {
+        match self {
+            CallTargetPlan::InstanceReceiver { rust_name, .. }
+            | CallTargetPlan::InstanceSelf { rust_name }
+            | CallTargetPlan::StaticSelf { rust_name } => Some(*rust_name),
+            CallTargetPlan::FallbackReceiver { rust_name, .. }
+            | CallTargetPlan::FallbackSelf { rust_name }
+            | CallTargetPlan::FallbackFree { rust_name }
+            | CallTargetPlan::StaticOwner { rust_name, .. }
+            | CallTargetPlan::SuperBoundary { rust_name, .. } => Some(rust_name.as_str()),
+            CallTargetPlan::ExternalFacadeReceiver { rust_path, .. } => {
+                Some(rust_path.rsplit("::").next().unwrap_or(rust_path))
+            }
+            CallTargetPlan::ExternalCrateReceiver { rust_name, .. } => Some(rust_name.as_str()),
+            CallTargetPlan::JavaClassStatic { rust_name } => Some(rust_name.as_str()),
+            CallTargetPlan::NativeCollectionMethod { .. }
+            | CallTargetPlan::NativeCollectionStatic { .. }
+            | CallTargetPlan::NativeJavaInstance { .. }
+            | CallTargetPlan::NativeJavaStatic { .. } => None,
+        }
+    }
+
+    pub fn is_fallback_receiver_method(&self, method: &str) -> bool {
+        matches!(
+            self,
+            CallTargetPlan::FallbackReceiver { rust_name, .. } if rust_name == method
+        )
+    }
+
+    pub fn uses_receiver_argument_lowering(&self) -> bool {
+        matches!(
+            self,
+            CallTargetPlan::FallbackReceiver { .. }
+                | CallTargetPlan::ExternalCrateReceiver { .. }
+                | CallTargetPlan::ExternalFacadeReceiver { .. }
+                | CallTargetPlan::NativeCollectionMethod { .. }
+        )
+    }
+}
+
+pub fn non_self_trivial_accessor_target<'a>(
+    receiver: Option<&'a Expr>,
+    rust_name: &'a str,
+) -> Option<CallTargetPlan<'a>> {
+    receiver.map(|receiver| CallTargetPlan::InstanceReceiver {
+        receiver,
+        rust_name,
+    })
+}
+
+pub fn retarget_static_call_to_receiver_if<'a>(
+    target: CallTargetPlan<'a>,
+    receiver: Option<&'a Expr>,
+    should_retarget: bool,
+) -> CallTargetPlan<'a> {
+    if !should_retarget {
+        return target;
+    }
+    let Some(receiver) = receiver else {
+        return target;
+    };
+    match target {
+        CallTargetPlan::StaticOwner { rust_name, .. } => CallTargetPlan::FallbackReceiver {
+            receiver,
+            rust_name,
+        },
+        CallTargetPlan::ExternalFacadeReceiver {
+            rust_path,
+            receiver_abi: ReceiverAbi::AssociatedFunction,
+            ..
+        } => CallTargetPlan::FallbackReceiver {
+            receiver,
+            rust_name: rust_path
+                .rsplit("::")
+                .next()
+                .unwrap_or(&rust_path)
+                .to_string(),
+        },
+        other => other,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
