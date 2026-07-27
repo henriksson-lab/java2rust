@@ -223,6 +223,32 @@ pub fn optional_receiver_slot_plan(
     }
 }
 
+pub fn optional_borrowed_receiver_slot_plan(
+    java_ty: JavaType,
+    mutable: bool,
+    facts: &FactSet,
+) -> OptionalReceiverSlotPlan {
+    let receiver_abi = if mutable {
+        ReceiverAbi::MutBorrowedSelf
+    } else {
+        ReceiverAbi::BorrowedSelf
+    };
+    let slot = facade_receiver_slot_plan(receiver_abi, java_ty, facts)
+        .slot
+        .expect("borrowed receiver ABI has a receiver slot");
+    let element_ownership = if mutable {
+        OwnershipShape::MutableBorrow
+    } else {
+        OwnershipShape::SharedBorrow
+    };
+    OptionalReceiverSlotPlan {
+        receiver_abi,
+        slot,
+        projection: OptionalReceiverProjection::Borrowed,
+        element_ownership,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeCollectionMethod {
     Len,

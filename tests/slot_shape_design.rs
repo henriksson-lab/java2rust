@@ -16,12 +16,13 @@ use new_java2rust::call_plan::{
     TrivialAccessorCallPlan, external_call_lowered_type, external_call_returns_rust_result,
     external_constructor_arg_shapes, facade_receiver_slot_plan, native_collection_arg_shapes,
     native_collection_arg_shapes_with_facts, native_collection_lowered_type,
-    native_java_instance_receiver_type_hint, optional_receiver_slot_plan, plan_call_arguments,
-    plan_call_arguments_with_facts, plan_call_arguments_with_facts_and_args,
-    plan_call_exception_propagation, plan_call_expr, plan_call_statement, plan_call_target,
-    plan_call_target_with_facts, plan_call_target_with_facts_and_arity, plan_constructor_arguments,
-    plan_new_target, plan_new_target_with_facts, plan_trivial_accessor_call,
-    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
+    native_java_instance_receiver_type_hint, optional_borrowed_receiver_slot_plan,
+    optional_receiver_slot_plan, plan_call_arguments, plan_call_arguments_with_facts,
+    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation, plan_call_expr,
+    plan_call_statement, plan_call_target, plan_call_target_with_facts,
+    plan_call_target_with_facts_and_arity, plan_constructor_arguments, plan_new_target,
+    plan_new_target_with_facts, plan_trivial_accessor_call, resolved_call_arg_shapes,
+    resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::{
     Coercion, OptionalReceiverProjection, RenderedMutableAliasProjection,
@@ -10279,6 +10280,16 @@ fn optional_receiver_slot_plan_maps_mutability_and_projection() {
         panic!("mutable optional receiver should plan an optional element borrow");
     };
     assert_eq!(element_shape.ownership, OwnershipShape::MutableBorrow);
+
+    let borrowed = optional_borrowed_receiver_slot_plan(reader_ty.clone(), false, &facts);
+    assert_eq!(borrowed.receiver_abi, ReceiverAbi::BorrowedSelf);
+    assert_eq!(borrowed.projection, OptionalReceiverProjection::Borrowed);
+    assert_eq!(borrowed.element_ownership, OwnershipShape::SharedBorrow);
+    let Slot::Argument(borrowed_shape) = &borrowed.slot else {
+        panic!("borrowed optional receiver should have an argument slot");
+    };
+    assert_eq!(borrowed_shape.java_ty, reader_ty);
+    assert_eq!(borrowed_shape.ownership, OwnershipShape::SharedBorrow);
 }
 
 #[test]
@@ -14248,6 +14259,8 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
     assert!(optional_instance_receiver_adapter.contains("plan_lowered_slot_conversion"));
     assert!(optional_instance_receiver_adapter.contains("project_optional_receiver"));
     assert!(optional_instance_receiver_adapter.contains("plan.optional_element_borrow_type"));
+    assert!(optional_instance_receiver_adapter.contains("optional_borrowed_receiver_slot_plan"));
+    assert!(!optional_instance_receiver_adapter.contains("OptionalReceiverProjection::Borrowed"));
     assert!(
         !optional_instance_receiver_adapter.contains("optional_element_borrow_from_option_shape")
     );

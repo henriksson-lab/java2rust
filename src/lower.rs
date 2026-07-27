@@ -18,11 +18,11 @@ use crate::call_plan::{
     apply_fallback_static_owner_rust_name, external_call_lowered_type_with_external_index,
     external_call_returns_rust_result_with_external_index,
     external_constructor_arg_shapes_with_args, external_constructor_returns_rust_result,
-    facade_receiver_slot_plan, native_collection_lowered_type, optional_receiver_slot_plan,
-    plan_call_arguments, plan_call_arguments_with_facts_and_args,
-    plan_call_exception_propagation_with_external_index, plan_call_expr_with_external_index,
-    plan_call_statement, plan_constructor_arguments, plan_native_collection_extend_arg,
-    plan_new_target_for_args_with_facts,
+    facade_receiver_slot_plan, native_collection_lowered_type,
+    optional_borrowed_receiver_slot_plan, optional_receiver_slot_plan, plan_call_arguments,
+    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation_with_external_index,
+    plan_call_expr_with_external_index, plan_call_statement, plan_constructor_arguments,
+    plan_native_collection_extend_arg, plan_new_target_for_args_with_facts,
 };
 use crate::coercion::{
     BorrowProjectionUse, Coercion, JavaDisplayPlan, OptionalSequenceReceiverProjection,
@@ -12663,16 +12663,9 @@ fn adapt_optional_instance_receiver_with_slot_plan(
     if let Some(LoweredType::OptionalElementBorrow { element_shape, .. }) =
         native_collection_optional_element_borrow_lowered_type(receiver, env, ctx)
     {
-        let projected = project_optional_receiver(
-            lowered,
-            crate::coercion::OptionalReceiverProjection::Borrowed,
-        );
-        let plan = optional_receiver_slot_plan(
-            element_shape.java_ty.clone(),
-            mutable,
-            legacy_unchecked,
-            ctx.facts,
-        );
+        let plan =
+            optional_borrowed_receiver_slot_plan(element_shape.java_ty.clone(), mutable, ctx.facts);
+        let projected = project_optional_receiver(lowered, plan.projection);
         let projected = crate::coercion::LoweredExpr {
             expr: projected,
             actual: LoweredType::Slot(element_shape),

@@ -4051,6 +4051,12 @@ Follow-up: borrowed-string stream lambda arguments now prefer the shared
 param/local `.as_str()` compatibility fallback. This keeps existing lambda
 binding recovery intact while making slot facts the first authority for
 String-to-`&str` argument adaptation.
+Optional borrowed receiver plan follow-up: already-borrowed optional receiver
+carriers (`Option<&T>` / `Option<&mut T>`) now enter
+`optional_borrowed_receiver_slot_plan` in `call_plan` before projection and slot
+conversion. The shared adapter still performs receiver expression discovery, but
+`lower.rs` no longer hardcodes the `OptionalReceiverProjection::Borrowed`
+choice for this carrier.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
