@@ -2687,6 +2687,46 @@ impl LoweredSlotExprConversionPlan {
     }
 }
 
+pub fn receiver_method_autoref_satisfies_facade_slot(
+    receiver_abi: crate::facts::ReceiverAbi,
+    plan: &LoweredSlotExprConversionPlan,
+) -> bool {
+    let SlotConversionPlan::Shape(shape_plan) = &plan.conversion else {
+        return false;
+    };
+    matches!(
+        (&shape_plan.dispatch, &shape_plan.view, &shape_plan.optional),
+        (
+            DispatchCoercionPolicy::NoDispatchChange,
+            ViewCoercionPolicy::NoViewChange,
+            OptionalShapeCoercionPolicy::NoChange
+        )
+    ) && shape_plan.primitive_widening.is_none()
+        && matches!(
+            (receiver_abi, &shape_plan.ownership),
+            (
+                crate::facts::ReceiverAbi::BorrowedSelf,
+                OwnershipCoercionPolicy::BorrowOwnedValue
+            ) | (
+                crate::facts::ReceiverAbi::MutBorrowedSelf,
+                OwnershipCoercionPolicy::BorrowOwnedMutably
+            )
+        )
+}
+
+pub fn receiver_method_autoref_satisfies_optional_slot(
+    plan: &LoweredSlotExprConversionPlan,
+) -> bool {
+    let SlotConversionPlan::Shape(shape_plan) = &plan.conversion else {
+        return false;
+    };
+    matches!(
+        shape_plan.ownership,
+        OwnershipCoercionPolicy::NoOwnershipChange
+    ) && matches!(shape_plan.optional, OptionalShapeCoercionPolicy::NoChange)
+        && shape_plan.primitive_widening.is_none()
+}
+
 pub fn plan_cast_conversion(
     expr: &Expr,
     target_ty: &JavaType,
@@ -3193,4 +3233,49 @@ fn rust_borrowed_facade_return_recovery(rust_type_name: &str) -> RustBorrowedFac
 fn java_type_is_erased_object_like(java_ty: &JavaType) -> bool {
     matches!(java_ty, JavaType::Unknown(name) | JavaType::Named { name, .. }
         if name.eq_ignore_ascii_case("Object") || name.eq_ignore_ascii_case("java.lang.Object"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::facts::ReceiverAbi;
+    use crate::shape_projection::borrowed_string_content_shape;
+
+    #[test]
+    fn receiver_method_autoref_predicates_are_conversion_plan_policy() {
+        let object_ty = JavaType::Unknown("FacadeValue".to_string());
+        let owned_object =
+            LoweredType::Slot(Box::new(RustSlotShape::for_storage(object_ty.clone())));
+        let mut borrowed_object = RustSlotShape::for_storage(object_ty);
+        borrowed_object.ownership = OwnershipShape::SharedBorrow;
+        let facade_plan = plan_lowered_slot_conversion(
+            &owned_object,
+            argument_slot(borrowed_object.clone()),
+            &FactSet::default(),
+        );
+        assert!(receiver_method_autoref_satisfies_facade_slot(
+            ReceiverAbi::BorrowedSelf,
+            &facade_plan
+        ));
+        assert!(!receiver_method_autoref_satisfies_optional_slot(
+            &facade_plan
+        ));
+
+        let borrowed_string = borrowed_string_content_shape();
+        let optional_receiver_plan = LoweredSlotExprConversionPlan {
+            actual: LoweredType::Slot(Box::new(borrowed_string.clone())),
+            slot: argument_slot(borrowed_string.clone()),
+            conversion: SlotConversionPlan::Shape(shape_coercion_plan(
+                &borrowed_string,
+                &borrowed_string,
+            )),
+        };
+        assert!(receiver_method_autoref_satisfies_optional_slot(
+            &optional_receiver_plan
+        ));
+        assert!(!receiver_method_autoref_satisfies_facade_slot(
+            ReceiverAbi::BorrowedSelf,
+            &optional_receiver_plan
+        ));
+    }
 }

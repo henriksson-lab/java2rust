@@ -3982,6 +3982,11 @@ When an `ExternalApiEffectFact` proves `ExternalRecord::getName -> String`,
 method-reference output-shape inference uses `external_call_lowered_type` to
 derive the precise return shape; the name-shaped `Unknown("get_name")` fallback
 remains only for factless source-shaped references.
+Receiver-autoref follow-up: the predicates that decide whether Rust method-call
+autoref already satisfies a planned facade or optional receiver slot moved from
+`lower.rs` into `conversion_plan`. Lowering still selects Java receiver context
+and optional receiver shape, but it no longer matches conversion-policy internals
+locally to decide whether to skip an explicit borrow/projection.
 
 ## Rerun Protocol
 

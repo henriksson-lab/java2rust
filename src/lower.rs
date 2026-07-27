@@ -74,13 +74,14 @@ use crate::conversion_lowering::{
     construct_optional_value_for_target,
 };
 use crate::conversion_plan::{
-    CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredSlotExprConversionPlan, LoweredType,
-    OptionalShapeCoercionPolicy, OwnershipCoercionPolicy, ReturnValuePlan, Slot,
-    SlotConversionPlan, ViewCoercionPolicy, actual_shape_for_slot_expr,
-    actual_shape_for_slot_expr_with_slot, argument_slot, assignment_statement_plan_for_target,
-    assignment_value_plan_for_shape, assignment_value_plan_for_target, condition_slot, index_slot,
+    CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredType, ReturnValuePlan, Slot,
+    SlotConversionPlan, actual_shape_for_slot_expr, actual_shape_for_slot_expr_with_slot,
+    argument_slot, assignment_statement_plan_for_target, assignment_value_plan_for_shape,
+    assignment_value_plan_for_target, condition_slot, index_slot,
     optional_slot_construction_plan_for_actual, plan_cast_conversion_from_actual, plan_instanceof,
-    plan_lowered_slot_conversion, plan_slot_conversion, return_value_plan,
+    plan_lowered_slot_conversion, plan_slot_conversion,
+    receiver_method_autoref_satisfies_facade_slot, receiver_method_autoref_satisfies_optional_slot,
+    return_value_plan,
 };
 use crate::diagnostics::DiagnosticBag;
 use crate::emit;
@@ -12386,33 +12387,6 @@ fn adapt_external_facade_receiver_slot(
     ))
 }
 
-fn receiver_method_autoref_satisfies_facade_slot(
-    receiver_abi: crate::facts::ReceiverAbi,
-    plan: &LoweredSlotExprConversionPlan,
-) -> bool {
-    let SlotConversionPlan::Shape(shape_plan) = &plan.conversion else {
-        return false;
-    };
-    matches!(
-        (&shape_plan.dispatch, &shape_plan.view, &shape_plan.optional),
-        (
-            DispatchCoercionPolicy::NoDispatchChange,
-            ViewCoercionPolicy::NoViewChange,
-            OptionalShapeCoercionPolicy::NoChange
-        )
-    ) && shape_plan.primitive_widening.is_none()
-        && matches!(
-            (receiver_abi, &shape_plan.ownership),
-            (
-                crate::facts::ReceiverAbi::BorrowedSelf,
-                OwnershipCoercionPolicy::BorrowOwnedValue
-            ) | (
-                crate::facts::ReceiverAbi::MutBorrowedSelf,
-                OwnershipCoercionPolicy::BorrowOwnedMutably
-            )
-        )
-}
-
 fn adapt_call_target_receiver_with_signature(
     target: &CallTargetPlan<'_>,
     receiver: &Expr,
@@ -12719,7 +12693,7 @@ fn adapt_optional_instance_receiver_with_slot_plan(
             actual: LoweredType::Slot(element_shape),
         };
         let conversion_plan = plan_lowered_slot_conversion(&projected.actual, plan.slot, ctx.facts);
-        if optional_receiver_method_autoref_satisfies_slot(&conversion_plan) {
+        if receiver_method_autoref_satisfies_optional_slot(&conversion_plan) {
             return projected.expr;
         }
         return apply_lowered_slot_expr_conversion(projected, &conversion_plan);
@@ -12762,21 +12736,10 @@ fn adapt_optional_instance_receiver_with_slot_plan(
         actual: LoweredType::Slot(element_shape),
     };
     let conversion_plan = plan_lowered_slot_conversion(&projected.actual, plan.slot, ctx.facts);
-    if optional_receiver_method_autoref_satisfies_slot(&conversion_plan) {
+    if receiver_method_autoref_satisfies_optional_slot(&conversion_plan) {
         return projected.expr;
     }
     apply_lowered_slot_expr_conversion(projected, &conversion_plan)
-}
-
-fn optional_receiver_method_autoref_satisfies_slot(plan: &LoweredSlotExprConversionPlan) -> bool {
-    let SlotConversionPlan::Shape(shape_plan) = &plan.conversion else {
-        return false;
-    };
-    matches!(
-        shape_plan.ownership,
-        OwnershipCoercionPolicy::NoOwnershipChange
-    ) && matches!(shape_plan.optional, OptionalShapeCoercionPolicy::NoChange)
-        && shape_plan.primitive_widening.is_none()
 }
 
 fn adapt_native_collection_receiver(

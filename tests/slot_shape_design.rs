@@ -14162,10 +14162,7 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
     let optional_instance_receiver_adapter = source
         .split("fn adapt_optional_instance_receiver_with_slot_plan")
         .nth(1)
-        .and_then(|tail| {
-            tail.split("fn optional_receiver_method_autoref_satisfies_slot")
-                .next()
-        })
+        .and_then(|tail| tail.split("fn adapt_native_collection_receiver").next())
         .expect("optional receiver slot-plan adapter should be present");
     assert!(optional_instance_receiver_adapter.contains("OptionalElementBorrow"));
     assert!(optional_instance_receiver_adapter.contains("plan_lowered_slot_conversion"));
@@ -14175,6 +14172,11 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
         !optional_instance_receiver_adapter.contains("optional_element_borrow_from_option_shape")
     );
     assert!(!optional_instance_receiver_adapter.contains("Some(if mutable"));
+    assert!(
+        optional_instance_receiver_adapter
+            .contains("receiver_method_autoref_satisfies_optional_slot")
+    );
+    assert!(!source.contains("fn optional_receiver_method_autoref_satisfies_slot"));
     let native_collection_receiver_helper = source
         .split("fn adapt_native_collection_receiver")
         .nth(1)
@@ -27498,6 +27500,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let lower_source = include_str!("../src/lower.rs");
     let call_source = include_str!("../src/call_lowering.rs");
     let call_plan_source = include_str!("../src/call_plan.rs");
+    let conversion_source = include_str!("../src/conversion_plan.rs");
     let stream_source = include_str!("../src/stream_lowering.rs");
     let access_source = include_str!("../src/access_lowering.rs");
     let array_source = include_str!("../src/array_lowering.rs");
@@ -28023,7 +28026,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         lower_source
             .contains("let conversion_plan = plan_lowered_slot_conversion(&projected.actual, plan.slot, ctx.facts);")
     );
-    assert!(lower_source.contains("fn optional_receiver_method_autoref_satisfies_slot"));
+    assert!(conversion_source.contains("fn receiver_method_autoref_satisfies_optional_slot"));
+    assert!(conversion_source.contains("fn receiver_method_autoref_satisfies_facade_slot"));
+    assert!(!lower_source.contains("fn optional_receiver_method_autoref_satisfies_slot"));
+    assert!(!lower_source.contains("fn receiver_method_autoref_satisfies_facade_slot"));
     assert!(lower_source.contains("actual: LoweredType::Slot(element_shape)"));
     assert!(call_plan_source.contains("pub struct OptionalReceiverSlotPlan"));
     assert!(call_plan_source.contains("pub element_ownership: OwnershipShape"));
