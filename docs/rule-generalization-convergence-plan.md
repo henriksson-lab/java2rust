@@ -156,17 +156,17 @@ Replacement direction:
 
 ### Facade Borrowed Returns
 
-`apply_rust_borrowed_facade_return` still decides path-like recovery by matching
-rendered Rust type names such as `Path` and `PathBuf`.
+Borrowed facade return recovery no longer decides path-like recovery by
+matching rendered Rust type names such as `Path` and `PathBuf`.
+`FacadeAbiFact.borrowed_return_recovery` selects the recovery policy, and
+missing facts default to `Clone` so non-clone/path-specific behavior remains a
+manifest or facade ABI gap instead of a Rust type-string heuristic.
 
-Replacement direction:
+Remaining direction:
 
-- move borrowed-return recovery into `FacadeAbiFact` or an attached
-  `BorrowRecoveryFact`;
 - model recovery as `Clone`, `ToOwned`, `ToPathBuf`, `ToVec`, `CloneBox`, or
-  `Unsupported`;
-- make `borrow_source` and recovery policy part of the selected ABI fact and
-  report it in diagnostics.
+  `Unsupported` instead of the current narrower `Clone`/`ToPathBuf` set;
+- report the selected `borrow_source` and recovery policy in diagnostics.
 
 ### Java Display Semantics
 
@@ -428,9 +428,9 @@ explicit `BorrowedReturnRecovery`, which is propagated through
 `LoweredType::RustBorrowed` into `RustBorrowedFacadeReturnPolicy`. `coercion.rs`
 therefore renders `Clone` versus `ToPathBuf` from the selected conversion
 policy instead of re-checking whether the Rust return type string looks
-path-like. A Rust-name classifier remains in `conversion_plan.rs` only as a
-legacy fallback for older `rust-return=&T` facts that do not yet provide the
-new recovery field. External-pack manifests can set this through
+path-like. The legacy Rust-name classifier in `conversion_plan.rs` has been
+removed; older `rust-return=&T` facts that need path-specific recovery must now
+provide the recovery field explicitly. External-pack manifests can set this through
 `borrowed-return-recovery=clone|to-path-buf` alongside `rust-return=&T`, so
 javalibs packs do not need a Rust-code special case for path-like borrowed
 returns.

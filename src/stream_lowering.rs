@@ -3,12 +3,12 @@ use crate::coercion::{
     BorrowProjectionUse, IndexToUsizeProjection, LoweredExpr, SequenceIterationProjection,
     StreamLambdaParamProjection, apply_borrowed_string_view_projection, apply_clone_projection,
     borrowed_string_view_projection, current_receiver_method_call_projection,
-    ensure_borrow_projection_rendered, len_i32_projection, owner_associated_path_projection,
-    receiver_method_call_projection, render_borrowed_collection_flat_map,
-    render_index_to_usize_projection, render_indexed_access_projection,
-    render_nullable_stream_map_body, render_optional_non_null_filter_map,
-    render_sequence_iteration_source, render_stream_lambda_param_projection,
-    self_associated_path_projection,
+    ensure_borrow_projection_rendered, function_call_projection, len_i32_projection,
+    owner_associated_path_projection, receiver_method_call_projection,
+    render_borrowed_collection_flat_map, render_index_to_usize_projection,
+    render_indexed_access_projection, render_nullable_stream_map_body,
+    render_optional_non_null_filter_map, render_sequence_iteration_source,
+    render_stream_lambda_param_projection, self_associated_path_projection,
 };
 use crate::conversion_lowering::apply_lowered_slot_expr_conversion;
 use crate::conversion_plan::{LoweredType, Slot, plan_lowered_slot_conversion};
@@ -476,13 +476,13 @@ fn emit_stream_lambda_body_with_locals_prec(
                     ctx,
                     param_shape,
                 )?;
-                let rendered = crate::emit::emit_expr(&RustExpr::Call {
-                    function: Box::new(owner_associated_path_projection(
+                let rendered = crate::emit::emit_expr(&function_call_projection(
+                    owner_associated_path_projection(
                         &stream_static_owner_type_name_with_context(&resolved.declaring_type, ctx),
                         &resolved.rust_name,
-                    )),
-                    args: args.into_iter().map(RustExpr::Raw).collect(),
-                });
+                    ),
+                    args.into_iter().map(RustExpr::Raw).collect(),
+                ));
                 return parenthesize_stream_expr_if_needed(
                     rendered,
                     11,
@@ -503,13 +503,10 @@ fn emit_stream_lambda_body_with_locals_prec(
                     ctx,
                     param_shape,
                 )?;
-                let rendered = crate::emit::emit_expr(&RustExpr::Call {
-                    function: Box::new(owner_associated_path_projection(
-                        &owner,
-                        &crate::parser::to_snake_case(name),
-                    )),
-                    args: args.into_iter().map(RustExpr::Raw).collect(),
-                });
+                let rendered = crate::emit::emit_expr(&function_call_projection(
+                    owner_associated_path_projection(&owner, &crate::parser::to_snake_case(name)),
+                    args.into_iter().map(RustExpr::Raw).collect(),
+                ));
                 return parenthesize_stream_expr_if_needed(
                     rendered,
                     11,
@@ -575,10 +572,10 @@ fn emit_stream_lambda_body_with_locals_prec(
                     (rendered, 11)
                 }
                 Some(CallKind::Static) => {
-                    let rendered = crate::emit::emit_expr(&RustExpr::Call {
-                        function: Box::new(self_associated_path_projection(&method)),
-                        args: rendered_args.into_iter().map(RustExpr::Raw).collect(),
-                    });
+                    let rendered = crate::emit::emit_expr(&function_call_projection(
+                        self_associated_path_projection(&method),
+                        rendered_args.into_iter().map(RustExpr::Raw).collect(),
+                    ));
                     (rendered, 11)
                 }
                 None if ctx.self_receiver_available

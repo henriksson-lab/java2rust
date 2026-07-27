@@ -4007,6 +4007,10 @@ lambda calls now build `RustExpr::Call`/`MethodCall` through
 `owner_associated_path_projection`, `self_associated_path_projection`, and
 `current_receiver_method_call_projection`. Stream lowering still owns fallback
 selection and lambda context while the emitted Rust call shape is shared.
+Follow-up: stream fallback static calls now also use the generic
+`function_call_projection` wrapper rather than constructing `RustExpr::Call`
+directly. Stream lowering still selects resolved-static versus owner-fallback
+semantics; only the final Rust call node construction is shared.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
