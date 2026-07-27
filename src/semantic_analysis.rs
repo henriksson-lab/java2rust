@@ -4296,8 +4296,19 @@ fn catch_assignable_from_types(
                 })
         })
         .collect::<Vec<_>>();
-    assignable.sort_by(|left, right| java_type_sort_key(left).cmp(&java_type_sort_key(right)));
-    assignable.dedup();
+    assignable.sort_by(|left, right| {
+        exception_assignable_alias_key(left)
+            .cmp(&exception_assignable_alias_key(right))
+            .then_with(|| {
+                java_type_sort_key(left)
+                    .len()
+                    .cmp(&java_type_sort_key(right).len())
+            })
+            .then_with(|| java_type_sort_key(left).cmp(&java_type_sort_key(right)))
+    });
+    assignable.dedup_by(|left, right| {
+        exception_assignable_alias_key(left) == exception_assignable_alias_key(right)
+    });
     assignable
 }
 
@@ -4316,6 +4327,13 @@ fn exception_assignable_to_catch(
 
 fn java_type_sort_key(java_ty: &JavaType) -> String {
     java_type_name(java_ty).unwrap_or("").to_string()
+}
+
+fn exception_assignable_alias_key(java_ty: &JavaType) -> String {
+    java_type_name(java_ty)
+        .and_then(|name| name.rsplit('.').next())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn collect_type_field_nullability_facts(

@@ -12803,7 +12803,6 @@ fn iharder_base64_pack_declares_nested_output_stream_conversion() {
     for from_type in [
         "net.sourceforge.iharder.base64.Base64.OutputStream",
         "Base64.OutputStream",
-        "Base64OutputStream",
     ] {
         let adapter = facts
             .external_conversion_adapter_facts

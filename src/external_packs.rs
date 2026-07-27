@@ -4654,7 +4654,6 @@ const IHARDER_BASE64_OWNED_TYPES: &[&str] = &[
     "Base64",
     "net.sourceforge.iharder.base64.Base64.OutputStream",
     "Base64.OutputStream",
-    "Base64OutputStream",
 ];
 const JAMA_OWNED_TYPES: &[&str] = &["Jama.Matrix", "Matrix"];
 const HIPPARCHUS_DISTRIBUTION_OWNED_TYPES: &[&str] = &[
@@ -5521,7 +5520,6 @@ const IHARDER_BASE64_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("Base64"),
     cloneable_final_capability("net.sourceforge.iharder.base64.Base64.OutputStream"),
     cloneable_final_capability("Base64.OutputStream"),
-    cloneable_final_capability("Base64OutputStream"),
 ];
 
 const JAMA_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
@@ -11690,7 +11688,7 @@ const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
     semantic_typed_effect(
         "htsjdk.samtools.SAMSequenceDictionary",
         "getSequence",
-        ExternalApiRole::Getter,
+        ExternalApiRole::IndexedGetter,
         ReceiverMutabilityFact::ReadOnly,
         "SAMSequenceRecord",
         NullabilityState::DefinitelyNonNull,
@@ -11698,7 +11696,7 @@ const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
     semantic_typed_effect(
         "SAMSequenceDictionary",
         "getSequence",
-        ExternalApiRole::Getter,
+        ExternalApiRole::IndexedGetter,
         ReceiverMutabilityFact::ReadOnly,
         "SAMSequenceRecord",
         NullabilityState::DefinitelyNonNull,
@@ -19105,7 +19103,6 @@ const IHARDER_BASE64_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
     erased_object_strategy("Base64"),
     erased_object_strategy("net.sourceforge.iharder.base64.Base64.OutputStream"),
     erased_object_strategy("Base64.OutputStream"),
-    erased_object_strategy("Base64OutputStream"),
 ];
 
 const JAMA_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
@@ -20919,7 +20916,6 @@ const APACHE_COMMONS_CODEC_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructo
 const IHARDER_BASE64_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
     modeled_semantic_constructor("net.sourceforge.iharder.base64.Base64.OutputStream", 1),
     modeled_semantic_constructor("Base64.OutputStream", 1),
-    modeled_semantic_constructor("Base64OutputStream", 1),
 ];
 
 const JAMA_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
@@ -27398,7 +27394,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             exceptions: NO_EXCEPTIONS,
             api_effects: &[],
             modeled_apis: &[],
-            modeled_constructors: BROAD_HELLBENDER_UTILS_MODELED_CONSTRUCTORS,
+            modeled_constructors: &[],
             modeled_fields: TRIBBLE_INDEX_MODELED_FIELDS,
             unsupported_apis: &[],
         },
@@ -28177,7 +28173,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             exceptions: NO_EXCEPTIONS,
             api_effects: BROAD_HELLBENDER_UTILS_API_EFFECTS,
             modeled_apis: BROAD_HELLBENDER_UTILS_MODELED_APIS,
-            modeled_constructors: &[],
+            modeled_constructors: BROAD_HELLBENDER_UTILS_MODELED_CONSTRUCTORS,
             modeled_fields: BROAD_HELLBENDER_UTILS_MODELED_FIELDS,
             unsupported_apis: &[],
         },
@@ -30825,7 +30821,6 @@ pub fn iharder_base64_pack_facts() -> FactSet {
             r#"
 external-pack-conversion net.sourceforge.iharder.base64 net.sourceforge.iharder.base64.Base64.OutputStream OutputStream into
 external-pack-conversion net.sourceforge.iharder.base64 Base64.OutputStream OutputStream into
-external-pack-conversion net.sourceforge.iharder.base64 Base64OutputStream OutputStream into
 "#,
         )
         .facts,

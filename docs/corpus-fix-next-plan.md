@@ -1591,10 +1591,13 @@ Current implementation note, 2026-07-23:
   `cargo test --test parser_gaps --quiet` with 18 passing tests,
   `cargo test --test idiom_gaps --quiet` with 401 passing tests, and
   `cargo build --release --quiet --bin new-java2rust`. A full
-  `cargo test --test external_packs --quiet` still reports 5 pre-existing
-  manifest-audit failures in this dirty checkout, but the ambiguous bare
-  `Option`/`Attribute` regressions from an attempted broad field-alias change
-  are gone. Focused FastQC math-util rerun
+  `cargo test --test external_packs --quiet` now passes after fixing the SAM
+  header indexed-getter role, keeping Broad Hellbender constructors in the
+  Broad manifest instead of Tribble index, removing the ambiguous iHarder
+  `Base64OutputStream` simple alias that collided with Apache Commons Codec,
+  and deduping source-facing exception aliases in catch facts. The ambiguous
+  bare `Option`/`Attribute` regressions from an attempted broad field-alias
+  change remain gone. Focused FastQC math-util rerun
   `.tmp/corpus-fastqc-math-util-after-localized-formats-pack-r1` translates
   10/10 files with 0 translation failures, 0 invalid-pattern files, and 107
   generated-Rust errors. The previous 42 missing `LocalizedFormats` rows and
