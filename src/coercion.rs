@@ -991,6 +991,13 @@ pub fn outer_this_field_projection(field_name: &str) -> RustExpr {
     ))
 }
 
+pub fn self_field_projection(field_name: &str) -> RustExpr {
+    RustExpr::Field(
+        Box::new(RustExpr::Var("self".to_string())),
+        crate::parser::to_snake_case(field_name),
+    )
+}
+
 pub fn char_sequence_collect_string_projection(chars: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
         "{}.iter().collect::<String>()",

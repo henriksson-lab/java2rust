@@ -5,7 +5,7 @@ use crate::rust_ir::RustExpr;
 use crate::types::TypeEnv;
 use crate::{
     coercion::{
-        associated_const_projection, self_associated_path_projection,
+        associated_const_projection, self_associated_path_projection, self_field_projection,
         static_storage_accessor_projection,
     },
     emit,
@@ -16,10 +16,7 @@ pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
         && env.is_instance_field(name)
         && !bare_name_looks_like_static_owner(name)
     {
-        RustExpr::Field(
-            Box::new(RustExpr::Var("self".to_string())),
-            crate::parser::to_snake_case(name),
-        )
+        self_field_projection(name)
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_storage_field_access_name(name)
     {
@@ -38,7 +35,7 @@ pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
         && env.is_instance_field(name)
         && !bare_name_looks_like_static_owner(name)
     {
-        format!("self.{}", crate::parser::to_snake_case(name))
+        emit::emit_expr(&self_field_projection(name))
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_storage_field_access_name(name)
     {

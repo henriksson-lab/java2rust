@@ -3872,6 +3872,11 @@ facade ABI work can replace or enrich. The same slice tightened member-access
 planning so untyped lowercase receivers with lowercase fields no longer match
 procedural external/static field guesses; static fallback now requires a
 static-looking member or a receiver that is already shaped like a type name.
+Follow-up: bare source instance-field access now uses
+`coercion::self_field_projection` for both structured lowering and rendered
+fallbacks. `access_lowering.rs` still owns local-vs-field-vs-static-name
+resolution, but the Rust `self.field` spelling is centralized with the other
+member/path projections.
 
 Method-reference projection cleanup: generic method-reference lowering now
 shares the same associated-path, unbound-method, current-receiver-method, and
