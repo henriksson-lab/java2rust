@@ -2,7 +2,7 @@ use crate::coercion::{
     AssociatedFunctionMethodReferenceProjection,
     associated_function_method_reference_body_projection, current_receiver_method_call_projection,
     current_receiver_method_reference_projection, facade_receiver_method_call_projection,
-    owner_associated_path_projection, receiver_method_call_projection,
+    function_call_projection, owner_associated_path_projection, receiver_method_call_projection,
     typed_single_input_callback_projection, unbound_method_call_projection,
     unbound_method_reference_projection,
 };
@@ -117,10 +117,12 @@ pub fn render_single_input_method_reference_body(
     value_expr: &str,
 ) -> String {
     match plan {
-        MethodReferencePlan::Constructor { type_name } => emit::emit_expr(&RustExpr::Call {
-            function: Box::new(owner_associated_path_projection(type_name, "new")),
-            args: vec![RustExpr::Raw(receiver.to_string())],
-        }),
+        MethodReferencePlan::Constructor { type_name } => {
+            emit::emit_expr(&function_call_projection(
+                owner_associated_path_projection(type_name, "new"),
+                vec![RustExpr::Raw(receiver.to_string())],
+            ))
+        }
         MethodReferencePlan::AssociatedFunction { owner, method } => {
             render_associated_function_method_reference_body(owner, method, receiver, value_expr)
         }

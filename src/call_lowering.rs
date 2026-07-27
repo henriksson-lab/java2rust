@@ -572,11 +572,11 @@ fn apply_string_join(args: Vec<RustExpr>) -> RustExpr {
         varargs.extend(rest);
         return string_join_varargs_projection(delimiter, varargs);
     }
-    RustExpr::MethodCall {
-        receiver: Box::new(values),
-        method: "join".to_string(),
-        args: vec![string_join_delimiter_projection(delimiter)],
-    }
+    receiver_method_call_projection_exact(
+        values,
+        "join",
+        vec![string_join_delimiter_projection(delimiter)],
+    )
 }
 
 fn apply_native_collection_static_method(

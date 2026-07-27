@@ -3933,6 +3933,11 @@ receiver methods, class-literal token calls, external crate constructors, and
 ordinary associated constructors in `call_lowering.rs`. Java target selection
 and facade ABI receiver policy remain in call planning; only Rust call spelling
 is centralized.
+Projection follow-up: `String.join` receiver calls, constructor
+method-reference bodies, and delegating constructor return calls now also use
+the shared function/receiver call projections. The Java varargs/method
+reference/delegation semantics remain in their existing planners; this only
+removes another set of local `RustExpr::Call`/`MethodCall` constructions.
 Follow-up: bare source instance-field access now uses
 `coercion::self_field_projection` for both structured lowering and rendered
 fallbacks. `access_lowering.rs` still owns local-vs-field-vs-static-name
