@@ -222,6 +222,11 @@ Constructor self-field projection follow-up: deferred constructor field
 assignments and delegated-constructor trailing field assignments now use a
 shared `__java_self.field` projection helper. Constructor lowering still owns
 sequencing, default seeding, and self-dependent expression recovery.
+Unsupported/abstract fallback projection follow-up: abstract method stubs,
+abstract interface stubs, unsupported inner-class outer capture placeholders,
+and unsupported constructor-call handoffs now use named coercion projections for
+their Rust `panic!` spellings. Lowering still owns when those Java fallback
+paths are selected.
 
 Landed optional-carrier follow-up: raw-erasure casts into optional targets now
 route through `lower_present_expr_for_optional_target`, so typed optional

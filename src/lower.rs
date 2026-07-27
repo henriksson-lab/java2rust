@@ -26,7 +26,8 @@ use crate::call_plan::{
 };
 use crate::coercion::{
     BorrowProjectionUse, Coercion, JavaDisplayPlan, OptionalSequenceReceiverProjection,
-    SequenceIterationProjection, anonymous_dyn_trait_projection, apply_audited_clone_recovery,
+    SequenceIterationProjection, abstract_interface_method_stub_projection,
+    abstract_method_stub_projection, anonymous_dyn_trait_projection, apply_audited_clone_recovery,
     apply_coercions, apply_java_display_plan, apply_literal_slot_plan, array_fill_projection,
     array2_rows_i32_projection, borrow_as_dyn_trait, borrowed_sequence_extend_arg,
     borrowed_string_literal_temporary_plan, boxed_dyn_trait_projection,
@@ -56,8 +57,9 @@ use crate::coercion::{
     static_storage_accessor_projection, static_storage_getter_body_projection,
     static_storage_setter_body_projection, static_storage_setter_path_projection,
     subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
-    tuple_field_projection, typed_none_projection,
-    unsupported_deserialization_cast_handoff_projection, unwrap_java_null_receiver_projection,
+    tuple_field_projection, typed_none_projection, unsupported_constructor_call_handoff_projection,
+    unsupported_deserialization_cast_handoff_projection,
+    unsupported_outer_capture_constructor_projection, unwrap_java_null_receiver_projection,
     unwrap_optional_shared_value, unwrap_result_or_panic_uncaught_java_exception,
     varargs_packed_vec_projection, varargs_spread_extend_projection,
 };
@@ -1046,10 +1048,10 @@ fn abstract_interface_method_stub(
     ctx: LowerCtx,
 ) -> RustFunction {
     let exception_plan = ctx.exceptions.method_plan(interface, interface_method);
-    let return_expr = Some(RustExpr::Raw(format!(
-        "panic!(\"abstract interface method {}.{} has no implementation\")",
-        interface.name, interface_method.name
-    )));
+    let return_expr = Some(abstract_interface_method_stub_projection(
+        &interface.name,
+        &interface_method.name,
+    ));
     let body = vec![return_stmt(
         return_expr,
         exception_plan.wrap_returns_in_result,
@@ -1370,10 +1372,7 @@ fn with_outer_this_capture_field(
         0,
         (
             "__outer".to_string(),
-            RustExpr::Raw(format!(
-                "panic!(\"unsupported Java inner-class outer capture construction for {}; pass an outer {} handle\")",
-                ty.name, outer_type
-            )),
+            unsupported_outer_capture_constructor_projection(&ty.name, outer_type),
         ),
     );
     fields
@@ -2492,10 +2491,9 @@ fn unsupported_source_constructor_call_expr(
             return None;
         }
         let policy = unsupported_constructor_message_policy(kind);
-        Some(RustExpr::Raw(format!(
-            "panic!({:?})/* TODO(translation): constructor call targets unsupported Java object graph mutation */",
-            policy.message
-        )))
+        Some(unsupported_constructor_call_handoff_projection(
+            &policy.message,
+        ))
     })
 }
 
@@ -2890,10 +2888,10 @@ fn lower_method(
                 lower_block(method.body.as_ref().unwrap(), &mut env, false, method_ctx)
             })
     } else if method.body.is_none() && method.modifiers.contains(&Modifier::Abstract) {
-        vec![expr_stmt(RustExpr::Raw(format!(
-            "panic!(\"abstract method {}.{} has no implementation\")",
-            ty.name, method.name
-        )))]
+        vec![expr_stmt(abstract_method_stub_projection(
+            &ty.name,
+            &method.name,
+        ))]
     } else if method.body.is_none() {
         bodyless_source_summary_method_body(
             method_signature.return_shape.as_ref(),

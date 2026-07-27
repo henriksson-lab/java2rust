@@ -27519,6 +27519,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn typed_none_projection"));
     assert!(coercion_source.contains("pub fn boxed_dyn_trait_projection"));
     assert!(coercion_source.contains("pub fn unsupported_deserialization_cast_handoff_projection"));
+    assert!(coercion_source.contains("pub fn abstract_method_stub_projection"));
+    assert!(coercion_source.contains("pub fn abstract_interface_method_stub_projection"));
+    assert!(coercion_source.contains("pub fn unsupported_outer_capture_constructor_projection"));
+    assert!(coercion_source.contains("pub fn unsupported_constructor_call_handoff_projection"));
     assert!(coercion_source.contains("pub fn print_macro_projection"));
     assert!(coercion_source.contains("pub fn logical_not_projection"));
     assert!(coercion_source.contains("pub fn java_update_expression_projection"));
@@ -27674,6 +27678,19 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("erased_object_box_projection(apply_audited_clone_recovery("));
     assert!(!lower_source.contains("unsupported Java deserialization cast to {java_name}"));
     assert!(lower_source.contains("unsupported_deserialization_cast_handoff_projection("));
+    assert!(!lower_source.contains("abstract method {}.{} has no implementation"));
+    assert!(!lower_source.contains("abstract interface method {}.{} has no implementation"));
+    assert!(!lower_source.contains(
+        "unsupported Java inner-class outer capture construction for {}; pass an outer {} handle"
+    ));
+    assert!(
+        !lower_source
+            .contains("constructor call targets unsupported Java object graph mutation */")
+    );
+    assert!(lower_source.contains("abstract_method_stub_projection("));
+    assert!(lower_source.contains("abstract_interface_method_stub_projection("));
+    assert!(lower_source.contains("unsupported_outer_capture_constructor_projection("));
+    assert!(lower_source.contains("unsupported_constructor_call_handoff_projection("));
     assert!(!lower_source.contains("fn rendered_arg_is_mutable_alias"));
     assert!(!lower_source.contains("as_deref_mut()\") {\n        return None;"));
     assert!(!lower_source.contains("java_clone_erased_object_ref("));

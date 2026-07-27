@@ -2131,6 +2131,30 @@ pub fn unsupported_deserialization_cast_handoff_projection(
     ))
 }
 
+pub fn abstract_method_stub_projection(owner: &str, method: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "panic!(\"abstract method {owner}.{method} has no implementation\")"
+    ))
+}
+
+pub fn abstract_interface_method_stub_projection(owner: &str, method: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "panic!(\"abstract interface method {owner}.{method} has no implementation\")"
+    ))
+}
+
+pub fn unsupported_outer_capture_constructor_projection(owner: &str, outer_type: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "panic!(\"unsupported Java inner-class outer capture construction for {owner}; pass an outer {outer_type} handle\")"
+    ))
+}
+
+pub fn unsupported_constructor_call_handoff_projection(message: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "panic!({message:?})/* TODO(translation): constructor call targets unsupported Java object graph mutation */"
+    ))
+}
+
 fn raw_contains_top_level_comma(raw: &str) -> bool {
     let mut paren_depth = 0usize;
     let mut bracket_depth = 0usize;
