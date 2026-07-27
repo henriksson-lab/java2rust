@@ -17716,9 +17716,15 @@ fn item_assembly_return_type_wrappers_delegate_to_fact_aware_rendering() {
 #[test]
 fn lower_orchestrator_does_not_render_default_slot_values() {
     let source = include_str!("../src/lower.rs");
+    let static_initializer = source
+        .split("fn static_storage_initial_value_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn static_const_reference_name_for_type").next())
+        .expect("static storage initializer should be present");
 
-    assert!(!source.contains("default_expr_for_slot"));
-    assert!(!source.contains("slot_render"));
+    assert!(!static_initializer.contains("default_expr_for_slot"));
+    assert!(!static_initializer.contains("slot_render"));
+    assert!(static_initializer.contains("static_storage_initial_fallback_value"));
 }
 
 #[test]

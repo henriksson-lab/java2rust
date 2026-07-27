@@ -116,7 +116,7 @@ use crate::item_assembly::{
     constructor_default_field_value_with_facts, constructor_function_shell_with_facts,
     constructor_return_body, delegating_constructor_return_body, impl_item_for_type,
     is_static_final_field, method_function_shell_with_facts_and_exception_plan, raw_item,
-    struct_item_for_type_with_facts_and_support_context,
+    static_storage_initial_fallback_value, struct_item_for_type_with_facts_and_support_context,
 };
 use crate::java_ir::Member as Jm;
 use crate::java_ir::*;
@@ -839,7 +839,7 @@ fn static_storage_initial_value_expr(
     ctx: LowerCtx,
 ) -> RustExpr {
     let Some(initializer) = field.initializer.as_ref() else {
-        return crate::slot_render::default_expr_for_slot_with_facts(shape, ctx.facts);
+        return static_storage_initial_fallback_value(shape, ctx.facts);
     };
     let value = match initializer {
         Expr::Literal(Literal::Null) if shape.optional_element_type().is_some() => {
@@ -858,14 +858,14 @@ fn static_storage_initial_value_expr(
             }
         }
         Expr::New { ty, args, body, .. } if args.is_empty() && body.is_none() => {
-            let rust_name = crate::slot_render::rust_name_for_java_named_type(
+            let rust_name = crate::java_naming::rust_name_for_java_named_type(
                 concrete_java_type_name(ty).unwrap_or_else(|| match ty {
                     JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
                     _ => "",
                 }),
             );
             if rust_name.is_empty() {
-                crate::slot_render::default_expr_for_slot_with_facts(shape, ctx.facts)
+                static_storage_initial_fallback_value(shape, ctx.facts)
             } else {
                 function_call_projection(
                     owner_associated_path_projection(&rust_name, "new"),
@@ -873,7 +873,7 @@ fn static_storage_initial_value_expr(
                 )
             }
         }
-        _ => crate::slot_render::default_expr_for_slot_with_facts(shape, ctx.facts),
+        _ => static_storage_initial_fallback_value(shape, ctx.facts),
     };
     if let Some(element_ty) = shape.optional_element_type() {
         planned_optional_value_for_target(

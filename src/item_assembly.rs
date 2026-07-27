@@ -191,6 +191,10 @@ pub fn constructor_default_field_value_with_facts(
     (field_name, default_expr_for_slot_with_facts(&shape, facts))
 }
 
+pub fn static_storage_initial_fallback_value(shape: &RustSlotShape, facts: &FactSet) -> RustExpr {
+    default_expr_for_slot_with_facts(shape, facts)
+}
+
 pub fn delegating_constructor_return_body(rust_name: &str, args: Vec<RustExpr>) -> Vec<RustStmt> {
     vec![RustStmt::Return(Some(function_call_projection(
         self_associated_path_projection(rust_name),

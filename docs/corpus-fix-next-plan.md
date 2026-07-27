@@ -4120,6 +4120,13 @@ Signature naming cleanup: Java named-type to Rust identifier normalization now
 lives in neutral `java_naming` with a compatibility wrapper in `slot_render`.
 `signature.rs` no longer depends on `slot_render` for closed-enum dispatch
 requirements, keeping signature planning free of Rust type rendering APIs.
+Static storage default cleanup: static-storage accessor generation no longer
+renders fallback slot defaults directly in `lower.rs`. Default initial values
+now go through `item_assembly::static_storage_initial_fallback_value`, keeping
+slot default rendering behind the same item-assembly/slot-render boundary used
+by constructor default fields. The lower design guard is scoped to the static
+storage initializer path while broader `slot_render` references in lowering are
+handled by later ownership slices.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
