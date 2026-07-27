@@ -7384,6 +7384,16 @@ fn lower_expr_with_refinements(
             {
                 return expr;
             }
+            if let Some(expr) = lower_source_output_stream_write_byte_array_call(
+                receiver.as_deref(),
+                name,
+                args,
+                env,
+                ctx,
+                refinements,
+            ) {
+                return expr;
+            }
             if name == "removeIf"
                 && args.len() == 1
                 && let Some(receiver) = receiver.as_deref()
@@ -12818,6 +12828,57 @@ fn lower_jdk_input_stream_super_read_call(
     Some(propagate_result_projection(
         apply_call_target_with_lower_context(&target, lowered_receiver, rust_args, ctx),
     ))
+}
+
+fn lower_source_output_stream_write_byte_array_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    if name != "write" || args.len() != 1 {
+        return None;
+    }
+    let receiver = receiver?;
+    let receiver_name = source_receiver_type_name(receiver, env, ctx)?;
+    let signature = ctx
+        .signatures
+        .method_signature_by_rust_name(&receiver_name, "write_byte_array_int_int")?;
+    if signature.params.len() != 3 || !java_type_is_byte_array_like(&signature.params[0].java_ty) {
+        return None;
+    }
+    let arg_ty = types::infer_expr_type(&args[0], env.type_env());
+    if !java_type_is_byte_array_like(&arg_ty) {
+        return None;
+    }
+    let byte_slot = Slot::Argument(signature.params[0].shape.clone());
+    let lowered_bytes =
+        lower_expr_for_slot_with_refinements(&args[0], env, byte_slot, ctx, refinements);
+    let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
+    let lowered_receiver = adapt_optional_instance_receiver_with_slot_plan(
+        receiver,
+        lowered_receiver,
+        env,
+        ctx,
+        true,
+        true,
+    );
+    let receiver_text = emit::emit_expr(&lowered_receiver);
+    let bytes_text = emit::emit_expr(&lowered_bytes);
+    Some(RustExpr::Raw(format!(
+        "{{ let __java_write_bytes = {bytes_text}; let __java_write_len = __java_write_bytes.len() as i32; {receiver_text}.write_byte_array_int_int(__java_write_bytes, 0, __java_write_len) }}"
+    )))
+}
+
+fn java_type_is_byte_array_like(java_ty: &JavaType) -> bool {
+    let java_ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+    matches!(
+        java_ty,
+        JavaType::Array(element)
+            if matches!(element.as_ref(), JavaType::Primitive(PrimitiveType::Byte))
+    )
 }
 
 fn current_type_extends_jdk_input_stream_facade(ctx: LowerCtx) -> bool {

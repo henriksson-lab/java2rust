@@ -581,6 +581,26 @@ impl CallableKey {
         }
     }
 
+    pub fn method_with_params(
+        owner: impl Into<String>,
+        method: impl Into<String>,
+        staticness: Staticness,
+        params: Vec<TypePattern>,
+    ) -> Self {
+        let arity = params.len();
+        Self {
+            owner: TypeKey {
+                type_name: owner.into(),
+            },
+            member: MemberName(method.into()),
+            kind: CallableKind::Method,
+            staticness,
+            arity,
+            params,
+            generic_arity: None,
+        }
+    }
+
     pub fn constructor(owner: impl Into<String>, params: Vec<TypePattern>) -> Self {
         let arity = params.len();
         Self {
@@ -1869,6 +1889,24 @@ impl FactSet {
             })
     }
 
+    pub fn facade_abi_for_call(
+        &self,
+        key: &CallableKey,
+        arg_types: &[JavaType],
+    ) -> Option<&FacadeAbiFact> {
+        self.facade_abi_facts
+            .iter()
+            .rev()
+            .filter(|fact| callable_key_header_matches(&fact.key, key))
+            .filter(|fact| callable_key_params_match_java_types(&fact.key.params, arg_types))
+            .max_by_key(|fact| {
+                (
+                    fact.provenance == FactProvenance::UserOverride,
+                    callable_key_param_specificity(&fact.key.params),
+                )
+            })
+    }
+
     pub fn external_crate_api_mapping_for_receiver(
         &self,
         receiver_type: &str,
@@ -2758,6 +2796,98 @@ pub fn external_type_name_matches(fact_type_name: &str, query_type_name: &str) -
             .iter()
             .any(|query_alias| query_alias == fact_alias)
     })
+}
+
+fn callable_key_header_matches(fact: &CallableKey, query: &CallableKey) -> bool {
+    external_type_name_matches(&fact.owner.type_name, &query.owner.type_name)
+        && fact.member == query.member
+        && fact.kind == query.kind
+        && (fact.staticness == query.staticness
+            || fact.staticness == Staticness::Unknown
+            || query.staticness == Staticness::Unknown)
+        && fact.arity == query.arity
+        && (fact.generic_arity.is_none()
+            || query.generic_arity.is_none()
+            || fact.generic_arity == query.generic_arity)
+}
+
+fn callable_key_params_match_java_types(params: &[TypePattern], arg_types: &[JavaType]) -> bool {
+    params.len() == arg_types.len()
+        && params
+            .iter()
+            .zip(arg_types)
+            .all(|(pattern, arg_ty)| type_pattern_matches_java_type(pattern, arg_ty))
+}
+
+fn callable_key_param_specificity(params: &[TypePattern]) -> usize {
+    params
+        .iter()
+        .map(|pattern| match pattern {
+            TypePattern::Any => 0,
+            TypePattern::TypeParam(_) => 1,
+            TypePattern::Erased(_) => 2,
+            TypePattern::Exact(_) => 3,
+        })
+        .sum()
+}
+
+fn type_pattern_matches_java_type(pattern: &TypePattern, java_ty: &JavaType) -> bool {
+    match pattern {
+        TypePattern::Any | TypePattern::TypeParam(_) => true,
+        TypePattern::Exact(type_key) => type_key_matches_java_type(&type_key.type_name, java_ty),
+        TypePattern::Erased(type_key) => {
+            let erased = erase_java_type_for_pattern(java_ty);
+            type_key_matches_java_type(&type_key.type_name, &erased)
+        }
+    }
+}
+
+fn erase_java_type_for_pattern(java_ty: &JavaType) -> JavaType {
+    match java_ty {
+        JavaType::Named { name, .. } => JavaType::Named {
+            name: name.clone(),
+            args: Vec::new(),
+        },
+        JavaType::Array(element) => JavaType::Array(Box::new(erase_java_type_for_pattern(element))),
+        other => other.clone(),
+    }
+}
+
+fn type_key_matches_java_type(type_name: &str, java_ty: &JavaType) -> bool {
+    let normalized = type_name.trim();
+    if let Some(element_name) = normalized.strip_suffix("[]") {
+        return matches!(
+            java_ty,
+            JavaType::Array(element) if type_key_matches_java_type(element_name, element)
+        );
+    }
+    match java_ty {
+        JavaType::Primitive(primitive) => primitive_type_name_matches(normalized, *primitive),
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            external_type_name_matches(normalized, name)
+        }
+        JavaType::Array(_) => false,
+        JavaType::Void => matches!(normalized, "void" | "Void" | "()"),
+        JavaType::String => {
+            external_type_name_matches(normalized, "String")
+                || external_type_name_matches(normalized, "java.lang.String")
+        }
+        JavaType::Wildcard(_) => matches!(normalized, "Object" | "java.lang.Object"),
+    }
+}
+
+fn primitive_type_name_matches(type_name: &str, primitive: crate::java_ir::PrimitiveType) -> bool {
+    let java_name = match primitive {
+        crate::java_ir::PrimitiveType::Boolean => "boolean",
+        crate::java_ir::PrimitiveType::Byte => "byte",
+        crate::java_ir::PrimitiveType::Short => "short",
+        crate::java_ir::PrimitiveType::Char => "char",
+        crate::java_ir::PrimitiveType::Int => "int",
+        crate::java_ir::PrimitiveType::Long => "long",
+        crate::java_ir::PrimitiveType::Float => "float",
+        crate::java_ir::PrimitiveType::Double => "double",
+    };
+    type_name.eq_ignore_ascii_case(java_name)
 }
 
 fn external_optional_type_name_matches(

@@ -14403,6 +14403,60 @@ class OutputStreamWriteByteRangeBorrow {
 }
 
 #[test]
+fn source_filter_output_stream_write_byte_array_uses_three_arg_override() {
+    let translation = translate_source(
+        r#"
+import java.io.FilterOutputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
+
+class SourceFilterOutputStreamWriteBytes {
+    static class EncodingOutput extends FilterOutputStream {
+        EncodingOutput(ByteArrayOutputStream out) {
+            super(out);
+        }
+
+        @Override
+        public void write(int value) throws java.io.IOException {
+            out.write(value);
+        }
+
+        @Override
+        public void write(byte[] bytes, int off, int len) throws java.io.IOException {
+            for (int i = 0; i < len; i++) {
+                write(bytes[off + i]);
+            }
+        }
+    }
+
+    void save(EncodingOutput out, byte[] bytes) throws java.io.IOException {
+        out.write(bytes);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("write_byte_array_int_int(__java_write_bytes, 0, __java_write_len)")
+            && !translation.rust.contains("write_int(bytes.as_slice()")
+            && !translation.rust.contains("write_int(__java_write_bytes"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_filter_output_stream_write_byte_array",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn buffered_image_graphics_facades_are_typed() {
     let translation = translate_source(
         r#"

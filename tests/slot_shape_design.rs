@@ -81,7 +81,8 @@ use new_java2rust::facts::{
     HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy, MethodEffectFact,
     MethodKey as FactMethodKey, NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability,
     OwnedRecoveryCapabilityFact, ReceiverAbi, ReceiverMutabilityFact, RecursionKind, ResultAbi,
-    Staticness, TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride,
+    Staticness, TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride, TypeKey,
+    TypePattern,
 };
 use new_java2rust::item_assembly::{
     constructor_default_field_value, constructor_function_shell, constructor_return_body,
@@ -30976,6 +30977,114 @@ fn stdlib_signature_facts_drive_jdk_io_byte_buffer_slice_shapes() {
         &types,
         None
     ));
+
+    let output_stream_write_bytes_key = CallableKey::method_with_params(
+        "java.io.OutputStream",
+        "write",
+        Staticness::Unknown,
+        vec![TypePattern::Exact(TypeKey {
+            type_name: "byte[]".to_string(),
+        })],
+    );
+    let output_stream_write_int_key = CallableKey::method_with_params(
+        "java.io.OutputStream",
+        "write",
+        Staticness::Unknown,
+        vec![TypePattern::Exact(TypeKey {
+            type_name: "int".to_string(),
+        })],
+    );
+
+    let write_one_bytes = vec![Expr::Var("buffer".to_string())];
+    let write_one_bytes_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("output".to_string())),
+        "write",
+        None,
+        &write_one_bytes,
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("OutputStream.write(byte[]) should use typed byte-slice ABI, got {plan:?}"),
+    };
+    assert_eq!(write_one_bytes_shapes.len(), 1);
+    assert_eq!(
+        write_one_bytes_shapes[0].ownership,
+        OwnershipShape::SharedBorrow
+    );
+    assert_eq!(write_one_bytes_shapes[0].view, ViewShape::Slice);
+    assert_eq!(
+        write_one_bytes_shapes[0].java_ty,
+        JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)))
+    );
+    assert!(matches!(
+        plan_call_expr(
+            Some(&Expr::Var("output".to_string())),
+            "write",
+            &write_one_bytes,
+            None,
+            &facts,
+            &types
+        ),
+        CallExprPlan::Target(CallTargetPlan::ExternalFacadeReceiver { ref rust_path, .. })
+            if rust_path == "OutputStream::write_1"
+    ));
+
+    let write_one_int = vec![Expr::Var("size".to_string())];
+    let write_one_int_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("output".to_string())),
+        "write",
+        None,
+        &write_one_int,
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("OutputStream.write(int) should use typed primitive ABI, got {plan:?}"),
+    };
+    assert_eq!(write_one_int_shapes.len(), 1);
+    assert_eq!(write_one_int_shapes[0].ownership, OwnershipShape::CopyValue);
+    assert_eq!(
+        write_one_int_shapes[0].java_ty,
+        JavaType::Primitive(PrimitiveType::Int)
+    );
+    assert!(matches!(
+        plan_call_expr(
+            Some(&Expr::Var("output".to_string())),
+            "write",
+            &write_one_int,
+            None,
+            &facts,
+            &types
+        ),
+        CallExprPlan::Target(CallTargetPlan::ExternalFacadeReceiver { ref rust_path, .. })
+            if rust_path == "OutputStream::write_int"
+    ));
+
+    assert_eq!(
+        facts
+            .facade_abi_for_call(
+                &output_stream_write_bytes_key,
+                &[JavaType::Array(Box::new(JavaType::Primitive(
+                    PrimitiveType::Byte
+                )))]
+            )
+            .expect("typed byte-array write ABI")
+            .rust_path,
+        "OutputStream::write_1"
+    );
+    assert_eq!(
+        facts
+            .facade_abi_for_call(
+                &output_stream_write_int_key,
+                &[JavaType::Primitive(PrimitiveType::Int)]
+            )
+            .expect("typed int write ABI")
+            .rust_path,
+        "OutputStream::write_int"
+    );
 }
 
 #[test]

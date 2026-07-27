@@ -6,7 +6,7 @@ use crate::facts::{
     CallableKey, ExternalApiRole, ExternalArgumentAliasPolicy, ExternalConversionAdapterKind,
     ExternalFieldFact, ExternalFieldKind, FacadeAbiFact, FacadeSlot, FactProvenance, FieldKey,
     HierarchyStrategy, NullabilityState, ReceiverAbi, ReceiverMutabilityFact, ResultAbi,
-    Staticness,
+    Staticness, TypeKey, TypePattern,
 };
 use crate::java_ir::{
     BinaryOp, Block, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
@@ -1326,6 +1326,44 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
         "FilterOutputStream",
         "java.io.FilterOutputStream",
     ] {
+        facts
+            .facade_abi_facts
+            .push(jdk_result_method_abi_with_params(
+                owner,
+                "write",
+                "OutputStream::write_1",
+                vec![TypePattern::Exact(TypeKey {
+                    type_name: "byte[]".to_string(),
+                })],
+                vec![FacadeSlot::Slice(Box::new(FacadeSlot::Borrowed))],
+                FacadeSlot::Owned,
+            ));
+        facts
+            .facade_abi_facts
+            .push(jdk_result_method_abi_with_params(
+                owner,
+                "write",
+                "OutputStream::write_int",
+                vec![TypePattern::Exact(TypeKey {
+                    type_name: "int".to_string(),
+                })],
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ));
+        for primitive in ["byte", "short", "char"] {
+            facts
+                .facade_abi_facts
+                .push(jdk_result_method_abi_with_params(
+                    owner,
+                    "write",
+                    "OutputStream::write_int",
+                    vec![TypePattern::Exact(TypeKey {
+                        type_name: primitive.to_string(),
+                    })],
+                    vec![FacadeSlot::Owned],
+                    FacadeSlot::Owned,
+                ));
+        }
         facts.facade_abi_facts.push(jdk_result_method_abi(
             owner,
             "write",
@@ -1372,6 +1410,25 @@ fn jdk_result_method_abi(
     return_slot: FacadeSlot,
 ) -> FacadeAbiFact {
     let mut fact = rust_stdlib_method_abi(owner, method, arity, rust_path, args, return_slot);
+    fact.result = ResultAbi::ResultWrapped;
+    fact
+}
+
+fn jdk_result_method_abi_with_params(
+    owner: &str,
+    method: &str,
+    rust_path: &str,
+    params: Vec<TypePattern>,
+    args: Vec<FacadeSlot>,
+    return_slot: FacadeSlot,
+) -> FacadeAbiFact {
+    let mut fact = rust_stdlib_method_abi(owner, method, args.len(), rust_path, args, return_slot);
+    fact.key = CallableKey::method_with_params(
+        owner.to_string(),
+        method.to_string(),
+        Staticness::Unknown,
+        params,
+    );
     fact.result = ResultAbi::ResultWrapped;
     fact
 }
@@ -4095,6 +4152,23 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
     .to_string()
 }
 
+fn is_known_java_platform_output_stream_receiver(receiver: &str) -> bool {
+    let canonical = canonical_external_receiver_type_key(receiver);
+    let simple = canonical.rsplit('.').next().unwrap_or(&canonical);
+    matches!(
+        simple,
+        "OutputStream"
+            | "FileOutputStream"
+            | "ByteArrayOutputStream"
+            | "BufferedOutputStream"
+            | "DataOutputStream"
+            | "GZIPOutputStream"
+            | "ZipOutputStream"
+            | "ObjectOutputStream"
+            | "FilterOutputStream"
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassLiteralTokenPlan {
     pub java_name: String,
@@ -6500,6 +6574,22 @@ impl ExternalApiFacadeSupport {
                         *arg_count,
                         &return_rust,
                     );
+                    if matches!(fact.method_name.as_str(), "write" | "write_1" | "write_int")
+                        && *arg_count == 1
+                        && is_known_java_platform_output_stream_receiver(&receiver_key)
+                    {
+                        for overload_method in ["write_1", "write_int"] {
+                            let overload_body = external_facade_instance_method_with_facts(
+                                facts,
+                                &receiver_key,
+                                overload_method,
+                                overload_method,
+                                *arg_count,
+                                &return_rust,
+                            );
+                            self.add_method(receiver_rust.clone(), overload_body);
+                        }
+                    }
                     if self.has_method_named(&receiver_rust, &rust_method)
                         && !self.has_method_signature(&receiver_rust, &rust_method, *arg_count)
                     {
@@ -11270,7 +11360,7 @@ fn external_facade_args_with_fact_prefix(
                 generic_params.push(generic.clone());
                 format!("Option<{generic}>")
             } else {
-                external_facade_argument_rust_type(facts, receiver_key, method, index)
+                external_facade_argument_rust_type(facts, receiver_key, method, arg_count, index)
                     .unwrap_or_else(|| {
                         let generic = format!("T{index}");
                         generic_params.push(generic.clone());
@@ -11337,6 +11427,7 @@ fn external_facade_argument_rust_type(
     facts: &FactSet,
     receiver_key: &str,
     method: &str,
+    arg_count: usize,
     index: usize,
 ) -> Option<String> {
     if external_facade_method_uses_generic_append_handoff(receiver_key, method, index) {
@@ -11344,6 +11435,11 @@ fn external_facade_argument_rust_type(
     }
     if external_facade_method_uses_display_argument(receiver_key, method, index) {
         return Some("impl std::fmt::Display".to_string());
+    }
+    if let Some(ty) =
+        external_facade_argument_rust_type_from_abi(facts, receiver_key, method, arg_count, index)
+    {
+        return Some(ty);
     }
     let effect = external_facade_argument_effect(facts, receiver_key, method, index)?;
     if let Some(ty) = external_facade_dyn_trait_argument_rust_type(facts, effect) {
@@ -11354,6 +11450,99 @@ fn external_facade_argument_rust_type(
     Some(crate::emit::emit_type(&rust_type_for_slot_with_facts(
         &shape, facts,
     )))
+}
+
+fn external_facade_argument_rust_type_from_abi(
+    facts: &FactSet,
+    receiver_key: &str,
+    method: &str,
+    arg_count: usize,
+    index: usize,
+) -> Option<String> {
+    let abi =
+        external_facade_argument_abi_for_method(facts, receiver_key, method, arg_count, index)?;
+    let pattern = abi.key.params.get(index)?;
+    let java_ty = java_type_from_callable_type_pattern(pattern)?;
+    let shape = external_facade_argument_shape_from_abi_slot(abi.args.get(index)?, java_ty);
+    Some(crate::emit::emit_type(&rust_type_for_slot_with_facts(
+        &shape, facts,
+    )))
+}
+
+fn external_facade_argument_abi_for_method<'a>(
+    facts: &'a FactSet,
+    receiver_key: &str,
+    method: &str,
+    arg_count: usize,
+    index: usize,
+) -> Option<&'a FacadeAbiFact> {
+    facts
+        .facade_abi_facts
+        .iter()
+        .filter(|abi| {
+            crate::stdlib::canonical_external_receiver_type_key(&abi.key.owner.type_name)
+                == crate::stdlib::canonical_external_receiver_type_key(receiver_key)
+                && abi.args.len() == arg_count
+                && abi.args.get(index).is_some()
+                && (abi.key.member.0 == method
+                    || abi.rust_path.rsplit("::").next().unwrap_or(&abi.rust_path) == method)
+        })
+        .max_by_key(|abi| {
+            let first_param = abi.key.params.first().and_then(|param| match param {
+                TypePattern::Exact(type_key) | TypePattern::Erased(type_key) => {
+                    Some(type_key.type_name.as_str())
+                }
+                TypePattern::TypeParam(_) | TypePattern::Any => None,
+            });
+            (
+                abi.rust_path.rsplit("::").next().unwrap_or(&abi.rust_path) == method,
+                first_param == Some("int"),
+                abi.key
+                    .params
+                    .iter()
+                    .filter(|param| !matches!(param, TypePattern::Any))
+                    .count(),
+            )
+        })
+}
+
+fn java_type_from_callable_type_pattern(pattern: &TypePattern) -> Option<JavaType> {
+    match pattern {
+        TypePattern::Exact(type_key) | TypePattern::Erased(type_key) => {
+            java_type_from_callable_type_name(&type_key.type_name)
+        }
+        TypePattern::TypeParam(name) => Some(JavaType::Unknown(name.clone())),
+        TypePattern::Any => None,
+    }
+}
+
+fn java_type_from_callable_type_name(type_name: &str) -> Option<JavaType> {
+    let name = type_name.trim();
+    if let Some(element_name) = name.strip_suffix("[]") {
+        return java_type_from_callable_type_name(element_name)
+            .map(|element| JavaType::Array(Box::new(element)));
+    }
+    let primitive = match name {
+        "boolean" => Some(PrimitiveType::Boolean),
+        "byte" => Some(PrimitiveType::Byte),
+        "short" => Some(PrimitiveType::Short),
+        "char" => Some(PrimitiveType::Char),
+        "int" => Some(PrimitiveType::Int),
+        "long" => Some(PrimitiveType::Long),
+        "float" => Some(PrimitiveType::Float),
+        "double" => Some(PrimitiveType::Double),
+        _ => None,
+    };
+    if let Some(primitive) = primitive {
+        return Some(JavaType::Primitive(primitive));
+    }
+    if matches!(name, "String" | "java.lang.String") {
+        return Some(JavaType::String);
+    }
+    Some(JavaType::Named {
+        name: name.to_string(),
+        args: Vec::new(),
+    })
 }
 
 fn external_facade_argument_abi_shape(

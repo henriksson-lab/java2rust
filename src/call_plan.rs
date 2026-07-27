@@ -1438,7 +1438,7 @@ pub fn plan_call_expr_with_external_index<'a>(
         };
     }
 
-    CallExprPlan::Target(plan_call_target_with_external_index_and_arity(
+    let target = plan_call_target_with_external_index_and_arity(
         receiver,
         name,
         args.len(),
@@ -1446,7 +1446,47 @@ pub fn plan_call_expr_with_external_index<'a>(
         facts,
         external_index,
         types,
+    );
+    CallExprPlan::Target(retarget_call_target_with_facade_abi_args(
+        target,
+        receiver,
+        name,
+        args,
+        facts,
+        external_index,
+        types,
     ))
+}
+
+fn retarget_call_target_with_facade_abi_args<'a>(
+    target: CallTargetPlan<'a>,
+    receiver: Option<&'a Expr>,
+    name: &str,
+    args: &[Expr],
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+) -> CallTargetPlan<'a> {
+    if !matches!(
+        target,
+        CallTargetPlan::FallbackReceiver { .. } | CallTargetPlan::ExternalFacadeReceiver { .. }
+    ) {
+        return target;
+    }
+    let Some(receiver) = receiver else {
+        return target;
+    };
+    let Some(abi) =
+        facade_abi_for_receiver_call(receiver, name, args, facts, external_index, types)
+    else {
+        return target;
+    };
+    CallTargetPlan::ExternalFacadeReceiver {
+        receiver,
+        rust_path: abi.rust_path.clone(),
+        receiver_abi: abi.receiver,
+        mutates_receiver: matches!(abi.receiver, ReceiverAbi::MutBorrowedSelf),
+    }
 }
 
 pub fn apply_fallback_receiver_rust_name<'a>(
@@ -3781,7 +3821,12 @@ fn facade_abi_call_arg_plan(
         Staticness::Unknown,
         arg_count,
     );
-    let abi = facts.facade_abi_for_key(&key)?;
+    let abi = if let Some(args) = args {
+        let arg_types = inferred_argument_java_types(args, types);
+        facts.facade_abi_for_call(&key, &arg_types)
+    } else {
+        facts.facade_abi_for_key(&key)
+    }?;
     let collection_arg_types =
         facade_abi_native_collection_arg_java_types(receiver, name, arg_count, types);
     facade_abi_argument_lowering_plan(
@@ -3808,18 +3853,43 @@ fn facade_abi_call_arg_plan_for_resolved(
         Staticness::Unknown,
         arg_count,
     );
-    facts
-        .facade_abi_for_key(&key)
-        .or_else(|| {
-            let source_key = CallableKey::method(
-                call.declaring_type.clone(),
-                source_name.to_string(),
-                Staticness::Unknown,
-                arg_count,
-            );
-            facts.facade_abi_for_key(&source_key)
-        })
-        .and_then(|abi| facade_abi_argument_lowering_plan(abi, arg_count, args, types, None, facts))
+    let source_key = CallableKey::method(
+        call.declaring_type.clone(),
+        source_name.to_string(),
+        Staticness::Unknown,
+        arg_count,
+    );
+    let abi = if let Some(args) = args {
+        let arg_types = inferred_argument_java_types(args, types);
+        facts
+            .facade_abi_for_call(&key, &arg_types)
+            .or_else(|| facts.facade_abi_for_call(&source_key, &arg_types))
+    } else {
+        facts
+            .facade_abi_for_key(&key)
+            .or_else(|| facts.facade_abi_for_key(&source_key))
+    };
+    abi.and_then(|abi| facade_abi_argument_lowering_plan(abi, arg_count, args, types, None, facts))
+}
+
+fn facade_abi_for_receiver_call<'a>(
+    receiver: &Expr,
+    name: &str,
+    args: &[Expr],
+    facts: &'a FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+) -> Option<&'a FacadeAbiFact> {
+    let receiver_name =
+        external_receiver_expr_type_key_with_index(receiver, facts, external_index, types, None)?;
+    let key = CallableKey::method(
+        receiver_name,
+        name.to_string(),
+        Staticness::Unknown,
+        args.len(),
+    );
+    let arg_types = inferred_argument_java_types(args, types);
+    facts.facade_abi_for_call(&key, &arg_types)
 }
 
 fn facade_abi_argument_lowering_plan(
@@ -3841,6 +3911,7 @@ fn facade_abi_argument_lowering_plan(
         let java_ty = arg_java_types
             .and_then(|arg_types| arg_types.get(index).cloned())
             .or_else(|| inferred_argument_java_type(args, index, types))
+            .map(|java_ty| facade_abi_effective_argument_java_type(abi, index, java_ty))
             .unwrap_or_else(|| JavaType::Unknown("Object".to_string()));
         if let Some(effect) = facts
             .external_api_argument_effect_for_key(&abi.key, index)
@@ -3885,6 +3956,24 @@ fn facade_abi_argument_lowering_plan(
         Some(ArgumentLoweringPlan::Slotted(slots))
     } else {
         Some(ArgumentLoweringPlan::Shaped(shapes))
+    }
+}
+
+fn facade_abi_effective_argument_java_type(
+    abi: &FacadeAbiFact,
+    index: usize,
+    java_ty: JavaType,
+) -> JavaType {
+    if index == 0
+        && abi.rust_path.rsplit("::").next().unwrap_or(&abi.rust_path) == "write_int"
+        && matches!(
+            java_ty,
+            JavaType::Primitive(PrimitiveType::Byte | PrimitiveType::Short | PrimitiveType::Char)
+        )
+    {
+        JavaType::Primitive(PrimitiveType::Int)
+    } else {
+        java_ty
     }
 }
 
@@ -3935,6 +4024,10 @@ fn inferred_argument_java_type(
     types: &TypeEnv,
 ) -> Option<JavaType> {
     args?.get(index).map(|arg| infer_expr_type(arg, types))
+}
+
+fn inferred_argument_java_types(args: &[Expr], types: &TypeEnv) -> Vec<JavaType> {
+    args.iter().map(|arg| infer_expr_type(arg, types)).collect()
 }
 
 fn rust_slot_shape_from_facade_arg_slot(

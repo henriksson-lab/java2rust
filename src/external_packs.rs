@@ -30092,6 +30092,11 @@ fn java_platform_io_api_effect(
         {
             (3, ExternalApiRole::SideEffect, JavaType::Void)
         }
+        (receiver, "write" | "write_1" | "write_int")
+            if is_java_platform_output_stream_receiver(receiver) && matches_arg_count(1) =>
+        {
+            (1, ExternalApiRole::SideEffect, JavaType::Void)
+        }
         ("ZipFile", "entries") if matches_arg_count(0) => (
             0,
             ExternalApiRole::Getter,
