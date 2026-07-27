@@ -7460,7 +7460,16 @@ fn spark_pack_declares_runtime_boundary() {
         sort_by_key_1.return_type,
         Some(JavaType::Named {
             name: "JavaPairRDD".to_string(),
-            args: Vec::new(),
+            args: vec![
+                JavaType::Named {
+                    name: "T0".to_string(),
+                    args: Vec::new(),
+                },
+                JavaType::Named {
+                    name: "T1".to_string(),
+                    args: Vec::new(),
+                },
+            ],
         })
     );
 
@@ -7471,7 +7480,16 @@ fn spark_pack_declares_runtime_boundary() {
         sort_by_key_3.return_type,
         Some(JavaType::Named {
             name: "JavaPairRDD".to_string(),
-            args: Vec::new(),
+            args: vec![
+                JavaType::Named {
+                    name: "T0".to_string(),
+                    args: Vec::new(),
+                },
+                JavaType::Named {
+                    name: "T1".to_string(),
+                    args: Vec::new(),
+                },
+            ],
         })
     );
 

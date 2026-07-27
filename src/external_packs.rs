@@ -8127,7 +8127,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "broadcast",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "Broadcast",
+        "Broadcast<T0>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -8135,7 +8135,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "broadcast",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "Broadcast",
+        "Broadcast<T0>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -8466,7 +8466,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         1,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "JavaPairRDD",
+        "JavaPairRDD<T0,T1>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -8475,7 +8475,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         1,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "JavaPairRDD",
+        "JavaPairRDD<T0,T1>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -8484,7 +8484,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         3,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "JavaPairRDD",
+        "JavaPairRDD<T0,T1>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -8493,7 +8493,7 @@ const SPARK_API_EFFECTS: &[ExternalPackApiEffect] = &[
         3,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "JavaPairRDD",
+        "JavaPairRDD<T0,T1>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(

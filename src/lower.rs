@@ -7406,6 +7406,13 @@ fn lower_expr_with_refinements(
                 arg_plan,
                 context_fallback_signature.as_ref(),
             );
+            let arg_plan = apply_dyn_trait_borrowed_return_arg_shapes(
+                arg_plan,
+                receiver.as_deref(),
+                env,
+                ctx,
+                fallback_signature.as_ref(),
+            );
             let arg_plan = apply_static_fallback_reference_arg_shapes(
                 arg_plan,
                 receiver.as_deref(),
@@ -9022,6 +9029,45 @@ fn apply_context_fallback_signature_arg_shapes(
     plan
 }
 
+fn apply_dyn_trait_borrowed_return_arg_shapes(
+    plan: ArgumentLoweringPlan,
+    receiver: Option<&Expr>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    fallback_signature: Option<&(String, &crate::signature::MethodSignaturePlan)>,
+) -> ArgumentLoweringPlan {
+    let Some(receiver) = receiver else {
+        return plan;
+    };
+    if !receiver_expr_uses_dyn_trait_slots(receiver, env, ctx) {
+        return plan;
+    }
+    let Some((_, signature)) = fallback_signature else {
+        return plan;
+    };
+    let Some(return_shape) = signature.return_shape.as_ref() else {
+        return plan;
+    };
+    if return_shape.ownership != OwnershipShape::SharedBorrow {
+        return plan;
+    }
+    let mut shapes = match plan {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        other => return other,
+    };
+    if shapes.len() != signature.params.len() {
+        return ArgumentLoweringPlan::Shaped(shapes);
+    }
+    for (shape, param) in shapes.iter_mut().zip(signature.params.iter()) {
+        if source_context_reference_param_should_borrow(&param.java_ty, param.is_varargs)
+            && !java_types_have_same_erased_identity(&param.java_ty, &return_shape.java_ty)
+        {
+            shape.ownership = OwnershipShape::SharedBorrow;
+        }
+    }
+    ArgumentLoweringPlan::Shaped(shapes)
+}
+
 fn apply_static_fallback_reference_arg_shapes(
     plan: ArgumentLoweringPlan,
     receiver: Option<&Expr>,
@@ -9924,7 +9970,6 @@ fn lower_args_for_call_target(
     fallback_signature: Option<&crate::signature::MethodSignaturePlan>,
 ) -> Vec<RustExpr> {
     if args.len() == 1
-        && matches!(args.first(), Some(Expr::Lambda { .. }))
         && let Some(lowered) = lower_unshaped_argument_for_call_target(&args[0], target, env, ctx)
             .or_else(|| {
                 call_receiver.and_then(|receiver| {
@@ -9997,16 +10042,29 @@ fn lower_args_for_call_target(
             method: NativeCollectionMethod::MapInsert,
             ..
         } => lower_map_insert_args(args, env, plan, ctx),
+        _ if external_facade_preserving_call_clones_leading_arg(target) => {
+            if matches!(plan, ArgumentLoweringPlan::Unshaped { .. }) {
+                lower_unshaped_external_facade_preserving_args(
+                    target,
+                    call_receiver,
+                    args,
+                    env,
+                    ctx,
+                )
+            } else {
+                apply_external_facade_preserving_leading_arg_clone(
+                    lower_args_with_plan(args, env, plan, ctx),
+                    args,
+                    env,
+                    ctx,
+                )
+            }
+        }
         _ if external_generic_facade_target_borrows_actual_argument_shapes(target, env) => {
             lower_external_generic_facade_args_with_borrowed_actual_shapes(args, env, ctx)
         }
         _ if external_generic_facade_target_keeps_argument_shapes(target, env, ctx) => {
             lower_external_generic_facade_args_with_actual_shapes(args, env, plan, ctx)
-        }
-        _ if matches!(plan, ArgumentLoweringPlan::Unshaped { .. })
-            && external_facade_preserving_call_clones_leading_arg(target) =>
-        {
-            lower_unshaped_external_facade_preserving_args(target, call_receiver, args, env, ctx)
         }
         _ if matches!(plan, ArgumentLoweringPlan::Unshaped { .. }) => args
             .iter()
@@ -10199,9 +10257,9 @@ fn lower_unshaped_external_facade_preserving_args(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Vec<RustExpr> {
-    args.iter()
-        .enumerate()
-        .map(|(index, arg)| {
+    let lowered = args
+        .iter()
+        .map(|arg| {
             let lowered = lower_unshaped_argument_for_call_target(arg, target, env, ctx)
                 .or_else(|| {
                     call_receiver.and_then(|receiver| {
@@ -10209,16 +10267,28 @@ fn lower_unshaped_external_facade_preserving_args(
                     })
                 })
                 .unwrap_or_else(|| lower_unshaped_argument(arg, env, ctx));
-            if index == 0 && external_facade_preserving_arg_needs_clone(arg, env, ctx) {
-                apply_clone_recovery_decision(
-                    lowered,
-                    audited_clone_recovery_decision(CloneRecoveryIdempotence::DirectClone),
-                )
-            } else {
-                lowered
-            }
+            lowered
         })
-        .collect()
+        .collect();
+    apply_external_facade_preserving_leading_arg_clone(lowered, args, env, ctx)
+}
+
+fn apply_external_facade_preserving_leading_arg_clone(
+    mut lowered: Vec<RustExpr>,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Vec<RustExpr> {
+    if let Some(first) = lowered.first_mut()
+        && let Some(arg) = args.first()
+        && external_facade_preserving_arg_needs_clone(arg, env, ctx)
+    {
+        *first = apply_clone_recovery_decision(
+            first.clone(),
+            audited_clone_recovery_decision(CloneRecoveryIdempotence::DirectClone),
+        );
+    }
+    lowered
 }
 
 fn external_facade_preserving_arg_needs_clone(arg: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
@@ -10235,7 +10305,8 @@ fn external_facade_preserving_arg_needs_clone(arg: &Expr, env: &ShapeEnv, ctx: L
         },
     );
     !matches!(shape.java_ty, JavaType::Primitive(_))
-        && known_owned_argument_clone_recovery_with_facts(&shape, ctx.facts)
+        && (known_owned_argument_clone_recovery_with_facts(&shape, ctx.facts)
+            || optional_owned_argument_clone_recovery(&shape, ctx.facts))
 }
 
 fn lower_varargs_call_args_with_signature(
@@ -10781,9 +10852,11 @@ fn stream_like_receiver_element_shape(
     if let Some(element_ty) = crate::types::sequence_element_type(&receiver_java_ty) {
         return Some(fallback_local_shape_from_declared_type(&element_ty));
     }
-    if let Some(return_ty) =
-        external_receiver_call_return_type_with_external_index(receiver, ctx.external_index)
-        && let Some(element_ty) = crate::types::sequence_element_type(&return_ty)
+    if let Some(return_ty) = external_receiver_call_return_type_with_external_index(
+        receiver,
+        ctx.external_index,
+        env.type_env(),
+    ) && let Some(element_ty) = crate::types::sequence_element_type(&return_ty)
     {
         return Some(fallback_local_shape_from_declared_type(&element_ty));
     }
@@ -10848,7 +10921,7 @@ fn stream_like_call_return_shape(
         return None;
     }
     if name == "filter" {
-        return Some(infer_expr_shape_with_context(
+        let receiver_shape = infer_expr_shape_with_context(
             receiver,
             env,
             ExprShapeContext {
@@ -10856,7 +10929,11 @@ fn stream_like_call_return_shape(
                 representations: Some(ctx.representations),
                 facts: Some(ctx.facts),
             },
-        ));
+        );
+        if receiver_shape.sequence_element_type().is_some() {
+            return Some(receiver_shape);
+        }
+        return stream_like_call_return_shape(receiver, env, ctx).or(Some(receiver_shape));
     }
     let element_shape = stream_like_map_result_element_shape(expr, env, ctx)?;
     match name.as_str() {
@@ -16866,9 +16943,20 @@ fn receiver_expr_uses_dyn_trait_slots(receiver: &Expr, env: &ShapeEnv, ctx: Lowe
         facts: Some(ctx.facts),
     };
     let receiver_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
-    matches!(
+    if matches!(
         receiver_shape.dispatch,
         DispatchShape::DynTrait { .. } | DispatchShape::BoxedDynTrait { .. }
+    ) {
+        return true;
+    }
+    let effective_facts = crate::effective_facts::EffectiveFacts::new(ctx.facts);
+    let optional_element_ty = receiver_shape.optional_element_type();
+    let represented_ty = optional_element_ty
+        .as_ref()
+        .unwrap_or(&receiver_shape.java_ty);
+    matches!(
+        effective_facts.object_representation_override_strategy_for(represented_ty),
+        Some(HierarchyStrategy::DynTrait { .. })
     )
 }
 

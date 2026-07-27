@@ -4724,7 +4724,7 @@ class Dog implements Named {
 }
 
 #[test]
-fn representation_lowering_skips_incomplete_trait_impls_for_abstract_classes() {
+fn representation_lowering_emits_stubbed_trait_impls_for_abstract_classes() {
     let parsed = parse_java_source(
         r#"
 interface Module {
@@ -4749,15 +4749,24 @@ abstract class AbstractModule implements Module {
         .find(|ty| ty.name == "AbstractModule")
         .unwrap();
 
-    assert_eq!(
-        trait_impl_emissions_for_type(
-            &representations,
-            &resolved.program,
-            abstract_ty,
-            &signatures
-        ),
-        Vec::<String>::new()
+    let impls = trait_impl_emissions_for_type(
+        &representations,
+        &resolved.program,
+        abstract_ty,
+        &signatures,
     );
+
+    assert_eq!(impls.len(), 1);
+    assert!(impls[0].contains("impl Module for AbstractModule"));
+    assert!(impls[0].contains(
+        "panic!(\"missing Java interface method implementation: AbstractModule.reset\")"
+    ));
+    assert!(
+        impls[0].contains(
+            "panic!(\"missing Java interface method implementation: AbstractModule.name\")"
+        )
+    );
+    assert!(!impls[0].contains("compile_error!"));
 }
 
 #[test]

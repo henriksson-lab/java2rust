@@ -816,8 +816,10 @@ pub fn external_call_lowered_type_from_static_owner_plan_with_external_index(
 pub fn external_receiver_call_return_type_with_external_index(
     receiver: &Expr,
     external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
 ) -> Option<JavaType> {
     let Expr::Call {
+        receiver: call_receiver,
         name,
         args,
         resolved,
@@ -845,7 +847,13 @@ pub fn external_receiver_call_return_type_with_external_index(
             })
             .and_then(|effect| effect.return_type)
         {
-            return Some(return_type);
+            let receiver_type = call_receiver
+                .as_deref()
+                .map(|receiver| infer_expr_type(receiver, types));
+            return Some(crate::types::receiver_generic_return_type(
+                receiver_type.as_ref(),
+                return_type,
+            ));
         }
     }
     None

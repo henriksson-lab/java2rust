@@ -247,18 +247,38 @@ pub fn receiver_generic_return_type(
     receiver_type: Option<&JavaType>,
     return_ty: JavaType,
 ) -> JavaType {
-    let Some(index) = receiver_generic_placeholder_index(&return_ty) else {
-        return return_ty;
-    };
     let Some(receiver_type) = receiver_type else {
         return return_ty;
     };
     let receiver_type =
         optional_element_type(receiver_type).unwrap_or_else(|| receiver_type.clone());
-    let JavaType::Named { args, .. } = receiver_type else {
+    let JavaType::Named {
+        args: receiver_args,
+        ..
+    } = receiver_type
+    else {
         return return_ty;
     };
-    args.get(index).cloned().unwrap_or(return_ty)
+    substitute_receiver_generic_placeholders(return_ty, &receiver_args)
+}
+
+fn substitute_receiver_generic_placeholders(
+    return_ty: JavaType,
+    receiver_args: &[JavaType],
+) -> JavaType {
+    if let Some(index) = receiver_generic_placeholder_index(&return_ty) {
+        return receiver_args.get(index).cloned().unwrap_or(return_ty);
+    }
+    match return_ty {
+        JavaType::Named { name, args } if !args.is_empty() => JavaType::Named {
+            name,
+            args: args
+                .into_iter()
+                .map(|arg| substitute_receiver_generic_placeholders(arg, receiver_args))
+                .collect(),
+        },
+        other => other,
+    }
 }
 
 fn receiver_generic_placeholder_index(return_ty: &JavaType) -> Option<usize> {

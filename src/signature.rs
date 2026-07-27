@@ -6420,11 +6420,48 @@ fn signature_object_representation_fact_constraints_with_effective_facts(
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> Vec<SignatureConstraint> {
-    facts
-        .object_representation_override_strategy_for(java_ty)
+    signature_object_representation_strategy_for(java_ty, facts)
         .and_then(hierarchy_strategy_signature_dispatch)
         .map(|dispatch| vec![SignatureConstraint::RequiredDispatch(dispatch)])
         .unwrap_or_default()
+}
+
+fn signature_object_representation_strategy_for<'a>(
+    java_ty: &JavaType,
+    facts: &'a EffectiveFacts<'_>,
+) -> Option<&'a HierarchyStrategy> {
+    let type_name = match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name.as_str(),
+        _ => return facts.object_representation_override_strategy_for(java_ty),
+    };
+    let exact_external_pack_override = facts
+        .hierarchy_overrides()
+        .iter()
+        .filter(|override_fact| {
+            override_fact.provenance == FactProvenance::ExternalLibraryPack
+                && override_fact.type_name.contains('.')
+                && override_fact.type_name == type_name
+        })
+        .max_by_key(|override_fact| {
+            signature_hierarchy_strategy_specificity_rank(&override_fact.strategy)
+        })
+        .map(|override_fact| &override_fact.strategy);
+    exact_external_pack_override.or_else(|| {
+        facts
+            .object_representation_override_strategy_for(java_ty)
+            .filter(|strategy| {
+                !matches!(strategy, HierarchyStrategy::ErasedObject) || type_name.contains('.')
+            })
+    })
+}
+
+fn signature_hierarchy_strategy_specificity_rank(strategy: &HierarchyStrategy) -> u8 {
+    match strategy {
+        HierarchyStrategy::ClosedEnum { .. } => 4,
+        HierarchyStrategy::DynTrait { .. } => 3,
+        HierarchyStrategy::ConcreteStruct => 2,
+        HierarchyStrategy::ErasedObject => 1,
+    }
 }
 
 fn exact_final_erased_facade_boundary_should_use_native(

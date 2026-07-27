@@ -244,9 +244,6 @@ pub fn trait_impl_emissions_for_type_with_facts_and_exceptions(
     if !matches!(ty.kind, TypeKind::Class | TypeKind::Enum) {
         return Vec::new();
     }
-    if ty.modifiers.contains(&Modifier::Abstract) {
-        return Vec::new();
-    }
     implemented_interfaces_for_type(program, ty)
         .into_iter()
         .filter_map(|interface_name| {
