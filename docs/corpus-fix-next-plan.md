@@ -3927,6 +3927,12 @@ instead of constructing `RustExpr::Call`/`RustExpr::MethodCall` locally for
 the common static, receiver, self, free, and Java-class call targets. Focused
 verification: `apply_call_target_uses_shared_call_projection_helpers` and
 `rendered_string_heuristics_have_centralization_guardrails`.
+Latest follow-up: the same generic call projection helpers now cover external
+crate receiver calls, free/associated facade receiver calls, native collection
+receiver methods, class-literal token calls, external crate constructors, and
+ordinary associated constructors in `call_lowering.rs`. Java target selection
+and facade ABI receiver policy remain in call planning; only Rust call spelling
+is centralized.
 Follow-up: bare source instance-field access now uses
 `coercion::self_field_projection` for both structured lowering and rendered
 fallbacks. `access_lowering.rs` still owns local-vs-field-vs-static-name

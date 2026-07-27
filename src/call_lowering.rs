@@ -115,10 +115,10 @@ pub fn apply_call_target(
                 lowered_receiver.expect("external crate receiver target must provide receiver"),
             );
             all_args.extend(args);
-            RustExpr::Call {
-                function: Box::new(external_crate_path_projection(crate_name, rust_name)),
-                args: all_args,
-            }
+            function_call_projection(
+                external_crate_path_projection(crate_name, rust_name),
+                all_args,
+            )
         }
         CallTargetPlan::ExternalFacadeReceiver {
             rust_path,
@@ -149,15 +149,11 @@ fn apply_external_facade_receiver_call(
             let mut all_args = Vec::with_capacity(args.len() + 1);
             all_args.push(receiver);
             all_args.extend(args);
-            RustExpr::Call {
-                function: Box::new(RustExpr::Raw(rust_path.to_string())),
-                args: all_args,
-            }
+            function_call_projection(RustExpr::Raw(rust_path.to_string()), all_args)
         }
-        ReceiverAbi::AssociatedFunction => RustExpr::Call {
-            function: Box::new(RustExpr::Raw(rust_path.to_string())),
-            args,
-        },
+        ReceiverAbi::AssociatedFunction => {
+            function_call_projection(RustExpr::Raw(rust_path.to_string()), args)
+        }
         ReceiverAbi::BorrowedSelf | ReceiverAbi::MutBorrowedSelf | ReceiverAbi::OwnedSelf => {
             facade_receiver_method_call_projection(receiver, rust_path, args)
         }
@@ -687,27 +683,19 @@ fn apply_native_collection_method(
         NativeCollectionMethod::Iterator => unreachable!("Iterator is rendered as JavaIterator"),
         NativeCollectionMethod::ToArray => unreachable!("ToArray is rendered as an owned Vec"),
     };
-    RustExpr::MethodCall {
-        receiver: Box::new(receiver),
-        method: rust_name.to_string(),
-        args,
-    }
+    receiver_method_call_projection_exact(receiver, rust_name, args)
 }
 
 pub fn apply_native_collection_extend(receiver: RustExpr, arg: RustExpr) -> RustExpr {
-    RustExpr::MethodCall {
-        receiver: Box::new(receiver),
-        method: "extend".to_string(),
-        args: vec![arg],
-    }
+    receiver_method_call_projection_exact(receiver, "extend", vec![arg])
 }
 
 pub fn apply_class_literal_token(ty: &JavaType, facts: &FactSet) -> RustExpr {
     let plan = crate::stdlib::class_literal_token_plan(ty, facts);
-    RustExpr::Call {
-        function: Box::new(java_class_literal_path_projection(&plan.rust_type)),
-        args: vec![RustExpr::Literal(format!("{:?}", plan.java_name))],
-    }
+    function_call_projection(
+        java_class_literal_path_projection(&plan.rust_type),
+        vec![RustExpr::Literal(format!("{:?}", plan.java_name))],
+    )
 }
 
 pub fn apply_new_target(target: &NewTargetPlan, args: Vec<RustExpr>) -> RustExpr {
@@ -723,14 +711,14 @@ pub fn apply_new_target_with_facts(
         return apply_native_collection_new_target(target, native_collection, args, facts);
     }
     if let Some(external_crate) = &target.external_crate {
-        return RustExpr::Call {
-            function: Box::new(external_crate_associated_path_projection(
+        return function_call_projection(
+            external_crate_associated_path_projection(
                 &external_crate.crate_name,
                 &external_crate.type_name,
                 &external_crate.rust_name,
-            )),
+            ),
             args,
-        };
+        );
     }
     let owner_type =
         crate::emit::emit_type(&rust_type_for_slot_with_facts(&target.owner_shape, facts));
@@ -758,13 +746,10 @@ pub fn apply_new_target_with_facts(
     if owner_type == "String" && target.rust_name == "new" && matches!(args.len(), 3 | 4) {
         return string_from_byte_range_constructor_expr(args);
     }
-    RustExpr::Call {
-        function: Box::new(owner_associated_path_projection(
-            &owner_type,
-            &target.rust_name,
-        )),
+    function_call_projection(
+        owner_associated_path_projection(&owner_type, &target.rust_name),
         args,
-    }
+    )
 }
 
 fn boxed_primitive_constructor_owner(java_ty: &JavaType) -> bool {

@@ -262,7 +262,15 @@ pub fn render_slot_value_rust_type_policy_with_effective_facts(
             ))
         }
         SlotValueRustTypePolicy::ConcreteDispatch { java_ty } => {
-            if erased_facade_concrete_dispatch_should_keep_named_type(java_ty, facts)
+            if let JavaType::Named { name, args } = java_ty
+                && let Some(ty) = external_crate_mapped_named_rust_type(name, args, facts)
+            {
+                ty
+            } else if let JavaType::Unknown(name) = java_ty
+                && let Some(ty) = external_crate_mapped_named_rust_type(name, &[], facts)
+            {
+                ty
+            } else if erased_facade_concrete_dispatch_should_keep_named_type(java_ty, facts)
                 && let JavaType::Named { name, .. } = java_ty
             {
                 RustType::Named(rust_name_for_java_named_type(name))
