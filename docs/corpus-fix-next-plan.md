@@ -4046,6 +4046,11 @@ Follow-up: stream lambda constructor fallback rendering now also wraps
 already-rendered stream arguments in shared owner-associated path and
 function-call projections. Stream lowering still owns lambda-local argument
 substitution and external constructor arity selection.
+Follow-up: borrowed-string stream lambda arguments now prefer the shared
+`plan_lowered_slot_conversion` argument path before using the remaining
+param/local `.as_str()` compatibility fallback. This keeps existing lambda
+binding recovery intact while making slot facts the first authority for
+String-to-`&str` argument adaptation.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,

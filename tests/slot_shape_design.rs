@@ -32916,6 +32916,14 @@ fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
         !borrowed_arg.contains("ensure_borrow_projection_rendered(\n        RustExpr::Raw(rendered),\n        actual.as_ref()"),
         "{borrowed_arg}"
     );
+    assert!(
+        borrowed_arg
+            .find("render_stream_lambda_arg_to_slot_through_plan")
+            .is_some_and(|slot_index| borrowed_arg
+                .find("render_stream_lambda_borrowed_string_param_arg")
+                .is_some_and(|fallback_index| slot_index < fallback_index)),
+        "{borrowed_arg}"
+    );
     let slot_projection = source
         .split("fn render_stream_lambda_arg_to_slot_through_plan")
         .nth(1)

@@ -2207,16 +2207,6 @@ fn render_stream_lambda_borrowed_str_arg(
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
 ) -> String {
-    if let Some(param_view) = render_stream_lambda_borrowed_string_param_arg(
-        arg,
-        &rendered,
-        param,
-        locals,
-        ctx,
-        param_shape,
-    ) {
-        return param_view;
-    }
     let target = borrowed_string_content_shape();
     if let Some(planned) = render_stream_lambda_arg_to_slot_through_plan(
         arg,
@@ -2228,6 +2218,16 @@ fn render_stream_lambda_borrowed_str_arg(
         param_shape,
     ) {
         return planned;
+    }
+    if let Some(param_view) = render_stream_lambda_borrowed_string_param_arg(
+        arg,
+        &rendered,
+        param,
+        locals,
+        ctx,
+        param_shape,
+    ) {
+        return param_view;
     }
     let actual = stream_lambda_arg_actual_shape(arg, param, locals, ctx, param_shape);
     let Some(actual) = actual else {
