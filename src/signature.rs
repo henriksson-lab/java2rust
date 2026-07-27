@@ -25,9 +25,9 @@ use crate::shape_projection::{
     return_shape_for_java_type, storage_shape_for_java_type,
 };
 use crate::slot_policy::{
-    BorrowedContentKind, BorrowedContentPolicy,
+    BorrowedContentKind, BorrowedContentPolicy, borrowed_content_type_policy,
     borrowed_return_content_policy_from_param_with_facts,
-    constructor_param_borrowed_content_policy_with_facts,
+    constructor_param_borrowed_content_policy_with_facts, method_assigns_to_binding,
     method_param_borrowed_content_policy_with_facts,
 };
 use crate::slot_shape::{
@@ -6090,6 +6090,18 @@ pub fn method_param_shape_constraints(
                 &mut constraints,
                 &[SignatureConstraint::MutableBinding],
             );
+            if borrowed_content_type_policy(&param.ty, facts)
+                .policy
+                .is_some()
+            {
+                push_unique_signature_constraints(
+                    &mut constraints,
+                    &[
+                        SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+                        SignatureConstraint::RequiredView(ViewShape::Native),
+                    ],
+                );
+            }
         }
         if array_element_mutated_names.contains(&param.name) {
             push_unique_signature_constraints(
@@ -11771,6 +11783,7 @@ fn internal_returned_object_alias_borrow_constraints(
     let returned_borrow_safe_alias = method_usage.bindings.values().any(|binding| {
         param_names.contains(binding.name.as_str())
             && exactly_returned_param_names.contains(binding.name.as_str())
+            && !method_assigns_to_binding(method, &binding.name)
             && java_types_have_same_signature_boundary_identity(
                 &binding.java_ty,
                 &method.return_type,

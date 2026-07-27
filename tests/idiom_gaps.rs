@@ -10082,6 +10082,58 @@ class PanelImageWriter {
 }
 
 #[test]
+fn reassigned_string_param_return_renders_owned_signature() {
+    let translation = translate_source(
+        r#"
+class SvgOptimizer {
+    private static String optimize(String svg) {
+        svg = merge(svg);
+        svg = trim(svg);
+        return svg;
+    }
+
+    private static String merge(String svg) {
+        return svg + "!";
+    }
+
+    private static String trim(String svg) {
+        return svg.trim();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn optimize(mut svg: String) -> String"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn optimize<'a>(svg: &'a String) -> &'a String"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("svg = &Self::") && translation.rust.contains("return svg;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "reassigned_string_param_return_renders_owned_signature",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn interface_return_this_does_not_emit_runtime_downcast() {
     let translation = translate_source(
         r#"

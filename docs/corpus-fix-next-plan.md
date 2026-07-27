@@ -4519,6 +4519,19 @@ That rerun translates 8/8 files with 0 invalid-pattern files and no remaining
 `?`/result-shell rows; the only generated-Rust errors are two
 `cannot return value referencing temporary value` rows in `SVGImageSaver`.
 
+Reassigned string-parameter follow-up: reassigned string-like parameters now
+force owned/native parameter slots, and returned-alias borrow constraints reject
+parameters that are assigned inside the method body. This keeps internal
+helpers such as FastQC `SVGImageSaver.optimizeSvg(String svg)` from returning
+references to temporaries after `svg = helper(svg)` rewrites. Focused
+verification:
+`reassigned_string_param_return_stays_owned_not_borrowed_alias`,
+`reassigned_string_param_return_renders_owned_signature`, release
+`new-java2rust`, and FastQC AbstractQCModule rerun
+`.tmp/corpus-fastqc-abstract-qcmodule-after-reassigned-return-owned-r3`.
+That rerun translates 8/8 files with 0 invalid-pattern files and
+`cargo_check=ok`.
+
 ## Rerun Protocol
 
 After each fix:

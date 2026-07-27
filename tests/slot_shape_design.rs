@@ -18536,6 +18536,55 @@ class ListUse {
 }
 
 #[test]
+fn reassigned_string_param_return_stays_owned_not_borrowed_alias() {
+    let parsed = parse_java_source(
+        r#"
+class SvgOptimizer {
+    private static String optimize(String svg) {
+        svg = merge(svg);
+        svg = trim(svg);
+        return svg;
+    }
+
+    private static String merge(String svg) {
+        return svg + "!";
+    }
+
+    private static String trim(String svg) {
+        return svg.trim();
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let ty = &resolved.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "optimize" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        borrowed_return_content_policy_from_param(ty, method, &usage),
+        None
+    );
+    assert_eq!(
+        borrowed_return_shape_from_param(ty, method, &representations, &usage),
+        None
+    );
+
+    let signatures = solve_signatures(&resolved.program, &representations, &usage);
+    let return_shape = signatures.method_return_shape(ty, method).unwrap();
+    assert_eq!(return_shape.ownership, OwnershipShape::Owned);
+    assert_eq!(return_shape.view, ViewShape::Native);
+}
+
+#[test]
 fn source_object_varargs_storage_carrier_uses_owned_native_param_shape() {
     let parsed = parse_java_source(
         r#"

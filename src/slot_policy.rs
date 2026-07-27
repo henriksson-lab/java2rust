@@ -352,11 +352,78 @@ fn method_return_allows_borrowed_param_content(
     if !method_exactly_returns_param(method, &param.name) {
         return false;
     }
+    if method_assigns_to_binding(method, &param.name) {
+        return false;
+    }
     !binding.uses.is_empty()
         && binding
             .uses
             .iter()
             .all(|usage| matches!(usage, BindingUse::Returned | BindingUse::ContentRead))
+}
+
+pub fn method_assigns_to_binding(method: &MethodDecl, binding_name: &str) -> bool {
+    method
+        .body
+        .as_ref()
+        .is_some_and(|body| stmts_assign_to_binding(&body.statements, binding_name))
+}
+
+fn stmts_assign_to_binding(statements: &[Stmt], binding_name: &str) -> bool {
+    statements
+        .iter()
+        .any(|stmt| stmt_assigns_to_binding(stmt, binding_name))
+}
+
+fn stmt_assigns_to_binding(stmt: &Stmt, binding_name: &str) -> bool {
+    match stmt {
+        Stmt::Assign { target, .. } => matches!(target, Expr::Var(name) if name == binding_name),
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            stmts_assign_to_binding(&then_block.statements, binding_name)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| stmts_assign_to_binding(&block.statements, binding_name))
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::EnhancedFor { body, .. }
+        | Stmt::Block(body) => stmts_assign_to_binding(&body.statements, binding_name),
+        Stmt::For { init, body, .. } => {
+            stmts_assign_to_binding(init, binding_name)
+                || stmts_assign_to_binding(&body.statements, binding_name)
+        }
+        Stmt::Switch { cases, .. } => cases
+            .iter()
+            .any(|case| stmts_assign_to_binding(&case.statements, binding_name)),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            stmts_assign_to_binding(resources, binding_name)
+                || stmts_assign_to_binding(&body.statements, binding_name)
+                || catches
+                    .iter()
+                    .any(|catch| stmts_assign_to_binding(&catch.body.statements, binding_name))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| stmts_assign_to_binding(&block.statements, binding_name))
+        }
+        Stmt::LocalType(_)
+        | Stmt::VarDecl { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return(_)
+        | Stmt::Throw(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => false,
+    }
 }
 
 fn method_exactly_returns_param(method: &MethodDecl, param_name: &str) -> bool {
