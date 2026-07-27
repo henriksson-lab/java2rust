@@ -31440,8 +31440,10 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(shape_source.contains("external_call_lowered_type"));
     assert!(shape_source.contains("external_api_receiver_type_for_method_reference"));
     assert!(java_naming_source.contains("pub fn java_method_name_aliases"));
+    assert!(java_naming_source.contains("pub fn java_accessor_method_reference_fallback_name"));
     assert!(lowering_source.contains("java_method_name_aliases(method)"));
     assert!(shape_source.contains("java_method_name_aliases(method)"));
+    assert!(shape_source.contains("java_accessor_method_reference_fallback_name(method)"));
     assert!(!lowering_source.contains("\"non_null\" => methods.push"));
     assert!(!shape_source.contains("fn method_reference_method_name_candidates"));
     assert!(lowering_source.contains("owner_associated_path_projection"));
@@ -31457,7 +31459,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     );
     assert!(shape_source.contains("infer_method_reference_output_shape_for_plan"));
     assert!(shape_source.contains("infer_unbound_accessor_method_reference_fallback_shape"));
-    assert!(shape_source.contains("is_java_accessor_method_reference_fallback"));
+    assert!(!shape_source.contains("fn is_java_accessor_method_reference_fallback"));
     assert!(stream_source.contains("infer_single_input_method_reference_output_shape"));
     assert!(!stream_source.contains("fn infer_stream_method_reference_output_shape"));
     assert!(stream_lowering_source.contains("render_single_input_method_reference_body"));

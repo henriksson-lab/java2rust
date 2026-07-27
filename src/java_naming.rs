@@ -16,6 +16,10 @@ pub fn java_method_name_aliases(name: &str) -> Vec<String> {
     aliases
 }
 
+pub fn java_accessor_method_reference_fallback_name(name: &str) -> bool {
+    name == "get" || name.starts_with("get_")
+}
+
 fn java_getter_property_suffix(name: &str) -> Option<&str> {
     name.strip_prefix("get")
         .filter(|rest| !rest.is_empty())
@@ -91,5 +95,13 @@ mod tests {
             java_method_name_aliases("toString"),
             vec!["toString".to_string(), "to_string".to_string()]
         );
+    }
+
+    #[test]
+    fn java_accessor_method_reference_fallback_names_are_explicit() {
+        assert!(java_accessor_method_reference_fallback_name("get"));
+        assert!(java_accessor_method_reference_fallback_name("get_name"));
+        assert!(!java_accessor_method_reference_fallback_name("getName"));
+        assert!(!java_accessor_method_reference_fallback_name("is_active"));
     }
 }

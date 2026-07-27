@@ -246,14 +246,10 @@ fn infer_unbound_accessor_method_reference_fallback_shape(
     method: &str,
     input_shape: &RustSlotShape,
 ) -> Option<RustSlotShape> {
-    if !is_java_accessor_method_reference_fallback(method) {
+    if !crate::java_naming::java_accessor_method_reference_fallback_name(method) {
         return None;
     }
     let mut shape = input_shape.clone();
     shape.java_ty = JavaType::Unknown(method.to_string());
     Some(shape)
-}
-
-fn is_java_accessor_method_reference_fallback(method: &str) -> bool {
-    method == "get" || method.starts_with("get_")
 }

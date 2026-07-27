@@ -3997,6 +3997,11 @@ output-shape receiver proofs now share `java_naming::java_method_name_aliases`
 instead of keeping separate snake/camel alias lists in lowering and shape
 inference. The aliases are still explicit compatibility candidates; resolved
 owner/type identity remains required before facts are selected.
+Accessor fallback naming follow-up: the legacy method-reference accessor shape
+fallback now asks `java_naming::java_accessor_method_reference_fallback_name`
+instead of matching `get`/`get_...` locally in shape inference. This preserves
+the compatibility fallback while making the remaining factless accessor naming
+policy explicit and auditable beside the other Java naming projections.
 
 ## Rerun Protocol
 
