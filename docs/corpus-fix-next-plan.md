@@ -3951,6 +3951,12 @@ Stream lambda receiver-call fallback still runs only after ordinary
 `CallTargetPlan` handling declines, but the final compatibility rendering now
 uses `coercion::receiver_method_call_projection` instead of locally formatting
 `receiver.method(args)` in `stream_lowering.rs`.
+Method-reference associated-function body compatibility cases are now isolated
+behind `AssociatedFunctionMethodReferenceBodyPlan`. The plan still has legacy
+Java owner/method cases for `Integer::intValue`, `Object::toString`,
+`String::valueOf`, and `Objects::nonNull`, but the public renderer consumes one
+named body-plan boundary that can later be replaced by callable-key/facade ABI
+facts.
 
 ## Rerun Protocol
 

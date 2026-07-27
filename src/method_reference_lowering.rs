@@ -1,11 +1,36 @@
 use crate::coercion::{
     current_receiver_method_call_projection, current_receiver_method_reference_projection,
-    owner_associated_path_projection, typed_single_input_callback_projection,
-    unbound_method_call_projection, unbound_method_reference_projection,
+    owner_associated_path_projection, receiver_method_call_projection,
+    typed_single_input_callback_projection, unbound_method_call_projection,
+    unbound_method_reference_projection,
 };
 use crate::emit;
 use crate::method_reference_plan::MethodReferencePlan;
 use crate::rust_ir::RustExpr;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssociatedFunctionMethodReferenceBodyPlan {
+    PrimitiveIdentityValue,
+    ReceiverToString,
+    AlwaysTrue,
+    StaticFunction,
+}
+
+fn associated_function_method_reference_body_plan(
+    owner: &str,
+    method: &str,
+) -> AssociatedFunctionMethodReferenceBodyPlan {
+    if owner == "Integer" && method == "int_value" {
+        return AssociatedFunctionMethodReferenceBodyPlan::PrimitiveIdentityValue;
+    }
+    if (owner == "Object" && method == "to_string") || (owner == "String" && method == "value_of") {
+        return AssociatedFunctionMethodReferenceBodyPlan::ReceiverToString;
+    }
+    if owner == "Objects" && method == "non_null" {
+        return AssociatedFunctionMethodReferenceBodyPlan::AlwaysTrue;
+    }
+    AssociatedFunctionMethodReferenceBodyPlan::StaticFunction
+}
 
 pub fn render_method_reference(plan: &MethodReferencePlan) -> RustExpr {
     match plan {
@@ -56,21 +81,7 @@ pub fn render_single_input_method_reference_body(
             args: vec![RustExpr::Raw(receiver.to_string())],
         }),
         MethodReferencePlan::AssociatedFunction { owner, method } => {
-            if owner == "Integer" && method == "int_value" {
-                return value_expr.to_string();
-            }
-            if (owner == "Object" && method == "to_string")
-                || (owner == "String" && method == "value_of")
-            {
-                return format!("{receiver}.to_string()");
-            }
-            if owner == "Objects" && method == "non_null" {
-                return "true".to_string();
-            }
-            emit::emit_expr(&RustExpr::Call {
-                function: Box::new(owner_associated_path_projection(owner, method)),
-                args: vec![RustExpr::Raw(receiver.to_string())],
-            })
+            render_associated_function_method_reference_body(owner, method, receiver, value_expr)
         }
         MethodReferencePlan::UnboundAccessor { method } => emit::emit_expr(
             &unbound_method_call_projection(RustExpr::Raw(receiver.to_string()), method),
@@ -80,6 +91,31 @@ pub fn render_single_input_method_reference_body(
                 method,
                 vec![RustExpr::Raw(receiver.to_string())],
             ))
+        }
+    }
+}
+
+fn render_associated_function_method_reference_body(
+    owner: &str,
+    method: &str,
+    receiver: &str,
+    value_expr: &str,
+) -> String {
+    match associated_function_method_reference_body_plan(owner, method) {
+        AssociatedFunctionMethodReferenceBodyPlan::PrimitiveIdentityValue => value_expr.to_string(),
+        AssociatedFunctionMethodReferenceBodyPlan::ReceiverToString => {
+            emit::emit_expr(&receiver_method_call_projection(
+                RustExpr::Raw(receiver.to_string()),
+                "to_string",
+                Vec::new(),
+            ))
+        }
+        AssociatedFunctionMethodReferenceBodyPlan::AlwaysTrue => "true".to_string(),
+        AssociatedFunctionMethodReferenceBodyPlan::StaticFunction => {
+            emit::emit_expr(&RustExpr::Call {
+                function: Box::new(owner_associated_path_projection(owner, method)),
+                args: vec![RustExpr::Raw(receiver.to_string())],
+            })
         }
     }
 }

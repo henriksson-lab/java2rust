@@ -31255,7 +31255,11 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(lowering_source.contains("pub fn render_method_reference"));
     assert!(lowering_source.contains("pub fn render_single_input_method_reference_body"));
     assert!(lowering_source.contains("pub fn render_typed_single_input_method_reference_callback"));
+    assert!(lowering_source.contains("enum AssociatedFunctionMethodReferenceBodyPlan"));
+    assert!(lowering_source.contains("fn associated_function_method_reference_body_plan"));
+    assert!(lowering_source.contains("fn render_associated_function_method_reference_body"));
     assert!(lowering_source.contains("owner_associated_path_projection"));
+    assert!(lowering_source.contains("receiver_method_call_projection"));
     assert!(lowering_source.contains("typed_single_input_callback_projection"));
     assert!(!lowering_source.contains("format!(\"{type_name}::new"));
     assert!(!lowering_source.contains("format!(\"{owner}::{method}"));
