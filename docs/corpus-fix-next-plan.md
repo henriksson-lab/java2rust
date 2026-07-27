@@ -3965,6 +3965,11 @@ reuse the same `coercion` path projections from `lower.rs` and
 `item_assembly.rs`. This keeps Rust path construction centralized while those
 modules continue to own Java constructor delegation, field initialization, and
 fallback selection semantics.
+Follow-up: the same lowerer paths now wrap delegated constructor calls, `Ok`
+result returns, no-argument default constructor expressions, URI parse
+constructors, and static self fallbacks with `function_call_projection`.
+Lowering still chooses those Java cases; the Rust call node construction is
+shared with ordinary call lowering.
 
 Loop/array borrow projection cleanup: assignment-in-condition loops now use the
 shared optional shared-value unwrap projection when introducing the narrowed

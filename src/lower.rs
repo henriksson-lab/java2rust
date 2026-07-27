@@ -38,10 +38,10 @@ use crate::coercion::{
     erased_object_borrowed_downcast_ref_projection, erased_object_box_projection,
     exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
-    into_projection, iterator_next_expect_projection, java_integral_literal_char,
-    java_update_expression_projection, len_i32_projection, literal_slot_plan,
-    logical_not_projection, map_get_expect_projection, map_get_mut_expect_projection,
-    map_get_projection, normalize_map_key_borrow_projection,
+    function_call_projection, into_projection, iterator_next_expect_projection,
+    java_integral_literal_char, java_update_expression_projection, len_i32_projection,
+    literal_slot_plan, logical_not_projection, map_get_expect_projection,
+    map_get_mut_expect_projection, map_get_projection, normalize_map_key_borrow_projection,
     normalize_reused_clone_for_borrowed_argument, optional_copied_expect_projection,
     outer_this_field_projection, owned_map_keys_set_projection, owner_associated_path_projection,
     parenthesize_borrowed_method_receiver, print_macro_projection,
@@ -866,10 +866,10 @@ fn static_storage_initial_value_expr(
             if rust_name.is_empty() {
                 crate::slot_render::default_expr_for_slot_with_facts(shape, ctx.facts)
             } else {
-                RustExpr::Call {
-                    function: Box::new(owner_associated_path_projection(&rust_name, "new")),
-                    args: Vec::new(),
-                }
+                function_call_projection(
+                    owner_associated_path_projection(&rust_name, "new"),
+                    Vec::new(),
+                )
             }
         }
         _ => crate::slot_render::default_expr_for_slot_with_facts(shape, ctx.facts),
@@ -1808,10 +1808,7 @@ fn constructor_field_plans_with_trailing_body(
     }
     let returned = RustExpr::Var("__java_self".to_string());
     body.push(RustStmt::Return(Some(if returns_result {
-        RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Ok".to_string())),
-            args: vec![returned],
-        }
+        function_call_projection(RustExpr::Raw("Ok".to_string()), vec![returned])
     } else {
         returned
     })));
@@ -2617,15 +2614,15 @@ fn delegated_constructor_with_trailing_body(
         mutable: true,
         name: "__java_self".to_string(),
         ty: None,
-        value: Some(RustExpr::Call {
-            function: Box::new(self_associated_path_projection(&resolved.rust_name)),
-            args: lower_args_with_plan(
+        value: Some(function_call_projection(
+            self_associated_path_projection(&resolved.rust_name),
+            lower_args_with_plan(
                 args,
                 env,
                 plan_constructor_arguments(Some(resolved), args.len(), ctx.signatures),
                 ctx,
             ),
-        }),
+        )),
     }];
     for stmt in trailing {
         body.push(lower_delegated_constructor_trailing_stmt(
@@ -2638,10 +2635,7 @@ fn delegated_constructor_with_trailing_body(
     }
     let returned = RustExpr::Var("__java_self".to_string());
     body.push(RustStmt::Return(Some(if returns_result {
-        RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Ok".to_string())),
-            args: vec![returned],
-        }
+        function_call_projection(RustExpr::Raw("Ok".to_string()), vec![returned])
     } else {
         returned
     })));
@@ -7412,9 +7406,9 @@ fn lower_expr_with_refinements(
                 == Some("URI")
                 && args.len() == 1
             {
-                let lowered = RustExpr::Call {
-                    function: Box::new(RustExpr::Raw("URI::parse".to_string())),
-                    args: lower_args_with_plan(
+                let lowered = function_call_projection(
+                    RustExpr::Raw("URI::parse".to_string()),
+                    lower_args_with_plan(
                         args,
                         env,
                         ArgumentLoweringPlan::Unshaped {
@@ -7422,7 +7416,7 @@ fn lower_expr_with_refinements(
                         },
                         ctx,
                     ),
-                };
+                );
                 return propagate_result_projection(lowered);
             }
             let target = plan_new_target_for_args_with_facts(
@@ -11261,10 +11255,7 @@ fn apply_call_target_with_lower_context(
         && matches!(ctx.current_receiver, Some(ReceiverPlan::None))
         && let CallTargetPlan::FallbackSelf { rust_name } = target
     {
-        return RustExpr::Call {
-            function: Box::new(self_associated_path_projection(rust_name)),
-            args,
-        };
+        return function_call_projection(self_associated_path_projection(rust_name), args);
     }
     apply_call_target(target, lowered_receiver, args)
 }
@@ -13718,10 +13709,10 @@ fn lower_static_initialized_singleton_field_for_slot(
     }
     let rust_name =
         crate::slot_render::rust_name_for_java_named_type(concrete_java_type_name(initializer_ty)?);
-    Some(RustExpr::Call {
-        function: Box::new(owner_associated_path_projection(&rust_name, "new")),
-        args: Vec::new(),
-    })
+    Some(function_call_projection(
+        owner_associated_path_projection(&rust_name, "new"),
+        Vec::new(),
+    ))
 }
 
 fn lower_functional_cast_callback_for_slot(
