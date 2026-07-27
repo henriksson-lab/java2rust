@@ -32,6 +32,7 @@ use crate::facts::FactSet;
 use crate::facts::ReceiverAbi;
 use crate::java_ir::{Expr, JavaType, LambdaBody, PrimitiveType};
 use crate::rust_ir::RustExpr;
+use crate::shape_projection::shape_is_erased_object_boundary;
 use crate::slot_render::rust_type_for_slot_with_facts;
 use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body};
 
@@ -768,7 +769,7 @@ pub fn apply_new_target_with_facts(
             .next()
             .expect("checked boxed primitive constructor arity");
     }
-    if owner_type == "Box<dyn std::any::Any>"
+    if shape_is_erased_object_boundary(&target.owner_shape)
         || matches!(
             &target.owner_shape.java_ty,
             JavaType::Named { name, .. } | JavaType::Unknown(name)

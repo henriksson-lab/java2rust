@@ -215,6 +215,11 @@ fallible-call `?` wrapping from call lowering. The generic rendered Rust
 projection now lives in `coercion::propagate_result_projection`, keeping
 result-shape spelling with slot/projection helpers while call planning remains
 responsible for deciding when propagation is required.
+Erased-object constructor follow-up: constructor lowering now uses
+`shape_is_erased_object_boundary(&target.owner_shape)` instead of comparing the
+rendered owner type to `Box<dyn std::any::Any>`. `call_lowering.rs` still
+selects the constructor projection, but the erased-object decision is based on
+the shared slot/shape fact boundary.
 External dyn-trait signature follow-up: `EffectiveFacts` now shares the
 canonical external type alias matcher, and same-provenance object
 representation facts prefer explicit non-concrete strategies over concrete

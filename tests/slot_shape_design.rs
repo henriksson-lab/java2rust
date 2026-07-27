@@ -28330,6 +28330,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn discard_value_projection"));
     assert!(!call_source.contains("fn erased_object_new_expr"));
     assert!(call_source.contains("erased_object_constructor_projection(args)"));
+    assert!(!call_source.contains("owner_type == \"Box<dyn std::any::Any>\""));
+    assert!(call_source.contains("shape_is_erased_object_boundary(&target.owner_shape)"));
     assert!(coercion_source.contains("pub fn erased_object_box_projection"));
     assert!(coercion_source.contains("pub fn erased_object_constructor_projection"));
     let native_collection_new_source = call_source
