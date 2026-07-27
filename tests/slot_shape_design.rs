@@ -27713,6 +27713,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn typed_single_input_callback_projection"));
     assert!(coercion_source.contains("pub fn outer_this_field_projection"));
     assert!(coercion_source.contains("pub fn self_field_projection"));
+    assert!(coercion_source.contains("pub fn field_projection"));
     assert!(coercion_source.contains("pub fn char_sequence_collect_string_projection"));
     assert!(coercion_source.contains("pub fn rendered_vec_macro_body"));
     assert!(types_source.contains("pub fn raw_rust_generic_args"));
@@ -32244,6 +32245,9 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
     assert!(member_plan_source.contains("MemberAccessOp::StaticConstant"));
     assert!(member_plan_source.contains("MemberAccessOp::RustField"));
     assert!(access_lowering_source.contains("self_field_projection(name)"));
+    assert!(access_lowering_source.contains("field_projection(receiver, rust_name)"));
+    assert!(access_lowering_source.contains("field_projection(lowered_receiver, field)"));
+    assert!(!access_lowering_source.contains("RustExpr::Field"));
     assert!(!access_lowering_source.contains("format!(\"self.{}\""));
     assert!(!access_lowering_source.contains("\"length\""));
     assert!(!access_lowering_source.contains("infer_member_access_type"));

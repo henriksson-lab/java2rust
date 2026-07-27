@@ -5,8 +5,8 @@ use crate::rust_ir::RustExpr;
 use crate::types::TypeEnv;
 use crate::{
     coercion::{
-        associated_const_projection, self_associated_path_projection, self_field_projection,
-        static_storage_accessor_projection,
+        associated_const_projection, field_projection, self_associated_path_projection,
+        self_field_projection, static_storage_accessor_projection,
     },
     emit,
 };
@@ -84,7 +84,7 @@ pub fn lower_field_access_with_facts(
             lower_optional_sequence_member_receiver(receiver, type_env, &plan, lowered_receiver);
         apply_member_access_plan(&plan, lowered_receiver)
     } else {
-        RustExpr::Field(Box::new(lowered_receiver), field.to_string())
+        field_projection(lowered_receiver, field)
     }
 }
 
@@ -125,9 +125,7 @@ fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> Rust
         MemberAccessOp::StaticConstant { owner } => {
             associated_const_projection(owner, &rust_associated_const_ident(&plan.member))
         }
-        MemberAccessOp::RustField { rust_name } => {
-            RustExpr::Field(Box::new(receiver), rust_name.clone())
-        }
+        MemberAccessOp::RustField { rust_name } => field_projection(receiver, rust_name),
     }
 }
 

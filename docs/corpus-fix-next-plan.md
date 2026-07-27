@@ -3877,6 +3877,11 @@ Follow-up: bare source instance-field access now uses
 fallbacks. `access_lowering.rs` still owns local-vs-field-vs-static-name
 resolution, but the Rust `self.field` spelling is centralized with the other
 member/path projections.
+Follow-up: planned and fallback receiver field access now use the generic
+`coercion::field_projection(receiver, field)` helper. Member-access planning
+still decides whether a Java access is a Rust field, static constant, or length
+projection, but `access_lowering.rs` no longer constructs `RustExpr::Field`
+directly.
 
 Method-reference projection cleanup: generic method-reference lowering now
 shares the same associated-path, unbound-method, current-receiver-method, and
