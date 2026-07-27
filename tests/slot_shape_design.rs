@@ -27616,6 +27616,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("logical_not_projection("));
     assert!(!lower_source.contains("__java_old_value = {target}"));
     assert!(lower_source.contains("java_update_expression_projection("));
+    assert!(!lower_source.contains("!({object_type_predicate})"));
+    assert!(!lower_source.contains("!({identity_expr})"));
     assert!(!lower_source.contains("format!(\"{}.into()\""));
     assert!(lower_source.contains("into_projection("));
     assert!(!access_source.contains("Self::__static_{}()"));

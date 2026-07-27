@@ -204,6 +204,10 @@ char-array-to-`String` collection now use coercion projection helpers. Lowering
 still decides when Java static storage, non-static inner capture, or a
 `new String(char[])` special Java semantic applies, but the emitted Rust
 spellings live beside the other shared projections.
+Erased-object comparison follow-up: `getClass()` type-predicate inequality and
+`this == Object` identity inequality now use the shared logical-not projection
+instead of formatting local `!(...)` wrappers in `lower.rs`. The erased-object
+runtime predicate itself is still selected by Java semantic lowering.
 
 Landed optional-carrier follow-up: raw-erasure casts into optional targets now
 route through `lower_present_expr_for_optional_target`, so typed optional

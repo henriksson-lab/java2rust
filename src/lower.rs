@@ -8554,7 +8554,7 @@ fn lower_current_type_get_class_comparison(
         erased_object_is_current_type_predicate(object_expr, &object_shape, env, ctx, refinements)?;
     Some(match op {
         BinaryOp::Eq => RustExpr::Raw(object_type_predicate),
-        BinaryOp::Ne => RustExpr::Raw(format!("!({object_type_predicate})")),
+        BinaryOp::Ne => logical_not_projection(RustExpr::Raw(object_type_predicate)),
         _ => return None,
     })
 }
@@ -8656,7 +8656,7 @@ fn lower_current_self_erased_object_identity_comparison(
     };
     Some(match op {
         BinaryOp::Eq => RustExpr::Raw(identity_expr),
-        BinaryOp::Ne => RustExpr::Raw(format!("!({identity_expr})")),
+        BinaryOp::Ne => logical_not_projection(RustExpr::Raw(identity_expr)),
         _ => return None,
     })
 }
