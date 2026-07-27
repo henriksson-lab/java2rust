@@ -27535,7 +27535,7 @@ external-pack hdf5 File rust-crate-mapping mapped target=hdf5_facade
 external-pack-object hdf5 HDF5File concrete
 external-pack-object hdf5 File concrete
 external-pack-capability hdf5 HDF5File clone=true final=true
-external-pack-api hdf5 HDF5File getFile mapped getter read-only definitely-non-null args=0 return=File rust=get_file rust-return=&std::path::Path
+external-pack-api hdf5 HDF5File getFile mapped getter read-only definitely-non-null args=0 return=File rust=get_file rust-return=&std::path::Path borrowed-return-recovery=to-path-buf
 "#,
     )
     .facts;
@@ -27560,7 +27560,10 @@ class BorrowedPathFacadeReturn {
     );
     assert!(conversion_source.contains("pub enum RustBorrowedFacadeReturnRecovery"));
     assert!(facts_source.contains("borrowed_return_recovery: Option<BorrowedReturnRecovery>"));
-    assert!(conversion_source.contains("unwrap_or_else(|| rust_borrowed_facade_return_recovery"));
+    assert!(
+        !conversion_source.contains("rust_borrowed_facade_return_recovery"),
+        "borrowed facade recovery should come from facade ABI facts, not Rust type-name heuristics"
+    );
     assert!(coercion_source.contains("RustBorrowedFacadeReturnRecovery::ToPathBuf"));
     assert!(!coercion_source.contains("rust_borrowed_return_is_path_like"));
     assert!(include_str!("../src/lower.rs").contains("!shape_is_erased_object_boundary(local)"));

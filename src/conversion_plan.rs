@@ -3064,8 +3064,7 @@ pub fn lowered_slot_conversion_plan_with_facts(
                 rust_type_name: rust_type_name.clone(),
                 java_semantic_shape: (**java_shape).clone(),
                 target: target.clone(),
-                recovery: recovery
-                    .unwrap_or_else(|| rust_borrowed_facade_return_recovery(rust_type_name)),
+                recovery: recovery.unwrap_or(RustBorrowedFacadeReturnRecovery::Clone),
             })
         }
         (
@@ -3247,15 +3246,6 @@ fn slot_or_optional_element_targets_erased_object(target: &RustSlotShape) -> boo
             DispatchShape::ErasedObject
         ) || java_type_is_erased_object_like(&element_ty)
     })
-}
-
-fn rust_borrowed_facade_return_recovery(rust_type_name: &str) -> RustBorrowedFacadeReturnRecovery {
-    match rust_type_name.trim_start_matches('&').trim() {
-        "Path" | "std::path::Path" | "std::path::PathBuf" | "PathBuf" => {
-            RustBorrowedFacadeReturnRecovery::ToPathBuf
-        }
-        _ => RustBorrowedFacadeReturnRecovery::Clone,
-    }
 }
 
 fn java_type_is_erased_object_like(java_ty: &JavaType) -> bool {

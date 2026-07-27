@@ -4030,6 +4030,12 @@ The CLI facade-signature parser now also uses the shared raw Rust generic
 helpers for `Result`, `Option`, nullable parameters, return payloads, and
 `FacadeSlot::Optional` detection, including path-qualified `...::Result<T>`
 without the previous broad `contains("Result<")` heuristic.
+Borrowed facade return recovery follow-up: erased-object recovery from borrowed
+Rust facade returns no longer guesses `ToPathBuf` by matching rendered Rust
+type names like `Path`/`PathBuf`. `FacadeAbiFact.borrowed_return_recovery`
+selects `Clone` vs `ToPathBuf`; missing facts now default to `Clone` so
+non-clone/path-specific behavior is exposed as a manifest/facade ABI gap rather
+than hidden behind a type-string heuristic.
 Raw struct clone-support checks in `item_assembly.rs` now reuse the same
 generic parsing helpers for `Option<T>`, `Vec<T>`, and `Box<dyn Trait>` instead
 of local prefix/suffix tests. This keeps the remaining raw Rust type parsing
