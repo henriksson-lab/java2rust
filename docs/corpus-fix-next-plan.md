@@ -208,6 +208,11 @@ Erased-object comparison follow-up: `getClass()` type-predicate inequality and
 `this == Object` identity inequality now use the shared logical-not projection
 instead of formatting local `!(...)` wrappers in `lower.rs`. The erased-object
 runtime predicate itself is still selected by Java semantic lowering.
+String equality projection follow-up: operator equality planning still selects
+direct, optional, string-view, and custom-equals comparison shapes, but the
+Rust `.as_str()` and optional string-view projection spellings now live in
+`coercion.rs`. This keeps recurring borrowed string comparison mechanics beside
+the other shared string/facade view helpers.
 
 Landed optional-carrier follow-up: raw-erasure casts into optional targets now
 route through `lower_present_expr_for_optional_target`, so typed optional

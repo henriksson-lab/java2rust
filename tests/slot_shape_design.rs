@@ -27413,6 +27413,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let access_source = include_str!("../src/access_lowering.rs");
     let array_source = include_str!("../src/array_lowering.rs");
     let item_assembly_source = include_str!("../src/item_assembly.rs");
+    let operator_source = include_str!("../src/operator_lowering.rs");
     let types_source = include_str!("../src/types.rs");
 
     assert!(coercion_source.contains("pub fn ensure_borrow_projection"));
@@ -27459,6 +27460,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn render_string_view_argument"));
     assert!(coercion_source.contains("pub fn string_join_delimiter_projection"));
     assert!(coercion_source.contains("pub fn string_join_varargs_projection"));
+    assert!(coercion_source.contains("pub fn render_string_equality_operand_projection"));
+    assert!(coercion_source.contains("pub fn optional_string_view_projection"));
     assert!(coercion_source.contains("pub fn string_helper_receiver_projection"));
     assert!(coercion_source.contains("pub fn string_hash_code_projection"));
     assert!(coercion_source.contains("pub fn string_replace_first_projection"));
@@ -27704,6 +27707,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("array2_rows_i32_projection"));
     assert!(access_source.contains("array2_rows_i32_projection"));
     assert!(access_source.contains("array2_cols_i32_projection"));
+    assert!(!operator_source.contains("{rendered}.as_str()"));
+    assert!(!operator_source.contains(".as_ref().map(|value| value.as_str())"));
     assert!(lower_source.contains("to_owned_sequence_projection"));
     assert!(!lower_source.contains("format!(\"{rendered}.to_vec()\")"));
     assert!(!lower_source.contains(".row({}).to_vec()"));

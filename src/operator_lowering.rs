@@ -1,4 +1,7 @@
-use crate::coercion::{Coercion, apply_coercions};
+use crate::coercion::{
+    Coercion, apply_coercions, optional_string_view_projection,
+    render_string_equality_operand_projection,
+};
 use crate::facts::FactSet;
 use crate::java_ir::{BinaryOp, JavaType, PrimitiveType, UnaryOp};
 use crate::rust_ir::RustExpr;
@@ -320,11 +323,10 @@ pub fn lower_equality_comparison_expr_for_op(
 }
 
 fn string_equality_operand_expr(expr: RustExpr, view: StringEqualityOperandView) -> String {
-    let rendered = crate::emit::emit_expr(&expr);
-    match view {
-        StringEqualityOperandView::BorrowedStr => rendered,
-        StringEqualityOperandView::NativeString => format!("{rendered}.as_str()"),
-    }
+    render_string_equality_operand_projection(
+        expr,
+        matches!(view, StringEqualityOperandView::BorrowedStr),
+    )
 }
 
 fn option_as_ref(expr: RustExpr) -> RustExpr {
@@ -336,10 +338,7 @@ fn option_as_ref(expr: RustExpr) -> RustExpr {
 }
 
 fn option_as_string_view(expr: RustExpr) -> RustExpr {
-    RustExpr::Raw(format!(
-        "{}.as_ref().map(|value| value.as_str())",
-        crate::emit::emit_expr(&expr)
-    ))
+    optional_string_view_projection(expr)
 }
 
 pub fn lower_unary_expr(op: UnaryOp, operand: RustExpr) -> RustExpr {

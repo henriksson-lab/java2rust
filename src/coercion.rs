@@ -1251,6 +1251,25 @@ pub fn string_join_varargs_projection(delimiter: RustExpr, values: Vec<RustExpr>
     ))
 }
 
+pub fn render_string_equality_operand_projection(
+    expr: RustExpr,
+    already_string_view: bool,
+) -> String {
+    let rendered = emit::emit_expr(&expr);
+    if already_string_view {
+        rendered
+    } else {
+        format!("{rendered}.as_str()")
+    }
+}
+
+pub fn optional_string_view_projection(expr: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{}.as_ref().map(|value| value.as_str())",
+        emit::emit_expr(&expr)
+    ))
+}
+
 pub fn string_helper_receiver_projection(receiver: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("{}.as_str()", emit::emit_expr(&receiver)))
 }
