@@ -4521,10 +4521,19 @@ Next FastQC batch candidates from that rerun:
    `__java_self` path, orders deferred assigned fields by Java constructor
    statement order, and drops the focused generated-Rust count to 37. The
    constructor `self.buffer_length`/`self.encode` use-before-construction
-   family is gone. The next Base64 slice should focus on inherited
-   `FilterOutputStream.out` state, bare `out` assignment, missing
-   `Base64InputStream.close`, byte-array move recovery, unresolved qualified
-   `java`, and `i8 | i32` coercion.
+   family is gone. The next Base64 slice
+   `.tmp/corpus-fastqc-base64-single-after-outputstream-impl-guard-r2` models
+   exact `java.io` inherited stream state for `FilterInputStream.in` and
+   `FilterOutputStream.out`, lets external inherited field facts override
+   weaker source-summary inherited shapes, and suppresses unsafe
+   `OutputStream -> JavaIoOutputStream` support impls when the simple source
+   type is later suppressed by a local nested `Base64.OutputStream`. Invalid
+   downcast patterns are now 0 and the focused generated-Rust count is 34.
+   The next Base64 slice should focus on exact stream-slot adaptation for
+   `Base64InputStream -> JavaIoInputStream` and erased constructor
+   `out -> JavaIoOutputStream`, JDK output-stream `write(int)` ABI, missing
+   inherited `Base64InputStream.close`, byte-array move recovery, unresolved
+   qualified `java`, ByteBuffer method return facts, and `i8 | i32` coercion.
 
 Inherited exception-owner follow-up: inherited source method bodies now lower
 with the emitted subclass as the body/field context but use the declaring type

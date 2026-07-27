@@ -1165,7 +1165,64 @@ pub fn constructor_self_field_replacement(replacement: &str) -> String {
 }
 
 pub fn constructor_self_field_projection(field_name: &str) -> RustExpr {
-    RustExpr::Raw(format!("__java_self.{field_name}"))
+    RustExpr::Raw(format!(
+        "__java_self.{}",
+        rust_field_projection_ident(field_name)
+    ))
+}
+
+fn rust_field_projection_ident(name: &str) -> String {
+    if name.starts_with("r#") || name.contains("::") || name.is_empty() {
+        return name.to_string();
+    }
+    if rust_projection_ident_needs_raw(name) {
+        format!("r#{name}")
+    } else {
+        name.to_string()
+    }
+}
+
+fn rust_projection_ident_needs_raw(name: &str) -> bool {
+    matches!(
+        name,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+    )
 }
 
 pub fn literal_slot_plan(literal: &Literal, slot: &Slot) -> Option<LiteralSlotPlan> {

@@ -8714,7 +8714,7 @@ class MiniSmartFileReader extends FileReader {
 }
 
 #[test]
-fn jdk_stream_wrapper_super_constructors_are_no_state_facades() {
+fn jdk_stream_wrapper_super_constructors_preserve_platform_state_fields() {
     let translation = translate_source(
         r#"
 import java.io.FilterInputStream;
@@ -8755,11 +8755,25 @@ class MiniFilterOutput extends FilterOutputStream {
     assert!(
         translation.rust.contains("pub struct MiniGzipStream")
             && translation.rust.contains("size: i32")
-            && translation.rust.contains("return MiniGzipStream {")
+            && translation
+                .rust
+                .contains("let mut __java_self = MiniGzipStream")
             && translation.rust.contains("size: size")
-            && translation.rust.contains("return MiniFilterInput {")
+            && translation.rust.contains("r#in: Option<JavaIoInputStream>")
+            && translation
+                .rust
+                .contains("__java_self.r#in = Some(input.into())")
+            && translation
+                .rust
+                .contains("let mut __java_self = MiniFilterInput")
             && translation.rust.contains("enabled: true")
-            && translation.rust.contains("return MiniFilterOutput {")
+            && translation.rust.contains("out: Option<JavaIoOutputStream>")
+            && translation
+                .rust
+                .contains("__java_self.out = Some(output.into())")
+            && translation
+                .rust
+                .contains("let mut __java_self = MiniFilterOutput")
             && translation.rust.contains("enabled: true")
             && !translation
                 .rust
@@ -14041,6 +14055,18 @@ fn java_platform_input_stream_upcast_support_emits_from_impl() {
             .any(|fact| fact.from_type == "FileInputStream" && fact.to_type == "InputStream"),
         "java platform conversion adapters should publish FileInputStream -> InputStream"
     );
+    assert!(
+        new_java2rust::external_packs::external_conversion_adapters()
+            .iter()
+            .any(|fact| fact.from_type == "InputStream" && fact.to_type == "java.io.InputStream"),
+        "java platform conversion adapters should publish InputStream -> java.io.InputStream"
+    );
+    assert!(
+        new_java2rust::external_packs::external_conversion_adapters()
+            .iter()
+            .any(|fact| fact.from_type == "OutputStream" && fact.to_type == "java.io.OutputStream"),
+        "java platform conversion adapters should publish OutputStream -> java.io.OutputStream"
+    );
     let items = new_java2rust::stdlib::external_api_facade_support_items(
         &new_java2rust::java_ir::Program::default(),
         &FactSet::default(),
@@ -14053,6 +14079,14 @@ fn java_platform_input_stream_upcast_support_emits_from_impl() {
 
     assert!(
         rendered.contains("impl From<FileInputStream> for InputStream"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("impl From<InputStream> for JavaIoInputStream"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("impl From<OutputStream> for JavaIoOutputStream"),
         "{rendered}"
     );
 }

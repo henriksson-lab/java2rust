@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::facts::{ExternalApiEffectFact, ExternalFieldKind, FactSet};
+use crate::facts::{ExternalApiEffectFact, ExternalFieldKind, FactSet, NullabilityState};
 use crate::java_ir::{FieldDecl, JavaType, Member, Modifier, Program, TypeDecl};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -9,6 +9,7 @@ pub struct ExternalInheritedInstanceField {
     pub field_name: String,
     pub rust_name: String,
     pub field_type: JavaType,
+    pub field_nullability: Option<NullabilityState>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,12 +109,15 @@ pub fn external_inherited_instance_fields_for_type(
     let super_names = external_super_names_for_type(ty, facts);
     let mut fields = Vec::new();
     let mut seen_fields = direct_fields;
-    let mut field_facts = facts.external_field_facts.clone();
-    field_facts
-        .extend(crate::external_packs::builtin_external_library_packs().external_field_facts);
+    let mut effective_facts = facts.clone();
+    effective_facts.extend_from(crate::external_packs::builtin_external_library_packs());
+    let field_facts = effective_facts.external_field_facts.clone();
     for super_name in super_names {
         for fact in &field_facts {
-            if fact.field_kind != ExternalFieldKind::Unknown {
+            if !matches!(
+                fact.field_kind,
+                ExternalFieldKind::Unknown | ExternalFieldKind::InstanceField
+            ) {
                 continue;
             }
             if !external_field_fact_matches_super_type(
@@ -135,6 +139,8 @@ pub fn external_inherited_instance_fields_for_type(
                     .field_type
                     .clone()
                     .unwrap_or_else(|| JavaType::Unknown("Object".to_string())),
+                field_nullability: effective_facts
+                    .field_nullability_for(&fact.field.type_name, &fact.field.field_name),
             });
         }
     }

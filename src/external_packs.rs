@@ -462,6 +462,27 @@ pub fn modeled_no_state_external_super_constructor(type_name: &str, arg_count: u
             && arg_count == 1
 }
 
+pub fn modeled_external_super_constructor_state_field(
+    type_name: &str,
+    arg_count: usize,
+) -> Option<&'static str> {
+    if arg_count != 1 {
+        return None;
+    }
+    let erased = erased_external_type_name(type_name);
+    if external_type_name_matches(erased, "java.io.FilterInputStream")
+        || external_type_name_matches(erased, "FilterInputStream")
+    {
+        return Some("in");
+    }
+    if external_type_name_matches(erased, "java.io.FilterOutputStream")
+        || external_type_name_matches(erased, "FilterOutputStream")
+    {
+        return Some("out");
+    }
+    None
+}
+
 pub fn external_template_method_hook_for_super_method(
     super_type: &str,
     method_name: &str,
@@ -28344,8 +28365,61 @@ fn manifest_by_name(pack_name: &str) -> ExternalPackManifest {
         .unwrap_or_else(|| panic!("missing builtin external pack manifest for {pack_name}"))
 }
 
+fn java_platform_field_fact_set() -> FactSet {
+    let mut facts = FactSet::default();
+    for (type_name, field_name, field_type, nullability) in [
+        (
+            "java.io.FilterInputStream",
+            "in",
+            "java.io.InputStream",
+            NullabilityState::MaybeNull,
+        ),
+        (
+            "FilterInputStream",
+            "in",
+            "java.io.InputStream",
+            NullabilityState::MaybeNull,
+        ),
+        (
+            "java.io.FilterOutputStream",
+            "out",
+            "java.io.OutputStream",
+            NullabilityState::MaybeNull,
+        ),
+        (
+            "FilterOutputStream",
+            "out",
+            "java.io.OutputStream",
+            NullabilityState::MaybeNull,
+        ),
+    ] {
+        facts.external_field_facts.push(ExternalFieldFact {
+            field: FieldKey {
+                type_name: type_name.to_string(),
+                field_name: field_name.to_string(),
+            },
+            field_type: Some(JavaType::Named {
+                name: field_type.to_string(),
+                args: Vec::new(),
+            }),
+            field_kind: ExternalFieldKind::InstanceField,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+        facts.field_nullability_facts.push(FieldNullabilityFact {
+            field: FieldKey {
+                type_name: type_name.to_string(),
+                field_name: field_name.to_string(),
+            },
+            state: nullability,
+            provenance: FieldNullabilityProvenance::ExternalLibraryPack,
+        });
+    }
+    facts
+}
+
 pub fn builtin_external_library_packs() -> FactSet {
     let mut facts = FactSet::default();
+    facts.extend_from(java_platform_field_fact_set());
     facts.extend_from(htsjdk_variantcontext_pack_facts());
     facts.extend_from(htsjdk_vcf_pack_facts());
     facts.extend_from(htsjdk_bcf_pack_facts());
@@ -28616,6 +28690,10 @@ fn builtin_external_pack_fact_sets() -> &'static [(String, FactSet)] {
     static FACT_SETS: OnceLock<Vec<(String, FactSet)>> = OnceLock::new();
     FACT_SETS.get_or_init(|| {
         vec![
+            (
+                "java-platform-fields".to_string(),
+                java_platform_field_fact_set(),
+            ),
             (
                 VARIANTCONTEXT_PACK.to_string(),
                 htsjdk_variantcontext_pack_facts(),
@@ -30438,6 +30516,32 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
                 provenance: FactProvenance::BuiltinExternalModel,
             }),
     );
+    adapters.extend([
+        ExternalConversionAdapterFact {
+            from_type: "InputStream".to_string(),
+            to_type: "java.io.InputStream".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "java.io.InputStream".to_string(),
+            to_type: "InputStream".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "OutputStream".to_string(),
+            to_type: "java.io.OutputStream".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "java.io.OutputStream".to_string(),
+            to_type: "OutputStream".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+    ]);
     adapters.extend(
         [
             "java.io.FileInputStream",
@@ -30462,7 +30566,38 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
         .into_iter()
         .map(|from_type| ExternalConversionAdapterFact {
             from_type: from_type.to_string(),
-            to_type: "InputStream".to_string(),
+            to_type: if from_type.starts_with("java.io.") {
+                "java.io.InputStream"
+            } else {
+                "InputStream"
+            }
+            .to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        }),
+    );
+    adapters.extend(
+        [
+            "java.io.FileOutputStream",
+            "FileOutputStream",
+            "java.io.BufferedOutputStream",
+            "BufferedOutputStream",
+            "java.io.FilterOutputStream",
+            "FilterOutputStream",
+            "java.io.ObjectOutputStream",
+            "ObjectOutputStream",
+            "java.util.zip.GZIPOutputStream",
+            "GZIPOutputStream",
+        ]
+        .into_iter()
+        .map(|from_type| ExternalConversionAdapterFact {
+            from_type: from_type.to_string(),
+            to_type: if from_type.starts_with("java.io.") {
+                "java.io.OutputStream"
+            } else {
+                "OutputStream"
+            }
+            .to_string(),
             kind: ExternalConversionAdapterKind::Into,
             provenance: FactProvenance::BuiltinExternalModel,
         }),

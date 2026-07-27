@@ -26,6 +26,7 @@ pub enum ConstructorDelegationPlan<'a> {
         trailing: Vec<DelegatedConstructorTrailingStmt<'a>>,
     },
     ModeledExternalSuperclassWithTrailing {
+        args: &'a [Expr],
         superclass: String,
         trailing: Vec<DelegatedConstructorTrailingStmt<'a>>,
     },
@@ -131,6 +132,7 @@ pub fn plan_constructor_delegation_for_type<'a>(
                 {
                     return Some(
                         ConstructorDelegationPlan::ModeledExternalSuperclassWithTrailing {
+                            args,
                             superclass: superclass.to_string(),
                             trailing,
                         },

@@ -5817,14 +5817,23 @@ fn collect_type_signatures(
             type_name: ty.name.clone(),
             field_name: inherited.rust_name.clone(),
         };
-        plan.fields.entry(field_key).or_insert_with(|| {
+        let mut external_constraints = constraints
+            .fields
+            .get(&field_key)
+            .cloned()
+            .unwrap_or_else(field_shape_constraints);
+        if let Some(nullability) = inherited.field_nullability {
+            external_constraints.push(SignatureConstraint::RequiredStorageNullability(nullability));
+        }
+        plan.fields.insert(
+            field_key,
             constrained_field_shape(
                 &inherited.field_type,
                 representations,
-                &field_shape_constraints(),
+                &external_constraints,
                 facts,
-            )
-        });
+            ),
+        );
     }
     for inherited in
         crate::inherited_members::external_inherited_instance_methods_for_type(ty, facts)

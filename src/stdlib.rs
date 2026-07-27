@@ -8020,6 +8020,7 @@ impl ExternalApiFacadeSupport {
             self.from_impls.insert((from, to));
         }
         self.add_jdk_input_stream_conversion_surfaces(local_types);
+        self.add_jdk_exact_stream_conversion_surfaces(local_types);
     }
 
     fn add_jdk_input_stream_conversion_surfaces(&mut self, local_types: &BTreeSet<String>) {
@@ -8044,6 +8045,47 @@ impl ExternalApiFacadeSupport {
             }
             self.add_opaque_type(from.clone());
             self.from_impls.insert((from, "InputStream".to_string()));
+        }
+    }
+
+    fn add_jdk_exact_stream_conversion_surfaces(&mut self, local_types: &BTreeSet<String>) {
+        for (from, to) in [
+            ("InputStream", "java.io.InputStream"),
+            ("java.io.InputStream", "InputStream"),
+            ("OutputStream", "java.io.OutputStream"),
+            ("java.io.OutputStream", "OutputStream"),
+            ("FileInputStream", "java.io.InputStream"),
+            ("ByteArrayInputStream", "java.io.InputStream"),
+            ("BufferedInputStream", "java.io.InputStream"),
+            ("DataInputStream", "java.io.InputStream"),
+            ("GZIPInputStream", "java.io.InputStream"),
+            ("ObjectInputStream", "java.io.InputStream"),
+            ("FilterInputStream", "java.io.InputStream"),
+            ("PushbackInputStream", "java.io.InputStream"),
+            ("SequenceInputStream", "java.io.InputStream"),
+            ("FileOutputStream", "java.io.OutputStream"),
+            ("BufferedOutputStream", "java.io.OutputStream"),
+            ("FilterOutputStream", "java.io.OutputStream"),
+            ("ObjectOutputStream", "java.io.OutputStream"),
+            ("GZIPOutputStream", "java.io.OutputStream"),
+        ] {
+            let from_key = canonical_external_receiver_type_key(from);
+            let to_key = canonical_external_receiver_type_key(to);
+            if (local_types.contains(&from_key) && !matches!(from, "InputStream" | "OutputStream"))
+                || (local_types.contains(&to_key) && !is_builtin_external_facade_type(&to_key))
+            {
+                continue;
+            }
+            let from = rust_name_for_java_named_type(from);
+            let to = rust_name_for_java_named_type(to);
+            if !valid_external_facade_type_ident(&to) || from == to {
+                continue;
+            }
+            if !is_builtin_external_facade_type(&from) && valid_external_facade_type_ident(&from) {
+                self.add_opaque_type(from.clone());
+            }
+            self.add_opaque_type(to.clone());
+            self.from_impls.insert((from, to));
         }
     }
 
@@ -8222,7 +8264,17 @@ impl ExternalApiFacadeSupport {
         for (from, to) in self.from_impls {
             if alias_names.contains(&from)
                 || alias_names.contains(&to)
-                || is_builtin_external_facade_type(&from)
+                || (!is_builtin_external_facade_type(&from)
+                    && !emitted_support_type_names.contains(&from))
+                || (is_builtin_external_facade_type(&from)
+                    && !matches!(
+                        (from.as_str(), to.as_str()),
+                        ("InputStream", "JavaIoInputStream")
+                    ))
+                || matches!(
+                    (from.as_str(), to.as_str()),
+                    ("OutputStream", "JavaIoOutputStream")
+                )
             {
                 continue;
             }

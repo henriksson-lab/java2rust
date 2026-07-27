@@ -1886,6 +1886,38 @@ fn sort_deferred_constructor_field_assignments_by_body_order(
     });
 }
 
+fn modeled_external_super_constructor_state_field_assignments<'a>(
+    superclass: &str,
+    args: &'a [Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Vec<DelegatedConstructorTrailingStmt<'a>> {
+    let Some(field_name) = crate::external_packs::modeled_external_super_constructor_state_field(
+        superclass,
+        args.len(),
+    ) else {
+        return Vec::new();
+    };
+    let Some(value) = args.first() else {
+        return Vec::new();
+    };
+    let rust_name = crate::parser::to_snake_case(field_name);
+    if env.local_shape(&rust_name).is_some() && !current_env_name_is_instance_field(env, &rust_name)
+    {
+        return Vec::new();
+    }
+    if ctx
+        .current_type
+        .is_some_and(|owner| ctx.signatures.field_shape(owner, &rust_name).is_none())
+    {
+        return Vec::new();
+    }
+    vec![DelegatedConstructorTrailingStmt::FieldAssignment {
+        field_name: rust_name,
+        value,
+    }]
+}
+
 fn constructor_self_temporary_seed_field_value(
     plan: &ConstructorFieldValuePlan<'_>,
     env: &ShapeEnv,
@@ -2124,7 +2156,11 @@ fn lower_delegating_constructor(
                 returns_result,
             )
         }
-        ConstructorDelegationPlan::ModeledExternalSuperclassWithTrailing { trailing, .. } => {
+        ConstructorDelegationPlan::ModeledExternalSuperclassWithTrailing {
+            args,
+            superclass,
+            trailing,
+        } => {
             let returns_result = delegated_constructor_trailing_can_throw(&trailing, env, ctx);
             let field_plans = plan_constructor_field_values_with_inherited_context(
                 ty,
@@ -2133,17 +2169,25 @@ fn lower_delegating_constructor(
                 ctx.support_local_type_program,
                 ctx.facts,
             );
-            let trailing_instance_calls = trailing
-                .iter()
-                .filter(|stmt| {
-                    matches!(
-                        stmt,
-                        DelegatedConstructorTrailingStmt::InstanceCall { .. }
-                            | DelegatedConstructorTrailingStmt::ExprStatement { .. }
-                    )
-                })
-                .cloned()
-                .collect::<Vec<_>>();
+            let mut trailing_instance_calls =
+                modeled_external_super_constructor_state_field_assignments(
+                    &superclass,
+                    args,
+                    env,
+                    ctx,
+                );
+            trailing_instance_calls.extend(
+                trailing
+                    .iter()
+                    .filter(|stmt| {
+                        matches!(
+                            stmt,
+                            DelegatedConstructorTrailingStmt::InstanceCall { .. }
+                                | DelegatedConstructorTrailingStmt::ExprStatement { .. }
+                        )
+                    })
+                    .cloned(),
+            );
             (
                 constructor_field_plans_with_trailing_body_ordered(
                     ty,
