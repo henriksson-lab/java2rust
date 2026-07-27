@@ -3295,7 +3295,7 @@ fn lower_stmt(
                 return;
             }
             let assignment_slot =
-                assignment_slot_for_target_with_current_type(target, env, ctx, shape_ctx);
+                target_assignment_slot_with_current_type(target, env, ctx, shape_ctx);
             if assignment_statement_plan_for_target_with_current_type(
                 target,
                 value,
@@ -3588,7 +3588,7 @@ fn own_uninitialized_optional_borrowed_local(
     local_plan
 }
 
-fn assignment_slot_for_target_with_current_type(
+fn target_assignment_slot_with_current_type(
     target: &Expr,
     env: &ShapeEnv,
     ctx: LowerCtx,
@@ -8000,7 +8000,7 @@ fn lower_array_assignment_value_expr(
         representations: Some(ctx.representations),
         facts: Some(ctx.facts),
     };
-    let assignment_slot = assignment_slot_for_target_with_current_type(target, env, ctx, shape_ctx);
+    let assignment_slot = target_assignment_slot_with_current_type(target, env, ctx, shape_ctx);
     let lowered_value =
         lower_expr_for_slot_with_refinements(value, env, assignment_slot.clone(), ctx, refinements);
     let lowered_value =
@@ -8099,7 +8099,7 @@ fn lower_local_assignment_value_expr(
         representations: Some(ctx.representations),
         facts: Some(ctx.facts),
     };
-    let assignment_slot = assignment_slot_for_target_with_current_type(target, env, ctx, shape_ctx);
+    let assignment_slot = target_assignment_slot_with_current_type(target, env, ctx, shape_ctx);
     let lowered_value =
         lower_expr_for_slot_with_refinements(value, env, assignment_slot.clone(), ctx, refinements);
     let lowered_value =
@@ -8141,7 +8141,7 @@ fn lower_assignment_null_comparison_expr(
         representations: Some(ctx.representations),
         facts: Some(ctx.facts),
     };
-    let assignment_slot = assignment_slot_for_target_with_current_type(left, env, ctx, shape_ctx);
+    let assignment_slot = target_assignment_slot_with_current_type(left, env, ctx, shape_ctx);
     if slot_target_shape(&assignment_slot)
         .and_then(RustSlotShape::optional_element_type)
         .is_none()

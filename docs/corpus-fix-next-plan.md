@@ -4100,6 +4100,11 @@ rewrap decisions now happen in lower-side planning wrappers, which pass
 `OptionalSlotConstructionPlan` / `SlotExprConversionPlan` into renderer helpers.
 Focused coverage includes the conversion-plan ownership guard and the optional
 storage, erased handoff, and assignment rewrap construction-plan guards.
+Invalid-cast policy naming cleanup: lower-side assignment slot helpers no
+longer reuse the `assignment_slot_for_target` planner name, preserving the
+separation where `conversion_plan` owns slot policy and invalid-cast runtime
+policy while lowering only asks for a target assignment slot in current-type
+context.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
