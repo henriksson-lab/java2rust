@@ -242,6 +242,7 @@ impl OptionalReceiverSlotPlan {
             option_shape,
             target_shape.java_ty.clone(),
             Some(self.element_ownership),
+            &FactSet::default(),
         )
     }
 }

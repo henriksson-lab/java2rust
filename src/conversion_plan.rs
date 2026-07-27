@@ -646,7 +646,7 @@ pub fn optional_slot_construction_plan_with_actual_element(
     facts: &FactSet,
 ) -> Option<OptionalSlotConstructionPlan> {
     let target_element_ty = target.optional_element_type()?;
-    let target_element = optional_element_slot_shape(target, target_element_ty);
+    let target_element = optional_element_slot_shape_with_facts(target, target_element_ty, facts);
     let element_plan = shape_coercion_plan_with_facts(actual_element_shape, &target_element, facts);
     Some(OptionalSlotConstructionPlan {
         target: target.clone(),
@@ -849,11 +849,13 @@ impl LoweredType {
         option_shape: RustSlotShape,
         element_ty: JavaType,
         element_ownership: Option<OwnershipShape>,
+        facts: &FactSet,
     ) -> Option<Self> {
         if option_shape.optional_element_type() != Some(element_ty.clone()) {
             return None;
         }
-        let mut element_shape = optional_element_slot_shape(&option_shape, element_ty);
+        let mut element_shape =
+            optional_element_slot_shape_with_facts(&option_shape, element_ty, facts);
         if let Some(element_ownership) = element_ownership {
             element_shape.ownership = element_ownership;
         }
@@ -1477,7 +1479,7 @@ pub fn optional_shape_coercion_policy_with_facts(
     if let Some(element_ty) = target.optional_element_type()
         && actual.optional_element_type().is_none()
     {
-        let target_element = optional_element_slot_shape(target, element_ty);
+        let target_element = optional_element_slot_shape_with_facts(target, element_ty, facts);
         return OptionalShapeCoercionPolicy::Wrap {
             element_ty: actual.java_ty.clone(),
             element_plan: Box::new(shape_coercion_plan_with_facts(
@@ -1490,7 +1492,7 @@ pub fn optional_shape_coercion_policy_with_facts(
     if let Some(element_ty) = actual.optional_element_type()
         && target.optional_element_type().is_none()
     {
-        let actual_element = optional_element_slot_shape(actual, element_ty);
+        let actual_element = optional_element_slot_shape_with_facts(actual, element_ty, facts);
         return OptionalShapeCoercionPolicy::Unwrap {
             element_ty: target.java_ty.clone(),
             element_plan: Box::new(shape_coercion_plan_with_facts(
@@ -1504,8 +1506,10 @@ pub fn optional_shape_coercion_policy_with_facts(
         actual.optional_element_type(),
         target.optional_element_type(),
     ) {
-        let actual_element = optional_element_slot_shape(actual, actual_element_ty.clone());
-        let target_element = optional_element_slot_shape(target, target_element_ty.clone());
+        let actual_element =
+            optional_element_slot_shape_with_facts(actual, actual_element_ty.clone(), facts);
+        let target_element =
+            optional_element_slot_shape_with_facts(target, target_element_ty.clone(), facts);
         if actual_element != target_element {
             return OptionalShapeCoercionPolicy::MapElement {
                 actual_element_ty,
@@ -1525,6 +1529,14 @@ pub(crate) fn optional_element_slot_shape(
     option_shape: &RustSlotShape,
     element_ty: JavaType,
 ) -> RustSlotShape {
+    optional_element_slot_shape_with_facts(option_shape, element_ty, &FactSet::default())
+}
+
+pub(crate) fn optional_element_slot_shape_with_facts(
+    option_shape: &RustSlotShape,
+    element_ty: JavaType,
+    facts: &FactSet,
+) -> RustSlotShape {
     let mut element_shape = option_shape.clone();
     if java_type_is_erased_object_like(&element_ty) {
         let projected = project_java_value_shape(None, element_ty);
@@ -1532,6 +1544,26 @@ pub(crate) fn optional_element_slot_shape(
         element_shape.dispatch = projected.dispatch;
         element_shape.view = projected.view;
         element_shape.type_identity = projected.type_identity;
+    } else if let JavaType::Named { name, args } = &element_ty
+        && args.is_empty()
+        && facts.object_safe_trait_fact_for_name(name) == Some(true)
+    {
+        let trait_name = name.clone();
+        element_shape.java_ty = element_ty;
+        element_shape.dispatch = DispatchShape::BoxedDynTrait { trait_name };
+        element_shape.view = ViewShape::DynTraitView;
+        element_shape.type_identity =
+            crate::slot_shape::TypeIdentity::from_java_type(element_shape.java_ty.clone());
+    } else if let Some(HierarchyStrategy::DynTrait { trait_name }) =
+        EffectiveFacts::new(facts).object_representation_override_strategy_for(&element_ty)
+    {
+        element_shape.java_ty = element_ty;
+        element_shape.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: trait_name.clone(),
+        };
+        element_shape.view = ViewShape::DynTraitView;
+        element_shape.type_identity =
+            crate::slot_shape::TypeIdentity::from_java_type(element_shape.java_ty.clone());
     } else {
         element_shape.java_ty = element_ty;
     }
@@ -1897,6 +1929,14 @@ pub fn dispatch_coercion_policy_with_facts(
             if external_crate_mapped_dyn_trait_boundary(trait_name, facts) {
                 return DispatchCoercionPolicy::NoDispatchChange;
             }
+            if actual.ownership == OwnershipShape::SharedBorrow
+                && actual.java_ty == target.java_ty
+                && object_safe_trait_boundary(&target.java_ty, facts)
+            {
+                return DispatchCoercionPolicy::BorrowBoxedDynTrait {
+                    trait_name: trait_name.clone(),
+                };
+            }
             DispatchCoercionPolicy::BorrowDynTrait {
                 trait_name: trait_name.clone(),
             }
@@ -2050,6 +2090,15 @@ fn external_crate_mapped_dyn_trait_boundary(trait_name: &str, facts: &FactSet) -
             trait_name,
         ))
         .is_some_and(|pack| pack.mode == crate::facts::ExternalLibraryMode::RustCrateMapping)
+}
+
+fn object_safe_trait_boundary(java_ty: &JavaType, facts: &FactSet) -> bool {
+    match java_ty {
+        JavaType::Named { name, args } if args.is_empty() => {
+            facts.object_safe_trait_fact_for_name(name) == Some(true)
+        }
+        _ => false,
+    }
 }
 
 fn external_conversion_adapter_policy(

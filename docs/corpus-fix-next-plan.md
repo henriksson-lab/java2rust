@@ -4368,6 +4368,20 @@ avoid a second slot-level ownership recovery after cast lowering has already
 wrapped the value. Focused guards green: semantic fact ownership,
 source-parsed object safety facts, dyn-trait signature rendering with facts, and
 closed-enum local-shape lowering.
+Public boundary and boxed-dyn carrier follow-up: public/protected method
+signature constraints now preserve source/interface representation boundaries
+instead of adding local borrowed-content or non-null return constraints. Copy
+capability facts prevent cheap copy values from being forced into owned storage
+shape. Optional element projection is fact-aware for object-safe dyn-trait
+carriers, and current-instance field arguments compare the optional element type
+while preserving the `Option<Box<dyn Trait>>` carrier for shared slot conversion.
+Focused guards green: `signature_constraints_make_public_api_fallback_explicit`,
+`signature_constraints_treat_protected_members_as_api_boundaries`,
+`signature_baseline_constraints_use_copy_capability_facts_for_all_slots`,
+`signature_plan_uses_boxed_dyn_for_interface_fields`,
+`signature_public_interface_boundaries_preserve_representation_shapes`,
+`optional_receiver_field_element_recovery_uses_borrowed_carrier_plan`, and
+`lowering_borrows_boxed_dyn_field_for_interface_arguments`.
 
 ## Rerun Protocol
 

@@ -3778,6 +3778,11 @@ fn current_instance_field_shape_with_env(
         return None;
     }
     current_instance_field_shape(expr, ctx)
+        .or_else(|| {
+            current_instance_field_name(expr)
+                .and_then(|field| env.field_shape(field))
+                .cloned()
+        })
         .or_else(|| outer_instance_field_shape_with_env(expr, env, ctx))
         .or_else(|| {
             let Expr::Var(name) = expr else {
@@ -11607,6 +11612,11 @@ fn lower_optional_argument_for_borrowed_target(
     actual_shape: &RustSlotShape,
     ctx: LowerCtx,
 ) -> Option<RustExpr> {
+    if let Some(lowered) =
+        lower_current_instance_field_for_borrowed_dyn_argument(arg, env, target_shape, ctx)
+    {
+        return Some(lowered);
+    }
     if !matches!(
         target_shape.ownership,
         OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
@@ -11626,8 +11636,12 @@ fn lower_optional_argument_for_borrowed_target(
         if optional_borrowed_expr_already_matches_target(arg, target_shape, env, ctx) {
             return Some(lowered);
         }
-        let lowered_type =
-            optional_element_borrow_lowered_type(actual_shape.clone(), actual_element, None)?;
+        let lowered_type = optional_element_borrow_lowered_type_with_facts(
+            actual_shape.clone(),
+            actual_element,
+            None,
+            ctx.facts,
+        )?;
         let plan = plan_lowered_slot_conversion(
             &lowered_type,
             Slot::Argument(target_shape.clone()),
@@ -11661,6 +11675,55 @@ fn lower_optional_argument_for_borrowed_target(
     }
 }
 
+fn lower_current_instance_field_for_borrowed_dyn_argument(
+    arg: &Expr,
+    env: &ShapeEnv,
+    target_shape: &RustSlotShape,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    if target_shape.ownership != OwnershipShape::SharedBorrow {
+        return None;
+    }
+    let DispatchShape::DynTrait { trait_name } = &target_shape.dispatch else {
+        return None;
+    };
+    let mut field_shape = current_instance_field_shape_with_env(arg, env, ctx)?;
+    let field_element_ty = field_shape
+        .optional_element_type()
+        .unwrap_or_else(|| field_shape.java_ty.clone());
+    if !same_concrete_java_type(&field_element_ty, &target_shape.java_ty) {
+        return None;
+    }
+    if !matches!(
+        field_shape.dispatch,
+        DispatchShape::BoxedDynTrait {
+            trait_name: ref field_trait
+        } if field_trait == trait_name
+    ) && !object_safe_trait_argument_boundary(&target_shape.java_ty, ctx.facts)
+    {
+        return None;
+    }
+    field_shape.dispatch = DispatchShape::BoxedDynTrait {
+        trait_name: trait_name.clone(),
+    };
+    let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());
+    Some(apply_expr_to_slot_via_plan(
+        lowered,
+        field_shape,
+        &Slot::Argument(target_shape.clone()),
+        ctx.facts,
+    ))
+}
+
+fn object_safe_trait_argument_boundary(java_ty: &JavaType, facts: &FactSet) -> bool {
+    match java_ty {
+        JavaType::Named { name, args } if args.is_empty() => {
+            facts.object_safe_trait_fact_for_name(name) == Some(true)
+        }
+        _ => false,
+    }
+}
+
 fn optional_array_lowered_type_for_slice_slot(
     actual_shape: &RustSlotShape,
     target_shape: &RustSlotShape,
@@ -11682,10 +11745,25 @@ fn optional_element_borrow_lowered_type(
     element_ty: JavaType,
     element_ownership: Option<OwnershipShape>,
 ) -> Option<LoweredType> {
+    optional_element_borrow_lowered_type_with_facts(
+        option_shape,
+        element_ty,
+        element_ownership,
+        &FactSet::default(),
+    )
+}
+
+fn optional_element_borrow_lowered_type_with_facts(
+    option_shape: RustSlotShape,
+    element_ty: JavaType,
+    element_ownership: Option<OwnershipShape>,
+    facts: &FactSet,
+) -> Option<LoweredType> {
     LoweredType::optional_element_borrow_from_option_shape(
         option_shape,
         element_ty,
         element_ownership,
+        facts,
     )
 }
 
@@ -11699,6 +11777,23 @@ fn optional_element_borrow_lowered_expr(
         option_shape.clone(),
         element_ty,
         Some(element_ownership),
+    )?;
+    let expr = project_optional_element_borrow_carrier(option_expr, element_ownership)?;
+    Some(crate::coercion::LoweredExpr { expr, actual })
+}
+
+fn optional_element_borrow_lowered_expr_with_facts(
+    option_expr: RustExpr,
+    option_shape: &RustSlotShape,
+    element_ty: JavaType,
+    element_ownership: OwnershipShape,
+    facts: &FactSet,
+) -> Option<crate::coercion::LoweredExpr> {
+    let actual = optional_element_borrow_lowered_type_with_facts(
+        option_shape.clone(),
+        element_ty,
+        Some(element_ownership),
+        facts,
     )?;
     let expr = project_optional_element_borrow_carrier(option_expr, element_ownership)?;
     Some(crate::coercion::LoweredExpr { expr, actual })
@@ -13205,6 +13300,16 @@ fn lower_expr_for_slot_with_refinements(
         refinements,
     ) {
         return recovered_field;
+    }
+    if let Some(optional_field) = lower_optional_self_field_borrowed_carrier_for_slot(
+        expr,
+        env,
+        &slot,
+        &actual,
+        ctx,
+        refinements,
+    ) {
+        return optional_field;
     }
     if let Some(reused_optional) =
         lower_reused_optional_unwrap_for_slot(expr, env, &slot, &actual, ctx, refinements)
@@ -15271,6 +15376,45 @@ fn lower_optional_self_field_borrowed_option_recovery(
     Some(apply_slot_expr_conversion(lowered, &plan))
 }
 
+fn lower_optional_self_field_borrowed_carrier_for_slot(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    actual: &RustSlotShape,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let target = slot_target_shape(slot)?;
+    if target.optional_element_type().is_some()
+        || !matches!(
+            target.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+    {
+        return None;
+    }
+    shared_self_field_read_name_with_ctx(expr, env, ctx)?;
+    let field_actual = if actual.optional_element_type().is_some() {
+        actual.clone()
+    } else {
+        current_instance_field_shape_with_env(expr, env, ctx)?
+    };
+    let element_ty = field_actual.optional_element_type()?;
+    if !same_concrete_java_type(&target.java_ty, &element_ty) {
+        return None;
+    }
+    let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+    let lowered = optional_element_borrow_lowered_expr_with_facts(
+        lowered,
+        &field_actual,
+        element_ty,
+        target.ownership,
+        ctx.facts,
+    )?;
+    let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
+    Some(apply_lowered_slot_expr_conversion(lowered, &plan))
+}
+
 fn lower_optional_self_field_read_owned_recovery(
     expr: &Expr,
     env: &ShapeEnv,
@@ -15373,7 +15517,7 @@ fn borrowed_self_receiver_can_read_fields(ctx: LowerCtx) -> bool {
 
 fn shared_self_field_read_name<'a>(expr: &'a Expr, env: &ShapeEnv) -> Option<&'a str> {
     match expr {
-        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+        Expr::FieldAccess(receiver, field) if is_this_receiver_expr(receiver) => {
             Some(field.as_str())
         }
         Expr::Var(name)

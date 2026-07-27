@@ -6049,6 +6049,7 @@ pub fn method_param_shape_constraints(
         );
         if method_param_borrowed_content_policy_with_facts(ty, method, param, usage, facts)
             .is_none()
+            && boundary_kind != Some(SignatureBoundaryKind::PublicApi)
             && !signature_capability_policy(&param.ty, facts)
                 .capability_ownership
                 .is_some_and(|ownership| ownership == OwnershipShape::CopyValue)
@@ -7456,8 +7457,12 @@ fn constrained_field_shape(
     )
     .expect("field signature shape is always present");
     if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) {
-        apply_required_ownership(&mut shape, OwnershipShape::Owned);
-        apply_required_view(&mut shape, ViewShape::Native);
+        if !facts.is_copy_type(java_ty) {
+            apply_required_ownership(&mut shape, OwnershipShape::Owned);
+        }
+        if matches!(shape.dispatch, DispatchShape::Concrete) {
+            apply_required_view(&mut shape, ViewShape::Native);
+        }
     }
     shape
 }
@@ -11154,8 +11159,11 @@ pub fn method_return_shape_constraints(
             )],
         );
     }
-    let flow_return_nullability =
-        typed_source_method_return_nullability_constraints(ty, method, facts);
+    let flow_return_nullability = if boundary_kind == Some(SignatureBoundaryKind::PublicApi) {
+        Vec::new()
+    } else {
+        typed_source_method_return_nullability_constraints(ty, method, facts)
+    };
     let flow_proves_non_null_return =
         signature_constraints_prove_non_null_storage(&flow_return_nullability);
     let mut source_return_nullability = flow_return_nullability;
@@ -11200,6 +11208,7 @@ pub fn method_return_shape_constraints(
     if borrowed_return_content_policy.is_none()
         && !returns_call_result
         && !borrowed_object_return
+        && boundary_kind != Some(SignatureBoundaryKind::PublicApi)
         && declared_return_should_use_concrete_shape(
             method,
             method_effect_nullability,
@@ -11357,6 +11366,9 @@ fn declared_return_should_use_concrete_shape(
     if matches!(method.return_type, JavaType::Void | JavaType::Primitive(_)) {
         return false;
     }
+    if facts.is_copy_type(&method.return_type) {
+        return false;
+    }
     if declared_return_has_non_concrete_representation(&method.return_type, facts) {
         return false;
     }
@@ -11491,6 +11503,9 @@ fn internal_returned_object_alias_borrow_constraints(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
+    if signature_member_api_boundary_policy(&method.modifiers).public_api {
+        return Vec::new();
+    }
     if matches!(method.return_type, JavaType::Primitive(_) | JavaType::Void) {
         return Vec::new();
     }
