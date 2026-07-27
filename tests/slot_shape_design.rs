@@ -29348,6 +29348,7 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     let objects_is_null_key =
         CallableKey::method("java.util.Objects", "isNull", Staticness::Unknown, 1);
     let system_gc_key = CallableKey::method("java.lang.System", "gc", Staticness::Unknown, 0);
+    let thread_sleep_key = CallableKey::method("java.lang.Thread", "sleep", Staticness::Unknown, 1);
     let file_exists_key = CallableKey::method("java.io.File", "exists", Staticness::Unknown, 0);
     let file_list_key = CallableKey::method("java.io.File", "list", Staticness::Unknown, 0);
     let file_is_file_key = CallableKey::method("java.io.File", "isFile", Staticness::Unknown, 0);
@@ -29551,6 +29552,13 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert_eq!(system_gc_abi.receiver, ReceiverAbi::AssociatedFunction);
     assert_eq!(system_gc_abi.args, Vec::<FacadeSlot>::new());
     assert_eq!(system_gc_abi.return_slot, FacadeSlot::Owned);
+
+    let thread_sleep_abi = stdlib_signature_facts
+        .facade_abi_for_key(&thread_sleep_key)
+        .expect("Thread.sleep ABI should come from selected Rust stdlib facts");
+    assert_eq!(thread_sleep_abi.receiver, ReceiverAbi::AssociatedFunction);
+    assert_eq!(thread_sleep_abi.args, vec![FacadeSlot::Owned]);
+    assert_eq!(thread_sleep_abi.return_slot, FacadeSlot::Owned);
 
     let file_exists_abi = stdlib_signature_facts
         .facade_abi_for_key(&file_exists_key)
@@ -30081,6 +30089,46 @@ fn stdlib_signature_facts_drive_objects_null_predicate_argument_shapes() {
         assert_eq!(shapes[0].java_ty, optional_java_type(JavaType::String));
         assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
     }
+}
+
+#[test]
+fn stdlib_signature_facts_drive_thread_sleep_owned_millis_shape() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let signatures = SignaturePlan::default();
+    let mut types = TypeEnv::new();
+    types.insert_static_type_alias("Thread", "java.lang.Thread");
+    types.insert_local("millis", JavaType::Primitive(PrimitiveType::Long));
+
+    let receiver = Expr::Var("Thread".to_string());
+    let args = vec![Expr::Var("millis".to_string())];
+    let shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&receiver),
+        "sleep",
+        None,
+        &args,
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("Thread.sleep should use an owned millis ABI fact, got {plan:?}"),
+    };
+
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(shapes[0].java_ty, JavaType::Primitive(PrimitiveType::Long));
+    assert_eq!(shapes[0].ownership, OwnershipShape::CopyValue);
+
+    let target =
+        plan_call_target_with_facts_and_arity(Some(&receiver), "sleep", 1, None, &facts, &types);
+    assert!(
+        matches!(
+            target,
+            CallTargetPlan::NativeJavaStatic {
+                method: NativeJavaStaticMethod::ThreadSleep,
+            }
+        ),
+        "Thread.sleep ABI fact should shape arguments without bypassing native sleep rendering: {target:?}"
+    );
 }
 
 #[test]

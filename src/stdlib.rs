@@ -621,6 +621,16 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
             FacadeSlot::Owned,
         ));
     }
+    for owner in ["Thread", "java.lang.Thread"] {
+        facts.facade_abi_facts.push(rust_stdlib_static_abi(
+            owner,
+            "sleep",
+            1,
+            "std::thread::sleep",
+            vec![FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ));
+    }
     add_jdk_numeric_facade_facts(&mut facts);
     add_jdk_collection_abi_facts(&mut facts);
     add_jdk_iterator_abi_facts(&mut facts);

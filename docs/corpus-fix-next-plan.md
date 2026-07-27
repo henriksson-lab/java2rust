@@ -4057,6 +4057,11 @@ carriers (`Option<&T>` / `Option<&mut T>`) now enter
 conversion. The shared adapter still performs receiver expression discovery, but
 `lower.rs` no longer hardcodes the `OptionalReceiverProjection::Borrowed`
 choice for this carrier.
+Thread sleep ABI follow-up: `java.lang.Thread.sleep(long)` now has a selected
+stdlib `FacadeAbiFact` with an owned/copy millisecond argument. Native lowering
+still owns Java sleep semantics and renders `Duration::from_millis(...)`, but
+argument shape selection no longer depends only on the `Thread.sleep` lowering
+branch.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
