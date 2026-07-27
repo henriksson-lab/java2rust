@@ -2117,9 +2117,7 @@ fn plan_external_facade_receiver_call<'a>(
 }
 
 fn plan_java_logging_facade_call<'a>(receiver: &'a Expr, name: &str) -> Option<CallTargetPlan<'a>> {
-    let Expr::Var(receiver_name) = receiver else {
-        return None;
-    };
+    let receiver_name = java_logging_receiver_name(receiver)?;
     if !matches!(
         crate::stdlib::canonical_external_receiver_type_key(receiver_name).as_str(),
         "logger" | "Logger"
@@ -2133,6 +2131,14 @@ fn plan_java_logging_facade_call<'a>(receiver: &'a Expr, name: &str) -> Option<C
         owner: "logger".to_string(),
         rust_name: crate::parser::to_snake_case(name),
     })
+}
+
+fn java_logging_receiver_name(receiver: &Expr) -> Option<&str> {
+    match receiver {
+        Expr::Var(receiver_name) => Some(receiver_name),
+        Expr::FieldAccess(_, field) => Some(field),
+        _ => None,
+    }
 }
 
 fn static_utility_owner_expr_type_name(

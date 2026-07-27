@@ -4314,6 +4314,15 @@ static call path instead of emitting value-receiver calls such as
 and array-conversion tests were also updated to accept the shared audited clone
 marker now emitted by recovery plans while still checking the same signed-byte,
 carrier, and adapter behavior.
+External field/logger cleanup: `MemberAccessPlan` now consumes typed external
+instance field facts directly, so lower-camel facade fields such as
+`record.totalBatchCount` lower through the same member plan as source fields and
+generate support struct storage from `InstanceField` facts. Rust-crate mapped
+external static constants now prefer the selected field fact owner when choosing
+the associated-constant path, preserving crate-qualified owners such as
+`hdf5_facade::OpenMode::CREATE`. Static logger fields are retargeted back to
+the shared `logger` facade after the general field-receiver retarget, preventing
+`Self::logger.info(...)` from bypassing logger facade calls.
 
 ## Rerun Protocol
 

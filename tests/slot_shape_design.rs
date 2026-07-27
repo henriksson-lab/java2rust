@@ -11882,9 +11882,9 @@ class UsesOwnedOptionalExternalGetter {
     );
 
     assert!(
-        translation.rust.contains(
-            "let name: Option<String> = db_facade::get_name(cursor, \"name\".to_string().as_str());"
-        ),
+        translation
+            .rust
+            .contains("let name: Option<String> = db_facade::get_name(cursor, \"name\");"),
         "{}",
         translation.rust
     );
@@ -24432,6 +24432,8 @@ fn external_support_struct_fields_are_generated_from_field_facts() {
     let source = r#"
 class UseExternalRecord {
     void touch(ExternalRecord record) {
+        int batch = record.batchCount;
+        int total = record.totalBatchCount;
     }
 }
 "#;
@@ -24442,7 +24444,7 @@ class UseExternalRecord {
             field_name: "batchCount".to_string(),
         },
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
-        field_kind: ExternalFieldKind::StaticFinal,
+        field_kind: ExternalFieldKind::InstanceField,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.external_field_facts.push(ExternalFieldFact {
@@ -24451,7 +24453,7 @@ class UseExternalRecord {
             field_name: "totalBatchCount".to_string(),
         },
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
-        field_kind: ExternalFieldKind::StaticFinal,
+        field_kind: ExternalFieldKind::InstanceField,
         provenance: FactProvenance::ExternalLibraryPack,
     });
 

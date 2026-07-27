@@ -7295,6 +7295,7 @@ fn lower_expr_with_refinements(
                 env,
                 ctx,
             );
+            let target = retarget_java_logging_facade_call(target, receiver.as_deref(), name);
             let target = retarget_receiverless_current_static_call(
                 target,
                 context_fallback_signature.as_ref(),
@@ -12582,6 +12583,37 @@ fn retarget_static_owner_call_for_instance_field_receiver<'a>(
     let should_retarget =
         receiver.is_some_and(|receiver| receiver_is_instance_or_outer_field(receiver, env, ctx));
     retarget_static_call_to_receiver_if(target, receiver, should_retarget)
+}
+
+fn retarget_java_logging_facade_call<'a>(
+    target: CallTargetPlan<'a>,
+    receiver: Option<&'a Expr>,
+    name: &str,
+) -> CallTargetPlan<'a> {
+    let Some(receiver) = receiver else {
+        return target;
+    };
+    if !java_logging_receiver_name(receiver).is_some_and(|receiver_name| {
+        matches!(
+            crate::stdlib::canonical_external_receiver_type_key(receiver_name).as_str(),
+            "logger" | "Logger"
+        )
+    }) || !matches!(name, "info" | "warn" | "debug" | "error" | "trace")
+    {
+        return target;
+    }
+    CallTargetPlan::StaticOwner {
+        owner: "logger".to_string(),
+        rust_name: crate::parser::to_snake_case(name),
+    }
+}
+
+fn java_logging_receiver_name(receiver: &Expr) -> Option<&str> {
+    match receiver {
+        Expr::Var(receiver_name) => Some(receiver_name),
+        Expr::FieldAccess(_, field) => Some(field),
+        _ => None,
+    }
 }
 
 fn receiver_is_instance_or_outer_field(receiver: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
@@ -17894,6 +17926,7 @@ fn lower_external_call_expr_for_slot(
         env,
         ctx,
     );
+    let target = retarget_java_logging_facade_call(target, receiver.as_deref(), name);
     let target =
         retarget_receiverless_current_static_call(target, context_fallback_signature.as_ref());
     let arg_plan = plan_call_arguments_with_facts_and_args(

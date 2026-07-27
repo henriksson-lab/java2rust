@@ -70,6 +70,13 @@ pub fn java_member_access_policy_with_facts(
                 kind: JavaMemberAccessKind::StaticConstant,
             });
         }
+        if let Some(java_ty) = external_instance_field_type(receiver, member, env, facts) {
+            return Some(JavaMemberAccessPolicy {
+                member: member.to_string(),
+                java_ty,
+                kind: JavaMemberAccessKind::InstanceField,
+            });
+        }
         if let Some(java_ty) = infer_member_access_type(receiver, member, env) {
             return Some(JavaMemberAccessPolicy {
                 member: member.to_string(),
@@ -96,6 +103,34 @@ pub fn java_member_access_policy_with_facts(
         java_ty,
         kind: JavaMemberAccessKind::ArrayLength,
     })
+}
+
+fn external_instance_field_type(
+    receiver: &Expr,
+    member: &str,
+    env: &TypeEnv,
+    facts: &FactSet,
+) -> Option<JavaType> {
+    let receiver_ty = crate::types::infer_expr_type(receiver, env);
+    let receiver_name = external_field_receiver_name(&receiver_ty)?;
+    facts
+        .external_field_for(&receiver_name, member)
+        .filter(|fact| fact.field_kind == crate::facts::ExternalFieldKind::InstanceField)
+        .and_then(|fact| fact.field_type.clone())
+        .or_else(|| {
+            crate::external_packs::external_field_for(&receiver_name, member)
+                .filter(|fact| fact.field_kind == crate::facts::ExternalFieldKind::InstanceField)
+                .and_then(|fact| fact.field_type)
+        })
+}
+
+fn external_field_receiver_name(receiver_ty: &JavaType) -> Option<String> {
+    match receiver_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+        }
+        _ => None,
+    }
 }
 
 fn receiver_is_static_type_name(receiver: &Expr) -> bool {
@@ -221,6 +256,22 @@ fn external_static_constant_rust_owner(
     facts: &FactSet,
 ) -> Option<String> {
     let receiver_name = static_receiver_java_name(receiver)?;
+    if let Some(owner) = facts
+        .external_field_for(&receiver_name, member)
+        .and_then(|fact| external_crate_mapped_type_owner(&fact.field.type_name, facts))
+        .or_else(|| {
+            crate::external_packs::external_field_for(&receiver_name, member).and_then(|fact| {
+                external_crate_mapped_type_owner(&fact.field.type_name, facts).or_else(|| {
+                    external_crate_mapped_type_owner(
+                        &fact.field.type_name,
+                        &fact_set_for_builtin_pack_lookup(),
+                    )
+                })
+            })
+        })
+    {
+        return Some(owner);
+    }
     if external_type_is_rust_crate_mapped(&receiver_name, facts)
         || java_type_is_rust_crate_mapped(field_ty, facts)
     {
@@ -243,6 +294,23 @@ fn external_static_constant_rust_owner(
         return static_constant_rust_owner_from_name(owner);
     }
     None
+}
+
+fn external_crate_mapped_type_owner(type_name: &str, facts: &FactSet) -> Option<String> {
+    if !external_type_is_rust_crate_mapped(type_name, facts) {
+        return None;
+    }
+    match crate::slot_render::rust_type_for_java_type_with_facts(
+        &JavaType::Unknown(type_name.to_string()),
+        facts,
+    ) {
+        RustType::Raw(owner) | RustType::Named(owner) if owner.contains("::") => Some(owner),
+        _ => None,
+    }
+}
+
+fn fact_set_for_builtin_pack_lookup() -> FactSet {
+    crate::external_packs::builtin_external_library_packs()
 }
 
 fn external_type_is_rust_crate_mapped(type_name: &str, facts: &FactSet) -> bool {
