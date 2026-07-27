@@ -9,7 +9,7 @@ use crate::coercion::{
     collections_singleton_list_projection, collections_singleton_map_projection,
     collections_singleton_projection, discard_value_projection, erased_object_box_projection,
     external_crate_associated_path_projection, external_crate_path_projection,
-    file_exists_projection, java_class_static_path_projection,
+    file_exists_projection, java_class_literal_path_projection, java_class_static_path_projection,
     java_iterator_from_collection_projection, len_i32_projection, math_max_projection,
     math_min_projection, native_collection_default_constructor_projection,
     native_collection_empty_new_projection, native_collection_with_capacity_projection,
@@ -182,13 +182,6 @@ fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) ->
         (JavaType::Void, false) => RustExpr::Raw("()".to_string()),
         _ => RustExpr::Raw("Default::default()".to_string()),
     }
-}
-
-pub fn propagate_result_expr(expr: RustExpr) -> RustExpr {
-    if matches!(&expr, RustExpr::Raw(raw) if raw.trim_end().ends_with('?')) {
-        return expr;
-    }
-    RustExpr::Raw(format!("{}?", crate::emit::emit_expr(&expr)))
 }
 
 fn apply_native_java_instance_method(
@@ -748,10 +741,7 @@ pub fn apply_native_collection_extend(receiver: RustExpr, arg: RustExpr) -> Rust
 pub fn apply_class_literal_token(ty: &JavaType, facts: &FactSet) -> RustExpr {
     let plan = crate::stdlib::class_literal_token_plan(ty, facts);
     RustExpr::Call {
-        function: Box::new(RustExpr::Raw(format!(
-            "JavaClass::<{}>::literal",
-            plan.rust_type
-        ))),
+        function: Box::new(java_class_literal_path_projection(&plan.rust_type)),
         args: vec![RustExpr::Literal(format!("{:?}", plan.java_name))],
     }
 }

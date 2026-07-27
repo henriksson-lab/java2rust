@@ -8,7 +8,7 @@ use crate::array_lowering::{
 use crate::array_plan::plan_array_expr;
 use crate::call_lowering::{
     apply_call_target, apply_class_literal_token, apply_collection_remove_if,
-    apply_native_collection_extend, apply_new_target_with_facts, propagate_result_expr,
+    apply_native_collection_extend, apply_new_target_with_facts,
 };
 use crate::call_plan::{
     ArgumentLoweringPlan, CallExceptionPropagationPlan, CallExprPlan, CallStatementPlan,
@@ -43,14 +43,15 @@ use crate::coercion::{
     owned_map_keys_set_projection, owner_associated_path_projection,
     parenthesize_borrowed_method_receiver, print_macro_projection,
     project_optional_element_borrow_carrier, project_optional_receiver,
-    project_optional_sequence_receiver, reborrow_optional_mut_projection,
-    render_sequence_iteration_source, rendered_expr_has_clone_recovery,
-    rendered_expr_has_direct_clone_recovery, rendered_expr_is_mutable_alias,
-    rewrite_downcast_expect_message, rust_expr_mentions_constructor_self_temporary,
-    self_associated_path_projection, sequence_get_expect_projection,
-    sequence_iter_cloned_projection, sequence_iter_copied_projection,
-    snapshot_rendered_shared_borrow_argument, subtype_owned_constructor_from_borrowed_projection,
-    to_owned_sequence_projection, tuple_field_projection, typed_none_projection,
+    project_optional_sequence_receiver, propagate_result_projection,
+    reborrow_optional_mut_projection, render_sequence_iteration_source,
+    rendered_expr_has_clone_recovery, rendered_expr_has_direct_clone_recovery,
+    rendered_expr_is_mutable_alias, rewrite_downcast_expect_message,
+    rust_expr_mentions_constructor_self_temporary, self_associated_path_projection,
+    sequence_get_expect_projection, sequence_iter_cloned_projection,
+    sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
+    subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
+    tuple_field_projection, typed_none_projection,
     unsupported_deserialization_cast_handoff_projection, unwrap_java_null_receiver_projection,
     unwrap_optional_shared_value, unwrap_result_or_panic_uncaught_java_exception,
     varargs_packed_vec_projection, varargs_spread_extend_projection,
@@ -2761,7 +2762,7 @@ fn lower_delegated_constructor_trailing_stmt(
                     CallExceptionPropagationPlan::PropagateResult
                 )
             {
-                lowered = propagate_result_expr(lowered);
+                lowered = propagate_result_projection(lowered);
             }
             expr_stmt(lowered)
         }
@@ -2773,7 +2774,7 @@ fn lower_delegated_constructor_trailing_stmt(
             }
             let mut lowered = replace_self_receiver(lower_expr(expr, env, ctx), "__java_self");
             if returns_result && slot_expr_needs_result_propagation(expr, env, ctx) {
-                lowered = propagate_result_expr(lowered);
+                lowered = propagate_result_projection(lowered);
             }
             expr_stmt(lowered)
         }
@@ -2835,7 +2836,7 @@ fn lower_inherited_context_trailing_expr_stmt(
         args: lowered_args,
     };
     if returns_result && slot_expr_needs_result_propagation(expr, env, ctx) {
-        lowered = propagate_result_expr(lowered);
+        lowered = propagate_result_projection(lowered);
     }
     Some(expr_stmt(lowered))
 }
@@ -5581,7 +5582,7 @@ fn try_resource_cleanup_stmts(resources: &[Stmt], env: &ShapeEnv, ctx: LowerCtx)
                     CallExceptionPropagationPlan::PropagateResult
                 )
             {
-                expr_stmt(propagate_result_expr(close_call))
+                expr_stmt(propagate_result_projection(close_call))
             } else {
                 expr_stmt(close_call)
             }
@@ -7339,7 +7340,7 @@ fn lower_expr_with_refinements(
             );
             lowered = wrap_call_expr_with_argument_temporaries(lowered, lowered_args.temporaries);
             if slot_expr_needs_result_propagation(expr, env, ctx) {
-                lowered = propagate_result_expr(lowered);
+                lowered = propagate_result_projection(lowered);
             }
             lowered
         }
@@ -7385,7 +7386,7 @@ fn lower_expr_with_refinements(
                         ctx,
                     ),
                 };
-                return propagate_result_expr(lowered);
+                return propagate_result_projection(lowered);
             }
             let target = plan_new_target_for_args_with_facts(
                 ty,
@@ -7416,7 +7417,7 @@ fn lower_expr_with_refinements(
             let rust_args = lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
             let mut lowered = apply_new_target_with_facts(&target, rust_args, ctx.facts);
             if external_constructor_returns_rust_result(ty, args.len(), ctx.facts) {
-                lowered = propagate_result_expr(lowered);
+                lowered = propagate_result_projection(lowered);
             }
             lowered
         }
@@ -9502,7 +9503,7 @@ fn lower_unshaped_argument(arg: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExp
     }
     let mut lowered = lower_expr(arg, env, ctx);
     if slot_expr_needs_result_propagation(arg, env, ctx) {
-        lowered = propagate_result_expr(lowered);
+        lowered = propagate_result_projection(lowered);
     }
     let shape = infer_expr_shape_with_context(
         arg,
@@ -12550,12 +12551,9 @@ fn lower_jdk_input_stream_super_read_call(
             &ExprRefinements::default(),
         )
     });
-    Some(propagate_result_expr(apply_call_target_with_lower_context(
-        &target,
-        lowered_receiver,
-        rust_args,
-        ctx,
-    )))
+    Some(propagate_result_projection(
+        apply_call_target_with_lower_context(&target, lowered_receiver, rust_args, ctx),
+    ))
 }
 
 fn current_type_extends_jdk_input_stream_facade(ctx: LowerCtx) -> bool {
@@ -13212,7 +13210,7 @@ fn lower_expr_for_slot_with_refinements(
         lower_external_call_expr_for_slot(expr, env, &slot, ctx, refinements)
     {
         if slot_expr_needs_result_propagation(expr, env, ctx) {
-            external_expr.expr = propagate_result_expr(external_expr.expr);
+            external_expr.expr = propagate_result_projection(external_expr.expr);
         }
         let plan = plan_lowered_slot_conversion(&external_expr.actual, slot, ctx.facts);
         let lowered = apply_lowered_slot_expr_conversion(external_expr, &plan);
@@ -13350,7 +13348,7 @@ fn lower_expr_for_slot_with_refinements(
         lower_expr_with_refinements(expr, env, ctx, refinements)
     };
     if slot_expr_needs_result_propagation(expr, env, ctx) {
-        lowered_expr = propagate_result_expr(lowered_expr);
+        lowered_expr = propagate_result_projection(lowered_expr);
     }
     if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment)
         && matches!(expr, Expr::Var(name) if refinements.non_null_locals.contains(name))
@@ -14665,7 +14663,7 @@ fn lower_target_typed_external_call_cast_source_for_slot(
     let mut lowered_expr =
         apply_call_target_with_lower_context(&target_plan, lowered_receiver, rust_args, ctx);
     if slot_expr_needs_result_propagation(inner, env, ctx) {
-        lowered_expr = propagate_result_expr(lowered_expr);
+        lowered_expr = propagate_result_projection(lowered_expr);
     }
     let actual = target_typed_call_cast_actual_shape(inner, env, ctx, &target_ty, target);
     if shape_is_erased_object_boundary(&actual)
@@ -17516,7 +17514,7 @@ fn lower_native_collection_call_expr_for_slot(
     let mut lowered_expr =
         apply_call_target_with_lower_context(&target, lowered_receiver, rust_args, ctx);
     if slot_expr_needs_result_propagation(expr, env, ctx) {
-        lowered_expr = propagate_result_expr(lowered_expr);
+        lowered_expr = propagate_result_projection(lowered_expr);
     }
     Some(crate::coercion::LoweredExpr {
         expr: lowered_expr,
@@ -18037,7 +18035,7 @@ fn lower_external_call_expr_for_slot(
         ctx.current_type,
     ) || slot_expr_needs_result_propagation(expr, env, ctx)
     {
-        lowered_expr = propagate_result_expr(lowered_expr);
+        lowered_expr = propagate_result_projection(lowered_expr);
     }
     actual = external_call_actual_for_matching_generic_slot(actual, slot);
     Some(crate::coercion::LoweredExpr {

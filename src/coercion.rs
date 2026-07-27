@@ -817,6 +817,13 @@ pub fn force_shared_borrow_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("&{}", emit::emit_expr(&expr)))
 }
 
+pub fn propagate_result_projection(expr: RustExpr) -> RustExpr {
+    if matches!(&expr, RustExpr::Raw(raw) if raw.trim_end().ends_with('?')) {
+        return expr;
+    }
+    RustExpr::Raw(format!("{}?", emit::emit_expr(&expr)))
+}
+
 pub fn self_associated_path_projection(member: &str) -> RustExpr {
     RustExpr::Raw(format!("Self::{member}"))
 }
@@ -827,6 +834,10 @@ pub fn owner_associated_path_projection(owner: &str, member: &str) -> RustExpr {
 
 pub fn java_class_static_path_projection(member: &str) -> RustExpr {
     RustExpr::Raw(format!("JavaClass::<()>::{member}"))
+}
+
+pub fn java_class_literal_path_projection(rust_type: &str) -> RustExpr {
+    RustExpr::Raw(format!("JavaClass::<{rust_type}>::literal"))
 }
 
 pub fn external_crate_path_projection(crate_name: &str, member: &str) -> RustExpr {

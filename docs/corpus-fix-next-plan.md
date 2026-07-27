@@ -37,6 +37,9 @@ Checkpoint policy: the user has granted permission to create git commits in
 their name at good checkpoints. Use this after coherent batches with meaningful
 verification, so larger edits have clean rollback points. Commit messages should
 name the completed slice and avoid bundling unrelated working-tree changes.
+This permission is explicit for the current batched mode: commit after green
+checkpoints when that helps make larger refactors tractable, while keeping
+unrelated user or generated files out of the commit.
 
 ## Top Design Priority: Infer Rust Facade ABI Slots
 
@@ -185,6 +188,16 @@ instead of formatting `self.clone()/* TODO(...) */` or
 `expr.clone()/* TODO(...) */` in `lower.rs`. Lowering still decides when a Java
 self/field value crosses an owned facade boundary, but the Rust clone spelling
 and audit marker live with the shared clone recovery policy.
+Class-literal projection follow-up: `call_lowering.rs` no longer formats
+`JavaClass::<T>::literal` directly. The spelling lives in
+`coercion::java_class_literal_path_projection`, beside the other shared
+call/member path projections, while class-literal planning still selects the
+Java name and Rust token type from facts.
+Result-propagation projection follow-up: `lower.rs` no longer imports
+fallible-call `?` wrapping from call lowering. The generic rendered Rust
+projection now lives in `coercion::propagate_result_projection`, keeping
+result-shape spelling with slot/projection helpers while call planning remains
+responsible for deciding when propagation is required.
 
 Landed optional-carrier follow-up: raw-erasure casts into optional targets now
 route through `lower_present_expr_for_optional_target`, so typed optional
