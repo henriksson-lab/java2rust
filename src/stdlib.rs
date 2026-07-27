@@ -1491,6 +1491,13 @@ fn jdk_result_static_abi(
 }
 
 fn add_jdk_platform_stream_facts(facts: &mut FactSet) {
+    for owner in ["java.util.zip.GZIPInputStream", "GZIPInputStream"] {
+        facts.external_field_facts.push(jdk_static_final_field_fact(
+            owner,
+            "GZIP_MAGIC",
+            JavaType::Primitive(PrimitiveType::Int),
+        ));
+    }
     for owner in [
         "java.io.FilterInputStream",
         "java.util.zip.InflaterInputStream",

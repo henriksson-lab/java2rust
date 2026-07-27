@@ -5506,6 +5506,94 @@ class BufferPutUse {
 }
 
 #[test]
+fn byte_values_widen_for_jdk_output_stream_and_bitwise_int_arithmetic() {
+    let translation = translate_source(
+        r#"
+import java.io.OutputStream;
+
+class ByteIntWidenUse {
+    static final byte NEW_LINE = 10;
+
+    static void writeLine(OutputStream out) throws java.io.IOException {
+        out.write(NEW_LINE);
+    }
+
+    static int head(byte[] bytes) {
+        return bytes[0] & 255 | ((bytes[1] << 8) & 65280);
+    }
+
+    static int nullableHead(byte[] input) {
+        byte[] bytes = null;
+        bytes = input;
+        if (bytes != null && bytes.length >= 2) {
+            return ((int)bytes[0] & 0xff) | ((bytes[1] << 8) & 0xff00);
+        }
+        return 0;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("out.write_int(Self::NEW_LINE as i32)?;")
+            && translation.rust.contains("bytes[0 as usize] as i32 & 255")
+            && translation.rust.contains("(bytes[1 as usize] as i32) << 8")
+            && translation
+                .rust
+                .contains("bytes.as_ref().expect(\"Java null receiver\")[0 as usize] as i32 & 255")
+            && !translation.rust.contains("i8 | i32")
+            && !translation.rust.contains("Self::NEW_LINE)?"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "byte_values_widen_for_jdk_output_stream_and_bitwise_int_arithmetic",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn fully_qualified_jdk_static_constant_lowers_through_external_field_fact() {
+    let translation = translate_source(
+        r#"
+class FullyQualifiedJdkStaticConstantUse {
+    static boolean isGzip(int head) {
+        return java.util.zip.GZIPInputStream.GZIP_MAGIC == head;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub const GZIP_MAGIC: i32 = 0;")
+            && translation
+                .rust
+                .contains("return GZIPInputStream::GZIP_MAGIC == head;")
+            && !translation
+                .rust
+                .contains("java.util.zip.GZIPInputStream.GZIP_MAGIC"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "fully_qualified_jdk_static_constant_lowers_through_external_field_fact",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn field_map_put_reused_key_clones_at_owned_boundary() {
     let translation = translate_source(&idiom_gap("FieldMapPutKeyReuse.java"));
 

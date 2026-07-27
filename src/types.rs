@@ -700,7 +700,7 @@ fn infer_binary_type(op: BinaryOp, left: &Expr, right: &Expr, env: &TypeEnv) -> 
         BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
             integral_binary_type(&infer_expr_type(left, env), &infer_expr_type(right, env))
         }
-        BinaryOp::Shl | BinaryOp::Shr => infer_expr_type(left, env),
+        BinaryOp::Shl | BinaryOp::Shr => shift_binary_type(&infer_expr_type(left, env)),
         _ => numeric_binary_type(&infer_expr_type(left, env), &infer_expr_type(right, env)),
     }
 }
@@ -731,6 +731,15 @@ fn integral_binary_type(left: &JavaType, right: &JavaType) -> JavaType {
         JavaType::Primitive(Long)
     } else {
         JavaType::Primitive(Int)
+    }
+}
+
+fn shift_binary_type(left: &JavaType) -> JavaType {
+    use PrimitiveType::*;
+    match left {
+        JavaType::Primitive(Long) => JavaType::Primitive(Long),
+        JavaType::Primitive(Byte | Short | Char | Int) => JavaType::Primitive(Int),
+        other => other.clone(),
     }
 }
 

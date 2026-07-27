@@ -7,7 +7,7 @@ use crate::facts::{
     AccessorInlinePolicy, CallableKey, ExternalApiArgumentEffectFact, ExternalApiRole,
     ExternalArgumentAliasPolicy, ExternalFactLookupIndex, ExternalLibraryMode, FacadeAbiFact,
     FacadeSlot, FactProvenance, FactSet, HierarchyStrategy, NullabilityState, ReceiverAbi,
-    ReceiverMutabilityFact, ResultAbi, Staticness, TrivialAccessorKind,
+    ReceiverMutabilityFact, ResultAbi, Staticness, TrivialAccessorKind, TypePattern,
     external_parameter_nullability_policy,
 };
 use crate::java_ir::{
@@ -3603,23 +3603,25 @@ pub fn plan_call_arguments_with_facts_and_args(
 ) -> ArgumentLoweringPlan {
     let arg_count = args.len();
     if let Some(call) = resolved {
+        if let Some(plan) =
+            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, Some(args), facts, types)
+        {
+            return plan;
+        }
         if let Some(shapes) = external_call_arg_shapes_for_resolved(call, name, arg_count, facts) {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
         if let Some(shapes) = external_call_arg_shapes(receiver, name, arg_count, facts, types) {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
-        if let Some(plan) =
-            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, Some(args), facts, types)
-        {
-            return plan;
-        }
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
     }
 
-    external_call_arg_shapes(receiver, name, arg_count, facts, types)
-        .map(ArgumentLoweringPlan::Shaped)
-        .or_else(|| facade_abi_call_arg_plan(receiver, name, arg_count, Some(args), facts, types))
+    facade_abi_call_arg_plan(receiver, name, arg_count, Some(args), facts, types)
+        .or_else(|| {
+            external_call_arg_shapes(receiver, name, arg_count, facts, types)
+                .map(ArgumentLoweringPlan::Shaped)
+        })
         .or_else(|| {
             native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
                 .map(ArgumentLoweringPlan::Shaped)
@@ -3823,7 +3825,9 @@ fn facade_abi_call_arg_plan(
     );
     let abi = if let Some(args) = args {
         let arg_types = inferred_argument_java_types(args, types);
-        facts.facade_abi_for_call(&key, &arg_types)
+        facts
+            .facade_abi_for_call(&key, &arg_types)
+            .or_else(|| unresolved_primitive_facade_abi_fallback(facts, &key, &arg_types))
     } else {
         facts.facade_abi_for_key(&key)
     }?;
@@ -3864,12 +3868,73 @@ fn facade_abi_call_arg_plan_for_resolved(
         facts
             .facade_abi_for_call(&key, &arg_types)
             .or_else(|| facts.facade_abi_for_call(&source_key, &arg_types))
+            .or_else(|| unresolved_primitive_facade_abi_fallback(facts, &key, &arg_types))
+            .or_else(|| unresolved_primitive_facade_abi_fallback(facts, &source_key, &arg_types))
     } else {
         facts
             .facade_abi_for_key(&key)
             .or_else(|| facts.facade_abi_for_key(&source_key))
     };
     abi.and_then(|abi| facade_abi_argument_lowering_plan(abi, arg_count, args, types, None, facts))
+}
+
+pub fn facade_abi_argument_plan_for_rust_path(
+    rust_path: &str,
+    arg_count: usize,
+    args: Option<&[Expr]>,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<ArgumentLoweringPlan> {
+    facts
+        .facade_abi_facts
+        .iter()
+        .rev()
+        .find(|abi| abi.rust_path == rust_path && abi.args.len() == arg_count)
+        .and_then(|abi| facade_abi_argument_lowering_plan(abi, arg_count, args, types, None, facts))
+}
+
+pub fn facade_abi_argument_plan_for_rust_method_name(
+    rust_method: &str,
+    arg_count: usize,
+    args: Option<&[Expr]>,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<ArgumentLoweringPlan> {
+    facts
+        .facade_abi_facts
+        .iter()
+        .rev()
+        .find(|abi| {
+            abi.args.len() == arg_count
+                && abi.rust_path.rsplit("::").next().unwrap_or(&abi.rust_path) == rust_method
+        })
+        .and_then(|abi| facade_abi_argument_lowering_plan(abi, arg_count, args, types, None, facts))
+}
+
+fn unresolved_primitive_facade_abi_fallback<'a>(
+    facts: &'a FactSet,
+    key: &CallableKey,
+    arg_types: &[JavaType],
+) -> Option<&'a FacadeAbiFact> {
+    if arg_types.len() != 1 || !matches!(arg_types.first(), Some(JavaType::Unknown(_))) {
+        return None;
+    }
+    facts.facade_abi_facts.iter().rev().find(|fact| {
+        external_method_receiver_matches(&fact.key.owner.type_name, &key.owner.type_name)
+            && fact.key.member == key.member
+            && fact.key.kind == key.kind
+            && (fact.key.staticness == key.staticness
+                || fact.key.staticness == Staticness::Unknown
+                || key.staticness == Staticness::Unknown)
+            && fact.key.arity == key.arity
+            && fact.args.len() == 1
+            && fact.rust_path.rsplit("::").next() == Some("write_int")
+            && matches!(
+                fact.key.params.as_slice(),
+                [TypePattern::Exact(type_key)]
+                    if matches!(type_key.type_name.as_str(), "byte" | "short" | "char" | "int")
+            )
+    })
 }
 
 fn facade_abi_for_receiver_call<'a>(

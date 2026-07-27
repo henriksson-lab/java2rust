@@ -83,6 +83,8 @@ pub fn plan_numeric_binary_promotion(
             | BinaryOp::BitAnd
             | BinaryOp::BitOr
             | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
             | BinaryOp::Eq
             | BinaryOp::Ne
             | BinaryOp::Lt
@@ -99,6 +101,15 @@ pub fn plan_numeric_binary_promotion(
         || !crate::types::is_numeric_primitive_type(*right)
     {
         return None;
+    }
+    if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+        let promoted_left = shift_left_promoted_primitive(*left);
+        let promoted_right = shift_right_promoted_primitive(*right);
+        return Some(NumericBinaryPromotionPlan {
+            promoted: promoted_left,
+            left: primitive_operand_coercions(*left, promoted_left),
+            right: primitive_operand_coercions(*right, promoted_right),
+        });
     }
     let promoted = promoted_numeric_primitive(op, *left, *right);
     Some(NumericBinaryPromotionPlan {
@@ -146,6 +157,20 @@ fn promoted_numeric_primitive(
         4 => Float,
         3 => Long,
         _ => Int,
+    }
+}
+
+fn shift_left_promoted_primitive(primitive: PrimitiveType) -> PrimitiveType {
+    use PrimitiveType::*;
+    if matches!(primitive, Long) { Long } else { Int }
+}
+
+fn shift_right_promoted_primitive(primitive: PrimitiveType) -> PrimitiveType {
+    use PrimitiveType::*;
+    if matches!(primitive, Byte | Short | Char) {
+        Int
+    } else {
+        primitive
     }
 }
 
