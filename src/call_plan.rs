@@ -3365,6 +3365,9 @@ pub fn plan_call_arguments_with_facts(
         if let Some(shapes) = external_call_arg_shapes_for_resolved(call, name, arg_count, facts) {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
+        if let Some(shapes) = external_call_arg_shapes(receiver, name, arg_count, facts, types) {
+            return ArgumentLoweringPlan::Shaped(shapes);
+        }
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
     }
 
@@ -3397,6 +3400,9 @@ pub fn plan_call_arguments_with_facts_and_args(
             return plan;
         }
         if let Some(shapes) = external_call_arg_shapes_for_resolved(call, name, arg_count, facts) {
+            return ArgumentLoweringPlan::Shaped(shapes);
+        }
+        if let Some(shapes) = external_call_arg_shapes(receiver, name, arg_count, facts, types) {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
@@ -3807,7 +3813,7 @@ fn facade_slot_contains_mut_borrow(slot: &FacadeSlot) -> bool {
     }
 }
 
-fn external_call_arg_shapes_for_resolved(
+pub(crate) fn external_call_arg_shapes_for_resolved(
     call: &ResolvedCall,
     source_name: &str,
     arg_count: usize,

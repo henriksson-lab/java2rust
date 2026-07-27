@@ -32947,8 +32947,7 @@ fn stream_plan_lowers_arrays_stream_to_array_and_all_match_terminals() {
     assert_eq!(
         to_array_lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value: &String| value.len() as i32).collect::<Vec<_>>()"
-                .to_string()
+            "values.iter().map(|value| value.len() as i32).collect::<Vec<_>>()".to_string()
         )
     );
 
@@ -33011,8 +33010,7 @@ fn stream_plan_lowers_method_references_in_map_and_map_to_int() {
     assert_eq!(
         names_lowered.expr,
         RustExpr::Raw(
-            "names.iter().map(|value: &String| (*value).to_string()).collect::<Vec<_>>()"
-                .to_string()
+            "names.iter().map(|value| (*value).to_string()).collect::<Vec<_>>()".to_string()
         )
     );
 }
@@ -33473,7 +33471,7 @@ fn stream_plan_lowers_flat_map_block_temporary_collection_as_owned_subpipeline()
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "partitions.iter().flat_map(|partition| { let bounds = OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace.as_ref().expect(\"Java null receiver\").as_str(), partition.as_str()); let names = Default::default(); names.into_iter().filter(move |name| (name.len() as i32) >= bounds[0 as usize]).map(|name: &String| name.trim()) }).collect::<Vec<_>>()"
+            "partitions.iter().flat_map(|partition| { let bounds = OrgGenomicsdbGenomicsDBUtils::get_array_column_bounds(self.workspace.as_ref().expect(\"Java null receiver\").as_str(), partition.as_str()); let names = Default::default(); names.into_iter().filter(move |name| (name.len() as i32) >= bounds[0 as usize]).map(|name| name.trim()) }).collect::<Vec<_>>()"
                 .to_string()
         )
     );
@@ -33571,7 +33569,7 @@ fn stream_plan_unwraps_optional_sequence_sources_before_iteration() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.as_ref().unwrap().iter().map(|value: &String| value.trim()).collect::<Vec<_>>()"
+            "values.as_ref().unwrap().iter().map(|value| value.trim()).collect::<Vec<_>>()"
                 .to_string()
         )
     );
@@ -33629,7 +33627,7 @@ fn stream_plan_fuses_nullable_map_with_non_null_filter_shape() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value: &String| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"
+            "values.iter().map(|value| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"
                 .to_string()
         )
     );
@@ -33666,7 +33664,7 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value: &String| { let pieces = java_string_split(value.as_str(), \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
+            "values.iter().map(|value| { let pieces = java_string_split(value.as_str(), \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
                 .to_string()
         )
     );
@@ -33729,7 +33727,7 @@ fn stream_lambda_string_char_at_uses_signature_index_slot() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value: &String| value.chars().nth((index) as usize).expect(\"Java string index out of bounds\")).collect::<Vec<_>>()"
+            "values.iter().map(|value| value.chars().nth((index) as usize).expect(\"Java string index out of bounds\")).collect::<Vec<_>>()"
                 .to_string()
         )
     );

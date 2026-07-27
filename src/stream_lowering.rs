@@ -2043,19 +2043,14 @@ fn emit_stream_lambda_call_args_for_resolved(
             .enumerate()
             .zip(default_args)
             .map(|((index, arg), rendered)| {
-                resolved
-                    .and_then(|resolved| {
-                        resolved
-                            .arg_coercions
-                            .iter()
-                            .find(|coercion| coercion.arg_index == index)
-                    })
-                    .map(|coercion| {
-                        let slot = storage_shape_for_java_type(coercion.target.clone());
+                source_signature
+                    .as_ref()
+                    .and_then(|(_, signature)| signature.params.get(index))
+                    .map(|param_plan| {
                         adapt_stream_lambda_arg_for_slot(
                             arg,
                             rendered.clone(),
-                            &slot,
+                            &param_plan.shape,
                             param,
                             locals,
                             ctx,
@@ -2063,14 +2058,42 @@ fn emit_stream_lambda_call_args_for_resolved(
                         )
                     })
                     .or_else(|| {
-                        source_signature
-                            .as_ref()
-                            .and_then(|(_, signature)| signature.params.get(index))
-                            .map(|param_plan| {
+                        resolved
+                            .and_then(|resolved| {
+                                crate::call_plan::external_call_arg_shapes_for_resolved(
+                                    resolved,
+                                    name,
+                                    args.len(),
+                                    ctx.facts.unwrap_or(&FactSet::default()),
+                                )
+                            })
+                            .and_then(|shapes| shapes.get(index).cloned())
+                            .map(|slot| {
                                 adapt_stream_lambda_arg_for_slot(
                                     arg,
                                     rendered.clone(),
-                                    &param_plan.shape,
+                                    &slot,
+                                    param,
+                                    locals,
+                                    ctx,
+                                    param_shape,
+                                )
+                            })
+                    })
+                    .or_else(|| {
+                        resolved
+                            .and_then(|resolved| {
+                                resolved
+                                    .arg_coercions
+                                    .iter()
+                                    .find(|coercion| coercion.arg_index == index)
+                            })
+                            .map(|coercion| {
+                                let slot = storage_shape_for_java_type(coercion.target.clone());
+                                adapt_stream_lambda_arg_for_slot(
+                                    arg,
+                                    rendered.clone(),
+                                    &slot,
                                     param,
                                     locals,
                                     ctx,

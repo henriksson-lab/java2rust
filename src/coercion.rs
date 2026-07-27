@@ -2838,6 +2838,15 @@ pub fn rendered_expr_is_already_string_view(rendered: &str) -> bool {
         || trimmed.starts_with("r\"")
 }
 
+fn simple_deref_projection_source(rendered: &str) -> Option<&str> {
+    let source = rendered.trim().strip_prefix('*')?;
+    (!source.is_empty()
+        && source
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
+    .then_some(source)
+}
+
 pub fn apply_instanceof_check(
     expr: RustExpr,
     actual: &RustSlotShape,
@@ -3315,7 +3324,14 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         Coercion::OptionalToJavaDisplayValue => {
             apply_java_display_plan(expr, JavaDisplayPlan::OptionalValue)
         }
-        Coercion::AsStr => RustExpr::Raw(format!("{}.as_str()", emit::emit_expr(&expr))),
+        Coercion::AsStr => {
+            let rendered = emit::emit_expr(&expr);
+            if let Some(borrowed_item) = simple_deref_projection_source(&rendered) {
+                RustExpr::Raw(format!("{borrowed_item}.as_str()"))
+            } else {
+                RustExpr::Raw(format!("{rendered}.as_str()"))
+            }
+        }
         Coercion::ToOwnedString => {
             let rendered = emit::emit_expr(&expr);
             if rendered.ends_with(".to_string()") {
@@ -3424,7 +3440,14 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         )),
         Coercion::Borrow => RustExpr::Raw(format!("&{}", emit::emit_expr(&expr))),
         Coercion::BorrowMut => RustExpr::Raw(format!("&mut {}", emit::emit_expr(&expr))),
-        Coercion::CopyBorrowedValue => RustExpr::Raw(format!("*{}", emit::emit_expr(&expr))),
+        Coercion::CopyBorrowedValue => {
+            let rendered = emit::emit_expr(&expr);
+            if rendered_expr_is_already_string_view(&rendered) {
+                RustExpr::Raw(rendered)
+            } else {
+                RustExpr::Raw(format!("*{rendered}"))
+            }
+        }
         Coercion::CloneErasedObject { sequence } => {
             let helper = if *sequence {
                 "java_clone_erased_object_vec_ref"
@@ -3768,6 +3791,12 @@ mod tests {
             render_string_view_argument(RustExpr::Raw("value.as_str()".to_string())),
             "value.as_str()"
         );
+    }
+
+    #[test]
+    fn as_str_coercion_removes_simple_borrowed_item_deref() {
+        let expr = apply_coercions(RustExpr::Raw("*partition".to_string()), &[Coercion::AsStr]);
+        assert_eq!(emit::emit_expr(&expr), "partition.as_str()");
     }
 
     #[test]

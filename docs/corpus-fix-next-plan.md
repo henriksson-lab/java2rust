@@ -4283,6 +4283,15 @@ support-enriched program passed to `plan_program_exceptions`. The
 exception-lowering unit fixture also avoids naming `RuntimeException` directly
 so the design guard continues to prove that runtime exception classification
 does not live in the renderer.
+Stream external-argument follow-up: receiverless/resolved stream call argument
+adaptation now checks resolved external argument facts before falling back to
+Java resolver coercions, and resolved calls in `call_plan` also try
+receiver-expression external argument facts before using resolver coercion
+shapes. Ordinary Java string stream lambdas continue to omit explicit `&String`
+annotations and rely on Rust inference. A shared `coercion::AsStr` projection
+guard strips the simple borrowed-item spelling (`*value`) before appending
+`.as_str()`, preventing invalid stream outputs such as `*partition.as_str()`
+without adding string-view heuristics back to `stream_lowering.rs`.
 
 ## Rerun Protocol
 
