@@ -7,8 +7,9 @@ use crate::java_ir::{Expr, JavaType, Member, MethodDecl, Modifier, Stmt, TypeDec
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
     borrowed_string_content_shape, indexed_assignment_shape_with_facts,
-    indexed_read_shape_with_facts, shape_is_erased_object_boundary,
+    indexed_read_shape_with_facts,
     project_java_value_shape as project_java_value_shape_with_representations,
+    shape_is_erased_object_boundary,
 };
 use crate::signature::{
     ConstructorSignaturePlan, LocalPlan, MethodSignaturePlan, ParamPlan, SignaturePlan,

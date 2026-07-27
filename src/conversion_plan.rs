@@ -768,6 +768,7 @@ pub enum LoweredType {
     OptionalElementBorrow {
         option_shape: Box<RustSlotShape>,
         element_shape: Box<RustSlotShape>,
+        recovery: Option<RustBorrowedFacadeReturnRecovery>,
     },
     VecElementBorrow {
         vec_shape: Box<RustSlotShape>,
@@ -822,6 +823,7 @@ impl LoweredType {
         Self::OptionalElementBorrow {
             option_shape: Box::new(option_shape),
             element_shape: Box::new(element_shape),
+            recovery: None,
         }
     }
 
@@ -840,7 +842,22 @@ impl LoweredType {
         Some(Self::OptionalElementBorrow {
             option_shape: Box::new(option_shape),
             element_shape: Box::new(element_shape),
+            recovery: None,
         })
+    }
+
+    pub fn optional_rust_borrowed_return(
+        element_ty: JavaType,
+        recovery: Option<RustBorrowedFacadeReturnRecovery>,
+    ) -> Self {
+        let element_shape = borrowed_sequence_element_shape(element_ty);
+        let option_shape =
+            RustSlotShape::conservative(optional_java_type(element_shape.java_ty.clone()));
+        Self::OptionalElementBorrow {
+            option_shape: Box::new(option_shape),
+            element_shape: Box::new(element_shape),
+            recovery,
+        }
     }
 
     pub fn vec_element_borrow(element_shape: RustSlotShape) -> Self {
@@ -3076,6 +3093,7 @@ pub fn lowered_slot_conversion_plan_with_facts(
             LoweredType::OptionalElementBorrow {
                 option_shape,
                 element_shape,
+                recovery,
             },
             Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
         ) => {
@@ -3085,7 +3103,7 @@ pub fn lowered_slot_conversion_plan_with_facts(
                         rust_type_name: rust_type_name_for_shape(element_shape),
                         java_semantic_shape: (**element_shape).clone(),
                         target: target.clone(),
-                        recovery: RustBorrowedFacadeReturnRecovery::Clone,
+                        recovery: recovery.unwrap_or(RustBorrowedFacadeReturnRecovery::Clone),
                     },
                 )
             } else {

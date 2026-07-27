@@ -172,6 +172,10 @@ Box<dyn std::any::Any>)` instead of first collapsing to `Option<T>`. Declared
 `Object` locals preserve optional erased carriers when nullable facade getters
 return concrete borrowed values, and optional erased-object carriers are treated
 as erased boundaries by the shared shape predicate.
+Optional borrowed-return recovery follow-up: optional borrowed facade returns
+now carry the same explicit borrowed-return recovery policy as required borrowed
+returns, so manifests can choose `clone` versus `to-path-buf` for
+`Option<&T>` without relying on rendered Rust type-name fallback checks.
 
 Rendered compatibility centralization follow-up: same-call alias snapshots still
 decide in `lower.rs` because they need argument aliasing and slot-shape context,

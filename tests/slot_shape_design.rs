@@ -25,7 +25,7 @@ use new_java2rust::call_plan::{
 };
 use new_java2rust::coercion::{
     Coercion, OptionalReceiverProjection, RenderedMutableAliasProjection,
-    borrowed_string_literal_temporary_plan, project_optional_receiver,
+    apply_slot_conversion_plan, borrowed_string_literal_temporary_plan, project_optional_receiver,
     rendered_expr_is_mutable_alias, rendered_mutable_alias_projection,
 };
 use new_java2rust::constructor_plan::{
@@ -27551,6 +27551,73 @@ fn facade_abi_fact_owns_borrowed_return_recovery_policy() {
         SlotConversionPlan::RustBorrowedFacadeReturn(policy)
             if policy.recovery == RustBorrowedFacadeReturnRecovery::ToPathBuf
     ));
+}
+
+#[test]
+fn optional_facade_abi_fact_owns_borrowed_return_recovery_policy() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "getFile".to_string(),
+        receiver_type: Some("HDF5File".to_string()),
+        arg_count: Some(0),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Named {
+            name: "File".to_string(),
+            args: Vec::new(),
+        }),
+        return_nullability: NullabilityState::MaybeNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method("HDF5File", "getFile", Staticness::Unknown, 0),
+        rust_path: "hdf5_facade::get_file".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: Vec::new(),
+        return_slot: FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed)),
+        result: ResultAbi::OptionWrapped,
+        borrow_source: Some(new_java2rust::facts::BorrowSource::Receiver),
+        borrowed_return_recovery: Some(BorrowedReturnRecovery::ToPathBuf),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    let mut types = TypeEnv::new();
+    types.insert_local(
+        "reader",
+        JavaType::Named {
+            name: "HDF5File".to_string(),
+            args: Vec::new(),
+        },
+    );
+    let lowered = external_call_lowered_type(
+        Some(&Expr::Var("reader".to_string())),
+        "getFile",
+        0,
+        &facts,
+        &types,
+        Some("Owner"),
+    )
+    .expect("facade ABI should select an optional borrowed return shape");
+
+    let mut erased_target = RustSlotShape::conservative(optional_java_type(JavaType::Named {
+        name: "Object".to_string(),
+        args: Vec::new(),
+    }));
+    erased_target.dispatch = DispatchShape::ErasedObject;
+    let plan = plan_lowered_slot_conversion(&lowered, Slot::Return(erased_target), &facts);
+
+    assert!(matches!(
+        plan.conversion,
+        SlotConversionPlan::OptionalRustBorrowedFacadeReturn(ref policy)
+            if policy.recovery == RustBorrowedFacadeReturnRecovery::ToPathBuf
+    ));
+    assert_eq!(
+        apply_slot_conversion_plan(RustExpr::Raw("reader.get_file()".to_string()), &plan.conversion),
+        RustExpr::Raw(
+            "reader.get_file().map(|value| Box::new(value.to_path_buf()) as Box<dyn std::any::Any>)"
+                .to_string()
+        )
+    );
 }
 
 #[test]

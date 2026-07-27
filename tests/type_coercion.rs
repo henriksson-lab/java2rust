@@ -1337,6 +1337,7 @@ fn borrowed_whole_optional_string_recovery_uses_borrowed_carrier_policy() {
     let actual = LoweredType::OptionalElementBorrow {
         option_shape: Box::new(option_shape),
         element_shape: Box::new(element_shape),
+        recovery: None,
     };
 
     let plan = lowered_slot_conversion_plan_with_facts(
@@ -1381,6 +1382,7 @@ fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy()
         &LoweredType::OptionalElementBorrow {
             option_shape: Box::new(option_shape.clone()),
             element_shape: Box::new(element_shape.clone()),
+            recovery: None,
         },
         &Slot::Argument(target.clone()),
         &FactSet::default(),
@@ -1421,6 +1423,7 @@ fn optional_array_carrier_to_required_slice_target_borrows_before_unwrap() {
         &LoweredType::OptionalElementBorrow {
             option_shape: Box::new(option_shape),
             element_shape: Box::new(element_shape),
+            recovery: None,
         },
         &Slot::Argument(target),
         &FactSet::default(),
@@ -1443,6 +1446,7 @@ fn lowered_slot_conversion_plan_records_borrowed_element_adapter_before_renderin
     let LoweredType::OptionalElementBorrow {
         option_shape,
         element_shape,
+        ..
     } = &actual
     else {
         panic!("expected optional element borrow");
@@ -4542,6 +4546,7 @@ fn optional_borrowed_element_adapter_unwraps_to_concrete_copy_target() {
         &LoweredType::OptionalElementBorrow {
             option_shape: Box::new(option_shape.clone()),
             element_shape: Box::new(element_shape.clone()),
+            recovery: None,
         },
         &Slot::Assignment(target.clone()),
         &FactSet::default(),
@@ -4595,6 +4600,7 @@ fn optional_borrowed_concrete_element_unwraps_to_dyn_trait_target() {
         &LoweredType::OptionalElementBorrow {
             option_shape: Box::new(option_shape.clone()),
             element_shape: Box::new(element_shape.clone()),
+            recovery: None,
         },
         &Slot::Argument(target.clone()),
         &facts,
@@ -4645,6 +4651,7 @@ fn optional_borrowed_concrete_element_unwraps_to_concrete_facade_target() {
         &LoweredType::OptionalElementBorrow {
             option_shape: Box::new(option_shape),
             element_shape: Box::new(element_shape),
+            recovery: None,
         },
         &Slot::Argument(target),
         &facts,

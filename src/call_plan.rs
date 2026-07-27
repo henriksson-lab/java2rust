@@ -574,8 +574,9 @@ pub fn external_call_lowered_type_with_external_index(
         )
         && !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void)
     {
-        return Some(LoweredType::optional_element_borrow_shape(
-            borrowed_sequence_element_shape(return_ty),
+        return Some(LoweredType::optional_rust_borrowed_return(
+            return_ty,
+            rust_return_type.and_then(|fact| fact.borrowed_return_recovery.map(Into::into)),
         ));
     }
 
@@ -707,8 +708,9 @@ fn lowered_type_for_facade_abi(abi: &FacadeAbiFact, return_ty: &JavaType) -> Opt
         || matches!(abi.return_slot, FacadeSlot::Optional(_));
 
     if returns_optional && matches!(unwrapped_slot, FacadeSlot::Borrowed) {
-        return Some(LoweredType::optional_element_borrow_shape(
-            borrowed_sequence_element_shape(return_ty.clone()),
+        return Some(LoweredType::optional_rust_borrowed_return(
+            return_ty.clone(),
+            abi.borrowed_return_recovery.map(Into::into),
         ));
     }
 
