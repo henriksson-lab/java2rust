@@ -4095,6 +4095,12 @@ lambda parameter shape, the final fallback body path now calls
 This gives stream method references the same facade ABI callback support as
 ordinary typed callbacks while preserving the older unshaped fallback for
 callers that still lack fact/slot context.
+Latest stream receiver-proof follow-up: the stream call-plan method-reference
+path now asks `method_reference_receiver_type_for_call_plan_with_facts`, so
+receiver identity can come from the same facade/API facts used by ordinary
+method-reference output-shape inference. Focused coverage:
+`stream_method_reference_uses_facade_abi_receiver_facts` and
+`method_reference_plan_owns_generic_function_adapter_shapes`.
 External fact alias follow-up: `ExternalFactLookupIndex` now builds and probes
 method-name aliases through `java_naming::java_method_name_aliases`, so external
 API effects and method-reference callable-key probes share the same explicit

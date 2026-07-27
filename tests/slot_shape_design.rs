@@ -31692,7 +31692,12 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(!stream_lowering_source.contains("format!(\"*{param}\")"));
     assert!(!stream_lowering_source.contains("format!(\"(**{param})\")"));
     assert!(!stream_lowering_source.contains("format!(\"(*{param})\")"));
-    assert!(stream_lowering_source.contains("method_reference_receiver_type_for_call_plan"));
+    assert!(
+        stream_lowering_source.contains("method_reference_receiver_type_for_call_plan_with_facts")
+    );
+    assert!(!stream_lowering_source.contains(
+        "use crate::method_reference_shape::method_reference_receiver_type_for_call_plan;"
+    ));
     assert!(!stream_lowering_source.contains("object_method_reference_receiver_type"));
     assert!(!stream_lowering_source.contains("fn object_method_reference_receiver_type"));
     assert!(!stream_lowering_source.contains("fn java_type_for_unbound_method_reference_target"));
@@ -32625,6 +32630,60 @@ fn stream_plan_lowers_method_references_in_map_and_map_to_int() {
         names_lowered.expr,
         RustExpr::Raw(
             "names.iter().map(|value: &String| (*value).to_string()).collect::<Vec<_>>()"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn stream_method_reference_uses_facade_abi_receiver_facts() {
+    let mut env = TypeEnv::new();
+    env.insert_local(
+        "values",
+        list_java_type(JavaType::Named {
+            name: "FacadeValue".to_string(),
+            args: Vec::new(),
+        }),
+    );
+    let mut shape_env = ShapeEnv::new();
+    shape_env.insert_local_shape(
+        "values",
+        RustSlotShape::conservative(list_java_type(JavaType::Named {
+            name: "FacadeValue".to_string(),
+            args: Vec::new(),
+        })),
+    );
+    let mut facts = FactSet::default();
+    facts.facade_abi_facts.push(FacadeAbiFact {
+        key: CallableKey::method(
+            "FacadeValue".to_string(),
+            "label".to_string(),
+            Staticness::Unknown,
+            0,
+        ),
+        rust_path: "FacadeValueFacade::label_text".to_string(),
+        receiver: ReceiverAbi::BorrowedSelf,
+        args: Vec::new(),
+        return_slot: FacadeSlot::Owned,
+        result: ResultAbi::Plain,
+        borrow_source: None,
+        borrowed_return_recovery: None,
+        provenance: FactProvenance::UserOverride,
+    });
+    let expr = parse_expr("values.stream().map(FacadeValue::label).collect(Collectors.toList())");
+
+    let plan = build_stream_plan(&expr, &env, &facts).unwrap();
+    let lowered = render_stream_plan_with_context(
+        &plan,
+        RustExpr::Var("values".to_string()),
+        StreamRenderContext::new_with_facts(&shape_env, &facts),
+    )
+    .unwrap();
+
+    assert_eq!(
+        lowered.expr,
+        RustExpr::Raw(
+            "values.iter().map(|value: &FacadeValue| (*value).label_text()).collect::<Vec<_>>()"
                 .to_string()
         )
     );
