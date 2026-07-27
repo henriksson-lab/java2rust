@@ -4323,6 +4323,15 @@ the associated-constant path, preserving crate-qualified owners such as
 `hdf5_facade::OpenMode::CREATE`. Static logger fields are retargeted back to
 the shared `logger` facade after the general field-receiver retarget, preventing
 `Self::logger.info(...)` from bypassing logger facade calls.
+Full design rerun after the external field/logger checkpoint reached 485 passed
+/ 24 failed in 340.91s. Remaining failures are now concentrated in:
+external borrowed literal hoisting, boxed-dyn interface field borrowing,
+pack-enabled final facade local shape, result metadata separation, semantic
+ownership guardrails, and the representation/signature structural guard cluster
+for dyn traits and public/API boundary shapes. The earlier external byte-array,
+array adapter, erased-object carrier, nullable owned option, support-field,
+static-field, logger, closed-enum cast, and stream clusters are green in the
+full run.
 
 ## Rerun Protocol
 
