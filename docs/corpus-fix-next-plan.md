@@ -4066,6 +4066,13 @@ System exit ABI follow-up: `java.lang.System.exit(int)` now has a selected
 stdlib `FacadeAbiFact` with an owned/copy status argument. Native lowering still
 owns Java exit semantics and renders `std::process::exit(...)`, but argument
 shape selection no longer depends only on the `System.exit` lowering branch.
+Math static ABI follow-up: fixed-arity `java.lang.Math` statics now have
+selected stdlib `FacadeAbiFact`s for `max`, `min`, `log`, `exp`, and
+`toIntExact` on both simple and fully qualified owners. Native lowering still
+owns Java-specific projections, but numeric argument shape selection is no
+longer tied only to the native static-call branch. Vararg/string formatting
+calls remain separate because their callable-key arity policy needs a deliberate
+design.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,

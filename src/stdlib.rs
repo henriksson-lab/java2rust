@@ -557,30 +557,6 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
             FacadeSlot::Owned,
         ),
         rust_stdlib_static_abi(
-            "Math",
-            "log",
-            1,
-            "f64::ln",
-            vec![FacadeSlot::Owned],
-            FacadeSlot::Owned,
-        ),
-        rust_stdlib_static_abi(
-            "Math",
-            "exp",
-            1,
-            "f64::exp",
-            vec![FacadeSlot::Owned],
-            FacadeSlot::Owned,
-        ),
-        rust_stdlib_static_abi(
-            "Math",
-            "toIntExact",
-            1,
-            "i32::try_from",
-            vec![FacadeSlot::Owned],
-            FacadeSlot::Owned,
-        ),
-        rust_stdlib_static_abi(
             "Double",
             "isNaN",
             1,
@@ -597,6 +573,50 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
             FacadeSlot::Owned,
         ),
     ]);
+    for owner in ["Math", "java.lang.Math"] {
+        facts.facade_abi_facts.extend([
+            rust_stdlib_static_abi(
+                owner,
+                "max",
+                2,
+                "std::cmp::max",
+                vec![FacadeSlot::Owned, FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ),
+            rust_stdlib_static_abi(
+                owner,
+                "min",
+                2,
+                "std::cmp::min",
+                vec![FacadeSlot::Owned, FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ),
+            rust_stdlib_static_abi(
+                owner,
+                "log",
+                1,
+                "f64::ln",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ),
+            rust_stdlib_static_abi(
+                owner,
+                "exp",
+                1,
+                "f64::exp",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ),
+            rust_stdlib_static_abi(
+                owner,
+                "toIntExact",
+                1,
+                "i32::try_from",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ),
+        ]);
+    }
     for owner in ["System", "java.lang.System"] {
         facts.facade_abi_facts.push(rust_stdlib_static_abi(
             owner,

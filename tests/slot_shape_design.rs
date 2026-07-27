@@ -29339,9 +29339,12 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     let parse_int_key = CallableKey::method("Integer", "parseInt", Staticness::Unknown, 1);
     let parse_float_key = CallableKey::method("Float", "parseFloat", Staticness::Unknown, 1);
     let parse_double_key = CallableKey::method("Double", "parseDouble", Staticness::Unknown, 1);
+    let math_max_key = CallableKey::method("Math", "max", Staticness::Unknown, 2);
+    let math_min_key = CallableKey::method("java.lang.Math", "min", Staticness::Unknown, 2);
     let math_log_key = CallableKey::method("Math", "log", Staticness::Unknown, 1);
     let math_exp_key = CallableKey::method("Math", "exp", Staticness::Unknown, 1);
-    let math_to_int_exact_key = CallableKey::method("Math", "toIntExact", Staticness::Unknown, 1);
+    let math_to_int_exact_key =
+        CallableKey::method("java.lang.Math", "toIntExact", Staticness::Unknown, 1);
     let double_is_nan_key = CallableKey::method("Double", "isNaN", Staticness::Unknown, 1);
     let float_is_nan_key = CallableKey::method("Float", "isNaN", Staticness::Unknown, 1);
     let objects_non_null_key = CallableKey::method("Objects", "nonNull", Staticness::Unknown, 1);
@@ -29513,9 +29516,21 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert_eq!(parse_double_abi.receiver, ReceiverAbi::AssociatedFunction);
 
     for (key, label) in [
+        (&math_max_key, "Math.max"),
+        (&math_min_key, "java.lang.Math.min"),
+    ] {
+        let abi = stdlib_signature_facts
+            .facade_abi_for_key(key)
+            .unwrap_or_else(|| panic!("{label} ABI should come from selected Rust stdlib facts"));
+        assert_eq!(abi.args, vec![FacadeSlot::Owned, FacadeSlot::Owned]);
+        assert_eq!(abi.receiver, ReceiverAbi::AssociatedFunction);
+        assert_eq!(abi.return_slot, FacadeSlot::Owned);
+    }
+
+    for (key, label) in [
         (&math_log_key, "Math.log"),
         (&math_exp_key, "Math.exp"),
-        (&math_to_int_exact_key, "Math.toIntExact"),
+        (&math_to_int_exact_key, "java.lang.Math.toIntExact"),
         (&double_is_nan_key, "Double.isNaN"),
         (&float_is_nan_key, "Float.isNaN"),
     ] {
@@ -30176,6 +30191,52 @@ fn stdlib_signature_facts_drive_system_exit_owned_status_shape() {
             }
         ),
         "System.exit ABI fact should shape arguments without bypassing native exit rendering: {target:?}"
+    );
+}
+
+#[test]
+fn stdlib_signature_facts_drive_math_max_owned_arg_shapes() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let signatures = SignaturePlan::default();
+    let mut types = TypeEnv::new();
+    types.insert_static_type_alias("Math", "java.lang.Math");
+    types.insert_local("left", JavaType::Primitive(PrimitiveType::Int));
+    types.insert_local("right", JavaType::Primitive(PrimitiveType::Int));
+
+    let receiver = Expr::Var("Math".to_string());
+    let args = vec![
+        Expr::Var("left".to_string()),
+        Expr::Var("right".to_string()),
+    ];
+    let shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&receiver),
+        "max",
+        None,
+        &args,
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("Math.max should use owned numeric ABI facts, got {plan:?}"),
+    };
+
+    assert_eq!(shapes.len(), 2);
+    assert_eq!(shapes[0].java_ty, JavaType::Primitive(PrimitiveType::Int));
+    assert_eq!(shapes[0].ownership, OwnershipShape::CopyValue);
+    assert_eq!(shapes[1].java_ty, JavaType::Primitive(PrimitiveType::Int));
+    assert_eq!(shapes[1].ownership, OwnershipShape::CopyValue);
+
+    let target =
+        plan_call_target_with_facts_and_arity(Some(&receiver), "max", 2, None, &facts, &types);
+    assert!(
+        matches!(
+            target,
+            CallTargetPlan::NativeJavaStatic {
+                method: NativeJavaStaticMethod::MathMax,
+            }
+        ),
+        "Math.max ABI facts should shape arguments without bypassing native max rendering: {target:?}"
     );
 }
 
