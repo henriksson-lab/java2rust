@@ -3786,6 +3786,13 @@ duplicated `as usize` suffix checks. Focused verification:
 `syntax_slot_coercion_policy_owns_index_condition_and_concat_segments`,
 `stdlib_signature_facts_drive_string_index_argument_slot`, and
 `stream_lambda_string_char_at_uses_signature_index_slot`.
+Follow-up: stream lambda array access now uses
+`coercion::render_indexed_access_projection`, which reuses the same
+`IndexToUsizeProjection::StreamLambdaArgument` policy instead of formatting
+`array[index as usize]` locally. Focused verification:
+`method_reference_plan_owns_generic_function_adapter_shapes`,
+`stream_plan_lowers_flat_map_block_temporary_collection_as_owned_subpipeline`,
+and `stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map`.
 
 Optional borrowed display cleanup: `Map.get(...)` values used in string
 concat/display slots now render through

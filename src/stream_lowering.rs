@@ -5,9 +5,10 @@ use crate::coercion::{
     borrowed_string_view_projection, current_receiver_method_call_projection,
     ensure_borrow_projection_rendered, len_i32_projection, owner_associated_path_projection,
     receiver_method_call_projection, render_borrowed_collection_flat_map,
-    render_index_to_usize_projection, render_nullable_stream_map_body,
-    render_optional_non_null_filter_map, render_sequence_iteration_source,
-    render_stream_lambda_param_projection, self_associated_path_projection,
+    render_index_to_usize_projection, render_indexed_access_projection,
+    render_nullable_stream_map_body, render_optional_non_null_filter_map,
+    render_sequence_iteration_source, render_stream_lambda_param_projection,
+    self_associated_path_projection,
 };
 use crate::conversion_lowering::apply_lowered_slot_expr_conversion;
 use crate::conversion_plan::{LoweredType, Slot, plan_lowered_slot_conversion};
@@ -415,17 +416,24 @@ fn emit_stream_lambda_body_with_locals_prec(
             )
         }
         Expr::ArrayAccess(array, index) => (
-            format!(
-                "{}[{} as usize]",
-                emit_stream_lambda_receiver_with_locals(
+            render_indexed_access_projection(
+                &emit_stream_lambda_receiver_with_locals(
                     array,
                     param,
                     value,
                     locals,
                     ctx,
-                    param_shape
+                    param_shape,
                 )?,
-                emit_stream_lambda_body_with_locals(index, param, value, locals, ctx, param_shape)?
+                &emit_stream_lambda_body_with_locals(
+                    index,
+                    param,
+                    value,
+                    locals,
+                    ctx,
+                    param_shape,
+                )?,
+                IndexToUsizeProjection::StreamLambdaArgument,
             ),
             11,
         ),

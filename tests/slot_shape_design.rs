@@ -27995,6 +27995,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));
     assert!(coercion_source.contains("pub fn render_index_to_usize_projection"));
+    assert!(coercion_source.contains("pub fn render_indexed_access_projection"));
     assert!(coercion_source.contains("pub enum RenderedMutableAliasProjection"));
     assert!(coercion_source.contains("pub fn rendered_mutable_alias_projection"));
     assert!(coercion_source.contains("pub fn rendered_expr_is_mutable_alias"));
@@ -31692,6 +31693,8 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(!stream_lowering_source.contains("format!(\"*{param}\")"));
     assert!(!stream_lowering_source.contains("format!(\"(**{param})\")"));
     assert!(!stream_lowering_source.contains("format!(\"(*{param})\")"));
+    assert!(stream_lowering_source.contains("render_indexed_access_projection"));
+    assert!(!stream_lowering_source.contains("\"{}[{} as usize]\""));
     assert!(
         stream_lowering_source.contains("method_reference_receiver_type_for_call_plan_with_facts")
     );

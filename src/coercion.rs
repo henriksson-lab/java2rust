@@ -1238,6 +1238,17 @@ pub fn render_index_to_usize_projection(
     }
 }
 
+pub fn render_indexed_access_projection(
+    array: &str,
+    index: &str,
+    projection: IndexToUsizeProjection,
+) -> String {
+    format!(
+        "{array}[{}]",
+        render_index_to_usize_projection(index, projection)
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderedMutableAliasProjection {
     DirectMutableBorrow,
