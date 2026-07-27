@@ -7,9 +7,9 @@ use crate::coercion::{
     collection_remove_if_projection, collections_empty_list_projection,
     collections_empty_sorted_set_projection, collections_n_copies_projection,
     collections_singleton_list_projection, collections_singleton_map_projection,
-    collections_singleton_projection, discard_value_projection, erased_object_box_projection,
-    external_crate_associated_path_projection, external_crate_path_projection,
-    facade_receiver_method_call_projection, file_exists_projection,
+    collections_singleton_projection, discard_value_projection,
+    erased_object_constructor_projection, external_crate_associated_path_projection,
+    external_crate_path_projection, facade_receiver_method_call_projection, file_exists_projection,
     java_class_literal_path_projection, java_class_static_path_projection,
     java_iterator_from_collection_projection, len_i32_projection, math_max_projection,
     math_min_projection, native_collection_default_constructor_projection,
@@ -775,7 +775,7 @@ pub fn apply_new_target_with_facts(
                 if name == "Object" || name == "java.lang.Object"
         )
     {
-        return erased_object_new_expr(args);
+        return erased_object_constructor_projection(args);
     }
     if owner_type == "String" && target.rust_name == "new" && matches!(args.len(), 1 | 2) {
         return string_from_bytes_constructor_expr(args);
@@ -819,21 +819,6 @@ fn string_from_bytes_constructor_expr(args: Vec<RustExpr>) -> RustExpr {
         .next()
         .expect("checked Java String constructor arity");
     string_from_bytes_projection(bytes)
-}
-
-fn erased_object_new_expr(args: Vec<RustExpr>) -> RustExpr {
-    let value = match args.as_slice() {
-        [] => RustExpr::Raw("()".to_string()),
-        [single] => single.clone(),
-        _ => RustExpr::Raw(format!(
-            "({})",
-            args.iter()
-                .map(crate::emit::emit_expr)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
-    };
-    erased_object_box_projection(value)
 }
 
 fn apply_native_collection_new_target(

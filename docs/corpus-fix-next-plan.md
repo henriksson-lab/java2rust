@@ -359,6 +359,11 @@ returns now call `coercion::erased_object_box_projection` for the
 `Box<dyn std::any::Any>` handoff shape. This keeps call lowering from owning the
 Rust erased-object ABI spelling directly and gives later facade ABI facts a
 single projection point to replace or specialize.
+Follow-up: `new Object(...)` now delegates the zero/one/many argument carrier
+selection to `coercion::erased_object_constructor_projection` as well. Call
+lowering still decides when Java `Object` construction is selected, but the
+unit/default payload, tuple payload, and final erased box projection are in the
+coercion layer.
 
 Inherited source-context import follow-up: inherited method bodies now seed
 static type aliases from support and source-summary context imports before

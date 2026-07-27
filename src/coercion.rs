@@ -2218,6 +2218,21 @@ pub fn erased_object_box_projection(value: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("Box::new({value}) as Box<dyn std::any::Any>"))
 }
 
+pub fn erased_object_constructor_projection(args: Vec<RustExpr>) -> RustExpr {
+    let value = match args.as_slice() {
+        [] => RustExpr::Raw("()".to_string()),
+        [single] => single.clone(),
+        _ => RustExpr::Raw(format!(
+            "({})",
+            args.iter()
+                .map(emit::emit_expr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    };
+    erased_object_box_projection(value)
+}
+
 pub fn boxed_dyn_trait_projection(value: RustExpr, trait_name: &str) -> RustExpr {
     RustExpr::Raw(format!(
         "Box::new({}) as Box<dyn {trait_name}>",
@@ -4155,6 +4170,23 @@ mod tests {
                 "(variant, None::<Void>)".to_string()
             ))),
             "Box::new((variant, None::<Void>)) as Box<dyn std::any::Any>"
+        );
+        assert_eq!(
+            emit::emit_expr(&erased_object_constructor_projection(Vec::new())),
+            "Box::new(()) as Box<dyn std::any::Any>"
+        );
+        assert_eq!(
+            emit::emit_expr(&erased_object_constructor_projection(vec![RustExpr::Var(
+                "value".to_string()
+            )])),
+            "Box::new(value) as Box<dyn std::any::Any>"
+        );
+        assert_eq!(
+            emit::emit_expr(&erased_object_constructor_projection(vec![
+                RustExpr::Var("left".to_string()),
+                RustExpr::Var("right".to_string())
+            ])),
+            "Box::new((left, right)) as Box<dyn std::any::Any>"
         );
         assert_eq!(
             emit::emit_expr(&boxed_dyn_trait_projection(

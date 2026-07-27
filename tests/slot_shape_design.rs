@@ -28203,14 +28203,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!call_source.contains("{{ let _ = {}; }}"));
     assert!(call_source.contains("discard_value_projection(arg)"));
     assert!(coercion_source.contains("pub fn discard_value_projection"));
-    let erased_object_new_source = call_source
-        .split("fn erased_object_new_expr")
-        .nth(1)
-        .and_then(|tail| tail.split("fn apply_native_collection_new_target").next())
-        .expect("erased Object constructor lowering should remain discoverable");
-    assert!(!erased_object_new_source.contains("as Box<dyn std::any::Any>"));
-    assert!(erased_object_new_source.contains("erased_object_box_projection(value)"));
+    assert!(!call_source.contains("fn erased_object_new_expr"));
+    assert!(call_source.contains("erased_object_constructor_projection(args)"));
     assert!(coercion_source.contains("pub fn erased_object_box_projection"));
+    assert!(coercion_source.contains("pub fn erased_object_constructor_projection"));
     let native_collection_new_source = call_source
         .split("fn apply_native_collection_new_target")
         .nth(1)
