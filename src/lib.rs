@@ -25,6 +25,7 @@ pub mod graph;
 pub mod inherited_members;
 pub mod item_assembly;
 pub mod java_ir;
+pub mod java_naming;
 pub mod javalibs;
 pub mod lattice;
 pub mod literal_lowering;

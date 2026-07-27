@@ -27510,6 +27510,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let stdlib_source = include_str!("../src/stdlib.rs");
     let main_source = include_str!("../src/main.rs");
     let external_packs_source = include_str!("../src/external_packs.rs");
+    let java_naming_source = include_str!("../src/java_naming.rs");
 
     assert!(coercion_source.contains("pub fn ensure_borrow_projection"));
     assert!(coercion_source.contains("pub fn rendered_expr_has_clone_recovery"));
@@ -28037,6 +28038,11 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!call_plan_source.contains("pub enum OptionalReceiverProjectionPlan"));
     assert!(!lower_source.contains("fn optional_receiver_projection_from_plan"));
     assert!(call_plan_source.contains("pub fn optional_receiver_slot_plan"));
+    assert!(java_naming_source.contains("pub fn java_getter_method_name"));
+    assert!(java_naming_source.contains("pub fn java_getter_field_name"));
+    assert!(!lower_source.contains("strip_prefix(\"get\")"));
+    assert!(!lower_source.contains("strip_prefix(\"is\")"));
+    assert!(!lower_source.contains("fn java_getter_method_name"));
     assert!(
         !lower_source
             .contains(".as_ref().map(|value| value.to_string()).unwrap_or_else(|| \\\"null\\\"")

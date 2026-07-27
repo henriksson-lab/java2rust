@@ -3987,6 +3987,11 @@ autoref already satisfies a planned facade or optional receiver slot moved from
 `lower.rs` into `conversion_plan`. Lowering still selects Java receiver context
 and optional receiver shape, but it no longer matches conversion-policy internals
 locally to decide whether to skip an explicit borrow/projection.
+JavaBean naming follow-up: getter-name parsing (`getX`/`isX` -> field `x`) now
+lives in `java_naming` instead of `lower.rs`. Lowering still chooses when a
+getter-shaped fallback is semantically allowed, but the Java naming convention
+is centralized for source getters, method-reference fallback, and future fact
+normalization work.
 
 ## Rerun Protocol
 

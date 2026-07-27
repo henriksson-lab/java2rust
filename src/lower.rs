@@ -13448,7 +13448,7 @@ fn optional_getter_actual_shape_for_slot(expr: &Expr, slot: &Slot) -> Option<Rus
     else {
         return None;
     };
-    if !args.is_empty() || !java_getter_method_name(name) {
+    if !args.is_empty() || !crate::java_naming::java_getter_method_name(name) {
         return None;
     }
     Some(target.clone())
@@ -16016,15 +16016,7 @@ fn getter_field_return_shape_from_receiver(
     method_name: &str,
     signatures: &SignaturePlan,
 ) -> Option<RustSlotShape> {
-    let field_name = method_name
-        .strip_prefix("get")
-        .filter(|rest| !rest.is_empty())
-        .or_else(|| {
-            method_name
-                .strip_prefix("is")
-                .filter(|rest| !rest.is_empty())
-        })?;
-    let field_name = crate::parser::to_snake_case(field_name);
+    let field_name = crate::java_naming::java_getter_field_name(method_name)?;
     signature_field_shape_for_type_aliases(signatures, receiver_name, &field_name).cloned()
 }
 
@@ -17888,7 +17880,7 @@ fn lower_external_call_expr_for_slot(
     actual = optional_borrow_slot_lowered_type(actual);
     if receiver.is_some()
         && args.is_empty()
-        && java_getter_method_name(name)
+        && crate::java_naming::java_getter_method_name(name)
         && !slot_targets_erased_object(slot)
         && let Some(target) = slot_target_shape(slot)
         && target.optional_element_type().is_some()
@@ -18032,12 +18024,6 @@ fn optional_borrow_slot_lowered_type(actual: LoweredType) -> LoweredType {
         Some(OwnershipShape::SharedBorrow),
     )
     .unwrap_or_else(|| LoweredType::Slot(shape))
-}
-
-fn java_getter_method_name(name: &str) -> bool {
-    name.strip_prefix("get")
-        .is_some_and(|rest| !rest.is_empty())
-        || name.strip_prefix("is").is_some_and(|rest| !rest.is_empty())
 }
 
 fn source_method_return_shape_for_call(
