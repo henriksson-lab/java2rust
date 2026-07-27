@@ -27187,6 +27187,74 @@ class ExternalDynTraitSourceSignatures {
 }
 
 #[test]
+fn nullable_external_dyn_trait_return_constraints_use_erased_owned_carrier() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep Locatable rust-crate-mapping mapped target=dep_facade
+external-pack-object dep Locatable dyn-trait Locatable
+external-pack-capability dep Locatable object-safe=true
+"#,
+    )
+    .facts;
+    let parsed = parse_java_source(
+        r#"
+class NullableExternalDynTraitReturn {
+    Locatable missing() {
+        return null;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "NullableExternalDynTraitReturn")
+        .expect("test type is present");
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "missing" => Some(method),
+            _ => None,
+        })
+        .expect("test method is present");
+
+    let constraints = method_return_shape_constraints(ty, method, &semantic.usage, &semantic.facts);
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+            NullabilityState::DefinitelyNull
+        )),
+        "{constraints:?}"
+    );
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::Owned
+        )),
+        "{constraints:?}"
+    );
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredDispatch(
+            DispatchShape::ErasedObject
+        )),
+        "{constraints:?}"
+    );
+    assert!(
+        constraints.contains(&SignatureConstraint::RequiredView(
+            ViewShape::ErasedObjectView
+        )),
+        "{constraints:?}"
+    );
+}
+
+#[test]
 fn borrowed_external_facade_return_recovers_owned_value_before_erasure() {
     let facts = parse_external_pack_manifest(
         r#"

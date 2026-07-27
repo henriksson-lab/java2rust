@@ -6020,6 +6020,10 @@ pub fn method_param_shape_constraints(
     }
     let mut constraints =
         signature_slot_baseline_policy(&param.ty, boundary_kind, facts).constraints;
+    push_unique_signature_constraints(
+        &mut constraints,
+        &signature_object_representation_fact_constraints(&param.ty, facts),
+    );
     if let Some(binding) = binding {
         push_unique_signature_constraints(
             &mut constraints,
@@ -6370,6 +6374,25 @@ fn signature_erased_object_boundary_constraints_with_effective_facts(
     ]
 }
 
+fn signature_object_representation_fact_constraints(
+    java_ty: &JavaType,
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    let effective_facts = EffectiveFacts::new(facts);
+    signature_object_representation_fact_constraints_with_effective_facts(java_ty, &effective_facts)
+}
+
+fn signature_object_representation_fact_constraints_with_effective_facts(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> Vec<SignatureConstraint> {
+    facts
+        .object_representation_override_strategy_for(java_ty)
+        .and_then(hierarchy_strategy_signature_dispatch)
+        .map(|dispatch| vec![SignatureConstraint::RequiredDispatch(dispatch)])
+        .unwrap_or_default()
+}
+
 fn exact_final_erased_facade_boundary_should_use_native(
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
@@ -6715,6 +6738,10 @@ pub fn constructor_param_shape_constraints(
     }
     let mut constraints =
         signature_slot_baseline_policy(&param.ty, boundary_kind, facts).constraints;
+    push_unique_signature_constraints(
+        &mut constraints,
+        &signature_object_representation_fact_constraints(&param.ty, facts),
+    );
     if let Some(binding) = binding {
         push_unique_signature_constraints(
             &mut constraints,
@@ -6796,6 +6823,19 @@ pub fn solve_signature_shape_with_facts(
         request,
         dispatch_policy.constraints,
     )
+}
+
+fn hierarchy_strategy_signature_dispatch(strategy: &HierarchyStrategy) -> Option<DispatchShape> {
+    match strategy {
+        HierarchyStrategy::DynTrait { trait_name } => Some(DispatchShape::DynTrait {
+            trait_name: trait_name.clone(),
+        }),
+        HierarchyStrategy::ClosedEnum { enum_name, .. } => Some(DispatchShape::ClosedEnum {
+            enum_name: crate::slot_render::rust_name_for_java_named_type(enum_name),
+        }),
+        HierarchyStrategy::ErasedObject => Some(DispatchShape::ErasedObject),
+        HierarchyStrategy::ConcreteStruct => Some(DispatchShape::Concrete),
+    }
 }
 
 fn solve_signature_shape_with_extra_constraints(
@@ -11139,6 +11179,15 @@ pub fn method_return_shape_constraints(
     let external_return_constraints =
         external_call_return_method_return_constraints(ty, method, usage, facts);
     push_unique_signature_constraints(&mut constraints, &external_return_constraints);
+    push_unique_signature_constraints(
+        &mut constraints,
+        &nullable_external_non_concrete_return_constraints(
+            &method.return_type,
+            &source_return_nullability,
+            &external_return_constraints,
+            facts,
+        ),
+    );
     let borrowed_return_content_policy =
         borrowed_return_content_policy_from_param_with_facts(ty, method, usage, facts);
     let returns_call_result = usage
@@ -11318,6 +11367,38 @@ fn declared_return_has_non_concrete_representation(java_ty: &JavaType, facts: &F
     if declared_return_is_jdk_structural_interface(java_ty) {
         return true;
     }
+    let effective_facts = EffectiveFacts::new(facts);
+    matches!(
+        effective_facts.object_representation_override_strategy_for(java_ty),
+        Some(HierarchyStrategy::DynTrait { .. } | HierarchyStrategy::ErasedObject)
+    ) || facts.object_safe_trait_fact_for(java_ty) == Some(true)
+}
+
+fn nullable_external_non_concrete_return_constraints(
+    java_ty: &JavaType,
+    source_return_constraints: &[SignatureConstraint],
+    external_return_constraints: &[SignatureConstraint],
+    facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    if !constraints_require_nullable_storage(source_return_constraints)
+        && !constraints_require_nullable_storage(external_return_constraints)
+    {
+        return Vec::new();
+    }
+    if !declared_external_return_has_non_concrete_representation(java_ty, facts) {
+        return Vec::new();
+    }
+    vec![
+        SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+        SignatureConstraint::RequiredDispatch(DispatchShape::ErasedObject),
+        SignatureConstraint::RequiredView(ViewShape::ErasedObjectView),
+    ]
+}
+
+fn declared_external_return_has_non_concrete_representation(
+    java_ty: &JavaType,
+    facts: &FactSet,
+) -> bool {
     let effective_facts = EffectiveFacts::new(facts);
     matches!(
         effective_facts.object_representation_override_strategy_for(java_ty),

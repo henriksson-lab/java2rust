@@ -298,6 +298,10 @@ pub fn method_return_type_with_facts(
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> Option<RustType> {
+    let return_shape = method_return_shape(ty, method, signatures);
+    if let Some(shape) = return_shape.as_ref() {
+        return Some(rust_type_for_slot_with_facts(shape, facts));
+    }
     if let Some(ty) = rust_crate_mapped_external_rust_type(&method.return_type, facts) {
         return Some(ty);
     }
@@ -307,16 +311,7 @@ pub fn method_return_type_with_facts(
             facts,
         ));
     }
-    method_return_shape(ty, method, signatures).map(|shape| {
-        if let Some(ty) = rust_crate_mapped_external_rust_type(&shape.java_ty, facts) {
-            return ty;
-        }
-        if rust_crate_mapped_external_java_type(&shape.java_ty, facts) {
-            rust_type_for_java_type_with_facts(&shape.java_ty, facts)
-        } else {
-            rust_type_for_slot_with_facts(&shape, facts)
-        }
-    })
+    None
 }
 
 fn rust_crate_mapped_external_rust_type(java_ty: &JavaType, facts: &FactSet) -> Option<RustType> {

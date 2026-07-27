@@ -198,6 +198,17 @@ fallible-call `?` wrapping from call lowering. The generic rendered Rust
 projection now lives in `coercion::propagate_result_projection`, keeping
 result-shape spelling with slot/projection helpers while call planning remains
 responsible for deciding when propagation is required.
+External dyn-trait signature follow-up: `EffectiveFacts` now shares the
+canonical external type alias matcher, and same-provenance object
+representation facts prefer explicit non-concrete strategies over concrete
+fallbacks. Source and constructor parameters consume object-representation facts
+directly, so external interface arguments render as crate-qualified
+`&impl facade::Trait` without method-local string matching. Nullable source
+returns declared as external dyn-trait/object-safe types now keep an owned
+erased carrier (`Option<Box<dyn Any>>`) unless a future precise facade return
+ABI fact proves a better concrete carrier. Method return rendering now trusts
+the solved slot shape before falling back to direct crate-mapped Java type
+spelling.
 Storage/capture/String projection follow-up: static storage setter/getter call
 paths, qualified static storage paths, captured outer-this field access, and
 char-array-to-`String` collection now use coercion projection helpers. Lowering

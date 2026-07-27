@@ -275,7 +275,12 @@ impl<'a> EffectiveFacts<'a> {
             .hierarchy_overrides
             .iter()
             .filter(|override_fact| type_name_matches(&override_fact.type_name, type_name))
-            .max_by_key(|override_fact| fact_precedence_key(override_fact.provenance))
+            .max_by_key(|override_fact| {
+                (
+                    fact_precedence_key(override_fact.provenance),
+                    hierarchy_strategy_specificity_rank(&override_fact.strategy),
+                )
+            })
             .map(|override_fact| &override_fact.strategy)
     }
 
@@ -443,23 +448,17 @@ fn fact_precedence_key(provenance: FactProvenance) -> u8 {
     }
 }
 
-fn type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
-    let fact_aliases = type_name_aliases(fact_type_name);
-    let query_aliases = type_name_aliases(query_type_name);
-    fact_aliases.iter().any(|fact_alias| {
-        query_aliases
-            .iter()
-            .any(|query_alias| query_alias == fact_alias)
-    })
+fn hierarchy_strategy_specificity_rank(strategy: &HierarchyStrategy) -> u8 {
+    match strategy {
+        HierarchyStrategy::ConcreteStruct => 0,
+        HierarchyStrategy::DynTrait { .. }
+        | HierarchyStrategy::ClosedEnum { .. }
+        | HierarchyStrategy::ErasedObject => 1,
+    }
 }
 
-fn type_name_aliases(type_name: &str) -> Vec<String> {
-    let canonical = crate::stdlib::canonical_external_receiver_type_key(type_name);
-    let snake = crate::parser::to_snake_case(type_name);
-    let mut aliases = vec![type_name.to_string(), canonical, snake];
-    aliases.sort();
-    aliases.dedup();
-    aliases
+fn type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
+    crate::facts::external_type_name_matches(fact_type_name, query_type_name)
 }
 
 fn apply_type_capability_override(
