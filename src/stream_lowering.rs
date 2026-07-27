@@ -608,23 +608,17 @@ fn emit_stream_lambda_body_with_locals_prec(
                     )
                 })
                 .unwrap_or_else(|| "new".to_string());
-            (
-                format!(
-                    "{}::{}({})",
-                    stream_lambda_type_name(ty)?,
-                    rust_name,
-                    emit_stream_lambda_args_with_locals(
-                        args,
-                        param,
-                        value,
-                        locals,
-                        ctx,
-                        param_shape
-                    )?
-                    .join(", ")
-                ),
-                11,
-            )
+            let owner = stream_lambda_type_name(ty)?;
+            let lowered_args =
+                emit_stream_lambda_args_with_locals(args, param, value, locals, ctx, param_shape)?
+                    .into_iter()
+                    .map(RustExpr::Raw)
+                    .collect();
+            let rendered = crate::emit::emit_expr(&function_call_projection(
+                owner_associated_path_projection(&owner, &rust_name),
+                lowered_args,
+            ));
+            (rendered, 11)
         }
         _ => return None,
     };
