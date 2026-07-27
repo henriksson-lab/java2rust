@@ -3970,6 +3970,12 @@ instead of only through the legacy `ReceiverToString` body plan. Unsupported
 cases such as generic `Object::toString`, `String::valueOf(Object)` null
 semantics, and boxed primitive `intValue` remain on their existing Java semantic
 paths until their ABI/fact rows can express the needed behavior precisely.
+Shape follow-up: method-reference output-shape inference now uses the same
+fact-backed receiver-type proof for unbound facade receiver methods and asks
+`external_call_lowered_type` for facade return slot interpretation once the
+ordinary call planner selects an `ExternalFacadeReceiver`. This lets external
+facade references such as `FacadeValue::label` derive both callback rendering
+and return shape from the same `ExternalApiEffectFact`/`FacadeAbiFact` pair.
 
 ## Rerun Protocol
 

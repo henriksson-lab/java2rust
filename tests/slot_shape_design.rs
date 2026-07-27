@@ -106,7 +106,9 @@ use new_java2rust::method_reference_lowering::{
 };
 use new_java2rust::method_reference_plan::{MethodReferencePlan, plan_method_reference};
 use new_java2rust::method_reference_shape::{
-    infer_single_input_method_reference_output_shape, method_reference_receiver_type_for_call_plan,
+    infer_single_input_method_reference_output_shape,
+    infer_single_input_method_reference_output_shape_with_context,
+    method_reference_receiver_type_for_call_plan,
 };
 use new_java2rust::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
 use new_java2rust::object_model::rust_enum_variant_name_from_parsed_constant;
@@ -31290,6 +31292,61 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         ),
         RustExpr::Raw("|value: &String| value.to_string()".to_string())
     );
+    let mut external_method_ref_facts = FactSet::default();
+    external_method_ref_facts
+        .external_api_effect_facts
+        .push(ExternalApiEffectFact {
+            method_name: "label".to_string(),
+            receiver_type: Some("FacadeValue".to_string()),
+            arg_count: Some(0),
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::String),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::UserOverride,
+        });
+    external_method_ref_facts
+        .facade_abi_facts
+        .push(FacadeAbiFact {
+            key: CallableKey::method(
+                "FacadeValue".to_string(),
+                "label".to_string(),
+                Staticness::Unknown,
+                0,
+            ),
+            rust_path: "FacadeValueFacade::label_text".to_string(),
+            receiver: ReceiverAbi::BorrowedSelf,
+            args: Vec::new(),
+            return_slot: FacadeSlot::Owned,
+            result: ResultAbi::Plain,
+            borrow_source: None,
+            borrowed_return_recovery: None,
+            provenance: FactProvenance::UserOverride,
+        });
+    let facade_value_shape = RustSlotShape::for_storage(JavaType::Named {
+        name: "FacadeValue".to_string(),
+        args: Vec::new(),
+    });
+    assert_eq!(
+        infer_single_input_method_reference_output_shape_with_context(
+            "FacadeValue",
+            "label",
+            &facade_value_shape,
+            &TypeEnv::new(),
+            &external_method_ref_facts,
+        ),
+        Some(new_java2rust::shape_projection::owned_string_value_shape())
+    );
+    assert_eq!(
+        render_typed_single_input_method_reference_callback_with_facts(
+            &plan_method_reference("FacadeValue", "label"),
+            "&FacadeValue",
+            &facade_value_shape,
+            &external_method_ref_facts,
+        ),
+        RustExpr::Raw("|value: &FacadeValue| value.label_text()".to_string())
+    );
     assert_eq!(
         render_typed_single_input_method_reference_callback_with_facts(
             &plan_method_reference("Objects", "nonNull"),
@@ -31327,6 +31384,8 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(lowering_source.contains("method_reference_receiver_owner_key"));
     assert!(lowering_source.contains("facade_receiver_method_call_projection"));
     assert!(lowering_source.contains("facade_abi_for_key"));
+    assert!(shape_source.contains("method_reference_receiver_type_for_call_plan_with_facts"));
+    assert!(shape_source.contains("external_call_lowered_type"));
     assert!(lowering_source.contains("owner_associated_path_projection"));
     assert!(lowering_source.contains("receiver_method_call_projection"));
     assert!(lowering_source.contains("typed_single_input_callback_projection"));

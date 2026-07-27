@@ -8,7 +8,7 @@ use crate::emit;
 use crate::facts::{CallableKey, FacadeSlot, FactSet, ReceiverAbi, ResultAbi, Staticness};
 use crate::java_ir::JavaType;
 use crate::method_reference_plan::MethodReferencePlan;
-use crate::method_reference_shape::method_reference_receiver_type_for_call_plan;
+use crate::method_reference_shape::method_reference_receiver_type_for_call_plan_with_facts;
 use crate::rust_ir::RustExpr;
 use crate::slot_shape::RustSlotShape;
 
@@ -200,7 +200,7 @@ fn method_reference_facade_abi<'a>(
     input_shape: &RustSlotShape,
     facts: &'a FactSet,
 ) -> Option<&'a crate::facts::FacadeAbiFact> {
-    method_reference_callable_key_candidates(owner, method, input_shape)
+    method_reference_callable_key_candidates(owner, method, input_shape, facts)
         .into_iter()
         .find_map(|key| facts.facade_abi_for_key(&key))
         .filter(|abi| method_reference_facade_abi_is_supported(abi, input_shape))
@@ -230,6 +230,7 @@ fn method_reference_callable_key_candidates(
     owner: &str,
     method: &str,
     input_shape: &RustSlotShape,
+    facts: &FactSet,
 ) -> Vec<CallableKey> {
     let mut methods = vec![method.to_string()];
     match method {
@@ -248,7 +249,9 @@ fn method_reference_callable_key_candidates(
             Staticness::Unknown,
             1,
         ));
-        if let Some(receiver_owner) = method_reference_receiver_owner_key(owner, input_shape) {
+        if let Some(receiver_owner) =
+            method_reference_receiver_owner_key(owner, &method, input_shape, facts)
+        {
             keys.push(CallableKey::method(
                 receiver_owner,
                 method,
@@ -260,10 +263,17 @@ fn method_reference_callable_key_candidates(
     keys
 }
 
-fn method_reference_receiver_owner_key(owner: &str, input_shape: &RustSlotShape) -> Option<String> {
-    java_type_callable_owner_key(&method_reference_receiver_type_for_call_plan(
+fn method_reference_receiver_owner_key(
+    owner: &str,
+    method: &str,
+    input_shape: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<String> {
+    java_type_callable_owner_key(&method_reference_receiver_type_for_call_plan_with_facts(
         owner,
+        method,
         Some(input_shape),
+        facts,
     )?)
 }
 
