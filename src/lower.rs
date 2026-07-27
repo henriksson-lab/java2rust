@@ -48,17 +48,17 @@ use crate::coercion::{
     project_optional_element_borrow_carrier, project_optional_receiver,
     project_optional_sequence_receiver, propagate_result_projection,
     qualified_static_storage_accessor_projection, qualified_static_storage_setter_path_projection,
-    reborrow_optional_mut_projection, render_sequence_iteration_source,
-    rendered_expr_has_clone_recovery, rendered_expr_has_direct_clone_recovery,
-    rendered_expr_is_mutable_alias, rewrite_downcast_expect_message,
-    rust_expr_is_constructed_optional_value, rust_expr_mentions_constructor_self_temporary,
-    self_associated_path_projection, sequence_get_expect_projection,
-    sequence_iter_cloned_projection, sequence_iter_copied_projection,
-    snapshot_rendered_shared_borrow_argument, static_storage_accessor_projection,
-    static_storage_getter_body_projection, static_storage_setter_body_projection,
-    static_storage_setter_path_projection, subtype_owned_constructor_from_borrowed_projection,
-    to_owned_sequence_projection, tuple_field_projection, typed_none_projection,
-    unsupported_constructor_call_handoff_projection,
+    reborrow_optional_mut_projection, receiver_method_call_projection_exact,
+    render_sequence_iteration_source, rendered_expr_has_clone_recovery,
+    rendered_expr_has_direct_clone_recovery, rendered_expr_is_mutable_alias,
+    rewrite_downcast_expect_message, rust_expr_is_constructed_optional_value,
+    rust_expr_mentions_constructor_self_temporary, self_associated_path_projection,
+    sequence_get_expect_projection, sequence_iter_cloned_projection,
+    sequence_iter_copied_projection, snapshot_rendered_shared_borrow_argument,
+    static_storage_accessor_projection, static_storage_getter_body_projection,
+    static_storage_setter_body_projection, static_storage_setter_path_projection,
+    subtype_owned_constructor_from_borrowed_projection, to_owned_sequence_projection,
+    tuple_field_projection, typed_none_projection, unsupported_constructor_call_handoff_projection,
     unsupported_deserialization_cast_handoff_projection,
     unsupported_outer_capture_constructor_projection, unwrap_java_null_receiver_projection,
     unwrap_optional_shared_value, unwrap_result_or_panic_uncaught_java_exception,
@@ -2670,10 +2670,7 @@ fn super_no_arg_constructor_with_trailing_body(
     }
     let returned = RustExpr::Var("__java_self".to_string());
     body.push(RustStmt::Return(Some(if returns_result {
-        RustExpr::Call {
-            function: Box::new(RustExpr::Raw("Ok".to_string())),
-            args: vec![returned],
-        }
+        function_call_projection(RustExpr::Raw("Ok".to_string()), vec![returned])
     } else {
         returned
     })));
@@ -2738,16 +2735,16 @@ fn lower_delegated_constructor_trailing_stmt(
         }
         DelegatedConstructorTrailingStmt::InstanceCall { resolved, args } => {
             let receiver = Expr::This;
-            let mut lowered = RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Var("__java_self".to_string())),
-                method: resolved.rust_name.clone(),
-                args: lower_args_with_plan(
+            let mut lowered = receiver_method_call_projection_exact(
+                RustExpr::Var("__java_self".to_string()),
+                &resolved.rust_name,
+                lower_args_with_plan(
                     args,
                     env,
                     plan_call_arguments(Some(resolved), args.len(), ctx.signatures),
                     ctx,
                 ),
-            };
+            );
             if returns_result
                 && matches!(
                     plan_call_exception_propagation_with_lower_context(
@@ -2827,14 +2824,15 @@ fn lower_inherited_context_trailing_expr_stmt(
                 ctx,
             )
         });
-    let mut lowered = RustExpr::MethodCall {
-        receiver: Box::new(RustExpr::Raw("__java_self.context".to_string())),
-        method: resolved
-            .as_ref()
-            .map(|resolved| resolved.rust_name.clone())
-            .unwrap_or_else(|| crate::parser::to_snake_case(name)),
-        args: lowered_args,
-    };
+    let method = resolved
+        .as_ref()
+        .map(|resolved| resolved.rust_name.clone())
+        .unwrap_or_else(|| crate::parser::to_snake_case(name));
+    let mut lowered = receiver_method_call_projection_exact(
+        RustExpr::Raw("__java_self.context".to_string()),
+        &method,
+        lowered_args,
+    );
     if returns_result && slot_expr_needs_result_propagation(expr, env, ctx) {
         lowered = propagate_result_projection(lowered);
     }
@@ -3305,11 +3303,11 @@ fn lower_stmt(
                 &assignment_slot,
             ) == crate::conversion_plan::AssignmentStatementPlan::ClearOptionalTarget
             {
-                out.push(expr_stmt(RustExpr::MethodCall {
-                    receiver: Box::new(lower_expr(target, env, ctx)),
-                    method: "take".to_string(),
-                    args: Vec::new(),
-                }));
+                out.push(expr_stmt(receiver_method_call_projection_exact(
+                    lower_expr(target, env, ctx),
+                    "take",
+                    Vec::new(),
+                )));
             } else {
                 let lowered_value = lower_expr_for_slot_with_refinements(
                     value,
@@ -3711,11 +3709,11 @@ fn lower_get_resource_as_stream_expr_for_optional_slot(
         argument_slot(RustSlotShape::conservative(JavaType::String)),
         ctx,
     );
-    Some(RustExpr::MethodCall {
-        receiver: Box::new(lowered_receiver),
-        method: "get_resource_as_stream".to_string(),
-        args: vec![lowered_arg],
-    })
+    Some(receiver_method_call_projection_exact(
+        lowered_receiver,
+        "get_resource_as_stream",
+        vec![lowered_arg],
+    ))
 }
 
 fn lower_create_graphics_expr_for_graphics_slot(
@@ -3747,11 +3745,8 @@ fn lower_create_graphics_expr_for_graphics_slot(
     }
     let receiver = receiver.as_deref()?;
     let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
-    let lowered = RustExpr::MethodCall {
-        receiver: Box::new(lowered_receiver),
-        method: "create_graphics".to_string(),
-        args: Vec::new(),
-    };
+    let lowered =
+        receiver_method_call_projection_exact(lowered_receiver, "create_graphics", Vec::new());
     Some(apply_expr_to_slot_via_plan(
         lowered,
         RustSlotShape::conservative(JavaType::Named {
@@ -4903,11 +4898,7 @@ fn lower_switch_match_selector(
 ) -> RustExpr {
     let lowered = lower_expr(selector, env, ctx);
     if matches!(selector_ty, JavaType::String) {
-        RustExpr::MethodCall {
-            receiver: Box::new(lowered),
-            method: "as_str".to_string(),
-            args: Vec::new(),
-        }
+        receiver_method_call_projection_exact(lowered, "as_str", Vec::new())
     } else {
         lowered
     }
@@ -5591,11 +5582,11 @@ fn try_resource_cleanup_stmts(resources: &[Stmt], env: &ShapeEnv, ctx: LowerCtx)
         .into_iter()
         .map(|name| {
             let receiver = Expr::Var(name.clone());
-            let close_call = RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Var(name.clone())),
-                method: "close".to_string(),
-                args: Vec::new(),
-            };
+            let close_call = receiver_method_call_projection_exact(
+                RustExpr::Var(name.clone()),
+                "close",
+                Vec::new(),
+            );
             if slot_expr_needs_result_propagation_from_shape_env(
                 Some(&receiver),
                 "close",
@@ -6942,11 +6933,7 @@ fn lower_for_each_lambda_body_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -
     };
     let rust_name = crate::parser::to_snake_case(name);
     let rust_args = lower_same_object_call_args(&rust_name, args, env, ctx);
-    RustExpr::MethodCall {
-        receiver: Box::new(RustExpr::Var("self".to_string())),
-        method: rust_name,
-        args: rust_args,
-    }
+    receiver_method_call_projection_exact(RustExpr::Var("self".to_string()), &rust_name, rust_args)
 }
 
 fn lower_same_object_call_args(
@@ -7589,10 +7576,10 @@ fn lower_boxed_primitive_string_constructor_expr(
     target.ownership = OwnershipShape::SharedBorrow;
     let value =
         lower_expr_for_slot_with_refinements(arg, env, Slot::Argument(target), ctx, refinements);
-    Some(RustExpr::Call {
-        function: Box::new(RustExpr::Raw(helper.to_string())),
-        args: vec![value],
-    })
+    Some(function_call_projection(
+        RustExpr::Raw(helper.to_string()),
+        vec![value],
+    ))
 }
 
 fn boxed_primitive_string_parse_helper(primitive: PrimitiveType) -> Option<&'static str> {
@@ -8202,10 +8189,10 @@ fn lower_static_storage_assignment_stmt(
         adapt_reused_owned_value_for_slot(lowered_value, value, &assignment_slot, env, ctx);
     let assigned_value =
         wrap_optional_assignment_value_if_needed(value, env, assignment_slot, lowered_value, ctx);
-    Some(expr_stmt(RustExpr::Call {
-        function: Box::new(static_storage_setter_path_projection(static_name)),
-        args: vec![assigned_value],
-    }))
+    Some(expr_stmt(function_call_projection(
+        static_storage_setter_path_projection(static_name),
+        vec![assigned_value],
+    )))
 }
 
 fn lower_static_storage_assignment_value_expr(
@@ -8250,13 +8237,10 @@ fn lower_qualified_static_storage_assignment_stmt(
         refinements,
         Slot::Assignment(plan.shape),
     );
-    Some(expr_stmt(RustExpr::Call {
-        function: Box::new(qualified_static_storage_setter_path_projection(
-            &plan.rust_owner,
-            &plan.field_name,
-        )),
-        args: vec![assigned_value],
-    }))
+    Some(expr_stmt(function_call_projection(
+        qualified_static_storage_setter_path_projection(&plan.rust_owner, &plan.field_name),
+        vec![assigned_value],
+    )))
 }
 
 fn lower_qualified_static_storage_assignment_value_expr(
@@ -10587,10 +10571,10 @@ fn lower_functional_interface_local_call(
             preserve_local_callback_argument(arg, lowered, env, ctx)
         })
         .collect();
-    Some(RustExpr::Call {
-        function: Box::new(RustExpr::Var(callback_name.clone())),
-        args: lowered_args,
-    })
+    Some(function_call_projection(
+        RustExpr::Var(callback_name.clone()),
+        lowered_args,
+    ))
 }
 
 fn preserve_local_callback_argument(

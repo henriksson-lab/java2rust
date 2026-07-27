@@ -3970,6 +3970,13 @@ result returns, no-argument default constructor expressions, URI parse
 constructors, and static self fallbacks with `function_call_projection`.
 Lowering still chooses those Java cases; the Rust call node construction is
 shared with ordinary call lowering.
+Method-call projection follow-up: lowerer trailing constructor instance calls,
+context trailing calls, optional target clearing, resource stream support,
+graphics creation, string switch selectors, try-resource cleanup, same-object
+calls, boxed primitive parse helpers, static storage setters, and local
+callback invocations now use shared function/receiver call projections.
+Lowering still selects the Java-specific cases and exception propagation; the
+Rust call or method-call node construction is centralized.
 
 Loop/array borrow projection cleanup: assignment-in-condition loops now use the
 shared optional shared-value unwrap projection when introducing the narrowed

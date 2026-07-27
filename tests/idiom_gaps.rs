@@ -6552,7 +6552,7 @@ mod generated_tests {
     #[test]
     fn typechecks_try_with_resources_close_surface() {
         let fixture = UsesReferenceTryWithResourcesCloseSurface { path: Some(Path::new("ref.fa")) };
-        let _: Option<SAMSequenceDictionary> = fixture.dictionary();
+        let _: SAMSequenceDictionary = fixture.dictionary();
     }
 }
 "#,
