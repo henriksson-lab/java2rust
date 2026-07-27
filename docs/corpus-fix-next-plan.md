@@ -185,6 +185,31 @@ now carry the same explicit borrowed-return recovery policy as required borrowed
 returns, so manifests can choose `clone` versus `to-path-buf` for
 `Option<&T>` without relying on rendered Rust type-name fallback checks.
 
+2026-07-27 checkpoint: external facade result metadata now takes precedence over
+Java `throws` when rendering support return types, so explicit Rust ABI facts can
+say `rust-result=false` without being rewrapped from Java exception facts. The
+same slice tightened external/facade argument precedence: external argument
+effects are preferred over facade ABI slots when present, nullable borrowed
+argument facts can request optional borrowed carriers, and static support
+signature fallback no longer overwrites an already-shaped fact plan. HTSJDK
+`IntervalList.add(Interval)` is now expressed as a built-in samtools-util
+argument fact and mutator effect rather than a lowering special case, which
+keeps `IntervalList` locals concrete and passes constructed `Interval` values
+without `Box<dyn Any>` handoff. Focused verification covered
+`rust_result_metadata_separates_facade_fallibility_from_java_throws`,
+`external_borrowed_literal_argument_is_hoisted_when_call_result_is_stored`,
+`external_byte_array_return_recovers_java_signed_bytes_from_rust_unsigned_bytes`,
+`borrowed_external_facade_return_recovers_owned_value_before_erasure`,
+`pack_enabled_final_domain_facade_local_stays_concrete_not_erased`,
+`domain_collection_facade_constructor_is_not_native_collection_constructor`,
+`builtin_htsjdk_interval_facade_support_matches_overloaded_constructor_calls`,
+and `array_plan_and_lowering_own_java_array_shape_before_orchestrator`.
+`cargo check`, `cargo fmt --check`, and `git diff --check` were clean. A full
+`slot_shape_design` run was restarted and progressed past the earlier argument
+and return-shape regressions, then reached the pre-existing representation and
+signature baseline failure cluster; continue treating that cluster as separate
+goal work unless a new focused change moves one of those fixtures.
+
 Rendered compatibility centralization follow-up: same-call alias snapshots still
 decide in `lower.rs` because they need argument aliasing and slot-shape context,
 but the rendered replacement table now lives in `coercion.rs` as

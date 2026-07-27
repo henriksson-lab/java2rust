@@ -3378,13 +3378,11 @@ pub fn plan_call_arguments_with_facts(
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
     }
 
-    facade_abi_call_arg_plan(receiver, name, arg_count, None, facts, types)
+    external_call_arg_shapes(receiver, name, arg_count, facts, types)
+        .map(ArgumentLoweringPlan::Shaped)
+        .or_else(|| facade_abi_call_arg_plan(receiver, name, arg_count, None, facts, types))
         .or_else(|| {
             native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
-                .map(ArgumentLoweringPlan::Shaped)
-        })
-        .or_else(|| {
-            external_call_arg_shapes(receiver, name, arg_count, facts, types)
                 .map(ArgumentLoweringPlan::Shaped)
         })
         .unwrap_or(ArgumentLoweringPlan::Unshaped { arg_count })
@@ -3401,27 +3399,25 @@ pub fn plan_call_arguments_with_facts_and_args(
 ) -> ArgumentLoweringPlan {
     let arg_count = args.len();
     if let Some(call) = resolved {
-        if let Some(plan) =
-            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, Some(args), facts, types)
-        {
-            return plan;
-        }
         if let Some(shapes) = external_call_arg_shapes_for_resolved(call, name, arg_count, facts) {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
         if let Some(shapes) = external_call_arg_shapes(receiver, name, arg_count, facts, types) {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
+        if let Some(plan) =
+            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, Some(args), facts, types)
+        {
+            return plan;
+        }
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
     }
 
-    facade_abi_call_arg_plan(receiver, name, arg_count, Some(args), facts, types)
+    external_call_arg_shapes(receiver, name, arg_count, facts, types)
+        .map(ArgumentLoweringPlan::Shaped)
+        .or_else(|| facade_abi_call_arg_plan(receiver, name, arg_count, Some(args), facts, types))
         .or_else(|| {
             native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
-                .map(ArgumentLoweringPlan::Shaped)
-        })
-        .or_else(|| {
-            external_call_arg_shapes(receiver, name, arg_count, facts, types)
                 .map(ArgumentLoweringPlan::Shaped)
         })
         .or_else(|| {
@@ -3682,6 +3678,33 @@ fn facade_abi_argument_lowering_plan(
             .and_then(|arg_types| arg_types.get(index).cloned())
             .or_else(|| inferred_argument_java_type(args, index, types))
             .unwrap_or_else(|| JavaType::Unknown("Object".to_string()));
+        if let Some(effect) = facts
+            .external_api_argument_effect_for_key(&abi.key, index)
+            .or_else(|| {
+                let owner_simple = abi
+                    .key
+                    .owner
+                    .type_name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&abi.key.owner.type_name);
+                facts.external_api_argument_effect_for_receiver(
+                    Some(owner_simple),
+                    &abi.key.member.0,
+                    index,
+                )
+            })
+        {
+            let receiver_ty = JavaType::Named {
+                name: abi.key.owner.type_name.clone(),
+                args: Vec::new(),
+            };
+            let shape =
+                argument_shape_from_external_effect(effect, Some(&receiver_ty), &effective_facts);
+            slots.push(argument_slot(shape.clone()));
+            shapes.push(shape);
+            continue;
+        }
         match slot {
             FacadeSlot::Index => {
                 has_explicit_slot = true;
@@ -4224,6 +4247,14 @@ fn argument_shape_from_external_effect(
 fn external_argument_effect_allows_nullable_borrowed_slot(
     effect: &ExternalApiArgumentEffectFact,
 ) -> bool {
+    if matches!(effect.alias_policy, ExternalArgumentAliasPolicy::Borrowed)
+        && matches!(
+            effect.parameter_nullability,
+            NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+        )
+    {
+        return true;
+    }
     effect.parameter_index == 0
         && matches!(effect.method_name.as_str(), "writeObject" | "write_object")
         && effect
@@ -4312,8 +4343,18 @@ fn external_generic_facade_receiver_keeps_argument_concrete(
     receiver_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> bool {
-    facts.is_final_type(receiver_ty)
-        && crate::stdlib::java_collection_kind_for_type(receiver_ty).is_some()
+    if !facts.is_final_type(receiver_ty) {
+        return false;
+    }
+    if crate::stdlib::java_collection_kind_for_type(receiver_ty).is_some() {
+        return true;
+    }
+    let Some(receiver_name) = java_type_name(receiver_ty) else {
+        return false;
+    };
+    facts
+        .external_library_pack_for_type(receiver_name)
+        .is_some()
 }
 
 pub fn resolved_constructor_arg_shapes(

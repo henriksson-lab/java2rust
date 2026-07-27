@@ -2261,6 +2261,16 @@ pub fn borrowed_string_literal_temporary_plan(
     temporary_name: &str,
 ) -> Option<BorrowedStringLiteralTemporaryPlan> {
     if let Some(inner) = raw
+        .strip_prefix("Some(Box::new(")
+        .and_then(|rest| rest.strip_suffix(") as Box<dyn std::any::Any>)"))
+        && string_literal_to_string_expr(inner)
+    {
+        return Some(BorrowedStringLiteralTemporaryPlan {
+            replacement_expr: format!("Some(&{temporary_name})"),
+            initializer_expr: inner.to_string(),
+        });
+    }
+    if let Some(inner) = raw
         .strip_prefix("Some(&")
         .and_then(|rest| rest.strip_suffix(')'))
         && string_literal_to_string_expr(inner)

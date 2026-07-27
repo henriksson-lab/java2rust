@@ -6163,6 +6163,25 @@ const SAMTOOLS_UTIL_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("PairOrientation"),
 ];
 
+const SAMTOOLS_UTIL_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
+    samtools_util_interval_list_add_argument("htsjdk.samtools.util.IntervalList"),
+    samtools_util_interval_list_add_argument("IntervalList"),
+];
+
+const fn samtools_util_interval_list_add_argument(
+    receiver_type: &'static str,
+) -> ExternalPackArgumentEffect {
+    ExternalPackArgumentEffect {
+        receiver_type,
+        method_name: "add",
+        parameter_index: 0,
+        parameter_type: Some("Interval"),
+        parameter_nullability: NullabilityState::DefinitelyNonNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+    }
+}
+
 const NO_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[];
 const NO_FIELD_NULLABILITY: &[ExternalPackFieldNullability] = &[];
 const NO_EXCEPTIONS: &[ExternalPackException] = &[];
@@ -14525,13 +14544,24 @@ const SAMTOOLS_UTIL_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_getter_effect("IntervalList", "size", NullabilityState::DefinitelyNonNull),
-    semantic_side_effect_with_arity(
+    semantic_typed_effect_with_arity(
         "htsjdk.samtools.util.IntervalList",
         "add",
         1,
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
         NullabilityState::Unknown,
     ),
-    semantic_side_effect_with_arity("IntervalList", "add", 1, NullabilityState::Unknown),
+    semantic_typed_effect_with_arity(
+        "IntervalList",
+        "add",
+        1,
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::Unknown,
+    ),
     semantic_mutator_effect(
         "htsjdk.samtools.util.IntervalList",
         "write",
@@ -27409,7 +27439,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             object_safety: NO_OBJECT_SAFETY,
             type_capabilities: SAMTOOLS_UTIL_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
-            argument_effects: NO_ARGUMENT_EFFECTS,
+            argument_effects: SAMTOOLS_UTIL_ARGUMENT_EFFECTS,
             exceptions: SAMTOOLS_UTIL_EXCEPTIONS,
             api_effects: SAMTOOLS_UTIL_API_EFFECTS,
             modeled_apis: SAMTOOLS_UTIL_MODELED_APIS,

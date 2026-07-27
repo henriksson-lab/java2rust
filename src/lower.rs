@@ -4223,6 +4223,16 @@ fn refine_local_plan_from_initializer(
                 },
             )
         });
+    if let Some(constructor_shape) =
+        external_crate_constructor_initializer_shape(initializer, env, ctx)
+        && java_types_have_same_erased_identity(
+            &constructor_shape.java_ty,
+            &local_plan.shape.java_ty,
+        )
+    {
+        local_plan.shape = constructor_shape;
+        return local_plan;
+    }
     if local_borrowed_optional_should_keep_owned_temporary(
         &local_plan.shape,
         &initializer_shape,
@@ -4250,6 +4260,31 @@ fn refine_local_plan_from_initializer(
     }
     local_plan.shape = initializer_shape;
     local_plan
+}
+
+fn external_crate_constructor_initializer_shape(
+    initializer: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustSlotShape> {
+    let Expr::New {
+        ty, args, resolved, ..
+    } = initializer
+    else {
+        return None;
+    };
+    let target = plan_new_target_for_args_with_facts(
+        ty,
+        resolved.as_ref(),
+        ctx.representations,
+        ctx.facts,
+        args,
+        env.type_env(),
+    );
+    target.external_crate.as_ref()?;
+    let mut shape = target.owner_shape;
+    crate::shape_projection::apply_required_dispatch(&mut shape, DispatchShape::Concrete);
+    Some(shape)
 }
 
 fn preserve_declared_erased_object_local_shape(mut local_plan: LocalPlan) -> LocalPlan {
@@ -4533,9 +4568,37 @@ fn planned_method_call_return_shape(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<RustSlotShape> {
-    stream_like_call_return_shape(expr, env, ctx)
+    constructor_call_return_shape(expr, env, ctx)
+        .or_else(|| stream_like_call_return_shape(expr, env, ctx))
         .or_else(|| receiverless_current_type_call_return_shape(expr, ctx))
         .or_else(|| method_call_return_shape_from_receiver(expr, env, ctx))
+}
+
+fn constructor_call_return_shape(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustSlotShape> {
+    let Expr::New {
+        ty, args, resolved, ..
+    } = expr
+    else {
+        return None;
+    };
+    let target = plan_new_target_for_args_with_facts(
+        ty,
+        resolved.as_ref(),
+        ctx.representations,
+        ctx.facts,
+        args,
+        env.type_env(),
+    );
+    if target.external_crate.is_some() {
+        let mut shape = target.owner_shape;
+        crate::shape_projection::apply_required_dispatch(&mut shape, DispatchShape::Concrete);
+        return Some(shape);
+    }
+    Some(target.owner_shape)
 }
 
 fn refine_assigned_local_shape(target: &Expr, value: &Expr, env: &mut ShapeEnv, ctx: LowerCtx) {
@@ -9855,7 +9918,10 @@ fn lower_args_for_call_target(
     {
         return packed;
     }
-    if let Some(static_signature_plan) = static_call_target_signature_arg_plan(target, args, ctx) {
+    if matches!(plan, ArgumentLoweringPlan::Unshaped { .. })
+        && let Some(static_signature_plan) =
+            static_call_target_signature_arg_plan(target, args, ctx)
+    {
         return lower_args_with_plan(args, env, static_signature_plan, ctx);
     }
     if let Some(packed) = lower_resolved_varargs_call_args(args, env, resolved, ctx) {
@@ -11432,8 +11498,14 @@ fn external_generic_facade_target_keeps_argument_shapes(
     }
     let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
     let effective_facts = crate::effective_facts::EffectiveFacts::new(ctx.facts);
-    effective_facts.is_final_type(&receiver_ty)
-        && crate::stdlib::java_collection_kind_for_type(&receiver_ty).is_some()
+    if !effective_facts.is_final_type(&receiver_ty) {
+        return false;
+    }
+    crate::stdlib::java_collection_kind_for_type(&receiver_ty).is_some()
+        || concrete_java_type_name(&receiver_ty).is_some_and(|name| {
+            ctx.facts.external_library_pack_for_type(name).is_some()
+                || crate::external_packs::external_library_pack_for_type(name).is_some()
+        })
 }
 
 fn external_generic_facade_target_borrows_actual_argument_shapes(
@@ -11494,15 +11566,18 @@ fn lower_external_generic_facade_args_with_actual_shapes(
                 if external_generic_facade_arg_shape_is_unspecified_object(&shape)
                     || external_generic_facade_arg_shape_is_erased_object_handoff(&shape)
                 {
-                    let actual_shape = infer_expr_shape_with_context(
-                        arg,
-                        env,
-                        ExprShapeContext {
-                            signatures: Some(ctx.signatures),
-                            representations: Some(ctx.representations),
-                            facts: Some(ctx.facts),
-                        },
-                    );
+                    let actual_shape = generic_facade_actual_argument_shape(arg, env, ctx)
+                        .unwrap_or_else(|| {
+                            infer_expr_shape_with_context(
+                                arg,
+                                env,
+                                ExprShapeContext {
+                                    signatures: Some(ctx.signatures),
+                                    representations: Some(ctx.representations),
+                                    facts: Some(ctx.facts),
+                                },
+                            )
+                        });
                     let lowered =
                         lower_expr_for_slot(arg, env, argument_slot(actual_shape.clone()), ctx);
                     let lowered = clone_indexed_erased_handoff_arg_if_needed(
@@ -11525,15 +11600,18 @@ fn lower_external_generic_facade_args_with_actual_shapes(
                         ctx,
                     )
                 } else {
-                    let actual_shape = infer_expr_shape_with_context(
-                        arg,
-                        env,
-                        ExprShapeContext {
-                            signatures: Some(ctx.signatures),
-                            representations: Some(ctx.representations),
-                            facts: Some(ctx.facts),
-                        },
-                    );
+                    let actual_shape = generic_facade_actual_argument_shape(arg, env, ctx)
+                        .unwrap_or_else(|| {
+                            infer_expr_shape_with_context(
+                                arg,
+                                env,
+                                ExprShapeContext {
+                                    signatures: Some(ctx.signatures),
+                                    representations: Some(ctx.representations),
+                                    facts: Some(ctx.facts),
+                                },
+                            )
+                        });
                     let lowered = lower_optional_argument_for_borrowed_target(
                         arg,
                         env,
@@ -11573,6 +11651,26 @@ fn lower_external_generic_facade_args_with_actual_shapes(
             .map(|(arg, slot)| lower_argument_for_explicit_slot(arg, env, slot, ctx))
             .collect(),
     }
+}
+
+fn generic_facade_actual_argument_shape(
+    arg: &Expr,
+    _env: &ShapeEnv,
+    _ctx: LowerCtx,
+) -> Option<RustSlotShape> {
+    let Expr::New { ty, resolved, .. } = arg else {
+        return None;
+    };
+    let constructed_ty = resolved
+        .as_ref()
+        .map(|resolved| resolved.constructed_type.clone())
+        .unwrap_or_else(|| ty.clone());
+    if concrete_java_type_name(&constructed_ty)
+        .is_some_and(|name| crate::stdlib::canonical_external_receiver_type_key(name) == "Object")
+    {
+        return None;
+    }
+    Some(RustSlotShape::for_storage(constructed_ty))
 }
 
 fn external_generic_facade_arg_shape_is_unspecified_object(shape: &RustSlotShape) -> bool {
@@ -11669,28 +11767,49 @@ fn lower_optional_argument_for_borrowed_target(
     let target_element = target_shape
         .optional_element_type()
         .unwrap_or_else(|| target_shape.java_ty.clone());
-    let actual_element = actual_shape.optional_element_type()?;
-    if !same_concrete_java_type(&actual_element, &target_element) {
+    if let Some(actual_element) = actual_shape.optional_element_type() {
+        if !same_concrete_java_type(&actual_element, &target_element)
+            && !java_type_is_erased_object_name(&target_element)
+        {
+            return None;
+        }
+        let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());
+        if optional_borrowed_expr_already_matches_target(arg, target_shape, env, ctx) {
+            return Some(lowered);
+        }
+        let lowered_type =
+            optional_element_borrow_lowered_type(actual_shape.clone(), actual_element, None)?;
+        let plan = plan_lowered_slot_conversion(
+            &lowered_type,
+            Slot::Argument(target_shape.clone()),
+            ctx.facts,
+        );
+        return Some(apply_lowered_slot_expr_conversion(
+            crate::coercion::LoweredExpr {
+                expr: lowered,
+                actual: plan.actual.clone(),
+            },
+            &plan,
+        ));
+    }
+    if !java_type_is_erased_object_name(&target_element)
+        && !same_concrete_java_type(&actual_shape.java_ty, &target_element)
+    {
+        return None;
+    }
+    if target_shape.optional_element_type().is_none()
+        && !java_type_is_erased_object_name(&target_element)
+    {
+        return None;
+    }
+    if !matches!(arg, Expr::Literal(Literal::String(_))) {
         return None;
     }
     let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());
-    if optional_borrowed_expr_already_matches_target(arg, target_shape, env, ctx) {
-        return Some(lowered);
+    match lowered {
+        RustExpr::Raw(rendered) => Some(RustExpr::Raw(format!("Some(&{rendered})"))),
+        _ => None,
     }
-    let lowered_type =
-        optional_element_borrow_lowered_type(actual_shape.clone(), actual_element, None)?;
-    let plan = plan_lowered_slot_conversion(
-        &lowered_type,
-        Slot::Argument(target_shape.clone()),
-        ctx.facts,
-    );
-    Some(apply_lowered_slot_expr_conversion(
-        crate::coercion::LoweredExpr {
-            expr: lowered,
-            actual: plan.actual.clone(),
-        },
-        &plan,
-    ))
 }
 
 fn optional_array_lowered_type_for_slice_slot(

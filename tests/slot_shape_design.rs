@@ -11024,14 +11024,14 @@ class BuiltinHtsjdkIntervalCaller {
     assert!(
         translation
             .rust
-            .contains("output.add(Box::new(Interval::new_1(locatable)) as Box<dyn std::any::Any>)"),
+            .contains("output.add(Interval::new_1(locatable))"),
         "{}",
         translation.rust
     );
     assert!(
         translation
             .rust
-            .contains("impl IntervalList {\n    pub fn add<T0>(&self, _arg0: T0) -> ()"),
+            .contains("impl IntervalList {\n    pub fn add(&self, _arg0: Interval) -> ()"),
         "{}",
         translation.rust
     );
@@ -11362,7 +11362,7 @@ class DomainCollectionConstructorUse {
     assert!(
         translation
             .rust
-            .contains("pub fn add<T0>(&self, _arg0: T0)"),
+            .contains("pub fn add(&self, _arg0: Interval)"),
         "{}",
         translation.rust
     );

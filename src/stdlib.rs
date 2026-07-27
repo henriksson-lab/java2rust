@@ -10295,6 +10295,15 @@ fn external_facade_wrap_result_for_effects(
     arg_count: Option<usize>,
     rendered: String,
 ) -> String {
+    if let Some(result_abi) =
+        explicit_external_facade_result_abi(facts, receiver_type, method_name, arg_count)
+    {
+        return match result_abi {
+            ResultAbi::Plain | ResultAbi::OptionWrapped => rendered,
+            ResultAbi::ResultWrapped if raw_rust_type_is_result(&rendered) => rendered,
+            ResultAbi::ResultWrapped => format!("Result<{rendered}, JavaException>"),
+        };
+    }
     let user_effect_throws = facts
         .external_api_effect_for_receiver_with_arity(receiver_type, method_name, arg_count)
         .is_some_and(|effect| !effect.thrown.is_empty());
@@ -10309,6 +10318,35 @@ fn external_facade_wrap_result_for_effects(
     } else {
         rendered
     }
+}
+
+fn explicit_external_facade_result_abi(
+    facts: &FactSet,
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_count: Option<usize>,
+) -> Option<ResultAbi> {
+    let arg_count = arg_count?;
+    if let Some(receiver_type) = receiver_type {
+        let key = CallableKey::method(
+            receiver_type.to_string(),
+            method_name.to_string(),
+            Staticness::Unknown,
+            arg_count,
+        );
+        if let Some(abi) = facts.facade_abi_for_key(&key) {
+            return Some(abi.result);
+        }
+    }
+    facts
+        .external_rust_result_for_receiver(receiver_type, method_name, Some(arg_count))
+        .map(|fact| {
+            if fact.returns_result {
+                ResultAbi::ResultWrapped
+            } else {
+                ResultAbi::Plain
+            }
+        })
 }
 
 fn external_facade_method_abi_return_type_with_facts(
