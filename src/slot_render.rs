@@ -104,6 +104,10 @@ pub fn rust_type_for_slot(shape: &RustSlotShape) -> RustType {
     rust_type_for_slot_with_facts(shape, &FactSet::default())
 }
 
+pub fn erased_object_rust_type() -> RustType {
+    RustType::Raw("Box<dyn std::any::Any>".to_string())
+}
+
 pub fn rust_type_for_slot_with_facts(shape: &RustSlotShape, facts: &FactSet) -> RustType {
     let effective_facts = EffectiveFacts::new(facts);
     rust_type_for_slot_with_effective_facts(shape, &effective_facts)
@@ -239,16 +243,14 @@ pub fn render_slot_value_rust_type_policy_with_effective_facts(
         SlotValueRustTypePolicy::BoxedDynTrait { trait_name }
         | SlotValueRustTypePolicy::BoxedDynTraitView { trait_name } => {
             if external_crate_mapped_dyn_trait_path(trait_name, facts).is_some() {
-                return RustType::Raw("Box<dyn std::any::Any>".to_string());
+                return erased_object_rust_type();
             }
             RustType::Raw(format!(
                 "Box<dyn {}>",
                 dyn_trait_rust_path_with_effective_facts(trait_name, facts)
             ))
         }
-        SlotValueRustTypePolicy::ErasedObject => {
-            RustType::Raw("Box<dyn std::any::Any>".to_string())
-        }
+        SlotValueRustTypePolicy::ErasedObject => erased_object_rust_type(),
         SlotValueRustTypePolicy::DynTrait { trait_name }
         | SlotValueRustTypePolicy::DynTraitView { trait_name } => {
             if let Some(trait_path) = external_crate_mapped_dyn_trait_path(trait_name, facts) {
@@ -518,7 +520,7 @@ pub fn native_java_rust_type_policy_with_effective_facts(
     ) && !external_final_facade_should_keep_named_type(ty, facts)
     {
         return NativeJavaRustTypePolicy::Direct {
-            ty: RustType::Raw("Box<dyn std::any::Any>".to_string()),
+            ty: erased_object_rust_type(),
         };
     }
     if external_final_facade_should_keep_named_type(ty, facts)
@@ -554,9 +556,10 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             crate::stdlib::JavaCollectionKind::Map if args.len() == 2 => {}
             crate::stdlib::JavaCollectionKind::Map => {
                 return NativeJavaRustTypePolicy::Direct {
-                    ty: RustType::Raw(
-                        "std::collections::HashMap<String, Box<dyn std::any::Any>>".to_string(),
-                    ),
+                    ty: RustType::Raw(format!(
+                        "std::collections::HashMap<String, {}>",
+                        crate::emit::emit_type(&erased_object_rust_type())
+                    )),
                 };
             }
         }
@@ -749,7 +752,7 @@ pub fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustType
         "Boolean" => NativeJavaRustTypePolicy::Direct { ty: RustType::Bool },
         "Character" => NativeJavaRustTypePolicy::Direct { ty: RustType::Char },
         "Object" => NativeJavaRustTypePolicy::Direct {
-            ty: RustType::Raw("Box<dyn std::any::Any>".to_string()),
+            ty: erased_object_rust_type(),
         },
         "Properties" => NativeJavaRustTypePolicy::Direct {
             ty: RustType::Raw("std::collections::HashMap<String, String>".to_string()),
@@ -867,7 +870,7 @@ fn rust_type_for_java_generic_arg_with_effective_facts(
     if let JavaType::Unknown(raw) = ty
         && java_type_variable_name(raw)
     {
-        return RustType::Raw("Box<dyn std::any::Any>".to_string());
+        return erased_object_rust_type();
     }
     if erased_final_facade_generic_arg_should_keep_named_type(ty, facts)
         && let JavaType::Named { name, .. } = ty
@@ -941,9 +944,7 @@ pub fn render_native_java_rust_type_policy_with_effective_facts(
         )),
         NativeJavaRustTypePolicy::Direct { ty } => ty.clone(),
         NativeJavaRustTypePolicy::Named { name } => RustType::Named(name.clone()),
-        NativeJavaRustTypePolicy::WildcardObject => {
-            RustType::Raw("Box<dyn std::any::Any>".to_string())
-        }
+        NativeJavaRustTypePolicy::WildcardObject => erased_object_rust_type(),
         NativeJavaRustTypePolicy::UnknownRaw { raw } => RustType::Raw(raw.clone()),
         NativeJavaRustTypePolicy::ArrayRequiresSequenceElement => {
             unreachable!("arrays are handled by sequence_element_type")

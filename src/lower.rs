@@ -148,7 +148,9 @@ use crate::signature::{
     LocalPlan, ReceiverPlan, SignatureConstraint, SignaturePlan, SolvedSlotShape,
     apply_signature_constraints,
 };
-use crate::slot_render::{rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts};
+use crate::slot_render::{
+    erased_object_rust_type, rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
+};
 use crate::slot_shape::{DispatchShape, ViewShape};
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 use crate::statement_render::{
@@ -7774,7 +7776,7 @@ fn render_iterator_callback_param_type(java_ty: &JavaType, facts: &FactSet) -> O
         return None;
     }
     let element_ty = args.first().map_or_else(
-        || "Box<dyn std::any::Any>".to_string(),
+        || emit::emit_type(&erased_object_rust_type()),
         |arg| emit::emit_type(&rust_type_for_java_type_with_facts(arg, facts)),
     );
     Some(format!("std::vec::IntoIter<{element_ty}>"))
@@ -13872,7 +13874,8 @@ fn typed_none_for_slot(slot: &Slot) -> Option<RustExpr> {
     {
         return None;
     }
-    Some(typed_none_projection("Box<dyn std::any::Any>"))
+    let rust_ty = emit::emit_type(&erased_object_rust_type());
+    Some(typed_none_projection(&rust_ty))
 }
 
 fn lower_array_expr_for_slot(

@@ -27802,6 +27802,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn unwrap_java_null_receiver_projection"));
     assert!(coercion_source.contains("pub fn typed_none_projection"));
     assert!(coercion_source.contains("pub fn boxed_dyn_trait_projection"));
+    assert!(include_str!("../src/slot_render.rs").contains("pub fn erased_object_rust_type"));
     assert!(coercion_source.contains("pub fn unsupported_deserialization_cast_handoff_projection"));
     assert!(coercion_source.contains("pub fn abstract_method_stub_projection"));
     assert!(coercion_source.contains("pub fn abstract_interface_method_stub_projection"));
@@ -28056,6 +28057,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("anonymous_dyn_trait_projection("));
     assert!(!lower_source.contains("format!(\"None::<{rust_ty}>\")"));
     assert!(!lower_source.contains("None::<Box<dyn std::any::Any>>"));
+    assert!(!lower_source.contains("\"Box<dyn std::any::Any>\""));
     assert!(lower_source.contains("typed_none_projection("));
     assert!(!lower_source.contains("{}.expect(\"Java null receiver\")"));
     assert!(lower_source.contains("unwrap_java_null_receiver_projection("));

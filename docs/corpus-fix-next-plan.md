@@ -220,6 +220,11 @@ Erased-object constructor follow-up: constructor lowering now uses
 rendered owner type to `Box<dyn std::any::Any>`. `call_lowering.rs` still
 selects the constructor projection, but the erased-object decision is based on
 the shared slot/shape fact boundary.
+Erased-object type spelling follow-up: `slot_render::erased_object_rust_type`
+now owns the canonical `Box<dyn std::any::Any>` type, including wildcard,
+erased-object, generic type-variable, and fallback map element policies.
+Lowering renders typed `None` and iterator fallback element types through that
+slot-render helper instead of carrying the Rust ABI spelling locally.
 External dyn-trait signature follow-up: `EffectiveFacts` now shares the
 canonical external type alias matcher, and same-provenance object
 representation facts prefer explicit non-concrete strategies over concrete
