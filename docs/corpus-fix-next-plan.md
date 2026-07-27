@@ -4516,9 +4516,15 @@ Next FastQC batch candidates from that rerun:
    owner-qualifies bare associated constants introduced by context seeding.
    The nested `Self::ENCODE`/`Self::get_decodabet` missing-owner family is
    gone and the focused generated-Rust count is now 41. The next Base64 slice
-   should focus on inherited `FilterOutputStream.out` state, constructor
-   `self.field` reads before `__java_self` exists, bare `out` assignment,
-   byte-array move recovery, and `i8 | i32` coercion.
+   `.tmp/corpus-fastqc-base64-single-after-modeled-super-order-r1` routes
+   modeled external-super constructors through the same deferred
+   `__java_self` path, orders deferred assigned fields by Java constructor
+   statement order, and drops the focused generated-Rust count to 37. The
+   constructor `self.buffer_length`/`self.encode` use-before-construction
+   family is gone. The next Base64 slice should focus on inherited
+   `FilterOutputStream.out` state, bare `out` assignment, missing
+   `Base64InputStream.close`, byte-array move recovery, unresolved qualified
+   `java`, and `i8 | i32` coercion.
 
 Inherited exception-owner follow-up: inherited source method bodies now lower
 with the emitted subclass as the body/field context but use the declaring type

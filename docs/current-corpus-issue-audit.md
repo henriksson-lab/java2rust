@@ -18,6 +18,7 @@ drift fixes and constructor self-initialization fix. Focused runs used
 | `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-local-type-rust-key-r1` | 1/1 translated, 1 invalid-pattern file, generated-Rust errors reduced to 64. The shared-support merger now removes the bad simple `OutputStream = Base64OutputStream` alias while preserving the real source-owned nested `Base64OutputStream` implementation, and local Rust identities suppress simple external facade stubs. The previous duplicate `OutputStream`/`Base64OutputStream` and conflicting self-conversion rows are gone. Remaining rows are real Base64 translation gaps: outer static member qualification from nested classes, constructor self-field initialization, inherited `FilterOutputStream.out` state, `java_string_from_bytes`, `File.length`, bare field assignment, and byte-array move/bitwise coercion drift. |
 | `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-focused-file-sync-r1` | 1/1 translated, 1 invalid-pattern file, generated-Rust errors reduced to 59. The focused wrapper now mirrors the platform `File::new_1/new_2`, `File.length()`, and `java_string_from_bytes` support surfaces, so the missing `java_string_from_bytes` and `File.length` families from the previous focused Base64 run are gone. |
 | `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-nested-static-owner-r1` | 1/1 translated, 1 invalid-pattern file, generated-Rust errors reduced to 41. Receiverless static calls resolved to an outer declaring source type now lower to that owner instead of `Self`, and owner-qualified associated constants are available for bare nested reads. The previous nested `Self::ENCODE`/`Self::get_decodabet` missing-owner family is gone. Remaining top families are mismatched types, inherited `FilterOutputStream.out` state, constructor `self` use before construction, bare `out` assignment, byte-array moves, and `i8 | i32` coercion. |
+| `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-modeled-super-order-r1` | 1/1 translated, 1 invalid-pattern file, generated-Rust errors reduced to 37. Delegating constructors for modeled external superclasses now use the same `__java_self` deferred-field path as source super constructors, and deferred assigned fields follow Java constructor statement order. The previous constructor `self.buffer_length`/`self.encode` use-before-construction family is gone. Remaining top families are mismatched types, inherited `FilterOutputStream.out` state, bare `out` assignment, missing `Base64InputStream.close`, byte-array moves, unresolved qualified `java`, and `i8 | i32` coercion. |
 
 Current FastQC top families after the 2026-07-27 full rerun:
 
@@ -30,9 +31,10 @@ Current FastQC top families after the 2026-07-27 full rerun:
   similar generated names;
 - Base64 stream state and byte coercion drift: the simple
   `OutputStream = Base64OutputStream` alias/stub conflict and nested outer
-  static-owner rows are fixed in focused proof, while constructor self-field
-  initialization, inherited `FilterOutputStream.out` state, bare `out`
-  assignment, byte-array moves, and `i8 | i32` coercion remain;
+  static-owner rows and constructor self-field initialization are fixed in
+  focused proof, while inherited `FilterOutputStream.out` state, bare `out`
+  assignment, byte-array moves, unresolved qualified `java`, missing stream
+  close support, and `i8 | i32` coercion remain;
 - JDK/platform facade overload gaps: `File::new_1`, `File::new_2`,
   `BorderLayout::CENTER/NORTH`, `JLabel::CENTER`, and `RenderingHints` constants;
 - source mutability inference gaps: methods mutating fields such as

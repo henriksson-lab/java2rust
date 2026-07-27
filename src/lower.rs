@@ -1464,7 +1464,13 @@ fn lower_constructor(
             constructor_ctx,
         )
     } else if constructor_field_plans_need_self_temporary(&field_plans, &env, constructor_ctx) {
-        constructor_return_body_with_self_dependent_fields(ty, &field_plans, &env, constructor_ctx)
+        constructor_return_body_with_self_dependent_fields(
+            ty,
+            &field_plans,
+            ctor.body.as_ref(),
+            &env,
+            constructor_ctx,
+        )
     } else {
         constructor_return_body(
             ty,
@@ -1653,10 +1659,11 @@ fn constructor_expr_needs_self_temporary(expr: &Expr, env: &ShapeEnv, ctx: Lower
 fn constructor_return_body_with_self_dependent_fields(
     ty: &TypeDecl,
     plans: &[ConstructorFieldValuePlan<'_>],
+    source_body: Option<&Block>,
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Vec<RustStmt> {
-    constructor_field_plans_with_trailing_body(ty, plans, &[], env, ctx, false)
+    constructor_field_plans_with_trailing_body_ordered(ty, plans, source_body, &[], env, ctx, false)
 }
 
 fn constructor_return_body_with_body_local_dependent_fields(
@@ -1754,9 +1761,10 @@ fn constructor_field_plans_with_body_local_decls(
     lowered_body
 }
 
-fn constructor_field_plans_with_trailing_body(
+fn constructor_field_plans_with_trailing_body_ordered(
     ty: &TypeDecl,
     plans: &[ConstructorFieldValuePlan<'_>],
+    source_body: Option<&Block>,
     trailing: &[DelegatedConstructorTrailingStmt<'_>],
     env: &ShapeEnv,
     ctx: LowerCtx,
@@ -1764,7 +1772,8 @@ fn constructor_field_plans_with_trailing_body(
 ) -> Vec<RustStmt> {
     let mut fields = Vec::new();
     let mut deferred = Vec::new();
-    for plan in plans {
+    let assignment_order = source_body.map(constructor_body_field_assignment_order);
+    for (plan_index, plan) in plans.iter().enumerate() {
         let self_dependent = constructor_field_value_expr(plan)
             .is_some_and(|expr| constructor_expr_needs_self_temporary(expr, env, ctx));
         if self_dependent {
@@ -1778,7 +1787,7 @@ fn constructor_field_plans_with_trailing_body(
                     )
                 }),
             );
-            deferred.push(plan);
+            deferred.push((plan_index, plan));
         } else {
             fields.push(lower_constructor_field_value_plan(plan.clone(), env, ctx));
         }
@@ -1794,7 +1803,12 @@ fn constructor_field_plans_with_trailing_body(
             fields,
         }),
     }];
-    for plan in deferred {
+    if let Some(assignment_order) = assignment_order.as_ref() {
+        deferred.sort_by_key(|(plan_index, plan)| {
+            deferred_constructor_field_order_key(*plan_index, plan, assignment_order)
+        });
+    }
+    for (_, plan) in deferred {
         let (field_name, value, shape) = constructor_assigned_field_parts(plan);
         let lowered = lower_self_dependent_constructor_field_value(value, shape, env, ctx);
         body.push(assignment_stmt(
@@ -1818,6 +1832,58 @@ fn constructor_field_plans_with_trailing_body(
         returned
     })));
     body
+}
+
+fn constructor_body_field_assignment_order(
+    body: &Block,
+) -> std::collections::HashMap<String, usize> {
+    body.statements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, stmt)| match stmt {
+            Stmt::Assign { target, .. } => match target {
+                Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+                    Some((crate::parser::to_snake_case(field), index))
+                }
+                Expr::Var(field) => Some((crate::parser::to_snake_case(field), index)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn deferred_constructor_field_order_key(
+    plan_index: usize,
+    plan: &ConstructorFieldValuePlan<'_>,
+    assignment_order: &std::collections::HashMap<String, usize>,
+) -> (usize, usize) {
+    match plan {
+        ConstructorFieldValuePlan::Assigned { field_name, .. } => (
+            1,
+            assignment_order
+                .get(field_name)
+                .copied()
+                .unwrap_or(usize::MAX),
+        ),
+        ConstructorFieldValuePlan::FieldInitializer { .. } => (0, plan_index),
+        ConstructorFieldValuePlan::Default { .. } => (2, plan_index),
+    }
+}
+
+fn sort_deferred_constructor_field_assignments_by_body_order(
+    assignments: &mut [DelegatedConstructorTrailingStmt<'_>],
+    body: &Block,
+) {
+    let assignment_order = constructor_body_field_assignment_order(body);
+    assignments.sort_by_key(|assignment| match assignment {
+        DelegatedConstructorTrailingStmt::FieldAssignment { field_name, .. } => assignment_order
+            .get(field_name)
+            .copied()
+            .unwrap_or(usize::MAX),
+        DelegatedConstructorTrailingStmt::InstanceCall { .. }
+        | DelegatedConstructorTrailingStmt::ExprStatement { .. } => usize::MAX,
+    });
 }
 
 fn constructor_self_temporary_seed_field_value(
@@ -2038,20 +2104,18 @@ fn lower_delegating_constructor(
         }
         ConstructorDelegationPlan::SuperNoArgWithTrailing { trailing } => {
             let returns_result = delegated_constructor_trailing_can_throw(&trailing, env, ctx);
-            let fields = plan_constructor_field_values_with_inherited_context(
+            let field_plans = plan_constructor_field_values_with_inherited_context(
                 ty,
                 Some(body),
                 ctx.signatures,
                 ctx.support_local_type_program,
                 ctx.facts,
-            )
-            .into_iter()
-            .map(|plan| lower_constructor_field_value_plan(plan, env, ctx))
-            .collect();
+            );
             (
-                super_no_arg_constructor_with_trailing_body(
+                constructor_field_plans_with_trailing_body_ordered(
                     ty,
-                    fields,
+                    &field_plans,
+                    Some(body),
                     &trailing,
                     env,
                     ctx,
@@ -2062,16 +2126,13 @@ fn lower_delegating_constructor(
         }
         ConstructorDelegationPlan::ModeledExternalSuperclassWithTrailing { trailing, .. } => {
             let returns_result = delegated_constructor_trailing_can_throw(&trailing, env, ctx);
-            let fields = plan_constructor_field_values_with_inherited_context(
+            let field_plans = plan_constructor_field_values_with_inherited_context(
                 ty,
                 Some(body),
                 ctx.signatures,
                 ctx.support_local_type_program,
                 ctx.facts,
-            )
-            .into_iter()
-            .map(|plan| lower_constructor_field_value_plan(plan, env, ctx))
-            .collect();
+            );
             let trailing_instance_calls = trailing
                 .iter()
                 .filter(|stmt| {
@@ -2083,34 +2144,39 @@ fn lower_delegating_constructor(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            if trailing_instance_calls.is_empty() {
-                (constructor_return_body(ty, fields), false)
-            } else {
-                (
-                    super_no_arg_constructor_with_trailing_body(
-                        ty,
-                        fields,
-                        &trailing_instance_calls,
-                        env,
-                        ctx,
-                        returns_result,
-                    ),
+            (
+                constructor_field_plans_with_trailing_body_ordered(
+                    ty,
+                    &field_plans,
+                    Some(body),
+                    &trailing_instance_calls,
+                    env,
+                    ctx,
                     returns_result,
-                )
-            }
+                ),
+                returns_result,
+            )
         }
         ConstructorDelegationPlan::ExternalExceptionSuperclass { .. } => {
-            let fields = plan_constructor_field_values_with_inherited_context(
+            let field_plans = plan_constructor_field_values_with_inherited_context(
                 ty,
                 Some(body),
                 ctx.signatures,
                 ctx.support_local_type_program,
                 ctx.facts,
+            );
+            (
+                constructor_field_plans_with_trailing_body_ordered(
+                    ty,
+                    &field_plans,
+                    Some(body),
+                    &[],
+                    env,
+                    ctx,
+                    false,
+                ),
+                false,
             )
-            .into_iter()
-            .map(|plan| lower_constructor_field_value_plan(plan, env, ctx))
-            .collect();
-            (constructor_return_body(ty, fields), false)
         }
         ConstructorDelegationPlan::ExternalExceptionSuperclassWithTrailing { trailing, .. } => {
             let trailing_side_effects = delegated_constructor_trailing_side_effects(&trailing);
@@ -2124,9 +2190,10 @@ fn lower_delegating_constructor(
                 ctx.facts,
             );
             (
-                constructor_field_plans_with_trailing_body(
+                constructor_field_plans_with_trailing_body_ordered(
                     ty,
                     &field_plans,
+                    Some(body),
                     &trailing_side_effects,
                     env,
                     ctx,
@@ -2171,7 +2238,7 @@ fn source_super_constructor_with_trailing_fields<'a>(
     ty: &'a TypeDecl,
     body: &'a Block,
     env: &ShapeEnv,
-    ctx: LowerCtx,
+    ctx: LowerCtx<'a>,
 ) -> Option<(
     Vec<(String, RustExpr)>,
     Vec<DelegatedConstructorTrailingStmt<'a>>,
@@ -2197,7 +2264,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
     args: &'a [Expr],
     trailing: Vec<DelegatedConstructorTrailingStmt<'a>>,
     env: &ShapeEnv,
-    ctx: LowerCtx,
+    ctx: LowerCtx<'a>,
 ) -> Option<(
     Vec<(String, RustExpr)>,
     Vec<DelegatedConstructorTrailingStmt<'a>>,
@@ -2260,6 +2327,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
 
     let mut fields = Vec::new();
     let mut super_field_values = std::collections::HashMap::new();
+    let mut deferred_child_field_assignments = Vec::new();
     for plan in super_plans {
         let (field_name, shape) = constructor_field_name_and_shape(&plan);
         if !inherited_field_names.contains(field_name) {
@@ -2290,6 +2358,31 @@ fn source_super_constructor_fields_and_trailing<'a>(
         let (field_name, _) = constructor_field_name_and_shape(&plan);
         if let Some(value) = super_field_values.remove(field_name) {
             fields.push((field_name.clone(), value));
+        } else if let Some(value) = match &plan {
+            ConstructorFieldValuePlan::Assigned { value, .. }
+            | ConstructorFieldValuePlan::FieldInitializer { value, .. }
+                if constructor_expr_needs_self_temporary(value, env, ctx) =>
+            {
+                Some(*value)
+            }
+            _ => None,
+        } {
+            let (field_name, shape) = constructor_field_name_and_shape(&plan);
+            fields.push(
+                constructor_self_temporary_seed_field_value(&plan, env, ctx).unwrap_or_else(|| {
+                    constructor_default_field_value_with_facts(
+                        field_name.clone(),
+                        shape.clone(),
+                        ctx.facts,
+                    )
+                }),
+            );
+            deferred_child_field_assignments.push(
+                DelegatedConstructorTrailingStmt::FieldAssignment {
+                    field_name: field_name.clone(),
+                    value,
+                },
+            );
         } else {
             fields.push(lower_constructor_field_value_plan_with_future_reads(
                 plan,
@@ -2300,7 +2393,11 @@ fn source_super_constructor_fields_and_trailing<'a>(
         }
     }
 
-    let trailing_instance_calls = trailing
+    sort_deferred_constructor_field_assignments_by_body_order(
+        &mut deferred_child_field_assignments,
+        body,
+    );
+    let mut trailing_instance_calls = trailing
         .into_iter()
         .filter(|stmt| {
             matches!(
@@ -2310,6 +2407,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
             )
         })
         .collect::<Vec<_>>();
+    trailing_instance_calls.splice(0..0, deferred_child_field_assignments);
     let returns_result =
         delegated_constructor_trailing_can_throw(&trailing_instance_calls, env, ctx);
     Some((fields, trailing_instance_calls, returns_result))
@@ -2445,7 +2543,7 @@ fn implicit_source_super_constructor_with_trailing_fields<'a>(
     ty: &'a TypeDecl,
     body: &'a Block,
     env: &ShapeEnv,
-    ctx: LowerCtx,
+    ctx: LowerCtx<'a>,
 ) -> Option<(
     Vec<(String, RustExpr)>,
     Vec<DelegatedConstructorTrailingStmt<'a>>,
@@ -2733,9 +2831,7 @@ fn lower_delegated_constructor_trailing_stmt(
     match stmt {
         DelegatedConstructorTrailingStmt::FieldAssignment { field_name, value } => {
             let shape = ctx.signatures.required_field_shape(&ty.name, field_name);
-            let slot = assignment_value_plan_for_shape(&shape).slot;
-            let lowered = lower_expr_for_slot(value, env, slot.clone(), ctx);
-            let lowered = wrap_optional_assignment_value_if_needed(value, env, slot, lowered, ctx);
+            let lowered = lower_self_dependent_constructor_field_value(value, &shape, env, ctx);
             assignment_stmt(constructor_self_field_projection(field_name), lowered)
         }
         DelegatedConstructorTrailingStmt::InstanceCall { resolved, args } => {

@@ -8771,6 +8771,50 @@ class MiniFilterOutput extends FilterOutputStream {
 }
 
 #[test]
+fn modeled_external_super_constructor_field_read_defers_until_self_temporary_exists() {
+    let translation = translate_source(
+        r#"
+import java.io.FilterInputStream;
+import java.io.InputStream;
+
+class ExternalSuperConstructorFieldRead extends FilterInputStream {
+    private boolean enabled;
+    private int bufferLength;
+    private byte[] buffer;
+
+    ExternalSuperConstructorFieldRead(InputStream input, int options) {
+        super(input);
+        this.enabled = (options & 1) != 0;
+        this.bufferLength = enabled ? 4 : 3;
+        this.buffer = new byte[bufferLength];
+    }
+}
+"#,
+    );
+
+    let length_assignment = translation
+        .rust
+        .find("__java_self.buffer_length = if __java_self.enabled { 4 } else { 3 };")
+        .unwrap_or(usize::MAX);
+    let buffer_assignment = translation
+        .rust
+        .find("__java_self.buffer = vec![0; __java_self.buffer_length as usize];")
+        .unwrap_or(usize::MAX);
+    assert!(
+        translation
+            .rust
+            .contains("let mut __java_self = ExternalSuperConstructorFieldRead")
+            && length_assignment < buffer_assignment
+            && !translation
+                .rust
+                .contains("buffer: vec![0; self.buffer_length")
+            && !translation.rust.contains("buffer_length: if self.enabled"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn jdk_stream_wrapper_inherits_typed_protected_stream_fields() {
     let translation = translate_source(
         r#"
@@ -14702,6 +14746,59 @@ class ConstructorAssignedFieldRead {
 
     cargo_check_generated_modules(
         "constructor_assigned_field_read",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_super_constructor_field_read_defers_until_self_temporary_exists() {
+    let translation = translate_source(
+        r#"
+class SuperConstructorFieldReadBase {
+    SuperConstructorFieldReadBase(int input) {
+    }
+}
+
+class SuperConstructorFieldReadChild extends SuperConstructorFieldReadBase {
+    private boolean enabled;
+    private int width;
+    private int[] values;
+
+    SuperConstructorFieldReadChild(int input, int options) {
+        super(input);
+        this.enabled = (options & 1) != 0;
+        this.width = enabled ? 4 : 3;
+        this.values = new int[width];
+    }
+}
+"#,
+    );
+
+    let width_assignment = translation
+        .rust
+        .find("__java_self.width = if __java_self.enabled { 4 } else { 3 };")
+        .unwrap_or(usize::MAX);
+    let values_assignment = translation
+        .rust
+        .find("__java_self.values = vec![0; __java_self.width as usize];")
+        .unwrap_or(usize::MAX);
+    assert!(
+        translation
+            .rust
+            .contains("let mut __java_self = SuperConstructorFieldReadChild")
+            && width_assignment < values_assignment
+            && !translation.rust.contains("values: vec![0; self.width")
+            && !translation.rust.contains("width: if self.enabled"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_super_constructor_field_read",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
