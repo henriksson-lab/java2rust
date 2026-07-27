@@ -12747,14 +12747,7 @@ fn adapt_optional_instance_receiver_with_slot_plan(
         .expect("receiver type was selected from receiver_shapes");
     let plan = optional_receiver_slot_plan(receiver_ty, mutable, legacy_unchecked, ctx.facts);
     let projected = project_optional_receiver(lowered, plan.projection);
-    let Some(target_shape) = slot_target_shape(&plan.slot) else {
-        return projected;
-    };
-    let Some(actual) = LoweredType::optional_element_borrow_from_option_shape(
-        option_shape,
-        target_shape.java_ty.clone(),
-        Some(plan.element_ownership),
-    ) else {
+    let Some(actual) = plan.optional_element_borrow_type(option_shape) else {
         return projected;
     };
     let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {

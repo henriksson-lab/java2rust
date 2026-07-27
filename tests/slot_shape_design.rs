@@ -10151,12 +10151,21 @@ fn optional_receiver_slot_plan_maps_mutability_and_projection() {
         shared.projection,
         OptionalReceiverProjection::SharedUnchecked
     );
-    let Slot::Argument(shared_shape) = shared.slot else {
+    let Slot::Argument(shared_shape) = &shared.slot else {
         panic!("shared optional receiver should have an argument slot");
     };
     assert_eq!(shared_shape.java_ty, reader_ty);
     assert_eq!(shared_shape.ownership, OwnershipShape::SharedBorrow);
     assert_eq!(shared.element_ownership, OwnershipShape::SharedBorrow);
+    let Some(LoweredType::OptionalElementBorrow { element_shape, .. }) = shared
+        .optional_element_borrow_type(RustSlotShape::conservative(optional_java_type(
+            reader_ty.clone(),
+        )))
+    else {
+        panic!("shared optional receiver should plan an optional element borrow");
+    };
+    assert_eq!(element_shape.java_ty, reader_ty);
+    assert_eq!(element_shape.ownership, OwnershipShape::SharedBorrow);
 
     let mutable = optional_receiver_slot_plan(
         JavaType::Named {
@@ -10169,12 +10178,23 @@ fn optional_receiver_slot_plan_maps_mutability_and_projection() {
     );
     assert_eq!(mutable.receiver_abi, ReceiverAbi::MutBorrowedSelf);
     assert_eq!(mutable.projection, OptionalReceiverProjection::Mutable);
-    let Slot::Argument(mutable_shape) = mutable.slot else {
+    let Slot::Argument(mutable_shape) = &mutable.slot else {
         panic!("mutable optional receiver should have an argument slot");
     };
     assert_eq!(mutable_shape.ownership, OwnershipShape::MutableBorrow);
     assert_eq!(mutable_shape.mutability, MutabilityShape::Mutable);
     assert_eq!(mutable.element_ownership, OwnershipShape::MutableBorrow);
+    let Some(LoweredType::OptionalElementBorrow { element_shape, .. }) = mutable
+        .optional_element_borrow_type(RustSlotShape::conservative(optional_java_type(
+            JavaType::Named {
+                name: "Reader".to_string(),
+                args: Vec::new(),
+            },
+        )))
+    else {
+        panic!("mutable optional receiver should plan an optional element borrow");
+    };
+    assert_eq!(element_shape.ownership, OwnershipShape::MutableBorrow);
 }
 
 #[test]
@@ -14146,7 +14166,10 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
     assert!(optional_instance_receiver_adapter.contains("OptionalElementBorrow"));
     assert!(optional_instance_receiver_adapter.contains("plan_lowered_slot_conversion"));
     assert!(optional_instance_receiver_adapter.contains("project_optional_receiver"));
-    assert!(optional_instance_receiver_adapter.contains("Some(plan.element_ownership)"));
+    assert!(optional_instance_receiver_adapter.contains("plan.optional_element_borrow_type"));
+    assert!(
+        !optional_instance_receiver_adapter.contains("optional_element_borrow_from_option_shape")
+    );
     assert!(!optional_instance_receiver_adapter.contains("Some(if mutable"));
     let native_collection_receiver_helper = source
         .split("fn adapt_native_collection_receiver")
@@ -27999,6 +28022,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("actual: LoweredType::Slot(element_shape)"));
     assert!(call_plan_source.contains("pub struct OptionalReceiverSlotPlan"));
     assert!(call_plan_source.contains("pub element_ownership: OwnershipShape"));
+    assert!(call_plan_source.contains("pub fn optional_element_borrow_type"));
     assert!(!call_plan_source.contains("pub enum OptionalReceiverProjectionPlan"));
     assert!(!lower_source.contains("fn optional_receiver_projection_from_plan"));
     assert!(call_plan_source.contains("pub fn optional_receiver_slot_plan"));

@@ -151,6 +151,20 @@ pub struct OptionalReceiverSlotPlan {
     pub element_ownership: OwnershipShape,
 }
 
+impl OptionalReceiverSlotPlan {
+    pub fn optional_element_borrow_type(&self, option_shape: RustSlotShape) -> Option<LoweredType> {
+        let target_shape = match &self.slot {
+            Slot::Assignment(shape) | Slot::Return(shape) | Slot::Argument(shape) => shape,
+            _ => return None,
+        };
+        LoweredType::optional_element_borrow_from_option_shape(
+            option_shape,
+            target_shape.java_ty.clone(),
+            Some(self.element_ownership),
+        )
+    }
+}
+
 pub fn facade_receiver_slot_plan(
     receiver_abi: ReceiverAbi,
     java_ty: JavaType,

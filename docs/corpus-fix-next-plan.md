@@ -3941,11 +3941,12 @@ Same-call mutable alias detection still remains local until global sequencing
 analysis can prove read/write ordering, but the rendered compatibility boundary
 now returns a named `RenderedMutableAliasProjection` instead of exposing an
 anonymous boolean over optional receiver and mutable-slice spellings.
-Optional receiver slot planning now also carries the optional element borrow
-ownership used for receiver carrier construction. `lower.rs` still owns the
+Optional receiver slot planning now also carries and constructs the optional
+element borrow carrier used for receiver adaptation. `lower.rs` still owns the
 expression-shape lookup and legacy unchecked projection choice, but it consumes
-`OptionalReceiverSlotPlan::element_ownership` instead of reconstructing the
-shared-vs-mutable carrier decision from the local `mutable` flag.
+`OptionalReceiverSlotPlan::optional_element_borrow_type` instead of
+reconstructing the shared-vs-mutable carrier decision from the local `mutable`
+flag.
 
 ## Rerun Protocol
 
