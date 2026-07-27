@@ -30087,6 +30087,24 @@ fn java_platform_io_api_effect(
             ExternalApiRole::Getter,
             JavaType::Primitive(PrimitiveType::Int),
         ),
+        (receiver, "hasRemaining" | "has_remaining")
+            if is_java_platform_nio_buffer_receiver(receiver) && matches_arg_count(0) =>
+        {
+            (
+                0,
+                ExternalApiRole::Getter,
+                JavaType::Primitive(PrimitiveType::Boolean),
+            )
+        }
+        (receiver, "remaining")
+            if is_java_platform_nio_buffer_receiver(receiver) && matches_arg_count(0) =>
+        {
+            (
+                0,
+                ExternalApiRole::Getter,
+                JavaType::Primitive(PrimitiveType::Int),
+            )
+        }
         (receiver, "write" | "write_3")
             if is_java_platform_output_stream_receiver(receiver) && matches_arg_count(3) =>
         {
@@ -30215,6 +30233,10 @@ fn is_java_platform_output_stream_receiver(receiver: &str) -> bool {
             | "FilterOutputStream"
             | "PrintStream"
     )
+}
+
+fn is_java_platform_nio_buffer_receiver(receiver: &str) -> bool {
+    matches!(receiver, "ByteBuffer" | "CharBuffer")
 }
 
 pub fn java_platform_constructor_argument_effect_for(

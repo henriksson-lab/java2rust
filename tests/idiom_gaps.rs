@@ -5481,9 +5481,11 @@ import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 
 class BufferPutUse {
-    static void encode(ByteBuffer bytes, CharBuffer chars, byte[] encoded) {
+    static int encode(ByteBuffer bytes, CharBuffer chars, byte[] encoded) {
+        int rem = bytes.hasRemaining() ? bytes.remaining() : 0;
         bytes.put(encoded);
         chars.put((char)(encoded[0] & 0xFF));
+        return rem;
     }
 }
 "#,
@@ -5491,6 +5493,9 @@ class BufferPutUse {
 
     assert!(
         translation.rust.contains("{ let _ = encoded")
+            && translation.rust.contains("let rem: i32 = if bytes.has_remaining() { bytes.remaining() } else { 0 };")
+            && translation.rust.contains("pub fn has_remaining(&self) -> bool")
+            && translation.rust.contains("pub fn remaining(&self) -> i32")
             && translation
                 .rust
                 .contains("{ let _ = char::from_u32(((encoded[0 as usize] as i32 & 255) as u32) & 0xffff).unwrap_or('\\0'); };")

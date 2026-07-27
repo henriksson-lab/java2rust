@@ -1306,6 +1306,37 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
             FacadeSlot::Owned,
         ));
     }
+    for (owner, rust_owner) in [
+        ("ByteBuffer", "ByteBuffer"),
+        ("java.nio.ByteBuffer", "ByteBuffer"),
+        ("CharBuffer", "CharBuffer"),
+        ("java.nio.CharBuffer", "CharBuffer"),
+    ] {
+        facts.facade_abi_facts.push(rust_stdlib_method_abi(
+            owner,
+            "hasRemaining",
+            0,
+            &format!("{rust_owner}::has_remaining"),
+            Vec::new(),
+            FacadeSlot::Owned,
+        ));
+        facts.facade_abi_facts.push(rust_stdlib_method_abi(
+            owner,
+            "has_remaining",
+            0,
+            &format!("{rust_owner}::has_remaining"),
+            Vec::new(),
+            FacadeSlot::Owned,
+        ));
+        facts.facade_abi_facts.push(rust_stdlib_method_abi(
+            owner,
+            "remaining",
+            0,
+            &format!("{rust_owner}::remaining"),
+            Vec::new(),
+            FacadeSlot::Owned,
+        ));
+    }
     for owner in [
         "OutputStream",
         "java.io.OutputStream",
