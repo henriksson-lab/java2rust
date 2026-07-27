@@ -707,14 +707,23 @@ strip_shared_support_items() {
         next
       }
       if ($0 ~ /^impl([[:space:]]*<[^>]+>)?[[:space:]]+.*[[:space:]]+for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*(<.*>)?[[:space:]]*\{/) {
-        impl_trait = $0
-        sub(/^impl([[:space:]]*<[^>]+>)?[[:space:]]+/, "", impl_trait)
-        sub(/[[:space:]]+for[[:space:]].*/, "", impl_trait)
+        impl_trait_raw = $0
+        sub(/^impl([[:space:]]*<[^>]+>)?[[:space:]]+/, "", impl_trait_raw)
+        sub(/[[:space:]]+for[[:space:]].*/, "", impl_trait_raw)
+        impl_trait = impl_trait_raw
         sub(/<.*>/, "", impl_trait)
+        from_trait_source = ""
+        if (impl_trait_raw ~ /^From<[A-Za-z_][A-Za-z0-9_]*>$/) {
+          from_trait_source = impl_trait_raw
+          sub(/^From</, "", from_trait_source)
+          sub(/>$/, "", from_trait_source)
+        }
         impl_target = $0
         sub(/^.*[[:space:]]for[[:space:]]+/, "", impl_target)
         sub(/(<.*>)?[[:space:]]*\{.*/, "", impl_target)
-        if (impl_target == "JavaException" || impl_target == "JavaClass" || impl_target == "FileSystem" || impl_target == "Path" || impl_target == "URI" || impl_target == "File" || impl_target == "URL" || impl_target == "URLConnection" || impl_target == "JarURLConnection" || impl_target == "JarFile" || impl_target == "JarEntry" || impl_target == "Manifest" || impl_target == "Attributes" || impl_target == "AttributesName" || impl_target == "Enumeration" || impl_target == "JavaIterator" || impl_target == "IOUtils" || (shared[impl_target] && impl_target != source_type) || shared[impl_trait]) {
+        target_is_shared = shared[impl_target] && impl_target != source_type
+        keep_module_from_impl_to_shared = target_is_shared && from_trait_source != "" && !shared[from_trait_source]
+        if (impl_target == "JavaException" || impl_target == "JavaClass" || impl_target == "FileSystem" || impl_target == "Path" || impl_target == "URI" || impl_target == "File" || impl_target == "URL" || impl_target == "URLConnection" || impl_target == "JarURLConnection" || impl_target == "JarFile" || impl_target == "JarEntry" || impl_target == "Manifest" || impl_target == "Attributes" || impl_target == "AttributesName" || impl_target == "Enumeration" || impl_target == "JavaIterator" || impl_target == "IOUtils" || (target_is_shared && !keep_module_from_impl_to_shared) || shared[impl_trait]) {
           skip_depth = 0
           skip_depth += gsub(/\{/, "{")
           skip_depth -= gsub(/\}/, "}")

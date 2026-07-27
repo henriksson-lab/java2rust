@@ -4529,11 +4529,23 @@ Next FastQC batch candidates from that rerun:
    `OutputStream -> JavaIoOutputStream` support impls when the simple source
    type is later suppressed by a local nested `Base64.OutputStream`. Invalid
    downcast patterns are now 0 and the focused generated-Rust count is 34.
-   The next Base64 slice should focus on exact stream-slot adaptation for
-   `Base64InputStream -> JavaIoInputStream` and erased constructor
-   `out -> JavaIoOutputStream`, JDK output-stream `write(int)` ABI, missing
-   inherited `Base64InputStream.close`, byte-array move recovery, unresolved
-   qualified `java`, ByteBuffer method return facts, and `i8 | i32` coercion.
+   The next Base64 slice
+   `.tmp/corpus-fastqc-base64-single-after-shared-from-strip-r1` preserves
+   explicit `java.io.*Stream` parameter names, keeps exact JDK stream adapter
+   endpoints distinct from simple stream names, and updates focused
+   shared-support stripping so module-local `From<T>` impls targeting shared
+   support types are not removed. The previous
+   `InputStream: From<JavaIoInputStream>` row is gone and the focused
+   generated-Rust count is 29. The next Base64 slice
+   `.tmp/corpus-fastqc-base64-single-after-byte-array-outputstream-r1` models
+   exact `java.io.ByteArrayOutputStream.toByteArray()` as a non-throwing
+   `Vec<i8>` getter and adds simple/exact byte-array-output-stream conversion
+   facts to `java.io.OutputStream`. The previous four missing `to_byte_array`
+   rows are gone and the focused generated-Rust count is 25. The next Base64
+   slice should focus on JDK output-stream `write(int)` ABI, source subclass
+   `Base64OutputStream -> JavaIoOutputStream` adaptation, missing inherited
+   `Base64InputStream.close`, byte-array move recovery, unresolved qualified
+   `java`, ByteBuffer method return facts, and byte/int bitwise coercion.
 
 Inherited exception-owner follow-up: inherited source method bodies now lower
 with the emitted subclass as the body/field context but use the declaring type

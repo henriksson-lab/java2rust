@@ -1031,15 +1031,19 @@ fn parse_params_node(node: tree_sitter::Node, source: &str) -> Vec<Param> {
             let name = field_text(param, "name", source)?;
             let is_varargs =
                 param.kind() == "spread_parameter" || text(param, source).contains("...");
-            let ty = param
-                .child_by_field_name("type")
-                .map(|node| {
-                    let mut ty = parse_type_node(node, source);
-                    if is_varargs {
-                        ty = JavaType::Array(Box::new(ty));
-                    }
-                    ty = type_with_declarator_array_dimensions(&ty, text(param, source), &name);
-                    ty
+            let explicit_java_io_ty = parse_param_text_fallback(text(param, source))
+                .map(|param| param.ty)
+                .filter(is_explicit_java_io_stream_type);
+            let ty = explicit_java_io_ty
+                .or_else(|| {
+                    param.child_by_field_name("type").map(|node| {
+                        let mut ty = parse_type_node(node, source);
+                        if is_varargs {
+                            ty = JavaType::Array(Box::new(ty));
+                        }
+                        ty = type_with_declarator_array_dimensions(&ty, text(param, source), &name);
+                        ty
+                    })
                 })
                 .or_else(|| {
                     is_varargs
@@ -2242,6 +2246,10 @@ fn parse_type_text(src: &str) -> JavaType {
 }
 
 fn java_type_name_suffix(src: &str) -> String {
+    let src = src.trim();
+    if preserve_explicit_java_io_type_name(src) {
+        return src.to_string();
+    }
     let mut suffix = Vec::new();
     for part in src.split('.') {
         let part = part.trim();
@@ -2259,6 +2267,35 @@ fn java_type_name_suffix(src: &str) -> String {
         src.rsplit('.').next().unwrap_or(src).trim().to_string()
     } else {
         suffix.join(".")
+    }
+}
+
+fn preserve_explicit_java_io_type_name(src: &str) -> bool {
+    matches!(
+        src,
+        "java.io.InputStream"
+            | "java.io.OutputStream"
+            | "java.io.FilterInputStream"
+            | "java.io.FilterOutputStream"
+            | "java.io.FileInputStream"
+            | "java.io.FileOutputStream"
+            | "java.io.BufferedInputStream"
+            | "java.io.BufferedOutputStream"
+            | "java.io.ByteArrayInputStream"
+            | "java.io.ByteArrayOutputStream"
+            | "java.io.DataInputStream"
+            | "java.io.ObjectInputStream"
+            | "java.io.ObjectOutputStream"
+            | "java.io.PushbackInputStream"
+            | "java.io.SequenceInputStream"
+    )
+}
+
+fn is_explicit_java_io_stream_type(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Named { name, .. } => preserve_explicit_java_io_type_name(name),
+        JavaType::Array(inner) => is_explicit_java_io_stream_type(inner),
+        _ => false,
     }
 }
 

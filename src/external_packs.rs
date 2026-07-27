@@ -30058,6 +30058,11 @@ fn java_platform_io_api_effect(
         ("ByteArrayOutputStream", "toString" | "to_string") if matches_arg_count(1) => {
             (1, ExternalApiRole::Getter, JavaType::String)
         }
+        ("ByteArrayOutputStream", "toByteArray" | "to_byte_array") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        ),
         ("ObjectInputStream", "readInt" | "read_int") if matches_arg_count(0) => (
             0,
             ExternalApiRole::Getter,
@@ -30138,6 +30143,8 @@ fn java_platform_io_api_effect(
     let thrown = if (matches!(simple_receiver, "Files" | "JavaNioFileFiles")
         && matches!(method_name, "exists"))
         || matches!(simple_receiver, "Inflater" | "PrintStream")
+        || (matches!(simple_receiver, "ByteArrayOutputStream")
+            && matches!(method_name, "toByteArray" | "to_byte_array"))
     {
         Vec::new()
     } else {
@@ -30580,6 +30587,8 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
         [
             "java.io.FileOutputStream",
             "FileOutputStream",
+            "java.io.ByteArrayOutputStream",
+            "ByteArrayOutputStream",
             "java.io.BufferedOutputStream",
             "BufferedOutputStream",
             "java.io.FilterOutputStream",

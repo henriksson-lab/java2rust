@@ -107,6 +107,26 @@ fn focused_package_shared_support_stripper_keeps_dyn_trait_inherent_impls() {
 }
 
 #[test]
+fn focused_package_shared_support_stripper_keeps_from_impls_from_module_local_types() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(
+        script.contains("from_trait_source = impl_trait_raw"),
+        "{script}"
+    );
+    assert!(
+        script.contains("keep_module_from_impl_to_shared = target_is_shared && from_trait_source != \"\" && !shared[from_trait_source]"),
+        "{script}"
+    );
+    assert!(
+        script.contains("(target_is_shared && !keep_module_from_impl_to_shared)"),
+        "{script}"
+    );
+}
+
+#[test]
 fn focused_package_module_type_extractor_strips_trait_bounds() {
     let script_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");

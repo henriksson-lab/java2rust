@@ -8064,6 +8064,8 @@ impl ExternalApiFacadeSupport {
             ("PushbackInputStream", "java.io.InputStream"),
             ("SequenceInputStream", "java.io.InputStream"),
             ("FileOutputStream", "java.io.OutputStream"),
+            ("java.io.ByteArrayOutputStream", "java.io.OutputStream"),
+            ("ByteArrayOutputStream", "java.io.OutputStream"),
             ("BufferedOutputStream", "java.io.OutputStream"),
             ("FilterOutputStream", "java.io.OutputStream"),
             ("ObjectOutputStream", "java.io.OutputStream"),
@@ -8071,14 +8073,15 @@ impl ExternalApiFacadeSupport {
         ] {
             let from_key = canonical_external_receiver_type_key(from);
             let to_key = canonical_external_receiver_type_key(to);
-            if (local_types.contains(&from_key) && !matches!(from, "InputStream" | "OutputStream"))
+            if (local_types.contains(&from_key)
+                && !matches!(from, "InputStream" | "OutputStream" | "java.io.InputStream"))
                 || (local_types.contains(&to_key) && !is_builtin_external_facade_type(&to_key))
             {
                 continue;
             }
-            let from = rust_name_for_java_named_type(from);
-            let to = rust_name_for_java_named_type(to);
-            if !valid_external_facade_type_ident(&to) || from == to {
+            let from = rust_name_for_exact_jdk_stream_adapter_endpoint(from);
+            let to = rust_name_for_exact_jdk_stream_adapter_endpoint(to);
+            if (!valid_external_facade_type_ident(&to) && to != "InputStream") || from == to {
                 continue;
             }
             if !is_builtin_external_facade_type(&from) && valid_external_facade_type_ident(&from) {
@@ -8269,7 +8272,7 @@ impl ExternalApiFacadeSupport {
                 || (is_builtin_external_facade_type(&from)
                     && !matches!(
                         (from.as_str(), to.as_str()),
-                        ("InputStream", "JavaIoInputStream")
+                        ("InputStream", "JavaIoInputStream") | ("JavaIoInputStream", "InputStream")
                     ))
                 || matches!(
                     (from.as_str(), to.as_str()),
@@ -11646,6 +11649,13 @@ fn valid_external_facade_type_ident(name: &str) -> bool {
             .next()
             .is_some_and(|ch| ch.is_ascii_uppercase())
         && !is_builtin_external_facade_type(name)
+}
+
+fn rust_name_for_exact_jdk_stream_adapter_endpoint(name: &str) -> String {
+    match name {
+        "java.io.InputStream" | "java.io.OutputStream" => rust_name_for_java_named_type(name),
+        _ => rust_name_for_java_named_type(&canonical_external_receiver_type_key(name)),
+    }
 }
 
 fn java_type_name_for_external_facade(java_ty: &JavaType) -> Option<&str> {

@@ -120,6 +120,40 @@ class NestedQualifiedConstructor {
 }
 
 #[test]
+fn preserves_explicit_java_io_stream_parameter_type_names() {
+    let parsed = parse_java_source(
+        r#"
+class ExplicitJavaIoStreamParam {
+    ExplicitJavaIoStreamParam(java.io.InputStream in, java.io.OutputStream out) {}
+}
+"#,
+    );
+    let ctor = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Constructor(ctor) => Some(ctor),
+            _ => None,
+        })
+        .expect("constructor");
+
+    assert_eq!(
+        ctor.params[0].ty,
+        JavaType::Named {
+            name: "java.io.InputStream".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        ctor.params[1].ty,
+        JavaType::Named {
+            name: "java.io.OutputStream".to_string(),
+            args: Vec::new(),
+        }
+    );
+}
+
+#[test]
 fn parses_local_array_dimensions_between_type_and_name() {
     let parsed = parse_java_source(
         r#"

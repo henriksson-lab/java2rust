@@ -14067,6 +14067,13 @@ fn java_platform_input_stream_upcast_support_emits_from_impl() {
             .any(|fact| fact.from_type == "OutputStream" && fact.to_type == "java.io.OutputStream"),
         "java platform conversion adapters should publish OutputStream -> java.io.OutputStream"
     );
+    assert!(
+        new_java2rust::external_packs::external_conversion_adapters()
+            .iter()
+            .any(|fact| fact.from_type == "java.io.ByteArrayOutputStream"
+                && fact.to_type == "java.io.OutputStream"),
+        "java platform conversion adapters should publish java.io.ByteArrayOutputStream -> java.io.OutputStream"
+    );
     let items = new_java2rust::stdlib::external_api_facade_support_items(
         &new_java2rust::java_ir::Program::default(),
         &FactSet::default(),
@@ -14086,8 +14093,69 @@ fn java_platform_input_stream_upcast_support_emits_from_impl() {
         "{rendered}"
     );
     assert!(
+        rendered.contains("impl From<JavaIoInputStream> for InputStream"),
+        "{rendered}"
+    );
+    assert!(
         !rendered.contains("impl From<OutputStream> for JavaIoOutputStream"),
         "{rendered}"
+    );
+    assert!(
+        rendered.contains("impl From<JavaIoByteArrayOutputStream> for JavaIoOutputStream"),
+        "{rendered}"
+    );
+
+    let local_stream_program = new_java2rust::parser::parse_java_source(
+        r#"
+class Base64 {
+    static class InputStream {}
+    static class UsesExactJavaIoStream {
+        UsesExactJavaIoStream(java.io.InputStream in) {}
+    }
+}
+"#,
+    )
+    .program;
+    let local_items = new_java2rust::stdlib::external_api_facade_support_items(
+        &local_stream_program,
+        &FactSet::default(),
+    );
+    let local_rendered = local_items
+        .iter()
+        .map(|item| format!("{item:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        local_rendered.contains("impl From<JavaIoInputStream> for InputStream"),
+        "{local_rendered}"
+    );
+
+    let exact_byte_array_program = new_java2rust::parser::parse_java_source(
+        r#"
+class UsesExactByteArrayOutputStream {
+    byte[] bytes(java.io.ByteArrayOutputStream out) {
+        return out.toByteArray();
+    }
+}
+"#,
+    )
+    .program;
+    let byte_array_items = new_java2rust::stdlib::external_api_facade_support_items(
+        &exact_byte_array_program,
+        &FactSet::default(),
+    );
+    let byte_array_rendered = byte_array_items
+        .iter()
+        .map(|item| format!("{item:?}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        byte_array_rendered.contains("impl JavaIoByteArrayOutputStream"),
+        "{byte_array_rendered}"
+    );
+    assert!(
+        byte_array_rendered.contains("pub fn to_byte_array(&self) -> Vec<i8>"),
+        "{byte_array_rendered}"
     );
 }
 
