@@ -448,10 +448,7 @@ impl HierarchyFactLookupIndex {
 }
 
 fn external_method_name_aliases(method_name: &str) -> Vec<String> {
-    let mut aliases = vec![
-        method_name.to_string(),
-        crate::parser::to_snake_case(method_name),
-    ];
+    let mut aliases = crate::java_naming::java_method_name_aliases(method_name);
     aliases.sort();
     aliases.dedup();
     aliases
@@ -2777,9 +2774,14 @@ fn external_optional_type_name_matches(
 }
 
 fn external_method_name_matches(fact_method_name: &str, query_method_name: &str) -> bool {
-    fact_method_name == query_method_name
-        || crate::parser::to_snake_case(fact_method_name)
-            == crate::parser::to_snake_case(query_method_name)
+    let fact_aliases = external_method_name_aliases(fact_method_name);
+    external_method_name_aliases(query_method_name)
+        .iter()
+        .any(|query_alias| {
+            fact_aliases
+                .iter()
+                .any(|fact_alias| fact_alias == query_alias)
+        })
 }
 
 fn external_type_name_aliases(type_name: &str) -> Vec<String> {

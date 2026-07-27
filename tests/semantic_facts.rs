@@ -6398,6 +6398,27 @@ class OptionalPresenceUse {
 }
 
 #[test]
+fn external_api_effect_lookup_uses_shared_java_method_aliases() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "valueOf".to_string(),
+        receiver_type: Some("ExternalEnum".to_string()),
+        arg_count: Some(1),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::String),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: Vec::new(),
+        provenance: FactProvenance::UserOverride,
+    });
+
+    let effect = facts
+        .external_api_effect_for_receiver_with_arity(Some("ExternalEnum"), "value_of", Some(1))
+        .expect("shared Java method aliases should connect snake and camel spellings");
+    assert_eq!(effect.method_name, "valueOf");
+}
+
+#[test]
 fn external_enum_name_is_non_null_string_getter_fact() {
     let semantic = analyze(
         r#"

@@ -31441,6 +31441,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(shape_source.contains("external_api_receiver_type_for_method_reference"));
     assert!(java_naming_source.contains("pub fn java_method_name_aliases"));
     assert!(java_naming_source.contains("pub fn java_accessor_method_reference_fallback_name"));
+    assert!(include_str!("../src/facts.rs").contains("java_method_name_aliases(method_name)"));
     assert!(lowering_source.contains("java_method_name_aliases(method)"));
     assert!(shape_source.contains("java_method_name_aliases(method)"));
     assert!(shape_source.contains("java_accessor_method_reference_fallback_name(method)"));
