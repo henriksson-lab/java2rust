@@ -27578,6 +27578,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(types_source.contains("pub fn raw_rust_type_is_option"));
     assert!(types_source.contains("pub fn raw_rust_result_args"));
     assert!(types_source.contains("pub fn raw_rust_option_inner"));
+    assert!(types_source.contains("pub fn raw_rust_vec_inner"));
+    assert!(types_source.contains("pub fn raw_rust_box_dyn_trait"));
     assert!(types_source.contains("pub fn split_top_level_rust_type_args"));
     assert_eq!(
         new_java2rust::types::raw_rust_result_args("std::io::Result<String>")
@@ -27587,6 +27589,14 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert_eq!(
         new_java2rust::types::raw_rust_option_inner("std::option::Option<&Schema>"),
         Some("&Schema")
+    );
+    assert_eq!(
+        new_java2rust::types::raw_rust_vec_inner("std::vec::Vec<Box<dyn Animal>>"),
+        Some("Box<dyn Animal>")
+    );
+    assert_eq!(
+        new_java2rust::types::raw_rust_box_dyn_trait("std::boxed::Box<dyn Animal>"),
+        Some("Animal")
     );
     let facade_cli_slot_parser = main_source
         .split("fn facade_slot_for_rust_type")
@@ -27665,6 +27675,20 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(facade_default_expr.contains("raw_rust_type_is_option"));
     assert!(!facade_default_expr.contains("strip_prefix(\"Result<\")"));
     assert!(!facade_default_expr.contains("starts_with(\"Option<\")"));
+    let raw_clone_support = item_assembly_source
+        .split("fn raw_rust_type_supports_derive_clone")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn rust_named_type_supports_struct_derive_clone")
+                .next()
+        })
+        .expect("raw Rust clone support helper should be present");
+    assert!(raw_clone_support.contains("raw_rust_option_inner"));
+    assert!(raw_clone_support.contains("raw_rust_vec_inner"));
+    assert!(raw_clone_support.contains("raw_rust_box_dyn_trait"));
+    assert!(!raw_clone_support.contains("starts_with(\"Option<\")"));
+    assert!(!raw_clone_support.contains("starts_with(\"Vec<\")"));
+    assert!(!raw_clone_support.contains("starts_with(\"Box<dyn \""));
     assert!(coercion_source.contains("pub fn collapse_redundant_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));

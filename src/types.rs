@@ -451,6 +451,29 @@ pub fn raw_rust_option_inner(raw: &str) -> Option<&str> {
         })
 }
 
+pub fn raw_rust_vec_inner(raw: &str) -> Option<&str> {
+    raw_rust_generic_args(raw, "Vec")
+        .or_else(|| raw_rust_generic_args(raw, "std::vec::Vec"))
+        .and_then(|args| {
+            if args.len() == 1 {
+                args.first().copied()
+            } else {
+                None
+            }
+        })
+}
+
+pub fn raw_rust_box_dyn_trait(raw: &str) -> Option<&str> {
+    raw_rust_generic_args(raw, "Box")
+        .or_else(|| raw_rust_generic_args(raw, "std::boxed::Box"))
+        .and_then(|args| {
+            if args.len() != 1 {
+                return None;
+            }
+            args[0].strip_prefix("dyn ").map(str::trim)
+        })
+}
+
 pub fn split_top_level_rust_type_args(args: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;

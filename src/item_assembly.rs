@@ -19,8 +19,8 @@ use crate::slot_render::{
 };
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 use crate::types::{
-    optional_element_type, raw_rust_generic_args, sequence_element_type,
-    two_dimensional_array_element_type,
+    optional_element_type, raw_rust_box_dyn_trait, raw_rust_generic_args, raw_rust_option_inner,
+    raw_rust_vec_inner, sequence_element_type, two_dimensional_array_element_type,
 };
 
 pub fn struct_item_for_type(ty: &TypeDecl, signatures: &SignaturePlan) -> RustItem {
@@ -608,7 +608,7 @@ fn raw_rust_type_supports_derive_clone(
     visiting: &mut HashSet<String>,
 ) -> bool {
     let raw = raw.trim();
-    if raw.starts_with("Box<dyn ") && raw.ends_with('>') {
+    if raw_rust_box_dyn_trait(raw).is_some() {
         return true;
     }
     if let Some(args) = raw_rust_generic_args(raw, "std::collections::HashMap")
@@ -628,42 +628,44 @@ fn raw_type_arg_supports_derive_clone(
     support_program: &Program,
     visiting: &mut HashSet<String>,
 ) -> bool {
-    match arg.trim() {
-        "String" | "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "f32" | "f64" => true,
-        raw if raw.starts_with("Option<") => {
-            raw_rust_generic_args(raw, "Option").is_some_and(|args| {
-                args.len() == 1
-                    && raw_type_arg_supports_derive_clone(
-                        args[0],
-                        signatures,
-                        facts,
-                        support_program,
-                        visiting,
-                    )
-            })
-        }
-        raw if raw.starts_with("Vec<") => raw_rust_generic_args(raw, "Vec").is_some_and(|args| {
-            args.len() == 1
-                && raw_type_arg_supports_derive_clone(
-                    args[0],
-                    signatures,
-                    facts,
-                    support_program,
-                    visiting,
-                )
-        }),
-        raw if raw.starts_with("Box<dyn ") && raw.ends_with('>') => true,
-        raw if raw.contains('<') => {
-            raw_rust_type_supports_derive_clone(raw, signatures, facts, support_program, visiting)
-        }
-        named => rust_named_type_supports_struct_derive_clone(
-            named,
+    let raw = arg.trim();
+    if matches!(
+        raw,
+        "String" | "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "f32" | "f64"
+    ) {
+        return true;
+    }
+    if let Some(inner) = raw_rust_option_inner(raw) {
+        return raw_type_arg_supports_derive_clone(
+            inner,
             signatures,
             facts,
             support_program,
             visiting,
-        ),
+        );
     }
+    if let Some(inner) = raw_rust_vec_inner(raw) {
+        return raw_type_arg_supports_derive_clone(
+            inner,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        );
+    }
+    if raw_rust_box_dyn_trait(raw).is_some() {
+        return true;
+    }
+    if raw.contains('<') {
+        return raw_rust_type_supports_derive_clone(
+            raw,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        );
+    }
+    rust_named_type_supports_struct_derive_clone(raw, signatures, facts, support_program, visiting)
 }
 
 fn rust_named_type_supports_struct_derive_clone(

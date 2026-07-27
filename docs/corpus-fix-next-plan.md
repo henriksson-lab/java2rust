@@ -3920,6 +3920,11 @@ The CLI facade-signature parser now also uses the shared raw Rust generic
 helpers for `Result`, `Option`, nullable parameters, return payloads, and
 `FacadeSlot::Optional` detection, including path-qualified `...::Result<T>`
 without the previous broad `contains("Result<")` heuristic.
+Raw struct clone-support checks in `item_assembly.rs` now reuse the same
+generic parsing helpers for `Option<T>`, `Vec<T>`, and `Box<dyn Trait>` instead
+of local prefix/suffix tests. This keeps the remaining raw Rust type parsing
+behind one boundary while typed Rust ABI facts continue to replace these
+compatibility paths.
 
 ## Rerun Protocol
 
