@@ -3937,6 +3937,10 @@ an explicit `StreamLambdaArgumentSlotPlan` before selecting borrowed-string
 view, owned-value, or generic slot-conversion rendering. Stream lowering still
 owns closure item projection semantics, but the call argument adapter no longer
 branches directly on borrowed-string/owned shape predicates.
+Same-call mutable alias detection still remains local until global sequencing
+analysis can prove read/write ordering, but the rendered compatibility boundary
+now returns a named `RenderedMutableAliasProjection` instead of exposing an
+anonymous boolean over optional receiver and mutable-slice spellings.
 
 ## Rerun Protocol
 

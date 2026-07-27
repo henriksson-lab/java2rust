@@ -24,8 +24,9 @@ use new_java2rust::call_plan::{
     resolved_call_arg_shapes, resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::{
-    Coercion, OptionalReceiverProjection, borrowed_string_literal_temporary_plan,
-    project_optional_receiver,
+    Coercion, OptionalReceiverProjection, RenderedMutableAliasProjection,
+    borrowed_string_literal_temporary_plan, project_optional_receiver,
+    rendered_expr_is_mutable_alias, rendered_mutable_alias_projection,
 };
 use new_java2rust::constructor_plan::{
     ConstructorDelegationPlan, ConstructorFieldValuePlan, DelegatedConstructorTrailingStmt,
@@ -10183,6 +10184,41 @@ fn optional_borrow_receiver_projection_uses_null_check_without_reborrow() {
         )),
         "values.get(key).expect(\"Java null receiver\")"
     );
+}
+
+#[test]
+fn rendered_mutable_alias_projection_names_same_call_alias_shapes() {
+    assert_eq!(
+        rendered_mutable_alias_projection("&mut values", "values"),
+        Some(RenderedMutableAliasProjection::DirectMutableBorrow)
+    );
+    assert_eq!(
+        rendered_mutable_alias_projection("values.as_mut_slice()", "values"),
+        Some(RenderedMutableAliasProjection::MutableSlice)
+    );
+    assert_eq!(
+        rendered_mutable_alias_projection(
+            "values.field.as_mut().expect(\"Java null receiver\")",
+            "values"
+        ),
+        Some(RenderedMutableAliasProjection::OptionalMutableReceiver)
+    );
+    assert_eq!(
+        rendered_mutable_alias_projection("values.field.as_deref_mut()", "values"),
+        Some(RenderedMutableAliasProjection::OptionalDerefMut)
+    );
+    assert_eq!(
+        rendered_mutable_alias_projection("values.field.as_mut_slice()", "values"),
+        Some(RenderedMutableAliasProjection::NestedMutableSlice)
+    );
+    assert_eq!(
+        rendered_mutable_alias_projection("other.as_mut_slice()", "values"),
+        None
+    );
+    assert!(rendered_expr_is_mutable_alias(
+        &RustExpr::Raw("values.field.as_deref_mut()".to_string()),
+        "values"
+    ));
 }
 
 #[test]
@@ -27728,6 +27764,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));
     assert!(coercion_source.contains("pub fn render_index_to_usize_projection"));
+    assert!(coercion_source.contains("pub enum RenderedMutableAliasProjection"));
+    assert!(coercion_source.contains("pub fn rendered_mutable_alias_projection"));
     assert!(coercion_source.contains("pub fn rendered_expr_is_mutable_alias"));
     assert!(coercion_source.contains("pub fn reborrow_optional_mut_projection"));
     assert!(coercion_source.contains("pub fn clone_erased_object_ref_once"));

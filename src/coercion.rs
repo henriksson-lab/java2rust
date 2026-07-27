@@ -1153,14 +1153,43 @@ pub fn render_index_to_usize_projection(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderedMutableAliasProjection {
+    DirectMutableBorrow,
+    MutableSlice,
+    OptionalMutableReceiver,
+    OptionalDerefMut,
+    NestedMutableSlice,
+}
+
 pub fn rendered_expr_is_mutable_alias(arg: &RustExpr, base: &str) -> bool {
     let rendered = emit::emit_expr(arg);
-    rendered == format!("&mut {base}")
-        || rendered == format!("{base}.as_mut_slice()")
-        || (rendered.starts_with(&format!("{base}."))
-            && (rendered.contains(".as_mut().expect(\"Java null receiver\")")
-                || rendered.contains(".as_deref_mut()")
-                || rendered.ends_with(".as_mut_slice()")))
+    rendered_mutable_alias_projection(&rendered, base).is_some()
+}
+
+pub fn rendered_mutable_alias_projection(
+    rendered: &str,
+    base: &str,
+) -> Option<RenderedMutableAliasProjection> {
+    if rendered == format!("&mut {base}") {
+        return Some(RenderedMutableAliasProjection::DirectMutableBorrow);
+    }
+    if rendered == format!("{base}.as_mut_slice()") {
+        return Some(RenderedMutableAliasProjection::MutableSlice);
+    }
+    if !rendered.starts_with(&format!("{base}.")) {
+        return None;
+    }
+    if rendered.contains(".as_mut().expect(\"Java null receiver\")") {
+        return Some(RenderedMutableAliasProjection::OptionalMutableReceiver);
+    }
+    if rendered.contains(".as_deref_mut()") {
+        return Some(RenderedMutableAliasProjection::OptionalDerefMut);
+    }
+    if rendered.ends_with(".as_mut_slice()") {
+        return Some(RenderedMutableAliasProjection::NestedMutableSlice);
+    }
+    None
 }
 
 pub fn reborrow_optional_mut_projection(expr: &RustExpr) -> Option<RustExpr> {
