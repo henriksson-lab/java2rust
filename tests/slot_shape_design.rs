@@ -27437,6 +27437,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let item_assembly_source = include_str!("../src/item_assembly.rs");
     let operator_source = include_str!("../src/operator_lowering.rs");
     let types_source = include_str!("../src/types.rs");
+    let stdlib_source = include_str!("../src/stdlib.rs");
 
     assert!(coercion_source.contains("pub fn ensure_borrow_projection"));
     assert!(coercion_source.contains("pub fn rendered_expr_has_clone_recovery"));
@@ -27572,7 +27573,36 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn char_sequence_collect_string_projection"));
     assert!(coercion_source.contains("pub fn rendered_vec_macro_body"));
     assert!(types_source.contains("pub fn raw_rust_generic_args"));
+    assert!(types_source.contains("pub fn raw_rust_type_is_result"));
+    assert!(types_source.contains("pub fn raw_rust_type_is_option"));
     assert!(types_source.contains("pub fn split_top_level_rust_type_args"));
+    let facade_result_wrapper = stdlib_source
+        .split("fn external_facade_wrap_result_for_effects")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn external_facade_method_abi_return_type_with_facts")
+                .next()
+        })
+        .expect("facade result wrapper helper should be present");
+    assert!(facade_result_wrapper.contains("raw_rust_type_is_result"));
+    assert!(!facade_result_wrapper.contains("starts_with(\"Result<\")"));
+    let facade_abi_return = stdlib_source
+        .split("fn external_facade_abi_return_type")
+        .nth(1)
+        .and_then(|tail| tail.split("fn external_facade_slot_return_type").next())
+        .expect("facade ABI return helper should be present");
+    assert!(facade_abi_return.contains("raw_rust_type_is_option"));
+    assert!(!facade_abi_return.contains("starts_with(\"Option<\")"));
+    let facade_slot_return = stdlib_source
+        .split("fn external_facade_slot_return_type")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn normalize_external_facade_return_type_text")
+                .next()
+        })
+        .expect("facade slot return helper should be present");
+    assert!(facade_slot_return.contains("raw_rust_type_is_option"));
+    assert!(!facade_slot_return.contains("starts_with(\"Option<\")"));
     assert!(coercion_source.contains("pub fn collapse_redundant_shared_borrow_projection"));
     assert!(coercion_source.contains("pub fn normalize_map_key_borrow_projection"));
     assert!(coercion_source.contains("pub enum IndexToUsizeProjection"));

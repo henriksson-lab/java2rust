@@ -3906,6 +3906,13 @@ collection-specific optional projection table and keeps unchecked legacy unwrap
 behavior behind the same typed slot-plan adapter used by ordinary optional
 receivers.
 
+Facade return text classifier cleanup: support-facade `Result<T, E>` and
+`Option<T>` wrapping decisions now use shared `types.rs` raw Rust generic
+classifiers instead of local `starts_with("Result<")`/
+`starts_with("Option<")` checks in the facade return helpers. This is still a
+boundary parser while Rust signatures are not fully structured everywhere, but
+the wrapper decisions are no longer reimplemented at each facade return branch.
+
 ## Rerun Protocol
 
 After each fix:

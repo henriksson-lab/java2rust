@@ -20,6 +20,7 @@ use crate::slot_render::{
     rust_type_for_slot_with_facts,
 };
 use crate::slot_shape::{MutabilityShape, OwnershipShape, RustSlotShape};
+use crate::types::{raw_rust_type_is_option, raw_rust_type_is_result};
 
 pub fn is_known_jdk_shadow_sensitive_owner(name: &str) -> bool {
     matches!(name, "Objects" | "Collections" | "Integer" | "Paths")
@@ -10258,7 +10259,7 @@ fn external_facade_wrap_result_for_effects(
         arg_count,
     )
     .is_some_and(|effect| !effect.thrown.is_empty());
-    if (user_effect_throws || builtin_effect_throws) && !rendered.starts_with("Result<") {
+    if (user_effect_throws || builtin_effect_throws) && !raw_rust_type_is_result(&rendered) {
         format!("Result<{rendered}, JavaException>")
     } else {
         rendered
@@ -10295,7 +10296,7 @@ fn external_facade_abi_return_type(
         external_facade_slot_return_type(facts, Some(receiver_type), &base, &abi.return_slot)?;
     Some(match abi.result {
         ResultAbi::Plain => rendered,
-        ResultAbi::OptionWrapped if rendered.starts_with("Option<") => rendered,
+        ResultAbi::OptionWrapped if raw_rust_type_is_option(&rendered) => rendered,
         ResultAbi::OptionWrapped => format!("Option<{rendered}>"),
         ResultAbi::ResultWrapped => format!("Result<{rendered}, JavaException>"),
     })
@@ -10320,7 +10321,7 @@ fn external_facade_slot_return_type(
         )),
         FacadeSlot::Optional(inner) => {
             let inner = external_facade_slot_return_type(facts, receiver_type, base, inner)?;
-            if inner.starts_with("Option<") {
+            if raw_rust_type_is_option(&inner) {
                 Some(inner)
             } else {
                 Some(format!("Option<{inner}>"))
