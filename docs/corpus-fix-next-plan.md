@@ -227,6 +227,11 @@ abstract interface stubs, unsupported inner-class outer capture placeholders,
 and unsupported constructor-call handoffs now use named coercion projections for
 their Rust `panic!` spellings. Lowering still owns when those Java fallback
 paths are selected.
+Optional receiver borrowed-carrier follow-up: call-target receiver adaptation no
+longer projects already-borrowed optional receivers inline. The shared optional
+receiver slot-plan adapter now handles `OptionalElementBorrow` receivers,
+projects the carrier, attaches the element shape, and runs the normal slot
+conversion/autoref gate.
 
 Landed optional-carrier follow-up: raw-erasure casts into optional targets now
 route through `lower_present_expr_for_optional_target`, so typed optional

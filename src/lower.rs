@@ -12339,12 +12339,6 @@ fn adapt_call_target_receiver(
         }
         _ if refined_non_null_receiver(receiver, refinements) => lowered,
         _ if target.adapts_optional_instance_receiver() => {
-            if lowered_receiver_is_optional_borrow(receiver, env, ctx) {
-                return project_optional_receiver(
-                    lowered,
-                    crate::coercion::OptionalReceiverProjection::Borrowed,
-                );
-            }
             adapt_optional_instance_receiver(receiver, lowered, env, ctx)
         }
         _ => lowered,
@@ -12574,10 +12568,6 @@ fn refined_non_null_receiver(receiver: &Expr, refinements: &ExprRefinements) -> 
     matches!(receiver, Expr::Var(name) if refinements.non_null_locals.contains(name))
 }
 
-fn lowered_receiver_is_optional_borrow(receiver: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
-    native_collection_optional_element_borrow_lowered_type(receiver, env, ctx).is_some()
-}
-
 fn optional_borrowed_expr_already_matches_target(
     expr: &Expr,
     target_shape: &RustSlotShape,
@@ -12707,6 +12697,30 @@ fn adapt_optional_instance_receiver_with_slot_plan(
     mutable: bool,
     legacy_unchecked: bool,
 ) -> RustExpr {
+    if let Some(LoweredType::OptionalElementBorrow { element_shape, .. }) =
+        native_collection_optional_element_borrow_lowered_type(receiver, env, ctx)
+    {
+        let projected = project_optional_receiver(
+            lowered,
+            crate::coercion::OptionalReceiverProjection::Borrowed,
+        );
+        let plan = optional_receiver_slot_plan(
+            element_shape.java_ty.clone(),
+            mutable,
+            legacy_unchecked,
+            ctx.facts,
+        );
+        let projected = crate::coercion::LoweredExpr {
+            expr: projected,
+            actual: LoweredType::Slot(element_shape),
+        };
+        let conversion_plan = plan_lowered_slot_conversion(&projected.actual, plan.slot, ctx.facts);
+        if optional_receiver_method_autoref_satisfies_slot(&conversion_plan) {
+            return projected.expr;
+        }
+        return apply_lowered_slot_expr_conversion(projected, &conversion_plan);
+    }
+
     let shape_ctx = ExprShapeContext {
         signatures: Some(ctx.signatures),
         representations: Some(ctx.representations),

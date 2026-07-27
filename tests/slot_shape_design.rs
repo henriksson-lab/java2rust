@@ -14090,6 +14090,24 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
     assert!(map_get_to_array_helper.contains("LoweredType::optional_element_borrow_shape"));
     assert!(map_get_to_array_helper.contains("plan_lowered_slot_conversion"));
     assert!(!map_get_to_array_helper.contains("expect(\\\"Java null receiver\\\").clone()"));
+    let call_target_receiver_helper = source
+        .split("fn adapt_call_target_receiver")
+        .nth(1)
+        .and_then(|tail| tail.split("fn adapt_external_facade_receiver_slot").next())
+        .expect("call target receiver helper should be present");
+    assert!(call_target_receiver_helper.contains("adapt_optional_instance_receiver("));
+    assert!(!call_target_receiver_helper.contains("project_optional_receiver"));
+    let optional_instance_receiver_adapter = source
+        .split("fn adapt_optional_instance_receiver_with_slot_plan")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn optional_receiver_method_autoref_satisfies_slot")
+                .next()
+        })
+        .expect("optional receiver slot-plan adapter should be present");
+    assert!(optional_instance_receiver_adapter.contains("OptionalElementBorrow"));
+    assert!(optional_instance_receiver_adapter.contains("plan_lowered_slot_conversion"));
+    assert!(optional_instance_receiver_adapter.contains("project_optional_receiver"));
     let native_collection_receiver_helper = source
         .split("fn adapt_native_collection_receiver")
         .nth(1)
