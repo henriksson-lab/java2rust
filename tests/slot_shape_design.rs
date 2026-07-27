@@ -4570,27 +4570,32 @@ class Holder {
         &analyze_usage(&enum_resolved.program),
         &FactSet::default(),
     );
-    let holder_ty = &enum_resolved.program.types[0];
+    let holder_ty = enum_resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Holder")
+        .unwrap();
     let enum_ty = holder_ty
         .members
         .iter()
         .find_map(|member| match member {
-            Member::Type(ty) if ty.name == "Type" => Some(ty),
+            Member::Type(ty) if ty.name.ends_with(".Type") => Some(ty),
             _ => None,
         })
         .unwrap();
     assert_eq!(rust_enum_variant_name_from_parsed_constant("s_n_p"), "SNP");
     assert!(matches!(
         enum_representations
-            .type_representation("Type")
+            .type_representation("Holder.Type")
             .map(|representation| &representation.representation),
         Some(ObjectRepresentation::JavaEnum { enum_name, variants })
-            if enum_name == "Type" && variants == &vec!["SNP".to_string(), "INDEL".to_string()]
+            if enum_name == "Holder.Type" && variants == &vec!["SNP".to_string(), "INDEL".to_string()]
     ));
     assert_eq!(
         type_emission_for(&enum_representations, enum_ty, &enum_signatures),
         RepresentationTypeEmission::RawRustItem(
-            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum Type {\n    SNP,\n    INDEL,\n}\n\nimpl std::fmt::Display for Type {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"{:?}\", self)\n    }\n}".to_string()
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum HolderType {\n    SNP,\n    INDEL,\n}\n\nimpl std::fmt::Display for HolderType {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"{:?}\", self)\n    }\n}".to_string()
         )
     );
 }
@@ -29069,7 +29074,11 @@ class SpecificProblem extends BaseProblem {}
     assert!(exception_plan_source.contains("pub fn catch_match_class_names"));
     assert!(exception_lowering_source.contains("pub struct CatchRenderArm"));
     assert!(exception_lowering_source.contains("pub fn try_catch_stmt"));
-    assert!(lower_source.contains("let exceptions = plan_program_exceptions(program, facts)"));
+    assert!(
+        lower_source.contains(
+            "let exceptions = plan_program_exceptions(support_local_type_program, facts)"
+        )
+    );
     assert!(lower_source.contains("exceptions.support.emit_support_item"));
     assert!(lower_source.contains("method_ctx.exceptions.method_plan"));
     assert!(lower_source.contains("method_function_shell_with_facts_and_exception_plan"));

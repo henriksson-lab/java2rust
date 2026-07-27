@@ -673,7 +673,7 @@ mod tests {
                 body: vec![RustStmt::Return(Some(RustExpr::Call {
                     function: Box::new(RustExpr::Raw("Err".to_string())),
                     args: vec![RustExpr::Raw(
-                        "JavaException::new(\"RuntimeException\", e.to_string())".to_string(),
+                        "JavaException::new(\"WrappedProblem\", e.to_string())".to_string(),
                     )],
                 }))],
             }],
@@ -685,8 +685,8 @@ mod tests {
         };
         assert!(
             rendered.contains(
-                "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"RuntimeException\", e.to_string()));"
-            ) && !rendered.contains("return Err(JavaException::new(\"RuntimeException\""),
+                "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"WrappedProblem\", e.to_string()));"
+            ) && !rendered.contains("return Err(JavaException::new(\"WrappedProblem\""),
             "{rendered}"
         );
     }

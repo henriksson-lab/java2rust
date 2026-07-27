@@ -666,10 +666,7 @@ fn infer_field_access_shape(
             .field_shape(&owner, field)
             .or_else(|| signatures.field_shape(&owner, &crate::parser::to_snake_case(field)))
         {
-            if matches!(shape.java_ty, JavaType::String) {
-                return Some(borrowed_string_content_shape());
-            }
-            return Some(shape.clone());
+            return Some(field_access_shape_from_signature_shape(shape));
         }
     }
     let receiver_ty = infer_expr_type(receiver, env.type_env());
@@ -684,8 +681,16 @@ fn infer_field_access_shape(
         signatures
             .field_shape(&name, field)
             .or_else(|| signatures.field_shape(&name, &crate::parser::to_snake_case(field)))
-            .cloned()
+            .map(field_access_shape_from_signature_shape)
     })
+}
+
+fn field_access_shape_from_signature_shape(shape: &RustSlotShape) -> RustSlotShape {
+    if matches!(shape.java_ty, JavaType::String) {
+        borrowed_string_content_shape()
+    } else {
+        shape.clone()
+    }
 }
 
 fn planned_member_access_shape(

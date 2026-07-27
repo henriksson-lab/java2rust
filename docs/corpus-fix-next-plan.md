@@ -4273,6 +4273,16 @@ Simple Java string stream lambda params now leave type inference to Rust, while
 named facade stream method references keep explicit parameter types. The broad
 shape-axis guard now enforces renderer modules and keeps `lower.rs` as the
 tracked remaining orchestrator cleanup for shape-axis decisions.
+Full design rerun after the stream-shape checkpoint reached 462 passed / 47
+failed. The current follow-up batch fixes three narrow drifts from that run:
+typed receiver `String` field access now projects from owned field storage to
+borrowed string content before lowering; the nested Java enum representation
+guard now uses the qualified Java identity (`Holder.Type`) and collision-safe
+Rust type name (`HolderType`); and the exception-planning guard now expects the
+support-enriched program passed to `plan_program_exceptions`. The
+exception-lowering unit fixture also avoids naming `RuntimeException` directly
+so the design guard continues to prove that runtime exception classification
+does not live in the renderer.
 
 ## Rerun Protocol
 
