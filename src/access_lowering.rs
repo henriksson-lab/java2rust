@@ -5,8 +5,8 @@ use crate::rust_ir::RustExpr;
 use crate::types::TypeEnv;
 use crate::{
     coercion::{
-        associated_const_projection, field_projection, self_associated_path_projection,
-        self_field_projection, static_storage_accessor_projection,
+        associated_const_projection, field_projection, owner_associated_path_projection,
+        self_associated_path_projection, self_field_projection, static_storage_accessor_projection,
     },
     emit,
 };
@@ -24,7 +24,14 @@ pub fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
-        self_associated_path_projection(static_name)
+        if let Some(owner) = env.static_field_access_owner(name) {
+            owner_associated_path_projection(
+                &crate::slot_render::rust_name_for_java_named_type(owner),
+                static_name,
+            )
+        } else {
+            self_associated_path_projection(static_name)
+        }
     } else {
         RustExpr::Var(crate::parser::to_snake_case(name))
     }
@@ -43,7 +50,14 @@ pub fn render_bare_name(name: &str, env: &ShapeEnv) -> String {
     } else if env.local_type(name).is_none()
         && let Some(static_name) = env.static_field_access_name(name)
     {
-        emit::emit_expr(&self_associated_path_projection(static_name))
+        if let Some(owner) = env.static_field_access_owner(name) {
+            emit::emit_expr(&owner_associated_path_projection(
+                &crate::slot_render::rust_name_for_java_named_type(owner),
+                static_name,
+            ))
+        } else {
+            emit::emit_expr(&self_associated_path_projection(static_name))
+        }
     } else {
         crate::parser::to_snake_case(name)
     }

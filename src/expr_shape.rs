@@ -23,6 +23,7 @@ pub struct ShapeEnv {
     local_shapes: HashMap<String, RustSlotShape>,
     field_shapes: HashMap<String, RustSlotShape>,
     static_field_names: HashMap<String, String>,
+    static_field_owners: HashMap<String, String>,
     static_storage_field_names: HashMap<String, String>,
     type_static_storage_field_names: HashMap<(String, String), String>,
     instance_field_names: HashSet<String>,
@@ -156,6 +157,26 @@ impl ShapeEnv {
         self.static_field_names.insert(alias, name);
     }
 
+    pub fn insert_static_field_shape_for_owner(
+        &mut self,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+        shape: RustSlotShape,
+    ) {
+        let owner = owner.into();
+        let name = name.into();
+        let alias = crate::parser::to_snake_case(&name);
+        let insert_owner_for_name = !self.static_field_names.contains_key(&name);
+        let insert_owner_for_alias = !self.static_field_names.contains_key(&alias);
+        self.insert_static_field_shape(name.clone(), shape);
+        if insert_owner_for_name {
+            self.static_field_owners.insert(name.clone(), owner.clone());
+        }
+        if insert_owner_for_alias {
+            self.static_field_owners.insert(alias, owner);
+        }
+    }
+
     pub fn insert_static_storage_field_shape(
         &mut self,
         name: impl Into<String>,
@@ -254,6 +275,10 @@ impl ShapeEnv {
 
     pub fn static_field_access_name(&self, name: &str) -> Option<&str> {
         self.static_field_names.get(name).map(String::as_str)
+    }
+
+    pub fn static_field_access_owner(&self, name: &str) -> Option<&str> {
+        self.static_field_owners.get(name).map(String::as_str)
     }
 
     pub fn static_storage_field_access_name(&self, name: &str) -> Option<&str> {

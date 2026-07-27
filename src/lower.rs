@@ -580,7 +580,7 @@ fn seed_support_type_fields_for_type(env: &mut ShapeEnv, ty: &TypeDecl) {
                 let shape = storage_shape(field.ty.clone());
                 if crate::item_assembly::static_final_field_has_associated_const(ty, field) {
                     env.insert_type_field_shape(&ty.name, field.name.clone(), shape.clone());
-                    env.insert_static_field_shape(field.name.clone(), shape);
+                    env.insert_static_field_shape_for_owner(&ty.name, field.name.clone(), shape);
                 } else if field.modifiers.contains(&Modifier::Static) {
                     env.insert_type_static_storage_field_shape(
                         &ty.name,
@@ -7399,6 +7399,12 @@ fn lower_expr_with_refinements(
             let target = retarget_receiverless_current_static_call(
                 target,
                 context_fallback_signature.as_ref(),
+            );
+            let target = retarget_receiverless_resolved_static_owner_call(
+                target,
+                receiver.as_deref(),
+                resolved.as_ref(),
+                ctx,
             );
             let arg_plan = plan_call_arguments_with_facts_and_args(
                 receiver.as_deref(),
@@ -16841,6 +16847,51 @@ fn retarget_receiverless_current_static_call<'a>(
     }
 }
 
+fn retarget_receiverless_resolved_static_owner_call<'a>(
+    target: CallTargetPlan<'a>,
+    receiver: Option<&Expr>,
+    resolved: Option<&ResolvedCall>,
+    ctx: LowerCtx,
+) -> CallTargetPlan<'a> {
+    if receiver.is_some() {
+        return target;
+    }
+    let Some(resolved) = resolved else {
+        return target;
+    };
+    if resolved.kind != CallKind::Static {
+        return target;
+    }
+    let Some(current_type) = ctx.current_type else {
+        return target;
+    };
+    if crate::stdlib::canonical_external_receiver_type_key(current_type)
+        == crate::stdlib::canonical_external_receiver_type_key(&resolved.declaring_type)
+    {
+        return target;
+    }
+    if find_context_type_by_key(ctx.program, &resolved.declaring_type).is_none()
+        && find_context_type_by_key(ctx.support_local_type_program, &resolved.declaring_type)
+            .is_none()
+        && find_context_type_by_key(ctx.source_summary_type_program, &resolved.declaring_type)
+            .is_none()
+    {
+        return target;
+    }
+    let rust_name = match target {
+        CallTargetPlan::StaticSelf { rust_name } => rust_name.to_string(),
+        CallTargetPlan::StaticOwner { owner, rust_name } if owner == "Self" => rust_name,
+        target => return target,
+    };
+    CallTargetPlan::StaticOwner {
+        owner: crate::call_plan::rust_static_owner_type_name_with_facts(
+            &resolved.declaring_type,
+            ctx.facts,
+        ),
+        rust_name,
+    }
+}
+
 fn static_context_owner_is_emitted(owner: &str, ctx: LowerCtx) -> bool {
     find_context_type_by_key(ctx.program, owner).is_some()
         || (ctx.context_sources_are_emitted
@@ -18207,6 +18258,12 @@ fn lower_external_call_expr_for_slot(
     let target = retarget_java_logging_facade_call(target, receiver.as_deref(), name);
     let target =
         retarget_receiverless_current_static_call(target, context_fallback_signature.as_ref());
+    let target = retarget_receiverless_resolved_static_owner_call(
+        target,
+        receiver.as_deref(),
+        resolved.as_ref(),
+        ctx,
+    );
     let arg_plan = plan_call_arguments_with_facts_and_args(
         receiver.as_deref(),
         name,

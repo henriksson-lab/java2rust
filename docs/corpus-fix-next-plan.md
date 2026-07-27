@@ -4510,6 +4510,15 @@ Next FastQC batch candidates from that rerun:
    focused wrapper with platform `File::new_1/new_2`, `File.length()`, and
    `java_string_from_bytes`; those missing-helper rows are gone and the focused
    generated-Rust count is now 59.
+   Follow-up focused proof
+   `.tmp/corpus-fastqc-base64-single-after-nested-static-owner-r1` retargets
+   receiverless static calls resolved to an outer declaring source type and
+   owner-qualifies bare associated constants introduced by context seeding.
+   The nested `Self::ENCODE`/`Self::get_decodabet` missing-owner family is
+   gone and the focused generated-Rust count is now 41. The next Base64 slice
+   should focus on inherited `FilterOutputStream.out` state, constructor
+   `self.field` reads before `__java_self` exists, bare `out` assignment,
+   byte-array move recovery, and `i8 | i32` coercion.
 
 Inherited exception-owner follow-up: inherited source method bodies now lower
 with the emitted subclass as the body/field context but use the declaring type

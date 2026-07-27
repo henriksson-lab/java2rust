@@ -18092,6 +18092,49 @@ class SameSourceStaticHelper {
 }
 
 #[test]
+fn nested_source_static_call_uses_declaring_outer_owner() {
+    let translation = translate_source(
+        r#"
+class NestedStaticOuterOwner {
+    static final int FLAG = 3;
+
+    static int mask(int value) {
+        return value | FLAG;
+    }
+
+    static class Worker {
+        int run(int value) {
+            return mask(value) + FLAG;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("NestedStaticOuterOwner::mask(value)")
+            && translation.rust.contains("NestedStaticOuterOwner::FLAG")
+            && !translation.rust.contains("Self::mask(value)")
+            && !translation
+                .rust
+                .contains("return Self::mask(value) + Self::FLAG;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nested_source_static_outer_owner",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn nested_static_table_field_type_guides_static_overload_selection() {
     let translation = translate_source(
         r#"
