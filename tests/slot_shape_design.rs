@@ -1495,9 +1495,13 @@ fn slot_render_projects_erased_object_facts_inside_native_generic_containers() {
     );
     assert_eq!(
         native_java_rust_type_policy(&concrete_facade, &facts),
-        NativeJavaRustTypePolicy::Named {
-            name: "IntervalList".to_string(),
+        NativeJavaRustTypePolicy::Direct {
+            ty: RustType::Named("IntervalList".to_string()),
         }
+    );
+    assert_eq!(
+        rust_type_for_java_type_with_facts(&concrete_facade, &facts),
+        RustType::Named("IntervalList".to_string())
     );
     assert_eq!(
         rust_type_for_java_type_with_facts(&map_ty, &facts),
