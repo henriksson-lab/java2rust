@@ -1,4 +1,4 @@
-use crate::coercion::unwrap_optional_shared_value;
+use crate::coercion::{receiver_method_call_projection_exact, unwrap_optional_shared_value};
 use crate::rewrite::NullTestKind;
 use crate::rust_ir::{RustExpr, RustStmt};
 
@@ -30,16 +30,12 @@ pub fn assignment_condition_loop(
 ) -> RustStmt {
     let local = RustExpr::Var(local_name.to_string());
     let break_condition = match null_test {
-        NullTestKind::NotNull => RustExpr::MethodCall {
-            receiver: Box::new(local.clone()),
-            method: "is_none".to_string(),
-            args: Vec::new(),
-        },
-        NullTestKind::IsNull => RustExpr::MethodCall {
-            receiver: Box::new(local.clone()),
-            method: "is_some".to_string(),
-            args: Vec::new(),
-        },
+        NullTestKind::NotNull => {
+            receiver_method_call_projection_exact(local.clone(), "is_none", Vec::new())
+        }
+        NullTestKind::IsNull => {
+            receiver_method_call_projection_exact(local.clone(), "is_some", Vec::new())
+        }
     };
     let mut loop_body = vec![
         RustStmt::Assign {

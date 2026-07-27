@@ -4002,6 +4002,16 @@ associated-path projections for `Self::CONST` and `Owner::CONST` references.
 Item assembly still owns constant eligibility and evaluation, but the Rust path
 spelling is no longer rebuilt locally for these constant expressions.
 
+Expression constructor projection follow-up: `expr_render::named_constructor_expr`
+now uses the shared owner-associated path and function-call projections. The
+expression rendering helper still owns the basic Rust expression shell API, but
+constructor path/call spelling is centralized with ordinary call cleanup.
+
+Loop null-test projection follow-up: assignment-in-condition loop lowering now
+uses the shared receiver-method-call projection for generated `is_none()` /
+`is_some()` break checks. Loop lowering still owns the Java control-flow rewrite
+shape and optional unwrap insertion, but receiver call assembly is shared.
+
 Stream receiver type-hint cleanup: stream lambda lowering now asks
 `call_plan::native_java_instance_receiver_type_hint` for the temporary receiver
 type implied by native Java instance-call planning, instead of checking the

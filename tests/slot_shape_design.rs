@@ -58,7 +58,8 @@ use new_java2rust::exception_plan::{
     try_resource_names,
 };
 use new_java2rust::expr_render::{
-    binary_expr, indexed_expr, literal_expr, raw_expr, super_expr, ternary_expr, this_expr,
+    binary_expr, indexed_expr, literal_expr, named_constructor_expr, raw_expr, super_expr,
+    ternary_expr, this_expr,
 };
 use new_java2rust::expr_shape::{
     ExprShapeContext, ShapeEnv, infer_assignment_target_shape,
@@ -31360,6 +31361,7 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
     assert!(!plan_source.contains("RustExpr"));
     assert!(lowering_source.contains("continue_with_updates"));
     assert!(lowering_source.contains("assignment_condition_loop"));
+    assert!(lowering_source.contains("receiver_method_call_projection_exact"));
     assert!(lowering_source.contains("unwrap_optional_shared_value("));
     assert!(!lowering_source.contains("format!(\"{local_name}.as_ref().unwrap()\""));
     assert!(lower_source.contains("plan_for_body_stmt"));
@@ -31413,6 +31415,17 @@ fn expr_render_owns_basic_rust_expression_shells() {
     assert_eq!(
         literal_expr(&Literal::String("value".to_string())),
         RustExpr::Literal("\"value\".to_string()".to_string())
+    );
+    assert_eq!(
+        named_constructor_expr(
+            "java.util.ArrayList",
+            "new",
+            vec![RustExpr::Var("size".to_string())],
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("JavaUtilArrayList::new".to_string())),
+            args: vec![RustExpr::Var("size".to_string())],
+        }
     );
     assert_eq!(
         indexed_expr(
