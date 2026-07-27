@@ -26,6 +26,7 @@ drift fixes and constructor self-initialization fix. Focused runs used
 | `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-bytebuffer-return-facts-r1` | 1/1 translated, 0 invalid-pattern files, generated-Rust errors reduced to 19. JDK NIO buffer query facts now model `ByteBuffer`/`CharBuffer.hasRemaining()` as plain `bool` and `remaining()` as plain `i32`, and matching facade ABI facts keep generated support non-fallible. The previous `?`/`Result` return-shape rows for `ByteBuffer.has_remaining()` and `ByteBuffer.remaining()` are gone. Remaining top families are byte constant widening into `write_int`, byte/int bitwise coercion, source subclass `Base64OutputStream -> JavaIoOutputStream` adaptation, inherited `Base64InputStream.close`, byte-array move recovery, one source `read(byte[])` overload gap, `File.length() > Integer.MAX_VALUE` widening, and qualified `java.util.zip.GZIPInputStream.GZIP_MAGIC`. |
 | `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-byte-int-widening-r4` | 1/1 translated, 0 invalid-pattern files, generated-Rust errors reduced to 14. Primitive byte values now widen through shared numeric-promotion lowering for bitwise/shift expressions, explicit primitive casts on nullable array reads are preserved as arithmetic operands, and `OutputStream.write(int)` receives an `i32` slot. The previous `i8 | i32` and byte-constant-into-`write_int` rows are gone. Remaining top families are inherited `Base64InputStream.close`, moved byte-array/stream temporaries, source subclass `Base64OutputStream -> JavaIoOutputStream` adaptation, one source `read(byte[])` overload gap, mismatched stream slots, and qualified `java.util.zip.GZIPInputStream.GZIP_MAGIC`. |
 | `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-gzip-magic-fact-r1` | 1/1 translated, 0 invalid-pattern files, generated-Rust errors reduced to 13. `java.util.zip.GZIPInputStream.GZIP_MAGIC` is now a typed JDK static-final field fact, generated support exposes `GZIPInputStream::GZIP_MAGIC`, and the fully qualified Java constant no longer leaks into Rust output. Remaining top families are inherited `Base64InputStream.close`, moved byte-array/stream temporaries, source subclass `Base64OutputStream -> JavaIoOutputStream` adaptation, one source `read(byte[])` overload gap, and mismatched stream slots. |
+| `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-finally-resource-clone-r1` | 1/1 translated, 0 invalid-pattern files, generated-Rust errors reduced to 11. Source `InputStream.read(byte[])` now lowers through the shared three-argument byte-slice overload path, and try/finally cleanup reads are visible to constructor argument clone recovery. The previous `read(buffer)` arity row and optional resource moves for `bais`/`b64os` into `GZIPInputStream`, `GZIPOutputStream`, and `ObjectInputStream` constructors are gone. Remaining top families are inherited `Base64InputStream.close`, `Base64OutputStream -> JavaIoOutputStream` adaptation, remaining optional unwrap/resource moves, one mutable-slice clone recovery row, one `OutputStream.write(byte[])` exact-slot mismatch, and `File.length() > Integer.MAX_VALUE` numeric widening. |
 
 Current FastQC top families after the 2026-07-27 full rerun:
 
@@ -44,9 +45,12 @@ Current FastQC top families after the 2026-07-27 full rerun:
   `java.io.ByteArrayOutputStream` support are now preserved through focused
   shared-support assembly. JDK byte/int numeric promotion and qualified
   `GZIPInputStream.GZIP_MAGIC` static constant lowering now pass focused corpus
-  proof. Remaining rows are source subclass to exact output-stream adaptation,
-  byte-array/stream move recovery, one source `read(byte[])` overload gap,
-  mismatched stream slots, and missing inherited stream close support;
+  proof. Source `InputStream.read(byte[])` lowering and try/finally resource
+  clone recovery now pass focused corpus proof. Remaining rows are source
+  subclass to exact output-stream adaptation, inherited stream close support,
+  remaining optional unwrap/resource moves, mutable-slice clone recovery,
+  exact `OutputStream.write(byte[])` slot selection, and `File.length()`/int
+  constant widening;
 - JDK/platform facade overload gaps: `File::new_1`, `File::new_2`,
   `BorderLayout::CENTER/NORTH`, `JLabel::CENTER`, and `RenderingHints` constants;
 - source mutability inference gaps: methods mutating fields such as

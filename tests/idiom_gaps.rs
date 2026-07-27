@@ -14550,6 +14550,97 @@ class SourceFilterOutputStreamWriteBytes {
 }
 
 #[test]
+fn input_stream_read_byte_array_uses_three_arg_overload_with_full_buffer() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+import java.util.zip.GZIPInputStream;
+
+class SourceGzipReadBytesUse {
+    static class LocalGzipInputStream extends GZIPInputStream {
+        LocalGzipInputStream(InputStream input) throws java.io.IOException {
+            super(input);
+        }
+
+        @Override
+        public int read(byte[] bytes, int off, int len) throws java.io.IOException {
+            return super.read(bytes, off, len);
+        }
+    }
+
+    int read(LocalGzipInputStream input, byte[] buffer) throws java.io.IOException {
+        return input.read(buffer);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("(__java_read_bytes, 0, __java_read_len)")
+            && translation.rust.contains("let __java_read_bytes = buffer;")
+            && !translation.rust.contains(".read(buffer.as_mut_slice())"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "input_stream_read_byte_array_uses_three_arg_overload_with_full_buffer",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_resource_constructor_argument_clones_before_later_cleanup_read() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+import java.util.zip.GZIPInputStream;
+
+class OptionalResourceConstructorMoveUse {
+    void wrap(InputStream input) throws java.io.IOException {
+        InputStream raw = null;
+        GZIPInputStream gzip = null;
+        try {
+            raw = input;
+            gzip = new GZIPInputStream(raw);
+        } finally {
+            if (raw != null) {
+                raw.close();
+            }
+            if (gzip != null) {
+                gzip.close();
+            }
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "GZIPInputStream::new(raw.clone()/* TODO(translation): validate added clone */)"
+        ) && translation.rust.contains("raw.as_ref().unwrap().close()?"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_resource_constructor_argument_clones_before_later_cleanup_read",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn buffered_image_graphics_facades_are_typed() {
     let translation = translate_source(
         r#"

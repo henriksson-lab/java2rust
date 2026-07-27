@@ -157,7 +157,7 @@ use crate::signature::{
 use crate::slot_render::{
     erased_object_rust_type, rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
 };
-use crate::slot_shape::{DispatchShape, ViewShape};
+use crate::slot_shape::{DispatchShape, MutabilityShape, ViewShape};
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 use crate::statement_render::{
     assignment_stmt, break_stmt, continue_stmt, expr_stmt, if_stmt,
@@ -5716,7 +5716,15 @@ fn lower_try_stmt(
             finally_block,
             completion,
         } => {
-            let try_body = lower_block(planned_body, &mut env.clone(), true, ctx);
+            let mut finally_read_names = statement_suffix_read_names(&finally_block.statements);
+            if let Some(inherited_later_read_names) = ctx.later_read_names {
+                finally_read_names.extend(inherited_later_read_names.iter().cloned());
+            }
+            let try_ctx = LowerCtx {
+                later_read_names: Some(&finally_read_names),
+                ..ctx
+            };
+            let try_body = lower_block(planned_body, &mut env.clone(), true, try_ctx);
             let finally_body =
                 lower_block(finally_block, &mut env.clone(), wrap_returns_in_ok, ctx);
             return try_finally_scope_stmt(
@@ -5734,8 +5742,13 @@ fn lower_try_stmt(
             completion,
         } => {
             let catch_future_use_names = catch_body_read_names(planned_catches);
+            let mut finally_read_names = statement_suffix_read_names(&finally_block.statements);
+            if let Some(inherited_later_read_names) = ctx.later_read_names {
+                finally_read_names.extend(inherited_later_read_names.iter().cloned());
+            }
             let try_ctx = LowerCtx {
                 catch_future_use_names: Some(&catch_future_use_names),
+                later_read_names: Some(&finally_read_names),
                 ..ctx
             };
             let try_body = lower_block(planned_body, &mut env.clone(), true, try_ctx);
@@ -7383,6 +7396,16 @@ fn lower_expr_with_refinements(
             if let Some(expr) =
                 lower_jdk_input_stream_super_read_call(receiver.as_deref(), name, args, env, ctx)
             {
+                return expr;
+            }
+            if let Some(expr) = lower_source_input_stream_read_byte_array_call(
+                receiver.as_deref(),
+                name,
+                args,
+                env,
+                ctx,
+                refinements,
+            ) {
                 return expr;
             }
             if let Some(expr) = lower_source_output_stream_write_byte_array_call(
@@ -9892,7 +9915,7 @@ fn lower_constructor_args_with_plan(
                 .map(|arg| {
                     let lowered = lower_unshaped_argument(arg, env, ctx);
                     let shape = infer_expr_shape_with_context(arg, env, shape_ctx);
-                    adapt_reused_owned_argument(lowered, arg, &shape, None, ctx)
+                    adapt_reused_owned_argument(lowered, arg, &shape, Some(&shape), ctx)
                 })
                 .collect()
         }
@@ -12445,6 +12468,14 @@ fn clone_recovery_decision_for_argument(
             idempotence: CloneRecoveryIdempotence::DirectClone,
         };
     }
+    if reused_actual_optional_owned_argument_needs_clone(source, actual_shape, ctx) {
+        return CloneRecoveryDecision::ApplyRecoveryCoercion {
+            coercion: Coercion::CloneRecovery {
+                policy: CloneRecoveryPolicy::AuditRequired,
+            },
+            idempotence: CloneRecoveryIdempotence::AnyCloneRecovery,
+        };
+    }
     if reused_owned_argument_needs_clone(source, target_shape, actual_shape, ctx) {
         return CloneRecoveryDecision::ApplyRecoveryCoercion {
             coercion: Coercion::CloneRecovery {
@@ -12454,6 +12485,28 @@ fn clone_recovery_decision_for_argument(
         };
     }
     CloneRecoveryDecision::NoRecovery
+}
+
+fn reused_actual_optional_owned_argument_needs_clone(
+    arg: &Expr,
+    actual_shape: Option<&RustSlotShape>,
+    ctx: LowerCtx,
+) -> bool {
+    let Some(actual_shape) = actual_shape else {
+        return false;
+    };
+    if actual_shape.optional_element_type().is_none()
+        || actual_shape.ownership != OwnershipShape::Owned
+    {
+        return false;
+    }
+    if !optional_owned_argument_clone_recovery(actual_shape, ctx.facts) {
+        return false;
+    }
+    let Expr::Var(name) = arg else {
+        return false;
+    };
+    MoveUseContext::new(ctx).has_later_or_repeated_current_read(name)
 }
 
 fn audited_clone_recovery_decision(idempotence: CloneRecoveryIdempotence) -> CloneRecoveryDecision {
@@ -12631,7 +12684,7 @@ fn reused_owned_argument_needs_clone(
         let move_use = MoveUseContext::new(ctx);
         return optional_owned_argument_clone_recovery(target_shape, ctx.facts)
             && matches!(arg, Expr::Var(_))
-            && move_use.has_later_read(match arg {
+            && move_use.has_later_or_repeated_current_read(match arg {
                 Expr::Var(name) => name,
                 _ => unreachable!("checked above"),
             });
@@ -13101,8 +13154,7 @@ fn lower_source_output_stream_write_byte_array_call(
     if signature.params.len() != 3 || !java_type_is_byte_array_like(&signature.params[0].java_ty) {
         return None;
     }
-    let arg_ty = types::infer_expr_type(&args[0], env.type_env());
-    if !java_type_is_byte_array_like(&arg_ty) {
+    if !expr_is_byte_array_like(&args[0], env, ctx) {
         return None;
     }
     let byte_slot = Slot::Argument(signature.params[0].shape.clone());
@@ -13124,6 +13176,57 @@ fn lower_source_output_stream_write_byte_array_call(
     )))
 }
 
+fn lower_source_input_stream_read_byte_array_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    if name != "read" || args.len() != 1 {
+        return None;
+    }
+    let receiver = receiver?;
+    let receiver_name = source_receiver_type_name(receiver, env, ctx)?;
+    let (read_method, byte_shape) = ctx
+        .signatures
+        .method_signature_by_rust_name(&receiver_name, "read_3")
+        .map(|signature| ("read_3".to_string(), signature.params[0].shape.clone()))
+        .or_else(|| {
+            ctx.signatures
+                .method_signature_by_base_name_and_arity(&receiver_name, "read", 3)
+                .map(|(rust_name, signature)| (rust_name, signature.params[0].shape.clone()))
+        })
+        .or_else(|| {
+            java_platform_input_stream_read_3_byte_slot(&receiver_name)
+                .map(|shape| ("read_3".to_string(), shape))
+        })?;
+    if !java_type_is_byte_array_like(&byte_shape.java_ty) {
+        return None;
+    }
+    if !expr_is_byte_array_like(&args[0], env, ctx) {
+        return None;
+    }
+    let byte_slot = Slot::Argument(byte_shape);
+    let lowered_bytes =
+        lower_expr_for_slot_with_refinements(&args[0], env, byte_slot, ctx, refinements);
+    let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
+    let lowered_receiver = adapt_optional_instance_receiver_with_slot_plan(
+        receiver,
+        lowered_receiver,
+        env,
+        ctx,
+        true,
+        true,
+    );
+    let receiver_text = emit::emit_expr(&lowered_receiver);
+    let bytes_text = emit::emit_expr(&lowered_bytes);
+    Some(RustExpr::Raw(format!(
+        "{{ let __java_read_bytes = {bytes_text}; let __java_read_len = __java_read_bytes.len() as i32; {receiver_text}.{read_method}(__java_read_bytes, 0, __java_read_len)? }}"
+    )))
+}
+
 fn java_type_is_byte_array_like(java_ty: &JavaType) -> bool {
     let java_ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
     matches!(
@@ -13131,6 +13234,54 @@ fn java_type_is_byte_array_like(java_ty: &JavaType) -> bool {
         JavaType::Array(element)
             if matches!(element.as_ref(), JavaType::Primitive(PrimitiveType::Byte))
     )
+}
+
+fn expr_is_byte_array_like(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
+    if java_type_is_byte_array_like(&types::infer_expr_type(expr, env.type_env())) {
+        return true;
+    }
+    let shape = actual_shape_for_slot_expr(
+        expr,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    java_type_is_byte_array_like(&shape.java_ty)
+}
+
+fn java_platform_input_stream_read_3_byte_slot(receiver_name: &str) -> Option<RustSlotShape> {
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    if !matches!(
+        canonical.as_str(),
+        "InputStream"
+            | "java.io.InputStream"
+            | "FileInputStream"
+            | "java.io.FileInputStream"
+            | "ByteArrayInputStream"
+            | "java.io.ByteArrayInputStream"
+            | "BufferedInputStream"
+            | "java.io.BufferedInputStream"
+            | "DataInputStream"
+            | "java.io.DataInputStream"
+            | "GZIPInputStream"
+            | "java.util.zip.GZIPInputStream"
+            | "ObjectInputStream"
+            | "java.io.ObjectInputStream"
+            | "FilterInputStream"
+            | "java.io.FilterInputStream"
+    ) {
+        return None;
+    }
+    let mut shape = RustSlotShape::for_storage(JavaType::Array(Box::new(JavaType::Primitive(
+        PrimitiveType::Byte,
+    ))));
+    shape.ownership = OwnershipShape::MutableBorrow;
+    shape.mutability = MutabilityShape::Mutable;
+    shape.view = ViewShape::Slice;
+    Some(shape)
 }
 
 fn current_type_extends_jdk_input_stream_facade(ctx: LowerCtx) -> bool {
@@ -13769,6 +13920,23 @@ fn lower_expr_for_slot_with_refinements(
     {
         let plan = plan_lowered_slot_conversion(&source_call_expr.actual, slot, ctx.facts);
         return apply_lowered_slot_expr_conversion(source_call_expr, &plan);
+    }
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = expr
+        && let Some(read_expr) = lower_source_input_stream_read_byte_array_call(
+            receiver.as_deref(),
+            name,
+            args,
+            env,
+            ctx,
+            refinements,
+        )
+    {
+        return read_expr;
     }
     if let Some(external_expr) =
         lower_exact_generic_external_call_for_slot(expr, env, &slot, ctx, refinements)
@@ -18405,6 +18573,15 @@ fn source_trivial_accessor_getter_lowered_type(
 }
 
 fn source_receiver_type_name(receiver: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<String> {
+    if let Expr::Var(name) = receiver
+        && let Some(local_ty) = env.local_type(name)
+    {
+        let receiver_ty =
+            crate::types::optional_element_type(local_ty).unwrap_or_else(|| local_ty.clone());
+        if let JavaType::Named { name, .. } | JavaType::Unknown(name) = receiver_ty {
+            return Some(name);
+        }
+    }
     let receiver_shape = infer_expr_shape_with_context(
         receiver,
         env,
