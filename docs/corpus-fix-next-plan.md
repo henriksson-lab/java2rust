@@ -40,6 +40,9 @@ name the completed slice and avoid bundling unrelated working-tree changes.
 This permission is explicit for the current batched mode: commit after green
 checkpoints when that helps make larger refactors tractable, while keeping
 unrelated user or generated files out of the commit.
+2026-07-27 confirmation: this permission remains active for the current goal;
+prefer committing each verified shared-policy slice before taking the next
+larger batched risk.
 
 ## Top Design Priority: Infer Rust Facade ABI Slots
 
@@ -1161,7 +1164,10 @@ Current implementation note, 2026-07-23:
   with no `invalid Java cast` downcast. The remaining focused compile family is
   `cannot move out of index of Vec<String>`, so the next slice should fixture
   indexed owned `String` reads that flow into owned slots and clone/recover via
-  the shared slot policy.
+  the shared slot policy. 2026-07-27 recheck: the focused
+  `indexed_string_array_reads_clone_only_for_owned_slots` idiom test is green
+  and compiles generated Rust, so treat future recurrence as corpus evidence
+  drift to rerun rather than as an unfixtureed translator gap.
 - the old emitted `lower_string_pattern_args` path has been retired. The only
   remaining no-facts compatibility path for `contains`/`startsWith`/`endsWith`
   and literal `replace` now builds an explicit borrowed-string
