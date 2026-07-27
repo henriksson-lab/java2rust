@@ -28,6 +28,24 @@ pub fn assignment_slot(shape: RustSlotShape) -> Slot {
     Slot::Assignment(shape)
 }
 
+pub fn storage_assignment_slot_for_java_type(java_ty: JavaType) -> Slot {
+    assignment_slot(storage_shape_for_java_type(java_ty))
+}
+
+pub fn storage_shape_for_java_type(java_ty: JavaType) -> RustSlotShape {
+    RustSlotShape::for_storage(java_ty)
+}
+
+pub fn effective_stream_item_shape(shape: &RustSlotShape, item_is_borrowed: bool) -> RustSlotShape {
+    let mut shape = shape.clone();
+    shape.ownership = if item_is_borrowed {
+        OwnershipShape::SharedBorrow
+    } else {
+        crate::slot_shape::conservative_ownership(&shape.java_ty)
+    };
+    shape
+}
+
 pub fn argument_slot(shape: RustSlotShape) -> Slot {
     Slot::Argument(shape)
 }

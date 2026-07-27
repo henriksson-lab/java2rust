@@ -11,7 +11,10 @@ use crate::coercion::{
     render_stream_lambda_param_projection, self_associated_path_projection,
 };
 use crate::conversion_lowering::apply_lowered_slot_expr_conversion;
-use crate::conversion_plan::{LoweredType, Slot, plan_lowered_slot_conversion};
+use crate::conversion_plan::{
+    LoweredType, Slot, effective_stream_item_shape, plan_lowered_slot_conversion,
+    storage_shape_for_java_type,
+};
 use crate::expr_shape::ShapeEnv;
 use crate::facts::{ExternalFactLookupIndex, FactSet, ReceiverMutabilityFact};
 use crate::java_ir::{BinaryOp, CallKind, Expr, JavaType, Literal, Stmt, UnaryOp};
@@ -834,16 +837,6 @@ fn render_stream_ops_with_options(
     Some((item_is_borrowed, item_shape))
 }
 
-fn effective_stream_item_shape(shape: &RustSlotShape, item_is_borrowed: bool) -> RustSlotShape {
-    let mut shape = shape.clone();
-    shape.ownership = if item_is_borrowed {
-        crate::slot_shape::OwnershipShape::SharedBorrow
-    } else {
-        crate::slot_shape::conservative_ownership(&shape.java_ty)
-    };
-    shape
-}
-
 fn render_stream_lambda_param(
     name: &str,
     item_shape: &RustSlotShape,
@@ -907,7 +900,7 @@ fn render_tuple_like_stream_lambda_param_type(
 fn stream_lambda_param_type_is_useful(item_shape: &RustSlotShape) -> bool {
     !matches!(
         item_shape.java_ty,
-        JavaType::Primitive(_) | JavaType::Unknown(_)
+        JavaType::Primitive(_) | JavaType::String | JavaType::Unknown(_)
     )
 }
 
@@ -2058,7 +2051,7 @@ fn emit_stream_lambda_call_args_for_resolved(
                             .find(|coercion| coercion.arg_index == index)
                     })
                     .map(|coercion| {
-                        let slot = RustSlotShape::for_storage(coercion.target.clone());
+                        let slot = storage_shape_for_java_type(coercion.target.clone());
                         adapt_stream_lambda_arg_for_slot(
                             arg,
                             rendered.clone(),

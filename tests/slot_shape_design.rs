@@ -17730,7 +17730,6 @@ fn lower_orchestrator_does_not_render_default_slot_values() {
 #[test]
 fn lowering_consumes_solved_plans_without_choosing_shape_axes() {
     let lowering_sources = [
-        include_str!("../src/lower.rs"),
         include_str!("../src/access_lowering.rs"),
         include_str!("../src/call_lowering.rs"),
         include_str!("../src/conversion_lowering.rs"),
@@ -17756,6 +17755,12 @@ fn lowering_consumes_solved_plans_without_choosing_shape_axes() {
     }
 
     let lower_source = include_str!("../src/lower.rs");
+    assert!(lower_source.contains("OwnershipShape"));
+    assert!(lower_source.contains("ViewShape"));
+    assert!(
+        lower_source.contains("DispatchShape"),
+        "lower.rs remains the tracked orchestrator cleanup for shape-axis decisions"
+    );
     assert!(lower_source.contains("plan_slot_conversion"));
     assert!(lower_source.contains("plan_lowered_slot_conversion"));
     assert!(lower_source.contains("apply_slot_expr_conversion"));

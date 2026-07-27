@@ -4085,6 +4085,10 @@ still red with 454 passed / 55 failed. The failures span pre-existing broad
 design-drift guards in representation, signature, stream, semantic-analysis,
 and lowering ownership tests, so treat the full design suite as a separate
 cleanup batch rather than a blocker for these committed ABI fact slices.
+Checkpoint policy: the user explicitly granted permission to create git commits
+at good checkpoints during larger batched edits. Keep commits narrow enough to
+audit, record focused verification for each checkpoint, and continue ignoring
+unrelated untracked local files.
 Call target ownership cleanup: lower-side `CallTargetPlan::InstanceReceiver` and
 `FallbackReceiver` variant construction/classification has moved behind
 call-plan helpers (`non_self_trivial_accessor_target`,
@@ -4261,6 +4265,14 @@ External fact alias follow-up: `ExternalFactLookupIndex` now builds and probes
 method-name aliases through `java_naming::java_method_name_aliases`, so external
 API effects and method-reference callable-key probes share the same explicit
 snake/camel compatibility candidates.
+Stream shape-axis cleanup: `stream_lowering.rs` no longer constructs effective
+item ownership or Java storage shapes directly. Effective stream item shape
+selection and Java coercion target storage shapes now go through
+`conversion_plan`, keeping `stream.rs` free of direct ownership-axis decisions.
+Simple Java string stream lambda params now leave type inference to Rust, while
+named facade stream method references keep explicit parameter types. The broad
+shape-axis guard now enforces renderer modules and keeps `lower.rs` as the
+tracked remaining orchestrator cleanup for shape-axis decisions.
 
 ## Rerun Protocol
 
