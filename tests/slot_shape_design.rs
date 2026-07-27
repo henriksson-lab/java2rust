@@ -115,11 +115,11 @@ use new_java2rust::method_reference_shape::{
 use new_java2rust::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
 use new_java2rust::object_model::rust_enum_variant_name_from_parsed_constant;
 use new_java2rust::operator_lowering::{
-    EqualityComparisonPlan, NullComparisonMethod, NumericBinaryPromotionPlan, binary_op_to_rust,
-    lower_equality_comparison_expr, lower_equality_comparison_expr_for_op,
-    lower_null_comparison_expr, lower_numeric_binary_expr, lower_unary_expr,
-    null_comparison_method, plan_equality_comparison, plan_equality_comparison_with_facts,
-    plan_numeric_binary_promotion, stream_unary_prefix,
+    EqualityComparisonPlan, NullComparisonMethod, NumericBinaryPromotionPlan,
+    StringEqualityOperandView, binary_op_to_rust, lower_equality_comparison_expr,
+    lower_equality_comparison_expr_for_op, lower_null_comparison_expr, lower_numeric_binary_expr,
+    lower_unary_expr, null_comparison_method, plan_equality_comparison,
+    plan_equality_comparison_with_facts, plan_numeric_binary_promotion, stream_unary_prefix,
 };
 use new_java2rust::parser::{parse_expr, parse_java_source, parse_type};
 use new_java2rust::representation::{
@@ -32631,7 +32631,10 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
     });
     assert_eq!(
         plan_equality_comparison(&string_shape, &string_shape),
-        EqualityComparisonPlan::Direct
+        EqualityComparisonPlan::StringView {
+            left_view: StringEqualityOperandView::NativeString,
+            right_view: StringEqualityOperandView::NativeString,
+        }
     );
     assert_eq!(
         plan_equality_comparison(&optional_string_shape, &optional_string_shape),
@@ -32691,7 +32694,9 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
             RustExpr::Raw("name.trim()".to_string()),
             RustExpr::Var("sample_name".to_string()),
         ),
-        RustExpr::Raw("Some(name.trim()) == sample_name.as_deref()".to_string())
+        RustExpr::Raw(
+            "Some(name.trim()) == sample_name.as_ref().map(|value| value.as_str())".to_string(),
+        )
     );
     let nullable_value_ty = JavaType::Named {
         name: "NullableValue".to_string(),
