@@ -29347,6 +29347,8 @@ fn stdlib_owns_known_jdk_content_method_facts() {
         CallableKey::method("java.lang.Math", "toIntExact", Staticness::Unknown, 1);
     let double_is_nan_key = CallableKey::method("Double", "isNaN", Staticness::Unknown, 1);
     let float_is_nan_key = CallableKey::method("Float", "isNaN", Staticness::Unknown, 1);
+    let objects_equals_key =
+        CallableKey::method("java.util.Objects", "equals", Staticness::Unknown, 2);
     let objects_non_null_key = CallableKey::method("Objects", "nonNull", Staticness::Unknown, 1);
     let objects_is_null_key =
         CallableKey::method("java.util.Objects", "isNull", Staticness::Unknown, 1);
@@ -29561,6 +29563,19 @@ fn stdlib_owns_known_jdk_content_method_facts() {
         vec![FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed))]
     );
     assert_eq!(is_null_abi.return_slot, FacadeSlot::Owned);
+
+    let objects_equals_abi = stdlib_signature_facts
+        .facade_abi_for_key(&objects_equals_key)
+        .expect("java.util.Objects.equals ABI should come from selected Rust stdlib facts");
+    assert_eq!(objects_equals_abi.receiver, ReceiverAbi::AssociatedFunction);
+    assert_eq!(
+        objects_equals_abi.args,
+        vec![
+            FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed)),
+            FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed))
+        ]
+    );
+    assert_eq!(objects_equals_abi.return_slot, FacadeSlot::Owned);
 
     let system_gc_abi = stdlib_signature_facts
         .facade_abi_for_key(&system_gc_key)
@@ -30112,6 +30127,52 @@ fn stdlib_signature_facts_drive_objects_null_predicate_argument_shapes() {
         assert_eq!(shapes[0].java_ty, optional_java_type(JavaType::String));
         assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
     }
+}
+
+#[test]
+fn stdlib_signature_facts_drive_objects_equals_optional_borrow_shapes() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let signatures = SignaturePlan::default();
+    let mut types = TypeEnv::new();
+    types.insert_static_type_alias("Objects", "java.util.Objects");
+    types.insert_local("left", optional_java_type(JavaType::String));
+    types.insert_local("right", optional_java_type(JavaType::String));
+
+    let receiver = Expr::Var("Objects".to_string());
+    let args = vec![
+        Expr::Var("left".to_string()),
+        Expr::Var("right".to_string()),
+    ];
+    let shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&receiver),
+        "equals",
+        None,
+        &args,
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("Objects.equals should use optional borrowed ABI facts, got {plan:?}"),
+    };
+
+    assert_eq!(shapes.len(), 2);
+    for shape in &shapes {
+        assert_eq!(shape.java_ty, optional_java_type(JavaType::String));
+        assert_eq!(shape.ownership, OwnershipShape::SharedBorrow);
+    }
+
+    let target =
+        plan_call_target_with_facts_and_arity(Some(&receiver), "equals", 2, None, &facts, &types);
+    assert!(
+        matches!(
+            target,
+            CallTargetPlan::NativeJavaStatic {
+                method: NativeJavaStaticMethod::ObjectsEquals,
+            }
+        ),
+        "Objects.equals ABI facts should shape arguments without bypassing native equality rendering: {target:?}"
+    );
 }
 
 #[test]

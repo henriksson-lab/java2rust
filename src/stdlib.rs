@@ -783,6 +783,17 @@ fn add_jdk_objects_abi_facts(facts: &mut FactSet) {
         facts.facade_abi_facts.extend([
             rust_stdlib_static_abi(
                 owner,
+                "equals",
+                2,
+                "Objects::equals",
+                vec![
+                    FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed)),
+                    FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed)),
+                ],
+                FacadeSlot::Owned,
+            ),
+            rust_stdlib_static_abi(
+                owner,
                 "nonNull",
                 1,
                 "Option::is_some",

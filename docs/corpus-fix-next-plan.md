@@ -4073,6 +4073,11 @@ owns Java-specific projections, but numeric argument shape selection is no
 longer tied only to the native static-call branch. Vararg/string formatting
 calls remain separate because their callable-key arity policy needs a deliberate
 design.
+Objects equality ABI follow-up: `java.util.Objects.equals(Object, Object)` now
+has a selected stdlib `FacadeAbiFact` with optional borrowed operands, matching
+the existing `Objects.nonNull/isNull` null-carrier facts. Native lowering still
+owns the equality projection, but nullable operand borrowing is now selected
+from shared slot facts.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
