@@ -101,7 +101,9 @@ use new_java2rust::loop_plan::{
 };
 use new_java2rust::lower::{lower_program_with_facts, lower_program_with_plans};
 use new_java2rust::lowering_diagnostics::collect_lowering_diagnostic_plans;
-use new_java2rust::method_reference_lowering::render_method_reference;
+use new_java2rust::method_reference_lowering::{
+    render_method_reference, render_typed_single_input_method_reference_callback_with_facts,
+};
 use new_java2rust::method_reference_plan::{MethodReferencePlan, plan_method_reference};
 use new_java2rust::method_reference_shape::{
     infer_single_input_method_reference_output_shape, method_reference_receiver_type_for_call_plan,
@@ -31241,6 +31243,25 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         }),
         RustExpr::Raw("|arg0, arg1, arg2| self.emit(arg0, arg1, arg2)".to_string())
     );
+    let stdlib_facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    assert_eq!(
+        render_typed_single_input_method_reference_callback_with_facts(
+            &plan_method_reference("Objects", "nonNull"),
+            "Option<&String>",
+            &RustSlotShape::conservative(optional_java_type(JavaType::String)),
+            &stdlib_facts,
+        ),
+        RustExpr::Raw("|value: Option<&String>| value.is_some()".to_string())
+    );
+    assert_eq!(
+        render_typed_single_input_method_reference_callback_with_facts(
+            &plan_method_reference("Objects", "nonNull"),
+            "&String",
+            &RustSlotShape::for_storage(JavaType::String),
+            &stdlib_facts,
+        ),
+        RustExpr::Raw("|value: &String| true".to_string())
+    );
 
     let lower_source = include_str!("../src/lower.rs");
     let plan_source = include_str!("../src/method_reference_plan.rs");
@@ -31254,10 +31275,21 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(!plan_source.contains("RustExpr"));
     assert!(lowering_source.contains("pub fn render_method_reference"));
     assert!(lowering_source.contains("pub fn render_single_input_method_reference_body"));
+    assert!(
+        lowering_source.contains("pub fn render_single_input_method_reference_body_with_facts")
+    );
     assert!(lowering_source.contains("pub fn render_typed_single_input_method_reference_callback"));
+    assert!(
+        lowering_source
+            .contains("pub fn render_typed_single_input_method_reference_callback_with_facts")
+    );
     assert!(lowering_source.contains("enum AssociatedFunctionMethodReferenceBodyPlan"));
     assert!(lowering_source.contains("fn associated_function_method_reference_body_plan"));
     assert!(lowering_source.contains("fn render_associated_function_method_reference_body"));
+    assert!(
+        lowering_source.contains("fn render_facade_abi_associated_function_method_reference_body")
+    );
+    assert!(lowering_source.contains("facade_abi_for_key"));
     assert!(lowering_source.contains("owner_associated_path_projection"));
     assert!(lowering_source.contains("receiver_method_call_projection"));
     assert!(lowering_source.contains("typed_single_input_callback_projection"));
@@ -31281,6 +31313,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(stream_lowering_source.contains("fn stream_lambda_param_projection"));
     assert!(stream_lowering_source.contains("render_stream_lambda_param_projection"));
     assert!(lower_source.contains("render_typed_single_input_method_reference_callback"));
+    assert!(!lower_source.contains("value.is_some()"));
     assert!(!lower_source.contains("format!(\"|value: {param_type}| {owner}::{method}(value)"));
     assert!(!lower_source.contains("format!(\"|value: {param_type}| value.{method}()"));
     assert!(!lower_source.contains("format!(\"|value: {param_type}| {type_name}::new(value)"));

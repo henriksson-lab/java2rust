@@ -122,7 +122,7 @@ use crate::loop_lowering::{assemble_for_loop, assignment_condition_loop, continu
 use crate::loop_plan::{ForBodyStmtPlan, WhileStmtPlan, plan_for_body_stmt, plan_while_stmt};
 use crate::lowering_diagnostics::{LoweringDiagnosticPlan, collect_lowering_diagnostic_plans};
 use crate::method_reference_lowering::{
-    render_method_reference, render_typed_single_input_method_reference_callback,
+    render_method_reference, render_typed_single_input_method_reference_callback_with_facts,
 };
 use crate::method_reference_plan::{
     MethodReferencePlan, plan_current_receiver_method_reference, plan_method_reference,
@@ -7710,9 +7710,11 @@ fn render_typed_method_reference_callback(
     ctx: LowerCtx,
 ) -> RustExpr {
     let param_type = render_callback_param_type(element_shape, ctx);
-    render_typed_single_input_method_reference_callback(
+    render_typed_single_input_method_reference_callback_with_facts(
         &plan_method_reference(target, method),
         &param_type,
+        element_shape,
+        ctx.facts,
     )
 }
 
@@ -10646,12 +10648,14 @@ fn lower_typed_single_input_method_reference(
         MethodReferencePlan::AssociatedFunction { owner, method }
             if owner == "Objects" && method == "non_null" =>
         {
-            let body = if element_shape.optional_element_type().is_some() {
-                "value.is_some()"
-            } else {
-                "true"
-            };
-            Some(RustExpr::Raw(format!("|value: {param_ty}| {body}")))
+            Some(
+                render_typed_single_input_method_reference_callback_with_facts(
+                    &MethodReferencePlan::AssociatedFunction { owner, method },
+                    &param_ty,
+                    element_shape,
+                    ctx.facts,
+                ),
+            )
         }
         MethodReferencePlan::UnboundAccessor { method } => {
             let param_ty = render_unbound_accessor_callback_param_type(element_shape, ctx);
