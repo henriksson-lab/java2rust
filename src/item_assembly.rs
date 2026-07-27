@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use crate::coercion::{function_call_projection, self_associated_path_projection};
+use crate::coercion::{
+    function_call_projection, owner_associated_path_projection, self_associated_path_projection,
+};
 use crate::exception_lowering::exception_result_type;
 use crate::exception_plan::MethodExceptionPlan;
 use crate::facts::FactSet;
@@ -885,15 +887,13 @@ fn const_expr_value(
 ) -> Option<RustExpr> {
     match expr {
         Expr::Literal(literal) => const_literal_expr_value(literal, expected_ty),
-        Expr::Var(name) => Some(RustExpr::Raw(format!(
-            "Self::{}",
-            const_reference_name(name, const_infos)
-        ))),
+        Expr::Var(name) => {
+            let member = const_reference_name(name, const_infos);
+            Some(self_associated_path_projection(&member))
+        }
         Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
-            Some(RustExpr::Raw(format!(
-                "Self::{}",
-                const_reference_name(field, const_infos)
-            )))
+            let member = const_reference_name(field, const_infos);
+            Some(self_associated_path_projection(&member))
         }
         Expr::FieldAccess(receiver, field)
             if field == "length" && matches!(expected_ty, Some(JavaType::Primitive(_))) =>
@@ -907,11 +907,9 @@ fn const_expr_value(
             let Expr::Var(owner) = receiver.as_ref() else {
                 return None;
             };
-            Some(RustExpr::Raw(format!(
-                "{}::{}",
-                rust_name_for_java_named_type(owner),
-                const_reference_name(field, const_infos)
-            )))
+            let owner = rust_name_for_java_named_type(owner);
+            let member = const_reference_name(field, const_infos);
+            Some(owner_associated_path_projection(&owner, &member))
         }
         Expr::Unary {
             op: crate::java_ir::UnaryOp::Neg,

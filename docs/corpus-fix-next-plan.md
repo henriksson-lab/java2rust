@@ -3997,6 +3997,11 @@ compatibility helpers while raw `RustExpr`/`RustType` strings are still common,
 but their parsing behavior is no longer owned by local lowering/assembly
 modules.
 
+Static final const assembly follow-up: `const_expr_value` now uses shared
+associated-path projections for `Self::CONST` and `Owner::CONST` references.
+Item assembly still owns constant eligibility and evaluation, but the Rust path
+spelling is no longer rebuilt locally for these constant expressions.
+
 Stream receiver type-hint cleanup: stream lambda lowering now asks
 `call_plan::native_java_instance_receiver_type_hint` for the temporary receiver
 type implied by native Java instance-call planning, instead of checking the
