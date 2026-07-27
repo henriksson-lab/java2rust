@@ -3916,6 +3916,10 @@ Follow-up cleanup extended the same classifier path to support-facade opaque
 return tracking, nested `Option<T>` return normalization, and default fallback
 expression generation, preserving the previous JavaException-specific
 `Result<T, JavaException>` behavior while avoiding local prefix parsing.
+The CLI facade-signature parser now also uses the shared raw Rust generic
+helpers for `Result`, `Option`, nullable parameters, return payloads, and
+`FacadeSlot::Optional` detection, including path-qualified `...::Result<T>`
+without the previous broad `contains("Result<")` heuristic.
 
 ## Rerun Protocol
 

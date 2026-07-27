@@ -27438,6 +27438,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let operator_source = include_str!("../src/operator_lowering.rs");
     let types_source = include_str!("../src/types.rs");
     let stdlib_source = include_str!("../src/stdlib.rs");
+    let main_source = include_str!("../src/main.rs");
 
     assert!(coercion_source.contains("pub fn ensure_borrow_projection"));
     assert!(coercion_source.contains("pub fn rendered_expr_has_clone_recovery"));
@@ -27578,6 +27579,36 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(types_source.contains("pub fn raw_rust_result_args"));
     assert!(types_source.contains("pub fn raw_rust_option_inner"));
     assert!(types_source.contains("pub fn split_top_level_rust_type_args"));
+    assert_eq!(
+        new_java2rust::types::raw_rust_result_args("std::io::Result<String>")
+            .expect("path-qualified Result should be parsed"),
+        vec!["String"]
+    );
+    assert_eq!(
+        new_java2rust::types::raw_rust_option_inner("std::option::Option<&Schema>"),
+        Some("&Schema")
+    );
+    let facade_cli_slot_parser = main_source
+        .split("fn facade_slot_for_rust_type")
+        .nth(1)
+        .and_then(|tail| tail.split("fn facade_slot_contains_shared_borrow").next())
+        .expect("CLI facade slot parser should be present");
+    assert!(facade_cli_slot_parser.contains("raw_rust_option_inner"));
+    assert!(!facade_cli_slot_parser.contains("strip_prefix(\"Option<\")"));
+    assert!(!facade_cli_slot_parser.contains("strip_prefix(\"std::option::Option<\")"));
+    let facade_cli_return_parser = main_source
+        .split("fn rust_type_is_result")
+        .nth(1)
+        .and_then(|tail| tail.split("fn rust_param_is_borrowed_or_borrowable").next())
+        .expect("CLI facade return parser should be present");
+    assert!(facade_cli_return_parser.contains("raw_rust_type_is_result"));
+    assert!(facade_cli_return_parser.contains("raw_rust_result_args"));
+    assert!(facade_cli_return_parser.contains("raw_rust_option_inner"));
+    assert!(facade_cli_return_parser.contains("raw_rust_type_is_option"));
+    assert!(!facade_cli_return_parser.contains("starts_with(\"Result<\")"));
+    assert!(!facade_cli_return_parser.contains("starts_with(\"Option<\")"));
+    assert!(!facade_cli_return_parser.contains("strip_prefix(\"Option<\")"));
+    assert!(!facade_cli_return_parser.contains("contains(\"Result<\")"));
     let opaque_return_tracker = stdlib_source
         .split("fn add_external_facade_return_opaque_type")
         .nth(1)

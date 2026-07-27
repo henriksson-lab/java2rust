@@ -1437,18 +1437,7 @@ fn facade_slot_for_rust_type(ty: &str) -> new_java2rust::facts::FacadeSlot {
     if ty == "usize" {
         return new_java2rust::facts::FacadeSlot::Index;
     }
-    if let Some(inner) = ty
-        .strip_prefix("Option<")
-        .and_then(|ty| ty.strip_suffix('>'))
-    {
-        return new_java2rust::facts::FacadeSlot::Optional(Box::new(facade_slot_for_rust_type(
-            inner,
-        )));
-    }
-    if let Some(inner) = ty
-        .strip_prefix("std::option::Option<")
-        .and_then(|ty| ty.strip_suffix('>'))
-    {
+    if let Some(inner) = new_java2rust::types::raw_rust_option_inner(ty) {
         return new_java2rust::facts::FacadeSlot::Optional(Box::new(facade_slot_for_rust_type(
             inner,
         )));
@@ -1935,21 +1924,19 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
 }
 
 fn rust_type_is_result(ty: &str) -> bool {
-    ty.trim().starts_with("Result<")
-        || ty.trim().starts_with("std::result::Result<")
-        || ty.trim().contains("Result<")
+    new_java2rust::types::raw_rust_type_is_result(ty)
 }
 
 fn rust_return_payload_is_optional(ty: &str) -> bool {
-    rust_return_payload_type(ty).trim().starts_with("Option<")
+    new_java2rust::types::raw_rust_option_inner(&rust_return_payload_type(ty)).is_some()
 }
 
 fn rust_return_payload_type(ty: &str) -> String {
     let ty = ty.trim().trim_end_matches(';').trim();
-    if let Some(inner) = result_payload(ty) {
-        return split_top_level(inner, ',')
+    if let Some(args) = new_java2rust::types::raw_rust_result_args(ty) {
+        return args
             .first()
-            .map(|payload| payload.trim().to_string())
+            .map(|payload| (*payload).to_string())
             .unwrap_or_else(|| ty.to_string());
     }
     ty.to_string()
@@ -1957,20 +1944,9 @@ fn rust_return_payload_type(ty: &str) -> String {
 
 fn rust_type_accepts_none(ty: &str, abi: &FacadeFnAbi) -> bool {
     let ty = ty.trim();
-    ty.starts_with("Option<")
-        || ty.starts_with("std::option::Option<")
+    new_java2rust::types::raw_rust_type_is_option(ty)
         || (abi.generic_params.iter().any(|param| param == ty)
             && !abi.generic_bounds.contains_key(ty))
-}
-
-fn result_payload(ty: &str) -> Option<&str> {
-    let generic_start = ty.find('<')?;
-    let outer = ty[..generic_start].trim();
-    if outer == "Result" || outer == "std::result::Result" || outer.ends_with("Result") {
-        let inner = &ty[generic_start + 1..];
-        return inner.strip_suffix('>');
-    }
-    None
 }
 
 fn rust_param_is_borrowed_or_borrowable(ty: &str, abi: &FacadeFnAbi) -> bool {
@@ -2038,11 +2014,7 @@ fn java_type_for_rust_param(
 
 fn rust_param_payload_type(ty: &str) -> String {
     let mut ty = ty.trim();
-    if let Some(inner) = ty
-        .strip_prefix("Option<")
-        .or_else(|| ty.strip_prefix("std::option::Option<"))
-        .and_then(|inner| inner.strip_suffix('>'))
-    {
+    if let Some(inner) = new_java2rust::types::raw_rust_option_inner(ty) {
         ty = inner.trim();
     }
     ty.trim_start_matches("&mut ")

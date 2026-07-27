@@ -429,8 +429,14 @@ pub fn raw_rust_type_is_option(raw: &str) -> bool {
 }
 
 pub fn raw_rust_result_args(raw: &str) -> Option<Vec<&str>> {
-    raw_rust_generic_args(raw, "Result")
-        .or_else(|| raw_rust_generic_args(raw, "std::result::Result"))
+    let raw = raw.trim();
+    let generic_start = raw.find('<')?;
+    let head = raw[..generic_start].trim();
+    if head != "Result" && head != "std::result::Result" && !head.ends_with("::Result") {
+        return None;
+    }
+    let inner = raw[generic_start + 1..].strip_suffix('>')?;
+    Some(split_top_level_rust_type_args(inner))
 }
 
 pub fn raw_rust_option_inner(raw: &str) -> Option<&str> {
