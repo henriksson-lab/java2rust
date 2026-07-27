@@ -3928,6 +3928,10 @@ compatibility paths.
 External-pack manifest facade slot parsing now uses the shared `Option<T>`
 classifier as well, and fluent self-returning facade support checks `Result`
 through the shared classifier instead of local string prefixes.
+Opaque final facade return handling now uses a shared raw generic head parser
+for compatibility names like `ObjectAssert<T>`, replacing another local
+`split_once('<')`/suffix check while the long-term target remains structured
+facade ABI facts.
 
 ## Rerun Protocol
 

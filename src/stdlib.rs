@@ -21,7 +21,8 @@ use crate::slot_render::{
 };
 use crate::slot_shape::{MutabilityShape, OwnershipShape, RustSlotShape};
 use crate::types::{
-    raw_rust_option_inner, raw_rust_result_args, raw_rust_type_is_option, raw_rust_type_is_result,
+    raw_generic_type_head, raw_rust_option_inner, raw_rust_result_args, raw_rust_type_is_option,
+    raw_rust_type_is_result,
 };
 
 pub fn is_known_jdk_shadow_sensitive_owner(name: &str) -> bool {
@@ -10161,12 +10162,8 @@ fn external_opaque_final_facade_return_type(
 ) -> Option<String> {
     let name = match java_type {
         JavaType::Named { name, args } if !args.is_empty() => name.as_str(),
-        JavaType::Named { name, args } if args.is_empty() && name.contains('<') => name
-            .split_once('<')
-            .and_then(|(erased, _)| name.ends_with('>').then_some(erased.trim()))?,
-        JavaType::Unknown(raw) => raw
-            .split_once('<')
-            .and_then(|(name, _)| raw.ends_with('>').then_some(name.trim()))?,
+        JavaType::Named { name, args } if args.is_empty() => raw_generic_type_head(name)?,
+        JavaType::Unknown(raw) => raw_generic_type_head(raw)?,
         _ => return None,
     };
     let erased = JavaType::Named {

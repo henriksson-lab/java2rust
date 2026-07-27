@@ -420,6 +420,12 @@ pub fn raw_rust_generic_args<'a>(raw: &'a str, head: &str) -> Option<Vec<&'a str
     Some(split_top_level_rust_type_args(inner))
 }
 
+pub fn raw_generic_type_head(raw: &str) -> Option<&str> {
+    let raw = raw.trim();
+    let (head, rest) = raw.split_once('<')?;
+    rest.ends_with('>').then_some(head.trim())
+}
+
 pub fn raw_rust_type_is_result(raw: &str) -> bool {
     raw_rust_result_args(raw).is_some()
 }

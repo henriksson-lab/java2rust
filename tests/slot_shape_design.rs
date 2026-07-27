@@ -27581,7 +27581,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(types_source.contains("pub fn raw_rust_option_inner"));
     assert!(types_source.contains("pub fn raw_rust_vec_inner"));
     assert!(types_source.contains("pub fn raw_rust_box_dyn_trait"));
+    assert!(types_source.contains("pub fn raw_generic_type_head"));
     assert!(types_source.contains("pub fn split_top_level_rust_type_args"));
+    assert_eq!(
+        new_java2rust::types::raw_generic_type_head("ObjectAssert<Box<dyn Animal>>"),
+        Some("ObjectAssert")
+    );
     assert_eq!(
         new_java2rust::types::raw_rust_result_args("std::io::Result<String>")
             .expect("path-qualified Result should be parsed"),
@@ -27694,6 +27699,17 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(manifest_facade_slot_parser.contains("raw_rust_option_inner"));
     assert!(!manifest_facade_slot_parser.contains("strip_prefix(\"Option<\")"));
     assert!(!manifest_facade_slot_parser.contains("strip_prefix(\"std::option::Option<\")"));
+    let opaque_final_return = stdlib_source
+        .split("fn external_opaque_final_facade_return_type")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn external_facade_crate_mapped_return_type")
+                .next()
+        })
+        .expect("opaque final facade return helper should be present");
+    assert!(opaque_final_return.contains("raw_generic_type_head"));
+    assert!(!opaque_final_return.contains("split_once('<')"));
+    assert!(!opaque_final_return.contains("ends_with('>')"));
     let raw_clone_support = item_assembly_source
         .split("fn raw_rust_type_supports_derive_clone")
         .nth(1)
