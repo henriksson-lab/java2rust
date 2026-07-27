@@ -29348,6 +29348,7 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     let objects_is_null_key =
         CallableKey::method("java.util.Objects", "isNull", Staticness::Unknown, 1);
     let system_gc_key = CallableKey::method("java.lang.System", "gc", Staticness::Unknown, 0);
+    let system_exit_key = CallableKey::method("java.lang.System", "exit", Staticness::Unknown, 1);
     let thread_sleep_key = CallableKey::method("java.lang.Thread", "sleep", Staticness::Unknown, 1);
     let file_exists_key = CallableKey::method("java.io.File", "exists", Staticness::Unknown, 0);
     let file_list_key = CallableKey::method("java.io.File", "list", Staticness::Unknown, 0);
@@ -29552,6 +29553,13 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert_eq!(system_gc_abi.receiver, ReceiverAbi::AssociatedFunction);
     assert_eq!(system_gc_abi.args, Vec::<FacadeSlot>::new());
     assert_eq!(system_gc_abi.return_slot, FacadeSlot::Owned);
+
+    let system_exit_abi = stdlib_signature_facts
+        .facade_abi_for_key(&system_exit_key)
+        .expect("System.exit ABI should come from selected Rust stdlib facts");
+    assert_eq!(system_exit_abi.receiver, ReceiverAbi::AssociatedFunction);
+    assert_eq!(system_exit_abi.args, vec![FacadeSlot::Owned]);
+    assert_eq!(system_exit_abi.return_slot, FacadeSlot::Owned);
 
     let thread_sleep_abi = stdlib_signature_facts
         .facade_abi_for_key(&thread_sleep_key)
@@ -30128,6 +30136,46 @@ fn stdlib_signature_facts_drive_thread_sleep_owned_millis_shape() {
             }
         ),
         "Thread.sleep ABI fact should shape arguments without bypassing native sleep rendering: {target:?}"
+    );
+}
+
+#[test]
+fn stdlib_signature_facts_drive_system_exit_owned_status_shape() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    let signatures = SignaturePlan::default();
+    let mut types = TypeEnv::new();
+    types.insert_static_type_alias("System", "java.lang.System");
+    types.insert_local("status", JavaType::Primitive(PrimitiveType::Int));
+
+    let receiver = Expr::Var("System".to_string());
+    let args = vec![Expr::Var("status".to_string())];
+    let shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&receiver),
+        "exit",
+        None,
+        &args,
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("System.exit should use an owned status ABI fact, got {plan:?}"),
+    };
+
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(shapes[0].java_ty, JavaType::Primitive(PrimitiveType::Int));
+    assert_eq!(shapes[0].ownership, OwnershipShape::CopyValue);
+
+    let target =
+        plan_call_target_with_facts_and_arity(Some(&receiver), "exit", 1, None, &facts, &types);
+    assert!(
+        matches!(
+            target,
+            CallTargetPlan::NativeJavaStatic {
+                method: NativeJavaStaticMethod::SystemExit,
+            }
+        ),
+        "System.exit ABI fact should shape arguments without bypassing native exit rendering: {target:?}"
     );
 }
 

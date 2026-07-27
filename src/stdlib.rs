@@ -608,6 +608,14 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
         ));
         facts.facade_abi_facts.push(rust_stdlib_static_abi(
             owner,
+            "exit",
+            1,
+            "std::process::exit",
+            vec![FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ));
+        facts.facade_abi_facts.push(rust_stdlib_static_abi(
+            owner,
             "arraycopy",
             5,
             "System::arraycopy",

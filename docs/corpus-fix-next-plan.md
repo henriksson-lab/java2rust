@@ -4062,6 +4062,10 @@ stdlib `FacadeAbiFact` with an owned/copy millisecond argument. Native lowering
 still owns Java sleep semantics and renders `Duration::from_millis(...)`, but
 argument shape selection no longer depends only on the `Thread.sleep` lowering
 branch.
+System exit ABI follow-up: `java.lang.System.exit(int)` now has a selected
+stdlib `FacadeAbiFact` with an owned/copy status argument. Native lowering still
+owns Java exit semantics and renders `std::process::exit(...)`, but argument
+shape selection no longer depends only on the `System.exit` lowering branch.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
