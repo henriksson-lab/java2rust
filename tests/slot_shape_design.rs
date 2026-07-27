@@ -31481,6 +31481,7 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     let lowering_source = include_str!("../src/method_reference_lowering.rs");
     let shape_source = include_str!("../src/method_reference_shape.rs");
     let java_naming_source = include_str!("../src/java_naming.rs");
+    let coercion_source = include_str!("../src/coercion.rs");
     let stream_source = include_str!("../src/stream.rs");
     let stream_lowering_source = include_str!("../src/stream_lowering.rs");
     assert!(lower_source.contains("plan_method_reference"));
@@ -31500,6 +31501,15 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(lowering_source.contains("enum AssociatedFunctionMethodReferenceBodyPlan"));
     assert!(lowering_source.contains("fn associated_function_method_reference_body_plan"));
     assert!(lowering_source.contains("fn render_associated_function_method_reference_body"));
+    assert!(lowering_source.contains("associated_function_method_reference_body_projection"));
+    assert!(
+        !lowering_source.contains(
+            "AssociatedFunctionMethodReferenceBodyPlan::PrimitiveIdentityValue => value_expr.to_string()"
+        ),
+        "method-reference lowering should not own associated-function body spelling"
+    );
+    assert!(coercion_source.contains("pub enum AssociatedFunctionMethodReferenceProjection"));
+    assert!(coercion_source.contains("associated_function_method_reference_body_projection"));
     assert!(lowering_source.contains("fn render_facade_abi_method_reference_body"));
     assert!(lowering_source.contains("method_reference_receiver_owner_key"));
     assert!(lowering_source.contains("facade_receiver_method_call_projection"));

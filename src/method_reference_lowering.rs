@@ -1,8 +1,10 @@
 use crate::coercion::{
-    current_receiver_method_call_projection, current_receiver_method_reference_projection,
-    facade_receiver_method_call_projection, owner_associated_path_projection,
-    receiver_method_call_projection, typed_single_input_callback_projection,
-    unbound_method_call_projection, unbound_method_reference_projection,
+    AssociatedFunctionMethodReferenceProjection,
+    associated_function_method_reference_body_projection, current_receiver_method_call_projection,
+    current_receiver_method_reference_projection, facade_receiver_method_call_projection,
+    owner_associated_path_projection, receiver_method_call_projection,
+    typed_single_input_callback_projection, unbound_method_call_projection,
+    unbound_method_reference_projection,
 };
 use crate::emit;
 use crate::facts::{CallableKey, FacadeSlot, FactSet, ReceiverAbi, ResultAbi, Staticness};
@@ -18,6 +20,25 @@ enum AssociatedFunctionMethodReferenceBodyPlan {
     ReceiverToString,
     AlwaysTrue,
     StaticFunction,
+}
+
+impl AssociatedFunctionMethodReferenceBodyPlan {
+    fn projection(self) -> AssociatedFunctionMethodReferenceProjection {
+        match self {
+            AssociatedFunctionMethodReferenceBodyPlan::PrimitiveIdentityValue => {
+                AssociatedFunctionMethodReferenceProjection::PrimitiveIdentityValue
+            }
+            AssociatedFunctionMethodReferenceBodyPlan::ReceiverToString => {
+                AssociatedFunctionMethodReferenceProjection::ReceiverToString
+            }
+            AssociatedFunctionMethodReferenceBodyPlan::AlwaysTrue => {
+                AssociatedFunctionMethodReferenceProjection::AlwaysTrue
+            }
+            AssociatedFunctionMethodReferenceBodyPlan::StaticFunction => {
+                AssociatedFunctionMethodReferenceProjection::StaticFunction
+            }
+        }
+    }
 }
 
 fn associated_function_method_reference_body_plan(
@@ -137,23 +158,13 @@ fn render_associated_function_method_reference_body(
     receiver: &str,
     value_expr: &str,
 ) -> String {
-    match associated_function_method_reference_body_plan(owner, method) {
-        AssociatedFunctionMethodReferenceBodyPlan::PrimitiveIdentityValue => value_expr.to_string(),
-        AssociatedFunctionMethodReferenceBodyPlan::ReceiverToString => {
-            emit::emit_expr(&receiver_method_call_projection(
-                RustExpr::Raw(receiver.to_string()),
-                "to_string",
-                Vec::new(),
-            ))
-        }
-        AssociatedFunctionMethodReferenceBodyPlan::AlwaysTrue => "true".to_string(),
-        AssociatedFunctionMethodReferenceBodyPlan::StaticFunction => {
-            emit::emit_expr(&RustExpr::Call {
-                function: Box::new(owner_associated_path_projection(owner, method)),
-                args: vec![RustExpr::Raw(receiver.to_string())],
-            })
-        }
-    }
+    associated_function_method_reference_body_projection(
+        associated_function_method_reference_body_plan(owner, method).projection(),
+        owner,
+        method,
+        receiver,
+        value_expr,
+    )
 }
 
 fn render_facade_abi_method_reference_body(

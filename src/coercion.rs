@@ -948,6 +948,42 @@ pub fn typed_single_input_callback_projection(param_type: &str, body: &str) -> R
     RustExpr::Raw(format!("|value: {param_type}| {body}"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssociatedFunctionMethodReferenceProjection {
+    PrimitiveIdentityValue,
+    ReceiverToString,
+    AlwaysTrue,
+    StaticFunction,
+}
+
+pub fn associated_function_method_reference_body_projection(
+    projection: AssociatedFunctionMethodReferenceProjection,
+    owner: &str,
+    method: &str,
+    receiver: &str,
+    value_expr: &str,
+) -> String {
+    match projection {
+        AssociatedFunctionMethodReferenceProjection::PrimitiveIdentityValue => {
+            value_expr.to_string()
+        }
+        AssociatedFunctionMethodReferenceProjection::ReceiverToString => {
+            emit::emit_expr(&receiver_method_call_projection(
+                RustExpr::Raw(receiver.to_string()),
+                "to_string",
+                Vec::new(),
+            ))
+        }
+        AssociatedFunctionMethodReferenceProjection::AlwaysTrue => "true".to_string(),
+        AssociatedFunctionMethodReferenceProjection::StaticFunction => {
+            emit::emit_expr(&RustExpr::Call {
+                function: Box::new(owner_associated_path_projection(owner, method)),
+                args: vec![RustExpr::Raw(receiver.to_string())],
+            })
+        }
+    }
+}
+
 pub fn outer_this_field_projection(field_name: &str) -> RustExpr {
     RustExpr::Raw(format!(
         "self.__outer.borrow().{}",

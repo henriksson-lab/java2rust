@@ -3974,6 +3974,13 @@ Java owner/method cases for `Integer::intValue`, `Object::toString`,
 `String::valueOf`, and `Objects::nonNull`, but the public renderer consumes one
 named body-plan boundary that can later be replaced by callable-key/facade ABI
 facts.
+Follow-up: the body plan still lives in method-reference lowering because it is
+the compatibility boundary for Java owner/method meaning, but the Rust body
+spellings now render through
+`coercion::associated_function_method_reference_body_projection`. This keeps
+primitive identity, receiver `to_string`, always-true, and static function
+callback bodies beside the other projection helpers while callable-key/facade
+ABI work replaces the legacy cases.
 Follow-up: typed method-reference callbacks now have a fact-aware rendering
 entry point. Optional `Objects::nonNull` callbacks are selected from the
 `Objects.nonNull` facade ABI fact and render `value.is_some()` through the
