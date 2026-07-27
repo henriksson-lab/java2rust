@@ -3977,6 +3977,10 @@ calls, boxed primitive parse helpers, static storage setters, and local
 callback invocations now use shared function/receiver call projections.
 Lowering still selects the Java-specific cases and exception propagation; the
 Rust call or method-call node construction is centralized.
+Optional/array receiver projection follow-up: refined optional unwraps,
+`Objects.isNull`/`Objects.nonNull` optional predicates, and ndarray row access
+now also use `receiver_method_call_projection_exact`. Lowering still chooses
+when those Java semantics apply; receiver-call spelling is shared.
 
 Loop/array borrow projection cleanup: assignment-in-condition loops now use the
 shared optional shared-value unwrap projection when introducing the narrowed

@@ -7790,11 +7790,7 @@ fn lower_refined_non_null_var(name: &str, env: &ShapeEnv) -> RustExpr {
         .and_then(|shape| shape.optional_element_type())
         .is_some()
     {
-        RustExpr::MethodCall {
-            receiver: Box::new(lowered),
-            method: "unwrap".to_string(),
-            args: Vec::new(),
-        }
+        receiver_method_call_projection_exact(lowered, "unwrap", Vec::new())
     } else {
         lowered
     }
@@ -12847,11 +12843,11 @@ fn lower_java_objects_null_predicate_call_expr(
     if arg_shape.optional_element_type().is_some() {
         let lowered = lower_expr_with_refinements(arg, env, ctx, refinements);
         let method = if is_non_null { "is_some" } else { "is_none" };
-        return Some(RustExpr::MethodCall {
-            receiver: Box::new(lowered),
-            method: method.to_string(),
-            args: Vec::new(),
-        });
+        return Some(receiver_method_call_projection_exact(
+            lowered,
+            method,
+            Vec::new(),
+        ));
     }
     Some(RustExpr::Literal(
         if is_non_null { "true" } else { "false" }.to_string(),
@@ -13971,11 +13967,11 @@ fn lower_array_access_expr(
                 lower_expr_for_slot(index, env, index_slot(), ctx),
             );
         }
-        let row_expr = RustExpr::MethodCall {
-            receiver: Box::new(lower_read_sequence_receiver(array, env, ctx, refinements)),
-            method: "row".to_string(),
-            args: vec![lower_expr_for_slot(index, env, index_slot(), ctx)],
-        };
+        let row_expr = receiver_method_call_projection_exact(
+            lower_read_sequence_receiver(array, env, ctx, refinements),
+            "row",
+            vec![lower_expr_for_slot(index, env, index_slot(), ctx)],
+        );
         return to_owned_sequence_projection(
             row_expr,
             &CloneRecoveryPolicy::ProvenCloneCapability {
