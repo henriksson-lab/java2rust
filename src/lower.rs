@@ -12753,11 +12753,7 @@ fn adapt_optional_instance_receiver_with_slot_plan(
     let Some(actual) = LoweredType::optional_element_borrow_from_option_shape(
         option_shape,
         target_shape.java_ty.clone(),
-        Some(if mutable {
-            OwnershipShape::MutableBorrow
-        } else {
-            OwnershipShape::SharedBorrow
-        }),
+        Some(plan.element_ownership),
     ) else {
         return projected;
     };

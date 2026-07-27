@@ -148,6 +148,7 @@ pub struct OptionalReceiverSlotPlan {
     pub receiver_abi: ReceiverAbi,
     pub slot: Slot,
     pub projection: OptionalReceiverProjection,
+    pub element_ownership: OwnershipShape,
 }
 
 pub fn facade_receiver_slot_plan(
@@ -195,10 +196,16 @@ pub fn optional_receiver_slot_plan(
         (false, true) => OptionalReceiverProjection::SharedUnchecked,
         (true, true) => OptionalReceiverProjection::MutableUnchecked,
     };
+    let element_ownership = if mutable {
+        OwnershipShape::MutableBorrow
+    } else {
+        OwnershipShape::SharedBorrow
+    };
     OptionalReceiverSlotPlan {
         receiver_abi,
         slot,
         projection,
+        element_ownership,
     }
 }
 
