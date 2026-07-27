@@ -1186,6 +1186,25 @@ fn emit_stream_method_reference_body(
     let plan = crate::method_reference_plan::plan_method_reference(target, method);
     let value_expr = render_stream_lambda_value_expr(value, param);
     let receiver = render_stream_lambda_receiver_expr(value, param);
+    let default_facts;
+    let facts = match ctx.facts {
+        Some(facts) => facts,
+        None => {
+            default_facts = FactSet::default();
+            &default_facts
+        }
+    };
+    if let Some(param_shape) = param_shape {
+        return Some(
+            crate::method_reference_lowering::render_single_input_method_reference_body_with_facts(
+                &plan,
+                &receiver,
+                &value_expr,
+                param_shape,
+                facts,
+            ),
+        );
+    }
     Some(
         crate::method_reference_lowering::render_single_input_method_reference_body(
             &plan,

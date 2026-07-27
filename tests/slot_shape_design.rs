@@ -31463,6 +31463,9 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(stream_source.contains("infer_single_input_method_reference_output_shape"));
     assert!(!stream_source.contains("fn infer_stream_method_reference_output_shape"));
     assert!(stream_lowering_source.contains("render_single_input_method_reference_body"));
+    assert!(
+        stream_lowering_source.contains("render_single_input_method_reference_body_with_facts")
+    );
     assert!(stream_lowering_source.contains("fn render_stream_lambda_value_expr"));
     assert!(stream_lowering_source.contains("fn render_stream_lambda_receiver_expr"));
     assert!(stream_lowering_source.contains("fn rendered_stream_lambda_borrowed_item_expr"));

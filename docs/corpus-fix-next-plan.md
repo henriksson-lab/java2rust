@@ -4002,6 +4002,12 @@ fallback now asks `java_naming::java_accessor_method_reference_fallback_name`
 instead of matching `get`/`get_...` locally in shape inference. This preserves
 the compatibility fallback while making the remaining factless accessor naming
 policy explicit and auditable beside the other Java naming projections.
+Stream method-reference fallback follow-up: when the stream renderer has a
+lambda parameter shape, the final fallback body path now calls
+`render_single_input_method_reference_body_with_facts` before legacy rendering.
+This gives stream method references the same facade ABI callback support as
+ordinary typed callbacks while preserving the older unshaped fallback for
+callers that still lack fact/slot context.
 
 ## Rerun Protocol
 
