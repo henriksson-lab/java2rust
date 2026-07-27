@@ -7,6 +7,29 @@ drift fixes and constructor self-initialization fix. Focused runs used
 `scripts/translate-focused-package.sh --skip-resolver-bench --jobs 10
 --translate-timeout-sec 60` with the release translator unless noted.
 
+## Latest Evidence 2026-07-27
+
+| Corpus | Output | Result |
+|---|---|---|
+| `jaligner` | `.tmp/corpus-rerun-20260727-jaligner-final` | 29/29 translated, 0 invalid-pattern files, `cargo_check=ok`, 0 generated-Rust errors. Simple-name external erasure no longer overrides parsed source `Matrix`, and public source methods that explicitly return `null` select optional return slots. |
+| `fastqc` full corpus | `.tmp/corpus-batch-current-fastqc-refresh-20260727-after-source-erasure` | 156/156 translated, 0 translation failures, 29 invalid-pattern files, 1459 generated-Rust errors. Runtime remains dominated by global analysis/signature work: total 2,110,447 ms, translation 1,650,111 ms, global analysis 1,254,644 ms, signature solve 795,894 ms, signature fixpoint 767,748 ms, semantic analysis 456,896 ms, crate assembly 447,799 ms. |
+
+Current FastQC top families after the 2026-07-27 full rerun:
+
+- mismatched types: 277 rows, mostly broad representation/facade slot drift;
+- fallibility shell propagation: 126 non-Result `?` rows and 88 `?`-on-non-`Try` rows;
+- AWT/Swing facade state gaps: erased receivers missing typed methods such as
+  `set_color`, `set_size`, `set_double_buffered`, `print`, `add_notify`,
+  `get_font_metrics_0`, `draw_line`, `draw_string`, and `fill_rect`;
+- switch/state-machine scaffold locals: unresolved `x0`, `x1`, `r`, and
+  similar generated names;
+- Base64/OutputStream facade identity and state drift:
+  `Base64OutputStream: From<ZipOutputStream>` plus missing wrapper fields;
+- JDK/platform facade overload gaps: `File::new_1`, `File::new_2`,
+  `BorderLayout::CENTER/NORTH`, `JLabel::CENTER`, and `RenderingHints` constants;
+- source mutability inference gaps: methods mutating fields such as
+  `self.random_data` and `self.v` still have `&self` receivers.
+
 ## Latest Evidence 2026-07-24
 
 | Corpus | Output | Result |
@@ -35,7 +58,7 @@ Current FastQC top families after the latest full rerun:
 |---|---|
 | `cargo fmt --check` | passes |
 | `cargo check --quiet` | passes |
-| `cargo test --test idiom_gaps --quiet` | current dirty checkout: 467 passed, 31 failed; failures are broader in-flight idiom slices, not the focused indexed-borrow regression |
+| `cargo test --test idiom_gaps --quiet` | 2026-07-27 checkpoint: passes, 499 passed |
 | `cargo test --test parser_gaps --quiet` | passes: 18 passed |
 | targeted `idiom_gaps` indexed-borrow/IO/String regressions | passes |
 | targeted `parser_gaps` local array declarator regressions | passes |

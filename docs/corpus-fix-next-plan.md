@@ -4456,6 +4456,52 @@ slice. Focused guards green:
 `source_object_varargs_forward_and_append_erased_arguments`, and
 `inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan`.
 
+2026-07-27 source/external identity checkpoint: simple-name external-pack
+erased-object facts no longer override a type that is known from parsed source.
+This keeps unrelated fixtures free to use explicit corpus/user dispatch
+requirements while preventing package-specific simple names such as `Matrix`
+from erasing source classes with the same simple name. Public source methods now
+retain positive nullable-return evidence even at API boundaries, so a public
+method that explicitly returns `null` selects `Option<T>` rather than a concrete
+return shell. Verification:
+`parsed_source_concrete_type_beats_external_simple_name_erasure`,
+`public_source_method_returning_null_uses_optional_concrete_return_shape`,
+`cargo test --test slot_shape_design --quiet` (512 passed),
+`cargo test --test idiom_gaps --quiet` (499 passed),
+`cargo fmt --check`, `cargo check --quiet`, `git diff --check`,
+`cargo build --release --quiet --bin new-java2rust`, and focused JAligner rerun
+`.tmp/corpus-rerun-20260727-jaligner-final` with 29/29 translated,
+0 invalid-pattern files, `cargo_check=ok`, and 0 generated-Rust errors.
+
+2026-07-27 full FastQC refresh after the source/external identity checkpoint:
+`.tmp/corpus-batch-current-fastqc-refresh-20260727-after-source-erasure`
+translates 156/156 files with 0 translation failures, 29 invalid-pattern files,
+and 1459 generated-Rust cargo errors. Runtime remains dominated by global
+semantic/signature work: total 2,110,447 ms, translation 1,650,111 ms, global
+analysis 1,254,644 ms, signature solve 795,894 ms, signature fixpoint
+767,748 ms, semantic analysis 456,896 ms, and crate assembly 447,799 ms. Top
+compile families are mismatched types, fallible `?` propagation/shell drift,
+GUI/AWT erased-object receiver surfaces, switch scaffold locals, Base64/
+OutputStream facade identity, JDK `File::new_1/new_2` overload support, and
+source methods that mutate fields through `&self`.
+
+Next FastQC batch candidates from that rerun:
+
+1. Fallibility shell propagation: 126 non-Result `?` rows plus 88 `?`-on-
+   non-`Try` rows suggest some source methods receive fallible facade calls
+   without corresponding result-shaped method signatures.
+2. GUI/AWT/Swing facade surfaces: many `Box<dyn Any>` receivers are missing
+   typed component/graphics methods such as `set_color`, `set_size`,
+   `set_double_buffered`, `print`, `add_notify`, `get_font_metrics_0`,
+   `draw_line`, `draw_string`, and `fill_rect`.
+3. Source mutability inference: rows such as `self.random_data` and `self.v`
+   behind `&self` should become shared receiver-mutability facts rather than
+   method-local fixes.
+4. Base64/OutputStream facade identity: the generated crate still has
+   `Base64OutputStream: From<ZipOutputStream>` and state-field rows, so the
+   shared-support merger/facade-alias rules need another focused fixture before
+   another full FastQC sweep.
+
 ## Rerun Protocol
 
 After each fix:
