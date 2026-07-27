@@ -1694,6 +1694,10 @@ impl OuterNested {
     pub fn value(&self) -> i32 { self.value }
 }
 
+impl From<OuterNested> for SharedFacade {
+    fn from(_value: OuterNested) -> Self { SharedFacade }
+}
+
 pub struct Outer;
 "#,
     )
@@ -1742,6 +1746,7 @@ pub struct UseShared;
     let shared = fs::read_to_string(shared_support).unwrap();
     assert!(shared.contains("pub struct SharedFacade"), "{shared}");
     assert!(!shared.contains("pub struct OuterNested"), "{shared}");
+    assert!(!shared.contains("impl From<OuterNested>"), "{shared}");
 
     let module = fs::read_to_string(generated_dir.join("00001_Outer.rs")).unwrap();
     assert_eq!(
@@ -1750,6 +1755,10 @@ pub struct UseShared;
         "{module}"
     );
     assert!(module.contains("impl OuterNested"), "{module}");
+    assert!(
+        module.contains("impl From<OuterNested> for SharedFacade"),
+        "{module}"
+    );
     assert!(module.contains("pub fn new(value: i32)"), "{module}");
     assert!(!module.contains("pub fn weak"), "{module}");
     assert!(!module.contains("pub struct SharedFacade"), "{module}");

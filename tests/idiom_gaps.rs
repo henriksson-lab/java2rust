@@ -8975,6 +8975,38 @@ class LocalFilterInputShadow extends FilterInputStream {
 }
 
 #[test]
+fn emitted_jdk_stream_subclass_converts_to_exact_platform_super_slot() {
+    let translation = translate_source(
+        r#"
+import java.io.*;
+
+class LocalFilterOutputAdapter extends FilterOutputStream {
+    LocalFilterOutputAdapter(OutputStream output) {
+        super(output);
+    }
+}
+
+class UsesLocalFilterOutputAdapter {
+    java.io.OutputStream wrap(OutputStream output) {
+        return new LocalFilterOutputAdapter(output);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return LocalFilterOutputAdapter::new(output).into();")
+            && translation
+                .rust
+                .contains("impl From<LocalFilterOutputAdapter> for JavaIoOutputStream"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn modeled_external_super_constructor_field_read_defers_until_self_temporary_exists() {
     let translation = translate_source(
         r#"

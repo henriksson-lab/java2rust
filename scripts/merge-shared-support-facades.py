@@ -185,7 +185,13 @@ def prelude_from_impls(path: Path) -> list[tuple[str, str]]:
             if trait_match:
                 from_match = FROM_TRAIT_RE.match(trait_match.group(1).strip())
                 if from_match:
-                    impls.append((from_match.group(1), trait_match.group(2)))
+                    from_name = from_match.group(1)
+                    to_name = trait_match.group(2)
+                    if not (
+                        source_owned_nested_type_name(source_type, from_name)
+                        or source_owned_nested_type_name(source_type, to_name)
+                    ):
+                        impls.append((from_name, to_name))
         depth += brace_delta(line)
     return impls
 
@@ -348,6 +354,14 @@ def parse_items(path: Path, selected: set[str]) -> list[dict]:
             if trait_match and (
                 trait_match.group(2) in selected or trait_match.group(1).strip() in selected
             ):
+                from_match = FROM_TRAIT_RE.match(trait_match.group(1).strip())
+                if from_match and (
+                    source_owned_nested_type_name(source_type, from_match.group(1))
+                    or source_owned_nested_type_name(source_type, trait_match.group(2))
+                ):
+                    depth += brace_delta(line)
+                    index += 1
+                    continue
                 end = item_end(lines, index)
                 items.append(
                     {
@@ -858,6 +872,51 @@ def remove_protected_aliases_from_shared_support(path: Path, aliases: set[str]) 
     path.write_text("".join(kept))
 
 
+def remove_protected_names_from_shared_support(path: Path, names: set[str]) -> None:
+    if not names or not path.exists():
+        return
+    lines = path.read_text().splitlines(keepends=True)
+    remove = [False] * len(lines)
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        start = attached_start(lines, index)
+        end = None
+        type_match = TYPE_RE.match(line)
+        trait_match = TRAIT_DECL_RE.match(line)
+        inherent_match = INHERENT_IMPL_RE.match(line)
+        impl_match = TRAIT_IMPL_RE.match(line)
+        alias_match = ALIAS_RE.match(line)
+        if type_match and type_match.group(2) in names:
+            end = item_end(lines, index)
+        elif trait_match and trait_match.group(1) in names:
+            end = item_end(lines, index)
+        elif inherent_match and inherent_match.group(1) in names:
+            end = item_end(lines, index)
+        elif impl_match:
+            trait_name = impl_match.group(1).strip()
+            target_name = impl_match.group(2)
+            from_match = FROM_TRAIT_RE.match(trait_name)
+            if target_name in names or (from_match and from_match.group(1) in names):
+                end = item_end(lines, index)
+        elif alias_match and (alias_match.group(1) in names or alias_match.group(2) in names):
+            end = index + 1
+        if end is not None:
+            for remove_index in range(start, end):
+                remove[remove_index] = True
+            index = end
+            continue
+        index += 1
+    path.write_text("".join(line for index, line in enumerate(lines) if not remove[index]))
+
+
+def remove_protected_names_from_shared_types(path: Path, names: set[str]) -> None:
+    if not names or not path.exists():
+        return
+    lines = path.read_text().splitlines(keepends=True)
+    path.write_text("".join(line for line in lines if line.strip() not in names))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generated-dir", required=True)
@@ -1003,6 +1062,12 @@ def main() -> int:
             if target in selected:
                 alias_targets[alias_name] = target
                 break
+    remove_protected_names_from_shared_support(
+        shared_support_path, protected_source_owned_nested_names
+    )
+    remove_protected_names_from_shared_types(
+        Path(args.shared_types), protected_source_owned_nested_names
+    )
     remove_protected_aliases_from_shared_support(shared_support_path, protected_shared_aliases)
     receiver_preferences = method_call_receiver_preferences(rust_paths, selected, alias_targets)
     for name in sorted(selected):

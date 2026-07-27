@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::access_lowering::{lower_bare_name, lower_field_access_with_facts};
 use crate::array_lowering::{
@@ -756,6 +756,9 @@ fn lower_type(
     for item in source_supertype_conversion_impls_for_type(ty, ctx) {
         file.items.push(raw_item(item));
     }
+    for item in source_external_supertype_conversion_impls_for_type(ty, ctx) {
+        file.items.push(raw_item(item));
+    }
 }
 
 fn static_storage_items_for_type(ty: &TypeDecl, ctx: LowerCtx) -> Vec<String> {
@@ -950,6 +953,47 @@ fn source_supertype_conversion_impls_for_type(ty: &TypeDecl, ctx: LowerCtx) -> V
         current = super_ty.extends.as_deref();
     }
     impls
+}
+
+fn source_external_supertype_conversion_impls_for_type(
+    ty: &TypeDecl,
+    ctx: LowerCtx,
+) -> Vec<String> {
+    let sub_name = crate::slot_render::rust_name_for_java_named_type(&ty.name);
+    crate::stdlib::resolved_external_super_names_for_method_queries(
+        ctx.facts,
+        ty,
+        ctx.support_local_type_program,
+    )
+    .into_iter()
+    .flat_map(|super_name| {
+        ctx.facts
+            .external_conversion_adapter_facts
+            .iter()
+            .cloned()
+            .chain(crate::external_packs::external_conversion_adapters())
+            .filter(move |adapter| {
+                matches!(
+                    adapter.kind,
+                    crate::facts::ExternalConversionAdapterKind::Into
+                ) && crate::facts::external_type_name_matches(&adapter.from_type, &super_name)
+            })
+    })
+    .filter_map(|adapter| {
+        let to_key = crate::stdlib::canonical_external_receiver_type_key(&adapter.to_type);
+        let to_name = crate::slot_render::rust_name_for_java_named_type(&to_key);
+        if matches!(to_name.as_str(), "OutputStream") {
+            return None;
+        }
+        (sub_name != to_name).then(|| {
+            format!(
+                "impl From<{sub_name}> for {to_name} {{\n    fn from(_value: {sub_name}) -> Self {{ Default::default() }}\n}}"
+            )
+        })
+    })
+    .collect::<BTreeSet<_>>()
+    .into_iter()
+    .collect()
 }
 
 fn source_supertype_conversion_target_is_emitted(super_ty: &TypeDecl, ctx: LowerCtx) -> bool {
@@ -14364,19 +14408,61 @@ fn source_subtype_conversion_available(
     target_name: &str,
     ctx: LowerCtx,
 ) -> bool {
-    (find_type_decl_by_name(ctx.support_local_type_program, actual_name).is_some()
-        || find_type_decl_by_name(ctx.source_summary_type_program, actual_name).is_some())
-        && (find_type_decl_by_name(ctx.program, target_name).is_some()
-            || (ctx.context_sources_are_emitted
-                && (find_type_decl_by_name(ctx.support_local_type_program, target_name).is_some()
-                    || find_type_decl_by_name(ctx.source_summary_type_program, target_name)
-                        .is_some())))
+    let actual_is_source = find_type_decl_by_name(ctx.support_local_type_program, actual_name)
+        .is_some()
+        || find_type_decl_by_name(ctx.source_summary_type_program, actual_name).is_some();
+    if !actual_is_source {
+        return false;
+    }
+    if source_external_super_conversion_available(actual_name, target_name, ctx) {
+        return true;
+    }
+    let target_is_source = find_type_decl_by_name(ctx.program, target_name).is_some()
+        || (ctx.context_sources_are_emitted
+            && (find_type_decl_by_name(ctx.support_local_type_program, target_name).is_some()
+                || find_type_decl_by_name(ctx.source_summary_type_program, target_name).is_some()));
+    target_is_source
         && (source_or_jdk_subtype_reaches(actual_name, target_name, ctx.support_local_type_program)
             || source_or_jdk_subtype_reaches(
                 actual_name,
                 target_name,
                 ctx.source_summary_type_program,
             ))
+}
+
+fn source_external_super_conversion_available(
+    actual_name: &str,
+    target_name: &str,
+    ctx: LowerCtx,
+) -> bool {
+    let Some(actual_ty) = find_type_decl_by_name(ctx.support_local_type_program, actual_name)
+        .or_else(|| find_type_decl_by_name(ctx.source_summary_type_program, actual_name))
+    else {
+        return false;
+    };
+    crate::stdlib::resolved_external_super_names_for_method_queries(
+        ctx.facts,
+        actual_ty,
+        ctx.support_local_type_program,
+    )
+    .into_iter()
+    .any(|super_name| {
+        ctx.facts
+            .external_conversion_adapter_for(&super_name, target_name)
+            .is_some_and(|adapter| {
+                matches!(
+                    adapter.kind,
+                    crate::facts::ExternalConversionAdapterKind::Into
+                )
+            })
+            || crate::external_packs::external_conversion_adapter_for(&super_name, target_name)
+                .is_some_and(|adapter| {
+                    matches!(
+                        adapter.kind,
+                        crate::facts::ExternalConversionAdapterKind::Into
+                    )
+                })
+    })
 }
 
 fn lower_nullable_resource_stream_call_for_concrete_slot(

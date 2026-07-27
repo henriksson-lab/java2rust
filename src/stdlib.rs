@@ -5218,18 +5218,28 @@ pub fn external_api_facade_support_items_with_local_type_program(
 fn local_type_keys_for_program(program: &Program) -> BTreeSet<String> {
     let mut types = BTreeSet::new();
     for ty in &program.types {
-        collect_local_type_keys(ty, &mut types);
+        collect_local_type_keys(ty, None, &mut types);
     }
     types
 }
 
-fn collect_local_type_keys(ty: &crate::java_ir::TypeDecl, types: &mut BTreeSet<String>) {
+fn collect_local_type_keys(
+    ty: &crate::java_ir::TypeDecl,
+    enclosing: Option<&str>,
+    types: &mut BTreeSet<String>,
+) {
+    let qualified = enclosing
+        .map(|outer| format!("{outer}.{}", ty.name))
+        .unwrap_or_else(|| ty.name.clone());
     let type_key = canonical_external_receiver_type_key(&ty.name);
     types.insert(type_key.clone());
     types.insert(rust_name_for_java_named_type(&type_key));
+    let qualified_key = canonical_external_receiver_type_key(&qualified);
+    types.insert(qualified_key.clone());
+    types.insert(rust_name_for_java_named_type(&qualified_key));
     for member in &ty.members {
         if let Member::Type(nested) = member {
-            collect_local_type_keys(nested, types);
+            collect_local_type_keys(nested, Some(&qualified), types);
         }
     }
 }
@@ -8200,6 +8210,11 @@ impl ExternalApiFacadeSupport {
             }
             let from = rust_name_for_java_named_type(&from_key);
             let to = rust_name_for_java_named_type(&to_key);
+            if local_types.contains(&from)
+                || (local_types.contains(&to) && !is_builtin_external_facade_type(&to_key))
+            {
+                continue;
+            }
             if !valid_external_facade_type_ident(&from)
                 || !valid_external_facade_type_ident(&to)
                 || is_builtin_external_facade_type(&from)
@@ -11144,7 +11159,7 @@ fn query_backed_external_inherited_methods_for_type(
     methods
 }
 
-fn resolved_external_super_names_for_method_queries(
+pub(crate) fn resolved_external_super_names_for_method_queries(
     facts: &FactSet,
     ty: &TypeDecl,
     program: &Program,
@@ -11184,7 +11199,9 @@ fn resolved_external_type_names_for_simple_or_qualified(
     for import in program.imports.iter().filter(|import| !import.is_static) {
         if import.is_wildcard {
             let qualified = format!("{}.{}", import.path.trim_end_matches(".*"), type_name);
-            if is_java_platform_facade_type_name(&qualified) {
+            if is_java_platform_facade_type_name(&qualified)
+                || is_known_java_platform_stream_type_name(&qualified)
+            {
                 out.push(qualified);
             }
             continue;
@@ -11196,6 +11213,61 @@ fn resolved_external_type_names_for_simple_or_qualified(
     out.sort();
     out.dedup();
     out
+}
+
+fn is_known_java_platform_stream_type_name(name: &str) -> bool {
+    let canonical = canonical_external_receiver_type_key(name);
+    let simple = name
+        .rsplit('.')
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .trim_start_matches("JavaIo");
+    matches!(
+        canonical.as_str(),
+        "InputStream"
+            | "OutputStream"
+            | "FileInputStream"
+            | "FileOutputStream"
+            | "ByteArrayInputStream"
+            | "ByteArrayOutputStream"
+            | "BufferedInputStream"
+            | "BufferedOutputStream"
+            | "DataInputStream"
+            | "DataOutputStream"
+            | "FilterInputStream"
+            | "FilterOutputStream"
+            | "ObjectInputStream"
+            | "ObjectOutputStream"
+            | "GZIPInputStream"
+            | "GZIPOutputStream"
+            | "ZipInputStream"
+            | "ZipOutputStream"
+            | "PushbackInputStream"
+            | "SequenceInputStream"
+    ) || matches!(
+        simple,
+        "InputStream"
+            | "OutputStream"
+            | "FileInputStream"
+            | "FileOutputStream"
+            | "ByteArrayInputStream"
+            | "ByteArrayOutputStream"
+            | "BufferedInputStream"
+            | "BufferedOutputStream"
+            | "DataInputStream"
+            | "DataOutputStream"
+            | "FilterInputStream"
+            | "FilterOutputStream"
+            | "ObjectInputStream"
+            | "ObjectOutputStream"
+            | "GZIPInputStream"
+            | "GZIPOutputStream"
+            | "ZipInputStream"
+            | "ZipOutputStream"
+            | "PushbackInputStream"
+            | "SequenceInputStream"
+    )
 }
 
 fn external_facade_instance_method_with_facts(
