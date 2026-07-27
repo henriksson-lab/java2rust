@@ -1492,6 +1492,22 @@ pub fn primitive_number_value_projection(receiver: RustExpr, target: PrimitiveTy
     RustExpr::Raw(format!("{} as {rust_ty}", emit::emit_expr(&receiver)))
 }
 
+pub fn facade_receiver_method_call_projection(
+    receiver: RustExpr,
+    rust_path: &str,
+    args: Vec<RustExpr>,
+) -> RustExpr {
+    receiver_method_call_projection(receiver, &facade_method_name(rust_path), args)
+}
+
+pub fn facade_method_name(rust_path: &str) -> String {
+    rust_path
+        .rsplit("::")
+        .next()
+        .unwrap_or(rust_path)
+        .to_string()
+}
+
 pub fn primitive_hash_code_projection(receiver: RustExpr, source: PrimitiveType) -> RustExpr {
     let rendered = emit::emit_expr(&receiver);
     match source {
@@ -4328,6 +4344,18 @@ mod tests {
                 PrimitiveType::Boolean
             )),
             "flag"
+        );
+    }
+
+    #[test]
+    fn facade_receiver_method_call_projection_owns_method_path_spelling() {
+        assert_eq!(
+            emit::emit_expr(&facade_receiver_method_call_projection(
+                RustExpr::Var("value".to_string()),
+                "StringFacade::display_name",
+                Vec::new()
+            )),
+            "value.display_name()"
         );
     }
 

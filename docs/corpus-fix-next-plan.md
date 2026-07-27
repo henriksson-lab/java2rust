@@ -3962,6 +3962,14 @@ entry point. Optional `Objects::nonNull` callbacks are selected from the
 `Objects.nonNull` facade ABI fact and render `value.is_some()` through the
 shared receiver-method projection; non-optional callbacks keep the conservative
 legacy `true` body.
+Latest follow-up: the same typed callback entry point now also probes
+receiver-method `FacadeAbiFact` rows using the inferred method-reference
+receiver type. `String::toString` and `Object::toString` over known `String`
+inputs can therefore render through the selected Rust ABI method projection
+instead of only through the legacy `ReceiverToString` body plan. Unsupported
+cases such as generic `Object::toString`, `String::valueOf(Object)` null
+semantics, and boxed primitive `intValue` remain on their existing Java semantic
+paths until their ABI/fact rows can express the needed behavior precisely.
 
 ## Rerun Protocol
 

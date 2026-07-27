@@ -1,12 +1,14 @@
 use crate::coercion::{
     current_receiver_method_call_projection, current_receiver_method_reference_projection,
-    owner_associated_path_projection, receiver_method_call_projection,
-    typed_single_input_callback_projection, unbound_method_call_projection,
-    unbound_method_reference_projection,
+    facade_receiver_method_call_projection, owner_associated_path_projection,
+    receiver_method_call_projection, typed_single_input_callback_projection,
+    unbound_method_call_projection, unbound_method_reference_projection,
 };
 use crate::emit;
 use crate::facts::{CallableKey, FacadeSlot, FactSet, ReceiverAbi, ResultAbi, Staticness};
+use crate::java_ir::JavaType;
 use crate::method_reference_plan::MethodReferencePlan;
+use crate::method_reference_shape::method_reference_receiver_type_for_call_plan;
 use crate::rust_ir::RustExpr;
 use crate::slot_shape::RustSlotShape;
 
@@ -121,13 +123,8 @@ pub fn render_single_input_method_reference_body_with_facts(
     facts: &FactSet,
 ) -> String {
     if let MethodReferencePlan::AssociatedFunction { owner, method } = plan
-        && let Some(body) = render_facade_abi_associated_function_method_reference_body(
-            owner,
-            method,
-            receiver,
-            input_shape,
-            facts,
-        )
+        && let Some(body) =
+            render_facade_abi_method_reference_body(owner, method, receiver, input_shape, facts)
     {
         return body;
     }
@@ -159,7 +156,7 @@ fn render_associated_function_method_reference_body(
     }
 }
 
-fn render_facade_abi_associated_function_method_reference_body(
+fn render_facade_abi_method_reference_body(
     owner: &str,
     method: &str,
     receiver: &str,
@@ -167,17 +164,32 @@ fn render_facade_abi_associated_function_method_reference_body(
     facts: &FactSet,
 ) -> Option<String> {
     let abi = method_reference_facade_abi(owner, method, input_shape, facts)?;
-    match abi.rust_path.as_str() {
-        "Option::is_some" => Some(emit::emit_expr(&receiver_method_call_projection(
-            RustExpr::Raw(receiver.to_string()),
-            "is_some",
-            Vec::new(),
-        ))),
-        "Option::is_none" => Some(emit::emit_expr(&receiver_method_call_projection(
-            RustExpr::Raw(receiver.to_string()),
-            "is_none",
-            Vec::new(),
-        ))),
+    match abi.receiver {
+        ReceiverAbi::AssociatedFunction => match abi.rust_path.as_str() {
+            "Option::is_some" => Some(emit::emit_expr(&receiver_method_call_projection(
+                RustExpr::Raw(receiver.to_string()),
+                "is_some",
+                Vec::new(),
+            ))),
+            "Option::is_none" => Some(emit::emit_expr(&receiver_method_call_projection(
+                RustExpr::Raw(receiver.to_string()),
+                "is_none",
+                Vec::new(),
+            ))),
+            _ => None,
+        },
+        ReceiverAbi::BorrowedSelf | ReceiverAbi::MutBorrowedSelf | ReceiverAbi::OwnedSelf
+            if abi.args.is_empty()
+                && abi.return_slot == FacadeSlot::Owned
+                && abi.result == ResultAbi::Plain =>
+        {
+            Some(emit::emit_expr(&facade_receiver_method_call_projection(
+                RustExpr::Raw(receiver.to_string()),
+                &abi.rust_path,
+                Vec::new(),
+            )))
+        }
+        ReceiverAbi::FreeFunction => None,
         _ => None,
     }
 }
@@ -188,21 +200,37 @@ fn method_reference_facade_abi<'a>(
     input_shape: &RustSlotShape,
     facts: &'a FactSet,
 ) -> Option<&'a crate::facts::FacadeAbiFact> {
-    if input_shape.optional_element_type().is_none() {
-        return None;
-    }
-    method_reference_callable_key_candidates(owner, method)
+    method_reference_callable_key_candidates(owner, method, input_shape)
         .into_iter()
         .find_map(|key| facts.facade_abi_for_key(&key))
-        .filter(|abi| {
-            abi.receiver == ReceiverAbi::AssociatedFunction
+        .filter(|abi| method_reference_facade_abi_is_supported(abi, input_shape))
+}
+
+fn method_reference_facade_abi_is_supported(
+    abi: &crate::facts::FacadeAbiFact,
+    input_shape: &RustSlotShape,
+) -> bool {
+    match abi.receiver {
+        ReceiverAbi::AssociatedFunction => {
+            input_shape.optional_element_type().is_some()
                 && abi.args == vec![FacadeSlot::Optional(Box::new(FacadeSlot::Borrowed))]
                 && abi.return_slot == FacadeSlot::Owned
                 && abi.result == ResultAbi::Plain
-        })
+        }
+        ReceiverAbi::BorrowedSelf | ReceiverAbi::MutBorrowedSelf | ReceiverAbi::OwnedSelf => {
+            abi.args.is_empty()
+                && abi.return_slot == FacadeSlot::Owned
+                && abi.result == ResultAbi::Plain
+        }
+        ReceiverAbi::FreeFunction => false,
+    }
 }
 
-fn method_reference_callable_key_candidates(owner: &str, method: &str) -> Vec<CallableKey> {
+fn method_reference_callable_key_candidates(
+    owner: &str,
+    method: &str,
+    input_shape: &RustSlotShape,
+) -> Vec<CallableKey> {
     let mut methods = vec![method.to_string()];
     match method {
         "non_null" => methods.push("nonNull".to_string()),
@@ -212,8 +240,41 @@ fn method_reference_callable_key_candidates(owner: &str, method: &str) -> Vec<Ca
         "int_value" => methods.push("intValue".to_string()),
         _ => {}
     }
-    methods
-        .into_iter()
-        .map(|method| CallableKey::method(owner.to_string(), method, Staticness::Unknown, 1))
-        .collect()
+    let mut keys = Vec::new();
+    for method in methods {
+        keys.push(CallableKey::method(
+            owner.to_string(),
+            method.clone(),
+            Staticness::Unknown,
+            1,
+        ));
+        if let Some(receiver_owner) = method_reference_receiver_owner_key(owner, input_shape) {
+            keys.push(CallableKey::method(
+                receiver_owner,
+                method,
+                Staticness::Unknown,
+                0,
+            ));
+        }
+    }
+    keys
+}
+
+fn method_reference_receiver_owner_key(owner: &str, input_shape: &RustSlotShape) -> Option<String> {
+    java_type_callable_owner_key(&method_reference_receiver_type_for_call_plan(
+        owner,
+        Some(input_shape),
+    )?)
+}
+
+fn java_type_callable_owner_key(ty: &JavaType) -> Option<String> {
+    match ty {
+        JavaType::String => Some("String".to_string()),
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            Some(crate::stdlib::canonical_external_receiver_type_key(name))
+        }
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => {
+            None
+        }
+    }
 }

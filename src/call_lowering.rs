@@ -9,7 +9,8 @@ use crate::coercion::{
     collections_singleton_list_projection, collections_singleton_map_projection,
     collections_singleton_projection, discard_value_projection, erased_object_box_projection,
     external_crate_associated_path_projection, external_crate_path_projection,
-    file_exists_projection, java_class_literal_path_projection, java_class_static_path_projection,
+    facade_receiver_method_call_projection, file_exists_projection,
+    java_class_literal_path_projection, java_class_static_path_projection,
     java_iterator_from_collection_projection, len_i32_projection, math_max_projection,
     math_min_projection, native_collection_default_constructor_projection,
     native_collection_empty_new_projection, native_collection_with_capacity_projection,
@@ -159,21 +160,9 @@ fn apply_external_facade_receiver_call(
             args,
         },
         ReceiverAbi::BorrowedSelf | ReceiverAbi::MutBorrowedSelf | ReceiverAbi::OwnedSelf => {
-            RustExpr::MethodCall {
-                receiver: Box::new(receiver),
-                method: facade_method_name(rust_path),
-                args,
-            }
+            facade_receiver_method_call_projection(receiver, rust_path, args)
         }
     }
-}
-
-fn facade_method_name(rust_path: &str) -> String {
-    rust_path
-        .rsplit("::")
-        .next()
-        .unwrap_or(rust_path)
-        .to_string()
 }
 
 fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) -> RustExpr {

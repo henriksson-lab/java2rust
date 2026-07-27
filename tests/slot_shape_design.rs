@@ -31253,6 +31253,43 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
         ),
         RustExpr::Raw("|value: Option<&String>| value.is_some()".to_string())
     );
+    let mut custom_method_ref_facts = FactSet::default();
+    custom_method_ref_facts
+        .facade_abi_facts
+        .push(FacadeAbiFact {
+            key: CallableKey::method(
+                "String".to_string(),
+                "toString".to_string(),
+                Staticness::Unknown,
+                0,
+            ),
+            rust_path: "StringFacade::display_name".to_string(),
+            receiver: ReceiverAbi::BorrowedSelf,
+            args: Vec::new(),
+            return_slot: FacadeSlot::Owned,
+            result: ResultAbi::Plain,
+            borrow_source: None,
+            borrowed_return_recovery: None,
+            provenance: FactProvenance::UserOverride,
+        });
+    assert_eq!(
+        render_typed_single_input_method_reference_callback_with_facts(
+            &plan_method_reference("Object", "toString"),
+            "&String",
+            &RustSlotShape::for_storage(JavaType::String),
+            &custom_method_ref_facts,
+        ),
+        RustExpr::Raw("|value: &String| value.display_name()".to_string())
+    );
+    assert_eq!(
+        render_typed_single_input_method_reference_callback_with_facts(
+            &plan_method_reference("String", "toString"),
+            "&String",
+            &RustSlotShape::for_storage(JavaType::String),
+            &stdlib_facts,
+        ),
+        RustExpr::Raw("|value: &String| value.to_string()".to_string())
+    );
     assert_eq!(
         render_typed_single_input_method_reference_callback_with_facts(
             &plan_method_reference("Objects", "nonNull"),
@@ -31286,9 +31323,9 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(lowering_source.contains("enum AssociatedFunctionMethodReferenceBodyPlan"));
     assert!(lowering_source.contains("fn associated_function_method_reference_body_plan"));
     assert!(lowering_source.contains("fn render_associated_function_method_reference_body"));
-    assert!(
-        lowering_source.contains("fn render_facade_abi_associated_function_method_reference_body")
-    );
+    assert!(lowering_source.contains("fn render_facade_abi_method_reference_body"));
+    assert!(lowering_source.contains("method_reference_receiver_owner_key"));
+    assert!(lowering_source.contains("facade_receiver_method_call_projection"));
     assert!(lowering_source.contains("facade_abi_for_key"));
     assert!(lowering_source.contains("owner_associated_path_projection"));
     assert!(lowering_source.contains("receiver_method_call_projection"));
