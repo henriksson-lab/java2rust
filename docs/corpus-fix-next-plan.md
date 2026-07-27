@@ -3721,6 +3721,12 @@ projection itself now goes through `coercion::apply_clone_projection` via
 generated-expression `format!("{rendered}.clone()")` /
 `format!("{param}.clone()")` spellings without pretending ordinary call slot
 facts model stream iterator bindings yet.
+Follow-up: nullable stream map lambdas still detect Java block guards in
+`stream_lowering.rs`, but the Rust optional carrier body now renders through
+`coercion::render_nullable_stream_map_body`. This keeps the `None`/`Some(...)`
+projection for fused nullable-map plus non-null-filter pipelines beside the
+other optional/stream projections while stream lowering owns only guard/local
+analysis.
 
 Index projection cleanup: call and stream lowering now share
 `coercion::render_index_to_usize_projection` with explicit

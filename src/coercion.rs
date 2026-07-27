@@ -2032,6 +2032,17 @@ pub fn render_optional_non_null_filter_map(item_is_borrowed: bool) -> &'static s
     }
 }
 
+pub fn render_nullable_stream_map_body(
+    before_guard: &str,
+    condition: &str,
+    else_body: &str,
+    final_expr: &str,
+) -> String {
+    format!(
+        "{{ {before_guard}if {condition} {{ None }} else {{ {else_body}Some({final_expr}) }} }}"
+    )
+}
+
 pub fn render_borrowed_collection_flat_map(param_name: &str) -> String {
     format!(".flat_map(|{param_name}| {param_name}.iter())")
 }

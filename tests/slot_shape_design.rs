@@ -33029,9 +33029,18 @@ fn stream_plan_fuses_nullable_map_with_non_null_filter_shape() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"
+            "values.iter().map(|value: &String| { if value.is_empty() { None } else { Some(value.to_lowercase()) } }).filter_map(|item| item).collect::<Vec<_>>()"
                 .to_string()
         )
+    );
+    let stream_lowering_source = include_str!("../src/stream_lowering.rs");
+    assert!(
+        stream_lowering_source.contains("render_nullable_stream_map_body"),
+        "nullable stream map carrier should be rendered by coercion projection"
+    );
+    assert!(
+        !stream_lowering_source.contains("Some({final_expr})"),
+        "stream lowering should not own nullable map Some(...) carrier spelling"
     );
 }
 

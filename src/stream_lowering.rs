@@ -5,8 +5,8 @@ use crate::coercion::{
     borrowed_string_view_projection, ensure_borrow_projection_rendered, len_i32_projection,
     owner_associated_path_projection, receiver_method_call_projection,
     render_borrowed_collection_flat_map, render_index_to_usize_projection,
-    render_optional_non_null_filter_map, render_sequence_iteration_source,
-    render_stream_lambda_param_projection,
+    render_nullable_stream_map_body, render_optional_non_null_filter_map,
+    render_sequence_iteration_source, render_stream_lambda_param_projection,
 };
 use crate::conversion_lowering::apply_lowered_slot_expr_conversion;
 use crate::conversion_plan::{LoweredType, Slot, plan_lowered_slot_conversion};
@@ -1452,8 +1452,11 @@ fn emit_nullable_stream_lambda_closure_body(
         ctx,
         param_shape,
     )?;
-    Some(format!(
-        "{{ {before_guard}if {condition} {{ None }} else {{ {else_body}Some({final_expr}) }} }}"
+    Some(render_nullable_stream_map_body(
+        &before_guard,
+        &condition,
+        &else_body,
+        &final_expr,
     ))
 }
 
