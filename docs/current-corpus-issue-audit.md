@@ -16,6 +16,7 @@ drift fixes and constructor self-initialization fix. Focused runs used
 | `fastqc` AbstractQCModule subset | `.tmp/corpus-fastqc-abstract-qcmodule-after-inherited-exception-owner-r1` | 8/8 translated, 0 invalid-pattern files, generated Rust reaches two `cannot return value referencing temporary value` rows in `SVGImageSaver`. The inherited `?`/result-shell family is gone after inherited body lowering started using the declaring type's exception plan. |
 | `fastqc` AbstractQCModule subset | `.tmp/corpus-fastqc-abstract-qcmodule-after-reassigned-return-owned-r3` | 8/8 translated, 0 invalid-pattern files, `cargo_check=ok`, 0 generated-Rust errors. Reassigned string-like parameters now force owned/native parameter slots and returned-alias borrow constraints reject reassigned parameters, fixing `SVGImageSaver.optimizeSvg`. |
 | `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-local-type-rust-key-r1` | 1/1 translated, 1 invalid-pattern file, generated-Rust errors reduced to 64. The shared-support merger now removes the bad simple `OutputStream = Base64OutputStream` alias while preserving the real source-owned nested `Base64OutputStream` implementation, and local Rust identities suppress simple external facade stubs. The previous duplicate `OutputStream`/`Base64OutputStream` and conflicting self-conversion rows are gone. Remaining rows are real Base64 translation gaps: outer static member qualification from nested classes, constructor self-field initialization, inherited `FilterOutputStream.out` state, `java_string_from_bytes`, `File.length`, bare field assignment, and byte-array move/bitwise coercion drift. |
+| `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-focused-file-sync-r1` | 1/1 translated, 1 invalid-pattern file, generated-Rust errors reduced to 59. The focused wrapper now mirrors the platform `File::new_1/new_2`, `File.length()`, and `java_string_from_bytes` support surfaces, so the missing `java_string_from_bytes` and `File.length` families from the previous focused Base64 run are gone. |
 
 Current FastQC top families after the 2026-07-27 full rerun:
 
@@ -30,7 +31,7 @@ Current FastQC top families after the 2026-07-27 full rerun:
   `OutputStream = Base64OutputStream` alias/stub conflict is fixed in focused
   proof, while nested classes still need outer static-owner qualification,
   constructor self-field initialization, inherited `FilterOutputStream.out`
-  state, byte/string helpers, and byte-array coercions;
+  state, and byte-array coercions;
 - JDK/platform facade overload gaps: `File::new_1`, `File::new_2`,
   `BorderLayout::CENTER/NORTH`, `JLabel::CENTER`, and `RenderingHints` constants;
 - source mutability inference gaps: methods mutating fields such as

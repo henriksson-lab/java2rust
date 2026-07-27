@@ -4504,8 +4504,12 @@ Next FastQC batch candidates from that rerun:
    remaining Base64 batch should target true nested-source semantics: qualify
    outer static members from nested classes as the outer owner, avoid
    `self.field` reads while constructing `__java_self`, model inherited
-   `FilterOutputStream.out` state, add missing byte/string and `File.length`
-   facade helpers, and fix byte-array move/bitwise coercion drift.
+   `FilterOutputStream.out` state, and fix byte-array move/bitwise coercion
+   drift. Follow-up focused proof
+   `.tmp/corpus-fastqc-base64-single-after-focused-file-sync-r1` syncs the
+   focused wrapper with platform `File::new_1/new_2`, `File.length()`, and
+   `java_string_from_bytes`; those missing-helper rows are gone and the focused
+   generated-Rust count is now 59.
 
 Inherited exception-owner follow-up: inherited source method bodies now lower
 with the emitted subclass as the body/field context but use the declaring type

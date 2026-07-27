@@ -1180,7 +1180,7 @@ class JdkFileCommonInstanceFacades {
         String[] names = file.list();
         for (int i = 0; i < names.length; i++) {
             File child = new File(file.getPath() + "/" + names[i]);
-            if (child.isFile() && child.canRead()) {
+            if (child.isFile() && child.canRead() && child.length() >= 0) {
                 count++;
             }
         }
@@ -1203,7 +1203,7 @@ class JdkFileCommonInstanceFacades {
                 .contains("let names: Vec<String> = file.list();")
             && translation
                 .rust
-                .contains("child.is_file() && child.can_read()"),
+                .contains("child.is_file() && child.can_read() && child.length() >= 0"),
         "{}",
         translation.rust
     );

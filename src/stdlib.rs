@@ -4592,6 +4592,12 @@ impl File {
         std::fs::File::open(std::path::Path::new(&self.value)).is_ok()
     }
 
+    pub fn length(&self) -> i64 {
+        std::fs::metadata(std::path::Path::new(&self.value))
+            .map(|metadata| metadata.len() as i64)
+            .unwrap_or(0)
+    }
+
     pub fn list(&self) -> Vec<String> {
         std::fs::read_dir(std::path::Path::new(&self.value))
             .map(|entries| {

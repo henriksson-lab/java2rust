@@ -1322,6 +1322,22 @@ impl File {
         File { value: value.into_path_value() }
     }
 
+    pub fn new_1<P: JavaPathArg>(value: P) -> File {
+        Self::new(value)
+    }
+
+    pub fn new_2<P: JavaPathArg, C: JavaPathArg>(parent: P, child: C) -> File {
+        let parent = parent.into_path_value();
+        let child = child.into_path_value();
+        if parent.is_empty() {
+            Self::new(child)
+        } else if parent.ends_with('/') {
+            Self::new(format!("{parent}{child}"))
+        } else {
+            Self::new(format!("{parent}/{child}"))
+        }
+    }
+
     pub fn to_path(&self) -> Path {
         Path::new(self.value.clone())
     }
@@ -1363,6 +1379,12 @@ impl File {
 
     pub fn can_read(&self) -> bool {
         std::fs::File::open(std::path::Path::new(&self.value)).is_ok()
+    }
+
+    pub fn length(&self) -> i64 {
+        std::fs::metadata(std::path::Path::new(&self.value))
+            .map(|metadata| metadata.len() as i64)
+            .unwrap_or(0)
     }
 
     pub fn list(&self) -> Vec<String> {
@@ -1637,6 +1659,11 @@ pub fn java_string_from_byte_range(bytes: &[i8], offset: i32, len: i32) -> Strin
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+pub fn java_string_from_bytes(bytes: &[i8]) -> String {
+    let bytes = bytes.iter().map(|byte| *byte as u8).collect::<Vec<_>>();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Vec<String> {
     let regex = regex.as_ref();
     let split_whitespace = regex == "\\s+";
@@ -1716,7 +1743,7 @@ fn java_simple_regex_literal(regex: &str) -> &str {
 }
 
 RUST
-  printf "java_string_substring\njava_string_hash_code\njava_string_index_of\njava_string_index_of_from\njava_string_compare_to\njava_string_compare_to_ignore_case\njava_string_equals_ignore_case\njava_primitive_compare_to\njava_parse_i8\njava_parse_i16\njava_parse_i32\njava_parse_i64\njava_parse_f32\njava_parse_f64\njava_string_from_byte_range\njava_string_split\njava_string_matches\njava_string_replace_first\njava_string_replace_all\n" >> "$shared_support_types_path"
+  printf "java_string_substring\njava_string_hash_code\njava_string_index_of\njava_string_index_of_from\njava_string_compare_to\njava_string_compare_to_ignore_case\njava_string_equals_ignore_case\njava_primitive_compare_to\njava_parse_i8\njava_parse_i16\njava_parse_i32\njava_parse_i64\njava_parse_f32\njava_parse_f64\njava_string_from_byte_range\njava_string_from_bytes\njava_string_split\njava_string_matches\njava_string_replace_first\njava_string_replace_all\n" >> "$shared_support_types_path"
 fi
 
 if grep -R -q 'java_is_serializable' "$generated_dir"; then
