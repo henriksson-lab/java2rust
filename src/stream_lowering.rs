@@ -59,6 +59,23 @@ fn render_stream_lambda_clone_projection(rendered: &str) -> String {
     crate::emit::emit_expr(&apply_clone_projection(RustExpr::Raw(rendered.to_string())))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamLambdaArgumentSlotPlan {
+    BorrowedStringView,
+    OwnedValue,
+    GenericSlotConversion,
+}
+
+fn stream_lambda_argument_slot_plan(slot: &RustSlotShape) -> StreamLambdaArgumentSlotPlan {
+    if shape_is_borrowed_string_content(slot) {
+        StreamLambdaArgumentSlotPlan::BorrowedStringView
+    } else if shape_is_owned(slot) {
+        StreamLambdaArgumentSlotPlan::OwnedValue
+    } else {
+        StreamLambdaArgumentSlotPlan::GenericSlotConversion
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct StreamRenderContext<'a> {
     env: Option<&'a ShapeEnv>,
@@ -2106,22 +2123,25 @@ fn adapt_stream_lambda_arg_for_slot(
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
 ) -> String {
-    let adapted = if shape_is_borrowed_string_content(slot) {
-        render_stream_lambda_borrowed_str_arg(arg, rendered, param, locals, ctx, param_shape)
-    } else if shape_is_owned(slot) {
-        render_stream_lambda_owned_arg(arg, rendered, param, locals)
-    } else if let Some(planned) = render_stream_lambda_arg_to_slot_through_plan(
-        arg,
-        &rendered,
-        slot,
-        param,
-        locals,
-        ctx,
-        param_shape,
-    ) {
-        planned
-    } else {
-        rendered
+    let adapted = match stream_lambda_argument_slot_plan(slot) {
+        StreamLambdaArgumentSlotPlan::BorrowedStringView => {
+            render_stream_lambda_borrowed_str_arg(arg, rendered, param, locals, ctx, param_shape)
+        }
+        StreamLambdaArgumentSlotPlan::OwnedValue => {
+            render_stream_lambda_owned_arg(arg, rendered, param, locals)
+        }
+        StreamLambdaArgumentSlotPlan::GenericSlotConversion => {
+            render_stream_lambda_arg_to_slot_through_plan(
+                arg,
+                &rendered,
+                slot,
+                param,
+                locals,
+                ctx,
+                param_shape,
+            )
+            .unwrap_or(rendered)
+        }
     };
     recover_stream_lambda_borrowed_string_param_move(arg, adapted, param, locals, ctx, param_shape)
 }

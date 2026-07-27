@@ -3932,6 +3932,11 @@ Opaque final facade return handling now uses a shared raw generic head parser
 for compatibility names like `ObjectAssert<T>`, replacing another local
 `split_once('<')`/suffix check while the long-term target remains structured
 facade ABI facts.
+Stream lambda argument adaptation now classifies target argument slots through
+an explicit `StreamLambdaArgumentSlotPlan` before selecting borrowed-string
+view, owned-value, or generic slot-conversion rendering. Stream lowering still
+owns closure item projection semantics, but the call argument adapter no longer
+branches directly on borrowed-string/owned shape predicates.
 
 ## Rerun Protocol
 
