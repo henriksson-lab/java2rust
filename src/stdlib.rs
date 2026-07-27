@@ -2045,6 +2045,14 @@ pub fn known_external_method_return_type(
         (_, "toString", 0) => Some(JavaType::String),
         (_, "hashCode", 0) => Some(JavaType::Primitive(PrimitiveType::Int)),
         (_, "equals", 1) => Some(JavaType::Primitive(PrimitiveType::Boolean)),
+        (Some(owner), "length", 0)
+            if canonical_external_receiver_type_key(owner)
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple == "File") =>
+        {
+            Some(JavaType::Primitive(PrimitiveType::Long))
+        }
         (_, "length", 0) => Some(JavaType::Primitive(PrimitiveType::Int)),
         (_, "compareTo", 0 | 1) => Some(JavaType::Primitive(PrimitiveType::Int)),
         (_, "ordinal", 0) => Some(JavaType::Primitive(PrimitiveType::Int)),

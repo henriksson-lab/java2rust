@@ -1822,6 +1822,10 @@ class NumericRelationalPromotion {
         return end < limit;
     }
 
+    boolean fileTooLarge(java.io.File file) {
+        return file.length() > Integer.MAX_VALUE;
+    }
+
     boolean zeroDouble(double x) {
         return x == 0;
     }
@@ -1843,6 +1847,9 @@ class NumericRelationalPromotion {
 
     assert!(
         translation.rust.contains("return (end as i64) < limit;")
+            && translation
+                .rust
+                .contains("return file.length() > (Integer::MAX_VALUE as i64);")
             && translation.rust.contains("return x == (0 as f64);")
             && translation.rust.contains("return x != (0 as f64);")
             && translation.rust.contains("return y == (yi as f64);")
@@ -4636,6 +4643,41 @@ class SystemArraycopyParameterFields {
         ) && !translation.rust.contains("System::arraycopy(source.values, 0, dest.values,"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn system_arraycopy_mutable_optional_local_dest_does_not_clone_slice() {
+    let translation = translate_source(
+        r#"
+class SystemArraycopyOptionalLocalDest {
+    byte[] copy(byte[] source, int n) {
+        byte[] dest = null;
+        dest = new byte[n];
+        System.arraycopy(source, 0, dest, 0, n);
+        return dest;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("System::arraycopy")
+            && translation
+                .rust
+                .contains("dest.as_mut().expect(\"Java null receiver\").as_mut_slice(), 0")
+            && !translation.rust.contains("as_mut_slice().clone()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "system_arraycopy_mutable_optional_local_dest_does_not_clone_slice",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -14637,6 +14679,90 @@ class OptionalResourceConstructorMoveUse {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn optional_source_receiver_uses_mut_projection_for_mutating_context_fallback() {
+    let translation = translate_source(
+        r#"
+class OptionalSourceReceiverMutClose {
+    static class LocalStream {
+        boolean closed;
+
+        void close() throws java.io.IOException {
+            closed = true;
+        }
+    }
+
+    void run() {
+        LocalStream stream = null;
+        try {
+            stream = new LocalStream();
+        } finally {
+            if (stream != null) {
+                stream.close();
+            }
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("stream.as_mut().unwrap().close()?;")
+            && !translation
+                .rust
+                .contains("stream.as_ref().unwrap().close();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "optional_source_receiver_uses_mut_projection_for_mutating_context_fallback",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+
+    let nested_translation = translate_source(
+        r#"
+class Base64 {
+    static class InputStream {
+        boolean closed;
+
+        void close() {
+            closed = true;
+        }
+    }
+
+    void run() throws java.io.IOException {
+        InputStream stream = null;
+        try {
+            stream = new InputStream();
+        } finally {
+            if (stream != null) {
+                stream.close();
+            }
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        nested_translation
+            .rust
+            .contains("stream.as_mut().unwrap().close()?;")
+            && !nested_translation
+                .rust
+                .contains("stream.as_ref().unwrap().close();"),
+        "{}",
+        nested_translation.rust
     );
 }
 

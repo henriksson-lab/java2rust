@@ -7636,6 +7636,7 @@ fn lower_expr_with_refinements(
                     ctx,
                     refinements,
                     fallback_signature.as_ref().map(|(_, signature)| *signature),
+                    context_fallback_signature.as_ref(),
                 )
             });
             let mut lowered = apply_call_target_with_lower_context(
@@ -8788,6 +8789,35 @@ fn numeric_operand_java_type(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Java
     ) {
         return inferred;
     }
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = expr
+        && let Some(lowered) = external_call_lowered_type_with_external_index(
+            receiver.as_deref(),
+            name,
+            args.len(),
+            ctx.facts,
+            ctx.external_index,
+            env.type_env(),
+            ctx.current_type,
+        )
+        && let Some(java_ty) = lowered.java_ty()
+        && matches!(
+            java_ty,
+            JavaType::Primitive(primitive) if crate::types::is_numeric_primitive_type(*primitive)
+        )
+    {
+        return java_ty.clone();
+    }
+    if let Some(java_ty) = numeric_receiver_method_signature_return_type(expr, env, ctx) {
+        return java_ty;
+    }
+    if let Some(java_ty) = numeric_member_access_java_type(expr, env, ctx) {
+        return java_ty;
+    }
     let shape_ctx = ExprShapeContext {
         signatures: Some(ctx.signatures),
         representations: Some(ctx.representations),
@@ -8808,6 +8838,96 @@ fn numeric_operand_java_type(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Java
         element_ty
     } else {
         inferred
+    }
+}
+
+fn numeric_receiver_method_signature_return_type(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<JavaType> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    let (_, signature) =
+        fallback_receiver_method_signature(receiver.as_deref(), name, args, env, ctx)?;
+    let java_ty = signature.return_shape.as_ref()?.java_ty.clone();
+    if matches!(
+        java_ty,
+        JavaType::Primitive(primitive) if crate::types::is_numeric_primitive_type(primitive)
+    ) {
+        Some(java_ty)
+    } else {
+        None
+    }
+}
+
+fn numeric_member_access_java_type(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<JavaType> {
+    let Expr::FieldAccess(receiver, field) = expr else {
+        return None;
+    };
+    if let Some(java_ty) = numeric_static_field_java_type(receiver, field, env, ctx) {
+        return Some(java_ty);
+    }
+    let plan = crate::member_access_plan::plan_member_access_with_facts(
+        receiver,
+        field,
+        env.type_env(),
+        ctx.facts,
+    )?;
+    if matches!(
+        plan.java_ty,
+        JavaType::Primitive(primitive) if crate::types::is_numeric_primitive_type(primitive)
+    ) {
+        Some(plan.java_ty)
+    } else {
+        None
+    }
+}
+
+fn numeric_static_field_java_type(
+    receiver: &Expr,
+    field: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<JavaType> {
+    let Expr::Var(receiver_name) = receiver else {
+        return None;
+    };
+    if env.local_type(receiver_name).is_some() || env.field_type(receiver_name).is_some() {
+        return None;
+    }
+    let owner = env
+        .type_env()
+        .static_type_alias(receiver_name)
+        .unwrap_or(receiver_name);
+    let java_ty = ctx
+        .facts
+        .external_field_for(owner, field)
+        .and_then(|fact| fact.field_type.clone())
+        .or_else(|| {
+            crate::external_packs::external_field_for(owner, field).and_then(|fact| fact.field_type)
+        })
+        .or_else(|| {
+            let receiver_ty = JavaType::Named {
+                name: owner.to_string(),
+                args: Vec::new(),
+            };
+            crate::stdlib::known_external_field_type_for_receiver(&receiver_ty, field)
+        })?;
+    if matches!(
+        java_ty,
+        JavaType::Primitive(primitive) if crate::types::is_numeric_primitive_type(primitive)
+    ) {
+        Some(java_ty)
+    } else {
+        None
     }
 }
 
@@ -9300,6 +9420,7 @@ fn static_owner_expr_candidates(receiver: &Expr, env: &ShapeEnv) -> Vec<String> 
 struct ContextFallbackMethodSignature {
     rust_name: String,
     arg_shapes: Vec<RustSlotShape>,
+    receiver: ReceiverPlan,
 }
 
 fn context_fallback_signature_for_method(
@@ -9327,11 +9448,13 @@ fn context_fallback_signature_for_method(
                 .iter()
                 .map(|param| param.shape.clone())
                 .collect(),
+            receiver: signature.receiver,
         };
     }
     ContextFallbackMethodSignature {
         rust_name,
         arg_shapes: source_context_param_shapes(method, ctx),
+        receiver: ReceiverPlan::Shared,
     }
 }
 
@@ -12460,6 +12583,12 @@ fn clone_recovery_decision_for_argument(
     actual_shape: Option<&RustSlotShape>,
     ctx: LowerCtx,
 ) -> CloneRecoveryDecision {
+    if matches!(
+        target_shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) {
+        return CloneRecoveryDecision::NoRecovery;
+    }
     if shared_borrow_argument_needs_owned_clone(target_shape, actual_shape, ctx) {
         return CloneRecoveryDecision::ApplyRecoveryCoercion {
             coercion: Coercion::CloneRecovery {
@@ -13011,6 +13140,7 @@ fn adapt_call_target_receiver_with_signature(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
     fallback_signature: Option<&crate::signature::MethodSignaturePlan>,
+    context_fallback_signature: Option<&ContextFallbackMethodSignature>,
 ) -> RustExpr {
     if let Some(cast_receiver) =
         lower_explicit_external_facade_cast_receiver(target, receiver, env, ctx, refinements)
@@ -13024,9 +13154,15 @@ fn adapt_call_target_receiver_with_signature(
     }
     if refined_non_null_receiver(receiver, refinements) {
         if target.adapts_optional_instance_receiver() {
-            let mutable = fallback_signature.is_some_and(|signature| {
-                matches!(signature.receiver, crate::signature::ReceiverPlan::Mutable)
-            }) || target.mutates_receiver();
+            let target_method = target.rust_method_name();
+            let mutable = fallback_signature
+                .is_some_and(|signature| matches!(signature.receiver, ReceiverPlan::Mutable))
+                || context_fallback_signature
+                    .is_some_and(|signature| matches!(signature.receiver, ReceiverPlan::Mutable))
+                || target_method.is_some_and(|method| {
+                    optional_receiver_method_requires_mutable_signature(receiver, method, env, ctx)
+                })
+                || target.mutates_receiver();
             let lowered =
                 lower_expr_with_refinements(receiver, env, ctx, &ExprRefinements::default());
             return adapt_optional_instance_receiver_with_slot_plan(
@@ -13036,9 +13172,18 @@ fn adapt_call_target_receiver_with_signature(
         return lowered;
     }
     if target.adapts_optional_instance_receiver()
-        && fallback_signature.is_some_and(|signature| {
-            matches!(signature.receiver, crate::signature::ReceiverPlan::Mutable)
-        })
+        && let Some(method) = target.rust_method_name()
+        && optional_receiver_method_requires_mutable_signature(receiver, method, env, ctx)
+    {
+        return adapt_optional_instance_receiver_with_slot_plan(
+            receiver, lowered, env, ctx, true, true,
+        );
+    }
+    if target.adapts_optional_instance_receiver()
+        && (fallback_signature
+            .is_some_and(|signature| matches!(signature.receiver, ReceiverPlan::Mutable))
+            || context_fallback_signature
+                .is_some_and(|signature| matches!(signature.receiver, ReceiverPlan::Mutable)))
     {
         return adapt_optional_instance_receiver_with_slot_plan(
             receiver, lowered, env, ctx, true, true,
@@ -13050,6 +13195,44 @@ fn adapt_call_target_receiver_with_signature(
         );
     }
     adapt_call_target_receiver(target, receiver, lowered, env, ctx, refinements)
+}
+
+fn optional_receiver_method_requires_mutable_signature(
+    receiver: &Expr,
+    rust_method: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let receiver_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
+    let Some(receiver_ty) = receiver_shape.optional_element_type() else {
+        return false;
+    };
+    let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = receiver_ty else {
+        return false;
+    };
+    let mut candidates = vec![
+        name.clone(),
+        crate::slot_render::rust_name_for_java_named_type(&name),
+    ];
+    for nested in nested_type_owner_candidates_for_receiver(&name, ctx) {
+        candidates.push(nested.clone());
+        candidates.push(crate::slot_render::rust_name_for_java_named_type(&nested));
+    }
+    candidates.into_iter().any(|candidate| {
+        ctx.signatures
+            .method_signature_by_rust_name(&candidate, rust_method)
+            .or_else(|| {
+                ctx.signatures
+                    .method_signature_by_base_name_and_arity(&candidate, rust_method, 0)
+                    .map(|(_, signature)| signature)
+            })
+            .is_some_and(|signature| matches!(signature.receiver, ReceiverPlan::Mutable))
+    })
 }
 
 fn lower_explicit_external_facade_cast_receiver(
@@ -15744,6 +15927,7 @@ fn lower_callback_call_expr_for_slot(
             ctx,
             refinements,
             None,
+            None,
         )
     });
     let rust_args = args
@@ -17246,6 +17430,7 @@ fn source_context_static_method_fallback_signature(
                         .iter()
                         .map(|param| param.shape.clone())
                         .collect(),
+                    receiver: signature.receiver,
                 });
             }
             if matching_methods.len() == 1 {
@@ -17285,6 +17470,7 @@ fn source_context_static_method_fallback_signature(
                     .iter()
                     .map(|param| param.shape.clone())
                     .collect(),
+                receiver: signature.receiver,
             });
         }
         let rust_name = matching_methods[0]
@@ -17304,6 +17490,11 @@ fn source_context_static_method_fallback_signature(
                         .collect()
                 })
                 .unwrap_or_else(|| source_context_param_shapes(matching_methods[0], ctx)),
+            receiver: ctx
+                .signatures
+                .method_signature_by_rust_name(&owner, &rust_name)
+                .map(|signature| signature.receiver)
+                .unwrap_or(ReceiverPlan::Shared),
         });
     }
     None
@@ -17376,6 +17567,7 @@ fn source_context_current_static_method_fallback_signature(
                 .iter()
                 .map(|param| param.shape.clone())
                 .collect(),
+            receiver: signature.receiver,
         });
     }
     if let Some(method) =
@@ -17396,11 +17588,13 @@ fn source_context_current_static_method_fallback_signature(
                     .iter()
                     .map(|param| param.shape.clone())
                     .collect(),
+                receiver: signature.receiver,
             });
         }
         return Some(ContextFallbackMethodSignature {
             rust_name,
             arg_shapes: source_context_param_shapes(method, ctx),
+            receiver: ReceiverPlan::Shared,
         });
     }
     if matching_methods.len() == 1 {
@@ -17634,6 +17828,7 @@ fn source_context_receiver_method_fallback_signature(
                     .zip(effective_signature.params.iter())
                     .map(|(_, solved)| solved.shape.clone())
                     .collect(),
+                receiver: effective_signature.receiver,
             });
         }
         if matching_methods.len() == 1 {
@@ -17655,6 +17850,7 @@ fn source_context_receiver_method_fallback_signature(
                         )
                     })
                     .collect(),
+                receiver: ReceiverPlan::Shared,
             });
         }
     }
@@ -17731,7 +17927,18 @@ fn fallback_receiver_type_name_candidates(
     let mut candidates = Vec::new();
     if let Some(receiver) = receiver {
         if let Some(receiver_name) = receiver_type_name_from_shape(receiver, env, ctx) {
+            let rust_receiver_name =
+                crate::slot_render::rust_name_for_java_named_type(&receiver_name);
+            let nested_receiver_candidates =
+                nested_type_owner_candidates_for_receiver(&receiver_name, ctx);
             push_unique_receiver_type_name(&mut candidates, receiver_name);
+            push_unique_receiver_type_name(&mut candidates, rust_receiver_name);
+            for nested_receiver in nested_receiver_candidates {
+                let rust_nested_receiver =
+                    crate::slot_render::rust_name_for_java_named_type(&nested_receiver);
+                push_unique_receiver_type_name(&mut candidates, nested_receiver);
+                push_unique_receiver_type_name(&mut candidates, rust_nested_receiver);
+            }
         }
         if let Expr::Var(receiver_name) = receiver
             && env.local_type(receiver_name).is_none()
@@ -17752,6 +17959,35 @@ fn fallback_receiver_type_name_candidates(
             || find_context_type_by_key(ctx.source_summary_type_program, candidate).is_some()
     });
     candidates
+}
+
+fn nested_type_owner_candidates_for_receiver(receiver_name: &str, ctx: LowerCtx) -> Vec<String> {
+    let Some(current_type) = ctx.current_type else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for program in [
+        ctx.program,
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ] {
+        if let Some(current) = find_context_type_by_key(program, current_type) {
+            collect_nested_type_owner_candidates(current, receiver_name, &mut candidates);
+        }
+    }
+    candidates
+}
+
+fn collect_nested_type_owner_candidates(ty: &TypeDecl, receiver_name: &str, out: &mut Vec<String>) {
+    for member in &ty.members {
+        let Member::Type(nested) = member else {
+            continue;
+        };
+        if type_simple_name_matches_receiver_alias(&nested.name, receiver_name) {
+            push_unique_receiver_type_name(out, nested.name.clone());
+        }
+        collect_nested_type_owner_candidates(nested, receiver_name, out);
+    }
 }
 
 fn push_unique_receiver_type_name(candidates: &mut Vec<String>, receiver_name: String) {

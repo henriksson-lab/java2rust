@@ -3744,6 +3744,12 @@ fn apply_clone_recovery(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExp
 }
 
 fn render_clone_recovery_expr(rendered: &str, policy: &CloneRecoveryPolicy) -> String {
+    if let Some(inner) = rendered
+        .strip_prefix("Some(")
+        .and_then(|inner| inner.strip_suffix(')'))
+    {
+        return format!("Some({})", render_clone_recovery_expr(inner, policy));
+    }
     if let Some(receiver) = rendered.strip_suffix(".into()") {
         return format!(
             "{receiver}.clone(){}.into()",
@@ -4714,6 +4720,15 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&expr),
             "value.clone()/* TODO(translation): validate added clone */"
+        );
+    }
+
+    #[test]
+    fn audited_clone_recovery_for_constructed_optional_clones_element() {
+        let expr = apply_audited_clone_recovery(RustExpr::Raw("Some(value)".to_string()));
+        assert_eq!(
+            emit::emit_expr(&expr),
+            "Some(value.clone()/* TODO(translation): validate added clone */)"
         );
     }
 
