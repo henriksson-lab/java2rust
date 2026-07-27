@@ -4634,7 +4634,7 @@ interface Named {
     assert_eq!(
         type_emission_for(&representations, named_ty, &signatures),
         RepresentationTypeEmission::RawRustItem(
-            "pub trait Named {\n    fn name(&self) -> String;\n    fn score(&self, prefix: String) -> i32;\n}"
+            "pub trait Named {\n    fn name(&self) -> String;\n    fn score(&self, prefix: String) -> i32;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Named>;\n}\n\nimpl dyn Named {\n    pub fn anonymous() -> Box<dyn Named> { panic!(\"java2rust: anonymous class body for Named requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Named> {\n    fn clone(&self) -> Self { self.clone_box() }\n}"
                 .to_string()
         )
     );
@@ -4718,7 +4718,7 @@ class Dog implements Named {
     assert_eq!(
         trait_impl_emissions_for_type(&representations, &resolved.program, dog_ty, &signatures),
         vec![
-            "impl Named for Dog {\n    fn name(&self) -> String { Dog::name(self) }\n}".to_string()
+            "impl Named for Dog {\n    fn name(&self) -> String { Dog::name(self) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> Box<dyn Named> { panic!(\"java2rust: clone_box for Named requires a cloneable Java object carrier\") }\n}".to_string()
         ]
     );
 }
@@ -4813,7 +4813,7 @@ class Source implements IdSource {
             &facts,
         ),
         vec![
-            "impl IdSource for Source {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { Source::ids(self, values) }\n}"
+            "impl IdSource for Source {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { Source::ids(self, values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> Box<dyn IdSource> { panic!(\"java2rust: clone_box for IdSource requires a cloneable Java object carrier\") }\n}"
                 .to_string()
         ]
     );
@@ -4896,14 +4896,14 @@ class BrokenNamed implements Named {
     );
     assert!(
         impls[0].contains(
-            "compile_error!(\"incompatible Java interface method implementation: BrokenNamed.score parameter types do not match interface\")"
+            "panic!(\"incompatible Java interface method implementation: BrokenNamed.score parameter types do not match interface\")"
         ),
         "{}",
         impls[0]
     );
     assert!(
         impls[0].contains(
-            "compile_error!(\"incompatible Java interface method implementation: BrokenNamed.arity parameter count does not match interface\")"
+            "panic!(\"incompatible Java interface method implementation: BrokenNamed.arity parameter count does not match interface\")"
         ),
         "{}",
         impls[0]

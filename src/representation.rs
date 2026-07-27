@@ -145,7 +145,9 @@ impl RepresentationPlan {
     }
 
     pub fn type_representation(&self, type_name: &str) -> Option<&TypeRepresentation> {
-        self.types.get(type_name)
+        self.types
+            .get(type_name)
+            .or_else(|| self.unique_type_representation_by_simple_name(type_name))
     }
 
     pub fn representation_for(&self, java_ty: &JavaType) -> ObjectRepresentation {
@@ -155,8 +157,7 @@ impl RepresentationPlan {
     pub fn representation_lookup_policy(&self, java_ty: &JavaType) -> RepresentationLookupPolicy {
         let planned_representation = match java_ty {
             JavaType::Named { name, .. } => self
-                .types
-                .get(name)
+                .type_representation(name)
                 .map(|entry| entry.representation.clone()),
             _ => None,
         };
@@ -164,8 +165,7 @@ impl RepresentationPlan {
     }
 
     pub fn direct_subtypes_of(&self, type_name: &str) -> &[String] {
-        self.types
-            .get(type_name)
+        self.type_representation(type_name)
             .map(|entry| entry.direct_subtypes.as_slice())
             .unwrap_or(&[])
     }
@@ -189,6 +189,21 @@ impl RepresentationPlan {
             .iter()
             .any(|known| known == &variant)
             .then(|| format!("{rust_enum_name}::{variant}"))
+    }
+
+    fn unique_type_representation_by_simple_name(
+        &self,
+        type_name: &str,
+    ) -> Option<&TypeRepresentation> {
+        if type_name.contains('.') {
+            return None;
+        }
+        let mut matches = self
+            .types
+            .values()
+            .filter(|entry| entry.java_name.rsplit('.').next() == Some(type_name));
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
     }
 
     pub fn diagnostics_for_program(&self, program: &Program) -> Vec<RepresentationDiagnostic> {

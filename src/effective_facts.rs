@@ -139,7 +139,9 @@ impl<'a> EffectiveFacts<'a> {
             .facts
             .type_capability_overrides
             .iter()
-            .filter(|override_fact| type_name_matches(&override_fact.type_name, type_name))
+            .filter(|override_fact| {
+                object_safety_type_name_matches(&override_fact.type_name, type_name)
+            })
             .filter_map(|override_fact| {
                 override_fact.object_safe_trait.map(|value| EffectiveFact {
                     value,

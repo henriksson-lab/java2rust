@@ -4382,6 +4382,17 @@ Focused guards green: `signature_constraints_make_public_api_fallback_explicit`,
 `signature_public_interface_boundaries_preserve_representation_shapes`,
 `optional_receiver_field_element_recovery_uses_borrowed_carrier_plan`, and
 `lowering_borrows_boxed_dyn_field_for_interface_arguments`.
+Signature/representation drift cleanup checkpoint: representation lookup now
+has a unique simple-name fallback for source-nested object-safety facts,
+abstract classes no longer emit incomplete dyn-trait impls, and synthetic
+external inherited method params are shaped through the same signature solver as
+ordinary slots. Signature constraints now route copy decisions through
+`signature_capability_policy`, preserve call-result/alias return shapes during
+fixpoint collection, and apply external unknown-argument non-null defaults only
+when an unqualified or external-modeled call justifies them. Explicit
+`KnownContentRead` argument boundaries still enable borrowed sequence views for
+native collection idioms such as `addAll`. Full verification:
+`cargo test --test slot_shape_design --quiet` passed 509/509 in 354.64s.
 
 ## Rerun Protocol
 

@@ -5922,7 +5922,16 @@ fn external_inherited_method_signature(
                     name: format!("arg{index}"),
                     java_ty: java_ty.clone(),
                     is_varargs: false,
-                    shape: storage_shape_for_java_type(representations, java_ty),
+                    shape: solve_signature_shape_with_facts(
+                        representations,
+                        SignatureShapeRequest {
+                            java_ty,
+                            role: SignatureSlotRole::Param { is_varargs: false },
+                            constraints: Vec::new(),
+                        },
+                        facts,
+                    )
+                    .expect("external inherited param signature shape is always present"),
                     binding_mutable: false,
                 }
             })
@@ -7457,7 +7466,10 @@ fn constrained_field_shape(
     )
     .expect("field signature shape is always present");
     if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) {
-        if !facts.is_copy_type(java_ty) {
+        if !signature_capability_policy(java_ty, facts)
+            .capability_ownership
+            .is_some_and(|ownership| ownership == OwnershipShape::CopyValue)
+        {
             apply_required_ownership(&mut shape, OwnershipShape::Owned);
         }
         if matches!(shape.dispatch, DispatchShape::Concrete) {
@@ -9464,9 +9476,16 @@ fn internal_object_binding_is_shared_borrow_safe(
                 }
                 saw_read = true;
             }
-            BindingUse::PassedToCall { .. } => {
+            BindingUse::PassedToCall {
+                boundary: CallArgumentBoundary::KnownContentRead,
+                ..
+            } => {
                 saw_read = true;
             }
+            BindingUse::PassedToCall {
+                boundary: CallArgumentBoundary::InternalSameType,
+                ..
+            } => {}
             BindingUse::AssignedFromCall { .. }
             | BindingUse::StoredInField { .. }
             | BindingUse::Mutated => return false,
@@ -9540,12 +9559,23 @@ pub fn external_argument_binding_constraints(
         if *boundary == CallArgumentBoundary::InternalSameType {
             continue;
         }
-        if let Some(effect) = external_api_argument_effect_for_call_arg(
+        let effect = external_api_argument_effect_for_call_arg(
             receiver_type.as_ref(),
             name,
             *arg_index,
             facts,
-        ) {
+        );
+        if *boundary == CallArgumentBoundary::Unknown
+            && effect.is_none()
+            && !unknown_external_argument_default_non_null_applies(
+                receiver_type.as_ref(),
+                name,
+                facts,
+            )
+        {
+            continue;
+        }
+        if let Some(effect) = effect {
             push_unique_signature_constraints(
                 &mut constraints,
                 &external_argument_effect_constraints_for_binding(
@@ -9569,6 +9599,24 @@ pub fn external_argument_binding_constraints(
         }
     }
     constraints
+}
+
+fn unknown_external_argument_default_non_null_applies(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    facts: &FactSet,
+) -> bool {
+    let Some(receiver_type) = receiver_type else {
+        return true;
+    };
+    let Some(receiver_key) = external_api_receiver_type_key(receiver_type) else {
+        return false;
+    };
+    facts
+        .external_api_effect_for_receiver(Some(&receiver_key), name)
+        .is_some()
+        || crate::external_packs::external_api_effect_for_receiver(Some(&receiver_key), name)
+            .is_some()
 }
 
 fn facade_abi_argument_binding_constraints(
@@ -11159,17 +11207,33 @@ pub fn method_return_shape_constraints(
             )],
         );
     }
-    let flow_return_nullability = if boundary_kind == Some(SignatureBoundaryKind::PublicApi) {
+    let returns_call_result = usage
+        .methods
+        .get(&UsageMethodKey {
+            type_name: ty.name.clone(),
+            method_name: method.name.clone(),
+        })
+        .is_some_and(|method_usage| !method_usage.returned_call_results.is_empty());
+    let returns_call_result_alias = method_returns_local_initialized_from_call(method);
+    let flow_return_nullability = if boundary_kind == Some(SignatureBoundaryKind::PublicApi)
+        || returns_call_result
+        || returns_call_result_alias
+    {
         Vec::new()
     } else {
         typed_source_method_return_nullability_constraints(ty, method, facts)
+    };
+    let returned_initializer_nullability = if returns_call_result || returns_call_result_alias {
+        Vec::new()
+    } else {
+        returned_local_initializer_source_call_nullability_constraints(ty, method, facts)
     };
     let flow_proves_non_null_return =
         signature_constraints_prove_non_null_storage(&flow_return_nullability);
     let mut source_return_nullability = flow_return_nullability;
     push_unique_signature_constraints(
         &mut source_return_nullability,
-        &returned_local_initializer_source_call_nullability_constraints(ty, method, facts),
+        &returned_initializer_nullability,
     );
     if flow_proves_non_null_return {
         retain_only_storage_nullability(
@@ -11198,15 +11262,9 @@ pub fn method_return_shape_constraints(
     );
     let borrowed_return_content_policy =
         borrowed_return_content_policy_from_param_with_facts(ty, method, usage, facts);
-    let returns_call_result = usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: ty.name.clone(),
-            method_name: method.name.clone(),
-        })
-        .is_some_and(|method_usage| !method_usage.returned_call_results.is_empty());
     if borrowed_return_content_policy.is_none()
         && !returns_call_result
+        && !returns_call_result_alias
         && !borrowed_object_return
         && boundary_kind != Some(SignatureBoundaryKind::PublicApi)
         && declared_return_should_use_concrete_shape(
@@ -11356,6 +11414,73 @@ fn java_return_type_can_borrow_as_object(java_ty: &JavaType, facts: &FactSet) ->
     !matches!(conservative_ownership(java_ty), OwnershipShape::CopyValue)
 }
 
+fn method_returns_local_initialized_from_call(method: &MethodDecl) -> bool {
+    let Some(body) = &method.body else {
+        return false;
+    };
+    block_returns_local_initialized_from_call(body, &mut HashSet::new())
+}
+
+fn block_returns_local_initialized_from_call(
+    block: &Block,
+    call_locals: &mut HashSet<String>,
+) -> bool {
+    for stmt in &block.statements {
+        if stmt_returns_local_initialized_from_call(stmt, call_locals) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_returns_local_initialized_from_call(
+    stmt: &Stmt,
+    call_locals: &mut HashSet<String>,
+) -> bool {
+    match stmt {
+        Stmt::VarDecl {
+            name,
+            initializer: Some(initializer),
+            ..
+        } => {
+            if expr_is_call_result_or_call_alias(initializer, call_locals) {
+                call_locals.insert(name.clone());
+            }
+            false
+        }
+        Stmt::Assign { target, value } => {
+            if let Expr::Var(name) = target
+                && expr_is_call_result_or_call_alias(value, call_locals)
+            {
+                call_locals.insert(name.clone());
+            }
+            false
+        }
+        Stmt::Return(Some(Expr::Var(name))) => call_locals.contains(name),
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            block_returns_local_initialized_from_call(then_block, &mut call_locals.clone())
+                || else_block.as_ref().is_some_and(|block| {
+                    block_returns_local_initialized_from_call(block, &mut call_locals.clone())
+                })
+        }
+        Stmt::Block(block) => block_returns_local_initialized_from_call(block, call_locals),
+        _ => false,
+    }
+}
+
+fn expr_is_call_result_or_call_alias(expr: &Expr, call_locals: &HashSet<String>) -> bool {
+    match expr {
+        Expr::Call { .. } | Expr::New { .. } => true,
+        Expr::Var(name) => call_locals.contains(name),
+        Expr::Cast { expr, .. } => expr_is_call_result_or_call_alias(expr, call_locals),
+        _ => false,
+    }
+}
+
 fn declared_return_should_use_concrete_shape(
     method: &MethodDecl,
     _method_effect_nullability: Option<NullabilityState>,
@@ -11366,7 +11491,10 @@ fn declared_return_should_use_concrete_shape(
     if matches!(method.return_type, JavaType::Void | JavaType::Primitive(_)) {
         return false;
     }
-    if facts.is_copy_type(&method.return_type) {
+    if signature_capability_policy(&method.return_type, facts)
+        .capability_ownership
+        .is_some_and(|ownership| ownership == OwnershipShape::CopyValue)
+    {
         return false;
     }
     if declared_return_has_non_concrete_representation(&method.return_type, facts) {

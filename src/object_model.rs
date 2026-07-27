@@ -1498,6 +1498,7 @@ fn non_object_safe_trait_fallback_diagnostic(
         .map(object_safety_violation_message);
     let message = match request {
         ObjectRepresentationRequest::DefaultInterface { type_name } => {
+            let type_name = object_safety_diagnostic_type_name(type_name);
             let mut message = format!(
                 "interface {type_name} is marked non-object-safe; falling back to erased object representation"
             );
@@ -1522,6 +1523,20 @@ fn non_object_safe_trait_fallback_diagnostic(
     RepresentationDiagnostic {
         code: "non_object_safe_trait_fallback",
         message,
+    }
+}
+
+fn object_safety_diagnostic_type_name(type_name: &str) -> &str {
+    let Some((prefix, simple)) = type_name.rsplit_once('.') else {
+        return type_name;
+    };
+    if prefix
+        .split('.')
+        .any(|segment| segment.chars().next().is_some_and(char::is_lowercase))
+    {
+        type_name
+    } else {
+        simple
     }
 }
 

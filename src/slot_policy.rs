@@ -11,10 +11,7 @@ use crate::shape_projection::{
     value_shape_for_java_type,
 };
 use crate::slot_shape::RustSlotShape;
-use crate::usage::{
-    BindingUse, CallArgumentBoundary, MethodUsageFacts, UsageConstructorKey, UsageFacts,
-    UsageMethodKey,
-};
+use crate::usage::{BindingUse, MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorrowedContentKind {
@@ -451,7 +448,7 @@ fn usage_allows_borrowed_content(usage: &MethodUsageFacts, param_name: &str) -> 
                 usage,
                 BindingUse::ContentRead
                     | BindingUse::PassedToCall {
-                        boundary: CallArgumentBoundary::KnownContentRead,
+                        boundary: crate::usage::CallArgumentBoundary::KnownContentRead,
                         ..
                     }
             )
