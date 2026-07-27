@@ -5098,7 +5098,9 @@ fn local_type_keys_for_program(program: &Program) -> BTreeSet<String> {
 }
 
 fn collect_local_type_keys(ty: &crate::java_ir::TypeDecl, types: &mut BTreeSet<String>) {
-    types.insert(canonical_external_receiver_type_key(&ty.name));
+    let type_key = canonical_external_receiver_type_key(&ty.name);
+    types.insert(type_key.clone());
+    types.insert(rust_name_for_java_named_type(&type_key));
     for member in &ty.members {
         if let Member::Type(nested) = member {
             collect_local_type_keys(nested, types);

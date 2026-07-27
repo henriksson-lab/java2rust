@@ -770,6 +770,8 @@ def remove_items(
         if item["name"] in keep_last_prelude_names and item.get("prelude", False)
     }
     for item in items:
+        if item.get("source_owned_nested"):
+            continue
         if item["name"] in removal_only_names and not item.get("prelude", False):
             continue
         if (
@@ -830,6 +832,19 @@ def read_existing_shared_types(path: Path) -> set[str]:
     }
 
 
+def declared_type_names_from_text(text: str) -> set[str]:
+    names = set()
+    depth = 0
+    for line in text.splitlines():
+        if depth == 0:
+            if type_match := TYPE_RE.match(line):
+                names.add(type_match.group(2))
+            if trait_match := TRAIT_DECL_RE.match(line):
+                names.add(trait_match.group(1))
+        depth += brace_delta(line)
+    return names
+
+
 def remove_protected_aliases_from_shared_support(path: Path, aliases: set[str]) -> None:
     if not aliases or not path.exists():
         return
@@ -857,7 +872,9 @@ def main() -> int:
     existing_shared_text = (
         shared_support_path.read_text() if shared_support_path.exists() else ""
     )
-    existing_shared_types = read_existing_shared_types(Path(args.shared_types))
+    existing_shared_types = read_existing_shared_types(
+        Path(args.shared_types)
+    ) | declared_type_names_from_text(existing_shared_text)
     existing_shared_alias_names = {
         match.group(1)
         for line in existing_shared_text.splitlines()
@@ -898,7 +915,10 @@ def main() -> int:
     }
     for path in rust_paths:
         for alias, target in prelude_aliases(path):
-            if alias in existing_shared_types and alias not in primary_output_types:
+            if (
+                alias in existing_shared_types
+                or alias in candidates_by_type
+            ) and alias not in primary_output_types:
                 protected_shared_aliases.add(alias)
                 continue
             if target in selected and alias not in primary_output_types:

@@ -621,7 +621,84 @@ pub struct ZipUser;
         !base64.contains("pub type OutputStream = Base64OutputStream;"),
         "{base64}"
     );
-    assert!(!base64.contains("source_owned_stateful_method"), "{base64}");
+    assert!(base64.contains("source_owned_stateful_method"), "{base64}");
+}
+
+#[test]
+fn shared_support_merger_protects_declared_shared_type_without_type_index_row() {
+    let dir = unique_temp_dir("shared_support_declared_type_collision");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_Base64.rs"),
+        r##"
+#[derive(Clone, Debug)]
+pub struct OutputStream;
+
+#[derive(Clone, Debug)]
+pub struct Base64OutputStream {
+    pub position: i32,
+}
+
+impl Base64OutputStream {
+    pub fn source_owned_stateful_method(&mut self) {
+        self.position = 0;
+    }
+}
+
+pub type OutputStream = Base64OutputStream;
+
+pub struct Base64;
+"##,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(
+        &shared_support,
+        "#[derive(Clone, Debug, Default)]\npub struct OutputStream;\n",
+    )
+    .unwrap();
+    fs::write(&shared_types, "").unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    let base64 = fs::read_to_string(generated_dir.join("00001_Base64.rs")).unwrap();
+    assert!(shared.contains("pub struct OutputStream;"), "{shared}");
+    assert!(
+        !shared.contains("pub type OutputStream = Base64OutputStream;"),
+        "{shared}"
+    );
+    assert!(
+        !base64.contains("pub type OutputStream = Base64OutputStream;"),
+        "{base64}"
+    );
+    assert!(
+        base64.contains("pub struct Base64OutputStream")
+            && base64.contains("source_owned_stateful_method"),
+        "{base64}"
+    );
 }
 
 #[test]

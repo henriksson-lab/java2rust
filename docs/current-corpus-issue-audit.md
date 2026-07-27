@@ -15,6 +15,7 @@ drift fixes and constructor self-initialization fix. Focused runs used
 | `fastqc` full corpus | `.tmp/corpus-batch-current-fastqc-refresh-20260727-after-source-erasure` | 156/156 translated, 0 translation failures, 29 invalid-pattern files, 1459 generated-Rust errors. Runtime remains dominated by global analysis/signature work: total 2,110,447 ms, translation 1,650,111 ms, global analysis 1,254,644 ms, signature solve 795,894 ms, signature fixpoint 767,748 ms, semantic analysis 456,896 ms, crate assembly 447,799 ms. |
 | `fastqc` AbstractQCModule subset | `.tmp/corpus-fastqc-abstract-qcmodule-after-inherited-exception-owner-r1` | 8/8 translated, 0 invalid-pattern files, generated Rust reaches two `cannot return value referencing temporary value` rows in `SVGImageSaver`. The inherited `?`/result-shell family is gone after inherited body lowering started using the declaring type's exception plan. |
 | `fastqc` AbstractQCModule subset | `.tmp/corpus-fastqc-abstract-qcmodule-after-reassigned-return-owned-r3` | 8/8 translated, 0 invalid-pattern files, `cargo_check=ok`, 0 generated-Rust errors. Reassigned string-like parameters now force owned/native parameter slots and returned-alias borrow constraints reject reassigned parameters, fixing `SVGImageSaver.optimizeSvg`. |
+| `fastqc` Base64 single-source subset | `.tmp/corpus-fastqc-base64-single-after-local-type-rust-key-r1` | 1/1 translated, 1 invalid-pattern file, generated-Rust errors reduced to 64. The shared-support merger now removes the bad simple `OutputStream = Base64OutputStream` alias while preserving the real source-owned nested `Base64OutputStream` implementation, and local Rust identities suppress simple external facade stubs. The previous duplicate `OutputStream`/`Base64OutputStream` and conflicting self-conversion rows are gone. Remaining rows are real Base64 translation gaps: outer static member qualification from nested classes, constructor self-field initialization, inherited `FilterOutputStream.out` state, `java_string_from_bytes`, `File.length`, bare field assignment, and byte-array move/bitwise coercion drift. |
 
 Current FastQC top families after the 2026-07-27 full rerun:
 
@@ -25,8 +26,11 @@ Current FastQC top families after the 2026-07-27 full rerun:
   `get_font_metrics_0`, `draw_line`, `draw_string`, and `fill_rect`;
 - switch/state-machine scaffold locals: unresolved `x0`, `x1`, `r`, and
   similar generated names;
-- Base64/OutputStream facade identity and state drift:
-  `Base64OutputStream: From<ZipOutputStream>` plus missing wrapper fields;
+- Base64 nested-class lowering and stream state drift: the simple
+  `OutputStream = Base64OutputStream` alias/stub conflict is fixed in focused
+  proof, while nested classes still need outer static-owner qualification,
+  constructor self-field initialization, inherited `FilterOutputStream.out`
+  state, byte/string helpers, and byte-array coercions;
 - JDK/platform facade overload gaps: `File::new_1`, `File::new_2`,
   `BorderLayout::CENTER/NORTH`, `JLabel::CENTER`, and `RenderingHints` constants;
 - source mutability inference gaps: methods mutating fields such as

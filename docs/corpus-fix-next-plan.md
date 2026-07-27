@@ -4497,10 +4497,15 @@ Next FastQC batch candidates from that rerun:
 3. Source mutability inference: rows such as `self.random_data` and `self.v`
    behind `&self` should become shared receiver-mutability facts rather than
    method-local fixes.
-4. Base64/OutputStream facade identity: the generated crate still has
-   `Base64OutputStream: From<ZipOutputStream>` and state-field rows, so the
-   shared-support merger/facade-alias rules need another focused fixture before
-   another full FastQC sweep.
+4. Base64 nested-class and stream state lowering: focused proof in
+   `.tmp/corpus-fastqc-base64-single-after-local-type-rust-key-r1` shows the
+   simple `OutputStream = Base64OutputStream` alias, duplicate source/stub
+   identity, and conflicting `From<Base64OutputStream>` rows are gone. The
+   remaining Base64 batch should target true nested-source semantics: qualify
+   outer static members from nested classes as the outer owner, avoid
+   `self.field` reads while constructing `__java_self`, model inherited
+   `FilterOutputStream.out` state, add missing byte/string and `File.length`
+   facade helpers, and fix byte-array move/bitwise coercion drift.
 
 Inherited exception-owner follow-up: inherited source method bodies now lower
 with the emitted subclass as the body/field context but use the declaring type

@@ -74,6 +74,7 @@ use new_java2rust::facts::{
     CaptureSource, ClosedHierarchyFact, ControlFlowFactKind, DispatchRequirementFact,
     DispatchRequirementKind, ExternalApiArgumentEffectFact, ExternalApiCoverage,
     ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy, ExternalConstructorFact,
+    ExternalConversionAdapterFact, ExternalConversionAdapterKind,
     ExternalCrateConstructorMappingFact, ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode,
     ExternalLibraryPackFact, ExternalRustReturnTypeFact, FacadeAbiFact, FacadeSlot, FactProvenance,
     FactSet, FieldKey as FactFieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
@@ -24708,6 +24709,45 @@ class UseExternalRecord {
         translation.rust.contains("pub total_batch_count: i32,"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn source_nested_type_rust_identity_suppresses_simple_external_facade_support() {
+    let parsed = parse_java_source(
+        r#"
+class Base64 {
+    static class OutputStream {
+        int position;
+    }
+}
+"#,
+    );
+    let mut facts = FactSet::default();
+    facts
+        .external_conversion_adapter_facts
+        .push(ExternalConversionAdapterFact {
+            from_type: "Base64OutputStream".to_string(),
+            to_type: "OutputStream".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+    let items = new_java2rust::stdlib::external_api_facade_support_items_with_local_type_program(
+        &parsed.program,
+        &facts,
+        &parsed.program,
+        &new_java2rust::java_ir::Program::default(),
+    );
+    let rendered = new_java2rust::emit::emit_file(&new_java2rust::rust_ir::RustFile { items });
+
+    assert!(
+        !rendered.contains("pub struct Base64OutputStream;"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("impl From<Base64OutputStream> for OutputStream"),
+        "{rendered}"
     );
 }
 
