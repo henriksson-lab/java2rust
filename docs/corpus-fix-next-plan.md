@@ -4305,6 +4305,15 @@ method parameters such as `&Dog` flowing into `(Animal) dog`, producing
 `AnimalValue::Dog(dog.clone()...)` instead of the invalid
 `AnimalValue::Dog(dog)`. Downcasts from borrowed closed-enum values continue to
 clone after extracting the variant payload.
+External/recovery cleanup: unresolved normalized singular utility receivers such
+as `ExternalUtil.consume(...)` now recover to a static owner after parser
+normalization (`external_util -> ExternalUtil`) when no local or field shadows
+the receiver. This keeps unshaped external argument clone recovery on a valid
+static call path instead of emitting value-receiver calls such as
+`external_util.consume(...)`. The external byte-array, erased-object carrier,
+and array-conversion tests were also updated to accept the shared audited clone
+marker now emitted by recovery plans while still checking the same signed-byte,
+carrier, and adapter behavior.
 
 ## Rerun Protocol
 

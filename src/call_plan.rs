@@ -2231,6 +2231,7 @@ fn unproven_simple_receiver_can_be_static_owner(receiver_name: &str) -> bool {
         .chars()
         .next()
         .is_some_and(|ch| ch.is_ascii_uppercase())
+        || receiver_name.ends_with("_util")
         || receiver_name.ends_with("_utils")
 }
 

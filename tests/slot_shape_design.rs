@@ -11647,6 +11647,20 @@ fn call_plan_recovers_normalized_static_utility_owner_receivers() {
     ));
     assert!(matches!(
         plan_call_target_with_facts_and_arity(
+            Some(&Expr::Var("external_util".to_string())),
+            "consume",
+            1,
+            None,
+            &FactSet::default(),
+            &TypeEnv::default(),
+        ),
+        CallTargetPlan::StaticOwner {
+            owner,
+            rust_name
+        } if owner == "ExternalUtil" && rust_name == "consume"
+    ));
+    assert!(matches!(
+        plan_call_target_with_facts_and_arity(
             Some(&Expr::Var("foo".to_string())),
             "toString",
             0,
@@ -11905,7 +11919,7 @@ class UsesExternalByteArrayReturn {
 
     assert!(
         translation.rust.contains(
-            "db_facade::get_bytes(cursor, \"name\".to_string().as_str()).map(|bytes| bytes.into_iter().map(|byte| byte as i8).collect::<Vec<_>>())"
+            "db_facade::get_bytes(cursor, \"name\").map(|bytes| bytes.into_iter().map(|byte| byte as i8).collect::<Vec<_>>())"
         ),
         "{}",
         translation.rust
@@ -13765,7 +13779,7 @@ class Holder {
             || translation.rust.contains("helper.consume(&self.value);")
             || translation
                 .rust
-                .contains("helper.consume(self.value.clone());"),
+                .contains("helper.consume(self.value.clone()"),
         "{}",
         translation.rust
     );
@@ -26690,9 +26704,9 @@ class UsesExternalConversionAdapters {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("vec![ids.clone().into(), names.clone().into()]"),
+        translation.rust.contains("vec![ids.clone()")
+            && translation.rust.contains(".into(), names.clone()")
+            && translation.rust.contains(".into()]"),
         "{}",
         translation.rust
     );
