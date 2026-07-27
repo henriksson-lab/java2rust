@@ -4684,7 +4684,7 @@ class ExternalId {}
     assert_eq!(
         type_emission_for_with_facts(&representations, source_ty, &signatures, &facts),
         RepresentationTypeEmission::RawRustItem(
-            "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n}"
+            "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for Box<dyn IdSource> {\n    fn clone(&self) -> Self { self.clone_box() }\n}"
                 .to_string()
         )
     );
@@ -5208,7 +5208,9 @@ class Use {
     let rust = emit::emit_file(&lowered.file);
 
     assert!(
-        rust.contains("let expr: ExprValue = ExprValue::Add(add);"),
+        rust.contains(
+            "let expr: ExprValue = ExprValue::Add(add.clone()/* TODO(translation): validate added clone */);"
+        ),
         "{rust}"
     );
     assert!(

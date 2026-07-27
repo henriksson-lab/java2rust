@@ -11329,6 +11329,7 @@ fn java_return_type_can_borrow_as_object(java_ty: &JavaType, facts: &FactSet) ->
         JavaType::Named { name, args } => {
             if crate::stdlib::canonical_external_receiver_type_key(name) == "Object"
                 || crate::stdlib::java_collection_kind_for_type(java_ty).is_some()
+                || facts.type_capabilities_for(java_ty).sequence_like.is_some()
             {
                 return false;
             }

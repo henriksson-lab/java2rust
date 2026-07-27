@@ -459,6 +459,14 @@ fn hierarchy_strategy_specificity_rank(strategy: &HierarchyStrategy) -> u8 {
 
 fn type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
     crate::facts::external_type_name_matches(fact_type_name, query_type_name)
+        || fact_type_name
+            .rsplit('.')
+            .next()
+            .is_some_and(|simple| simple == query_type_name)
+        || query_type_name
+            .rsplit('.')
+            .next()
+            .is_some_and(|simple| simple == fact_type_name)
 }
 
 fn apply_type_capability_override(

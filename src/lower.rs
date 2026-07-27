@@ -15,14 +15,18 @@ use crate::call_plan::{
     CallTargetPlan, NativeCollectionExtendArgPlan, NativeCollectionMethod,
     NativeCollectionNewTarget, NativeJavaInstanceMethod, NativePrintStreamMethod,
     NativeSystemStream, apply_fallback_receiver_rust_name, apply_fallback_self_rust_name,
-    apply_fallback_static_owner_rust_name, external_call_lowered_type_with_external_index,
+    apply_fallback_static_owner_rust_name,
+    external_call_lowered_type_from_static_owner_plan_with_external_index,
+    external_call_lowered_type_with_external_index,
     external_call_returns_rust_result_with_external_index,
     external_constructor_arg_shapes_with_args, external_constructor_returns_rust_result,
-    facade_receiver_slot_plan, native_collection_lowered_type, non_self_trivial_accessor_target,
-    optional_borrowed_receiver_slot_plan, optional_receiver_slot_plan, plan_call_arguments,
-    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation_with_external_index,
-    plan_call_expr_with_external_index, plan_call_statement, plan_constructor_arguments,
-    plan_native_collection_extend_arg, plan_new_target_for_args_with_facts,
+    external_receiver_call_return_type_with_external_index, facade_receiver_slot_plan,
+    known_external_call_lowered_type, native_collection_lowered_type,
+    non_self_trivial_accessor_target, optional_borrowed_receiver_slot_plan,
+    optional_receiver_slot_plan, plan_call_arguments, plan_call_arguments_with_facts_and_args,
+    plan_call_exception_propagation_with_external_index, plan_call_expr_with_external_index,
+    plan_call_statement, plan_constructor_arguments, plan_native_collection_extend_arg,
+    plan_new_target_for_args_with_facts, resource_close_declares_result_with_external_index,
     retarget_static_call_to_receiver_if,
 };
 use crate::coercion::{
@@ -109,8 +113,8 @@ use crate::expr_shape::{
     shape_env_for_method, shape_env_for_type,
 };
 use crate::facts::{
-    CallableKey, ExternalApiRole, ExternalFactLookupIndex, FactSet, HierarchyStrategy,
-    NullabilityState, OwnedRecoveryCapability, ResultAbi, Staticness,
+    CallableKey, ExternalFactLookupIndex, FactSet, HierarchyStrategy, NullabilityState,
+    OwnedRecoveryCapability, ResultAbi, Staticness,
 };
 use crate::item_assembly::{
     constructor_default_field_value_with_facts, constructor_function_shell_with_facts,
@@ -5686,28 +5690,7 @@ fn resource_close_declares_result(resources: &[Stmt], resource_name: &str, ctx: 
     }) else {
         return false;
     };
-    resource_type_names_for_close_lookup(resource_ty)
-        .into_iter()
-        .any(|receiver_type| {
-            ctx.facts
-                .external_api_effect_for_receiver_with_arity(Some(receiver_type), "close", Some(0))
-                .is_some_and(|effect| !effect.thrown.is_empty())
-                || crate::external_packs::external_api_effect_for_receiver_with_arity(
-                    Some(receiver_type),
-                    "close",
-                    Some(0),
-                )
-                .is_some_and(|effect| !effect.thrown.is_empty())
-        })
-}
-
-fn resource_type_names_for_close_lookup(ty: &JavaType) -> Vec<&str> {
-    match ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            vec![name.as_str(), name.rsplit('.').next().unwrap_or(name)]
-        }
-        _ => Vec::new(),
-    }
+    resource_close_declares_result_with_external_index(resource_ty, ctx.external_index)
 }
 
 fn catch_body_read_names(catches: &[CatchClause]) -> std::collections::HashSet<String> {
@@ -10756,7 +10739,8 @@ fn stream_like_receiver_element_shape(
     if let Some(element_ty) = crate::types::sequence_element_type(&receiver_java_ty) {
         return Some(fallback_local_shape_from_declared_type(&element_ty));
     }
-    if let Some(return_ty) = external_receiver_call_return_type(receiver, ctx.facts)
+    if let Some(return_ty) =
+        external_receiver_call_return_type_with_external_index(receiver, ctx.external_index)
         && let Some(element_ty) = crate::types::sequence_element_type(&return_ty)
     {
         return Some(fallback_local_shape_from_declared_type(&element_ty));
@@ -10986,13 +10970,14 @@ fn external_call_expr_result_shape(
         ctx.current_type,
     )
     .or_else(|| {
-        external_call_lowered_type_from_planned_static_owner(
+        external_call_lowered_type_from_static_owner_plan_with_external_index(
             receiver.as_deref(),
             name,
             args,
             resolved.as_ref(),
-            env,
-            ctx,
+            ctx.facts,
+            ctx.external_index,
+            env.type_env(),
         )
     })?;
     if let LoweredType::Slot(shape) = lowered {
@@ -11054,8 +11039,8 @@ fn known_external_call_result_shape_from_syntax(
         .find_map(|method| {
             crate::stdlib::known_external_method_return_type(Some(&owner), &method, args.len()).map(
                 |return_ty| {
-                    let lowered = known_external_static_owner_lowered_type(
-                        &owner,
+                    let lowered = known_external_call_lowered_type(
+                        Some(&owner),
                         &method,
                         args.len(),
                         return_ty,
@@ -11126,142 +11111,6 @@ fn plan_call_exception_propagation_with_lower_context(
         env.type_env(),
         current_type,
     )
-}
-
-fn external_call_lowered_type_from_planned_static_owner(
-    receiver: Option<&Expr>,
-    name: &str,
-    args: &[Expr],
-    resolved: Option<&ResolvedCall>,
-    env: &ShapeEnv,
-    ctx: LowerCtx,
-) -> Option<LoweredType> {
-    let plan = plan_call_expr_with_lower_context(receiver, name, args, resolved, ctx, env);
-    let CallExprPlan::Target(CallTargetPlan::StaticOwner { owner, .. }) = plan else {
-        return None;
-    };
-    static_owner_result_type_candidates(receiver, &owner, env)
-        .into_iter()
-        .find_map(|owner| {
-            ctx.facts
-                .external_api_effect_for_receiver_with_arity(Some(&owner), name, Some(args.len()))
-                .cloned()
-                .or_else(|| {
-                    crate::external_packs::external_api_effect_for_receiver_with_arity(
-                        Some(&owner),
-                        name,
-                        Some(args.len()),
-                    )
-                })
-                .and_then(|effect| external_effect_lowered_type(effect))
-                .or_else(|| {
-                    crate::stdlib::known_external_method_return_type(Some(&owner), name, args.len())
-                        .map(|return_ty| {
-                            known_external_static_owner_lowered_type(
-                                &owner,
-                                name,
-                                args.len(),
-                                return_ty,
-                            )
-                        })
-                })
-        })
-}
-
-fn known_external_static_owner_lowered_type(
-    owner: &str,
-    name: &str,
-    arg_count: usize,
-    return_ty: JavaType,
-) -> LoweredType {
-    match crate::stdlib::external_api_return_nullability(
-        Some(owner),
-        name,
-        arg_count,
-        ExternalApiRole::Getter,
-    ) {
-        NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
-            if !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void) =>
-        {
-            LoweredType::from_java(crate::types::optional_java_type(return_ty))
-        }
-        _ => LoweredType::from_java(return_ty),
-    }
-}
-
-fn external_effect_lowered_type(
-    effect: crate::facts::ExternalApiEffectFact,
-) -> Option<LoweredType> {
-    let return_ty = effect.return_type?;
-    match effect.return_nullability {
-        NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
-            if !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void) =>
-        {
-            Some(LoweredType::from_java(crate::types::optional_java_type(
-                return_ty,
-            )))
-        }
-        _ => Some(LoweredType::from_java(return_ty)),
-    }
-}
-
-fn static_owner_result_type_candidates(
-    receiver: Option<&Expr>,
-    planned_owner: &str,
-    env: &ShapeEnv,
-) -> Vec<String> {
-    let mut owners = Vec::new();
-    if let Some(Expr::Var(receiver_name)) = receiver {
-        if let Some(alias) = env.type_env().static_type_alias(receiver_name) {
-            owners.push(alias.to_string());
-            owners.push(crate::stdlib::canonical_external_receiver_type_key(alias));
-        }
-        owners.push(receiver_name.clone());
-        owners.push(crate::stdlib::canonical_external_receiver_type_key(
-            receiver_name,
-        ));
-    }
-    owners.push(planned_owner.to_string());
-    owners.push(crate::stdlib::canonical_external_receiver_type_key(
-        planned_owner,
-    ));
-    owners.dedup();
-    owners
-}
-
-fn external_receiver_call_return_type(receiver: &Expr, facts: &FactSet) -> Option<JavaType> {
-    let Expr::Call {
-        name,
-        args,
-        resolved,
-        ..
-    } = receiver
-    else {
-        return None;
-    };
-    let resolved = resolved.as_ref()?;
-    let arity = Some(args.len());
-    for method_name in [name.as_str(), resolved.rust_name.as_str()] {
-        if let Some(effect) = facts
-            .external_api_effect_for_receiver_with_arity(
-                Some(&resolved.declaring_type),
-                method_name,
-                arity,
-            )
-            .cloned()
-            .or_else(|| {
-                crate::external_packs::external_api_effect_for_receiver_with_arity(
-                    Some(&resolved.declaring_type),
-                    method_name,
-                    arity,
-                )
-            })
-            && let Some(return_type) = effect.return_type
-        {
-            return Some(return_type);
-        }
-    }
-    None
 }
 
 fn apply_call_target_with_lower_context(
@@ -13154,6 +13003,10 @@ fn lower_expr_for_slot_with_refinements(
     if let Some(expr) = lower_raw_erasure_cast_source_for_slot(expr, env, &slot, ctx, refinements) {
         return expr;
     }
+    if let Some(expr) = lower_closed_enum_cast_for_matching_slot(expr, env, &slot, ctx, refinements)
+    {
+        return expr;
+    }
     if let Some(stream_expr) = lower_stream_expr(expr, env, ctx) {
         let plan = plan_lowered_slot_conversion(&stream_expr.actual, slot, ctx.facts);
         return apply_lowered_slot_expr_conversion(stream_expr, &plan);
@@ -14877,6 +14730,26 @@ fn lower_raw_erasure_cast_source_for_slot(
         ctx,
         refinements,
     ))
+}
+
+fn lower_closed_enum_cast_for_matching_slot(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::Cast { ty, .. } = expr else {
+        return None;
+    };
+    let target = slot_target_shape(slot)?;
+    if !matches!(target.dispatch, DispatchShape::ClosedEnum { .. })
+        || target.ownership != OwnershipShape::Owned
+        || !same_concrete_java_type(ty, &target.java_ty)
+    {
+        return None;
+    }
+    Some(lower_expr_with_refinements(expr, env, ctx, refinements))
 }
 
 fn raw_erasure_cast_inner_already_matches_slot(
@@ -17947,13 +17820,14 @@ fn lower_external_call_expr_for_slot(
         ctx.current_type,
     )
     .or_else(|| {
-        external_call_lowered_type_from_planned_static_owner(
+        external_call_lowered_type_from_static_owner_plan_with_external_index(
             receiver.as_deref(),
             name,
             args,
             resolved.as_ref(),
-            env,
-            ctx,
+            ctx.facts,
+            ctx.external_index,
+            env.type_env(),
         )
     })?;
     let inferred_actual = infer_expr_shape_with_context(

@@ -763,7 +763,162 @@ pub fn external_call_lowered_type_with_external_index(
     Some(lowered)
 }
 
-fn known_external_call_lowered_type(
+pub fn external_call_lowered_type_from_static_owner_plan_with_external_index(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&ResolvedCall>,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+) -> Option<LoweredType> {
+    let plan = plan_call_expr_with_external_index(
+        receiver,
+        name,
+        args,
+        resolved,
+        facts,
+        external_index,
+        types,
+    );
+    let CallExprPlan::Target(CallTargetPlan::StaticOwner { owner, .. }) = plan else {
+        return None;
+    };
+    static_owner_result_type_candidates(receiver, &owner, types)
+        .into_iter()
+        .find_map(|owner| {
+            external_index
+                .external_api_effect_for_receiver_with_arity(Some(&owner), name, Some(args.len()))
+                .cloned()
+                .or_else(|| {
+                    crate::external_packs::external_api_effect_for_receiver_with_arity(
+                        Some(&owner),
+                        name,
+                        Some(args.len()),
+                    )
+                })
+                .and_then(external_effect_lowered_type)
+                .or_else(|| {
+                    crate::stdlib::known_external_method_return_type(Some(&owner), name, args.len())
+                        .map(|return_ty| {
+                            known_external_call_lowered_type(
+                                Some(&owner),
+                                name,
+                                args.len(),
+                                return_ty,
+                            )
+                        })
+                })
+        })
+}
+
+pub fn external_receiver_call_return_type_with_external_index(
+    receiver: &Expr,
+    external_index: &ExternalFactLookupIndex<'_>,
+) -> Option<JavaType> {
+    let Expr::Call {
+        name,
+        args,
+        resolved,
+        ..
+    } = receiver
+    else {
+        return None;
+    };
+    let resolved = resolved.as_ref()?;
+    let arity = Some(args.len());
+    for method_name in [name.as_str(), resolved.rust_name.as_str()] {
+        if let Some(return_type) = external_index
+            .external_api_effect_for_receiver_with_arity(
+                Some(&resolved.declaring_type),
+                method_name,
+                arity,
+            )
+            .cloned()
+            .or_else(|| {
+                crate::external_packs::external_api_effect_for_receiver_with_arity(
+                    Some(&resolved.declaring_type),
+                    method_name,
+                    arity,
+                )
+            })
+            .and_then(|effect| effect.return_type)
+        {
+            return Some(return_type);
+        }
+    }
+    None
+}
+
+pub fn resource_close_declares_result_with_external_index(
+    resource_ty: &JavaType,
+    external_index: &ExternalFactLookupIndex<'_>,
+) -> bool {
+    resource_type_names_for_close_lookup(resource_ty)
+        .into_iter()
+        .any(|receiver_type| {
+            external_index
+                .external_api_effect_for_receiver_with_arity(Some(receiver_type), "close", Some(0))
+                .is_some_and(|effect| !effect.thrown.is_empty())
+                || crate::external_packs::external_api_effect_for_receiver_with_arity(
+                    Some(receiver_type),
+                    "close",
+                    Some(0),
+                )
+                .is_some_and(|effect| !effect.thrown.is_empty())
+        })
+}
+
+fn external_effect_lowered_type(
+    effect: crate::facts::ExternalApiEffectFact,
+) -> Option<LoweredType> {
+    let return_ty = effect.return_type?;
+    match effect.return_nullability {
+        NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+            if !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void) =>
+        {
+            Some(LoweredType::from_java(crate::types::optional_java_type(
+                return_ty,
+            )))
+        }
+        _ => Some(LoweredType::from_java(return_ty)),
+    }
+}
+
+fn static_owner_result_type_candidates(
+    receiver: Option<&Expr>,
+    planned_owner: &str,
+    types: &TypeEnv,
+) -> Vec<String> {
+    let mut owners = Vec::new();
+    if let Some(Expr::Var(receiver_name)) = receiver {
+        if let Some(alias) = types.static_type_alias(receiver_name) {
+            owners.push(alias.to_string());
+            owners.push(crate::stdlib::canonical_external_receiver_type_key(alias));
+        }
+        owners.push(receiver_name.clone());
+        owners.push(crate::stdlib::canonical_external_receiver_type_key(
+            receiver_name,
+        ));
+    }
+    owners.push(planned_owner.to_string());
+    owners.push(crate::stdlib::canonical_external_receiver_type_key(
+        planned_owner,
+    ));
+    owners.dedup();
+    owners
+}
+
+fn resource_type_names_for_close_lookup(ty: &JavaType) -> Vec<&str> {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            vec![name.as_str(), name.rsplit('.').next().unwrap_or(name)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+pub(crate) fn known_external_call_lowered_type(
     receiver_key: Option<&str>,
     name: &str,
     arg_count: usize,

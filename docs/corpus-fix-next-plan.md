@@ -4357,6 +4357,17 @@ for dyn traits and public/API boundary shapes. The earlier external byte-array,
 array adapter, erased-object carrier, nullable owned option, support-field,
 static-field, logger, closed-enum cast, and stream clusters are green in the
 full run.
+Fact/planner ownership follow-up: lower-side direct external API effect lookups
+for resource close, planned static-owner return typing, and receiver-call return
+typing moved behind `call_plan` helpers. Nested interface object-safety fact
+lookup now accepts qualified/simple nested aliases through effective-fact
+matching. Interface object-return borrowing no longer treats typed
+sequence-like facades as borrowed object returns, preserving owned `Vec<T>`
+trait returns, and explicit closed-enum casts matching an owned closed-enum slot
+avoid a second slot-level ownership recovery after cast lowering has already
+wrapped the value. Focused guards green: semantic fact ownership,
+source-parsed object safety facts, dyn-trait signature rendering with facts, and
+closed-enum local-shape lowering.
 
 ## Rerun Protocol
 
