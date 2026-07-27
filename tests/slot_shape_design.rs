@@ -14020,6 +14020,8 @@ fn static_optional_storage_initializers_use_optional_construction_plan() {
 
     assert!(!source.contains("fn construct_optional_value_for_target"));
     assert!(conversion_lowering_source.contains("fn construct_optional_value_for_target"));
+    assert!(!conversion_lowering_source.contains("FactSet"));
+    assert!(!conversion_lowering_source.contains("plan_slot_conversion"));
     assert!(
         conversion_lowering_source
             .contains("SlotConversionPlan::OptionalConstruction(construction)")
@@ -14033,7 +14035,7 @@ fn static_optional_storage_initializers_use_optional_construction_plan() {
         })
         .expect("present optional target helper should be present");
     assert!(
-        present_optional_helper.contains("construct_optional_value_for_target"),
+        present_optional_helper.contains("planned_optional_value_for_target"),
         "{present_optional_helper}"
     );
     assert!(
@@ -14046,7 +14048,7 @@ fn static_optional_storage_initializers_use_optional_construction_plan() {
         .and_then(|tail| tail.split("fn indexed_access_needs_borrowed_place").next())
         .expect("array-access slot helper should be present");
     assert!(
-        array_access_helper.contains("construct_optional_value_for_target"),
+        array_access_helper.contains("planned_optional_value_for_target"),
         "{array_access_helper}"
     );
     assert!(
@@ -14073,7 +14075,7 @@ fn optional_erased_handoff_arguments_use_optional_construction_plan() {
         })
         .expect("optional erased handoff wrapper should be present");
 
-    assert!(wrapper.contains("construct_optional_value_for_target"));
+    assert!(wrapper.contains("planned_optional_value_for_target"));
     assert!(
         conversion_lowering_source.contains("fn construct_preconverted_optional_value_for_target")
     );
@@ -14093,7 +14095,7 @@ fn optional_assignment_rewrap_uses_optional_construction_plan() {
         })
         .expect("optional assignment wrapper should be present");
 
-    assert!(wrapper.contains("adapt_optional_assignment_value_for_target"));
+    assert!(wrapper.contains("planned_optional_assignment_value_for_target"));
     assert!(!wrapper.contains("unwrap_rendered_some_expr"));
     assert!(
         conversion_lowering_source.contains("construct_preconverted_optional_value_for_target")

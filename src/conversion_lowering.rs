@@ -2,13 +2,10 @@ use crate::coercion::{LoweredExpr, apply_slot_conversion_plan};
 use crate::conversion_plan::{
     CastConversionPlan, InstanceOfPlan, JavaCastSemanticsPolicy, LoweredSlotExprConversionPlan,
     LoweredType, OptionalSlotConstructionPlan, Slot, SlotConversionPlan, SlotExprConversionPlan,
-    optional_slot_construction_plan_for_actual, plan_slot_conversion,
-    shape_coercion_plan_with_facts,
 };
-use crate::facts::FactSet;
 use crate::java_ir::PrimitiveType;
 use crate::rust_ir::RustExpr;
-use crate::slot_shape::{OwnershipShape, RustSlotShape};
+use crate::slot_shape::RustSlotShape;
 
 pub fn apply_cast_conversion(expr: RustExpr, plan: &CastConversionPlan) -> RustExpr {
     if let JavaCastSemanticsPolicy::PrimitiveNumericCast { from, to, .. } = plan.semantics {
@@ -52,15 +49,11 @@ pub fn apply_lowered_slot_expr_conversion(
 
 pub fn construct_optional_value_for_target(
     value: RustExpr,
-    actual_element_shape: RustSlotShape,
-    target_shape: &RustSlotShape,
-    facts: &FactSet,
+    construction: OptionalSlotConstructionPlan,
 ) -> RustExpr {
-    let construction =
-        optional_slot_construction_plan_for_actual(&actual_element_shape, target_shape, facts);
     let plan = LoweredSlotExprConversionPlan {
-        actual: LoweredType::Slot(Box::new(actual_element_shape)),
-        slot: Slot::Assignment(target_shape.clone()),
+        actual: LoweredType::Slot(Box::new(construction.element_shape.clone())),
+        slot: Slot::Assignment(construction.target.clone()),
         conversion: SlotConversionPlan::OptionalConstruction(construction),
     };
     apply_lowered_slot_expr_conversion(
@@ -74,19 +67,11 @@ pub fn construct_optional_value_for_target(
 
 pub fn construct_preconverted_optional_value_for_target(
     value: RustExpr,
-    element_shape: RustSlotShape,
-    target_shape: &RustSlotShape,
-    facts: &FactSet,
+    construction: OptionalSlotConstructionPlan,
 ) -> RustExpr {
-    let construction = OptionalSlotConstructionPlan {
-        target: target_shape.clone(),
-        element_shape: element_shape.clone(),
-        element_plan: shape_coercion_plan_with_facts(&element_shape, &element_shape, facts),
-        wrapper_ownership: OwnershipShape::Owned,
-    };
     let plan = LoweredSlotExprConversionPlan {
-        actual: LoweredType::Slot(Box::new(element_shape)),
-        slot: Slot::Assignment(target_shape.clone()),
+        actual: LoweredType::Slot(Box::new(construction.element_shape.clone())),
+        slot: Slot::Assignment(construction.target.clone()),
         conversion: SlotConversionPlan::OptionalConstruction(construction),
     };
     apply_lowered_slot_expr_conversion(
@@ -101,10 +86,9 @@ pub fn construct_preconverted_optional_value_for_target(
 pub fn adapt_optional_assignment_value_for_target(
     lowered_value: RustExpr,
     actual: RustSlotShape,
-    slot: Slot,
-    target: &RustSlotShape,
+    conversion_plan: SlotExprConversionPlan,
+    preconverted_some_plan: OptionalSlotConstructionPlan,
     already_optional_result: bool,
-    facts: &FactSet,
 ) -> RustExpr {
     if actual.optional_element_type().is_some() || already_optional_result {
         if let Some(inner) = crate::coercion::unwrap_rendered_some_expr(&lowered_value) {
@@ -118,15 +102,7 @@ pub fn adapt_optional_assignment_value_for_target(
         return lowered_value;
     }
     if let Some(inner) = crate::coercion::unwrap_rendered_some_expr(&lowered_value) {
-        let mut target_element = target.clone();
-        target_element.java_ty = actual.java_ty.clone();
-        return construct_preconverted_optional_value_for_target(
-            inner,
-            target_element,
-            target,
-            facts,
-        );
+        return construct_preconverted_optional_value_for_target(inner, preconverted_some_plan);
     }
-    let plan = plan_slot_conversion(actual, slot, facts);
-    apply_slot_expr_conversion(lowered_value, &plan)
+    apply_slot_expr_conversion(lowered_value, &conversion_plan)
 }

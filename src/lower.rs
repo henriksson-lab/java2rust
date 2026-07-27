@@ -71,19 +71,19 @@ use crate::constructor_plan::{
 };
 use crate::control_flow_lowering::{TailRecursiveLoopRender, render_tail_recursive_loop_body};
 use crate::conversion_lowering::{
-    adapt_optional_assignment_value_for_target, apply_cast_conversion, apply_instanceof,
-    apply_lowered_slot_expr_conversion, apply_slot_expr_conversion,
-    construct_optional_value_for_target,
+    adapt_optional_assignment_value_for_target as render_adapt_optional_assignment_value_for_target,
+    apply_cast_conversion, apply_instanceof, apply_lowered_slot_expr_conversion,
+    apply_slot_expr_conversion, construct_optional_value_for_target,
 };
 use crate::conversion_plan::{
-    CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredType, ReturnValuePlan, Slot,
-    SlotConversionPlan, actual_shape_for_slot_expr, actual_shape_for_slot_expr_with_slot,
-    argument_slot, assignment_statement_plan_for_target, assignment_value_plan_for_shape,
-    assignment_value_plan_for_target, condition_slot, index_slot,
+    CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredType, OptionalSlotConstructionPlan,
+    ReturnValuePlan, Slot, SlotConversionPlan, actual_shape_for_slot_expr,
+    actual_shape_for_slot_expr_with_slot, argument_slot, assignment_statement_plan_for_target,
+    assignment_value_plan_for_shape, assignment_value_plan_for_target, condition_slot, index_slot,
     optional_slot_construction_plan_for_actual, plan_cast_conversion_from_actual, plan_instanceof,
     plan_lowered_slot_conversion, plan_slot_conversion,
     receiver_method_autoref_satisfies_facade_slot, receiver_method_autoref_satisfies_optional_slot,
-    return_value_plan,
+    return_value_plan, shape_coercion_plan_with_facts,
 };
 use crate::diagnostics::DiagnosticBag;
 use crate::emit;
@@ -876,7 +876,7 @@ fn static_storage_initial_value_expr(
         _ => crate::slot_render::default_expr_for_slot_with_facts(shape, ctx.facts),
     };
     if let Some(element_ty) = shape.optional_element_type() {
-        construct_optional_value_for_target(
+        planned_optional_value_for_target(
             value,
             RustSlotShape::conservative(element_ty),
             shape,
@@ -3639,7 +3639,7 @@ fn wrap_optional_assignment_value_if_needed(
     let actual = planned_actual.unwrap_or(inferred_actual);
     let already_optional_result = known_external_call_result_shape_from_syntax(value, ctx)
         .is_some_and(|shape| shape.optional_element_type().is_some());
-    adapt_optional_assignment_value_for_target(
+    planned_optional_assignment_value_for_target(
         lowered_value,
         actual,
         slot.clone(),
@@ -11600,7 +11600,7 @@ fn wrap_erased_handoff_arg_for_optional_target(
     if target_shape.optional_element_type().is_some()
         && actual_shape.optional_element_type().is_none()
     {
-        construct_optional_value_for_target(lowered, actual_shape.clone(), target_shape, facts)
+        planned_optional_value_for_target(lowered, actual_shape.clone(), target_shape, facts)
     } else {
         lowered
     }
@@ -14984,6 +14984,43 @@ fn constructor_result_can_flow_into_concrete_slot(
     )
 }
 
+fn planned_optional_value_for_target(
+    value: RustExpr,
+    actual_element_shape: RustSlotShape,
+    target_shape: &RustSlotShape,
+    facts: &FactSet,
+) -> RustExpr {
+    let construction =
+        optional_slot_construction_plan_for_actual(&actual_element_shape, target_shape, facts);
+    construct_optional_value_for_target(value, construction)
+}
+
+fn planned_optional_assignment_value_for_target(
+    lowered_value: RustExpr,
+    actual: RustSlotShape,
+    slot: Slot,
+    target: &RustSlotShape,
+    already_optional_result: bool,
+    facts: &FactSet,
+) -> RustExpr {
+    let conversion_plan = plan_slot_conversion(actual.clone(), slot, facts);
+    let mut target_element = target.clone();
+    target_element.java_ty = actual.java_ty.clone();
+    let preconverted_some_plan = OptionalSlotConstructionPlan {
+        target: target.clone(),
+        element_shape: target_element.clone(),
+        element_plan: shape_coercion_plan_with_facts(&target_element, &target_element, facts),
+        wrapper_ownership: OwnershipShape::Owned,
+    };
+    render_adapt_optional_assignment_value_for_target(
+        lowered_value,
+        actual,
+        conversion_plan,
+        preconverted_some_plan,
+        already_optional_result,
+    )
+}
+
 fn concrete_java_type_name(java_ty: &JavaType) -> Option<&str> {
     match java_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
@@ -15621,7 +15658,7 @@ fn lower_reused_optional_wrap_for_slot(
     }
     let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
     let recovered = apply_audited_clone_recovery(lowered);
-    Some(construct_optional_value_for_target(
+    Some(planned_optional_value_for_target(
         recovered,
         actual.clone(),
         target,
@@ -16890,7 +16927,7 @@ fn lower_array_access_expr_for_slot(
         && matches!(target.view, ViewShape::Native)
     {
         let actual_access = RustSlotShape::conservative(actual.java_ty.clone());
-        return Some(construct_optional_value_for_target(
+        return Some(planned_optional_value_for_target(
             access_expr,
             actual_access,
             target,
@@ -18221,7 +18258,7 @@ fn lower_present_expr_for_optional_target(
                 &else_refinements,
             ),
         );
-        return construct_optional_value_for_target(
+        return planned_optional_value_for_target(
             branch_value,
             construction.element_shape,
             target,
@@ -18257,7 +18294,7 @@ fn lower_present_expr_for_optional_target(
     };
     let lowered_expr =
         lower_expr_for_slot_with_refinements(expr, env, element_lowering_slot, ctx, refinements);
-    construct_optional_value_for_target(lowered_expr, construction.element_shape, target, ctx.facts)
+    construct_optional_value_for_target(lowered_expr, construction)
 }
 
 fn ternary_condition_non_null_branch_expr(condition: &Expr) -> Option<(&Expr, bool)> {

@@ -4093,6 +4093,13 @@ call-plan helpers (`non_self_trivial_accessor_target`,
 arity-aware call-target planner for argument-bearing Java string methods, which
 matches real lowering and keeps native Java string semantics from depending on a
 zero-arity compatibility path.
+Conversion-lowering ownership cleanup: `conversion_lowering.rs` no longer
+depends on `FactSet` or calls slot-conversion planners while rendering optional
+slot construction. Facts-aware optional construction and optional assignment
+rewrap decisions now happen in lower-side planning wrappers, which pass
+`OptionalSlotConstructionPlan` / `SlotExprConversionPlan` into renderer helpers.
+Focused coverage includes the conversion-plan ownership guard and the optional
+storage, erased handoff, and assignment rewrap construction-plan guards.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
