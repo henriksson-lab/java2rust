@@ -950,6 +950,25 @@ pub fn unbound_method_call_projection(receiver: RustExpr, method: &str) -> RustE
     }
 }
 
+pub fn function_call_projection(function: RustExpr, args: Vec<RustExpr>) -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(function),
+        args,
+    }
+}
+
+pub fn receiver_method_call_projection_exact(
+    receiver: RustExpr,
+    method: &str,
+    args: Vec<RustExpr>,
+) -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(receiver),
+        method: method.to_string(),
+        args,
+    }
+}
+
 pub fn receiver_method_call_projection(
     receiver: RustExpr,
     method: &str,

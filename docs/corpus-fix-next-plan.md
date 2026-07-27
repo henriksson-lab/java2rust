@@ -3920,6 +3920,13 @@ methods, `Optional.isPresent`, and `MessageFormat.format` now also render
 through `coercion::receiver_method_call_projection` instead of constructing
 `RustExpr::MethodCall` directly in `call_lowering.rs`. Focused verification:
 `rendered_string_heuristics_have_centralization_guardrails`.
+Follow-up: the generic `apply_call_target` path now wraps selected function
+paths and receiver methods through
+`coercion::{function_call_projection, receiver_method_call_projection_exact}`
+instead of constructing `RustExpr::Call`/`RustExpr::MethodCall` locally for
+the common static, receiver, self, free, and Java-class call targets. Focused
+verification: `apply_call_target_uses_shared_call_projection_helpers` and
+`rendered_string_heuristics_have_centralization_guardrails`.
 Follow-up: bare source instance-field access now uses
 `coercion::self_field_projection` for both structured lowering and rendered
 fallbacks. `access_lowering.rs` still owns local-vs-field-vs-static-name

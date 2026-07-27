@@ -8204,6 +8204,75 @@ class Add implements Expr {}
 }
 
 #[test]
+fn apply_call_target_uses_shared_call_projection_helpers() {
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::StaticSelf { rust_name: "make" },
+            None,
+            vec![RustExpr::Var("value".to_string())],
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("Self::make".to_string())),
+            args: vec![RustExpr::Var("value".to_string())],
+        }
+    );
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::StaticOwner {
+                owner: "Owner".to_string(),
+                rust_name: "make".to_string(),
+            },
+            None,
+            Vec::new(),
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Raw("Owner::make".to_string())),
+            args: Vec::new(),
+        }
+    );
+    let receiver = Expr::Var("helper".to_string());
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::InstanceReceiver {
+                receiver: &receiver,
+                rust_name: "readName",
+            },
+            Some(RustExpr::Var("helper".to_string())),
+            Vec::new(),
+        ),
+        RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("helper".to_string())),
+            method: "readName".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::FallbackFree {
+                rust_name: "make".to_string(),
+            },
+            None,
+            Vec::new(),
+        ),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Var("make".to_string())),
+            args: Vec::new(),
+        }
+    );
+
+    let call_lowering_source = include_str!("../src/call_lowering.rs");
+    let apply_call_target_source = call_lowering_source
+        .split("pub fn apply_call_target")
+        .nth(1)
+        .expect("apply_call_target should exist")
+        .split("fn apply_external_facade_call")
+        .next()
+        .expect("apply_call_target should be bounded");
+    assert!(apply_call_target_source.contains("function_call_projection"));
+    assert!(apply_call_target_source.contains("receiver_method_call_projection_exact"));
+}
+
+#[test]
 fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     let receiver = Expr::Var("helper".to_string());
     let resolved_static = new_java2rust::java_ir::ResolvedCall {
@@ -27833,6 +27902,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("pub fn unbound_method_reference_projection"));
     assert!(coercion_source.contains("pub fn current_receiver_method_reference_projection"));
     assert!(coercion_source.contains("pub fn unbound_method_call_projection"));
+    assert!(coercion_source.contains("pub fn function_call_projection"));
+    assert!(coercion_source.contains("pub fn receiver_method_call_projection_exact"));
     assert!(coercion_source.contains("pub fn receiver_method_call_projection"));
     assert!(coercion_source.contains("pub fn current_receiver_method_call_projection"));
     assert!(call_source.contains("receiver_method_call_projection"));
@@ -28120,6 +28191,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(call_source.contains("self_associated_path_projection("));
     assert!(call_source.contains("owner_associated_path_projection("));
     assert!(call_source.contains("java_class_static_path_projection("));
+    assert!(call_source.contains("function_call_projection("));
+    assert!(call_source.contains("receiver_method_call_projection_exact("));
     assert!(call_source.contains("java_class_literal_path_projection("));
     assert!(call_source.contains("external_crate_path_projection("));
     assert!(call_source.contains("external_crate_associated_path_projection("));
