@@ -4078,6 +4078,13 @@ has a selected stdlib `FacadeAbiFact` with optional borrowed operands, matching
 the existing `Objects.nonNull/isNull` null-carrier facts. Native lowering still
 owns the equality projection, but nullable operand borrowing is now selected
 from shared slot facts.
+Batch-boundary verification note: after the `System.exit`, fixed-arity `Math`,
+and `Objects.equals` ABI fact slices, focused tests and `cargo check --quiet`
+passed, but the full `cargo test --test slot_shape_design --quiet` gate is
+still red with 454 passed / 55 failed. The failures span pre-existing broad
+design-drift guards in representation, signature, stream, semantic-analysis,
+and lowering ownership tests, so treat the full design suite as a separate
+cleanup batch rather than a blocker for these committed ABI fact slices.
 
 Native collection optional receiver cleanup: optional Java collection receiver
 adaptation still verifies that the nullable payload is a known Java collection,
