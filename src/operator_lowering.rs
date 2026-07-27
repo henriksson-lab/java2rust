@@ -197,7 +197,6 @@ pub fn plan_equality_comparison_with_facts(
         && right.optional_element_type().is_none()
         && left.java_ty == JavaType::String
         && right.java_ty == JavaType::String
-        && (is_borrowed_string_view(left) || is_borrowed_string_view(right))
     {
         return EqualityComparisonPlan::StringView {
             left_view: string_equality_operand_view(left),

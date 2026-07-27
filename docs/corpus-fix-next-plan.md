@@ -4394,6 +4394,36 @@ when an unqualified or external-modeled call justifies them. Explicit
 native collection idioms such as `addAll`. Full verification:
 `cargo test --test slot_shape_design --quiet` passed 509/509 in 354.64s.
 
+Optional/string slot stabilization checkpoint: public read-only string
+parameters again participate in borrowed-content policy while public API
+signature guards preserve explicit boundary representation. Optional string
+view projection now uses `as_ref().map(|value| value.as_str())`, which works
+for both `Option<String>` and `Option<&String>` carriers. Nullable owned facade
+arguments for `HtsjdkReadsRddStorage.referenceSourcePath` and
+`SamReaderFactory.referenceSequence` now use `NoAlias` external-pack facts, so
+their `Option<String>`/`Option<Path>` support signatures receive owned optional
+payloads instead of borrowed payload views. Java string equality planning now
+normalizes all non-null string operands through the shared string-view equality
+plan, not only operands that already arrived borrowed. Focused guards green:
+`nullable_external_fluent_argument_wraps_owned_optional_branch`,
+`nullable_sam_reader_reference_sequence_argument_wraps_path_branch`,
+`map_get_into_optional_borrowed_arg_uses_optional_carrier_plan`,
+`non_null_ternary_into_optional_borrowed_arg_wraps_planned_borrow`,
+`borrowed_nullable_trim_equals_original_uses_optional_string_view_policy`,
+`nullable_trim_equals_original_uses_optional_string_view_policy`,
+`public_readonly_string_param_uses_str_view_for_static_string_constants`,
+`java_string_equality_normalizes_owned_and_borrowed_slots`,
+`disq_write_pack_declares_temp_parts_option_boundary`,
+`htsjdk_sam_reader_pack_declares_factory_option_nested_enum`, and
+`htsjdk_variantcontext_pack_models_builder_and_getter_effects`.
+
+Remaining adjacent work: varargs packing now calls the shared reused-owned clone
+decision for each element, but `source_varargs_pack_external_elements_with_explicit_adapter`
+still exposes a real static-field precision gap where typed external constants
+can be erased before the `Into<WriteOption>` adapter is selected. Some varargs
+assertions also need review because they still expect clones for values that are
+consumed exactly once and not read later.
+
 ## Rerun Protocol
 
 After each fix:

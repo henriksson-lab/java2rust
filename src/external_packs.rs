@@ -13997,7 +13997,7 @@ const SAM_READER_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
         parameter_type: Some("Path"),
         parameter_nullability: NullabilityState::MaybeNull,
         argument_mutability: ReceiverMutabilityFact::ReadOnly,
-        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+        alias_policy: ExternalArgumentAliasPolicy::NoAlias,
     },
     ExternalPackArgumentEffect {
         receiver_type: "SamReaderFactory",
@@ -14006,7 +14006,7 @@ const SAM_READER_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
         parameter_type: Some("Path"),
         parameter_nullability: NullabilityState::MaybeNull,
         argument_mutability: ReceiverMutabilityFact::ReadOnly,
-        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+        alias_policy: ExternalArgumentAliasPolicy::NoAlias,
     },
 ];
 
@@ -23456,7 +23456,7 @@ const DISQ_WRITE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
         parameter_type: Some("String"),
         parameter_nullability: NullabilityState::MaybeNull,
         argument_mutability: ReceiverMutabilityFact::ReadOnly,
-        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+        alias_policy: ExternalArgumentAliasPolicy::NoAlias,
     },
     ExternalPackArgumentEffect {
         receiver_type: "HtsjdkReadsRddStorage",
@@ -23465,7 +23465,7 @@ const DISQ_WRITE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
         parameter_type: Some("String"),
         parameter_nullability: NullabilityState::MaybeNull,
         argument_mutability: ReceiverMutabilityFact::ReadOnly,
-        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+        alias_policy: ExternalArgumentAliasPolicy::NoAlias,
     },
 ];
 

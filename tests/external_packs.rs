@@ -8421,6 +8421,7 @@ fn disq_write_pack_declares_temp_parts_option_boundary() {
             argument.argument_mutability,
             ReceiverMutabilityFact::ReadOnly
         );
+        assert_eq!(argument.alias_policy, ExternalArgumentAliasPolicy::NoAlias);
     }
 }
 
@@ -11959,6 +11960,7 @@ fn htsjdk_sam_reader_pack_declares_factory_option_nested_enum() {
             argument.argument_mutability,
             ReceiverMutabilityFact::ReadOnly
         );
+        assert_eq!(argument.alias_policy, ExternalArgumentAliasPolicy::NoAlias);
     }
 }
 

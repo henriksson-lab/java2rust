@@ -1436,7 +1436,10 @@ pub fn render_string_equality_operand_projection(
 }
 
 pub fn optional_string_view_projection(expr: RustExpr) -> RustExpr {
-    RustExpr::Raw(format!("{}.as_deref()", emit::emit_expr(&expr)))
+    RustExpr::Raw(format!(
+        "{}.as_ref().map(|value| value.as_str())",
+        emit::emit_expr(&expr)
+    ))
 }
 
 pub fn string_helper_receiver_projection(receiver: RustExpr) -> RustExpr {
@@ -3190,8 +3193,8 @@ fn apply_optional_borrowed_element_target_view(
         (OwnershipShape::SharedBorrow, ViewShape::Str)
             if target_element.java_ty == crate::java_ir::JavaType::String =>
         {
-            (!rendered.ends_with(".as_deref()"))
-                .then(|| RustExpr::Raw(format!("{rendered}.as_deref()")))
+            (!rendered.ends_with(".as_ref().map(|value| value.as_str())"))
+                .then(|| RustExpr::Raw(format!("{rendered}.as_ref().map(|value| value.as_str())")))
         }
         (OwnershipShape::SharedBorrow, ViewShape::Native) => (!rendered.ends_with(".as_ref()"))
             .then(|| RustExpr::Raw(format!("{rendered}.as_ref()"))),

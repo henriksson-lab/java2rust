@@ -10435,6 +10435,10 @@ fn lower_varargs_element_expr(
         let cloned = apply_audited_clone_recovery(lowered);
         return apply_slot_expr_conversion(cloned, &plan);
     }
+    lowered = apply_clone_recovery_decision(
+        lowered,
+        clone_recovery_decision_for_argument(arg, element_shape, Some(&actual_shape), ctx),
+    );
     apply_slot_expr_conversion(lowered, &plan)
 }
 
@@ -18452,6 +18456,16 @@ fn lower_present_expr_for_optional_target(
     }
     let actual_is_indexed_borrow_projection = matches!(expr, Expr::ArrayAccess(_, _))
         && actual_element_shape.ownership == OwnershipShape::SharedBorrow;
+    let target_element_shape =
+        crate::conversion_plan::optional_element_slot_shape(target, element_ty.clone());
+    if !actual_is_indexed_borrow_projection
+        && matches!(
+            target_element_shape.ownership,
+            OwnershipShape::Owned | OwnershipShape::CopyValue
+        )
+    {
+        actual_element_shape = target_element_shape;
+    }
     if actual_is_indexed_borrow_projection {
         actual_element_shape = RustSlotShape::conservative(actual_element_shape.java_ty.clone());
     }

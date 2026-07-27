@@ -104,13 +104,6 @@ pub fn method_param_borrowed_content_policy_with_effective_facts(
     facts: &EffectiveFacts<'_>,
 ) -> Option<BorrowedContentPolicy> {
     let content_policy = borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy;
-    if method
-        .modifiers
-        .iter()
-        .any(|modifier| matches!(modifier, Modifier::Public | Modifier::Protected))
-    {
-        return None;
-    }
     if method_param_allows_borrowed_content(ty, method, param, usage, facts)
         || method_return_allows_borrowed_param_content(ty, method, param, usage, facts)
     {
