@@ -4188,6 +4188,7 @@ fn refine_local_plan_from_initializer(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> LocalPlan {
+    local_plan = preserve_declared_erased_object_local_shape(local_plan);
     let Some(initializer) = initializer else {
         return local_plan;
     };
@@ -4255,6 +4256,35 @@ fn refine_local_plan_from_initializer(
         return local_plan;
     }
     local_plan.shape = initializer_shape;
+    local_plan
+}
+
+fn preserve_declared_erased_object_local_shape(mut local_plan: LocalPlan) -> LocalPlan {
+    if !java_type_is_erased_object_name(&local_plan.java_ty) {
+        return local_plan;
+    }
+    if shape_is_erased_object_boundary(&local_plan.shape)
+        && local_plan.shape.java_ty == local_plan.java_ty
+    {
+        return local_plan;
+    }
+    if shape_is_erased_object_boundary(&local_plan.shape)
+        && local_plan
+            .shape
+            .optional_element_type()
+            .is_some_and(|element_ty| element_ty == local_plan.java_ty)
+    {
+        return local_plan;
+    }
+    let semantic_ty = if local_plan.shape.optional_element_type().is_some() {
+        crate::types::optional_java_type(local_plan.java_ty.clone())
+    } else {
+        local_plan.java_ty.clone()
+    };
+    local_plan.shape = RustSlotShape::for_storage(semantic_ty);
+    local_plan.shape.dispatch = DispatchShape::ErasedObject;
+    local_plan.shape.view = ViewShape::ErasedObjectView;
+    local_plan.shape.ownership = OwnershipShape::Owned;
     local_plan
 }
 
@@ -4422,6 +4452,7 @@ fn local_shape_can_inherit_optional_initializer_shape(
     initializer: &RustSlotShape,
 ) -> bool {
     local.ownership == OwnershipShape::Owned
+        && !shape_is_erased_object_boundary(local)
         && local.optional_element_type().is_none()
         && initializer
             .optional_element_type()
@@ -4432,6 +4463,9 @@ fn initializer_shape_is_more_specific_for_local(
     initializer: &RustSlotShape,
     local: &RustSlotShape,
 ) -> bool {
+    if shape_is_erased_object_boundary(local) {
+        return false;
+    }
     java_types_have_same_erased_identity(&initializer.java_ty, &local.java_ty)
         && shape_is_concrete_native(initializer)
 }
@@ -4473,7 +4507,7 @@ fn fallback_local_shape_from_declared_type_and_initializer(
     ctx: LowerCtx,
 ) -> RustSlotShape {
     let declared = fallback_local_shape_from_declared_type(ty);
-    if declared.optional_element_type().is_some() {
+    if declared.optional_element_type().is_some() || shape_is_erased_object_boundary(&declared) {
         return declared;
     }
     let Some(initializer) = initializer else {

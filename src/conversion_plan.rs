@@ -2613,6 +2613,7 @@ pub enum SlotConversionPlan {
     BorrowedElement(BorrowedElementSlotAdapterPolicy),
     RustScalarCast(RustScalarSlotCastPolicy),
     RustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy),
+    OptionalRustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy),
     RustUnsignedByteArrayReturn(RustUnsignedByteArrayReturnPolicy),
     Identity { actual: LoweredType, slot: Slot },
 }
@@ -2628,6 +2629,7 @@ impl SlotConversionPlan {
             SlotConversionPlan::Syntax(_)
             | SlotConversionPlan::RustScalarCast(_)
             | SlotConversionPlan::RustBorrowedFacadeReturn(_)
+            | SlotConversionPlan::OptionalRustBorrowedFacadeReturn(_)
             | SlotConversionPlan::RustUnsignedByteArrayReturn(_)
             | SlotConversionPlan::Identity { .. } => Vec::new(),
         }
@@ -3078,13 +3080,14 @@ pub fn lowered_slot_conversion_plan_with_facts(
             Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
         ) => {
             if slot_or_optional_element_targets_erased_object(target) {
-                let mut option_shape = (**option_shape).clone();
-                option_shape.ownership = element_shape.ownership;
-                SlotConversionPlan::Shape(shape_coercion_plan_with_facts(
-                    &option_shape,
-                    target,
-                    facts,
-                ))
+                SlotConversionPlan::OptionalRustBorrowedFacadeReturn(
+                    RustBorrowedFacadeReturnPolicy {
+                        rust_type_name: rust_type_name_for_shape(element_shape),
+                        java_semantic_shape: (**element_shape).clone(),
+                        target: target.clone(),
+                        recovery: RustBorrowedFacadeReturnRecovery::Clone,
+                    },
+                )
             } else {
                 SlotConversionPlan::BorrowedElement(borrowed_element_slot_adapter_policy(
                     BorrowedElementCarrier::Option,
@@ -3125,6 +3128,13 @@ pub fn lowered_slot_conversion_plan_with_facts(
             actual: actual.clone(),
             slot: slot.clone(),
         },
+    }
+}
+
+fn rust_type_name_for_shape(shape: &RustSlotShape) -> String {
+    match &shape.java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name.clone(),
+        other => format!("{other:?}"),
     }
 }
 

@@ -7,7 +7,7 @@ use crate::java_ir::{Expr, JavaType, Member, MethodDecl, Modifier, Stmt, TypeDec
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
     borrowed_string_content_shape, indexed_assignment_shape_with_facts,
-    indexed_read_shape_with_facts,
+    indexed_read_shape_with_facts, shape_is_erased_object_boundary,
     project_java_value_shape as project_java_value_shape_with_representations,
 };
 use crate::signature::{
@@ -198,6 +198,13 @@ impl ShapeEnv {
             .filter(|local| local.name == name && local.java_ty == *declared_ty)
             .collect::<Vec<_>>();
         if !exact_matches.is_empty() {
+            if java_type_is_erased_object_boundary(declared_ty)
+                && let Some(local) = exact_matches
+                    .iter()
+                    .find(|local| shape_is_erased_object_boundary(&local.shape))
+            {
+                return Some(*local);
+            }
             let index = self.consume_local_plan_occurrence(name, declared_ty);
             return exact_matches
                 .get(index)
@@ -280,6 +287,11 @@ impl ShapeEnv {
 
 fn is_this_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::This) || matches!(expr, Expr::Var(name) if name == "this")
+}
+
+fn java_type_is_erased_object_boundary(ty: &JavaType) -> bool {
+    matches!(ty, JavaType::Named { name, .. } | JavaType::Unknown(name)
+        if name == "Object" || name == "java.lang.Object")
 }
 
 fn java_type_occurrence_key(ty: &JavaType) -> String {

@@ -756,6 +756,9 @@ pub fn apply_slot_conversion_plan(expr: RustExpr, plan: &SlotConversionPlan) -> 
         SlotConversionPlan::RustBorrowedFacadeReturn(policy) => {
             apply_rust_borrowed_facade_return(expr, policy)
         }
+        SlotConversionPlan::OptionalRustBorrowedFacadeReturn(policy) => {
+            apply_optional_rust_borrowed_facade_return(expr, policy)
+        }
         SlotConversionPlan::RustUnsignedByteArrayReturn(policy) => {
             apply_rust_unsigned_byte_array_return(expr, policy)
         }
@@ -2370,6 +2373,20 @@ fn apply_rust_borrowed_facade_return(
     } else {
         erased
     }
+}
+
+fn apply_optional_rust_borrowed_facade_return(
+    expr: RustExpr,
+    policy: &RustBorrowedFacadeReturnPolicy,
+) -> RustExpr {
+    let rendered = emit::emit_expr(&expr);
+    let recovered = match policy.recovery {
+        RustBorrowedFacadeReturnRecovery::ToPathBuf => "value.to_path_buf()",
+        RustBorrowedFacadeReturnRecovery::Clone => "value.clone()",
+    };
+    RustExpr::Raw(format!(
+        "{rendered}.map(|value| Box::new({recovered}) as Box<dyn std::any::Any>)"
+    ))
 }
 
 fn apply_rust_scalar_slot_cast(expr: RustExpr, policy: &RustScalarSlotCastPolicy) -> RustExpr {

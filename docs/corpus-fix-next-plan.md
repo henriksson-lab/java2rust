@@ -165,6 +165,14 @@ Remaining cleanup should continue replacing nullable call sites that choose
 `.as_ref()`, `.as_deref()`, `Some(...)`, or clone recovery locally with calls
 through these shared conversion helpers or direct slot plans.
 
+Optional borrowed facade return cleanup: `Option<&T>` returns from Rust facade
+ABI facts now convert to optional erased-object slots through a shared slot
+conversion plan, rendering `.map(|value| Box::new(value.clone()) as
+Box<dyn std::any::Any>)` instead of first collapsing to `Option<T>`. Declared
+`Object` locals preserve optional erased carriers when nullable facade getters
+return concrete borrowed values, and optional erased-object carriers are treated
+as erased boundaries by the shared shape predicate.
+
 Rendered compatibility centralization follow-up: same-call alias snapshots still
 decide in `lower.rs` because they need argument aliasing and slot-shape context,
 but the rendered replacement table now lives in `coercion.rs` as

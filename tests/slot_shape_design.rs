@@ -1570,17 +1570,23 @@ class NativeMapFinalFacadeValueUse {
     }
 }
 "#;
+    let mut effective_facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    effective_facts.extend_from(facts.clone());
     let parsed = parse_java_source(source);
     let resolved = resolve_program_with_source_program_and_facts(
         &parsed.program,
         parsed.diagnostics,
         &parsed.program,
-        &facts,
+        &effective_facts,
     );
-    let representations = plan_representations(&resolved.program, &facts);
-    let usage = analyze_usage_with_facts(&resolved.program, &facts);
-    let signatures =
-        solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
+    let representations = plan_representations(&resolved.program, &effective_facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &effective_facts);
+    let signatures = solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &usage,
+        &effective_facts,
+    );
     let ty = &resolved.program.types[0];
     let method = match &ty.members[0] {
         Member::Method(method) => method,
@@ -27273,8 +27279,7 @@ external-pack-argument apache.arrow VectorSchemaRoot getVector 0 definitely-non-
 "#,
     )
     .facts;
-    let translation = translate_source_with_facts(
-        r#"
+    let source = r#"
 class BorrowedArrowGetterReturn {
     void run(VectorSchemaRoot root) {
         Object schema = root.getSchema();
@@ -27282,9 +27287,53 @@ class BorrowedArrowGetterReturn {
         root.close();
     }
 }
-"#,
-        &facts,
+"#;
+    let mut effective_facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+    effective_facts.extend_from(facts.clone());
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &effective_facts,
     );
+    let representations = plan_representations(&resolved.program, &effective_facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &effective_facts);
+    let signatures = solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &usage,
+        &effective_facts,
+    );
+    let ty = &resolved.program.types[0];
+    let method = match &ty.members[0] {
+        Member::Method(method) => method,
+        _ => panic!("expected method"),
+    };
+    let local_plans = signatures.method_local_shapes_or_empty(ty, method);
+    assert!(
+        local_plans.iter().any(|local| {
+            local.name == "vector"
+                && matches!(local.java_ty, JavaType::Named { ref name, .. } if name == "Object")
+        }),
+        "{local_plans:?}"
+    );
+    assert!(
+        local_plans
+            .iter()
+            .filter(|local| local.name == "vector")
+            .all(|local| matches!(local.java_ty, JavaType::Named { ref name, .. } if name == "Object")),
+        "{local_plans:?}"
+    );
+    let vector_shape = signatures.required_local_shape(local_plans, "vector");
+    assert_eq!(vector_shape.dispatch, DispatchShape::ErasedObject);
+    assert_eq!(vector_shape.view, ViewShape::ErasedObjectView);
+    assert!(matches!(
+        vector_shape.optional_element_type(),
+        Some(JavaType::Named { name, .. }) if name == "Object"
+    ));
+
+    let translation = translate_source_with_facts(source, &facts);
 
     assert!(
         translation
@@ -27295,7 +27344,7 @@ class BorrowedArrowGetterReturn {
     );
     assert!(
         translation.rust.contains(
-            "arrow_facade::get_vector(root, \"id\".to_string().as_str()).map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>)"
+            "arrow_facade::get_vector(root, \"id\").map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>)"
         ),
         "{}",
         translation.rust
@@ -27441,6 +27490,7 @@ class BorrowedPathFacadeReturn {
     assert!(conversion_source.contains("unwrap_or_else(|| rust_borrowed_facade_return_recovery"));
     assert!(coercion_source.contains("RustBorrowedFacadeReturnRecovery::ToPathBuf"));
     assert!(!coercion_source.contains("rust_borrowed_return_is_path_like"));
+    assert!(include_str!("../src/lower.rs").contains("!shape_is_erased_object_boundary(local)"));
 }
 
 #[test]

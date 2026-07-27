@@ -153,6 +153,10 @@ pub fn borrowed_sequence_element_shape(element_ty: JavaType) -> RustSlotShape {
 pub fn shape_is_erased_object_boundary(shape: &RustSlotShape) -> bool {
     matches!(shape.dispatch, DispatchShape::ErasedObject)
         || matches!(shape.view, ViewShape::ErasedObjectView)
+        || shape.optional_element_type().is_some_and(|element_ty| {
+            matches!(element_ty, JavaType::Named { name, .. } | JavaType::Unknown(name)
+                if name == "Object" || name == "java.lang.Object")
+        })
 }
 
 pub fn shape_is_concrete_native(shape: &RustSlotShape) -> bool {
