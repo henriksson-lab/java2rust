@@ -456,6 +456,16 @@ existing range helper, while the charset argument itself remains a mechanical
 ABI concern handled by the call/constructor argument planner. Verified with
 `byte_array_local_with_spaced_dimensions_feeds_string_range_constructor`.
 
+Static string map-key follow-up: native `Map.get(...)` key normalization now
+keeps inferred shared-borrow shape facts for associated/static string constants
+through the final borrow projection gate. This prevents
+`HashMap<String, _>.get(CONST_STR)` from becoming `get(&CONST_STR)` and
+selecting the invalid `String: Borrow<&str>` lookup shape. Verified with
+`map_get_static_string_constant_key_does_not_double_borrow_str` and
+`.tmp/corpus-rerun-htsjdk-vcf-after-static-string-map-key-r1`, where the VCF
+focused corpus drops from 658 to 652 generated-Rust errors and the
+`Borrow<&str>` family is gone.
+
 Corpus cleanup slice: abstract classes that implement interfaces now emit the
 trait impl even when some interface methods are abstract/missing; the generated
 trait method uses the existing panic fallback while the inherent abstract stub

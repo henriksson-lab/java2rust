@@ -19018,23 +19018,21 @@ fn lower_map_key_arg_borrow_projection(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> RustExpr {
-    let (local_name, actual) = if let Expr::Var(name) = arg {
-        (
-            Some(name.as_str()),
-            Some(infer_expr_shape_with_context(
-                arg,
-                env,
-                ExprShapeContext {
-                    signatures: Some(ctx.signatures),
-                    representations: Some(ctx.representations),
-                    facts: Some(ctx.facts),
-                },
-            )),
-        )
+    let local_name = if let Expr::Var(name) = arg {
+        Some(name.as_str())
     } else {
-        (None, None)
+        None
     };
-    normalize_map_key_borrow_projection(lowered, local_name, actual.as_ref())
+    let actual = infer_expr_shape_with_context(
+        arg,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    normalize_map_key_borrow_projection(lowered, local_name, Some(&actual))
 }
 
 fn apply_expr_to_slot_via_plan(

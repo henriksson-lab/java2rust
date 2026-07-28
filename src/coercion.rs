@@ -1345,6 +1345,18 @@ pub fn collapse_redundant_shared_borrow_projection(expr: RustExpr, base: &str) -
     }
 }
 
+fn collapse_redundant_rendered_shared_borrow_projection(expr: RustExpr) -> RustExpr {
+    let rendered = emit::emit_expr(&expr);
+    let trimmed = rendered.trim();
+    let Some(unborrowed) = trimmed.strip_prefix('&') else {
+        return expr;
+    };
+    if unborrowed.is_empty() || unborrowed.starts_with('&') {
+        return expr;
+    }
+    RustExpr::Raw(unborrowed.trim_start().to_string())
+}
+
 pub fn normalize_map_key_borrow_projection(
     expr: RustExpr,
     local_name: Option<&str>,
@@ -1354,14 +1366,23 @@ pub fn normalize_map_key_borrow_projection(
         if let Some(name) = local_name {
             collapse_redundant_shared_borrow_projection(expr, name)
         } else {
-            expr
+            collapse_redundant_rendered_shared_borrow_projection(expr)
         }
     } else {
         expr
     };
-    let actual_for_projection = local_name
-        .filter(|name| emit::emit_expr(&expr) == *name)
-        .and(actual);
+    let actual_for_projection = if actual.is_some_and(|shape| {
+        matches!(
+            shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+    }) {
+        actual
+    } else {
+        local_name
+            .filter(|name| emit::emit_expr(&expr) == *name)
+            .and(actual)
+    };
     ensure_borrow_projection(
         expr,
         actual_for_projection,

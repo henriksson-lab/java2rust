@@ -14140,6 +14140,47 @@ class MapEntryEnhancedFor {
 }
 
 #[test]
+fn map_get_static_string_constant_key_does_not_double_borrow_str() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class MapGetStaticStringKey {
+    static final String ID = "ID";
+
+    String read(Map<String, String> values) {
+        return values.get(ID);
+    }
+
+    String run(String name) {
+        Map<String, String> values = new HashMap<String, String>();
+        values.put(ID, name);
+        return read(values);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".get(Self::ID)")
+            && !translation.rust.contains(".get(&Self::ID)")
+            && !translation.rust.contains("Borrow<&str>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_get_static_string_key",
+        vec![GeneratedCrateModule {
+            name: "map_get_static_string_key",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn final_sorted_map_receiver_mutation_declares_rust_local_mutable() {
     let translation = translate_source(&idiom_gap("FinalSortedMapReceiverMutation.java"));
 
