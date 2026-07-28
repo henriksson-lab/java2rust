@@ -4849,11 +4849,21 @@ fixtures `closed_enum_variant_borrows_as_dyn_trait_parameter`,
 and `source_nested_enum_type_access_uses_flattened_enum_helpers` pass, and the
 new object-model regression
 `object_model_keeps_source_interface_dyn_trait_for_resolved_receiver_call`
-proves the usage requirement remains `NeedsBorrowedTraitView`. The adjacent
-`source_interface_collection_elements_use_boxed_dyn_trait` fixture remains a
-separate return-slot problem: `List<Localizable>` storage and `add(pattern)` use
-boxed dyn carriers, but `Localizable first(...)` still returns an erased object
-when the body is `patterns.get(index)`.
+proves the usage requirement remains `NeedsBorrowedTraitView`.
+
+Follow-up source-field collection return cleanup: usage analysis now carries
+source-declared field types directly, so unshadowed source fields such as
+`patterns: List<Localizable>` can recover the receiver type for both
+`patterns.add(pattern)` and returned `patterns.get(index)` calls without
+depending on external field facts. Collection storage calls on `List`, `Set`,
+and `Map` use the receiver element/key/value type to classify unknown external
+argument boundaries as owned polymorphic storage when the stored binding matches
+the collection slot. This keeps `List<Localizable>` fields as
+`Vec<Box<dyn Localizable>>`, preserves `pattern.clone_box()` on insertion, and
+solves `Localizable first(...) { return patterns.get(index); }` as
+`Box<dyn Localizable>` instead of `Box<dyn Any>`. Verified with
+`source_interface_collection_get_return_keeps_boxed_dyn_trait_slot` and
+`source_interface_collection_elements_use_boxed_dyn_trait`.
 
 ## Rerun Protocol
 

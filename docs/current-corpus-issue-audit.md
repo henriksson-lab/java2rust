@@ -1136,9 +1136,12 @@ passed for `commons_math_localized_formats_constants_borrow_as_localizable_pack_
 object-model regression
 `object_model_keeps_source_interface_dyn_trait_for_resolved_receiver_call`.
 The related `source_interface_collection_elements_use_boxed_dyn_trait` fixture
-still fails: field and argument slots use `Vec<Box<dyn Localizable>>` and
-`pattern.clone_box()`, but `Localizable first(...)` still solves its method
-return as erased object when returning `patterns.get(index)`.
+now passes in focused reruns. Usage analysis recovers source-declared field
+types for unshadowed field receivers, so `List<Localizable>.add(...)` records
+owned polymorphic storage and returned `List<Localizable>.get(...)` solves the
+method return as `Box<dyn Localizable>` instead of erased `Box<dyn Any>`.
+Verified with `source_interface_collection_get_return_keeps_boxed_dyn_trait_slot`
+and `source_interface_collection_elements_use_boxed_dyn_trait`.
 
 ## Next Batch
 
@@ -1149,12 +1152,9 @@ return as erased object when returning `patterns.get(index)`.
 2. Continue generalizing optional carrier projection through slot plans, with an
    audit pass for old narrow rules that still emit wrapper-level
    `.clone().unwrap()` instead of borrowing and cloning the contained value.
-3. Fix source-interface collection return slots so `List<Trait>.get(...)`
-   returned from a method declared as `Trait` keeps `Box<dyn Trait>` instead of
-   erasing the method return to `Box<dyn Any>`.
-4. Minimize the VCF shared-support enum assembly failure.
-5. Add a Spark/DISQ interface bridge fixture around `getBases`.
-6. Convert shared errors from the newly unblocked ndarray corpus reruns into
+3. Minimize the VCF shared-support enum assembly failure.
+4. Add a Spark/DISQ interface bridge fixture around `getBases`.
+5. Convert shared errors from the newly unblocked ndarray corpus reruns into
    fixtures, especially `super(...)`, array creation, switch scaffolding,
    Java string/file/logging facades, non-emitter raw keyword leaks, and
    trait/interface assembly. The current local matrix idiom fixtures are green;

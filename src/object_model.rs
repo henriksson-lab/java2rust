@@ -6,7 +6,7 @@ use crate::facts::{
     ObjectSafetyViolation,
 };
 use crate::java_ir::{JavaType, Member, Program, TypeDecl, TypeKind};
-use crate::usage::{BindingUse, CallArgumentBoundary, UsageFacts};
+use crate::usage::{BindingUse, BindingUseFacts, CallArgumentBoundary, UsageFacts};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ObjectModelInput<'a> {
@@ -307,7 +307,7 @@ pub fn dispatch_requirements_from_usage(usage: &UsageFacts) -> UsageDispatchRequ
                 continue;
             };
             for use_fact in &binding.uses {
-                for requirement in dispatch_requirements_for_binding_use(use_fact) {
+                for requirement in dispatch_requirements_for_binding_use(binding, use_fact) {
                     push_usage_dispatch_requirement(&mut requirements, type_name, requirement);
                 }
             }
@@ -316,14 +316,39 @@ pub fn dispatch_requirements_from_usage(usage: &UsageFacts) -> UsageDispatchRequ
     requirements
 }
 
-fn dispatch_requirements_for_binding_use(use_fact: &BindingUse) -> Vec<DispatchRequirement> {
+fn dispatch_requirements_for_binding_use(
+    binding: &BindingUseFacts,
+    use_fact: &BindingUse,
+) -> Vec<DispatchRequirement> {
     match use_fact {
         BindingUse::StoredInField { .. } | BindingUse::Returned => {
             vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
         }
         BindingUse::InstanceOfTarget { .. } => vec![DispatchRequirementKind::NeedsInstanceof],
-        BindingUse::PassedToCall { boundary, .. }
-        | BindingUse::AssignedFromCall { boundary, .. } => match boundary {
+        BindingUse::PassedToCall {
+            name,
+            receiver_type,
+            arg_index,
+            boundary,
+            ..
+        } => match boundary {
+            CallArgumentBoundary::InternalSameType | CallArgumentBoundary::KnownContentRead => {
+                vec![DispatchRequirementKind::NeedsBorrowedTraitView]
+            }
+            CallArgumentBoundary::Unknown => {
+                if collection_call_stores_binding_value(
+                    name,
+                    receiver_type.as_ref(),
+                    *arg_index,
+                    &binding.java_ty,
+                ) {
+                    vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
+                } else {
+                    vec![DispatchRequirementKind::NeedsUnknownRuntimeObject]
+                }
+            }
+        },
+        BindingUse::AssignedFromCall { boundary, .. } => match boundary {
             CallArgumentBoundary::InternalSameType | CallArgumentBoundary::KnownContentRead => {
                 vec![DispatchRequirementKind::NeedsBorrowedTraitView]
             }
@@ -340,6 +365,66 @@ fn dispatch_requirements_for_binding_use(use_fact: &BindingUse) -> Vec<DispatchR
         BindingUse::ContentRead | BindingUse::AssignedToLocal { .. } | BindingUse::Mutated => {
             Vec::new()
         }
+    }
+}
+
+fn collection_call_stores_binding_value(
+    name: &str,
+    receiver_type: Option<&JavaType>,
+    arg_index: usize,
+    binding_ty: &JavaType,
+) -> bool {
+    let Some(receiver_type) = receiver_type else {
+        return false;
+    };
+    match crate::stdlib::java_collection_kind_for_type(receiver_type) {
+        Some(crate::stdlib::JavaCollectionKind::List)
+            if matches!(name, "add" | "set") && matches!(arg_index, 0 | 1) =>
+        {
+            collection_type_arg_matches_binding(receiver_type, 0, binding_ty)
+        }
+        Some(crate::stdlib::JavaCollectionKind::Set) if name == "add" && arg_index == 0 => {
+            collection_type_arg_matches_binding(receiver_type, 0, binding_ty)
+        }
+        Some(crate::stdlib::JavaCollectionKind::Map)
+            if name == "put" && matches!(arg_index, 0 | 1) =>
+        {
+            collection_type_arg_matches_binding(receiver_type, arg_index, binding_ty)
+        }
+        _ => false,
+    }
+}
+
+fn collection_type_arg_matches_binding(
+    receiver_type: &JavaType,
+    arg_index: usize,
+    binding_ty: &JavaType,
+) -> bool {
+    let JavaType::Named { args, .. } = receiver_type else {
+        return false;
+    };
+    args.get(arg_index)
+        .is_some_and(|arg_ty| collection_storage_type_matches(arg_ty, binding_ty))
+}
+
+fn collection_storage_type_matches(left: &JavaType, right: &JavaType) -> bool {
+    match (left, right) {
+        (
+            JavaType::Named {
+                name: left_name,
+                args: left_args,
+            },
+            JavaType::Named {
+                name: right_name,
+                args: right_args,
+            },
+        ) => {
+            left_args.len() == right_args.len()
+                && (left_name == right_name
+                    || left_name.rsplit('.').next() == Some(right_name.as_str())
+                    || right_name.rsplit('.').next() == Some(left_name.as_str()))
+        }
+        _ => left == right,
     }
 }
 

@@ -2288,10 +2288,11 @@ class Kennel {
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let representations = plan_representations(&resolved.program, &resolved.facts);
-    let usage = analyze_usage(&resolved.program);
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
     let signatures =
-        solve_signatures_with_facts(&resolved.program, &representations, &usage, &resolved.facts);
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &semantic.facts);
 
     let field_shape = signatures.required_field_shape("Kennel", "resident");
 
@@ -4630,10 +4631,11 @@ interface Named {
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let representations = plan_representations(&resolved.program, &resolved.facts);
-    let usage = analyze_usage(&resolved.program);
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
     let signatures =
-        solve_signatures_with_facts(&resolved.program, &representations, &usage, &resolved.facts);
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &semantic.facts);
     let named_ty = resolved
         .program
         .types
@@ -4714,10 +4716,11 @@ class Dog implements Named {
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let representations = plan_representations(&resolved.program, &resolved.facts);
-    let usage = analyze_usage(&resolved.program);
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
     let signatures =
-        solve_signatures_with_facts(&resolved.program, &representations, &usage, &resolved.facts);
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &semantic.facts);
     let dog_ty = resolved
         .program
         .types
@@ -18116,6 +18119,87 @@ class Poodle extends Dog {}
             .any(|diagnostic| diagnostic.code == "unsupported_inheritance"
                 && diagnostic.message.contains("Poodle")),
         "{diagnostics:?}"
+    );
+}
+
+#[test]
+fn source_interface_collection_get_return_keeps_boxed_dyn_trait_slot() {
+    let parsed = parse_java_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+interface Localizable {
+    String getSourceString();
+}
+
+class LocalizableStore {
+    private List<Localizable> patterns;
+
+    LocalizableStore() {
+        patterns = new ArrayList<Localizable>();
+    }
+
+    void add(Localizable pattern) {
+        patterns.add(pattern);
+    }
+
+    Localizable first(int index) {
+        return patterns.get(index);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &semantic.facts);
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "LocalizableStore")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "first" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+
+    let constraints = method_return_shape_constraints(ty, method, &usage, &semantic.facts);
+    let usage_debug = usage
+        .methods
+        .iter()
+        .filter(|(key, _)| key.type_name == "LocalizableStore")
+        .collect::<Vec<_>>();
+    let representation = representations.representation_for(&JavaType::Named {
+        name: "Localizable".to_string(),
+        args: Vec::new(),
+    });
+    let field_debug = semantic
+        .facts
+        .external_field_facts
+        .iter()
+        .map(|fact| {
+            (
+                &fact.field.type_name,
+                &fact.field.field_name,
+                &fact.field_type,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        signatures.method_return_shape(ty, method).unwrap().dispatch,
+        DispatchShape::BoxedDynTrait {
+            trait_name: "Localizable".to_string(),
+        },
+        "return_type={:?} representation={representation:?} constraints={constraints:?} usage={usage_debug:?} fields={field_debug:?}",
+        method.return_type
     );
 }
 

@@ -276,6 +276,7 @@ pub fn build_call_graph(program: &Program) -> CallGraph {
 fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &FactSet) {
     let internal_methods = internal_method_names(ty);
     let field_names = field_names(ty);
+    let field_types = field_types(ty);
     for member in &ty.members {
         match member {
             Member::Method(method) => {
@@ -298,6 +299,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                             &ty.name,
                             &internal_methods,
                             &field_names,
+                            &field_types,
                             semantic_facts,
                         );
                     }
@@ -347,6 +349,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                             &ty.name,
                             &internal_methods,
                             &field_names,
+                            &field_types,
                             semantic_facts,
                         );
                     }
@@ -827,6 +830,16 @@ fn field_names(ty: &TypeDecl) -> HashSet<String> {
         .collect()
 }
 
+fn field_types(ty: &TypeDecl) -> HashMap<String, JavaType> {
+    ty.members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) => Some((field.name.clone(), field.ty.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 fn internal_method_names(ty: &TypeDecl) -> HashSet<String> {
     ty.members
         .iter()
@@ -853,6 +866,7 @@ fn analyze_stmt(
     current_type: &str,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
 ) {
     match stmt {
@@ -879,9 +893,15 @@ fn analyze_stmt(
                         },
                     );
                 }
-                if let Some(policy) =
-                    call_result_boundary_policy(initializer, internal_methods, facts)
-                {
+                if let Some(policy) = call_result_boundary_policy_with_context(
+                    initializer,
+                    internal_methods,
+                    facts,
+                    current_type,
+                    field_names,
+                    field_types,
+                    semantic_facts,
+                ) {
                     record_use(
                         facts,
                         name,
@@ -898,6 +918,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -906,9 +927,15 @@ fn analyze_stmt(
             if let Expr::Var(name) = target {
                 if is_unshadowed_field_name(facts, field_names, name) {
                     facts.mutates_self = true;
-                    if let Some(policy) =
-                        call_result_boundary_policy(value, internal_methods, facts)
-                    {
+                    if let Some(policy) = call_result_boundary_policy_with_context(
+                        value,
+                        internal_methods,
+                        facts,
+                        current_type,
+                        field_names,
+                        field_types,
+                        semantic_facts,
+                    ) {
                         facts.field_uses.push(FieldUse::AssignedFromCall {
                             field_name: name.clone(),
                             name: policy.name,
@@ -928,9 +955,15 @@ fn analyze_stmt(
                             },
                         );
                     }
-                    if let Some(policy) =
-                        call_result_boundary_policy(value, internal_methods, facts)
-                    {
+                    if let Some(policy) = call_result_boundary_policy_with_context(
+                        value,
+                        internal_methods,
+                        facts,
+                        current_type,
+                        field_names,
+                        field_types,
+                        semantic_facts,
+                    ) {
                         record_use(
                             facts,
                             name,
@@ -947,7 +980,15 @@ fn analyze_stmt(
                 if target_is_this_field(target) {
                     facts.mutates_self = true;
                 }
-                if let Some(policy) = call_result_boundary_policy(value, internal_methods, facts) {
+                if let Some(policy) = call_result_boundary_policy_with_context(
+                    value,
+                    internal_methods,
+                    facts,
+                    current_type,
+                    field_names,
+                    field_types,
+                    semantic_facts,
+                ) {
                     facts.field_uses.push(FieldUse::AssignedFromCall {
                         field_name: field_name.clone(),
                         name: policy.name,
@@ -966,6 +1007,7 @@ fn analyze_stmt(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
             analyze_expr(
@@ -974,6 +1016,7 @@ fn analyze_stmt(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
         }
@@ -987,7 +1030,15 @@ fn analyze_stmt(
                     record_use(facts, name, BindingUse::Returned);
                 }
             }
-            record_returned_call_result_use(expr, facts, internal_methods);
+            record_returned_call_result_use(
+                expr,
+                facts,
+                internal_methods,
+                current_type,
+                field_names,
+                field_types,
+                semantic_facts,
+            );
             if let Expr::FieldAccess(receiver, field_name) = expr
                 && matches!(receiver.as_ref(), Expr::This)
             {
@@ -1001,6 +1052,7 @@ fn analyze_stmt(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
         }
@@ -1015,6 +1067,7 @@ fn analyze_stmt(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
         }
@@ -1029,6 +1082,7 @@ fn analyze_stmt(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
             for stmt in &then_block.statements {
@@ -1038,6 +1092,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1049,6 +1104,7 @@ fn analyze_stmt(
                         current_type,
                         internal_methods,
                         field_names,
+                        field_types,
                         semantic_facts,
                     );
                 }
@@ -1061,6 +1117,7 @@ fn analyze_stmt(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
             for stmt in &body.statements {
@@ -1070,6 +1127,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1088,6 +1146,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1098,6 +1157,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1108,6 +1168,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1118,6 +1179,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1129,6 +1191,7 @@ fn analyze_stmt(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
             for stmt in &body.statements {
@@ -1138,6 +1201,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1149,6 +1213,7 @@ fn analyze_stmt(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
             for case in cases {
@@ -1159,6 +1224,7 @@ fn analyze_stmt(
                         current_type,
                         internal_methods,
                         field_names,
+                        field_types,
                         semantic_facts,
                     );
                 }
@@ -1172,6 +1238,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1186,6 +1253,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1196,6 +1264,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1206,6 +1275,7 @@ fn analyze_stmt(
             current_type,
             internal_methods,
             field_names,
+            field_types,
             semantic_facts,
         ),
         Stmt::ConstructorInvocation {
@@ -1226,6 +1296,7 @@ fn analyze_stmt(
                     facts,
                     current_type,
                     field_names,
+                    field_types,
                     semantic_facts,
                     arg,
                     "constructor",
@@ -1239,6 +1310,7 @@ fn analyze_stmt(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1270,6 +1342,28 @@ pub fn call_result_boundary_policy(
     internal_methods: &HashSet<String>,
     facts: &MethodUsageFacts,
 ) -> Option<CallResultBoundaryPolicy> {
+    let empty_field_types = HashMap::new();
+    let empty_facts = FactSet::default();
+    call_result_boundary_policy_with_context(
+        expr,
+        internal_methods,
+        facts,
+        "",
+        &HashSet::new(),
+        &empty_field_types,
+        &empty_facts,
+    )
+}
+
+fn call_result_boundary_policy_with_context(
+    expr: &Expr,
+    internal_methods: &HashSet<String>,
+    facts: &MethodUsageFacts,
+    current_type: &str,
+    field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
+    semantic_facts: &FactSet,
+) -> Option<CallResultBoundaryPolicy> {
     match expr {
         Expr::Call {
             receiver,
@@ -1277,9 +1371,16 @@ pub fn call_result_boundary_policy(
             args,
             resolved,
         } => {
-            let receiver_type = receiver
-                .as_deref()
-                .and_then(|receiver| call_result_receiver_type(receiver, facts));
+            let receiver_type = receiver.as_deref().and_then(|receiver| {
+                call_result_receiver_type_with_context(
+                    receiver,
+                    facts,
+                    current_type,
+                    field_names,
+                    field_types,
+                    semantic_facts,
+                )
+            });
             let boundary =
                 call_argument_boundary_policy(receiver.as_deref(), name, internal_methods).boundary;
             Some(CallResultBoundaryPolicy {
@@ -1305,6 +1406,25 @@ pub fn call_result_boundary_policy(
     }
 }
 
+fn call_result_receiver_type_with_context(
+    receiver: &Expr,
+    facts: &MethodUsageFacts,
+    current_type: &str,
+    field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
+    semantic_facts: &FactSet,
+) -> Option<JavaType> {
+    match receiver {
+        Expr::Var(name) if is_unshadowed_field_name(facts, field_names, name) => {
+            source_field_type(current_type, name, field_types, semantic_facts)
+        }
+        Expr::FieldAccess(inner, field_name) if matches!(inner.as_ref(), Expr::This) => {
+            source_field_type(current_type, field_name, field_types, semantic_facts)
+        }
+        _ => call_result_receiver_type(receiver, facts),
+    }
+}
+
 fn call_result_receiver_type(receiver: &Expr, facts: &MethodUsageFacts) -> Option<JavaType> {
     match receiver {
         Expr::Var(name) => facts
@@ -1323,6 +1443,7 @@ fn analyze_expr(
     current_type: &str,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
 ) {
     analyze_expr_with_context(
@@ -1331,6 +1452,7 @@ fn analyze_expr(
         current_type,
         internal_methods,
         field_names,
+        field_types,
         semantic_facts,
         false,
     );
@@ -1342,6 +1464,7 @@ fn analyze_return_expr(
     current_type: &str,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
 ) {
     analyze_expr_with_context(
@@ -1350,6 +1473,7 @@ fn analyze_return_expr(
         current_type,
         internal_methods,
         field_names,
+        field_types,
         semantic_facts,
         true,
     );
@@ -1361,6 +1485,7 @@ fn analyze_nested_argument_expr(
     current_type: &str,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
 ) {
     if matches!(expr, Expr::Var(_)) {
@@ -1372,6 +1497,7 @@ fn analyze_nested_argument_expr(
         current_type,
         internal_methods,
         field_names,
+        field_types,
         semantic_facts,
     );
 }
@@ -1395,6 +1521,7 @@ fn analyze_expr_with_context(
     current_type: &str,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
     result_returned: bool,
 ) {
@@ -1414,6 +1541,7 @@ fn analyze_expr_with_context(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
         }
@@ -1425,7 +1553,14 @@ fn analyze_expr_with_context(
             ..
         } => {
             let policy = call_argument_boundary_policy(receiver.as_deref(), name, internal_methods);
-            let receiver_type = call_receiver_java_type(receiver.as_deref(), facts);
+            let receiver_type = call_receiver_java_type_with_context(
+                receiver.as_deref(),
+                facts,
+                current_type,
+                field_names,
+                field_types,
+                semantic_facts,
+            );
             let call_boundary = resolved_receiver_call_boundary(
                 policy.boundary,
                 receiver_type.as_ref(),
@@ -1486,6 +1621,7 @@ fn analyze_expr_with_context(
                     facts,
                     current_type,
                     field_names,
+                    field_types,
                     semantic_facts,
                     arg,
                     name,
@@ -1499,6 +1635,7 @@ fn analyze_expr_with_context(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1509,6 +1646,7 @@ fn analyze_expr_with_context(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1520,6 +1658,7 @@ fn analyze_expr_with_context(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
             analyze_expr(
@@ -1528,6 +1667,7 @@ fn analyze_expr_with_context(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
         }
@@ -1537,6 +1677,7 @@ fn analyze_expr_with_context(
             current_type,
             internal_methods,
             field_names,
+            field_types,
             semantic_facts,
             result_returned,
         ),
@@ -1546,6 +1687,7 @@ fn analyze_expr_with_context(
             current_type,
             internal_methods,
             field_names,
+            field_types,
             semantic_facts,
         ),
         Expr::InstanceOf { expr, ty } => {
@@ -1564,6 +1706,7 @@ fn analyze_expr_with_context(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
         }
@@ -1574,6 +1717,7 @@ fn analyze_expr_with_context(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
             analyze_expr(
@@ -1582,6 +1726,7 @@ fn analyze_expr_with_context(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
         }
@@ -1597,6 +1742,7 @@ fn analyze_expr_with_context(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1608,6 +1754,7 @@ fn analyze_expr_with_context(
                         current_type,
                         internal_methods,
                         field_names,
+                        field_types,
                         semantic_facts,
                     );
                 }
@@ -1621,6 +1768,7 @@ fn analyze_expr_with_context(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1636,6 +1784,7 @@ fn analyze_expr_with_context(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
             );
             analyze_expr_with_context(
@@ -1644,6 +1793,7 @@ fn analyze_expr_with_context(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
                 result_returned,
             );
@@ -1653,6 +1803,7 @@ fn analyze_expr_with_context(
                 current_type,
                 internal_methods,
                 field_names,
+                field_types,
                 semantic_facts,
                 result_returned,
             );
@@ -1663,6 +1814,7 @@ fn analyze_expr_with_context(
                     facts,
                     current_type,
                     field_names,
+                    field_types,
                     semantic_facts,
                     arg,
                     "new",
@@ -1676,6 +1828,7 @@ fn analyze_expr_with_context(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1687,6 +1840,7 @@ fn analyze_expr_with_context(
             current_type,
             internal_methods,
             field_names,
+            field_types,
             semantic_facts,
         ),
         Expr::Var(name) => record_use(facts, name, BindingUse::ContentRead),
@@ -1706,6 +1860,7 @@ fn analyze_lambda_body(
     current_type: &str,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
 ) {
     let saved_params = params
@@ -1734,6 +1889,7 @@ fn analyze_lambda_body(
             current_type,
             internal_methods,
             field_names,
+            field_types,
             semantic_facts,
         ),
         LambdaBody::Block(block) => {
@@ -1744,6 +1900,7 @@ fn analyze_lambda_body(
                     current_type,
                     internal_methods,
                     field_names,
+                    field_types,
                     semantic_facts,
                 );
             }
@@ -1762,10 +1919,22 @@ fn record_returned_call_result_use(
     expr: &Expr,
     facts: &mut MethodUsageFacts,
     internal_methods: &HashSet<String>,
+    current_type: &str,
+    field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
+    semantic_facts: &FactSet,
 ) {
     match expr {
         Expr::Call { .. } | Expr::New { .. } => {
-            let Some(policy) = call_result_boundary_policy(expr, internal_methods, facts) else {
+            let Some(policy) = call_result_boundary_policy_with_context(
+                expr,
+                internal_methods,
+                facts,
+                current_type,
+                field_names,
+                field_types,
+                semantic_facts,
+            ) else {
                 return;
             };
             facts.returned_call_results.push(ReturnedCallResultUse {
@@ -1776,14 +1945,38 @@ fn record_returned_call_result_use(
                 resolved: policy.resolved,
             });
         }
-        Expr::Cast { expr, .. } => record_returned_call_result_use(expr, facts, internal_methods),
+        Expr::Cast { expr, .. } => record_returned_call_result_use(
+            expr,
+            facts,
+            internal_methods,
+            current_type,
+            field_names,
+            field_types,
+            semantic_facts,
+        ),
         Expr::Ternary {
             then_expr,
             else_expr,
             ..
         } => {
-            record_returned_call_result_use(then_expr, facts, internal_methods);
-            record_returned_call_result_use(else_expr, facts, internal_methods);
+            record_returned_call_result_use(
+                then_expr,
+                facts,
+                internal_methods,
+                current_type,
+                field_names,
+                field_types,
+                semantic_facts,
+            );
+            record_returned_call_result_use(
+                else_expr,
+                facts,
+                internal_methods,
+                current_type,
+                field_names,
+                field_types,
+                semantic_facts,
+            );
         }
         _ => {}
     }
@@ -1793,6 +1986,7 @@ fn record_call_arg_use(
     facts: &mut MethodUsageFacts,
     current_type: &str,
     field_names: &HashSet<String>,
+    _field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
     arg: &Expr,
     call_name: &str,
@@ -1921,6 +2115,38 @@ fn call_receiver_java_type(receiver: Option<&Expr>, facts: &MethodUsageFacts) ->
         .or_else(|| {
             static_owner_receiver_name(name).map(|owner| JavaType::Unknown(owner.to_string()))
         })
+}
+
+fn call_receiver_java_type_with_context(
+    receiver: Option<&Expr>,
+    facts: &MethodUsageFacts,
+    current_type: &str,
+    field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
+    semantic_facts: &FactSet,
+) -> Option<JavaType> {
+    match receiver {
+        Some(Expr::Var(name)) if is_unshadowed_field_name(facts, field_names, name) => {
+            source_field_type(current_type, name, field_types, semantic_facts)
+        }
+        Some(Expr::FieldAccess(inner, field_name)) if matches!(inner.as_ref(), Expr::This) => {
+            source_field_type(current_type, field_name, field_types, semantic_facts)
+        }
+        _ => call_receiver_java_type(receiver, facts),
+    }
+}
+
+fn source_field_type(
+    current_type: &str,
+    field_name: &str,
+    field_types: &HashMap<String, JavaType>,
+    semantic_facts: &FactSet,
+) -> Option<JavaType> {
+    field_types.get(field_name).cloned().or_else(|| {
+        semantic_facts
+            .external_field_for(current_type, field_name)
+            .and_then(|field| field.field_type.clone())
+    })
 }
 
 fn static_owner_receiver_name(name: &str) -> Option<&str> {
