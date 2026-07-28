@@ -18,8 +18,12 @@ pub enum EqualityComparisonPlan {
     BothOptionalByRef,
     LeftOptionalByRef,
     RightOptionalByRef,
-    LeftOptionalStringView,
-    RightOptionalStringView,
+    LeftOptionalStringView {
+        left_view: OptionalStringEqualityOperandView,
+    },
+    RightOptionalStringView {
+        right_view: OptionalStringEqualityOperandView,
+    },
     LeftSharedBorrowRightOwned,
     LeftOwnedRightSharedBorrow,
     BothOptionalCustomEquals {
@@ -29,6 +33,12 @@ pub enum EqualityComparisonPlan {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringEqualityOperandView {
+    NativeString,
+    BorrowedStr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionalStringEqualityOperandView {
     NativeString,
     BorrowedStr,
 }
@@ -240,12 +250,16 @@ pub fn plan_equality_comparison_with_facts(
         (Some(left_element), None)
             if left_element == JavaType::String && is_borrowed_string_view(right) =>
         {
-            EqualityComparisonPlan::LeftOptionalStringView
+            EqualityComparisonPlan::LeftOptionalStringView {
+                left_view: optional_string_equality_operand_view(left, left_element),
+            }
         }
         (None, Some(right_element))
             if right_element == JavaType::String && is_borrowed_string_view(left) =>
         {
-            EqualityComparisonPlan::RightOptionalStringView
+            EqualityComparisonPlan::RightOptionalStringView {
+                right_view: optional_string_equality_operand_view(right, right_element),
+            }
         }
         (Some(left_element), None) if left_element == right.java_ty => {
             EqualityComparisonPlan::LeftOptionalByRef
@@ -274,6 +288,18 @@ fn string_equality_operand_view(shape: &RustSlotShape) -> StringEqualityOperandV
         StringEqualityOperandView::BorrowedStr
     } else {
         StringEqualityOperandView::NativeString
+    }
+}
+
+fn optional_string_equality_operand_view(
+    shape: &RustSlotShape,
+    element_ty: JavaType,
+) -> OptionalStringEqualityOperandView {
+    let element_shape = crate::conversion_plan::optional_element_slot_shape(shape, element_ty);
+    if shape_is_borrowed_string_content(&element_shape) {
+        OptionalStringEqualityOperandView::BorrowedStr
+    } else {
+        OptionalStringEqualityOperandView::NativeString
     }
 }
 
@@ -338,15 +364,15 @@ pub fn lower_equality_comparison_expr_for_op(
             crate::emit::emit_expr(&left),
             crate::emit::emit_expr(&option_as_ref(right))
         )),
-        EqualityComparisonPlan::LeftOptionalStringView => RustExpr::Raw(format!(
+        EqualityComparisonPlan::LeftOptionalStringView { left_view } => RustExpr::Raw(format!(
             "{} {op} Some({})",
-            crate::emit::emit_expr(&option_as_string_view(left)),
+            crate::emit::emit_expr(&option_as_string_view(left, left_view)),
             crate::emit::emit_expr(&right)
         )),
-        EqualityComparisonPlan::RightOptionalStringView => RustExpr::Raw(format!(
+        EqualityComparisonPlan::RightOptionalStringView { right_view } => RustExpr::Raw(format!(
             "Some({}) {op} {}",
             crate::emit::emit_expr(&left),
-            crate::emit::emit_expr(&option_as_string_view(right))
+            crate::emit::emit_expr(&option_as_string_view(right, right_view))
         )),
         EqualityComparisonPlan::LeftSharedBorrowRightOwned => RustExpr::Raw(format!(
             "({} {op} &{})",
@@ -385,8 +411,11 @@ fn option_as_ref(expr: RustExpr) -> RustExpr {
     }
 }
 
-fn option_as_string_view(expr: RustExpr) -> RustExpr {
-    optional_string_view_projection(expr)
+fn option_as_string_view(expr: RustExpr, view: OptionalStringEqualityOperandView) -> RustExpr {
+    match view {
+        OptionalStringEqualityOperandView::NativeString => optional_string_view_projection(expr),
+        OptionalStringEqualityOperandView::BorrowedStr => expr,
+    }
 }
 
 pub fn lower_unary_expr(op: UnaryOp, operand: RustExpr) -> RustExpr {

@@ -118,10 +118,11 @@ use new_java2rust::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_nu
 use new_java2rust::object_model::rust_enum_variant_name_from_parsed_constant;
 use new_java2rust::operator_lowering::{
     EqualityComparisonPlan, NullComparisonMethod, NumericBinaryPromotionPlan,
-    StringEqualityOperandView, binary_op_to_rust, lower_equality_comparison_expr,
-    lower_equality_comparison_expr_for_op, lower_null_comparison_expr, lower_numeric_binary_expr,
-    lower_unary_expr, null_comparison_method, plan_equality_comparison,
-    plan_equality_comparison_with_facts, plan_numeric_binary_promotion, stream_unary_prefix,
+    OptionalStringEqualityOperandView, StringEqualityOperandView, binary_op_to_rust,
+    lower_equality_comparison_expr, lower_equality_comparison_expr_for_op,
+    lower_null_comparison_expr, lower_numeric_binary_expr, lower_unary_expr,
+    null_comparison_method, plan_equality_comparison, plan_equality_comparison_with_facts,
+    plan_numeric_binary_promotion, stream_unary_prefix,
 };
 use new_java2rust::parser::{parse_expr, parse_java_source, parse_type};
 use new_java2rust::representation::{
@@ -33149,21 +33150,46 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
     borrowed_str_shape.view = ViewShape::Str;
     assert_eq!(
         plan_equality_comparison(&borrowed_str_shape, &optional_string_shape),
-        EqualityComparisonPlan::RightOptionalStringView
+        EqualityComparisonPlan::RightOptionalStringView {
+            right_view: OptionalStringEqualityOperandView::NativeString,
+        }
     );
     assert_eq!(
         plan_equality_comparison(&optional_string_shape, &borrowed_str_shape),
-        EqualityComparisonPlan::LeftOptionalStringView
+        EqualityComparisonPlan::LeftOptionalStringView {
+            left_view: OptionalStringEqualityOperandView::NativeString,
+        }
     );
     assert_eq!(
         lower_equality_comparison_expr(
-            EqualityComparisonPlan::RightOptionalStringView,
+            EqualityComparisonPlan::RightOptionalStringView {
+                right_view: OptionalStringEqualityOperandView::NativeString,
+            },
             RustExpr::Raw("name.trim()".to_string()),
             RustExpr::Var("sample_name".to_string()),
         ),
         RustExpr::Raw(
             "Some(name.trim()) == sample_name.as_ref().map(|value| value.as_str())".to_string(),
         )
+    );
+    let mut optional_borrowed_str_shape = optional_string_shape.clone();
+    optional_borrowed_str_shape.ownership = OwnershipShape::SharedBorrow;
+    optional_borrowed_str_shape.view = ViewShape::Str;
+    assert_eq!(
+        plan_equality_comparison(&borrowed_str_shape, &optional_borrowed_str_shape),
+        EqualityComparisonPlan::RightOptionalStringView {
+            right_view: OptionalStringEqualityOperandView::BorrowedStr,
+        }
+    );
+    assert_eq!(
+        lower_equality_comparison_expr(
+            EqualityComparisonPlan::RightOptionalStringView {
+                right_view: OptionalStringEqualityOperandView::BorrowedStr,
+            },
+            RustExpr::Raw("name.trim()".to_string()),
+            RustExpr::Var("sample_name".to_string()),
+        ),
+        RustExpr::Raw("Some(name.trim()) == sample_name".to_string())
     );
     let nullable_value_ty = JavaType::Named {
         name: "NullableValue".to_string(),

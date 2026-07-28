@@ -2270,7 +2270,7 @@ fn nullable_string_format_and_concat_use_java_null_display_policy() {
     assert!(
         translation
             .rust
-            .contains("pub fn describe(&self, value: Option<&String>) -> String")
+            .contains("pub fn describe(&self, value: Option<&str>) -> String")
             && translation.rust.contains(
                 "value.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
             )
@@ -2839,7 +2839,7 @@ class Format {}
     assert!(
         translation
             .rust
-            .contains("self.formats.get(id.as_str()).expect(\"Java null receiver\").clone()")
+            .contains("self.formats.get(id).expect(\"Java null receiver\").clone()")
             && !translation.rust.contains("downcast::<Format>")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
@@ -5982,11 +5982,11 @@ class MapGetOptionalBorrowedArg {
     assert!(
         translation
             .rust
-            .contains("self.valid(values.get(key.as_str()))")
+            .contains("self.valid(values.get(key).as_ref().map(|value| value.as_str()))")
             && !translation.rust.contains("self.valid(Some(")
             && !translation
                 .rust
-                .contains(".get(key.as_str()).expect(\"Java null receiver\")"),
+                .contains(".get(key).expect(\"Java null receiver\")"),
         "{}",
         translation.rust
     );
@@ -16420,9 +16420,7 @@ fn nullable_equals_comparisons_use_option_reference_policy() {
         translation
             .rust
             .contains("return left.as_ref() == right.as_ref();")
-            && translation
-                .rust
-                .contains("return Some(&left) == right.as_ref();")
+            && translation.rust.contains("return Some(left) == right;")
             && !translation.rust.contains(".equals(")
             && !translation.rust.contains("objects.equals("),
         "{}",
@@ -16466,8 +16464,13 @@ class BorrowedNullableTrimEqualsOriginal {
     assert!(
         translation
             .rust
-            .contains("Some(sample_name.as_ref().unwrap().trim()) == sample_name.as_ref().map(|value| value.as_str())")
-            && !translation.rust.contains("Some(sample_name.as_ref().unwrap().trim()) == sample_name.as_deref()")
+            .contains("Some(sample_name.as_ref().unwrap().trim()) == sample_name")
+            && !translation
+                .rust
+                .contains("Some(sample_name.as_ref().unwrap().trim()) == sample_name.as_deref()")
+            && !translation
+                .rust
+                .contains(".as_ref().map(|value| value.as_str())")
             && !translation.rust.contains("Option<&&str>"),
         "{}",
         translation.rust

@@ -234,6 +234,15 @@ Remaining cleanup should continue replacing nullable call sites that choose
 `.as_ref()`, `.as_deref()`, `Some(...)`, or clone recovery locally with calls
 through these shared conversion helpers or direct slot plans.
 
+Optional string equality planner cleanup: equality comparison planning now
+tracks whether an optional string operand is an owned Java string carrier or an
+already-borrowed `Option<&str>` carrier. Owned optional strings still project
+through `.as_ref().map(|value| value.as_str())`, while borrowed optional strings
+stay as the existing optional carrier. This removes the unstable
+`str_as_str` drift from `Option<&str>` comparisons such as map-get nullable
+arguments and borrowed nullable trim/equality idioms, and records the behavior
+in `operator_lowering_owns_binary_and_unary_rust_spelling`.
+
 Optional borrowed facade return cleanup: `Option<&T>` returns from Rust facade
 ABI facts now convert to optional erased-object slots through a shared slot
 conversion plan, rendering `.map(|value| Box::new(value.clone()) as
