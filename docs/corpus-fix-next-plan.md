@@ -191,6 +191,38 @@ same actual-shape construction path to map lookups, field getters, facade
 optional returns, and any remaining nullable helper that still manually chooses
 between `Some(value)`, `Some(&value)`, `.as_ref()`, or `.as_deref()`.
 
+## 2026-07-28 Batch Status: Trait Return Slot Widening
+
+Latest full boundary after this slice:
+`cargo test --test idiom_gaps --quiet` ran 537 tests and finished with
+`537 passed / 0 failed` in 1579.57s. Cheap gates were also green:
+`cargo fmt --check`, `cargo check --quiet`, and `git diff --check`.
+
+Landed in this slice:
+
+- Interface trait return signatures now widen from borrowed to owned when a
+  compatible implementing source method proves that the interface return cannot
+  safely be represented as `&T`. This keeps dyn-trait wrappers from returning
+  references to owned temporaries while preserving borrowed interface returns
+  when all visible implementations support them.
+- The Spark interface delegation fixture now locks in the widened owned return
+  shape for `getReferenceBases` while retaining the borrowed dictionary return
+  where the selected implementation signature supports it.
+- Borrowed-string expectation drift was cleaned up across numeric parsing,
+  lambda side-effect forwarding, Java `Objects` null predicates, keyword
+  receiver lowering, source/source-summary setters, nested static table owners,
+  async template construction, and borrowed varargs pack conversion.
+
+Focused verification passed before the full boundary:
+
+- `context_translation_uses_sibling_overload_signature_for_call_target`
+- `lowercase_keyword_receiver_is_not_guessed_as_static_owner`
+- `nested_static_table_field_type_guides_static_overload_selection`
+- `source_varargs_pack_borrowed_external_elements_clones_before_into`
+- `no_arg_super_constructor_with_inherited_setter_trailing_call_lowers`
+- `no_arg_super_constructor_with_source_summary_inherited_setter_lowers`
+- `optional_field_mutating_overload_call_uses_signature_name_and_mut_receiver`
+
 Optional assignment rewrap follow-up: assignment values that arrive as
 already-rendered `Some(inner)` now unwrap the element and re-enter
 `SlotConversionPlan::OptionalConstruction` instead of formatting a new

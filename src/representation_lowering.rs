@@ -359,13 +359,14 @@ fn trait_item_for_type_with_program(
         .members
         .iter()
         .filter_map(|member| match member {
-            Member::Method(method) => Some(trait_method_signature_with_receiver(
+            Member::Method(method) => Some(trait_method_signature_with_receiver_and_return_shape(
                 ty,
                 method,
                 signatures,
                 facts,
                 trait_method_exception_plan(ty, method, program, exceptions),
                 trait_method_receiver_plan(ty, method, program, signatures),
+                trait_method_return_shape_plan(ty, method, program, signatures),
             )),
             _ => None,
         })
@@ -453,13 +454,16 @@ fn trait_impl_method(
     facts: &FactSet,
     interface_exceptions: MethodExceptionPlan,
 ) -> String {
-    let signature = trait_method_signature_with_receiver(
+    let trait_return_shape =
+        trait_method_return_shape_plan(interface, interface_method, program, signatures);
+    let signature = trait_method_signature_with_receiver_and_return_shape(
         interface,
         interface_method,
         signatures,
         facts,
         interface_exceptions,
         trait_receiver,
+        trait_return_shape,
     );
     let candidates = implementing_method_candidates_in_hierarchy(ty, interface_method, program);
     if candidates.is_empty() {
@@ -711,6 +715,26 @@ fn trait_method_signature_with_receiver(
     exceptions: MethodExceptionPlan,
     receiver_override: Option<ReceiverPlan>,
 ) -> String {
+    trait_method_signature_with_receiver_and_return_shape(
+        ty,
+        method,
+        signatures,
+        facts,
+        exceptions,
+        receiver_override,
+        None,
+    )
+}
+
+fn trait_method_signature_with_receiver_and_return_shape(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+    receiver_override: Option<ReceiverPlan>,
+    return_shape_override: Option<RustSlotShape>,
+) -> String {
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
     if !method.modifiers.contains(&Modifier::Static) {
@@ -726,15 +750,72 @@ fn trait_method_signature_with_receiver(
             emit_type(&rust_type_for_slot_with_facts(&param.shape, facts))
         )
     }));
-    let return_type =
-        trait_method_return_type_with_exception_plan(method, signatures, ty, facts, exceptions)
-            .map(|ty| format!(" -> {}", emit_type(&ty)))
-            .unwrap_or_default();
+    let return_type = trait_method_return_type_with_exception_plan(
+        method,
+        signatures,
+        ty,
+        facts,
+        exceptions,
+        return_shape_override,
+    )
+    .map(|ty| format!(" -> {}", emit_type(&ty)))
+    .unwrap_or_default();
     let rust_name = method
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
     format!("    fn {rust_name}({}){return_type};", params.join(", "))
+}
+
+fn trait_method_return_shape_plan(
+    interface: &TypeDecl,
+    interface_method: &MethodDecl,
+    program: &Program,
+    signatures: &SignaturePlan,
+) -> Option<RustSlotShape> {
+    let interface_shape = signatures
+        .required_method_signature(interface, interface_method)
+        .return_shape
+        .clone()?;
+    for implementor in program.types.iter().filter(|ty| {
+        ty.kind == TypeKind::Class
+            && ty
+                .implements
+                .iter()
+                .any(|implemented| implemented == &interface.name)
+    }) {
+        let Some(implementation) = implementing_method_candidates(implementor, interface_method)
+            .into_iter()
+            .find(|candidate| {
+                trait_impl_method_compatibility_error(interface_method, candidate).is_none()
+            })
+        else {
+            continue;
+        };
+        let Some(implementation_shape) = signatures
+            .required_method_signature(implementor, implementation)
+            .return_shape
+            .clone()
+        else {
+            continue;
+        };
+        if trait_return_shape_should_widen_to_implementation(
+            &interface_shape,
+            &implementation_shape,
+        ) {
+            return Some(implementation_shape);
+        }
+    }
+    Some(interface_shape)
+}
+
+fn trait_return_shape_should_widen_to_implementation(
+    interface_shape: &RustSlotShape,
+    implementation_shape: &RustSlotShape,
+) -> bool {
+    interface_shape.ownership == OwnershipShape::SharedBorrow
+        && implementation_shape.ownership == OwnershipShape::Owned
+        && interface_shape.java_ty == implementation_shape.java_ty
 }
 
 fn trait_method_receiver_plan(
@@ -810,10 +891,15 @@ fn trait_method_return_type_with_exception_plan(
     ty: &TypeDecl,
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
+    return_shape_override: Option<RustSlotShape>,
 ) -> Option<RustType> {
-    let rust_return = signatures
-        .required_method_signature(ty, method)
-        .return_shape
+    let return_shape = return_shape_override.or_else(|| {
+        signatures
+            .required_method_signature(ty, method)
+            .return_shape
+            .clone()
+    });
+    let rust_return = return_shape
         .as_ref()
         .map(|shape| rust_type_for_slot_with_facts(shape, facts));
     if exceptions.wrap_returns_in_result {
