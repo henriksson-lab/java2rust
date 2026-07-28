@@ -14496,7 +14496,7 @@ fn lower_source_input_stream_read_byte_array_call(
         lowered_receiver,
         env,
         ctx,
-        true,
+        false,
         true,
     );
     let receiver_text = emit::emit_expr(&lowered_receiver);

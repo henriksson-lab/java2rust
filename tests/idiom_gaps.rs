@@ -9204,9 +9204,7 @@ class MiniSmartFileReader extends FileReader {
             && translation
                 .rust
                 .contains("pub fn new(file: File) -> MiniSmartFileReader")
-            && translation
-                .rust
-                .contains("return MiniSmartFileReader {  };")
+            && translation.rust.contains("return __java_self;")
             && !translation
                 .rust
                 .contains("super(...) requires inheritance lowering")
@@ -15140,12 +15138,10 @@ class ResourceInputStreamReadClose {
     );
 
     assert!(
-        (translation.rust.contains(".read(&buffer)")
-            || translation.rust.contains(".read(&mut buffer)")
-            || translation.rust.contains(".read(buffer.as_slice())")
-            || translation.rust.contains(".read(buffer.as_mut_slice())"))
+        translation.rust.contains(".read_3(")
+            && translation.rust.contains("buffer.as_mut_slice()")
             && translation.rust.contains(".close()")
-            && translation.rust.contains("pub fn read")
+            && translation.rust.contains("pub fn read_3")
             && translation.rust.contains("pub fn close")
             && !translation.rust.contains("no method named `read`")
             && !translation.rust.contains("no method named `close`"),
@@ -18256,7 +18252,7 @@ mod generated_tests {
     fn try_finally_cleanup_typechecks() {
         let fixture = SimpleTryFinallyCleanup {};
         let resource = Resource {};
-        assert_eq!(fixture.copy(resource), Ok(()));
+        assert_eq!(fixture.copy(&resource), Ok(()));
     }
 }
 "#

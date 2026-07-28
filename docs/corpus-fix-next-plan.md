@@ -4929,6 +4929,20 @@ needed. Focused guards now pass for
 `static_owned_path_argument_does_not_borrow_owned_temporary`, and
 `source_borrowed_getter_initializers_recover_owned_locals`.
 
+Follow-up JDK input-stream receiver mutability cleanup: the byte-array
+`InputStream.read(buffer)` bridge still lowers the buffer through the mutable
+slice argument slot, but the stream receiver itself now uses a shared optional
+receiver projection. This keeps nullable resource streams from requiring
+`let mut in` just because `read_3` mutates the byte-array argument. The same
+focused cleanup aligned no-state JDK super-constructor and try/finally harness
+expectations with the current emitted constructor/test ABI. Verified with
+`resource_input_stream_read_and_close_have_typed_facade_support`,
+`input_stream_read_byte_array_uses_three_arg_overload_with_full_buffer`,
+`source_filter_output_stream_write_byte_array_uses_three_arg_override`,
+`jdk_file_reader_super_constructor_is_no_state_facade`,
+`simple_try_finally_cleanup_generated_rust_compiles`, `cargo fmt --check`,
+`cargo check --quiet`, and `git diff --check`.
+
 ## Rerun Protocol
 
 After each fix:
