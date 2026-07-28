@@ -4518,6 +4518,8 @@ const VCF_OWNED_TYPES: &[&str] = &[
     VCF_PACK,
     "htsjdk.variant.vcf.VCFConstants",
     "VCFConstants",
+    "htsjdk.variant.utils.GeneralUtils",
+    "GeneralUtils",
     "htsjdk.variant.vcf.VCFCompoundHeaderLine",
     "VCFCompoundHeaderLine",
     "htsjdk.variant.vcf.VCFCompoundHeaderLine.SupportedHeaderLineType",
@@ -19845,6 +19847,18 @@ const BCF_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
 ];
 
 const VCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
+    modeled_semantic_field_typed(
+        "htsjdk.variant.utils.GeneralUtils",
+        "DEBUG_MODE_ENABLED",
+        "boolean",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "GeneralUtils",
+        "DEBUG_MODE_ENABLED",
+        "boolean",
+        ExternalFieldKind::StaticFinal,
+    ),
     modeled_semantic_field("htsjdk.variant.vcf.VCFConstants", "PASSES_FILTERS_v4"),
     modeled_semantic_field("VCFConstants", "PASSES_FILTERS_v4"),
     modeled_semantic_field("htsjdk.variant.vcf.VCFConstants", "MISSING_VALUE_v4"),

@@ -5226,6 +5226,24 @@ string display, arity mismatches, missing `GeneralUtils`/genotype facades,
 boxed dyn-clone recovery, incompatible `?` usage, and source-super constructor
 lowering.
 
+2026-07-28 VCF typed external static-field follow-up:
+`htsjdk.variant.utils.GeneralUtils.DEBUG_MODE_ENABLED` is now represented as a
+VCF-pack typed static-final boolean field fact instead of a missing facade
+owner. Focused coverage checks both pack dispatch/provenance and translation
+support emission for the imported owner alias.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260728-htsjdk-vcf-after-generalutils-static-field`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `506` to `498`. Generated support now includes
+`HtsjdkVariantUtilsGeneralUtils::DEBUG_MODE_ENABLED: bool` plus the
+`GeneralUtils` alias, and the 8 unresolved `GeneralUtils` rows are gone from
+the top compile-error summary. Remaining top families are broad mismatched
+types, type annotations, unsupported concrete/concrete `instanceof`, nullable
+string display, arity mismatches, boxed dyn-clone recovery, incompatible `?`
+usage, source-super constructor lowering, and missing genotype/VCF facade
+precision.
+
 ## Rerun Protocol
 
 After each fix:

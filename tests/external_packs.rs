@@ -4582,6 +4582,28 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         ))
     );
 
+    let debug_mode = facts
+        .external_field_for("GeneralUtils", "DEBUG_MODE_ENABLED")
+        .expect("GeneralUtils.DEBUG_MODE_ENABLED should be pack-owned");
+    assert_eq!(debug_mode.provenance, FactProvenance::ExternalLibraryPack);
+    assert_eq!(
+        debug_mode.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Boolean))
+    );
+    assert_eq!(debug_mode.field_kind, ExternalFieldKind::StaticFinal);
+    let dispatched_debug_mode =
+        new_java2rust::external_packs::external_field_for("GeneralUtils", "DEBUG_MODE_ENABLED")
+            .expect("GeneralUtils.DEBUG_MODE_ENABLED should be globally pack-dispatched");
+    assert_eq!(
+        dispatched_debug_mode.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
+    assert_eq!(
+        new_java2rust::stdlib::external_field_provenance("GeneralUtils", "DEBUG_MODE_ENABLED"),
+        FactProvenance::ExternalLibraryPack,
+        "GeneralUtils.DEBUG_MODE_ENABLED precision should come from the VCF pack, not stdlib"
+    );
+
     for (field_name, expected_ty) in [
         ("PASSES_FILTERS_v4", JavaType::String),
         ("MISSING_VALUE_v4", JavaType::String),

@@ -24379,6 +24379,39 @@ class BuiltinPrimitiveConstant {
         "{}",
         builtin_translation.rust
     );
+
+    let builtin_boolean_translation = translate_source(
+        r#"
+import htsjdk.variant.utils.GeneralUtils;
+
+class BuiltinBooleanConstant {
+    boolean debug() {
+        return GeneralUtils.DEBUG_MODE_ENABLED;
+    }
+}
+"#,
+    );
+    assert!(
+        builtin_boolean_translation
+            .rust
+            .contains("pub type GeneralUtils = HtsjdkVariantUtilsGeneralUtils;"),
+        "{}",
+        builtin_boolean_translation.rust
+    );
+    assert!(
+        builtin_boolean_translation
+            .rust
+            .contains("pub const DEBUG_MODE_ENABLED: bool = false;"),
+        "{}",
+        builtin_boolean_translation.rust
+    );
+    assert!(
+        builtin_boolean_translation
+            .rust
+            .contains("GeneralUtils::DEBUG_MODE_ENABLED"),
+        "{}",
+        builtin_boolean_translation.rust
+    );
 }
 
 #[test]
