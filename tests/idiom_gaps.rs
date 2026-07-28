@@ -2946,11 +2946,10 @@ class Path {
     assert!(
         translation
             .rust
-            .contains("pub fn check_path(path: Path, optional_index_path: Option<Path>)")
+            .contains("pub fn check_path(path: &Path, optional_index_path: Option<Path>)")
             && translation.rust.contains("Helper::check_path(")
             && translation.rust.contains("IO::get_path(vcf_path")
             && translation.rust.contains("Some(IO::get_path(")
-            && !translation.rust.contains("&IO::get_path")
             && !translation.rust.contains("Some(&IO::get_path"),
         "{}",
         translation.rust
@@ -16515,8 +16514,8 @@ mod generated_tests {
         let fixture = CustomEqualsMethod {};
         let left = Value::new(7);
         let same = Value::new(7);
-        assert!(fixture.same(left, same));
-        assert!(!fixture.same(Value::new(7), Value::new(8)));
+        assert!(fixture.same(&left, &same));
+        assert!(!fixture.same(&Value::new(7), &Value::new(8)));
     }
 }
 "#,
@@ -17002,13 +17001,13 @@ class Zip {
     assert!(
         translation
             .rust
-            .contains("let xhtml: Option<Writer> = report.xhtml_stream().cloned()")
+            .contains("let xhtml: Option<&Writer> = report.xhtml_stream()")
             && translation
                 .rust
-                .contains("let data: Option<Buffer> = report.data_document().cloned()")
+                .contains("let data: Option<&Buffer> = report.data_document()")
             && translation
                 .rust
-                .contains("let zip: Zip = report.zip_file().clone()")
+                .contains("let zip: &Zip = report.zip_file()")
             && !translation.rust.contains("Some(report.xhtml_stream())")
             && !translation.rust.contains("Some(report.data_document())")
             && !translation

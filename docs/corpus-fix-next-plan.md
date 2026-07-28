@@ -4920,6 +4920,14 @@ site. Verified with
 `nullable_source_call_through_field_receiver_stays_optional_without_double_wrap`,
 `cargo test source_summary_nullable_return --test idiom_gaps --quiet`,
 `cargo fmt --check`, and `cargo check --quiet`.
+The same ABI change made several older expectations obsolete: custom equals
+generated harness calls now borrow `Value` arguments, owned-path static helper
+fixtures allow borrowed `Path` arguments when the helper only reads the value,
+and getter-initializer fixtures keep borrowed locals when no owned recovery is
+needed. Focused guards now pass for
+`custom_equals_method_call_stays_a_method_call`,
+`static_owned_path_argument_does_not_borrow_owned_temporary`, and
+`source_borrowed_getter_initializers_recover_owned_locals`.
 
 ## Rerun Protocol
 
