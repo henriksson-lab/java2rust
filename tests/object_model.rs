@@ -978,6 +978,46 @@ final class Num implements Expr {}
 }
 
 #[test]
+fn object_model_keeps_source_interface_dyn_trait_for_resolved_receiver_call() {
+    let parsed = parse_java_source(
+        r#"
+interface Localizable {
+    String getSourceString();
+}
+
+class UseLocalized {
+    String format(Localizable pattern) {
+        return pattern.getSourceString();
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let effective_facts = EffectiveFacts::new(&resolved.facts);
+    let usage = analyze_usage(&resolved.program);
+
+    let object_plan = plan_object_model_from_input(ObjectModelInput {
+        program: &resolved.program,
+        facts: &resolved.facts,
+        effective_facts: &effective_facts,
+        usage: Some(&usage),
+    });
+    let localizable = object_plan.strategy_for("Localizable").unwrap();
+
+    assert_eq!(
+        localizable.strategy,
+        ObjectRepresentation::DynTrait {
+            trait_name: "Localizable".to_string(),
+        }
+    );
+    assert!(localizable.rejected.is_empty());
+    assert_eq!(
+        localizable.requirements,
+        vec![DispatchRequirementKind::NeedsBorrowedTraitView]
+    );
+}
+
+#[test]
 fn object_model_uses_erased_object_when_trait_objects_are_rejected() {
     let parsed = parse_java_source(
         r#"

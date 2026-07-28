@@ -20873,7 +20873,7 @@ public class NestedEnumApiUser {
             .contains("NestedEnumApiUserLocalMode::values().len()")
             && translation
                 .rust
-                .contains("NestedEnumApiUserLocalMode::value_of(name)")
+                .contains("NestedEnumApiUserLocalMode::value_of(name.as_str())")
             && translation
                 .rust
                 .contains("NestedEnumApiUserLocalMode::SECONDARY")

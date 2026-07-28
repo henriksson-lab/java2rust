@@ -11429,13 +11429,15 @@ pub fn method_return_shape_constraints(
             )],
         );
     }
-    let returns_call_result = usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: ty.name.clone(),
-            method_name: method.name.clone(),
-        })
-        .is_some_and(|method_usage| !method_usage.returned_call_results.is_empty());
+    let method_usage = usage.methods.get(&UsageMethodKey {
+        type_name: ty.name.clone(),
+        method_name: method.name.clone(),
+    });
+    let returns_call_result =
+        method_usage.is_some_and(|method_usage| !method_usage.returned_call_results.is_empty());
+    let returns_unknown_call_result = method_usage.is_some_and(|method_usage| {
+        method_usage_returns_unknown_call_result(method_usage, &method.return_type, facts)
+    });
     let returns_call_result_alias = method_returns_local_initialized_from_call(method);
     let typed_return_nullability =
         typed_source_method_return_nullability_constraints(ty, method, facts);
@@ -11484,7 +11486,7 @@ pub fn method_return_shape_constraints(
     let borrowed_return_content_policy =
         borrowed_return_content_policy_from_param_with_facts(ty, method, usage, facts);
     if borrowed_return_content_policy.is_none()
-        && !returns_call_result
+        && !returns_unknown_call_result
         && !returns_call_result_alias
         && !borrowed_object_return
         && boundary_kind != Some(SignatureBoundaryKind::PublicApi)
@@ -11533,6 +11535,25 @@ pub fn method_return_shape_constraints(
         );
     }
     constraints
+}
+
+fn method_usage_returns_unknown_call_result(
+    method_usage: &MethodUsageFacts,
+    declared_return: &JavaType,
+    facts: &FactSet,
+) -> bool {
+    (method_usage.returned_call_results.is_empty()
+        && method_usage.call_sites.iter().any(|call_site| {
+            call_site.result_returned && call_site.boundary == CallArgumentBoundary::Unknown
+        }))
+        || method_usage.returned_call_results.iter().any(|returned| {
+            returned.boundary == CallArgumentBoundary::Unknown
+                && !returned_external_call_result_matches_declared_return(
+                    returned,
+                    declared_return,
+                    facts,
+                )
+        })
 }
 
 fn source_summary_bodyless_return_may_be_null(java_ty: &JavaType) -> bool {
@@ -12027,18 +12048,8 @@ pub fn method_return_boundary_policy(
     }) {
         let returns_matching_anonymous_declared =
             method_returns_matching_anonymous_declared(method);
-        let returns_unknown_call_result = (method_usage.returned_call_results.is_empty()
-            && method_usage.call_sites.iter().any(|call_site| {
-                call_site.result_returned && call_site.boundary == CallArgumentBoundary::Unknown
-            }))
-            || method_usage.returned_call_results.iter().any(|returned| {
-                returned.boundary == CallArgumentBoundary::Unknown
-                    && !returned_external_call_result_matches_declared_return(
-                        returned,
-                        &method.return_type,
-                        facts,
-                    )
-            });
+        let returns_unknown_call_result =
+            method_usage_returns_unknown_call_result(method_usage, &method.return_type, facts);
         kind = merge_signature_boundary_kind_policy(
             kind,
             (returns_unknown_call_result && !returns_matching_anonymous_declared)

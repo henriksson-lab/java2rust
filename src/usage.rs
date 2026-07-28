@@ -1276,16 +1276,24 @@ pub fn call_result_boundary_policy(
             name,
             args,
             resolved,
-        } => Some(CallResultBoundaryPolicy {
-            name: name.clone(),
-            arg_count: args.len(),
-            receiver_type: receiver
+        } => {
+            let receiver_type = receiver
                 .as_deref()
-                .and_then(|receiver| call_result_receiver_type(receiver, facts)),
-            boundary: call_argument_boundary_policy(receiver.as_deref(), name, internal_methods)
-                .boundary,
-            resolved: resolved.clone(),
-        }),
+                .and_then(|receiver| call_result_receiver_type(receiver, facts));
+            let boundary =
+                call_argument_boundary_policy(receiver.as_deref(), name, internal_methods).boundary;
+            Some(CallResultBoundaryPolicy {
+                name: name.clone(),
+                arg_count: args.len(),
+                boundary: resolved_receiver_call_boundary(
+                    boundary,
+                    receiver_type.as_ref(),
+                    resolved.as_ref(),
+                ),
+                receiver_type,
+                resolved: resolved.clone(),
+            })
+        }
         Expr::New { .. } => Some(CallResultBoundaryPolicy {
             name: "new".to_string(),
             arg_count: 0,
@@ -1417,6 +1425,12 @@ fn analyze_expr_with_context(
             ..
         } => {
             let policy = call_argument_boundary_policy(receiver.as_deref(), name, internal_methods);
+            let receiver_type = call_receiver_java_type(receiver.as_deref(), facts);
+            let call_boundary = resolved_receiver_call_boundary(
+                policy.boundary,
+                receiver_type.as_ref(),
+                resolved.as_ref(),
+            );
             record_trivial_accessor_call_use(
                 facts,
                 current_type,
@@ -1433,10 +1447,9 @@ fn analyze_expr_with_context(
                 result_returned,
                 receiver_is_self: call_receiver_is_self(receiver.as_deref()),
                 null_arg_indices: null_argument_indices(args),
-                boundary: policy.boundary,
+                boundary: call_boundary,
                 resolved: resolved.clone(),
             });
-            let receiver_type = call_receiver_java_type(receiver.as_deref(), facts);
             if is_content_read_method(name)
                 && let Some(receiver) = receiver
                 && let Expr::Var(binding) = receiver.as_ref()
@@ -1452,7 +1465,7 @@ fn analyze_expr_with_context(
                     binding,
                     BindingUse::ReceiverForCall {
                         name: name.clone(),
-                        boundary: policy.boundary,
+                        boundary: call_boundary,
                     },
                 );
             }
@@ -1468,7 +1481,7 @@ fn analyze_expr_with_context(
             }
             for (arg_index, arg) in args.iter().enumerate() {
                 let arg_boundary =
-                    call_argument_use_boundary_policy(name, arg_index, policy.boundary);
+                    call_argument_use_boundary_policy(name, arg_index, call_boundary);
                 record_call_arg_use(
                     facts,
                     current_type,
@@ -2115,6 +2128,39 @@ pub fn call_argument_boundary_policy(
         name: name.to_string(),
         boundary,
     }
+}
+
+fn resolved_receiver_call_boundary(
+    boundary: CallArgumentBoundary,
+    receiver_type: Option<&JavaType>,
+    resolved: Option<&ResolvedCall>,
+) -> CallArgumentBoundary {
+    if boundary != CallArgumentBoundary::Unknown {
+        return boundary;
+    }
+    let Some(resolved) = resolved else {
+        return boundary;
+    };
+    if resolved.kind != crate::java_ir::CallKind::Instance {
+        return boundary;
+    }
+    if receiver_static_type_matches_declaring_type(receiver_type, &resolved.declaring_type) {
+        CallArgumentBoundary::KnownContentRead
+    } else {
+        boundary
+    }
+}
+
+fn receiver_static_type_matches_declaring_type(
+    receiver_type: Option<&JavaType>,
+    declaring_type: &str,
+) -> bool {
+    let Some(JavaType::Named { name, .. }) = receiver_type else {
+        return false;
+    };
+    name == declaring_type
+        || name.rsplit('.').next() == Some(declaring_type)
+        || declaring_type.rsplit('.').next() == Some(name)
 }
 
 pub fn call_argument_use_boundary_policy(

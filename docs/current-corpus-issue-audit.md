@@ -1124,6 +1124,22 @@ current explicit-cast-preserving spelling
 `explicit_primitive_cast_applies_to_whole_shift_and_bitwise_expression`
 regression also passes.
 
+Focused enum/interface dispatch update:
+`closed_enum_variant_borrows_as_dyn_trait_parameter` now passes. Usage analysis
+now treats resolved instance calls on a receiver whose static Java type matches
+the resolved declaring type as a known borrowed trait-view boundary instead of
+an unknown runtime-object boundary. This keeps source interfaces such as
+`Localizable` in dyn-trait representation, emits the enum/interface impl, and
+allows enum constants to pass as `&... as &dyn Localizable`. Focused checks also
+passed for `commons_math_localized_formats_constants_borrow_as_localizable_pack_trait`,
+`source_nested_enum_type_access_uses_flattened_enum_helpers`, and the new
+object-model regression
+`object_model_keeps_source_interface_dyn_trait_for_resolved_receiver_call`.
+The related `source_interface_collection_elements_use_boxed_dyn_trait` fixture
+still fails: field and argument slots use `Vec<Box<dyn Localizable>>` and
+`pattern.clone_box()`, but `Localizable first(...)` still solves its method
+return as erased object when returning `patterns.get(index)`.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
@@ -1133,14 +1149,17 @@ regression also passes.
 2. Continue generalizing optional carrier projection through slot plans, with an
    audit pass for old narrow rules that still emit wrapper-level
    `.clone().unwrap()` instead of borrowing and cloning the contained value.
-3. Minimize the VCF shared-support enum assembly failure.
-4. Add a Spark/DISQ interface bridge fixture around `getBases`.
-5. Convert shared errors from the newly unblocked ndarray corpus reruns into
+3. Fix source-interface collection return slots so `List<Trait>.get(...)`
+   returned from a method declared as `Trait` keeps `Box<dyn Trait>` instead of
+   erasing the method return to `Box<dyn Any>`.
+4. Minimize the VCF shared-support enum assembly failure.
+5. Add a Spark/DISQ interface bridge fixture around `getBases`.
+6. Convert shared errors from the newly unblocked ndarray corpus reruns into
    fixtures, especially `super(...)`, array creation, switch scaffolding,
    Java string/file/logging facades, non-emitter raw keyword leaks, and
    trait/interface assembly. The current local matrix idiom fixtures are green;
    rerun the affected ndarray corpuses before promoting more matrix work.
-5. For JAligner, prefer statement-side or mutator-role ABI facts for
+7. For JAligner, prefer statement-side or mutator-role ABI facts for
    `Collections.sort(...) -> ()`, then handle `NamedInputStream.get_name()`,
    `Pair -> Format`, `SequenceParser` nullable line flow, temporary borrowed
    string lifetimes, and moved `StringBuffer.append(...)` arguments.

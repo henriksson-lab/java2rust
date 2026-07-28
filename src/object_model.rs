@@ -948,10 +948,7 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             continue;
         };
         if let Some(strategy) = plan.strategy_for_mut(&policy.type_name) {
-            if external_pack_erased_override_should_not_replace_parsed_source(
-                override_fact,
-                strategy,
-            ) {
+            if external_pack_override_should_not_replace_parsed_source(override_fact, strategy) {
                 continue;
             }
             strategy.strategy = representation;
@@ -972,12 +969,11 @@ fn apply_hierarchy_overrides_to_strategy_plan(
     }
 }
 
-fn external_pack_erased_override_should_not_replace_parsed_source(
+fn external_pack_override_should_not_replace_parsed_source(
     override_fact: &HierarchyOverride,
     strategy: &ObjectStrategyPlan,
 ) -> bool {
     override_fact.provenance == FactProvenance::ExternalLibraryPack
-        && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
         && strategy.primary_provenance() == FactProvenance::ParsedSource
 }
 

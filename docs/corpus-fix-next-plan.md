@@ -4841,6 +4841,20 @@ support identities such as `VCFHeader.HEADER_FIELDS`, source enum static
 accessors like `__static_v_c_f4_3`, and package/facade static constants such as
 `TabixFormat.VCF`, not raw mixed-case source constant names.
 
+Follow-up enum/interface boundary cleanup: resolved source-interface receiver
+calls now stay as known borrowed trait-view usage instead of demoting the
+interface to erased object through an unknown receiver boundary. Focused
+fixtures `closed_enum_variant_borrows_as_dyn_trait_parameter`,
+`commons_math_localized_formats_constants_borrow_as_localizable_pack_trait`,
+and `source_nested_enum_type_access_uses_flattened_enum_helpers` pass, and the
+new object-model regression
+`object_model_keeps_source_interface_dyn_trait_for_resolved_receiver_call`
+proves the usage requirement remains `NeedsBorrowedTraitView`. The adjacent
+`source_interface_collection_elements_use_boxed_dyn_trait` fixture remains a
+separate return-slot problem: `List<Localizable>` storage and `add(pattern)` use
+boxed dyn carriers, but `Localizable first(...)` still returns an erased object
+when the body is `patterns.get(index)`.
+
 ## Rerun Protocol
 
 After each fix:
