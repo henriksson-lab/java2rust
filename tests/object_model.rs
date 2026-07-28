@@ -20,10 +20,10 @@ use new_java2rust::resolve::resolve_program;
 use new_java2rust::shape_projection::{
     DispatchRequirementProjectionRole, dispatch_requirement_projection_policy,
 };
-use new_java2rust::usage::analyze_usage;
 use new_java2rust::usage::{
     BindingUse, BindingUseFacts, CallArgumentBoundary, MethodUsageFacts, UsageFacts, UsageMethodKey,
 };
+use new_java2rust::usage::{analyze_usage, analyze_usage_with_facts};
 use new_java2rust::{
     facts::{FactSet, TypeCapabilityOverride},
     slot_shape::DispatchShape,
@@ -305,10 +305,7 @@ class Use {
             .iter()
             .any(
                 |usage| matches!(usage, BindingUse::InstanceOfTarget { target_ty }
-                if target_ty == &JavaType::Named {
-                    name: "InfoHeaderLine".to_string(),
-                    args: Vec::new(),
-                })
+                if matches!(target_ty, JavaType::Named { name, args } if name == "InfoHeaderLine" && args.is_empty()))
             ),
         "instanceof should be represented as a dispatch requirement source"
     );
@@ -719,6 +716,62 @@ interface RejectedReceiver {}
             .unwrap()
             .strategy,
         ObjectRepresentation::ErasedObject
+    );
+}
+
+#[test]
+fn resolved_constructor_interface_flow_keeps_dyn_trait_storage() {
+    let parsed = parse_java_source(
+        r#"
+interface Writer {
+}
+
+class BasicWriter implements Writer {
+}
+
+class AsyncWriter implements Writer {
+    Writer delegate;
+
+    AsyncWriter(Writer writer) {
+        this.delegate = writer;
+    }
+}
+
+class InterfaceWriterFactory {
+    Writer newWriter(boolean async) {
+        Writer writer = new BasicWriter();
+        if (async) {
+            return new AsyncWriter(writer);
+        }
+        return writer;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+    let usage_requirements = dispatch_requirements_from_usage(&usage);
+    let writer_requirements = usage_requirements.get("Writer").unwrap();
+
+    assert!(
+        writer_requirements.contains(&DispatchRequirementKind::NeedsOwnedPolymorphicStorage),
+        "{writer_requirements:?}"
+    );
+    assert!(
+        !writer_requirements.contains(&DispatchRequirementKind::NeedsUnknownRuntimeObject),
+        "{writer_requirements:?}"
+    );
+    assert!(
+        !writer_requirements.contains(&DispatchRequirementKind::RejectTraitObject),
+        "{writer_requirements:?}"
+    );
+
+    let object_plan = plan_object_model(&resolved.program, &resolved.facts);
+    assert_eq!(
+        object_plan.strategy_for("Writer").unwrap().strategy,
+        ObjectRepresentation::DynTrait {
+            trait_name: "Writer".to_string(),
+        }
     );
 }
 

@@ -1395,11 +1395,11 @@ fn call_result_boundary_policy_with_context(
                 resolved: resolved.clone(),
             })
         }
-        Expr::New { .. } => Some(CallResultBoundaryPolicy {
+        Expr::New { resolved, .. } => Some(CallResultBoundaryPolicy {
             name: "new".to_string(),
             arg_count: 0,
             receiver_type: None,
-            boundary: CallArgumentBoundary::Unknown,
+            boundary: constructor_result_boundary_policy(resolved.as_ref()),
             resolved: None,
         }),
         _ => None,
@@ -1808,7 +1808,7 @@ fn analyze_expr_with_context(
                 result_returned,
             );
         }
-        Expr::New { args, .. } => {
+        Expr::New { args, resolved, .. } => {
             for (arg_index, arg) in args.iter().enumerate() {
                 record_call_arg_use(
                     facts,
@@ -1820,7 +1820,7 @@ fn analyze_expr_with_context(
                     "new",
                     None,
                     arg_index,
-                    CallArgumentBoundary::Unknown,
+                    constructor_argument_boundary_policy(resolved.as_ref(), arg_index),
                 );
                 analyze_nested_argument_expr(
                     arg,
@@ -2353,6 +2353,30 @@ pub fn call_argument_boundary_policy(
     CallArgumentBoundaryPolicy {
         name: name.to_string(),
         boundary,
+    }
+}
+
+fn constructor_result_boundary_policy(
+    resolved: Option<&ResolvedConstructor>,
+) -> CallArgumentBoundary {
+    if resolved.is_some() {
+        CallArgumentBoundary::InternalSameType
+    } else {
+        CallArgumentBoundary::Unknown
+    }
+}
+
+fn constructor_argument_boundary_policy(
+    resolved: Option<&ResolvedConstructor>,
+    arg_index: usize,
+) -> CallArgumentBoundary {
+    if resolved
+        .and_then(|resolved| resolved.params.get(arg_index))
+        .is_some()
+    {
+        CallArgumentBoundary::InternalSameType
+    } else {
+        CallArgumentBoundary::Unknown
     }
 }
 

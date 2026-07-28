@@ -5023,6 +5023,21 @@ expectations with the current emitted constructor/test ABI. Verified with
 `simple_try_finally_cleanup_generated_rust_compiles`, `cargo fmt --check`,
 `cargo check --quiet`, and `git diff --check`.
 
+Resolved source-call and constructor boundary cleanup: final source-call
+argument lowering now uses emitted source method signatures for both instance
+and static resolved calls, keyed by resolved staticness. This prevents
+context-fallback string-view refinements from contradicting an emitted owned
+source method parameter, so reused owned arguments recover through the shared
+clone policy. Resolved constructor expressions and their arguments are also no
+longer recorded as opaque unknown boundaries in usage analysis when the
+resolver selected a constructor. This keeps constructor-created source
+interface values on `Box<dyn Trait>` storage instead of forcing the interface
+representation to `Box<dyn Any>`. Verified with
+`method_argument_reuse_clones_at_owned_boundary`,
+`boxed_dyn_clone_recovery_parenthesizes_cast_receiver`,
+`resolved_constructor_interface_flow_keeps_dyn_trait_storage`,
+`cargo fmt --check`, `cargo check --quiet`, and `git diff --check`.
+
 ## Rerun Protocol
 
 After each fix:

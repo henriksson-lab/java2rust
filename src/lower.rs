@@ -11597,7 +11597,7 @@ fn emitted_source_resolved_call_argument_plan(
     let method = owner.members.iter().find_map(|member| match member {
         Member::Method(method)
             if method.params.len() == arg_count
-                && method.modifiers.contains(&Modifier::Static)
+                && method_staticness_matches_resolved(method, resolved.kind)
                 && method_rust_name_matches_resolved(method, &resolved.rust_name) =>
         {
             Some(method)
@@ -11612,6 +11612,14 @@ fn emitted_source_resolved_call_argument_plan(
             .map(|param| param.shape.clone())
             .collect(),
     ))
+}
+
+fn method_staticness_matches_resolved(method: &MethodDecl, resolved_kind: CallKind) -> bool {
+    let method_is_static = method.modifiers.contains(&Modifier::Static);
+    matches!(
+        (resolved_kind, method_is_static),
+        (CallKind::Static, true) | (CallKind::Instance, false)
+    )
 }
 
 fn method_rust_name_matches_resolved(method: &MethodDecl, resolved_rust_name: &str) -> bool {
