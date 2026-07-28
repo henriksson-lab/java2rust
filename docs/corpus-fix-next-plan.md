@@ -5053,6 +5053,17 @@ with `documents_method_reference_flat_map_gap`,
 `neutral_idiom_fixtures_generated_crate_cargo_checks`, `cargo fmt --check`,
 `cargo check --quiet`, and `git diff --check`.
 
+Trait implementation forwarding cleanup: generated dyn-trait implementation
+methods now adapt borrowed Java string trait parameters into owned `String`
+implementation slots with `.to_string()`, matching the existing borrowed
+slice-to-owned-`Vec` forwarding adapter. This keeps interface ABI borrowing
+compatible with concrete source methods that still own their Java `String`
+parameters and avoids re-specializing fallible trait implementations. Verified
+with `source_interface_trait_uses_fallible_implementation_signature`,
+`documents_comparator_interface_gap`, `documents_core_functional_interfaces_gap`,
+`swing_panel_converts_to_component_facade_slots`, `cargo fmt --check`,
+`cargo check --quiet`, and `git diff --check`.
+
 ## Rerun Protocol
 
 After each fix:

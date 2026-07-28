@@ -11718,13 +11718,13 @@ class IOException extends Exception {}
     assert!(
         translation
             .rust
-            .contains("pub trait Sink {\n    fn write(&self, value: String) -> Result<(), JavaException>;")
+            .contains("pub trait Sink {\n    fn write(&self, value: &str) -> Result<(), JavaException>;")
             && translation
                 .rust
-                .contains("impl Sink for FileSink {\n    fn write(&self, value: String) -> Result<(), JavaException> { FileSink::write(self, value) }")
+                .contains("impl Sink for FileSink {\n    fn write(&self, value: &str) -> Result<(), JavaException> { FileSink::write(self, value.to_string()) }")
             && !translation
                 .rust
-                .contains("fn write(&self, value: String);"),
+                .contains("fn write(&self, value: &str);"),
         "{}",
         translation.rust
     );
@@ -11738,7 +11738,7 @@ class IOException extends Exception {}
     );
     assert!(
         interface_translation.rust.contains(
-            "pub trait Sink {\n    fn write(&self, value: String) -> Result<(), JavaException>;"
+            "pub trait Sink {\n    fn write(&self, value: &str) -> Result<(), JavaException>;"
         ),
         "{}",
         interface_translation.rust
@@ -11754,7 +11754,7 @@ class IOException extends Exception {}
     assert!(
         implementation_translation
             .rust
-            .contains("impl Sink for FileSink {\n    fn write(&self, value: String) -> Result<(), JavaException> { FileSink::write(self, value) }"),
+            .contains("impl Sink for FileSink {\n    fn write(&self, value: &str) -> Result<(), JavaException> { FileSink::write(self, value.to_string()) }"),
         "{}",
         implementation_translation.rust
     );

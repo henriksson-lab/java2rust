@@ -575,6 +575,15 @@ fn trait_impl_forwarded_arg(
     }) {
         return format!("{arg_name}.to_vec()");
     }
+    if implementation_shape.is_some_and(|shape| {
+        trait_shape.ownership == OwnershipShape::SharedBorrow
+            && trait_shape.view == ViewShape::Str
+            && shape.ownership == OwnershipShape::Owned
+            && shape.view == ViewShape::Native
+            && shape.java_ty == trait_shape.java_ty
+    }) {
+        return format!("{arg_name}.to_string()");
+    }
     arg_name.to_string()
 }
 
