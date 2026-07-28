@@ -4865,6 +4865,17 @@ solves `Localizable first(...) { return patterns.get(index); }` as
 `source_interface_collection_get_return_keeps_boxed_dyn_trait_slot` and
 `source_interface_collection_elements_use_boxed_dyn_trait`.
 
+Follow-up source input-stream overload cleanup: source methods that directly
+override JDK input-stream `read(byte[], int, int)` now inherit the arity-safe
+Rust ABI name `read_3` even when the source class declares only that one
+`read(...)` method. This prevents source subclasses such as
+`GZIPInputStream` wrappers from emitting both one-argument and three-argument
+`read` methods with the same Rust name, while preserving the existing
+source-output-stream `write_byte_array_int_int` override path. Verified with
+`input_stream_read_byte_array_uses_three_arg_overload_with_full_buffer`,
+`source_filter_output_stream_write_byte_array_uses_three_arg_override`, and
+`documents_try_with_resources_copy_gap`.
+
 ## Rerun Protocol
 
 After each fix:

@@ -13253,7 +13253,7 @@ fn documents_try_with_resources_copy_gap() {
     assert!(
         translation.rust.contains("pub fn copy")
             && translation.rust.contains("new_input_stream")
-            && translation.rust.contains("input.read(")
+            && translation.rust.contains("input.read_3(")
             && translation.rust.contains(")?;")
             && translation.rust.contains("output.write_3(")
             && translation.rust.contains("output.close()?;")

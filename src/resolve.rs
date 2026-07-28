@@ -11,8 +11,8 @@ use crate::facts::{
 };
 use crate::java_ir::{
     Block, CallKind, ConstructorDecl, ConstructorInvocationKind, Expr, JavaCoercionEvidence,
-    JavaCoercionKind, JavaType, LambdaBody, Member, MethodDecl, Modifier, Param, Program,
-    ResolvedCall, ResolvedConstructor, Stmt, TypeDecl, TypeKind, WildcardBound,
+    JavaCoercionKind, JavaType, LambdaBody, Member, MethodDecl, Modifier, Param, PrimitiveType,
+    Program, ResolvedCall, ResolvedConstructor, Stmt, TypeDecl, TypeKind, WildcardBound,
 };
 use crate::types::{TypeEnv, infer_expr_type};
 
@@ -584,7 +584,7 @@ fn assign_type_rust_names(ty: &mut TypeDecl, diagnostics: &mut DiagnosticBag) {
 
     for member in &mut ty.members {
         match member {
-            Member::Method(method) => resolve_method(method, &method_counts),
+            Member::Method(method) => resolve_method(method, &method_counts, ty.extends.as_deref()),
             Member::Constructor(ctor) => resolve_constructor(ctor, ctor_count),
             Member::Type(nested) => assign_type_rust_names(nested, diagnostics),
             Member::Unsupported { reason, .. } => {
@@ -665,8 +665,16 @@ fn resolve_type_calls(
     }
 }
 
-fn resolve_method(method: &mut MethodDecl, counts: &HashMap<String, usize>) {
+fn resolve_method(
+    method: &mut MethodDecl,
+    counts: &HashMap<String, usize>,
+    direct_superclass: Option<&str>,
+) {
     let base = crate::parser::to_snake_case(&method.name);
+    if source_method_overrides_jdk_input_stream_read_3(method, direct_superclass) {
+        method.rust_name = Some("read_3".to_string());
+        return;
+    }
     if counts.get(&method.name).copied().unwrap_or(0) <= 1 {
         method.rust_name = Some(base);
         return;
@@ -679,6 +687,47 @@ fn resolve_method(method: &mut MethodDecl, counts: &HashMap<String, usize>) {
         .collect::<Vec<_>>()
         .join("_");
     method.rust_name = Some(format!("{base}_{suffix}"));
+}
+
+fn source_method_overrides_jdk_input_stream_read_3(
+    method: &MethodDecl,
+    direct_superclass: Option<&str>,
+) -> bool {
+    method.name == "read"
+        && method.params.len() == 3
+        && direct_superclass
+            .and_then(|name| name.rsplit('.').next())
+            .is_some_and(|name| {
+                matches!(
+                    name,
+                    "InputStream"
+                        | "FileInputStream"
+                        | "ByteArrayInputStream"
+                        | "BufferedInputStream"
+                        | "DataInputStream"
+                        | "GZIPInputStream"
+                        | "ZipInputStream"
+                        | "ObjectInputStream"
+                        | "FilterInputStream"
+                        | "PushbackInputStream"
+                        | "SequenceInputStream"
+                )
+            })
+        && method.params.first().is_some_and(|param| {
+            matches!(
+                &param.ty,
+                JavaType::Array(element)
+                    if matches!(element.as_ref(), JavaType::Primitive(PrimitiveType::Byte))
+            )
+        })
+        && method
+            .params
+            .get(1)
+            .is_some_and(|param| matches!(param.ty, JavaType::Primitive(PrimitiveType::Int)))
+        && method
+            .params
+            .get(2)
+            .is_some_and(|param| matches!(param.ty, JavaType::Primitive(PrimitiveType::Int)))
 }
 
 fn resolve_constructor(ctor: &mut ConstructorDecl, ctor_count: usize) {

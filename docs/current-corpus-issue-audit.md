@@ -1143,6 +1143,17 @@ method return as `Box<dyn Localizable>` instead of erased `Box<dyn Any>`.
 Verified with `source_interface_collection_get_return_keeps_boxed_dyn_trait_slot`
 and `source_interface_collection_elements_use_boxed_dyn_trait`.
 
+Focused source input-stream overload update:
+`input_stream_read_byte_array_uses_three_arg_overload_with_full_buffer` now
+passes. Source methods that directly override JDK input-stream
+`read(byte[], int, int)` use the inherited arity-safe Rust name `read_3` even
+when that source class declares no other `read(...)` overload, avoiding a
+duplicate generated `read` method beside the one-argument byte-array facade.
+Guard checks `source_filter_output_stream_write_byte_array_uses_three_arg_override`
+and `documents_try_with_resources_copy_gap` also pass with the existing
+output-stream `write_byte_array_int_int` and try-with-resources `read_3`/`write_3`
+paths.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
@@ -1159,7 +1170,7 @@ and `source_interface_collection_elements_use_boxed_dyn_trait`.
    Java string/file/logging facades, non-emitter raw keyword leaks, and
    trait/interface assembly. The current local matrix idiom fixtures are green;
    rerun the affected ndarray corpuses before promoting more matrix work.
-7. For JAligner, prefer statement-side or mutator-role ABI facts for
+6. For JAligner, prefer statement-side or mutator-role ABI facts for
    `Collections.sort(...) -> ()`, then handle `NamedInputStream.get_name()`,
    `Pair -> Format`, `SequenceParser` nullable line flow, temporary borrowed
    string lifetimes, and moved `StringBuffer.append(...)` arguments.
