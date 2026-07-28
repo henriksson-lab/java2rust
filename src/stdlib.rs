@@ -4913,6 +4913,18 @@ pub fn java_string_hash_code(value: &str) -> i32 {
         .fold(0i32, |hash, unit| hash.wrapping_mul(31).wrapping_add(unit as i32))
 }
 
+pub fn java_list_hash_code<T>(value: &[T]) -> i32 {
+    value.len() as i32
+}
+
+pub fn java_set_hash_code<T, S>(value: &std::collections::HashSet<T, S>) -> i32 {
+    value.len() as i32
+}
+
+pub fn java_map_hash_code<K, V, S>(value: &std::collections::HashMap<K, V, S>) -> i32 {
+    value.len() as i32
+}
+
 pub fn java_string_index_of<V: AsRef<str>, N: AsRef<str>>(value: V, needle: N) -> i32 {
     value
         .as_ref()

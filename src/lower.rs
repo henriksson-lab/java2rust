@@ -13983,7 +13983,10 @@ fn adapt_native_collection_receiver(
         | NativeCollectionMethod::MapInsert => true,
         NativeCollectionMethod::Len
         | NativeCollectionMethod::IsEmpty
+        | NativeCollectionMethod::ListHashCode
         | NativeCollectionMethod::ListGet
+        | NativeCollectionMethod::SetHashCode
+        | NativeCollectionMethod::MapHashCode
         | NativeCollectionMethod::MapGet
         | NativeCollectionMethod::MapContainsKey
         | NativeCollectionMethod::MapKeys

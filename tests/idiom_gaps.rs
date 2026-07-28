@@ -13961,6 +13961,37 @@ class Params {
 }
 
 #[test]
+fn map_hash_code_lowers_to_java_runtime_helper() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapHashCodeJavaApi {
+    int hash(HashMap<String, String> values) {
+        return values.hashCode();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("java_map_hash_code(&values)")
+            && !translation.rust.contains(".hash_code("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_hash_code_java_api",
+        vec![GeneratedCrateModule {
+            name: "map_hash_code_java_api",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn final_sorted_map_receiver_mutation_declares_rust_local_mutable() {
     let translation = translate_source(&idiom_gap("FinalSortedMapReceiverMutation.java"));
 

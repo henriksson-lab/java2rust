@@ -335,10 +335,13 @@ pub fn optional_borrowed_receiver_slot_plan(
 pub enum NativeCollectionMethod {
     Len,
     IsEmpty,
+    ListHashCode,
     ListPush,
     ListGet,
+    SetHashCode,
     SetInsert,
     Extend,
+    MapHashCode,
     MapInsert,
     MapGet,
     MapContainsKey,
@@ -461,6 +464,11 @@ pub fn native_collection_lowered_type(
                 value_ty.clone(),
             )))
         }
+        NativeCollectionMethod::ListHashCode
+        | NativeCollectionMethod::SetHashCode
+        | NativeCollectionMethod::MapHashCode => Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Int,
+        ))),
         NativeCollectionMethod::ToArray => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::from_java(JavaType::Array(Box::new(
@@ -2642,6 +2650,9 @@ fn plan_native_collection_receiver_call<'a>(
         (_, "size") => NativeCollectionMethod::Len,
         (_, "isEmpty") => NativeCollectionMethod::IsEmpty,
         (_, "toArray" | "to_array") => NativeCollectionMethod::ToArray,
+        (crate::stdlib::JavaCollectionKind::List, "hashCode" | "hash_code") => {
+            NativeCollectionMethod::ListHashCode
+        }
         (crate::stdlib::JavaCollectionKind::List, "add") => NativeCollectionMethod::ListPush,
         (crate::stdlib::JavaCollectionKind::List, "put")
             if receiver_type_is_queue(&receiver_ty) =>
@@ -2649,11 +2660,17 @@ fn plan_native_collection_receiver_call<'a>(
             NativeCollectionMethod::ListPush
         }
         (crate::stdlib::JavaCollectionKind::List, "get") => NativeCollectionMethod::ListGet,
+        (crate::stdlib::JavaCollectionKind::Set, "hashCode" | "hash_code") => {
+            NativeCollectionMethod::SetHashCode
+        }
         (crate::stdlib::JavaCollectionKind::Set, "add") => NativeCollectionMethod::SetInsert,
         (
             crate::stdlib::JavaCollectionKind::List | crate::stdlib::JavaCollectionKind::Set,
             "addAll",
         ) => NativeCollectionMethod::Extend,
+        (crate::stdlib::JavaCollectionKind::Map, "hashCode" | "hash_code") => {
+            NativeCollectionMethod::MapHashCode
+        }
         (crate::stdlib::JavaCollectionKind::Map, "putAll" | "put_all") => {
             NativeCollectionMethod::Extend
         }
@@ -3673,6 +3690,13 @@ pub fn native_collection_arg_shapes_with_facts(
                 &effective_facts,
             )]
         }
+        NativeCollectionMethod::ListHashCode
+        | NativeCollectionMethod::SetHashCode
+        | NativeCollectionMethod::MapHashCode
+            if arg_count == 0 =>
+        {
+            Vec::new()
+        }
         NativeCollectionMethod::MapInsert if arg_count == 2 => {
             let (key_ty, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
             vec![
@@ -4063,6 +4087,13 @@ fn facade_abi_native_collection_arg_java_types(
             crate::types::sequence_element_type(&receiver_ty).map(|element_ty| vec![element_ty])
         }
         NativeCollectionMethod::Extend if arg_count == 1 => None,
+        NativeCollectionMethod::ListHashCode
+        | NativeCollectionMethod::SetHashCode
+        | NativeCollectionMethod::MapHashCode
+            if arg_count == 0 =>
+        {
+            Some(Vec::new())
+        }
         NativeCollectionMethod::MapInsert if arg_count == 2 => {
             let (key_ty, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
             Some(vec![key_ty.clone(), value_ty.clone()])

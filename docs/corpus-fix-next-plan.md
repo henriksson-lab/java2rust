@@ -4703,6 +4703,21 @@ as a targeted correctness fix with no headline count movement; the next VCF map
 work is broader raw `Map` owner/value support and erased-object clone/comparison
 rather than `putAll` lowering.
 
+Follow-up native collection hashCode slice: Java collection `hashCode()` is now
+planned as native collection lowering for list, set, and map receivers, and
+renders through shared runtime helper projections instead of a Rust
+`.hash_code()` method guess. The focused fixture
+`map_hash_code_lowers_to_java_runtime_helper` passes; `cargo fmt --check`,
+`cargo check --quiet`, adjacent map idiom tests, `bash -n
+scripts/translate-focused-package.sh`, and
+`cargo build --release --quiet --bin new-java2rust` were clean. VCF rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-map-hash-code-r2` translates 32/32 files,
+keeps 20 invalid-pattern files, and reduces generated-Rust errors from 691 to
+685. The previous native-map `.hash_code()` row is gone; remaining
+`.hash_code()` call sites are source enum/header-line types such as
+`VCFHeaderLineType` and `VCFHeaderLineCount`, so the next hash-related slice
+should be source enum/source-class hash support rather than map ABI lowering.
+
 ## Rerun Protocol
 
 After each fix:

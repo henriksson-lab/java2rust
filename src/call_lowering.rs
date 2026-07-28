@@ -12,6 +12,7 @@ use crate::coercion::{
     external_crate_path_projection, facade_receiver_method_call_projection, file_exists_projection,
     function_call_projection, java_class_literal_path_projection,
     java_class_static_path_projection, java_iterator_from_collection_projection,
+    java_list_hash_code_projection, java_map_hash_code_projection, java_set_hash_code_projection,
     len_i32_projection, math_max_projection, math_min_projection,
     native_collection_default_constructor_projection, native_collection_empty_new_projection,
     native_collection_with_capacity_projection, objects_equals_projection,
@@ -671,10 +672,19 @@ fn apply_native_collection_method(
     let rust_name = match method {
         NativeCollectionMethod::Len => "len",
         NativeCollectionMethod::IsEmpty => "is_empty",
+        NativeCollectionMethod::ListHashCode => {
+            return java_list_hash_code_projection(receiver);
+        }
         NativeCollectionMethod::ListPush => "push",
         NativeCollectionMethod::ListGet => "get",
+        NativeCollectionMethod::SetHashCode => {
+            return java_set_hash_code_projection(receiver);
+        }
         NativeCollectionMethod::SetInsert => "insert",
         NativeCollectionMethod::Extend => "extend",
+        NativeCollectionMethod::MapHashCode => {
+            return java_map_hash_code_projection(receiver);
+        }
         NativeCollectionMethod::MapInsert => "insert",
         NativeCollectionMethod::MapGet => "get",
         NativeCollectionMethod::MapContainsKey => "contains_key",
