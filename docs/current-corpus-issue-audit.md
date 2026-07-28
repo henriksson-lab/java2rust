@@ -1081,16 +1081,24 @@ site now exposes an argument-shape issue where an optional `LineIterator` field
 is passed to `read_actual_header(LineIterator)` without unwrapping or borrowing
 through a slot plan.
 
+Focused optional-reuse update: focused idiom reruns for
+`optional_map_put_reused_value_borrows_before_clone_unwrap` and
+`optional_argument_wrap_reused_value_clones_before_some` now pass. Reused Java
+nullable values that must feed owned argument slots lower by borrowing the
+`Option` carrier and cloning the contained value through the shared
+`.as_ref().cloned()/* TODO(translation): validate added clone */.expect(...)`
+projection. This avoids moving the carrier before later borrowed/display uses
+and keeps the clone-audit marker on the owned recovery.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
    `.tmp/corpus-batch-current-fastqc-after-display-context-return-r1` into
    fixtures and fixes. Prefer Rust signature/ABI facts over new special-case
    lowering whenever a Rust signature proves the same slot shape.
-2. Generalize optional field receiver/argument projection through slot plans;
-   the current focused VCF witness is
-   `VCFIteratorBuilderVCFReaderIterator::new` passing `line_iterator` to
-   `read_actual_header`.
+2. Continue generalizing optional carrier projection through slot plans, with an
+   audit pass for old narrow rules that still emit wrapper-level
+   `.clone().unwrap()` instead of borrowing and cloning the contained value.
 3. Minimize the VCF shared-support enum assembly failure.
 4. Add a Spark/DISQ interface bridge fixture around `getBases`.
 5. Convert shared errors from the newly unblocked ndarray corpus reruns into

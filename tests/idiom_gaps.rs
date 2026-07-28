@@ -5953,7 +5953,7 @@ fn optional_argument_wrap_reused_value_clones_before_some() {
 
     assert!(
         translation.rust.contains(
-            "self.seen.insert(name.as_ref().cloned().expect(\"Java null receiver\"), \"seen\".to_string())"
+            "self.seen.insert(name.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\"), \"seen\".to_string())"
         ) && translation
             .rust
             .contains("self.valid(name.as_ref().map(|value| value.as_str()))")

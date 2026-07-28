@@ -13427,17 +13427,27 @@ fn adapt_reused_owned_optional_argument(
         return None;
     }
     let rendered = emit::emit_expr(&lowered);
+    let cloned_unwrap = format!("{name}.clone().unwrap()");
+    if rendered.contains(&cloned_unwrap) {
+        return Some(RustExpr::Raw(rendered.replacen(
+            &cloned_unwrap,
+            &format!(
+                "{name}.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
+            ),
+            1,
+        )));
+    }
     if rendered.contains(".unwrap()") || rendered.contains(".expect(\"Java null receiver\")") {
         return Some(lowered);
     }
-    let plan = plan_slot_conversion(
-        actual_shape.clone(),
-        argument_slot(target_shape.clone()),
+    let owned_element = RustExpr::Raw(format!(
+        "{rendered}.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
+    ));
+    Some(apply_expr_to_slot_via_plan(
+        owned_element,
+        element_shape,
+        &argument_slot(target_shape.clone()),
         ctx.facts,
-    );
-    Some(apply_slot_expr_conversion(
-        apply_clone_projection(lowered),
-        &plan,
     ))
 }
 
@@ -13587,7 +13597,9 @@ fn apply_clone_recovery_decision(lowered: RustExpr, decision: CloneRecoveryDecis
         if rendered.contains(&consuming_unwrap) {
             return RustExpr::Raw(rendered.replacen(
                 &consuming_unwrap,
-                &format!("{name}.clone().unwrap()"),
+                &format!(
+                    "{name}.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
+                ),
                 1,
             ));
         }
