@@ -3113,11 +3113,12 @@ class Path {
     );
 
     assert!(
-        translation.rust.contains(
-            "let path: Option<Path> = self.lookup.as_ref().unwrap().find(Some(sample.as_str()));"
-        ) && !translation
+        translation
             .rust
-            .contains("let path: Option<Path> = Some(self.lookup.as_ref().unwrap().find"),
+            .contains("let path: Option<Path> = self.lookup.as_ref().unwrap().find(Some(sample));")
+            && !translation
+                .rust
+                .contains("let path: Option<Path> = Some(self.lookup.as_ref().unwrap().find"),
         "{}",
         translation.rust
     );

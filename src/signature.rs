@@ -6164,6 +6164,13 @@ pub fn method_param_shape_constraints(
                     OwnershipShape::SharedBorrow,
                 )],
             );
+            push_unique_signature_constraints(
+                &mut constraints,
+                &borrowed_content_type_policy(&param.ty, facts)
+                    .policy
+                    .map(signature_constraints_for_borrowed_content_policy)
+                    .unwrap_or_default(),
+            );
         }
     }
     if let Some(body) = &method.body {
@@ -9723,7 +9730,7 @@ fn internal_object_binding_is_shared_borrow_safe(
             | BindingUse::Mutated => return false,
         }
     }
-    saw_read
+    saw_read || binding.uses.is_empty()
 }
 
 fn external_receiver_call_is_readonly(java_ty: &JavaType, name: &str, facts: &FactSet) -> bool {

@@ -4908,6 +4908,19 @@ being boxed as `dyn Any`. Verified with
 `inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan`,
 and `cargo test erased_object --test idiom_gaps --quiet`.
 
+Follow-up source/context string-view ABI cleanup: internal non-escaping
+reference parameters may now borrow even when the parameter is unused, and
+borrowed Java `String` parameters project to string-view slots. Source-summary
+and non-emitted context fallback signatures use the same projection, so ordinary
+source calls, context overload calls, and nullable source-summary calls agree on
+`&str`/shared-borrow ABI instead of cloning into owned `String` at each call
+site. Verified with
+`optional_field_mutating_overload_call_uses_signature_name_and_mut_receiver`,
+`context_translation_uses_sibling_overload_signature_for_call_target`,
+`nullable_source_call_through_field_receiver_stays_optional_without_double_wrap`,
+`cargo test source_summary_nullable_return --test idiom_gaps --quiet`,
+`cargo fmt --check`, and `cargo check --quiet`.
+
 ## Rerun Protocol
 
 After each fix:

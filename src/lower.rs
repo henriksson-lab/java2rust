@@ -10395,12 +10395,7 @@ fn source_context_trait_receiver_param_shape(
     if receiver_uses_dyn_trait_slots
         && source_context_reference_param_should_borrow(&param.ty, param.is_varargs)
     {
-        apply_signature_constraints(
-            shape,
-            &[SignatureConstraint::RequiredOwnership(
-                OwnershipShape::SharedBorrow,
-            )],
-        )
+        source_context_borrowed_param_shape(shape, &param.ty)
     } else {
         shape
     }
@@ -10410,8 +10405,30 @@ fn source_context_reference_param_should_borrow(java_ty: &JavaType, is_varargs: 
     !is_varargs
         && matches!(
             java_ty,
-            JavaType::Named { .. } | JavaType::Unknown(_) | JavaType::Wildcard(_)
+            JavaType::String
+                | JavaType::Named { .. }
+                | JavaType::Unknown(_)
+                | JavaType::Wildcard(_)
         )
+}
+
+fn source_context_borrowed_param_shape(
+    mut shape: RustSlotShape,
+    java_ty: &JavaType,
+) -> RustSlotShape {
+    shape = apply_signature_constraints(
+        shape,
+        &[SignatureConstraint::RequiredOwnership(
+            OwnershipShape::SharedBorrow,
+        )],
+    );
+    if matches!(java_ty, JavaType::String) {
+        shape = apply_signature_constraints(
+            shape,
+            &[SignatureConstraint::RequiredView(ViewShape::Str)],
+        );
+    }
+    shape
 }
 
 fn apply_context_fallback_signature_arg_shapes(
@@ -18871,7 +18888,7 @@ fn non_emitted_static_context_arg_shape(
     if matches!(shape.ownership, OwnershipShape::Owned)
         && source_context_reference_param_should_borrow(java_ty, is_varargs)
     {
-        shape.ownership = OwnershipShape::SharedBorrow;
+        shape = source_context_borrowed_param_shape(shape, java_ty);
     }
     shape
 }
@@ -19213,7 +19230,7 @@ fn source_context_receiver_method_fallback_signature(
                 arg_shapes: source_context_param_shapes(method, ctx)
                     .into_iter()
                     .zip(effective_signature.params.iter())
-                    .map(|(_, solved)| solved.shape.clone())
+                    .map(|(_, solved)| non_emitted_static_context_arg_shape_from_param_plan(solved))
                     .collect(),
                 receiver: effective_signature.receiver,
             });
