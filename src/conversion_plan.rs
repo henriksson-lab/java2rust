@@ -1338,7 +1338,10 @@ pub fn ownership_coercion_policy_with_effective_facts(
     }
     if actual.java_ty == target.java_ty
         && actual.dispatch == target.dispatch
-        && actual.ownership == OwnershipShape::SharedBorrow
+        && matches!(
+            actual.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
         && actual.view == ViewShape::Slice
         && target.ownership == OwnershipShape::Owned
         && target.view == ViewShape::Native
@@ -1834,7 +1837,7 @@ fn optional_element_slot_shape_matches(
         && target_element.dispatch == actual_element_shape.dispatch
 }
 
-fn borrowed_element_target_matches_element(
+pub(crate) fn borrowed_element_target_matches_element(
     target: &RustSlotShape,
     element_shape: &RustSlotShape,
     facts: &FactSet,
@@ -1844,6 +1847,7 @@ fn borrowed_element_target_matches_element(
         || facts
             .hierarchy_subtype_policy(&element_shape.java_ty, &target.java_ty)
             .reaches
+        || external_conversion_adapter_policy(element_shape, target, facts).is_some()
         || known_structural_element_matches_target(&element_shape.java_ty, &target.java_ty)
 }
 

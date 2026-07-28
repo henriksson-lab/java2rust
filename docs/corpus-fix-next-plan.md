@@ -4559,9 +4559,15 @@ Next FastQC batch candidates from that rerun:
    by their present element type and adds exact `JavaIo*OutputStream` receiver
    keys to the shared JDK byte-slice write facts. The focused generated-Rust
    count is now 5 and the `OutputStream.write(byte[])` exact-slot mismatch is
-   gone. The next Base64 slice should focus on `baos.unwrap()` moving an
-   optional resource before cleanup and byte-array move recovery for
-   `buffer`/`out_buff`.
+   gone. The optional-resource/byte-array follow-up keeps output-stream wrapper
+   constructor slots on the shared argument-effect path, solves nullable
+   mutated byte-array helper parameters as `Option<&mut [T]>` while caller
+   locals stay owned, recovers owned `Vec<T>` from returned mutable slices with
+   the shared sequence recovery policy, and makes required borrowed-element
+   target-view projection idempotent when an `Option<&[T]>` unwrap already
+   yields the requested slice view. Focused proof
+   `.tmp/corpus-fastqc-base64-single-after-optional-borrowed-slice-r1`
+   translates 1/1 files with 0 invalid-pattern files and `cargo_check=ok`.
 
 Inherited exception-owner follow-up: inherited source method bodies now lower
 with the emitted subclass as the body/field context but use the declaring type

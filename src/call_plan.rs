@@ -4296,6 +4296,15 @@ pub fn external_constructor_arg_shapes_with_args(
             {
                 saw_fact = true;
                 argument_shape_from_external_constructor_effect(effect, &effective_facts)
+            } else if let Some(effect) =
+                crate::external_packs::java_platform_constructor_argument_effect_for(
+                    receiver_name,
+                    arg_count,
+                    index,
+                )
+            {
+                saw_fact = true;
+                argument_shape_from_external_constructor_effect(&effect, &effective_facts)
             } else if let Some(effect) = facts.external_api_argument_effect_for_receiver(
                 Some(receiver_name),
                 rust_name,

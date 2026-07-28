@@ -4353,12 +4353,84 @@ fn add_method_param_constraint(
         return false;
     };
     let param_constraints = &mut method_constraints.params[param_index];
+    if borrowed_slice_param_rejects_constraint(param_constraints, &constraint) {
+        return false;
+    }
+    let normalized =
+        normalize_borrowed_slice_param_constraints_after_insert(param_constraints, &constraint);
     if param_constraints.contains(&constraint) {
-        false
+        normalized
     } else {
         param_constraints.push(constraint);
         true
     }
+}
+
+fn normalize_borrowed_slice_param_constraints_after_insert(
+    constraints: &mut Vec<SignatureConstraint>,
+    incoming: &SignatureConstraint,
+) -> bool {
+    let mut projected = constraints.clone();
+    if !projected.contains(incoming) {
+        projected.push(incoming.clone());
+    }
+    if !borrowed_slice_param_constraints(&projected) {
+        return false;
+    }
+    let before = constraints.len();
+    constraints
+        .retain(|constraint| !borrowed_slice_param_rejects_constraint(&projected, constraint));
+    constraints.len() != before
+}
+
+fn normalize_borrowed_slice_param_constraints(constraints: &mut Vec<SignatureConstraint>) {
+    if !borrowed_slice_param_constraints(constraints) {
+        return;
+    }
+    let projected = constraints.clone();
+    constraints
+        .retain(|constraint| !borrowed_slice_param_rejects_constraint(&projected, constraint));
+}
+
+fn borrowed_slice_param_rejects_constraint(
+    constraints: &[SignatureConstraint],
+    constraint: &SignatureConstraint,
+) -> bool {
+    match constraint {
+        SignatureConstraint::RequiredOwnership(OwnershipShape::Owned) => {
+            borrowed_slice_param_constraints(constraints)
+                || mutable_borrow_param_constraints(constraints)
+        }
+        SignatureConstraint::RequiredView(ViewShape::Native) | SignatureConstraint::StorageSlot => {
+            borrowed_slice_param_constraints(constraints)
+        }
+        _ => false,
+    }
+}
+
+fn borrowed_slice_param_constraints(constraints: &[SignatureConstraint]) -> bool {
+    constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            SignatureConstraint::RequiredView(ViewShape::Slice)
+        )
+    }) && constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            SignatureConstraint::RequiredOwnership(
+                OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+            )
+        )
+    })
+}
+
+fn mutable_borrow_param_constraints(constraints: &[SignatureConstraint]) -> bool {
+    constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow)
+        )
+    })
 }
 
 fn add_method_param_constraint_scoped(
@@ -6099,7 +6171,14 @@ pub fn method_param_shape_constraints(
                 &mut constraints,
                 &[SignatureConstraint::MutableBinding],
             );
-            if borrowed_content_type_policy(&param.ty, facts)
+            if matches!(param.ty, JavaType::Array(_)) {
+                push_unique_signature_constraints(
+                    &mut constraints,
+                    &[SignatureConstraint::RequiredOwnership(
+                        OwnershipShape::MutableBorrow,
+                    )],
+                );
+            } else if borrowed_content_type_policy(&param.ty, facts)
                 .policy
                 .is_some()
             {
@@ -6164,6 +6243,7 @@ pub fn method_param_shape_constraints(
                 .unwrap_or_default(),
         );
     }
+    normalize_borrowed_slice_param_constraints(&mut constraints);
     constraints
 }
 
@@ -6910,6 +6990,8 @@ fn constrained_param_plan(
     constraints: &[SignatureConstraint],
     facts: &FactSet,
 ) -> ParamPlan {
+    let mut constraints = constraints.to_vec();
+    normalize_borrowed_slice_param_constraints(&mut constraints);
     let shape = solve_signature_shape_with_facts(
         representations,
         SignatureShapeRequest {
@@ -6917,7 +6999,7 @@ fn constrained_param_plan(
             role: SignatureSlotRole::Param {
                 is_varargs: param.is_varargs,
             },
-            constraints: constraints.to_vec(),
+            constraints: constraints.clone(),
         },
         facts,
     )
@@ -6927,7 +7009,7 @@ fn constrained_param_plan(
         java_ty: param.ty.clone(),
         is_varargs: param.is_varargs,
         shape,
-        binding_mutable: signature_constraints_require_mutable_binding(constraints),
+        binding_mutable: signature_constraints_require_mutable_binding(&constraints),
     }
 }
 

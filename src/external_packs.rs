@@ -30246,14 +30246,24 @@ pub fn java_platform_constructor_argument_effect_for(
 ) -> Option<ExternalConstructorArgumentEffectFact> {
     if arg_count == 1
         && parameter_index == 0
-        && crate::facts::external_type_name_matches(type_name, "java.io.PrintStream")
+        && [
+            "java.io.PrintStream",
+            "java.io.BufferedOutputStream",
+            "java.io.DataOutputStream",
+            "java.io.ObjectOutputStream",
+            "java.io.FilterOutputStream",
+            "java.util.zip.GZIPOutputStream",
+            "java.util.zip.ZipOutputStream",
+        ]
+        .iter()
+        .any(|expected| crate::facts::external_type_name_matches(type_name, expected))
     {
         return Some(ExternalConstructorArgumentEffectFact {
             type_name: type_name.to_string(),
             arg_count,
             parameter_index,
             parameter_type: Some(JavaType::Named {
-                name: "OutputStream".to_string(),
+                name: "java.io.OutputStream".to_string(),
                 args: Vec::new(),
             }),
             parameter_nullability: NullabilityState::DefinitelyNonNull,

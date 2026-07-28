@@ -34,13 +34,13 @@ use crate::coercion::{
     BorrowProjectionUse, Coercion, JavaDisplayPlan, OptionalSequenceReceiverProjection,
     SequenceIterationProjection, abstract_interface_method_stub_projection,
     abstract_method_stub_projection, anonymous_dyn_trait_projection, apply_audited_clone_recovery,
-    apply_coercions, apply_java_display_plan, apply_literal_slot_plan, array_fill_projection,
-    array2_rows_i32_projection, borrow_as_dyn_trait, borrowed_sequence_extend_arg,
-    borrowed_string_literal_temporary_plan, boxed_dyn_trait_projection,
-    char_sequence_collect_string_projection, clone_erased_object_ref_once,
-    collection_sort_by_comparator_projection, collection_sort_projection,
-    constructor_self_field_projection, constructor_self_field_replacement,
-    deref_borrowed_projection, ensure_borrow_projection,
+    apply_clone_projection, apply_coercions, apply_java_display_plan, apply_literal_slot_plan,
+    array_fill_projection, array2_rows_i32_projection, borrow_as_dyn_trait,
+    borrowed_sequence_extend_arg, borrowed_string_literal_temporary_plan,
+    boxed_dyn_trait_projection, char_sequence_collect_string_projection,
+    clone_erased_object_ref_once, collection_sort_by_comparator_projection,
+    collection_sort_projection, constructor_self_field_projection,
+    constructor_self_field_replacement, deref_borrowed_projection, ensure_borrow_projection,
     erased_object_borrowed_downcast_ref_projection, erased_object_box_projection,
     exception_self_as_supertype_facade_boundary_projection,
     explicit_java_facade_cast_placeholder_projection, force_shared_borrow_projection,
@@ -84,11 +84,13 @@ use crate::conversion_plan::{
     CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredType, OptionalSlotConstructionPlan,
     ReturnValuePlan, Slot, SlotConversionPlan, actual_shape_for_slot_expr,
     actual_shape_for_slot_expr_with_slot, argument_slot, assignment_statement_plan_for_target,
-    assignment_value_plan_for_shape, assignment_value_plan_for_target, condition_slot, index_slot,
-    optional_slot_construction_plan_for_actual, plan_cast_conversion_from_actual, plan_instanceof,
-    plan_lowered_slot_conversion, plan_slot_conversion,
-    receiver_method_autoref_satisfies_facade_slot, receiver_method_autoref_satisfies_optional_slot,
-    return_value_plan, shape_coercion_plan_with_facts,
+    assignment_value_plan_for_shape, assignment_value_plan_for_target,
+    borrowed_element_target_matches_element, condition_slot, index_slot,
+    optional_element_slot_shape_with_facts, optional_slot_construction_plan_for_actual,
+    plan_cast_conversion_from_actual, plan_instanceof, plan_lowered_slot_conversion,
+    plan_slot_conversion, receiver_method_autoref_satisfies_facade_slot,
+    receiver_method_autoref_satisfies_optional_slot, return_value_plan,
+    shape_coercion_plan_with_facts,
 };
 use crate::diagnostics::DiagnosticBag;
 use crate::emit;
@@ -10064,14 +10066,31 @@ fn lower_constructor_args_with_plan(
     ctx: LowerCtx,
 ) -> Vec<RustExpr> {
     match plan {
-        ArgumentLoweringPlan::Shaped(shapes) => args
-            .iter()
-            .zip(shapes)
-            .map(|(arg, shape)| {
-                let lowered = lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx);
-                adapt_reused_owned_argument(lowered, arg, &shape, None, ctx)
-            })
-            .collect(),
+        ArgumentLoweringPlan::Shaped(shapes) => {
+            let actual_shapes: Vec<RustSlotShape> = args
+                .iter()
+                .map(|arg| {
+                    infer_expr_shape_with_context(
+                        arg,
+                        env,
+                        ExprShapeContext {
+                            signatures: Some(ctx.signatures),
+                            representations: Some(ctx.representations),
+                            facts: Some(ctx.facts),
+                        },
+                    )
+                })
+                .collect();
+            args.iter()
+                .zip(shapes)
+                .enumerate()
+                .map(|(index, (arg, shape))| {
+                    let actual_shape = &actual_shapes[index];
+                    let lowered = lower_expr_for_slot(arg, env, argument_slot(shape.clone()), ctx);
+                    adapt_reused_owned_argument(lowered, arg, &shape, Some(actual_shape), ctx)
+                })
+                .collect()
+        }
         ArgumentLoweringPlan::Unshaped { .. } => {
             let shape_ctx = ExprShapeContext {
                 signatures: Some(ctx.signatures),
@@ -12548,15 +12567,74 @@ fn adapt_reused_owned_argument(
     {
         return borrowed;
     }
+    if let Some(adapted) = adapt_reused_owned_optional_argument(
+        lowered.clone(),
+        source,
+        target_shape,
+        actual_shape,
+        ctx,
+    ) {
+        return adapted;
+    }
     apply_clone_recovery_decision(
         lowered,
         clone_recovery_decision_for_argument(source, target_shape, actual_shape, ctx),
     )
 }
 
+fn adapt_reused_owned_optional_argument(
+    lowered: RustExpr,
+    source: &Expr,
+    target_shape: &RustSlotShape,
+    actual_shape: Option<&RustSlotShape>,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    if target_shape.optional_element_type().is_some() || !shape_is_owned(target_shape) {
+        return None;
+    }
+    let actual_shape = actual_shape?;
+    if actual_shape.optional_element_type().is_none()
+        || actual_shape.ownership != OwnershipShape::Owned
+    {
+        return None;
+    }
+    let Expr::Var(name) = source else {
+        return None;
+    };
+    let move_use = MoveUseContext::new(ctx);
+    if !move_use.has_later_or_repeated_current_read(name)
+        && !move_use
+            .binding_use_count(name)
+            .is_some_and(|use_count| use_count > 1)
+    {
+        return None;
+    }
+    let element_ty = actual_shape.optional_element_type()?;
+    let element_shape = optional_element_slot_shape_with_facts(actual_shape, element_ty, ctx.facts);
+    if !borrowed_element_target_matches_element(target_shape, &element_shape, ctx.facts) {
+        return None;
+    }
+    let rendered = emit::emit_expr(&lowered);
+    if rendered.contains(".unwrap()") || rendered.contains(".expect(\"Java null receiver\")") {
+        return Some(lowered);
+    }
+    let plan = plan_slot_conversion(
+        actual_shape.clone(),
+        argument_slot(target_shape.clone()),
+        ctx.facts,
+    );
+    Some(apply_slot_expr_conversion(
+        apply_clone_projection(lowered),
+        &plan,
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CloneRecoveryDecision {
     NoRecovery,
+    CloneOptionalBeforeConsumingUnwrap {
+        name: String,
+    },
     ApplyRecoveryCoercion {
         coercion: Coercion,
         idempotence: CloneRecoveryIdempotence,
@@ -12642,12 +12720,11 @@ fn clone_recovery_decision_for_argument(
         };
     }
     if reused_actual_optional_owned_argument_needs_clone(source, actual_shape, ctx) {
-        return CloneRecoveryDecision::ApplyRecoveryCoercion {
-            coercion: Coercion::CloneRecovery {
-                policy: CloneRecoveryPolicy::AuditRequired,
-            },
-            idempotence: CloneRecoveryIdempotence::AnyCloneRecovery,
-        };
+        if let Expr::Var(name) = source {
+            return CloneRecoveryDecision::CloneOptionalBeforeConsumingUnwrap {
+                name: name.clone(),
+            };
+        }
     }
     if reused_owned_argument_needs_clone(source, target_shape, actual_shape, ctx) {
         return CloneRecoveryDecision::ApplyRecoveryCoercion {
@@ -12692,6 +12769,18 @@ fn audited_clone_recovery_decision(idempotence: CloneRecoveryIdempotence) -> Clo
 }
 
 fn apply_clone_recovery_decision(lowered: RustExpr, decision: CloneRecoveryDecision) -> RustExpr {
+    if let CloneRecoveryDecision::CloneOptionalBeforeConsumingUnwrap { name } = decision {
+        let rendered = emit::emit_expr(&lowered);
+        let consuming_unwrap = format!("{name}.unwrap()");
+        if rendered.contains(&consuming_unwrap) {
+            return RustExpr::Raw(rendered.replacen(
+                &consuming_unwrap,
+                &format!("{name}.clone().unwrap()"),
+                1,
+            ));
+        }
+        return apply_audited_clone_recovery(lowered);
+    }
     let CloneRecoveryDecision::ApplyRecoveryCoercion {
         coercion,
         idempotence,
@@ -16763,28 +16852,77 @@ fn lower_reused_optional_unwrap_for_slot(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> Option<RustExpr> {
-    let Expr::Var(_) = expr else {
+    let Expr::Var(name) = expr else {
         return None;
     };
     let target = slot_target_shape(slot)?;
-    if target.optional_element_type().is_some() || !shape_is_owned(target) {
+    if target.optional_element_type().is_some() {
         return None;
     }
     if shape_is_erased_object_boundary(target) {
         return None;
     }
     let element_ty = actual.optional_element_type()?;
-    if element_ty != target.java_ty {
+    let element_shape = optional_element_slot_shape_with_facts(actual, element_ty, ctx.facts);
+    if !borrowed_element_target_matches_element(target, &element_shape, ctx.facts) {
         return None;
     }
-    if !known_owned_argument_clone_recovery(target) && !known_named_clone_recovery(target) {
+    if matches!(
+        target.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) {
+        let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+        if target.ownership == OwnershipShape::SharedBorrow
+            && actual.ownership == OwnershipShape::SharedBorrow
+            && actual.view == target.view
+        {
+            let actual = optional_element_borrow_lowered_type_with_facts(
+                actual.clone(),
+                element_shape.java_ty,
+                Some(OwnershipShape::SharedBorrow),
+                ctx.facts,
+            )?;
+            let rendered = emit::emit_expr(&lowered);
+            let expr = RustExpr::Raw(format!("{rendered}.expect(\"Java null receiver\")"));
+            let lowered = crate::coercion::LoweredExpr { expr, actual };
+            let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
+            return Some(apply_lowered_slot_expr_conversion(lowered, &plan));
+        }
+        let lowered = optional_element_borrow_lowered_expr_with_facts(
+            lowered,
+            actual,
+            element_shape.java_ty,
+            target.ownership.clone(),
+            ctx.facts,
+        )?;
+        let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);
+        return Some(apply_lowered_slot_expr_conversion(lowered, &plan));
+    }
+    if !shape_is_owned(target) {
+        return None;
+    }
+    if !known_owned_argument_clone_recovery(target)
+        && !known_named_clone_recovery(target)
+        && !known_owned_argument_clone_recovery_with_facts(target, ctx.facts)
+        && !known_owned_argument_clone_recovery_with_facts(&element_shape, ctx.facts)
+    {
         return None;
     }
     let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+    if actual.ownership == OwnershipShape::Owned
+        && !matches!(slot, Slot::Return(_))
+        && MoveUseContext::new(ctx).has_later_or_repeated_current_read(name)
+    {
+        let plan = plan_slot_conversion(actual.clone(), slot.clone(), ctx.facts);
+        return Some(apply_slot_expr_conversion(
+            apply_clone_projection(lowered),
+            &plan,
+        ));
+    }
     let lowered = reused_optional_unwrap_lowered_expr(
         lowered,
         actual,
-        element_ty,
+        element_shape.java_ty,
         matches!(slot, Slot::Return(_)),
     )?;
     let plan = plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts);

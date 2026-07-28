@@ -3268,6 +3268,9 @@ fn apply_required_borrowed_element_target_view(
     if policy.target.optional_element_type().is_some() {
         return None;
     }
+    if required_borrowed_element_already_matches_target(policy) {
+        return None;
+    }
     let rendered = emit::emit_expr(expr);
     match (policy.target.ownership, &policy.target.view) {
         (OwnershipShape::SharedBorrow, ViewShape::Slice)
@@ -3290,6 +3293,15 @@ fn apply_required_borrowed_element_target_view(
         }
         _ => None,
     }
+}
+
+fn required_borrowed_element_already_matches_target(
+    policy: &BorrowedElementSlotAdapterPolicy,
+) -> bool {
+    policy.element_shape.java_ty == policy.target.java_ty
+        && policy.element_shape.ownership == policy.target.ownership
+        && policy.element_shape.view == policy.target.view
+        && policy.element_shape.dispatch == policy.target.dispatch
 }
 
 fn apply_borrowed_option_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
@@ -4740,6 +4752,38 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&expr),
             "value.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
+        );
+    }
+
+    #[test]
+    fn optional_borrowed_slice_unwrap_does_not_reproject_slice_view() {
+        let array_ty = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)));
+        let mut carrier_shape =
+            RustSlotShape::conservative(crate::types::optional_java_type(array_ty.clone()));
+        carrier_shape.ownership = OwnershipShape::SharedBorrow;
+        carrier_shape.view = ViewShape::Slice;
+
+        let mut element_shape = RustSlotShape::conservative(array_ty.clone());
+        element_shape.ownership = OwnershipShape::SharedBorrow;
+        element_shape.view = ViewShape::Slice;
+
+        let mut target = RustSlotShape::conservative(array_ty);
+        target.ownership = OwnershipShape::SharedBorrow;
+        target.view = ViewShape::Slice;
+
+        let policy = crate::conversion_plan::borrowed_element_slot_adapter_policy(
+            BorrowedElementCarrier::Option,
+            &target,
+            &carrier_shape,
+            &element_shape,
+            &FactSet::default(),
+        );
+        let expr =
+            apply_borrowed_element_slot_adapter(RustExpr::Var("source".to_string()), &policy);
+
+        assert_eq!(
+            emit::emit_expr(&expr),
+            "source.expect(\"Java null receiver\")"
         );
     }
 

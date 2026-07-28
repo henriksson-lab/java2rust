@@ -955,6 +955,16 @@ owner-aware local mutability scan. The logging case now uses the same nullable
 JDK throwable string-return fact for `getLocalizedMessage()`/`get_localized_message`
 as `getMessage()`.
 
+Focused Base64 cleanup update: the latest single-file FastQC Base64 rerun at
+`.tmp/corpus-fastqc-base64-single-after-optional-borrowed-slice-r1` translates
+1/1 files, reports 0 invalid-pattern files, and has `cargo_check=ok`. The
+slice removes the previous `baos`/`buffer`/`out_buff` move family by modeling
+output-stream wrapper constructor argument handoff, solving nullable mutated
+byte-array helper parameters as borrowed slices while caller locals stay owned,
+recovering owned `Vec<T>` from returned mutable slices, and making
+`Option<&[T]> -> &[T]` unwrap projection idempotent so redundant
+`source.expect("Java null receiver").as_slice()` rows are gone.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

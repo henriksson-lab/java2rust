@@ -14770,6 +14770,44 @@ class OptionalResourceConstructorMoveUse {
 }
 
 #[test]
+fn optional_resource_facade_upcast_clones_wrapper_before_consuming_unwrap() {
+    let translation = translate_source(
+        r#"
+import java.io.ByteArrayOutputStream;
+import java.util.zip.GZIPOutputStream;
+
+class OptionalResourceFacadeUpcastMoveUse {
+    void wrap() throws java.io.IOException {
+        ByteArrayOutputStream baos = null;
+        GZIPOutputStream gzip = null;
+        try {
+            baos = new ByteArrayOutputStream();
+            gzip = new GZIPOutputStream(baos);
+        } finally {
+            if (baos != null) {
+                baos.close();
+            }
+            if (gzip != null) {
+                gzip.close();
+            }
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("baos.clone().unwrap()")
+            && !translation
+                .rust
+                .contains("GZIPOutputStream::new(baos.unwrap()")
+            && translation.rust.contains("baos.as_ref().unwrap().close()?"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn optional_source_receiver_uses_mut_projection_for_mutating_context_fallback() {
     let translation = translate_source(
         r#"
@@ -18935,6 +18973,134 @@ class LocalArrayNullableOutParameter {
 
     cargo_check_generated_modules(
         "local_array_nullable_out_parameter",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_mutable_array_helper_return_count_keeps_caller_storage_owned() {
+    let translation = translate_source(
+        r#"
+class NullableMutableArrayHelperReturnCount {
+    static int fill(byte source[], byte destination[], int offset) {
+        if (destination != null) {
+            destination[offset] = source[0];
+            destination[offset + 1] = source[1];
+        }
+        return 2;
+    }
+
+    static byte[] run(byte source[]) {
+        byte[] outBuff = new byte[4];
+        int pos = 0;
+        pos += fill(source, outBuff, pos);
+        byte[] out = new byte[pos];
+        System.arraycopy(outBuff, 0, out, 0, pos);
+        return out;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn fill(source: &[i8], mut destination: Option<&mut [i8]>, offset: i32) -> i32")
+            && translation
+                .rust
+                .contains("let mut out_buff: Option<Vec<i8>> = Some(vec![0; 4 as usize]);")
+            && translation
+                .rust
+                .contains("Self::fill(source, out_buff.as_deref_mut(), pos)")
+            && translation.rust.contains(
+                "System::arraycopy(out_buff.as_ref().expect(\"Java null receiver\").as_slice(), 0 as usize, out.as_mut_slice(), 0 as usize, pos as usize);"
+            )
+            && !translation.rust.contains("destination: Option<Vec<i8>>")
+            && !translation.rust.contains("Self::fill(source, out_buff,"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_mutable_array_helper_return_count",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_borrowed_array_param_passes_to_slice_helper_without_extra_as_slice() {
+    let translation = translate_source(
+        r#"
+class NullableBorrowedArrayParamSliceHelper {
+    static int read(byte source[], int offset) {
+        if (source == null) {
+            return 0;
+        }
+        return consume(source, offset);
+    }
+
+    static int consume(final byte source[], int offset) {
+        return source[offset];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn read(source: Option<&[i8]>, offset: i32) -> i32")
+            && translation.rust.contains("Self::consume(source, offset)")
+            && !translation
+                .rust
+                .contains("source.expect(\"Java null receiver\").as_slice()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_borrowed_array_param_slice_helper",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn mutable_array_parameter_direct_return_can_remain_borrowed() {
+    let translation = translate_source(
+        r#"
+class MutableArrayParameterReturn {
+    static byte[] fill(byte out[]) {
+        out[0] = 1;
+        return out;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn fill<'a>(out: &'a mut [i8]) -> &'a mut [i8]")
+            && translation.rust.contains("return out;")
+            && !translation.rust.contains("return out.clone()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "mutable_array_parameter_return",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
