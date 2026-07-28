@@ -722,6 +722,40 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
         NullabilityState::DefinitelyNonNull
     );
 
+    let parsing_split_2 = external_api_effect_for_receiver_with_arity(
+        Some("htsjdk.tribble.util.ParsingUtils"),
+        "split",
+        Some(2),
+    )
+    .expect("ParsingUtils.split(String,char) should resolve through builtin pack facts");
+    assert_eq!(
+        parsing_split_2.return_type,
+        Some(JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::String]
+        })
+    );
+
+    let parsing_split_3 =
+        external_api_effect_for_receiver_with_arity(Some("ParsingUtils"), "split", Some(3)).expect(
+            "ParsingUtils.split(String,String[],char) should resolve through builtin pack facts",
+        );
+    assert_eq!(
+        parsing_split_3.return_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+
+    let parsing_split_4 = external_api_effect_for_receiver_with_arity(
+        Some("htsjdk.tribble.util.ParsingUtils"),
+        "split",
+        Some(4),
+    )
+    .expect("ParsingUtils.split(String,String[],char,boolean) should resolve through builtin pack facts");
+    assert_eq!(
+        parsing_split_4.return_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+
     for method_name in [
         "listFromPrimitives",
         "nonNull",

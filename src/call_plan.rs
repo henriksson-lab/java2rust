@@ -2079,7 +2079,7 @@ pub fn plan_call_target_with_external_index_and_arity<'a>(
     }
 
     if let Some(receiver) = receiver
-        && let Some(owner) = static_utility_owner_expr_type_name(
+        && let Some(target) = static_utility_owner_call_target(
             receiver,
             name,
             arg_count,
@@ -2088,10 +2088,7 @@ pub fn plan_call_target_with_external_index_and_arity<'a>(
             types,
         )
     {
-        return CallTargetPlan::StaticOwner {
-            owner,
-            rust_name: crate::parser::to_snake_case(name),
-        };
+        return target;
     }
 
     if let Some(call) = resolved {
@@ -2146,14 +2143,14 @@ pub fn plan_call_target_with_external_index_and_arity<'a>(
         if let Some(owner) = types.static_member_import_owner(name) {
             return CallTargetPlan::StaticOwner {
                 owner: rust_static_owner_type_name_with_facts(owner, facts),
-                rust_name: crate::parser::to_snake_case(name),
+                rust_name: external_method_rust_name(owner, name, arg_count, facts),
             };
         }
         let rust_name = crate::parser::to_snake_case(name);
         if let Some(owner) = types.static_member_import_owner(&rust_name) {
             return CallTargetPlan::StaticOwner {
                 owner: rust_static_owner_type_name_with_facts(owner, facts),
-                rust_name,
+                rust_name: external_method_rust_name(owner, name, arg_count, facts),
             };
         }
         CallTargetPlan::FallbackFree {
@@ -2454,14 +2451,14 @@ fn java_logging_receiver_name(receiver: &Expr) -> Option<&str> {
     }
 }
 
-fn static_utility_owner_expr_type_name(
+fn static_utility_owner_call_target(
     receiver: &Expr,
     name: &str,
     arg_count: usize,
     facts: &FactSet,
     external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
-) -> Option<String> {
+) -> Option<CallTargetPlan<'static>> {
     let Expr::Var(receiver_name) = receiver else {
         return None;
     };
@@ -2469,12 +2466,18 @@ fn static_utility_owner_expr_type_name(
         return None;
     }
     if let Some(owner) = types.static_type_alias(receiver_name) {
-        return Some(rust_static_owner_type_name_with_facts(owner, facts));
+        return Some(CallTargetPlan::StaticOwner {
+            owner: rust_static_owner_type_name_with_facts(owner, facts),
+            rust_name: external_method_rust_name(owner, name, arg_count, facts),
+        });
     }
-    if let Some(owner) =
+    if let Some((owner_key, owner)) =
         external_fact_proven_static_owner(receiver_name, name, arg_count, facts, external_index)
     {
-        return Some(owner);
+        return Some(CallTargetPlan::StaticOwner {
+            owner,
+            rust_name: external_method_rust_name(&owner_key, name, arg_count, facts),
+        });
     }
     let query_owner = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
     if crate::stdlib::external_api_method_role(Some(&query_owner), name, arg_count)
@@ -2482,12 +2485,16 @@ fn static_utility_owner_expr_type_name(
         && (unproven_simple_receiver_can_be_static_owner(receiver_name)
             || query_owner != receiver_name.as_str())
     {
-        Some(rust_static_owner_type_name_with_facts(&query_owner, facts))
+        Some(CallTargetPlan::StaticOwner {
+            owner: rust_static_owner_type_name_with_facts(&query_owner, facts),
+            rust_name: external_method_rust_name(&query_owner, name, arg_count, facts),
+        })
     } else if unproven_simple_receiver_can_be_static_owner(receiver_name) {
-        Some(rust_static_owner_type_name_with_facts(
-            &upper_camel_from_snake_or_preserved(receiver_name),
-            facts,
-        ))
+        let owner_key = upper_camel_from_snake_or_preserved(receiver_name);
+        Some(CallTargetPlan::StaticOwner {
+            owner: rust_static_owner_type_name_with_facts(&owner_key, facts),
+            rust_name: external_method_rust_name(&owner_key, name, arg_count, facts),
+        })
     } else {
         None
     }
@@ -2499,7 +2506,7 @@ fn external_fact_proven_static_owner(
     arg_count: usize,
     facts: &FactSet,
     external_index: &ExternalFactLookupIndex<'_>,
-) -> Option<String> {
+) -> Option<(String, String)> {
     let mut query_owners = vec![crate::stdlib::canonical_external_receiver_type_key(
         receiver_name,
     )];
@@ -2536,9 +2543,15 @@ fn external_fact_proven_static_owner(
             if let Some(alias) =
                 crate::javalibs::preferred_static_owner_alias(owner, name, arg_count)
             {
-                return Some(rust_static_owner_type_name_with_facts(alias, facts));
+                return Some((
+                    alias.to_string(),
+                    rust_static_owner_type_name_with_facts(alias, facts),
+                ));
             }
-            return Some(rust_static_owner_type_name_with_facts(owner, facts));
+            return Some((
+                owner.to_string(),
+                rust_static_owner_type_name_with_facts(owner, facts),
+            ));
         }
     }
 

@@ -24455,6 +24455,56 @@ class BuiltinErasedStaticFacadeMethod {
 }
 
 #[test]
+fn external_static_facade_overloads_use_arity_specific_support_methods() {
+    let translation = translate_source(
+        r#"
+import htsjdk.tribble.util.ParsingUtils;
+
+class BuiltinExternalStaticOverloads {
+    int count(String line, String[] parts) {
+        return ParsingUtils.split(line, parts, ',', true);
+    }
+
+    int countDefaultTrim(String line, String[] parts) {
+        return ParsingUtils.split(line, parts, ',');
+    }
+
+    java.util.List<String> values(String line) {
+        return ParsingUtils.split(line, ',');
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("pub fn split_2"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub fn split_3"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub fn split_4"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("ParsingUtils::split_2")
+            && translation.rust.contains("ParsingUtils::split_3")
+            && translation.rust.contains("ParsingUtils::split_4"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_static_named_constant_support_is_generated_from_field_facts() {
     let source = r#"
 class UseExternalNamedConstant {

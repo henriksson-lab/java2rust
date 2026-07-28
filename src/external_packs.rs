@@ -4393,6 +4393,8 @@ const TRIBBLE_FEATURE_OWNED_TYPES: &[&str] = &[
     "CodecLineParsingException",
     "htsjdk.tribble.gff.Gff3BaseData",
     "Gff3BaseData",
+    "htsjdk.tribble.util.ParsingUtils",
+    "ParsingUtils",
 ];
 
 const TRIBBLE_FEATURE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
@@ -10892,6 +10894,60 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         None,
         NullabilityState::Unknown,
         &[],
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.util.ParsingUtils",
+        "split",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<String>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "ParsingUtils",
+        "split",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<String>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.util.ParsingUtils",
+        "split",
+        3,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "ParsingUtils",
+        "split",
+        3,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.util.ParsingUtils",
+        "split",
+        4,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "ParsingUtils",
+        "split",
+        4,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
     ),
 ];
 
@@ -26831,6 +26887,8 @@ const TRIBBLE_FEATURE_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("FeatureReader", "isQueryable"),
     modeled_semantic("htsjdk.tribble.FeatureReader", "close"),
     modeled_semantic("FeatureReader", "close"),
+    modeled_semantic("htsjdk.tribble.util.ParsingUtils", "split"),
+    modeled_semantic("ParsingUtils", "split"),
 ];
 
 const SAMTOOLS_UTIL_MODELED_APIS: &[ExternalPackModeledApi] = &[
