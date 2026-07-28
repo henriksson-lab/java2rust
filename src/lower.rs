@@ -5370,6 +5370,15 @@ fn lower_simple_return_switch(
     ctx: LowerCtx,
 ) -> String {
     let selector_ty = crate::types::infer_expr_type(plan.selector, env.type_env());
+    let selector_shape = infer_expr_shape_with_context(
+        plan.selector,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
     let selector = lower_switch_match_selector(plan.selector, env, ctx, &selector_ty);
     let mut cases = Vec::new();
     let mut default_statements = None;
@@ -5398,7 +5407,9 @@ fn lower_simple_return_switch(
         }
         let patterns = pending_labels
             .iter()
-            .filter_map(|label| switch_match_pattern(label, env, ctx, &selector_ty))
+            .filter_map(|label| {
+                switch_match_pattern(label, env, ctx, &selector_ty, &selector_shape)
+            })
             .collect::<Vec<_>>();
         pending_labels.clear();
         cases.push(SwitchMatchRenderCase {
@@ -5428,6 +5439,7 @@ fn switch_match_pattern(
     env: &ShapeEnv,
     ctx: LowerCtx,
     selector_ty: &JavaType,
+    selector_shape: &RustSlotShape,
 ) -> Option<String> {
     let SwitchCaseLabelPlan::Expr(expr) = label else {
         return None;
@@ -5447,6 +5459,24 @@ fn switch_match_pattern(
         );
         let field = crate::parser::to_snake_case(label_name);
         return Some(format!("{owner}::{field}"));
+    }
+    if let Some(element_ty) = selector_shape.optional_element_type()
+        && let JavaType::Named { name, .. } = &element_ty
+        && let Expr::Var(label_name) = expr
+    {
+        if let Some(variant) = ctx
+            .representations
+            .java_enum_variant_for_label(name, label_name)
+        {
+            return Some(format!("Some({variant})"));
+        }
+        if external_enum_constant_label_matches(ctx.facts, name, label_name) {
+            let owner = crate::slot_render::rust_name_for_java_named_type(
+                &crate::stdlib::canonical_external_receiver_type_key(name),
+            );
+            let field = crate::parser::to_snake_case(label_name);
+            return Some(format!("Some({owner}::{field})"));
+        }
     }
     if matches!(
         selector_ty,
@@ -5473,13 +5503,26 @@ fn switch_label_condition(
 ) -> String {
     let case_plan = plan_switch_case(case);
     let selector_ty = crate::types::infer_expr_type(plan.selector, env.type_env());
+    let selector_shape = infer_expr_shape_with_context(
+        plan.selector,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
     let label_exprs = case_plan
         .labels
         .iter()
         .filter_map(|label| match label {
-            SwitchCaseLabelPlan::Expr(expr) => {
-                Some(lower_switch_case_label_expr(expr, env, ctx, &selector_ty))
-            }
+            SwitchCaseLabelPlan::Expr(expr) => Some(lower_switch_case_label_expr(
+                expr,
+                env,
+                ctx,
+                &selector_ty,
+                &selector_shape,
+            )),
             SwitchCaseLabelPlan::Default => None,
         })
         .collect::<Vec<_>>();
@@ -5491,6 +5534,7 @@ fn lower_switch_case_label_expr(
     env: &ShapeEnv,
     ctx: LowerCtx,
     selector_ty: &JavaType,
+    selector_shape: &RustSlotShape,
 ) -> RustExpr {
     if matches!(
         selector_ty,
@@ -5512,6 +5556,24 @@ fn lower_switch_case_label_expr(
             );
             let field = crate::parser::to_snake_case(label_name);
             return owner_associated_path_projection(&owner, &field);
+        }
+    }
+    if let Some(element_ty) = selector_shape.optional_element_type()
+        && let JavaType::Named { name, .. } = &element_ty
+        && let Expr::Var(label_name) = expr
+    {
+        if let Some(variant) = ctx
+            .representations
+            .java_enum_variant_for_label(name, label_name)
+        {
+            return RustExpr::Raw(format!("Some({variant})"));
+        }
+        if external_enum_constant_label_matches(ctx.facts, name, label_name) {
+            let owner = crate::slot_render::rust_name_for_java_named_type(
+                &crate::stdlib::canonical_external_receiver_type_key(name),
+            );
+            let field = crate::parser::to_snake_case(label_name);
+            return RustExpr::Raw(format!("Some({owner}::{field})"));
         }
     }
     lower_expr(expr, env, ctx)
@@ -7791,13 +7853,13 @@ fn lower_expr_with_refinements(
             {
                 return constant;
             }
-            if let Some(storage) = lower_static_storage_field_access(receiver, field, env, ctx) {
-                return storage;
-            }
             if let Some(enum_variant) =
                 lower_java_enum_static_field_access(receiver, field, env, ctx)
             {
                 return enum_variant;
+            }
+            if let Some(storage) = lower_static_storage_field_access(receiver, field, env, ctx) {
+                return storage;
             }
             if field == "length"
                 && let Some(length) =

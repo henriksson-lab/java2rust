@@ -13890,6 +13890,70 @@ class FallbackSwitchTrailingBreakIsUnitTyped {
 }
 
 #[test]
+fn nullable_source_enum_field_switch_keeps_concrete_enum_storage() {
+    let translation = translate_source(
+        r#"
+public class NullableEnumSwitchOwner {
+    public enum CountType {
+        INTEGER,
+        UNBOUNDED
+    }
+
+    private CountType countType;
+    private int count;
+
+    public void setFixed() {
+        countType = CountType.INTEGER;
+    }
+
+    public boolean isFixedCount() {
+        return countType == CountType.INTEGER;
+    }
+
+    public int getCount() {
+        switch (countType) {
+            case INTEGER:
+                return count;
+            case UNBOUNDED:
+                return -1;
+            default:
+                return 0;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("count_type: Option<NullableEnumSwitchOwnerCountType>")
+            && translation.rust.contains(
+                "self.count_type.as_ref() == Some(&NullableEnumSwitchOwnerCountType::INTEGER)"
+            )
+            && translation
+                .rust
+                .contains("Some(NullableEnumSwitchOwnerCountType::INTEGER) =>")
+            && translation
+                .rust
+                .contains("self.count_type = Some(NullableEnumSwitchOwnerCountType::INTEGER)")
+            && !translation.rust.contains("count_type: Option<Box<dyn")
+            && !translation.rust.contains("__static_i_n_t_e_g_e_r"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_enum_switch_owner",
+        vec![GeneratedCrateModule {
+            name: "nullable_enum_switch_owner",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn documents_diamond_single_unknown_gap() {
     let translation = translate_source(&idiom_gap("DiamondSingleUnknown.java"));
 

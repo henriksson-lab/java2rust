@@ -1014,6 +1014,19 @@ switch state-machine scaffolding, runtime downcasts, class-literal token
 planning, unsupported instanceof/cast shapes, and `super(...)` constructor
 state as the highest remaining VCF families.
 
+Focused VCF source-enum switch update: after rebuilding the release translator,
+rerun `.tmp/corpus-rerun-htsjdk-vcf-after-source-enum-switch-r2` translates
+32/32 files, keeps 20 invalid-pattern files, and reduces generated-Rust errors
+from 614 to 551. Source Java enum fields now keep concrete enum storage when
+generic object-like uses would previously erase them, and both simple `match`
+switches and fallback switch scaffolding adapt nullable enum selectors by
+matching labels as `Some(EnumVariant)`. The concrete `count_type:
+Option<Box<dyn Any>>` / `Self::__static_i_n_t_e_g_e_r()` family is gone for the
+main VCF compound-header switch. Remaining errors in this neighborhood are
+constructor/subclass field-initialization mismatches where optional enum fields
+still receive a bare enum in some struct literals; treat that as an optional
+construction/field-plan follow-up, not as a switch-label issue.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

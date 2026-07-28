@@ -7673,7 +7673,11 @@ fn constrained_field_shape(
     )
     .expect("field signature shape is always present");
     if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) {
-        if !signature_capability_policy(java_ty, facts)
+        if source_java_enum_storage_is_copy(representations, java_ty) {
+            apply_required_ownership(&mut shape, OwnershipShape::CopyValue);
+            apply_required_dispatch(&mut shape, DispatchShape::Concrete);
+            apply_required_view(&mut shape, ViewShape::Native);
+        } else if !signature_capability_policy(java_ty, facts)
             .capability_ownership
             .is_some_and(|ownership| ownership == OwnershipShape::CopyValue)
         {
@@ -7684,6 +7688,16 @@ fn constrained_field_shape(
         }
     }
     shape
+}
+
+fn source_java_enum_storage_is_copy(
+    representations: &RepresentationPlan,
+    java_ty: &JavaType,
+) -> bool {
+    matches!(
+        representations.representation_for(java_ty),
+        crate::object_model::ObjectRepresentation::JavaEnum { .. }
+    )
 }
 
 fn collect_type_signature_constraints(
