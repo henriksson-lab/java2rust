@@ -1117,6 +1117,13 @@ optional-reuse batch:
 The fixture now rejects wrapper-level `baos.clone().unwrap()` and keeps the
 finally cleanup read as `baos.as_ref().unwrap().close()?`.
 
+Focused numeric-cast assertion update:
+`explicit_primitive_casts_survive_numeric_binary_lowering` now passes with the
+current explicit-cast-preserving spelling
+`(ratio as f32) * (value as f32)`. The adjacent
+`explicit_primitive_cast_applies_to_whole_shift_and_bitwise_expression`
+regression also passes.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

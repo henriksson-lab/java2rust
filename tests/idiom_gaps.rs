@@ -855,7 +855,7 @@ class ExplicitPrimitiveCastNumericBinary {
     assert!(
         translation
             .rust
-            .contains("let adjusted: f32 = (ratio as f32) * value;"),
+            .contains("let adjusted: f32 = (ratio as f32) * (value as f32);"),
         "{}",
         translation.rust
     );
