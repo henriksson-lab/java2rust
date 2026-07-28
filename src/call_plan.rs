@@ -378,6 +378,7 @@ pub enum NativeJavaInstanceMethod {
     StringToUppercase,
     StringToString,
     ObjectToString,
+    SourceHashCode,
     StringContains,
     StringStartsWith,
     StringEndsWith,
@@ -495,7 +496,11 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 | NativeJavaStaticMethod::MathToIntExact,
         }
         | CallTargetPlan::NativeJavaInstance {
-            method: NativeJavaInstanceMethod::StringLen,
+            method:
+                NativeJavaInstanceMethod::StringLen
+                | NativeJavaInstanceMethod::SourceHashCode
+                | NativeJavaInstanceMethod::StringHashCode
+                | NativeJavaInstanceMethod::PrimitiveHashCode { .. },
             ..
         } => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Int,
@@ -2040,6 +2045,15 @@ pub fn plan_call_target_with_external_index_and_arity<'a>(
 
     if let Some(call) = resolved
         && let (CallKind::Instance, Some(receiver)) = (&call.kind, receiver)
+        && let Some(target) = plan_resolved_java_source_hash_code_fallback(
+            receiver, name, arg_count, call, facts, types,
+        )
+    {
+        return target;
+    }
+
+    if let Some(call) = resolved
+        && let (CallKind::Instance, Some(receiver)) = (&call.kind, receiver)
     {
         return CallTargetPlan::InstanceReceiver {
             receiver,
@@ -2093,6 +2107,13 @@ pub fn plan_call_target_with_external_index_and_arity<'a>(
     if let Some(receiver) = receiver
         && let Some(target) =
             plan_java_object_to_string_fallback(receiver, name, arg_count, facts, types)
+    {
+        return target;
+    }
+
+    if let Some(receiver) = receiver
+        && let Some(target) =
+            plan_java_source_hash_code_fallback(receiver, name, arg_count, facts, types)
     {
         return target;
     }
@@ -2158,6 +2179,26 @@ fn plan_java_object_to_string_fallback<'a>(
     }
 }
 
+fn plan_java_source_hash_code_fallback<'a>(
+    receiver: &'a Expr,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<CallTargetPlan<'a>> {
+    if matches!(name, "hashCode" | "hash_code")
+        && arg_count == 0
+        && receiver_declared_source_hash_code_type(receiver, facts, types).is_some()
+    {
+        Some(CallTargetPlan::NativeJavaInstance {
+            receiver,
+            method: NativeJavaInstanceMethod::SourceHashCode,
+        })
+    } else {
+        None
+    }
+}
+
 fn plan_resolved_java_object_to_string_fallback<'a>(
     receiver: &'a Expr,
     name: &str,
@@ -2187,6 +2228,28 @@ fn plan_resolved_java_object_to_string_fallback<'a>(
     })
 }
 
+fn plan_resolved_java_source_hash_code_fallback<'a>(
+    receiver: &'a Expr,
+    name: &str,
+    arg_count: usize,
+    call: &ResolvedCall,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<CallTargetPlan<'a>> {
+    if !matches!(name, "hashCode" | "hash_code")
+        || arg_count != 0
+        || call.rust_name != "hash_code"
+        || call.return_type != JavaType::Primitive(PrimitiveType::Int)
+    {
+        return None;
+    }
+    receiver_declared_source_hash_code_type(receiver, facts, types)?;
+    Some(CallTargetPlan::NativeJavaInstance {
+        receiver,
+        method: NativeJavaInstanceMethod::SourceHashCode,
+    })
+}
+
 fn receiver_declared_source_object_type<'a>(
     receiver: &'a Expr,
     facts: &FactSet,
@@ -2205,7 +2268,37 @@ fn receiver_declared_source_object_type<'a>(
     Some(receiver_name)
 }
 
+fn receiver_declared_source_hash_code_type<'a>(
+    receiver: &'a Expr,
+    facts: &FactSet,
+    types: &'a TypeEnv,
+) -> Option<&'a str> {
+    let receiver_ty = match receiver {
+        Expr::Var(name) => types.local_type(name).or_else(|| types.field_type(name))?,
+        Expr::FieldAccess(_, field) => types.field_type(field)?,
+        Expr::This => return None,
+        _ => return None,
+    };
+    let receiver_name = java_type_name(receiver_ty)?;
+    if !java_source_hash_code_fallback_receiver(receiver_name, facts) {
+        return None;
+    }
+    Some(receiver_name)
+}
+
 fn java_object_to_string_source_fallback_receiver(receiver_name: &str, facts: &FactSet) -> bool {
+    java_source_object_fallback_receiver(receiver_name, facts, "toString")
+}
+
+fn java_source_hash_code_fallback_receiver(receiver_name: &str, facts: &FactSet) -> bool {
+    java_source_object_fallback_receiver(receiver_name, facts, "hashCode")
+}
+
+fn java_source_object_fallback_receiver(
+    receiver_name: &str,
+    facts: &FactSet,
+    method_name: &str,
+) -> bool {
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
     let receiver_simple = receiver_key.rsplit('.').next().unwrap_or(&receiver_key);
     if matches!(
@@ -2241,7 +2334,12 @@ fn java_object_to_string_source_fallback_receiver(receiver_name: &str, facts: &F
     {
         return false;
     }
-    let key = CallableKey::method(receiver_key, "toString".to_string(), Staticness::Unknown, 0);
+    let key = CallableKey::method(
+        receiver_key,
+        method_name.to_string(),
+        Staticness::Unknown,
+        0,
+    );
     facts.facade_abi_for_key(&key).is_none()
 }
 

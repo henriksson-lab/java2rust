@@ -4925,6 +4925,13 @@ pub fn java_map_hash_code<K, V, S>(value: &std::collections::HashMap<K, V, S>) -
     value.len() as i32
 }
 
+pub fn java_value_hash_code<T: std::hash::Hash + ?Sized>(value: &T) -> i32 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish() as i32
+}
+
 pub fn java_string_index_of<V: AsRef<str>, N: AsRef<str>>(value: V, needle: N) -> i32 {
     value
         .as_ref()

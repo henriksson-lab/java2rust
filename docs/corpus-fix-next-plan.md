@@ -4718,6 +4718,22 @@ keeps 20 invalid-pattern files, and reduces generated-Rust errors from 691 to
 `VCFHeaderLineType` and `VCFHeaderLineCount`, so the next hash-related slice
 should be source enum/source-class hash support rather than map ABI lowering.
 
+Follow-up source hashCode slice: source-object `hashCode()` fallback now mirrors
+the source-object `toString` exclusions for strings, collections, platform
+types, external packs, and explicit facade ABI facts, then lowers hashable
+source values through `java_value_hash_code(&...)`. The focused fixture
+`source_enum_hash_code_lowers_to_java_value_hash_helper` passes, and adjacent
+hash fixtures plus `cargo fmt --check`, `cargo check --quiet`, `bash -n
+scripts/translate-focused-package.sh`, and
+`cargo build --release --quiet --bin new-java2rust` were clean. VCF rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-source-hash-code-r1` translates 32/32
+files, keeps 20 invalid-pattern files, and reduces generated-Rust errors from
+685 to 680. The generated VCF modules now have no `.hash_code(` call sites;
+nine former enum/header-line source hash calls render as `java_value_hash_code`.
+The next high-count VCF work should move away from hash lowering and target
+raw `Map` owner/value support, source hierarchy/`instanceof`, VCF
+constants/static fields, or duplicate `to_string` emission.
+
 ## Rerun Protocol
 
 After each fix:

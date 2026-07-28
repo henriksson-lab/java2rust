@@ -13,7 +13,7 @@ use crate::coercion::{
     function_call_projection, java_class_literal_path_projection,
     java_class_static_path_projection, java_iterator_from_collection_projection,
     java_list_hash_code_projection, java_map_hash_code_projection, java_set_hash_code_projection,
-    len_i32_projection, math_max_projection, math_min_projection,
+    java_value_hash_code_projection, len_i32_projection, math_max_projection, math_min_projection,
     native_collection_default_constructor_projection, native_collection_empty_new_projection,
     native_collection_with_capacity_projection, objects_equals_projection,
     objects_is_null_projection, objects_non_null_projection, optional_get_owned_value_projection,
@@ -194,6 +194,7 @@ fn apply_native_java_instance_method(
         NativeJavaInstanceMethod::ObjectToString => {
             apply_java_display_plan(receiver, JavaDisplayPlan::ErasedObject)
         }
+        NativeJavaInstanceMethod::SourceHashCode => java_value_hash_code_projection(receiver),
         NativeJavaInstanceMethod::StringContains => {
             receiver_method_call_projection(receiver, "contains", args)
         }

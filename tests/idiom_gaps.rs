@@ -13992,6 +13992,46 @@ class MapHashCodeJavaApi {
 }
 
 #[test]
+fn source_enum_hash_code_lowers_to_java_value_hash_helper() {
+    let translation = translate_source(
+        r#"
+class SourceEnumHashCodeJavaApi {
+    enum Kind {
+        ALPHA,
+        BETA
+    }
+
+    private Kind kind;
+
+    int hash() {
+        return kind.hashCode();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_value_hash_code(&self.kind.as_ref().unwrap())")
+            && !translation
+                .rust
+                .contains(".kind.as_ref().unwrap().hash_code("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_enum_hash_code_java_api",
+        vec![GeneratedCrateModule {
+            name: "source_enum_hash_code_java_api",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn final_sorted_map_receiver_mutation_declares_rust_local_mutable() {
     let translation = translate_source(&idiom_gap("FinalSortedMapReceiverMutation.java"));
 

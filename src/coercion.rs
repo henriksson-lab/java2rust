@@ -1596,6 +1596,13 @@ pub fn java_map_hash_code_projection(receiver: RustExpr) -> RustExpr {
     }
 }
 
+pub fn java_value_hash_code_projection(receiver: RustExpr) -> RustExpr {
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw("java_value_hash_code".to_string())),
+        args: vec![force_shared_borrow_projection(receiver)],
+    }
+}
+
 pub fn string_replace_first_projection(
     receiver: RustExpr,
     regex: RustExpr,
