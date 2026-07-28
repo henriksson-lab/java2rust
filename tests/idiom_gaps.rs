@@ -6469,6 +6469,42 @@ class HeaderChild extends HeaderBase {
 }
 
 #[test]
+fn plain_returning_method_recovers_fallible_helper_call_without_question_mark() {
+    let translation = translate_source(
+        r#"
+import java.io.IOException;
+import java.util.Map;
+
+class PlainReturnFallibleHelper {
+    String render() {
+        return encode();
+    }
+
+    String encode() {
+        return "value";
+    }
+
+    static String encode(Map<String, Object> values) throws IOException {
+        return "map";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn render(&self) -> String")
+            && translation.rust.contains(
+                "return self.encode_().unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));"
+            )
+            && !translation.rust.contains("return self.encode_()?;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn context_translation_uses_sibling_static_string_constant_shape() {
     let caller = r#"
 class ContextConstantCaller {

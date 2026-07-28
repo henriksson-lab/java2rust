@@ -5957,11 +5957,18 @@ fn lower_return_stmt_with_refinements(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> RustStmt {
-    let value = expr.map(|expr| match return_value_plan(ctx.current_return_shape) {
-        ReturnValuePlan::Slot(slot) => {
-            lower_expr_for_slot_with_refinements(expr, env, slot, ctx, refinements)
+    let value = expr.map(|expr| {
+        let lowered = match return_value_plan(ctx.current_return_shape) {
+            ReturnValuePlan::Slot(slot) => {
+                lower_expr_for_slot_with_refinements(expr, env, slot, ctx, refinements)
+            }
+            ReturnValuePlan::Raw => lower_expr_with_refinements(expr, env, ctx, refinements),
+        };
+        if !wrap_returns_in_ok && slot_expr_needs_result_propagation(expr, env, ctx) {
+            unwrap_result_or_panic_uncaught_java_exception(lowered)
+        } else {
+            lowered
         }
-        ReturnValuePlan::Raw => lower_expr_with_refinements(expr, env, ctx, refinements),
     });
     return_stmt(value, wrap_returns_in_ok)
 }

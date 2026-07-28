@@ -1053,15 +1053,30 @@ different base-class fallibility shell issue: `VCFHeaderLine::to_string()`
 returns `String` while calling a `Result<String, JavaException>` helper with
 `?`. The top compile-error family remains broad mismatched types, now 176 rows.
 
+Focused VCF unchecked fallible-return update: rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-return-result-recovery-r2` translates 32/32
+files, keeps 20 invalid-pattern files, and reduces generated-Rust errors from
+546 to 543. Plain Java value-returning methods now recover fallible helper
+calls with the unchecked Java-exception panic path instead of emitting `?`, so
+`VCFHeaderLine::to_string()` now calls
+`self.to_string_encoding_().unwrap_or_else(...)`. One related non-`Result`
+constructor-shell case remains in `VCFIteratorBuilderVCFReaderIterator::new`,
+where field initialization still calls `read_actual_header(...)?` while
+returning the constructed iterator directly. The top compile-error family
+remains broad mismatched types, now 176 rows.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
    `.tmp/corpus-batch-current-fastqc-after-display-context-return-r1` into
    fixtures and fixes. Prefer Rust signature/ABI facts over new special-case
    lowering whenever a Rust signature proves the same slot shape.
-2. Minimize the VCF shared-support enum assembly failure.
-3. Add a Spark/DISQ interface bridge fixture around `getBases`.
-4. Convert shared errors from the newly unblocked ndarray corpus reruns into
+2. Generalize unchecked fallible call recovery across constructor/deferred-field
+   initialization paths; the current focused VCF witness is
+   `VCFIteratorBuilderVCFReaderIterator::new`.
+3. Minimize the VCF shared-support enum assembly failure.
+4. Add a Spark/DISQ interface bridge fixture around `getBases`.
+5. Convert shared errors from the newly unblocked ndarray corpus reruns into
    fixtures, especially `super(...)`, array creation, switch scaffolding,
    Java string/file/logging facades, non-emitter raw keyword leaks, and trait/interface
    assembly.
