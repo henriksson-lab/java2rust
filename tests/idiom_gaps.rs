@@ -6536,6 +6536,50 @@ class ConstructorFallibleCast {
 }
 
 #[test]
+fn constructor_self_optional_field_argument_uses_field_slot_shape() {
+    let translation = translate_source(
+        r#"
+import java.io.IOException;
+
+class ConstructorOptionalFieldArgument {
+    Helper helper = new Helper();
+    Token token = null;
+    Token copied;
+
+    ConstructorOptionalFieldArgument(InputStream input) {
+        this.token = this.helper.make(input);
+        this.copied = this.helper.echo(this.token);
+    }
+}
+
+class Helper {
+    Token make(InputStream input) {
+        return new Token();
+    }
+
+    Token echo(Token token) throws IOException {
+        return token;
+    }
+}
+
+class Token {
+}
+"#,
+    );
+
+    assert!(
+        (translation.rust.contains(
+            "__java_self.token.as_ref().expect(\"Java null receiver\").clone()"
+        ) || translation.rust.contains(
+            "__java_self.token.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\")"
+        ))
+            && !translation.rust.contains("echo(__java_self.token)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn context_translation_uses_sibling_static_string_constant_shape() {
     let caller = r#"
 class ContextConstantCaller {

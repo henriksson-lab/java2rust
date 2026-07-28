@@ -17172,9 +17172,15 @@ fn lower_shared_self_field_owned_recovery_for_slot(
     {
         return Some(expr);
     }
-    if let Some(expr) =
-        lower_optional_self_field_read_owned_recovery(expr, env, target, actual, ctx, refinements)
-    {
+    if let Some(expr) = lower_optional_self_field_read_owned_recovery(
+        expr,
+        env,
+        slot,
+        target,
+        actual,
+        ctx,
+        refinements,
+    ) {
         return Some(expr);
     }
     if !shape_is_owned(target) || target.java_ty != actual.java_ty {
@@ -17386,13 +17392,19 @@ fn lower_optional_self_field_borrowed_carrier_for_slot(
 fn lower_optional_self_field_read_owned_recovery(
     expr: &Expr,
     env: &ShapeEnv,
+    slot: &Slot,
     target: &RustSlotShape,
     actual: &RustSlotShape,
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> Option<RustExpr> {
-    shared_self_field_read_name(expr, env)?;
-    let element_ty = actual.optional_element_type()?;
+    shared_self_field_read_name_with_ctx(expr, env, ctx)?;
+    let field_actual = if actual.optional_element_type().is_some() {
+        actual.clone()
+    } else {
+        current_instance_field_shape_with_env(expr, env, ctx)?
+    };
+    let element_ty = field_actual.optional_element_type()?;
     if !shape_is_owned(target) || target.java_ty != element_ty {
         return None;
     }
@@ -17403,12 +17415,7 @@ fn lower_optional_self_field_read_owned_recovery(
         return None;
     }
     let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
-    apply_optional_field_borrowed_carrier_to_slot(
-        lowered,
-        actual,
-        Slot::Return(target.clone()),
-        ctx,
-    )
+    apply_optional_field_borrowed_carrier_to_slot(lowered, &field_actual, slot.clone(), ctx)
 }
 
 fn lower_optional_self_field_unwrap_owned_recovery(
