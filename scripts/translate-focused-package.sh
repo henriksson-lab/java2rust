@@ -1906,8 +1906,11 @@ done
 if [[ -s "$module_types_path" ]]; then
   awk -F '\t' '{ count[$2]++ } END { for (name in count) print name "\t" count[name] }' \
     "$module_types_path" > "$type_counts_path"
-  awk -F '\t' 'NR == FNR { count[$1] = $2; next } count[$2] == 1 { print $1 "\t" $2 }' \
-    "$type_counts_path" "$module_types_path" \
+  awk -F '\t' '
+    FILENAME == ARGV[1] { count[$1] = $2; next }
+    FILENAME == ARGV[2] { shared[$1] = 1; next }
+    count[$2] == 1 && !shared[$2] { print $1 "\t" $2 }
+  ' "$type_counts_path" "$shared_support_types_path" "$module_types_path" \
     | sort -k2,2 > "$unique_types_path"
 else
   touch "$type_counts_path" "$unique_types_path"

@@ -10372,7 +10372,7 @@ fn context_fallback_signature_for_method(
                 .map(|param| param.shape.clone())
                 .collect(),
             receiver: signature.receiver,
-            arg_shapes_are_authoritative: false,
+            arg_shapes_are_authoritative: true,
         };
     }
     ContextFallbackMethodSignature {
@@ -18954,7 +18954,7 @@ fn source_context_resolved_static_method_fallback_signature(
                 non_emitted_static_context_arg_shapes_from_signature(signature)
             },
             receiver: signature.receiver,
-            arg_shapes_are_authoritative: !owner_is_emitted,
+            arg_shapes_are_authoritative: true,
         });
     }
     if matching_methods.len() == 1 {
@@ -19360,13 +19360,25 @@ fn source_context_receiver_method_fallback_signature(
                 .signatures
                 .method_signature_by_rust_name(&ty.name, &rust_name)
                 .unwrap_or(signature);
+            let owner_is_emitted = static_context_owner_is_emitted(&owner, ctx)
+                || static_context_owner_is_emitted(&ty.name, ctx);
             return Some(ContextFallbackMethodSignature {
                 rust_name,
-                arg_shapes: source_context_param_shapes(method, ctx)
-                    .into_iter()
-                    .zip(effective_signature.params.iter())
-                    .map(|(_, solved)| non_emitted_static_context_arg_shape_from_param_plan(solved))
-                    .collect(),
+                arg_shapes: if owner_is_emitted {
+                    effective_signature
+                        .params
+                        .iter()
+                        .map(|param| param.shape.clone())
+                        .collect()
+                } else {
+                    source_context_param_shapes(method, ctx)
+                        .into_iter()
+                        .zip(effective_signature.params.iter())
+                        .map(|(_, solved)| {
+                            non_emitted_static_context_arg_shape_from_param_plan(solved)
+                        })
+                        .collect()
+                },
                 receiver: effective_signature.receiver,
                 arg_shapes_are_authoritative: true,
             });

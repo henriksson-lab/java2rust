@@ -859,6 +859,18 @@ def declared_type_names_from_text(text: str) -> set[str]:
     return names
 
 
+def from_impl_keys_from_text(text: str) -> set[tuple[str, str]]:
+    keys = set()
+    for line in text.splitlines():
+        trait_match = TRAIT_IMPL_RE.match(line)
+        if not trait_match:
+            continue
+        from_match = FROM_TRAIT_RE.match(trait_match.group(1).strip())
+        if from_match:
+            keys.add((from_match.group(1), trait_match.group(2)))
+    return keys
+
+
 def remove_protected_aliases_from_shared_support(path: Path, aliases: set[str]) -> None:
     if not aliases or not path.exists():
         return
@@ -917,6 +929,26 @@ def remove_protected_names_from_shared_types(path: Path, names: set[str]) -> Non
     path.write_text("".join(line for line in lines if line.strip() not in names))
 
 
+def append_missing_builtin_from_impls(
+    shared_support_path: Path,
+    shared_type_universe: set[str],
+    primary_output_types: set[str],
+    existing_from_impl_keys: set[tuple[str, str]],
+) -> None:
+    chunks = []
+    for from_name, to_name, text in builtin_from_impls(shared_type_universe):
+        if (
+            from_name in primary_output_types
+            or to_name in primary_output_types
+            or (from_name, to_name) in existing_from_impl_keys
+        ):
+            continue
+        chunks.append("\n" + text.rstrip() + "\n")
+    if chunks:
+        with shared_support_path.open("a") as shared:
+            shared.write("".join(chunks))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generated-dir", required=True)
@@ -934,6 +966,7 @@ def main() -> int:
     existing_shared_types = read_existing_shared_types(
         Path(args.shared_types)
     ) | declared_type_names_from_text(existing_shared_text)
+    existing_shared_from_impl_keys = from_impl_keys_from_text(existing_shared_text)
     existing_shared_alias_names = {
         match.group(1)
         for line in existing_shared_text.splitlines()
@@ -1018,6 +1051,12 @@ def main() -> int:
 
     conflict_lines = ["type\tkind\tdetail\n"]
     if not selected:
+        append_missing_builtin_from_impls(
+            shared_support_path,
+            existing_shared_types,
+            primary_output_types,
+            existing_shared_from_impl_keys,
+        )
         for path in rust_paths:
             remove_duplicate_source_owned_nested_stubs(path)
             remove_duplicate_inherent_methods(path)
@@ -1055,6 +1094,7 @@ def main() -> int:
     shared_chunks = []
     shared_aliases = set()
     alias_targets = {}
+    emitted_from_impl_keys = set(existing_shared_from_impl_keys)
     for alias_name, variants in aliases.items():
         if alias_name in protected_shared_aliases:
             continue
@@ -1165,7 +1205,11 @@ def main() -> int:
                 )
             if trait_is_derived_by_decl(trait_name, derived_traits):
                 continue
-            shared_chunks.append("\n" + unique_variants[0].rstrip() + "\n")
+            selected_trait_impl = unique_variants[0]
+            from_match = FROM_TRAIT_RE.match(trait_name)
+            if from_match:
+                emitted_from_impl_keys.add((from_match.group(1), type_name))
+            shared_chunks.append("\n" + selected_trait_impl.rstrip() + "\n")
         if selected_decl_is_trait:
             for (type_name, trait_name), variants in sorted(trait_impls.items()):
                 if trait_name != name or type_name in selected:
@@ -1197,8 +1241,8 @@ def main() -> int:
                 shared_chunks.append("}\n")
         shared_chunks.append("\n")
 
-    existing_from_impl_keys = set(from_impls)
     shared_type_universe = selected | existing_shared_types
+    existing_from_impl_keys = emitted_from_impl_keys
     for from_name, to_name, text in builtin_from_impls(shared_type_universe):
         if (
             from_name in primary_output_types

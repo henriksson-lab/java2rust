@@ -15133,6 +15133,51 @@ class FileInputStreamOptionalInputSlot {
 }
 
 #[test]
+fn emitted_source_call_uses_authoritative_owned_param_signature() {
+    let translation = translate_source(
+        r#"
+class SourceOwnedParamCallUsesSolvedSignature {
+    static class Alignment {
+        int score() { return 1; }
+    }
+
+    static class Pair {
+        public String format(Alignment alignment) {
+            return "" + alignment.score();
+        }
+    }
+
+    static String run() {
+        Alignment alignment = new Alignment();
+        return new Pair().format(alignment);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn format(&self, alignment: SourceOwnedParamCallUsesSolvedSignatureAlignment) -> String")
+            && translation
+                .rust
+                .contains("return SourceOwnedParamCallUsesSolvedSignaturePair::new().format(alignment);")
+            && !translation.rust.contains("format(&alignment)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "emitted_source_call_uses_authoritative_owned_param_signature",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn resource_input_stream_read_and_close_have_typed_facade_support() {
     let translation = translate_source(
         r#"

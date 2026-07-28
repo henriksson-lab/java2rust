@@ -8302,7 +8302,7 @@ impl ExternalApiFacadeSupport {
                 continue;
             }
             let from = rust_name_for_java_named_type(&from_key);
-            if !valid_external_facade_type_ident(&from) || is_builtin_external_facade_type(&from) {
+            if !valid_rust_type_ident(&from) || from == "InputStream" {
                 continue;
             }
             self.add_opaque_type(from.clone());
@@ -8532,10 +8532,7 @@ impl ExternalApiFacadeSupport {
                 || (!is_builtin_external_facade_type(&from)
                     && !emitted_support_type_names.contains(&from))
                 || (is_builtin_external_facade_type(&from)
-                    && !matches!(
-                        (from.as_str(), to.as_str()),
-                        ("InputStream", "JavaIoInputStream") | ("JavaIoInputStream", "InputStream")
-                    ))
+                    && !is_allowed_builtin_external_from_impl(&from, &to))
                 || matches!(
                     (from.as_str(), to.as_str()),
                     ("OutputStream", "JavaIoOutputStream")
@@ -12150,6 +12147,25 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "char"
             | "()"
     ) || crate::javalibs::is_builtin_external_facade_type(name)
+}
+
+fn is_allowed_builtin_external_from_impl(from: &str, to: &str) -> bool {
+    matches!(
+        (from, to),
+        ("InputStream", "JavaIoInputStream") | ("JavaIoInputStream", "InputStream")
+    ) || (to == "InputStream"
+        && matches!(
+            from,
+            "FileInputStream"
+                | "ByteArrayInputStream"
+                | "BufferedInputStream"
+                | "DataInputStream"
+                | "GZIPInputStream"
+                | "ObjectInputStream"
+                | "FilterInputStream"
+                | "PushbackInputStream"
+                | "SequenceInputStream"
+        ))
 }
 
 fn valid_external_facade_type_ident(name: &str) -> bool {

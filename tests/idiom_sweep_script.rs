@@ -557,6 +557,62 @@ pub struct {primary};
 }
 
 #[test]
+fn shared_support_merger_adds_input_stream_upcast_for_existing_jdk_facades() {
+    let dir = unique_temp_dir("shared_support_existing_input_stream_upcast");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_UseFileInput.rs"),
+        r#"
+pub struct UseFileInput;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(
+        &shared_support,
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct InputStream;
+
+#[derive(Clone, Debug, Default)]
+pub struct FileInputStream;
+"#,
+    )
+    .unwrap();
+    fs::write(&shared_types, "InputStream\nFileInputStream\n").unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(
+        shared.contains("impl From<FileInputStream> for InputStream"),
+        "{shared}"
+    );
+}
+
+#[test]
 fn shared_support_merger_does_not_let_local_alias_override_existing_shared_type() {
     let dir = unique_temp_dir("shared_support_alias_collision");
     let generated_dir = dir.join("generated");

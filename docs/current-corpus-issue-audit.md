@@ -1191,7 +1191,14 @@ and `cargo test erased_object --test idiom_gaps --quiet` also pass.
    Java string/file/logging facades, non-emitter raw keyword leaks, and
    trait/interface assembly. The current local matrix idiom fixtures are green;
    rerun the affected ndarray corpuses before promoting more matrix work.
-6. For JAligner, prefer statement-side or mutator-role ABI facts for
-   `Collections.sort(...) -> ()`, then handle `NamedInputStream.get_name()`,
-   `Pair -> Format`, `SequenceParser` nullable line flow, temporary borrowed
-   string lifetimes, and moved `StringBuffer.append(...)` arguments.
+6. JAligner is currently clean in
+   `.tmp/corpus-rerun-20260728-jaligner-after-merge-from-dedupe`: `29/29`
+   translated, `cargo_check=ok`, and `invalid_pattern_files=0`. The fixes that
+   closed it were shared JDK stream upcast support, shared-support export
+   filtering/deduplication, and authoritative emitted cross-file source
+   signatures.
+7. Before ranking new HTSJDK VCF compile errors, investigate the focused script
+   assembly/reporting stall seen in
+   `.tmp/corpus-rerun-20260728-htsjdk-vcf-after-jaligner-clean`. Worker events
+   showed all 32 files emitted, but the run was interrupted before crate
+   assembly/cargo-check results were produced.

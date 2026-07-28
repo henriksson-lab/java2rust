@@ -5137,6 +5137,31 @@ with `receiverless_overloaded_static_same_class_call_uses_self_and_arg_types`,
 `resolved_static_helper_call_uses_fallback_signature_arg_shapes`, and
 `summary_context_translation_resolves_sibling_symbols_without_lowering_bodies`.
 
+2026-07-28 focused JAligner cleanup: the focused JAligner corpus now translates
+and cargo-checks cleanly after three shared fixes. JDK stream subtype upcasts
+are retained through shared support (`FileInputStream -> InputStream`), module
+types already present in shared support are no longer re-exported from
+individual generated modules, and emitted cross-file source method calls now
+trust solved callee argument slots instead of re-borrowing owned public
+parameters through source-summary fallback heuristics. The shared-support
+merger also de-duplicates built-in `From<T> for U` fallbacks against impls it
+has already promoted. Verified with
+`shared_support_merger_adds_input_stream_upcast_for_promoted_jdk_facades`,
+`shared_support_merger_adds_input_stream_upcast_for_existing_jdk_facades`,
+`java_platform_input_stream_upcast_support_emits_from_impl`,
+`file_input_stream_constructor_upcasts_into_optional_input_stream_slot`,
+`emitted_source_call_uses_authoritative_owned_param_signature`,
+`cargo build --release --quiet`, and
+`scripts/translate-focused-package.sh --skip-resolver-bench --jobs 10 --translate-timeout-sec 60 --primary /home/mahogny/github/claude/java2rust/testdata/jaligner/src --out .tmp/corpus-rerun-20260728-jaligner-after-merge-from-dedupe`
+(`29/29` translated, `cargo_check=ok`, `invalid_pattern_files=0`).
+
+2026-07-28 noisy rerun note: an HTSJDK VCF run at
+`.tmp/corpus-rerun-20260728-htsjdk-vcf-after-jaligner-clean` emitted all 32
+files according to `worker-events.tsv`, but was interrupted after the phase file
+failed to advance past `batch_parse_global_emit_start` for several minutes.
+Treat this as an assembly/reporting stall to investigate before using that
+output as failure evidence.
+
 ## Rerun Protocol
 
 After each fix:
