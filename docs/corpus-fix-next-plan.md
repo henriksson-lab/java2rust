@@ -4876,6 +4876,16 @@ source-output-stream `write_byte_array_int_int` override path. Verified with
 `source_filter_output_stream_write_byte_array_uses_three_arg_override`, and
 `documents_try_with_resources_copy_gap`.
 
+Follow-up source-summary static helper borrow cleanup: receiver-style and
+resolved receiverless static calls into non-emitted context/source-summary
+helpers now project reference-like parameters into shared-borrow call slots.
+When a support/facade argument plan has already shaped the call, the context
+fallback may only refine an owned reference argument to the borrowed slot proved
+by the source-summary signature; it does not otherwise overwrite fact-shaped
+arguments. Verified with
+`resolved_static_helper_call_uses_fallback_signature_arg_shapes` and
+`constructed_external_argument_is_borrowed_for_borrowed_source_slot`.
+
 ## Rerun Protocol
 
 After each fix:

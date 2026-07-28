@@ -1154,6 +1154,16 @@ and `documents_try_with_resources_copy_gap` also pass with the existing
 output-stream `write_byte_array_int_int` and try-with-resources `read_3`/`write_3`
 paths.
 
+Focused source-summary static borrow update:
+`resolved_static_helper_call_uses_fallback_signature_arg_shapes` now passes.
+Resolved receiverless static calls and receiver-style static-owner calls into
+non-emitted context/source-summary helpers project reference parameters as
+shared-borrow call slots, while already-shaped support/facade argument plans
+are only refined from owned to borrowed when the context fallback proves the
+same erased Java type. The adjacent
+`constructed_external_argument_is_borrowed_for_borrowed_source_slot` guard also
+passes.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

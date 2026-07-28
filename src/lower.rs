@@ -8139,6 +8139,16 @@ fn lower_expr_with_refinements(
                 )
             })
             .or_else(|| {
+                source_context_resolved_static_method_fallback_signature(
+                    receiver.as_deref(),
+                    name,
+                    args,
+                    resolved.as_ref(),
+                    env,
+                    ctx,
+                )
+            })
+            .or_else(|| {
                 source_context_current_static_method_fallback_signature(
                     receiver.as_deref(),
                     name,
@@ -10380,15 +10390,44 @@ fn apply_context_fallback_signature_arg_shapes(
     plan: ArgumentLoweringPlan,
     fallback_signature: Option<&ContextFallbackMethodSignature>,
 ) -> ArgumentLoweringPlan {
-    let ArgumentLoweringPlan::Unshaped { arg_count } = plan else {
+    let Some(signature) = fallback_signature else {
         return plan;
     };
-    if let Some(signature) = fallback_signature
-        && signature.arg_shapes.len() == arg_count
-    {
-        return ArgumentLoweringPlan::Shaped(signature.arg_shapes.clone());
+    match plan {
+        ArgumentLoweringPlan::Unshaped { arg_count } if signature.arg_shapes.len() == arg_count => {
+            ArgumentLoweringPlan::Shaped(signature.arg_shapes.clone())
+        }
+        ArgumentLoweringPlan::Shaped(shapes) if signature.arg_shapes.len() == shapes.len() => {
+            ArgumentLoweringPlan::Shaped(
+                shapes
+                    .into_iter()
+                    .zip(signature.arg_shapes.iter())
+                    .map(|(shape, fallback)| {
+                        refine_shaped_arg_with_context_fallback_borrow(shape, fallback)
+                    })
+                    .collect(),
+            )
+        }
+        plan => plan,
     }
-    plan
+}
+
+fn refine_shaped_arg_with_context_fallback_borrow(
+    mut shape: RustSlotShape,
+    fallback: &RustSlotShape,
+) -> RustSlotShape {
+    if matches!(shape.ownership, OwnershipShape::Owned)
+        && matches!(
+            fallback.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+        && java_types_have_same_erased_identity(&shape.java_ty, &fallback.java_ty)
+    {
+        shape.ownership = fallback.ownership;
+        shape.view = fallback.view.clone();
+        shape.dispatch = fallback.dispatch.clone();
+    }
+    shape
 }
 
 fn apply_dyn_trait_borrowed_return_arg_shapes(
@@ -18566,17 +18605,15 @@ fn source_context_static_method_fallback_signature(
             {
                 return Some(ContextFallbackMethodSignature {
                     rust_name,
-                    arg_shapes: signature
-                        .params
-                        .iter()
-                        .map(|param| param.shape.clone())
-                        .collect(),
+                    arg_shapes: non_emitted_static_context_arg_shapes_from_signature(signature),
                     receiver: signature.receiver,
                 });
             }
             if matching_methods.len() == 1 {
                 let method = matching_methods[0];
-                return Some(context_fallback_signature_for_method(&owner, method, ctx));
+                return Some(non_emitted_static_context_fallback_signature_for_method(
+                    &owner, method, ctx,
+                ));
             }
             continue;
         }
@@ -18606,11 +18643,7 @@ fn source_context_static_method_fallback_signature(
         {
             return Some(ContextFallbackMethodSignature {
                 rust_name,
-                arg_shapes: signature
-                    .params
-                    .iter()
-                    .map(|param| param.shape.clone())
-                    .collect(),
+                arg_shapes: non_emitted_static_context_arg_shapes_from_signature(signature),
                 receiver: signature.receiver,
             });
         }
@@ -18623,14 +18656,10 @@ fn source_context_static_method_fallback_signature(
             arg_shapes: ctx
                 .signatures
                 .method_signature_by_rust_name(&owner, &rust_name)
-                .map(|signature| {
-                    signature
-                        .params
-                        .iter()
-                        .map(|param| param.shape.clone())
-                        .collect()
-                })
-                .unwrap_or_else(|| source_context_param_shapes(matching_methods[0], ctx)),
+                .map(non_emitted_static_context_arg_shapes_from_signature)
+                .unwrap_or_else(|| {
+                    non_emitted_static_context_arg_shapes_for_method(matching_methods[0], ctx)
+                }),
             receiver: ctx
                 .signatures
                 .method_signature_by_rust_name(&owner, &rust_name)
@@ -18639,6 +18668,145 @@ fn source_context_static_method_fallback_signature(
         });
     }
     None
+}
+
+fn source_context_resolved_static_method_fallback_signature(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&ResolvedCall>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<ContextFallbackMethodSignature> {
+    if receiver.is_some() {
+        return None;
+    }
+    let resolved = resolved?;
+    if resolved.kind != CallKind::Static {
+        return None;
+    }
+    let owner = &resolved.declaring_type;
+    let ty = find_context_type_by_key(ctx.program, owner)
+        .or_else(|| find_context_type_by_key(ctx.support_local_type_program, owner))
+        .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, owner))?;
+    let matching_methods = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method)
+                if method.modifiers.contains(&Modifier::Static)
+                    && method.name == name
+                    && method.params.len() == args.len() =>
+            {
+                Some(method)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if matching_methods.is_empty() {
+        return None;
+    }
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let arg_types = args
+        .iter()
+        .map(|arg| infer_expr_shape_with_context(arg, env, shape_ctx).java_ty)
+        .collect::<Vec<_>>();
+    let owner_is_emitted = static_context_owner_is_emitted(owner, ctx);
+    if let Some((rust_name, signature)) = ctx
+        .signatures
+        .method_signature_by_base_name_and_arg_types_with_facts(owner, name, &arg_types, ctx.facts)
+        .or_else(|| {
+            ctx.signatures
+                .method_signature_by_base_name_and_arg_types(owner, name, &arg_types)
+        })
+        .or_else(|| {
+            ctx.signatures
+                .method_signature_by_base_name_and_arity(owner, name, args.len())
+        })
+    {
+        return Some(ContextFallbackMethodSignature {
+            rust_name,
+            arg_shapes: if owner_is_emitted {
+                signature
+                    .params
+                    .iter()
+                    .map(|param| param.shape.clone())
+                    .collect()
+            } else {
+                non_emitted_static_context_arg_shapes_from_signature(signature)
+            },
+            receiver: signature.receiver,
+        });
+    }
+    if matching_methods.len() == 1 {
+        let method = matching_methods[0];
+        return Some(if owner_is_emitted {
+            context_fallback_signature_for_method(owner, method, ctx)
+        } else {
+            non_emitted_static_context_fallback_signature_for_method(owner, method, ctx)
+        });
+    }
+    None
+}
+
+fn non_emitted_static_context_fallback_signature_for_method(
+    owner: &str,
+    method: &MethodDecl,
+    ctx: LowerCtx,
+) -> ContextFallbackMethodSignature {
+    let mut signature = context_fallback_signature_for_method(owner, method, ctx);
+    signature.arg_shapes = non_emitted_static_context_arg_shapes_for_method(method, ctx);
+    signature
+}
+
+fn non_emitted_static_context_arg_shapes_from_signature(
+    signature: &crate::signature::MethodSignaturePlan,
+) -> Vec<RustSlotShape> {
+    signature
+        .params
+        .iter()
+        .map(non_emitted_static_context_arg_shape_from_param_plan)
+        .collect()
+}
+
+fn non_emitted_static_context_arg_shapes_for_method(
+    method: &MethodDecl,
+    ctx: LowerCtx,
+) -> Vec<RustSlotShape> {
+    method
+        .params
+        .iter()
+        .map(|param| {
+            non_emitted_static_context_arg_shape(
+                source_context_param_shape(param, ctx),
+                &param.ty,
+                param.is_varargs,
+            )
+        })
+        .collect()
+}
+
+fn non_emitted_static_context_arg_shape_from_param_plan(
+    param: &crate::signature::ParamPlan,
+) -> RustSlotShape {
+    non_emitted_static_context_arg_shape(param.shape.clone(), &param.java_ty, param.is_varargs)
+}
+
+fn non_emitted_static_context_arg_shape(
+    mut shape: RustSlotShape,
+    java_ty: &JavaType,
+    is_varargs: bool,
+) -> RustSlotShape {
+    if matches!(shape.ownership, OwnershipShape::Owned)
+        && source_context_reference_param_should_borrow(java_ty, is_varargs)
+    {
+        shape.ownership = OwnershipShape::SharedBorrow;
+    }
+    shape
 }
 
 fn source_context_current_static_method_fallback_signature(
