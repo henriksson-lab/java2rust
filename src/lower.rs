@@ -8264,6 +8264,14 @@ fn lower_expr_with_refinements(
                 ctx,
                 fallback_signature.as_ref(),
             );
+            let arg_plan = emitted_call_target_signature_arg_plan(
+                &target,
+                receiver.as_deref(),
+                args,
+                env,
+                ctx,
+            )
+            .unwrap_or(arg_plan);
             let lowered_args = lower_args_for_call_target_with_temporaries(
                 &target,
                 receiver.as_deref(),
@@ -10335,6 +10343,7 @@ struct ContextFallbackMethodSignature {
     rust_name: String,
     arg_shapes: Vec<RustSlotShape>,
     receiver: ReceiverPlan,
+    arg_shapes_are_authoritative: bool,
 }
 
 fn context_fallback_signature_for_method(
@@ -10363,12 +10372,30 @@ fn context_fallback_signature_for_method(
                 .map(|param| param.shape.clone())
                 .collect(),
             receiver: signature.receiver,
+            arg_shapes_are_authoritative: false,
         };
     }
     ContextFallbackMethodSignature {
         rust_name,
         arg_shapes: source_context_param_shapes(method, ctx),
         receiver: ReceiverPlan::Shared,
+        arg_shapes_are_authoritative: false,
+    }
+}
+
+fn context_fallback_signature_for_signature(
+    rust_name: String,
+    signature: &crate::signature::MethodSignaturePlan,
+) -> ContextFallbackMethodSignature {
+    ContextFallbackMethodSignature {
+        rust_name,
+        arg_shapes: signature
+            .params
+            .iter()
+            .map(|param| param.shape.clone())
+            .collect(),
+        receiver: signature.receiver,
+        arg_shapes_are_authoritative: false,
     }
 }
 
@@ -10446,6 +10473,9 @@ fn apply_context_fallback_signature_arg_shapes(
             ArgumentLoweringPlan::Shaped(signature.arg_shapes.clone())
         }
         ArgumentLoweringPlan::Shaped(shapes) if signature.arg_shapes.len() == shapes.len() => {
+            if signature.arg_shapes_are_authoritative {
+                return ArgumentLoweringPlan::Shaped(signature.arg_shapes.clone());
+            }
             ArgumentLoweringPlan::Shaped(
                 shapes
                     .into_iter()
@@ -11597,15 +11627,33 @@ fn emitted_source_resolved_call_argument_plan(
 ) -> Option<ArgumentLoweringPlan> {
     let resolved = resolved?;
     let owner = find_context_type_by_key(ctx.program, &resolved.declaring_type)?;
-    let method = owner.members.iter().find_map(|member| match member {
+    let exact_method = owner.members.iter().find_map(|member| match member {
         Member::Method(method)
             if method.params.len() == arg_count
                 && method_staticness_matches_resolved(method, resolved.kind)
-                && method_rust_name_matches_resolved(method, &resolved.rust_name) =>
+                && method_effective_rust_name(method) == resolved.rust_name =>
         {
             Some(method)
         }
         _ => None,
+    });
+    let method = exact_method.or_else(|| {
+        let mut matches = owner.members.iter().filter_map(|member| match member {
+            Member::Method(method)
+                if method.params.len() == arg_count
+                    && method_staticness_matches_resolved(method, resolved.kind)
+                    && method_rust_name_matches_resolved(method, &resolved.rust_name) =>
+            {
+                Some(method)
+            }
+            _ => None,
+        });
+        let first = matches.next()?;
+        if matches.next().is_none() {
+            Some(first)
+        } else {
+            None
+        }
     })?;
     let signature = ctx.signatures.required_method_signature(owner, method);
     Some(ArgumentLoweringPlan::Shaped(
@@ -11615,6 +11663,13 @@ fn emitted_source_resolved_call_argument_plan(
             .map(|param| param.shape.clone())
             .collect(),
     ))
+}
+
+fn method_effective_rust_name(method: &MethodDecl) -> String {
+    method
+        .rust_name
+        .clone()
+        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name))
 }
 
 fn method_staticness_matches_resolved(method: &MethodDecl, resolved_kind: CallKind) -> bool {
@@ -11809,6 +11864,28 @@ fn call_target_signature_arg_plan(
             .map(|param| param.shape.clone())
             .collect(),
     ))
+}
+
+fn emitted_call_target_signature_arg_plan(
+    target: &CallTargetPlan<'_>,
+    call_receiver: Option<&Expr>,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<ArgumentLoweringPlan> {
+    let owner_key = match target {
+        CallTargetPlan::StaticOwner { owner, .. } if owner == "Self" => ctx.current_type?,
+        CallTargetPlan::StaticOwner { owner, .. } => owner.as_str(),
+        CallTargetPlan::StaticSelf { .. }
+        | CallTargetPlan::FallbackSelf { .. }
+        | CallTargetPlan::FallbackFree { .. }
+        | CallTargetPlan::InstanceSelf { .. } => ctx.current_type?,
+        _ => return None,
+    };
+    if !static_context_owner_is_emitted(owner_key, ctx) {
+        return None;
+    }
+    call_target_signature_arg_plan(target, call_receiver, args, env, ctx)
 }
 
 fn method_signature_for_owner_aliases<'a>(
@@ -18731,6 +18808,7 @@ fn source_context_static_method_fallback_signature(
                     rust_name,
                     arg_shapes: non_emitted_static_context_arg_shapes_from_signature(signature),
                     receiver: signature.receiver,
+                    arg_shapes_are_authoritative: true,
                 });
             }
             if matching_methods.len() == 1 {
@@ -18769,6 +18847,7 @@ fn source_context_static_method_fallback_signature(
                 rust_name,
                 arg_shapes: non_emitted_static_context_arg_shapes_from_signature(signature),
                 receiver: signature.receiver,
+                arg_shapes_are_authoritative: true,
             });
         }
         let rust_name = matching_methods[0]
@@ -18789,6 +18868,7 @@ fn source_context_static_method_fallback_signature(
                 .method_signature_by_rust_name(&owner, &rust_name)
                 .map(|signature| signature.receiver)
                 .unwrap_or(ReceiverPlan::Shared),
+            arg_shapes_are_authoritative: true,
         });
     }
     None
@@ -18840,6 +18920,16 @@ fn source_context_resolved_static_method_fallback_signature(
         .map(|arg| infer_expr_shape_with_context(arg, env, shape_ctx).java_ty)
         .collect::<Vec<_>>();
     let owner_is_emitted = static_context_owner_is_emitted(owner, ctx);
+    if owner_is_emitted
+        && let Some(signature) = ctx
+            .signatures
+            .method_signature_by_rust_name(owner, &resolved.rust_name)
+    {
+        return Some(context_fallback_signature_for_signature(
+            resolved.rust_name.clone(),
+            signature,
+        ));
+    }
     if let Some((rust_name, signature)) = ctx
         .signatures
         .method_signature_by_base_name_and_arg_types_with_facts(owner, name, &arg_types, ctx.facts)
@@ -18864,6 +18954,7 @@ fn source_context_resolved_static_method_fallback_signature(
                 non_emitted_static_context_arg_shapes_from_signature(signature)
             },
             receiver: signature.receiver,
+            arg_shapes_are_authoritative: !owner_is_emitted,
         });
     }
     if matching_methods.len() == 1 {
@@ -18884,6 +18975,7 @@ fn non_emitted_static_context_fallback_signature_for_method(
 ) -> ContextFallbackMethodSignature {
     let mut signature = context_fallback_signature_for_method(owner, method, ctx);
     signature.arg_shapes = non_emitted_static_context_arg_shapes_for_method(method, ctx);
+    signature.arg_shapes_are_authoritative = true;
     signature
 }
 
@@ -19001,6 +19093,7 @@ fn source_context_current_static_method_fallback_signature(
                 .map(|param| param.shape.clone())
                 .collect(),
             receiver: signature.receiver,
+            arg_shapes_are_authoritative: false,
         });
     }
     if let Some(method) =
@@ -19022,12 +19115,14 @@ fn source_context_current_static_method_fallback_signature(
                     .map(|param| param.shape.clone())
                     .collect(),
                 receiver: signature.receiver,
+                arg_shapes_are_authoritative: false,
             });
         }
         return Some(ContextFallbackMethodSignature {
             rust_name,
             arg_shapes: source_context_param_shapes(method, ctx),
             receiver: ReceiverPlan::Shared,
+            arg_shapes_are_authoritative: false,
         });
     }
     if matching_methods.len() == 1 {
@@ -19273,6 +19368,7 @@ fn source_context_receiver_method_fallback_signature(
                     .map(|(_, solved)| non_emitted_static_context_arg_shape_from_param_plan(solved))
                     .collect(),
                 receiver: effective_signature.receiver,
+                arg_shapes_are_authoritative: true,
             });
         }
         if matching_methods.len() == 1 {
@@ -19295,6 +19391,7 @@ fn source_context_receiver_method_fallback_signature(
                     })
                     .collect(),
                 receiver: ReceiverPlan::Shared,
+                arg_shapes_are_authoritative: true,
             });
         }
     }

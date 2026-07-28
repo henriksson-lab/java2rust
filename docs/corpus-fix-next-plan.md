@@ -5091,6 +5091,20 @@ old redundant `.as_str()` spellings. Verified with
 `same_class_nullable_string_field_hash_code_method_uses_runtime_helper`, and
 `cargo test string_join --quiet`.
 
+Static/source-summary signature identity cleanup: emitted source-call argument
+planning now prefers exact resolved Rust method names before falling back to
+base-name compatibility, and ambiguous base-name projections no longer silently
+select the first overload. Final emitted call targets can also recover argument
+slots directly from the selected method signature. Non-emitted support and
+summary fallback signatures carry explicit provenance so their synthesized
+borrowed boundary slots can replace generic owned plans, while emitted source
+methods keep the conservative borrow-only refinement path. Stale emitted
+overload expectations were refreshed for direct `&str` parameters. Verified
+with `receiverless_overloaded_static_same_class_call_uses_self_and_arg_types`,
+`overloaded_static_caller_gets_exception_fact_on_emitted_rust_name`,
+`resolved_static_helper_call_uses_fallback_signature_arg_shapes`, and
+`summary_context_translation_resolves_sibling_symbols_without_lowering_bodies`.
+
 ## Rerun Protocol
 
 After each fix:

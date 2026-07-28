@@ -3432,16 +3432,16 @@ class CheckedProblem extends Exception {}
 
     assert!(
         translation.rust.contains(
-            "pub fn print_string_int_double_array(name: String, expected: i32, values: &[f64]) -> Result<(), JavaException>"
+            "pub fn print_string_int_double_array(name: &str, expected: i32, values: &[f64]) -> Result<(), JavaException>"
         ) && translation.rust.contains(
-            "pub fn print_string_int_double_array_array(name: String, expected: i32, values: &ndarray::Array2<f64>) -> Result<(), JavaException>"
+            "pub fn print_string_int_double_array_array(name: &str, expected: i32, values: &ndarray::Array2<f64>) -> Result<(), JavaException>"
         ) && translation.rust.contains("Self::check_len(expected, values.len() as i32)?;")
             && translation
                 .rust
                 .contains("Self::check_len(expected, values.nrows() as i32)?;")
             && !translation
                 .rust
-                .contains("pub fn print_string_int_double_array(name: String, expected: i32, values: &[f64]) {"),
+                .contains("pub fn print_string_int_double_array(name: &str, expected: i32, values: &[f64]) {"),
         "{}",
         translation.rust
     );
