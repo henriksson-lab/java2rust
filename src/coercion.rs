@@ -791,6 +791,18 @@ fn apply_optional_slot_construction(
 }
 
 fn normalize_optional_constructed_element_expr(expr: RustExpr) -> RustExpr {
+    if let RustExpr::If {
+        condition,
+        then_expr,
+        else_expr,
+    } = expr
+    {
+        return RustExpr::If {
+            condition,
+            then_expr: Box::new(normalize_optional_constructed_element_expr(*then_expr)),
+            else_expr: Box::new(normalize_optional_constructed_element_expr(*else_expr)),
+        };
+    }
     let rendered = emit::emit_expr(&expr);
     if let Some(inner) = rendered
         .strip_prefix('&')

@@ -2500,10 +2500,12 @@ class NonNullTernaryOptionalBorrowedArg {
 
     assert!(
         translation.rust.contains(
-            "self.legal(Some(if choose_left { &parts[0 as usize] } else { &parts[1 as usize] }))"
+            "self.legal(Some(if choose_left { parts[0 as usize].as_str() } else { parts[1 as usize].as_str() }))"
         ) && !translation
             .rust
             .contains("if choose_left { parts[0 as usize] } else { parts[1 as usize] }")
+            && !translation.rust.contains("&parts[0 as usize].as_str()")
+            && !translation.rust.contains("&parts[1 as usize].as_str()")
             && !translation.rust.contains("self.legal(&Some("),
         "{}",
         translation.rust
@@ -6017,7 +6019,7 @@ fn map_get_optional_receiver_to_string_uses_java_null_receiver_policy() {
     assert!(
         translation
             .rust
-            .contains("paths.get(sample.as_str()).expect(\"Java null receiver\").to_string()")
+            .contains("paths.get(sample).expect(\"Java null receiver\").to_string()")
             && !translation
                 .rust
                 .contains("paths.get(sample.as_str()).to_string()")
@@ -6062,7 +6064,7 @@ class MapGetPrimitiveArithmetic {
     assert!(
         translation
             .rust
-            .contains("totals.get(key.as_str()).copied().expect(\"Java null receiver\") / count")
+            .contains("totals.get(key).copied().expect(\"Java null receiver\") / count")
             && !translation
                 .rust
                 .contains("totals.get(key.as_str()) / count"),
@@ -7465,7 +7467,7 @@ class MapGetStringDisplaySegment {
 
     assert!(
         translation.rust.contains(
-            "values.get(key.as_str()).map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
+            "values.get(key).map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
         ) && translation.rust.contains("format!(\"{}{}\"")
             && !translation
                 .rust

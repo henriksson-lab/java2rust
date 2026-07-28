@@ -217,6 +217,13 @@ path.
 Optional construction boundary cleanup: the concrete
 `LoweredSlotExprConversionPlan { SlotConversionPlan::OptionalConstruction(..) }`
 assembly now lives in `conversion_lowering.rs` rather than `lower.rs`.
+Branch optional construction cleanup: optional wrapper construction now
+normalizes ternary/`if` branch elements before rendering `Some(...)`, so
+borrowed string-view branches produce `Option<&str>` without the previous
+`&value.as_str()` / `&&str` drift. The optional-focused idiom subset is green
+after this cleanup, and map-get assertions were refreshed for direct `&str`
+key projections (`HashMap<String, _>::get(key)`) that no longer need redundant
+`.as_str()` calls.
 Expression lowering may still infer actual element shape and choose branch
 slots, but optional wrapper application is a conversion-lowering concern.
 Optional assignment adaptation cleanup: `wrap_optional_assignment_value_if_needed`
