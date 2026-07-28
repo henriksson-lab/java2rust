@@ -1000,6 +1000,20 @@ method call` rows and nested
 The leading remaining VCF family is representation/enum coercion, especially
 erased-object-to-closed-enum and closed-enum-to-erased-object boundaries.
 
+Focused VCF source-enum collection update: rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-enum-values-collection-r1` translates 32/32
+files, keeps 20 invalid-pattern files, and reduces generated-Rust errors from
+620 to 614 relative to the previous source nested-enum checkpoint. Source enum
+`values()` enhanced-for loops now lower through copied value iteration, enum
+`valueOf(...)` arguments use borrowed string slots, `Arrays.asList(enum.values())`
+preserves Java varargs array spreading instead of producing a nested vector, and
+`LinkedHashSet(Collection)` collects from the source vector. The concrete VCF
+regressions around `&VCFHeaderHEADERFIELDS` comparison and
+`Vec<Vec<VCFHeaderHEADERFIELDS>>` are gone. The new idiom sweep ranks synthetic
+switch state-machine scaffolding, runtime downcasts, class-literal token
+planning, unsupported instanceof/cast shapes, and `super(...)` constructor
+state as the highest remaining VCF families.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

@@ -2005,6 +2005,20 @@ pub fn arrays_as_list_projection(args: Vec<RustExpr>) -> RustExpr {
     ))
 }
 
+pub fn native_collection_from_source_projection(
+    kind: crate::stdlib::JavaCollectionKind,
+    source: RustExpr,
+) -> RustExpr {
+    match kind {
+        crate::stdlib::JavaCollectionKind::List => source,
+        crate::stdlib::JavaCollectionKind::Set => RustExpr::Raw(format!(
+            "{}.into_iter().collect::<std::collections::HashSet<_>>()",
+            emit::emit_expr(&source)
+        )),
+        crate::stdlib::JavaCollectionKind::Map => source,
+    }
+}
+
 pub fn arrays_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
     RustExpr::Binary {
         op: "==".to_string(),

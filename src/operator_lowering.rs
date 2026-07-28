@@ -6,7 +6,7 @@ use crate::facts::FactSet;
 use crate::java_ir::{BinaryOp, JavaType, PrimitiveType, UnaryOp};
 use crate::rust_ir::RustExpr;
 use crate::shape_projection::shape_is_borrowed_string_content;
-use crate::slot_shape::RustSlotShape;
+use crate::slot_shape::{OwnershipShape, RustSlotShape};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EqualityComparisonPlan {
@@ -20,6 +20,8 @@ pub enum EqualityComparisonPlan {
     RightOptionalByRef,
     LeftOptionalStringView,
     RightOptionalStringView,
+    LeftSharedBorrowRightOwned,
+    LeftOwnedRightSharedBorrow,
     BothOptionalCustomEquals {
         method_name: String,
     },
@@ -251,6 +253,18 @@ pub fn plan_equality_comparison_with_facts(
         (None, Some(right_element)) if left.java_ty == right_element => {
             EqualityComparisonPlan::RightOptionalByRef
         }
+        _ if left.java_ty == right.java_ty
+            && left.ownership == OwnershipShape::SharedBorrow
+            && right.ownership != OwnershipShape::SharedBorrow =>
+        {
+            EqualityComparisonPlan::LeftSharedBorrowRightOwned
+        }
+        _ if left.java_ty == right.java_ty
+            && left.ownership != OwnershipShape::SharedBorrow
+            && right.ownership == OwnershipShape::SharedBorrow =>
+        {
+            EqualityComparisonPlan::LeftOwnedRightSharedBorrow
+        }
         _ => EqualityComparisonPlan::Direct,
     }
 }
@@ -333,6 +347,16 @@ pub fn lower_equality_comparison_expr_for_op(
             "Some({}) {op} {}",
             crate::emit::emit_expr(&left),
             crate::emit::emit_expr(&option_as_string_view(right))
+        )),
+        EqualityComparisonPlan::LeftSharedBorrowRightOwned => RustExpr::Raw(format!(
+            "({} {op} &{})",
+            crate::emit::emit_expr(&left),
+            crate::emit::emit_expr(&right)
+        )),
+        EqualityComparisonPlan::LeftOwnedRightSharedBorrow => RustExpr::Raw(format!(
+            "(&{} {op} {})",
+            crate::emit::emit_expr(&left),
+            crate::emit::emit_expr(&right)
         )),
         EqualityComparisonPlan::BothOptionalCustomEquals { method_name } => {
             let true_expr = matches!(op, "==");

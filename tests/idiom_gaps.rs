@@ -20612,3 +20612,59 @@ public class NestedEnumApiUser {
         }],
     );
 }
+
+#[test]
+fn source_enum_values_spread_into_arrays_as_list_and_compare_borrowed_loop_items() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+public class EnumValuesCollectionUser {
+    public enum Mode {
+        ALPHA,
+        BETA
+    }
+
+    public static Set<Mode> allModes() {
+        return new LinkedHashSet<Mode>(Arrays.asList(Mode.values()));
+    }
+
+    public static boolean valid(String[] names) {
+        int index = 0;
+        for (Mode mode : Mode.values()) {
+            if (mode != EnumValuesCollectionUser.Mode.valueOf(names[index])) {
+                return false;
+            }
+            index++;
+        }
+        return true;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "EnumValuesCollectionUserMode::values().into_iter().collect::<std::collections::HashSet<_>>()"
+        )
+            && translation
+                .rust
+                .contains("mode != EnumValuesCollectionUserMode::value_of(")
+            && !translation
+                .rust
+                .contains("vec![EnumValuesCollectionUserMode::values()]"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_enum_values_collection_user",
+        vec![GeneratedCrateModule {
+            name: "source_enum_values_collection_user",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}

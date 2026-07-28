@@ -15,13 +15,13 @@ use crate::coercion::{
     java_list_hash_code_projection, java_map_hash_code_projection, java_set_hash_code_projection,
     java_value_hash_code_projection, len_i32_projection, math_max_projection, math_min_projection,
     native_collection_default_constructor_projection, native_collection_empty_new_projection,
-    native_collection_with_capacity_projection, objects_equals_projection,
-    objects_is_null_projection, objects_non_null_projection, optional_get_owned_value_projection,
-    optional_or_else_owned_value_projection, owned_collection_to_vec_projection,
-    owned_map_keys_vec_projection, owner_associated_path_projection,
-    primitive_compare_to_projection, primitive_f64_method_projection,
-    primitive_hash_code_projection, primitive_is_nan_projection, primitive_number_value_projection,
-    primitive_parse_projection, receiver_method_call_projection,
+    native_collection_from_source_projection, native_collection_with_capacity_projection,
+    objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
+    optional_get_owned_value_projection, optional_or_else_owned_value_projection,
+    owned_collection_to_vec_projection, owned_map_keys_vec_projection,
+    owner_associated_path_projection, primitive_compare_to_projection,
+    primitive_f64_method_projection, primitive_hash_code_projection, primitive_is_nan_projection,
+    primitive_number_value_projection, primitive_parse_projection, receiver_method_call_projection,
     receiver_method_call_projection_exact, self_associated_path_projection,
     string_char_at_projection, string_compare_to_ignore_case_projection,
     string_compare_to_projection, string_equals_ignore_case_projection, string_format_projection,
@@ -808,6 +808,7 @@ fn apply_native_collection_new_target(
         }
         NativeCollectionNewTarget::FromSource { kind } => args
             .pop()
+            .map(|source| native_collection_from_source_projection(kind, source))
             .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
         NativeCollectionNewTarget::FromSingleArg { kind } => args
             .pop()

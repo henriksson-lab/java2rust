@@ -7465,6 +7465,20 @@ fn lower_enhanced_for_stmt(
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
         );
     }
+    if !var_is_assigned
+        && let Some(element_ty) = enhanced_for_iterable_element_type(iterable, env, ctx)
+        && let Some(element_name) = concrete_java_type_name(&element_ty)
+        && matches_source_java_enum_type(element_name, ctx)
+    {
+        loop_env.insert_local_shape(var_name.to_string(), value_shape(element_ty));
+        let iterator =
+            sequence_iter_copied_projection(lower_enhanced_for_iterable_expr(iterable, env, ctx));
+        return render_enhanced_for_iterator(
+            var_name,
+            &iterator,
+            &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
+        );
+    }
     if let Some(element_shape) =
         infer_stream_source_element_shape_with_facts(iterable, env.type_env(), ctx.facts)
     {
@@ -7518,6 +7532,14 @@ fn enhanced_for_iterable_element_type(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<JavaType> {
+    if let Some(owner) = source_java_enum_values_call_owner(iterable, env, ctx)
+        && matches_source_java_enum_type(&owner, ctx)
+    {
+        return Some(JavaType::Named {
+            name: owner,
+            args: Vec::new(),
+        });
+    }
     if let Expr::Call {
         receiver: Some(receiver),
         name,
@@ -7933,6 +7955,15 @@ fn lower_expr_with_refinements(
                 env,
                 ctx,
                 refinements,
+            ) {
+                return expr;
+            }
+            if let Some(expr) = lower_arrays_as_list_single_object_array_call(
+                receiver.as_deref(),
+                name,
+                args,
+                env,
+                ctx,
             ) {
                 return expr;
             }
@@ -8935,11 +8966,64 @@ fn lower_source_java_enum_type_api_call(
     match (name, args) {
         ("values", []) => Some(RustExpr::Raw(format!("{rust_owner}::values()"))),
         ("valueOf" | "value_of", [arg]) => {
-            let arg = lower_expr_with_refinements(arg, env, ctx, refinements);
+            let arg = lower_expr_for_slot_with_refinements(
+                arg,
+                env,
+                argument_slot(borrowed_string_content_shape()),
+                ctx,
+                refinements,
+            );
             Some(RustExpr::Raw(format!(
                 "{rust_owner}::value_of({})",
                 emit::emit_expr(&arg)
             )))
+        }
+        _ => None,
+    }
+}
+
+fn lower_arrays_as_list_single_object_array_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let Expr::Var(receiver_name) = receiver? else {
+        return None;
+    };
+    let receiver_key = env
+        .type_env()
+        .static_type_alias(receiver_name)
+        .map(crate::stdlib::canonical_external_receiver_type_key)
+        .unwrap_or_else(|| crate::stdlib::canonical_external_receiver_type_key(receiver_name));
+    if !matches!(
+        receiver_key.as_str(),
+        "Arrays" | "java.util.Arrays" | "JavaUtilArrays"
+    ) || !matches!(name, "asList" | "as_list")
+    {
+        return None;
+    }
+    let [arg] = args else {
+        return None;
+    };
+    if source_java_enum_values_call_owner(arg, env, ctx)
+        .is_some_and(|owner| matches_source_java_enum_type(&owner, ctx))
+    {
+        return Some(lower_expr(arg, env, ctx));
+    }
+    let shape = infer_expr_shape_with_context(
+        arg,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    match shape.java_ty {
+        JavaType::Array(element) if !matches!(element.as_ref(), JavaType::Primitive(_)) => {
+            Some(lower_expr(arg, env, ctx))
         }
         _ => None,
     }
