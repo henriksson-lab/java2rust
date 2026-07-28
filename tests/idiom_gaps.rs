@@ -1203,7 +1203,7 @@ class JdkFileCommonInstanceFacades {
                 .contains("let names: Vec<String> = file.list();")
             && translation
                 .rust
-                .contains("child.is_file() && child.can_read() && child.length() >= 0"),
+                .contains("child.is_file() && child.can_read() && child.length() >= (0 as i64)"),
         "{}",
         translation.rust
     );
@@ -11390,8 +11390,10 @@ class PrintStreamOutputStreamConstructorUse {
         translation.rust.contains("pub struct OutputStream;")
             && translation
                 .rust
-                .contains("pub fn new(_arg0: OutputStream) -> Self")
-            && translation.rust.contains("return PrintStream::new(out);")
+                .contains("pub fn new(_arg0: JavaIoOutputStream) -> Self")
+            && translation
+                .rust
+                .contains("return PrintStream::new(out.into());")
             && !translation
                 .rust
                 .contains("pub fn new<T0>(_arg0: T0) -> Self"),
