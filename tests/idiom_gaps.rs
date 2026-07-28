@@ -4017,6 +4017,32 @@ class MapPutAllJavaApi {
 }
 
 #[test]
+fn map_put_all_boxes_values_for_erased_object_value_map() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapPutAllErasedValues {
+    HashMap<String, Object> copy(HashMap<String, String> fields) {
+        HashMap<String, Object> out = new HashMap<String, Object>();
+        out.putAll(fields);
+        return out;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "out.extend(fields.into_iter().map(|(k, v)| (k, Box::new(v) as Box<dyn std::any::Any>)));"
+        ) && !translation.rust.contains("out.extend(fields);")
+            && !translation.rust.contains(".put_all("),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn array_arguments_use_borrowed_slice_views() {
     let translation = translate_source(&idiom_gap("ArrayArgumentSliceView.java"));
 

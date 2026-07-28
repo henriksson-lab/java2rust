@@ -4691,6 +4691,18 @@ trait stub text still contains `put_all`. Remaining VCF map work is no longer
 missing `putAll`; it is mainly raw/erased map value-shape adaptation such as
 `HashMap<String, String>` flowing into `HashMap<String, Box<dyn Any>>`.
 
+Follow-up erased-map entry adaptation: shared native collection `Extend`
+lowering now maps entries when the receiver is a map with an erased/object value
+slot and the source map has concrete values. Focused fixture
+`map_put_all_boxes_values_for_erased_object_value_map` passes, and VCF rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-map-extend-erased-values-r1` still reports
+691 generated-Rust errors but removes the explicit
+`HashMap<String, String> as IntoIterator<Item = (String, Box<dyn Any>)>` family.
+Seven VCF `generic_fields` copy sites now box values during `extend`. Treat this
+as a targeted correctness fix with no headline count movement; the next VCF map
+work is broader raw `Map` owner/value support and erased-object clone/comparison
+rather than `putAll` lowering.
+
 ## Rerun Protocol
 
 After each fix:

@@ -6658,7 +6658,10 @@ fn lower_native_collection_extend_expr_stmt(
             borrowed_sequence_extend_arg(lower_expr(&args[0], env, ctx), &element_shape, ctx.facts)
         }
         NativeCollectionExtendArgPlan::OwnedSource { slot_shape } => {
-            lower_expr_for_slot(&args[0], env, argument_slot(slot_shape), ctx)
+            lower_native_map_extend_owned_arg(&receiver_ty, &args[0], &arg_shape, env, ctx)
+                .unwrap_or_else(|| {
+                    lower_expr_for_slot(&args[0], env, argument_slot(slot_shape), ctx)
+                })
         }
     };
 
@@ -6759,6 +6762,53 @@ fn optional_collection_receiver_bulk_extend_method(
             "addAll" | "add_all"
         ) | (crate::stdlib::JavaCollectionKind::Map, "putAll" | "put_all")
     )
+}
+
+fn lower_native_map_extend_owned_arg(
+    receiver_ty: &JavaType,
+    arg: &Expr,
+    arg_shape: &RustSlotShape,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let receiver_ty =
+        crate::types::optional_element_type(receiver_ty).unwrap_or_else(|| receiver_ty.clone());
+    if crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        != Some(crate::stdlib::JavaCollectionKind::Map)
+    {
+        return None;
+    }
+    let (target_key_ty, target_value_ty, _) = map_type_args_from_java_type(&receiver_ty)?;
+    let (source_key_ty, source_value_ty, _) = map_type_args_from_java_type(&arg_shape.java_ty)?;
+    if source_key_ty != target_key_ty
+        || source_value_ty == target_value_ty
+        || !java_type_is_erased_object_like_for_lowering(&target_value_ty)
+    {
+        return None;
+    }
+
+    let source_shape = RustSlotShape::for_storage(arg_shape.java_ty.clone());
+    let lowered_source = lower_expr_for_slot(arg, env, argument_slot(source_shape), ctx);
+    let target_value_shape = crate::shape_projection::project_java_value_shape(
+        Some(ctx.representations),
+        target_value_ty,
+    );
+    let value_expr = apply_expr_to_slot_via_plan(
+        RustExpr::Var("v".to_string()),
+        RustSlotShape::for_storage(source_value_ty),
+        &argument_slot(target_value_shape),
+        ctx.facts,
+    );
+    Some(RustExpr::Raw(format!(
+        "{}.into_iter().map(|(k, v)| (k, {}))",
+        emit::emit_expr(&lowered_source),
+        emit::emit_expr(&value_expr)
+    )))
+}
+
+fn java_type_is_erased_object_like_for_lowering(java_ty: &JavaType) -> bool {
+    matches!(java_ty, JavaType::Unknown(name) | JavaType::Named { name, .. }
+        if name.eq_ignore_ascii_case("Object") || name.eq_ignore_ascii_case("java.lang.Object"))
 }
 
 fn plan_call_expr_with_lower_context<'a>(
