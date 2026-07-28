@@ -7757,6 +7757,11 @@ fn lower_expr_with_refinements(
         Expr::This => this_expr(),
         Expr::Super => super_expr(),
         Expr::FieldAccess(receiver, field) => {
+            if let Some(constant) =
+                lower_source_associated_const_field_access(receiver, field, env, ctx)
+            {
+                return constant;
+            }
             if let Some(storage) = lower_static_storage_field_access(receiver, field, env, ctx) {
                 return storage;
             }
@@ -8818,6 +8823,27 @@ fn lower_write_sequence_receiver(
         return lowered;
     }
     project_optional_sequence_receiver(lowered, OptionalSequenceReceiverProjection::Mutable)
+}
+
+fn lower_source_associated_const_field_access(
+    receiver: &Expr,
+    field: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let owner = static_storage_owner_type_name(receiver, env, ctx)?;
+    let owner_ty = find_context_type_by_key(ctx.program, &owner)
+        .or_else(|| find_context_type_by_key(ctx.support_local_type_program, &owner))
+        .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))?;
+    let field_decl = static_field_decl_by_name(owner_ty, field)?;
+    if !crate::item_assembly::static_final_field_has_associated_const(owner_ty, field_decl) {
+        return None;
+    }
+    let rust_owner = crate::slot_render::rust_name_for_java_named_type(&owner);
+    Some(owner_associated_path_projection(
+        &rust_owner,
+        &field_decl.name,
+    ))
 }
 
 fn lower_static_storage_field_access(

@@ -4812,6 +4812,21 @@ generated-Rust errors from 652 to 645. The intermediate missing
 identity/name drift such as `MISSING_VALUE_v4`/`PASSES_FILTERS_v4` rather than
 adding more string-concat special cases.
 
+Follow-up source static field identity cleanup: qualified source associated
+constant reads now resolve the receiver owner and field declaration before
+rendering, so access sites use the same associated-const identifier item
+assembly emitted. This fixes mixed-case suffix constants such as
+`MISSING_VALUE_v4` and `PASSES_FILTERS_v4` without adding VCF-specific aliases.
+Focused fixture
+`source_static_final_mixed_case_suffix_field_access_uses_emitted_const_name`
+passes. VCF rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-static-field-identity-r1` translates 32/32
+files, keeps 20 invalid-pattern files, and reduces generated-Rust errors from
+645 to 627. Remaining static/enum work is now more clearly about enum/static
+support identities such as `VCFHeader.HEADER_FIELDS`, source enum static
+accessors like `__static_v_c_f4_3`, and package/facade static constants such as
+`TabixFormat.VCF`, not raw mixed-case source constant names.
+
 ## Rerun Protocol
 
 After each fix:

@@ -18255,6 +18255,57 @@ class QualifiedRuntime {
 }
 
 #[test]
+fn source_static_final_mixed_case_suffix_field_access_uses_emitted_const_name() {
+    let target = r###"
+public class MixedCaseConstantUser {
+    public static boolean check(String value) {
+        return value.equals(MixedCaseConstants.MISSING_VALUE_v4)
+            || value.equals(MixedCaseConstants.PASSES_FILTERS_v4);
+    }
+}
+
+class MixedCaseConstants {
+    public static final String MISSING_VALUE_v4 = ".";
+    public static final String PASSES_FILTERS_v4 = "PASS";
+}
+"###;
+
+    let translation = translate_source(target);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub const m_i_s_s_i_n_g_v_a_l_u_e_v4: &'static str = \".\";")
+            && translation
+                .rust
+                .contains("pub const p_a_s_s_e_s_f_i_l_t_e_r_s_v4: &'static str = \"PASS\";")
+            && translation
+                .rust
+                .contains("MixedCaseConstants::m_i_s_s_i_n_g_v_a_l_u_e_v4")
+            && translation
+                .rust
+                .contains("MixedCaseConstants::p_a_s_s_e_s_f_i_l_t_e_r_s_v4")
+            && !translation
+                .rust
+                .contains("MixedCaseConstants::MISSING_VALUE_v4")
+            && !translation
+                .rust
+                .contains("MixedCaseConstants::PASSES_FILTERS_v4"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_static_final_mixed_case_suffix_field_access",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_static_final_byte_constants_preserve_declared_slot_type() {
     let translation = translate_source(
         r#"
