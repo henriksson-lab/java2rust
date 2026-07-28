@@ -3483,6 +3483,10 @@ Current status:
   `map_get_static_string_constant_key_does_not_double_borrow_str`,
   `map_get_collection_mutation_uses_mutable_lookup`, `cargo fmt --check`, and
   `cargo check --quiet`.
+- 2026-07-28 borrowed string parse expectation refresh: ndarray scalar
+  assignment coverage now accepts direct `value.parse::<f32>()` when the shared
+  signature planner has already rendered the Java `String` parameter as
+  `&str`, while continuing to reject accidental borrowed parse results.
 - 2026-07-26 sequence get projection cleanup: Java sequence `get(index)`
   lowering still selects indexed sequence semantics and borrowed element shapes
   in `lower.rs`, but the emitted

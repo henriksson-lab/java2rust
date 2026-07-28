@@ -19256,11 +19256,12 @@ class NdarrayMatrixLowering {
         translation.rust
     );
     assert!(
-        translation.rust.contains(
-            "scores[[row as usize, col as usize]] = value.as_str().parse::<f32>().unwrap();"
-        ) && !translation.rust.contains(
-            "scores[[row as usize, col as usize]] = &value.as_str().parse::<f32>().unwrap();"
-        ),
+        translation
+            .rust
+            .contains("scores[[row as usize, col as usize]] = value.parse::<f32>().unwrap();")
+            && !translation.rust.contains(
+                "scores[[row as usize, col as usize]] = &value.as_str().parse::<f32>().unwrap();"
+            ),
         "{}",
         translation.rust
     );
