@@ -1090,6 +1090,25 @@ nullable values that must feed owned argument slots lower by borrowing the
 projection. This avoids moving the carrier before later borrowed/display uses
 and keeps the clone-audit marker on the owned recovery.
 
+Broad idiom refresh: a full `cargo test --test idiom_gaps --quiet` run after
+the optional-reuse checkpoint reached 514 passed / 23 failed in 1180.33s. The
+remaining failures were concentrated in enum/dyn-trait boundaries, older JDK
+facade support drift, nested/static identity, numeric cast preservation,
+try-with-resources documents, interface/varargs planning, and three matrix
+fixtures.
+
+Focused matrix/map-key update: the three matrix fixtures
+`two_dimensional_numeric_arrays_lower_to_ndarray_array2`,
+`static_final_two_dimensional_numeric_tables_can_feed_readonly_slice_helpers`,
+and `ragged_object_two_dimensional_arrays_stay_nested_vecs` now pass in focused
+reruns. Ordinary Java `.length` access now consults the same member-access plan
+used by other field access, so rectangular numeric `Array2` values render row
+count as `.nrows() as i32` while nested-slice/static table cases keep `.len()`.
+The ragged object case also exposed a shared map-key projection drift: indexed
+`String` elements now retain the explicit `&base_names[i as usize]` borrow for
+`HashMap::get`, while borrowed local keys and `&'static str` constants still
+avoid double-borrowing.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
@@ -1103,8 +1122,9 @@ and keeps the clone-audit marker on the owned recovery.
 4. Add a Spark/DISQ interface bridge fixture around `getBases`.
 5. Convert shared errors from the newly unblocked ndarray corpus reruns into
    fixtures, especially `super(...)`, array creation, switch scaffolding,
-   Java string/file/logging facades, non-emitter raw keyword leaks, and trait/interface
-   assembly.
+   Java string/file/logging facades, non-emitter raw keyword leaks, and
+   trait/interface assembly. The current local matrix idiom fixtures are green;
+   rerun the affected ndarray corpuses before promoting more matrix work.
 5. For JAligner, prefer statement-side or mutator-role ABI facts for
    `Collections.sort(...) -> ()`, then handle `NamedInputStream.get_name()`,
    `Pair -> Format`, `SequenceParser` nullable line flow, temporary borrowed

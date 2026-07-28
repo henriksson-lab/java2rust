@@ -9075,12 +9075,28 @@ fn lower_java_array_length_access(
     if !matches!(shape.java_ty, JavaType::Array(_)) {
         return None;
     }
-    Some(len_i32_projection(lower_expr_with_refinements(
+    let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
+    if let Some(plan) = crate::member_access_plan::plan_member_access_with_facts(
         receiver,
-        env,
-        ctx,
-        refinements,
-    )))
+        "length",
+        env.type_env(),
+        ctx.facts,
+    ) {
+        return match plan.op {
+            crate::member_access_plan::MemberAccessOp::Array2RowsAsI32
+                if !two_dimensional_array_expr_uses_nested_slice(receiver, env, ctx) =>
+            {
+                Some(array2_rows_i32_projection(lowered_receiver))
+            }
+            crate::member_access_plan::MemberAccessOp::Array2ColsAsI32
+            | crate::member_access_plan::MemberAccessOp::LenAsI32
+            | crate::member_access_plan::MemberAccessOp::Array2RowsAsI32 => {
+                Some(len_i32_projection(lowered_receiver))
+            }
+            _ => None,
+        };
+    }
+    Some(len_i32_projection(lowered_receiver))
 }
 
 fn lower_source_java_enum_type_api_call(

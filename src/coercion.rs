@@ -1361,18 +1361,6 @@ pub fn collapse_redundant_shared_borrow_projection(expr: RustExpr, base: &str) -
     }
 }
 
-fn collapse_redundant_rendered_shared_borrow_projection(expr: RustExpr) -> RustExpr {
-    let rendered = emit::emit_expr(&expr);
-    let trimmed = rendered.trim();
-    let Some(unborrowed) = trimmed.strip_prefix('&') else {
-        return expr;
-    };
-    if unborrowed.is_empty() || unborrowed.starts_with('&') {
-        return expr;
-    }
-    RustExpr::Raw(unborrowed.trim_start().to_string())
-}
-
 pub fn normalize_map_key_borrow_projection(
     expr: RustExpr,
     local_name: Option<&str>,
@@ -1382,7 +1370,7 @@ pub fn normalize_map_key_borrow_projection(
         if let Some(name) = local_name {
             collapse_redundant_shared_borrow_projection(expr, name)
         } else {
-            collapse_redundant_rendered_shared_borrow_projection(expr)
+            expr
         }
     } else {
         expr
@@ -3190,7 +3178,9 @@ fn borrow_projection_already_satisfied(
     match use_case {
         BorrowProjectionUse::MapKey => {
             rendered_expr_is_already_borrowed_map_key(&rendered)
-                || actual.is_some_and(|shape| shape.ownership == OwnershipShape::SharedBorrow)
+                || actual.is_some_and(map_key_shape_is_borrowed_string_view)
+                || (actual.is_some_and(|shape| shape.ownership == OwnershipShape::SharedBorrow)
+                    && rendered_expr_is_simple_local_path(&rendered))
         }
         BorrowProjectionUse::StringView => rendered_expr_is_already_string_view(&rendered),
         BorrowProjectionUse::SliceView => rendered.ends_with(".as_slice()"),
@@ -3257,6 +3247,20 @@ fn rendered_expr_is_already_borrowed_map_key(rendered: &str) -> bool {
     trimmed.ends_with(".as_str()")
         || (trimmed.starts_with('"') && trimmed.ends_with('"'))
         || trimmed.starts_with("java_string_")
+}
+
+fn map_key_shape_is_borrowed_string_view(shape: &RustSlotShape) -> bool {
+    shape.java_ty == JavaType::String
+        && shape.ownership == OwnershipShape::SharedBorrow
+        && shape.view == ViewShape::Str
+}
+
+fn rendered_expr_is_simple_local_path(rendered: &str) -> bool {
+    let trimmed = rendered.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '#'))
 }
 
 pub fn rendered_expr_is_already_string_view(rendered: &str) -> bool {

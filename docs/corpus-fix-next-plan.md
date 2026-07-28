@@ -3371,6 +3371,20 @@ Current status:
   array creation still selects ragged `Vec<Vec<_>>` semantics in `lower.rs`,
   but the emitted `vec![Vec::new(); len]` outer-vector projection now comes
   from `array_lowering::ragged_array_outer_creation_projection`.
+- 2026-07-28 matrix/member-access cleanup: ordinary Java `.length` access now
+  asks the same `MemberAccessPlan` used by field lowering before rendering row
+  counts. Rectangular numeric `ndarray::Array2<T>` receivers emit
+  `.nrows() as i32`, while nested-slice/static table receivers keep `.len()`.
+  The ragged object matrix fixture also exposed map-key borrow drift; indexed
+  owned `String` elements now keep an explicit borrow for `HashMap::get`, while
+  borrowed local keys and `&'static str` constants still avoid double-borrowing.
+  Verified with `two_dimensional_numeric_arrays_lower_to_ndarray_array2`,
+  `static_final_two_dimensional_numeric_tables_can_feed_readonly_slice_helpers`,
+  `ragged_object_two_dimensional_arrays_stay_nested_vecs`,
+  `map_get_keyset_loop_does_not_double_borrow_key`,
+  `map_get_static_string_constant_key_does_not_double_borrow_str`,
+  `map_get_collection_mutation_uses_mutable_lookup`, `cargo fmt --check`, and
+  `cargo check --quiet`.
 - 2026-07-26 sequence get projection cleanup: Java sequence `get(index)`
   lowering still selects indexed sequence semantics and borrowed element shapes
   in `lower.rs`, but the emitted
