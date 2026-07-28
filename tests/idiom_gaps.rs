@@ -1334,6 +1334,14 @@ class JavaStringBytesAndIndex {
     static boolean hasAmpersand(String value) {
         return value.indexOf("&") >= 0;
     }
+
+    static boolean hasEquals(String value) {
+        return value.indexOf('=') >= 0;
+    }
+
+    static int nextTab(String value, int from) {
+        return value.indexOf('\t', from);
+    }
 }
 "#,
     );
@@ -1345,6 +1353,14 @@ class JavaStringBytesAndIndex {
             && translation
                 .rust
                 .contains("java_string_index_of(&value, \"&\")")
+            && translation
+                .rust
+                .contains("java_string_index_of(&value, \"=\")")
+            && translation
+                .rust
+                .contains("java_string_index_of_from(&value, \"\\t\", from)")
+            && !translation.rust.contains("&'='")
+            && !translation.rust.contains("&'\\t'")
             && !translation.rust.contains(".get_bytes_1(")
             && !translation.rust.contains(".get_bytes()")
             && !translation.rust.contains(".index_of("),

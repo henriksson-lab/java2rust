@@ -4770,6 +4770,20 @@ VCF constants/static support, concrete/concrete `instanceof`, erased-object
 clone/comparison, inherited `super(...)`, and unresolved external/source facade
 methods.
 
+Follow-up Java string-search char needle cleanup: `String.indexOf(char)` and
+`indexOf(char, from)` now normalize char-literal needles into one-character
+string literals inside `string_index_of_projection` before using the existing
+string-view ABI. The focused fixture
+`java_string_get_bytes_and_index_of_use_native_helpers` now covers `"&"`, `'='`,
+and `'\t'` needles. VCF rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-char-index-of-r1` translates 32/32 files,
+keeps 20 invalid-pattern files, and reduces generated-Rust errors from 664 to
+658. The previous `char: AsRef<str>` rows are gone; remaining top families are
+broad mismatched types, type annotations, duplicate `to_string`, VCF
+constants/static support, concrete/concrete `instanceof`, erased-object
+clone/comparison, inherited `super(...)`, unresolved external/source facade
+methods, and `String: Borrow<&str>` map/set lookup drift.
+
 ## Rerun Protocol
 
 After each fix:

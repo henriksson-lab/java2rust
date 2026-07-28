@@ -1721,7 +1721,7 @@ pub fn string_index_of_projection(
     from_index: Option<RustExpr>,
 ) -> RustExpr {
     let receiver = render_string_view_argument(receiver);
-    let needle = render_string_view_argument(needle);
+    let needle = render_string_view_argument(string_search_needle_projection(needle));
     if let Some(from_index) = from_index {
         return RustExpr::Call {
             function: Box::new(RustExpr::Raw("java_string_index_of_from".to_string())),
@@ -1732,6 +1732,26 @@ pub fn string_index_of_projection(
         function: Box::new(RustExpr::Raw("java_string_index_of".to_string())),
         args: vec![RustExpr::Raw(receiver), RustExpr::Raw(needle)],
     }
+}
+
+fn string_search_needle_projection(needle: RustExpr) -> RustExpr {
+    let rendered = emit::emit_expr(&needle);
+    if let Some(literal) = string_literal_from_rust_char_literal(&rendered) {
+        RustExpr::Literal(literal)
+    } else {
+        needle
+    }
+}
+
+fn string_literal_from_rust_char_literal(rendered: &str) -> Option<String> {
+    let trimmed = rendered.trim();
+    let literal = trimmed.strip_prefix('&').unwrap_or(trimmed);
+    let inner = literal.strip_prefix('\'')?.strip_suffix('\'')?;
+    if inner.is_empty() {
+        return None;
+    }
+    let string_inner = if inner == "\\'" { "'" } else { inner };
+    Some(format!("\"{string_inner}\""))
 }
 
 pub fn string_substring_projection(receiver: RustExpr, begin: RustExpr, end: RustExpr) -> RustExpr {
