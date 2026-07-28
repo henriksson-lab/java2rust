@@ -1065,15 +1065,27 @@ where field initialization still calls `read_actual_header(...)?` while
 returning the constructed iterator directly. The top compile-error family
 remains broad mismatched types, now 176 rows.
 
+Focused VCF constructor unchecked-result update: rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-constructor-result-recovery-r1` translates
+32/32 files, keeps 20 invalid-pattern files, and reduces generated-Rust errors
+from 543 to 542. Deferred constructor field assignments whose source expression
+is a casted fallible call now recover the inner generated `?` through the same
+unchecked Java-exception panic path. The previous non-`Result`
+`VCFIteratorBuilderVCFReaderIterator::new` `?` diagnostic is gone; the same
+site now exposes an argument-shape issue where an optional `LineIterator` field
+is passed to `read_actual_header(LineIterator)` without unwrapping or borrowing
+through a slot plan.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
    `.tmp/corpus-batch-current-fastqc-after-display-context-return-r1` into
    fixtures and fixes. Prefer Rust signature/ABI facts over new special-case
    lowering whenever a Rust signature proves the same slot shape.
-2. Generalize unchecked fallible call recovery across constructor/deferred-field
-   initialization paths; the current focused VCF witness is
-   `VCFIteratorBuilderVCFReaderIterator::new`.
+2. Generalize optional field receiver/argument projection through slot plans;
+   the current focused VCF witness is
+   `VCFIteratorBuilderVCFReaderIterator::new` passing `line_iterator` to
+   `read_actual_header`.
 3. Minimize the VCF shared-support enum assembly failure.
 4. Add a Spark/DISQ interface bridge fixture around `getBases`.
 5. Convert shared errors from the newly unblocked ndarray corpus reruns into

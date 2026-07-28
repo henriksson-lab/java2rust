@@ -6505,6 +6505,37 @@ class PlainReturnFallibleHelper {
 }
 
 #[test]
+fn constructor_deferred_field_recovers_casted_fallible_helper_without_question_mark() {
+    let translation = translate_source(
+        r#"
+import java.io.IOException;
+
+class ConstructorFallibleCast {
+    Object source;
+    String value;
+
+    ConstructorFallibleCast(Object input) {
+        this.source = input;
+        this.value = (String) read(this.source);
+    }
+
+    static Object read(Object input) throws IOException {
+        return "value";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "Self::read(__java_self.source.clone()/* TODO(translation): validate added clone */).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+        ) && !translation.rust.contains("Self::read(__java_self.source.clone()/* TODO(translation): validate added clone */)?"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn context_translation_uses_sibling_static_string_constant_shape() {
     let caller = r#"
 class ContextConstantCaller {

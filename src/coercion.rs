@@ -2444,12 +2444,194 @@ pub fn deref_borrowed_projection(expr: RustExpr) -> RustExpr {
 }
 
 pub fn unwrap_result_or_panic_uncaught_java_exception(expr: RustExpr) -> RustExpr {
+    let panic_recovery = ".unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))";
+    if let Some(expr) = recover_nested_result_try_operator(expr.clone(), panic_recovery) {
+        return expr;
+    }
     let rendered = emit::emit_expr(&expr);
-    let rendered = rendered.strip_suffix('?').unwrap_or(&rendered);
-    RustExpr::Raw(format!(
-        "{}.unwrap_or_else(|ex| panic!(\"uncaught Java exception: {{:?}}\", ex))",
-        rendered
-    ))
+    if let Some(rendered) = rendered.strip_suffix('?') {
+        return RustExpr::Raw(format!("{rendered}{panic_recovery}"));
+    }
+    if let Some(index) = first_rust_try_operator_index(&rendered).or_else(|| rendered.find('?')) {
+        let mut recovered = String::with_capacity(rendered.len() + panic_recovery.len());
+        recovered.push_str(&rendered[..index]);
+        recovered.push_str(panic_recovery);
+        recovered.push_str(&rendered[index + 1..]);
+        return RustExpr::Raw(recovered);
+    }
+    RustExpr::Raw(format!("{rendered}{panic_recovery}"))
+}
+
+fn recover_nested_result_try_operator(expr: RustExpr, recovery: &str) -> Option<RustExpr> {
+    match expr {
+        RustExpr::Raw(raw) => raw.trim_end().strip_suffix('?').map(|without_try| {
+            first_rust_try_operator_index(without_try)
+                .or_else(|| without_try.find('?'))
+                .map(|index| {
+                    let mut recovered = String::with_capacity(without_try.len() + recovery.len());
+                    recovered.push_str(&without_try[..index]);
+                    recovered.push_str(recovery);
+                    recovered.push_str(&without_try[index + 1..]);
+                    RustExpr::Raw(recovered)
+                })
+                .unwrap_or_else(|| RustExpr::Raw(format!("{without_try}{recovery}")))
+        }),
+        RustExpr::Field(receiver, field) => recover_nested_result_try_operator(*receiver, recovery)
+            .map(|receiver| RustExpr::Field(Box::new(receiver), field)),
+        RustExpr::Index(array, index) => {
+            if let Some(array) = recover_nested_result_try_operator((*array).clone(), recovery) {
+                return Some(RustExpr::Index(Box::new(array), index));
+            }
+            recover_nested_result_try_operator(*index, recovery)
+                .map(|index| RustExpr::Index(array, Box::new(index)))
+        }
+        RustExpr::Binary { op, left, right } => {
+            if let Some(left) = recover_nested_result_try_operator((*left).clone(), recovery) {
+                return Some(RustExpr::Binary {
+                    op,
+                    left: Box::new(left),
+                    right,
+                });
+            }
+            recover_nested_result_try_operator(*right, recovery).map(|right| RustExpr::Binary {
+                op,
+                left,
+                right: Box::new(right),
+            })
+        }
+        RustExpr::Unary { op, expr } => {
+            recover_nested_result_try_operator(*expr, recovery).map(|expr| RustExpr::Unary {
+                op,
+                expr: Box::new(expr),
+            })
+        }
+        RustExpr::Cast { expr, ty } => {
+            recover_nested_result_try_operator(*expr, recovery).map(|expr| RustExpr::Cast {
+                expr: Box::new(expr),
+                ty,
+            })
+        }
+        RustExpr::If {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            if let Some(condition) =
+                recover_nested_result_try_operator((*condition).clone(), recovery)
+            {
+                return Some(RustExpr::If {
+                    condition: Box::new(condition),
+                    then_expr,
+                    else_expr,
+                });
+            }
+            if let Some(then_expr) =
+                recover_nested_result_try_operator((*then_expr).clone(), recovery)
+            {
+                return Some(RustExpr::If {
+                    condition,
+                    then_expr: Box::new(then_expr),
+                    else_expr,
+                });
+            }
+            recover_nested_result_try_operator(*else_expr, recovery).map(|else_expr| RustExpr::If {
+                condition,
+                then_expr,
+                else_expr: Box::new(else_expr),
+            })
+        }
+        RustExpr::Call { function, args } => {
+            if let Some(function) =
+                recover_nested_result_try_operator((*function).clone(), recovery)
+            {
+                return Some(RustExpr::Call {
+                    function: Box::new(function),
+                    args,
+                });
+            }
+            recover_first_arg_try_operator(args, recovery)
+                .map(|args| RustExpr::Call { function, args })
+        }
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } => {
+            if let Some(receiver) =
+                recover_nested_result_try_operator((*receiver).clone(), recovery)
+            {
+                return Some(RustExpr::MethodCall {
+                    receiver: Box::new(receiver),
+                    method,
+                    args,
+                });
+            }
+            recover_first_arg_try_operator(args, recovery).map(|args| RustExpr::MethodCall {
+                receiver,
+                method,
+                args,
+            })
+        }
+        RustExpr::StructLit { name, fields } => {
+            let mut updated = Vec::with_capacity(fields.len());
+            let mut recovered = false;
+            for (field, value) in fields {
+                if !recovered
+                    && let Some(value) = recover_nested_result_try_operator(value.clone(), recovery)
+                {
+                    updated.push((field, value));
+                    recovered = true;
+                } else {
+                    updated.push((field, value));
+                }
+            }
+            recovered.then_some(RustExpr::StructLit {
+                name,
+                fields: updated,
+            })
+        }
+        RustExpr::Literal(_) | RustExpr::Var(_) => None,
+    }
+}
+
+fn recover_first_arg_try_operator(args: Vec<RustExpr>, recovery: &str) -> Option<Vec<RustExpr>> {
+    let mut updated = Vec::with_capacity(args.len());
+    let mut recovered = false;
+    for arg in args {
+        if !recovered && let Some(arg) = recover_nested_result_try_operator(arg.clone(), recovery) {
+            updated.push(arg);
+            recovered = true;
+        } else {
+            updated.push(arg);
+        }
+    }
+    recovered.then_some(updated)
+}
+
+fn first_rust_try_operator_index(rendered: &str) -> Option<usize> {
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    for (index, ch) in rendered.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string || in_char => {
+                escaped = true;
+            }
+            '"' if !in_char => {
+                in_string = !in_string;
+            }
+            '\'' if !in_string => {
+                in_char = !in_char;
+            }
+            '?' if !in_string && !in_char => return Some(index),
+            _ => {}
+        }
+    }
+    None
 }
 
 pub fn normalize_reused_clone_for_borrowed_argument(

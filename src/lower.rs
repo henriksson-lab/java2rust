@@ -17519,6 +17519,9 @@ fn shared_self_field_read_name_with_ctx<'a>(
 }
 
 fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
+    if let Expr::Cast { expr, .. } = expr {
+        return slot_expr_needs_result_propagation(expr, env, ctx);
+    }
     let Expr::Call {
         receiver,
         name,
