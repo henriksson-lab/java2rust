@@ -24846,6 +24846,65 @@ class Base64 {
 }
 
 #[test]
+fn emitted_source_method_suppresses_matching_external_facade_stub() {
+    let local = parse_java_source(
+        r#"
+package htsjdk.variant.vcf;
+
+class VCFHeaderLine {
+    public String toString() {
+        return "line";
+    }
+}
+
+class VCFCompoundHeaderLine extends VCFHeaderLine {
+}
+
+class VCFHeaderLineCaller {
+    String render(VCFHeaderLine line) {
+        return line.toString();
+    }
+
+    String renderCompound(VCFCompoundHeaderLine line) {
+        return line.toString();
+    }
+}
+"#,
+    );
+    let current = parse_java_source(
+        r#"
+package htsjdk.variant.vcf;
+
+class VCFCompoundHeaderLine extends VCFHeaderLine {
+}
+
+class VCFHeaderLineCaller {
+    String renderCompound(VCFCompoundHeaderLine line) {
+        return line.toString();
+    }
+}
+"#,
+    );
+    let facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
+    let items = new_java2rust::stdlib::external_api_facade_support_items_with_local_type_program(
+        &current.program,
+        &facts,
+        &local.program,
+        &new_java2rust::java_ir::Program::default(),
+    );
+    let rendered = new_java2rust::emit::emit_file(&new_java2rust::rust_ir::RustFile { items });
+
+    assert!(
+        !rendered.contains("impl VCFHeaderLine {\n    pub fn to_string(&self) -> String"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("impl VCFCompoundHeaderLine {\n    pub fn to_string(&self) -> String"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn external_nested_builder_facade_support_is_generated_from_facts_and_used_calls() {
     let source = r#"
 class UseExternalBuilder {

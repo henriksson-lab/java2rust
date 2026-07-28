@@ -11246,6 +11246,46 @@ class SourceObjectToStringCaller {
 }
 
 #[test]
+fn inherited_source_to_string_suppresses_object_fallback() {
+    let translation = translate_source(
+        r#"
+class SourceToStringBase {
+    public String toString() {
+        return "base";
+    }
+}
+
+class SourceToStringChild extends SourceToStringBase {
+    String describe() {
+        return this.toString();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("impl SourceToStringChild")
+            && translation
+                .rust
+                .contains("pub fn to_string(&self) -> String")
+            && !translation.rust.contains(
+                "pub fn to_string(&self) -> String { java_erased_object_to_string(self) }"
+            ),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "inherited_source_to_string_no_object_fallback",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn string_buffer_to_string_stays_jdk_facade_method() {
     let translation = translate_source(
         r#"

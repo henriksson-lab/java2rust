@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::FactSet;
@@ -5191,6 +5191,10 @@ pub fn external_api_facade_support_items_with_local_type_program(
     let imported_static_owner_calls = collect_imported_static_owner_calls(program);
 
     let mut support = ExternalApiFacadeSupport::default();
+    support.add_emitted_source_method_signatures(local_type_program);
+    if !std::ptr::eq(program, local_type_program) {
+        support.add_emitted_source_method_signatures(program);
+    }
     support.add_nested_type_aliases_from_fields(facts, &local_types);
     support.add_declared_external_types(program, &declared_external_type_exclusions);
     support.add_declared_source_summary_types(program, &source_summary_types, &emitted_local_types);
@@ -5544,6 +5548,7 @@ struct ExternalApiFacadeSupport {
     from_impls: BTreeSet<(String, String)>,
     erased_object_methods: BTreeMap<String, ExternalErasedObjectMethod>,
     erased_object_method_conflicts: BTreeSet<String>,
+    emitted_source_methods: BTreeSet<(String, String, usize)>,
 }
 
 fn is_awt_platform_facade_owner(owner: &str) -> bool {
@@ -5577,7 +5582,123 @@ struct ExternalFacadeTrait {
     methods: BTreeSet<String>,
 }
 
+fn collect_source_method_signatures_for_type_name(
+    program: &Program,
+    type_name: &str,
+    visited: &mut HashSet<String>,
+    methods: &mut BTreeSet<(String, usize)>,
+) {
+    let Some(ty) = find_source_type_decl(program, type_name) else {
+        return;
+    };
+    if !visited.insert(ty.name.clone()) {
+        return;
+    }
+    for member in &ty.members {
+        if let Member::Method(method) = member {
+            methods.insert((
+                crate::parser::to_snake_case(&method.name),
+                method.params.len(),
+            ));
+        }
+    }
+    if let Some(super_name) = ty.extends.as_deref() {
+        collect_source_method_signatures_for_type_name(program, super_name, visited, methods);
+    }
+}
+
+fn find_source_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
+    program
+        .types
+        .iter()
+        .find_map(|ty| find_source_type_decl_in_type(ty, type_name))
+}
+
+fn find_source_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
+    let canonical = canonical_external_receiver_type_key(type_name);
+    if ty.name == type_name
+        || canonical_external_receiver_type_key(&ty.name) == canonical
+        || ty.name.rsplit('.').next() == Some(type_name)
+        || rust_name_for_java_named_type(&ty.name) == rust_name_for_java_named_type(type_name)
+    {
+        return Some(ty);
+    }
+    ty.members.iter().find_map(|member| match member {
+        Member::Type(nested) => find_source_type_decl_in_type(nested, type_name),
+        _ => None,
+    })
+}
+
 impl ExternalApiFacadeSupport {
+    fn add_emitted_source_method_signatures(&mut self, program: &Program) {
+        for ty in &program.types {
+            self.add_emitted_source_method_signatures_from_type(program, ty, None);
+        }
+    }
+
+    fn add_emitted_source_method_signatures_from_type(
+        &mut self,
+        program: &Program,
+        ty: &crate::java_ir::TypeDecl,
+        enclosing: Option<&str>,
+    ) {
+        let qualified = enclosing
+            .map(|outer| format!("{outer}.{}", ty.name))
+            .unwrap_or_else(|| ty.name.clone());
+        let owners = [
+            ty.name.clone(),
+            qualified.clone(),
+            canonical_external_receiver_type_key(&ty.name),
+            canonical_external_receiver_type_key(&qualified),
+        ];
+        for member in &ty.members {
+            match member {
+                Member::Method(method) => {
+                    let rust_method = crate::parser::to_snake_case(&method.name);
+                    for owner in &owners {
+                        let rust_owner = rust_name_for_java_named_type(owner);
+                        if valid_external_facade_type_ident(&rust_owner) {
+                            self.emitted_source_methods.insert((
+                                rust_owner,
+                                rust_method.clone(),
+                                method.params.len(),
+                            ));
+                        }
+                    }
+                }
+                Member::Type(nested) => {
+                    self.add_emitted_source_method_signatures_from_type(
+                        program,
+                        nested,
+                        Some(&qualified),
+                    );
+                }
+                Member::Field(_) | Member::Constructor(_) | Member::Unsupported { .. } => {}
+            }
+        }
+        if let Some(super_name) = ty.extends.as_deref() {
+            let mut inherited = BTreeSet::new();
+            collect_source_method_signatures_for_type_name(
+                program,
+                super_name,
+                &mut HashSet::new(),
+                &mut inherited,
+            );
+            for (rust_method, arg_count) in inherited {
+                for owner in &owners {
+                    let rust_owner = rust_name_for_java_named_type(owner);
+                    if valid_external_facade_type_ident(&rust_owner) {
+                        self.emitted_source_methods.insert((
+                            rust_owner,
+                            rust_method.clone(),
+                            arg_count,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     fn add_declared_external_types(&mut self, program: &Program, local_types: &BTreeSet<String>) {
         for ty in &program.types {
             self.add_declared_external_types_from_type(ty, local_types);
@@ -7888,6 +8009,13 @@ impl ExternalApiFacadeSupport {
             return;
         };
         let arg_count = facade_method_arg_count(&method);
+        if self.emitted_source_methods.contains(&(
+            owner.clone(),
+            method_name.to_string(),
+            arg_count,
+        )) {
+            return;
+        }
         let receiver_kind = facade_method_receiver_kind(&method);
         if self.has_method_signature_with_receiver(&owner, method_name, arg_count, receiver_kind) {
             if !self.replace_weak_method_return_with_receiver(

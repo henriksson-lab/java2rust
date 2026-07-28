@@ -5207,6 +5207,25 @@ remaining `get_header` failures are now real return-slot precision problems:
 the concrete nested implementations return `Option<Box<dyn Any>>` while the
 `VCFIterator` trait expects `&VCFHeader`.
 
+2026-07-28 VCF object-support fallback follow-up: source Object support is now
+emitted only when the target inherent method slot is still unoccupied after
+normal lowering, and external facade support suppresses method stubs already
+provided by emitted source methods, including methods inherited across the
+broader local source program. Focused coverage:
+`inherited_source_to_string_suppresses_object_fallback` and
+`emitted_source_method_suppresses_matching_external_facade_stub`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260728-htsjdk-vcf-after-cross-file-source-stub-suppression`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `540` to `506`. The duplicate
+`to_string`/`get_class` diagnostics and the associated multiple-applicable-items
+rows are gone from `compile.log`. Remaining top families are broad mismatched
+types, type annotations, unsupported concrete/concrete `instanceof`, nullable
+string display, arity mismatches, missing `GeneralUtils`/genotype facades,
+boxed dyn-clone recovery, incompatible `?` usage, and source-super constructor
+lowering.
+
 ## Rerun Protocol
 
 After each fix:

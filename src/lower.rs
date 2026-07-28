@@ -407,15 +407,21 @@ pub fn lower_program_with_semantic_plans_and_support_context(
     for ty in &program.types {
         lower_type(program, ty, &mut file, &mut diagnostics, ctx);
     }
-    file.items
-        .extend(source_object_to_string_fallback_items(program));
+    let occupied_inherent_methods = occupied_inherent_methods_for_items(&file.items);
+    file.items.extend(source_object_to_string_fallback_items(
+        program,
+        &occupied_inherent_methods,
+    ));
     LoweredProgram { file, diagnostics }
 }
 
-fn source_object_to_string_fallback_items(program: &Program) -> Vec<RustItem> {
+fn source_object_to_string_fallback_items(
+    program: &Program,
+    occupied_inherent_methods: &BTreeSet<(String, String)>,
+) -> Vec<RustItem> {
     let mut items = Vec::new();
     for ty in &program.types {
-        collect_source_object_to_string_fallback_items(ty, &mut items);
+        collect_source_object_to_string_fallback_items(ty, occupied_inherent_methods, &mut items);
     }
     items
 }
@@ -436,8 +442,7 @@ fn program_has_source_object_get_class_fallback_items(program: &Program) -> bool
 
 fn type_has_source_object_to_string_fallback_item(ty: &TypeDecl) -> bool {
     (matches!(ty.kind, TypeKind::Class | TypeKind::Record)
-        && find_declared_method_by_name_and_arity(ty, "toString", 0).is_none()
-        && find_declared_method_by_name_and_arity(ty, "to_string", 0).is_none())
+        && !type_declares_zero_arg_rust_method(ty, "to_string"))
         || ty.members.iter().any(|member| match member {
             Member::Type(nested) => type_has_source_object_to_string_fallback_item(nested),
             _ => false,
@@ -446,28 +451,31 @@ fn type_has_source_object_to_string_fallback_item(ty: &TypeDecl) -> bool {
 
 fn type_has_source_object_get_class_fallback_item(ty: &TypeDecl) -> bool {
     (matches!(ty.kind, TypeKind::Class | TypeKind::Record)
-        && find_declared_method_by_name_and_arity(ty, "getClass", 0).is_none()
-        && find_declared_method_by_name_and_arity(ty, "get_class", 0).is_none())
+        && !type_declares_zero_arg_rust_method(ty, "get_class"))
         || ty.members.iter().any(|member| match member {
             Member::Type(nested) => type_has_source_object_get_class_fallback_item(nested),
             _ => false,
         })
 }
 
-fn collect_source_object_to_string_fallback_items(ty: &TypeDecl, items: &mut Vec<RustItem>) {
+fn collect_source_object_to_string_fallback_items(
+    ty: &TypeDecl,
+    occupied_inherent_methods: &BTreeSet<(String, String)>,
+    items: &mut Vec<RustItem>,
+) {
     if matches!(ty.kind, TypeKind::Class | TypeKind::Record) {
         let rust_name = crate::slot_render::rust_name_for_java_named_type(&ty.name);
         let mut methods = Vec::new();
-        if find_declared_method_by_name_and_arity(ty, "toString", 0).is_none()
-            && find_declared_method_by_name_and_arity(ty, "to_string", 0).is_none()
+        if !type_declares_zero_arg_rust_method(ty, "to_string")
+            && !occupied_inherent_methods.contains(&(rust_name.clone(), "to_string".to_string()))
         {
             methods.push(
                 "    pub fn to_string(&self) -> String { java_erased_object_to_string(self) }"
                     .to_string(),
             );
         }
-        if find_declared_method_by_name_and_arity(ty, "getClass", 0).is_none()
-            && find_declared_method_by_name_and_arity(ty, "get_class", 0).is_none()
+        if !type_declares_zero_arg_rust_method(ty, "get_class")
+            && !occupied_inherent_methods.contains(&(rust_name.clone(), "get_class".to_string()))
         {
             methods.push(format!(
                 "    pub fn get_class(&self) -> JavaClass<{rust_name}> {{ JavaClass::<{rust_name}>::literal({:?}) }}",
@@ -483,9 +491,85 @@ fn collect_source_object_to_string_fallback_items(ty: &TypeDecl, items: &mut Vec
     }
     for member in &ty.members {
         if let Member::Type(nested) = member {
-            collect_source_object_to_string_fallback_items(nested, items);
+            collect_source_object_to_string_fallback_items(
+                nested,
+                occupied_inherent_methods,
+                items,
+            );
         }
     }
+}
+
+fn type_declares_zero_arg_rust_method(ty: &TypeDecl, rust_name: &str) -> bool {
+    ty.members.iter().any(|member| {
+        let Member::Method(method) = member else {
+            return false;
+        };
+        method.params.is_empty() && crate::parser::to_snake_case(&method.name) == rust_name
+    })
+}
+
+fn occupied_inherent_methods_for_items(items: &[RustItem]) -> BTreeSet<(String, String)> {
+    let mut occupied = BTreeSet::new();
+    for item in items {
+        match item {
+            RustItem::Impl(imp) => {
+                for function in &imp.functions {
+                    occupied.insert((imp.target.clone(), function.name.clone()));
+                }
+            }
+            RustItem::Raw(raw) => collect_raw_inherent_methods(raw, &mut occupied),
+            RustItem::Struct(_) | RustItem::Function(_) | RustItem::Comment(_) => {}
+        }
+    }
+    occupied
+}
+
+fn collect_raw_inherent_methods(raw: &str, occupied: &mut BTreeSet<(String, String)>) {
+    let mut current_owner: Option<String> = None;
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        if let Some(owner) = raw_inherent_impl_owner(trimmed) {
+            current_owner = Some(owner);
+        }
+        if let Some(owner) = current_owner.as_ref()
+            && let Some(method_name) = raw_impl_method_name(trimmed)
+        {
+            occupied.insert((owner.clone(), method_name));
+        }
+        if trimmed == "}" {
+            current_owner = None;
+        }
+    }
+}
+
+fn raw_inherent_impl_owner(trimmed: &str) -> Option<String> {
+    let rest = trimmed.strip_prefix("impl ")?;
+    if rest.contains(" for ") {
+        return None;
+    }
+    let rest = if rest.starts_with('<') {
+        let generic_end = rest.find('>')?;
+        rest[generic_end + 1..].trim_start()
+    } else {
+        rest
+    };
+    let owner = rest
+        .split(|ch: char| ch == '<' || ch == '{' || ch.is_whitespace())
+        .next()
+        .unwrap_or_default();
+    (!owner.is_empty()).then(|| owner.to_string())
+}
+
+fn raw_impl_method_name(trimmed: &str) -> Option<String> {
+    let rest = trimmed
+        .strip_prefix("pub fn ")
+        .or_else(|| trimmed.strip_prefix("fn "))?;
+    let name = rest
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .next()
+        .unwrap_or_default();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn push_lowering_diagnostic_plans(
