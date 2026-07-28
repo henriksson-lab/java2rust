@@ -3978,6 +3978,45 @@ class MapKeySetReturnSet {
 }
 
 #[test]
+fn map_put_all_lowers_to_hash_map_extend() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapPutAllJavaApi {
+    private HashMap<String, String> values = new HashMap<String, String>();
+    private HashMap<String, String> maybeValues;
+
+    void merge(HashMap<String, String> other) {
+        values.putAll(other);
+    }
+
+    void mergeMaybe(HashMap<String, String> other) {
+        maybeValues.putAll(other);
+    }
+
+    HashMap<String, String> copy() {
+        HashMap<String, String> out = new HashMap<String, String>();
+        out.putAll(values);
+        return out;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".extend(")
+            && translation
+                .rust
+                .contains("self.maybe_values.as_mut().unwrap().extend(")
+            && !translation.rust.contains(".put_all(")
+            && !translation.rust.contains(".putAll("),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn array_arguments_use_borrowed_slice_views() {
     let translation = translate_source(&idiom_gap("ArrayArgumentSliceView.java"));
 

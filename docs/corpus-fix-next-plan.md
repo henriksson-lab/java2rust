@@ -4680,6 +4680,17 @@ mismatched types, type annotations, duplicate `to_string`, VCF constants/static
 support, concrete/concrete `instanceof`, map API gaps, erased-object
 clone/comparison, and inherited `super(...)` lowering.
 
+Follow-up JDK collection ABI slice: `Map.putAll` now has `HashMap::extend`
+facade facts and the shared native collection `Extend` plan covers optional
+collection field receivers. Focused idiom and signature-fact tests pass, and
+VCF rerun `.tmp/corpus-rerun-htsjdk-vcf-after-map-put-all-r3` translates 32/32
+files, keeps 20 invalid-pattern files, and reduces generated-Rust errors from
+698 to 691. The generated VCF `generic_fields.putAll(...)` call sites now
+render as `self.generic_fields.as_mut().unwrap().extend(...)`; only generated
+trait stub text still contains `put_all`. Remaining VCF map work is no longer
+missing `putAll`; it is mainly raw/erased map value-shape adaptation such as
+`HashMap<String, String>` flowing into `HashMap<String, Box<dyn Any>>`.
+
 ## Rerun Protocol
 
 After each fix:

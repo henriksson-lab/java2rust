@@ -967,6 +967,14 @@ fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
             ),
             rust_stdlib_method_abi(
                 owner,
+                "putAll",
+                1,
+                "HashMap::extend",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ),
+            rust_stdlib_method_abi(
+                owner,
                 "get",
                 1,
                 "HashMap::get",

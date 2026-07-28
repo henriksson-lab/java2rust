@@ -31210,6 +31210,7 @@ fn stdlib_signature_facts_include_jdk_collection_rust_abi_slots() {
         CallableKey::method("java.util.List", "toArray", Staticness::Unknown, 0);
     let map_get_key = CallableKey::method("HashMap", "get", Staticness::Unknown, 1);
     let map_put_key = CallableKey::method("LinkedHashMap", "put", Staticness::Unknown, 2);
+    let map_put_all_key = CallableKey::method("Map", "putAll", Staticness::Unknown, 1);
     let map_key_set_key = CallableKey::method("Map", "keySet", Staticness::Unknown, 0);
     let map_entry_set_key =
         CallableKey::method("java.util.Map", "entrySet", Staticness::Unknown, 0);
@@ -31259,6 +31260,12 @@ fn stdlib_signature_facts_include_jdk_collection_rust_abi_slots() {
         .expect("LinkedHashMap.put should have owned insert ABI facts");
     assert_eq!(map_put.args, vec![FacadeSlot::Owned, FacadeSlot::Owned]);
 
+    let map_put_all = facts
+        .facade_abi_for_key(&map_put_all_key)
+        .expect("Map.putAll should have a Rust HashMap::extend ABI fact");
+    assert_eq!(map_put_all.args, vec![FacadeSlot::Owned]);
+    assert_eq!(map_put_all.return_slot, FacadeSlot::Owned);
+
     let map_key_set = facts
         .facade_abi_for_key(&map_key_set_key)
         .expect("Map.keySet should have a Rust HashMap::keys ABI fact");
@@ -31306,6 +31313,13 @@ fn stdlib_collection_signature_facts_precede_native_collection_arg_fallbacks() {
         "counts",
         JavaType::Named {
             name: "HashMap".to_string(),
+            args: vec![JavaType::String, JavaType::Primitive(PrimitiveType::Int)],
+        },
+    );
+    types.insert_local(
+        "other_counts",
+        JavaType::Named {
+            name: "Map".to_string(),
             args: vec![JavaType::String, JavaType::Primitive(PrimitiveType::Int)],
         },
     );
@@ -31415,6 +31429,24 @@ fn stdlib_collection_signature_facts_precede_native_collection_arg_fallbacks() {
         JavaType::Primitive(PrimitiveType::Int)
     );
     assert_eq!(map_put_shapes[1].ownership, OwnershipShape::CopyValue);
+
+    let map_put_all_shapes = match plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("counts".to_string())),
+        "putAll",
+        None,
+        &[Expr::Var("other_counts".to_string())],
+        &signatures,
+        &facts,
+        &types,
+    ) {
+        ArgumentLoweringPlan::Shaped(shapes) => shapes,
+        plan => panic!("HashMap.putAll should use facade ABI owned-map shaping, got {plan:?}"),
+    };
+    assert_eq!(
+        map_put_all_shapes[0].java_ty,
+        types.local_type("other_counts").unwrap().clone()
+    );
+    assert_eq!(map_put_all_shapes[0].ownership, OwnershipShape::Owned);
 }
 
 #[test]

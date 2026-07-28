@@ -2654,6 +2654,9 @@ fn plan_native_collection_receiver_call<'a>(
             crate::stdlib::JavaCollectionKind::List | crate::stdlib::JavaCollectionKind::Set,
             "addAll",
         ) => NativeCollectionMethod::Extend,
+        (crate::stdlib::JavaCollectionKind::Map, "putAll" | "put_all") => {
+            NativeCollectionMethod::Extend
+        }
         (crate::stdlib::JavaCollectionKind::Map, "put") => NativeCollectionMethod::MapInsert,
         (crate::stdlib::JavaCollectionKind::Map, "get") => NativeCollectionMethod::MapGet,
         (crate::stdlib::JavaCollectionKind::Map, "containsKey" | "contains_key") => {

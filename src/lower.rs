@@ -6634,15 +6634,19 @@ fn lower_native_collection_extend_expr_stmt(
     }
     let plan =
         plan_call_expr_with_lower_context(Some(receiver), name, args, resolved.as_ref(), ctx, env);
-    let CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
-        method: crate::call_plan::NativeCollectionMethod::Extend,
-        ..
-    }) = plan
-    else {
+    let planned_extend = matches!(
+        plan,
+        CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
+            method: crate::call_plan::NativeCollectionMethod::Extend,
+            ..
+        })
+    );
+    if !planned_extend && !optional_collection_receiver_bulk_extend_method(receiver, name, env, ctx)
+    {
         return None;
-    };
+    }
 
-    let receiver_ty = types::infer_expr_type(receiver, env.type_env());
+    let receiver_ty = native_collection_extend_receiver_type(receiver, env, ctx)?;
     let shape_ctx = ExprShapeContext {
         signatures: Some(ctx.signatures),
         representations: Some(ctx.representations),
@@ -6658,13 +6662,27 @@ fn lower_native_collection_extend_expr_stmt(
         }
     };
 
-    let lowered_receiver = adapt_native_collection_receiver(
-        receiver,
-        lower_expr(receiver, env, ctx),
-        crate::call_plan::NativeCollectionMethod::Extend,
-        env,
-        ctx,
-    );
+    let lowered_receiver = lower_expr(receiver, env, ctx);
+    let lowered_receiver = if crate::types::optional_element_type(&receiver_ty)
+        .is_some_and(|ty| crate::stdlib::java_collection_kind_for_type(&ty).is_some())
+    {
+        adapt_optional_instance_receiver_with_slot_plan(
+            receiver,
+            lowered_receiver,
+            env,
+            ctx,
+            true,
+            true,
+        )
+    } else {
+        adapt_native_collection_receiver(
+            receiver,
+            lowered_receiver,
+            crate::call_plan::NativeCollectionMethod::Extend,
+            env,
+            ctx,
+        )
+    };
     if native_collection_extend_needs_self_read_temp(receiver, &args[0], env, ctx) {
         let temp_name = "__java2rust_add_all_source";
         return Some(raw_stmt(format!(
@@ -6681,6 +6699,66 @@ fn lower_native_collection_extend_expr_stmt(
         lowered_receiver,
         arg,
     )))
+}
+
+fn native_collection_extend_receiver_type(
+    receiver: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<JavaType> {
+    let inferred_ty = types::infer_expr_type(receiver, env.type_env());
+    if crate::stdlib::java_collection_kind_for_type(
+        &crate::types::optional_element_type(&inferred_ty).unwrap_or_else(|| inferred_ty.clone()),
+    )
+    .is_some()
+    {
+        return Some(inferred_ty);
+    }
+
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let inferred_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
+    if inferred_shape
+        .optional_element_type()
+        .is_some_and(|ty| crate::stdlib::java_collection_kind_for_type(&ty).is_some())
+    {
+        return Some(inferred_shape.java_ty);
+    }
+
+    let field_shape = current_instance_field_shape_with_env(receiver, env, ctx)?;
+    if field_shape
+        .optional_element_type()
+        .is_some_and(|ty| crate::stdlib::java_collection_kind_for_type(&ty).is_some())
+    {
+        return Some(field_shape.java_ty);
+    }
+    None
+}
+
+fn optional_collection_receiver_bulk_extend_method(
+    receiver: &Expr,
+    method: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    let Some(receiver_ty) = native_collection_extend_receiver_type(receiver, env, ctx) else {
+        return false;
+    };
+    let effective_ty =
+        crate::types::optional_element_type(&receiver_ty).unwrap_or_else(|| receiver_ty.clone());
+    let Some(kind) = crate::stdlib::java_collection_kind_for_type(&effective_ty) else {
+        return false;
+    };
+    matches!(
+        (kind, method),
+        (
+            crate::stdlib::JavaCollectionKind::List | crate::stdlib::JavaCollectionKind::Set,
+            "addAll" | "add_all"
+        ) | (crate::stdlib::JavaCollectionKind::Map, "putAll" | "put_all")
+    )
 }
 
 fn plan_call_expr_with_lower_context<'a>(
