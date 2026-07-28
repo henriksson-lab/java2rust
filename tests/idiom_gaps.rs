@@ -20566,3 +20566,49 @@ class SynchronizedBodyAfterGuard {
         }],
     );
 }
+
+#[test]
+fn source_nested_enum_type_access_uses_flattened_enum_helpers() {
+    let translation = translate_source(
+        r#"
+public class NestedEnumApiUser {
+    public enum LocalMode {
+        PRIMARY,
+        SECONDARY
+    }
+
+    public static int count() {
+        return NestedEnumApiUser.LocalMode.values().length;
+    }
+
+    public static boolean matches(String name) {
+        return NestedEnumApiUser.LocalMode.valueOf(name) == NestedEnumApiUser.LocalMode.SECONDARY;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("NestedEnumApiUserLocalMode::values().len()")
+            && translation
+                .rust
+                .contains("NestedEnumApiUserLocalMode::value_of(name)")
+            && translation
+                .rust
+                .contains("NestedEnumApiUserLocalMode::SECONDARY")
+            && !translation.rust.contains("NestedEnumApiUser::LocalMode"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_nested_enum_type_access",
+        vec![GeneratedCrateModule {
+            name: "source_nested_enum_type_access",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}

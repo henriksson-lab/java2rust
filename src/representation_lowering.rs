@@ -90,13 +90,28 @@ pub fn type_emission_for_with_facts_and_exceptions(
             variants,
         } => {
             let rust_enum_name = rust_name_for_java_named_type(enum_name);
-            let variants = variants
+            let variant_items = variants
                 .iter()
                 .map(|variant| format!("    {variant},"))
                 .collect::<Vec<_>>()
                 .join("\n");
+            let values = variants
+                .iter()
+                .map(|variant| format!("Self::{variant}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let value_of_arms = variants
+                .iter()
+                .map(|variant| format!("            {variant:?} => Self::{variant},"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let name_arms = variants
+                .iter()
+                .map(|variant| format!("            Self::{variant} => {variant:?},"))
+                .collect::<Vec<_>>()
+                .join("\n");
             RepresentationTypeEmission::RawRustItem(format!(
-                "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum {rust_enum_name} {{\n{variants}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{:?}}\", self)\n    }}\n}}"
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {{}}.{{}}\", {enum_name:?}, other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
             ))
         }
         ObjectRepresentation::ClosedEnum {

@@ -5552,12 +5552,16 @@ fn lower_java_enum_static_field_access_with_owner(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<(String, RustExpr)> {
+    if let Some(owner) = source_type_name_from_expr(receiver, env, ctx)
+        && let Some(variant) = ctx
+            .representations
+            .java_enum_variant_for_label(&owner, field)
+    {
+        return Some((owner, RustExpr::Raw(variant)));
+    }
     let Expr::Var(receiver_name) = receiver else {
         return None;
     };
-    if env.local_type(receiver_name).is_some() || env.field_type(receiver_name).is_some() {
-        return None;
-    }
     java_enum_static_field_owner_candidates(receiver_name, env, ctx)
         .into_iter()
         .find_map(|owner| {
@@ -7757,6 +7761,9 @@ fn lower_expr_with_refinements(
         Expr::This => this_expr(),
         Expr::Super => super_expr(),
         Expr::FieldAccess(receiver, field) => {
+            if let Some(nested_type) = lower_source_nested_type_access(receiver, field, env, ctx) {
+                return nested_type;
+            }
             if let Some(constant) =
                 lower_source_associated_const_field_access(receiver, field, env, ctx)
             {
@@ -7769,6 +7776,12 @@ fn lower_expr_with_refinements(
                 lower_java_enum_static_field_access(receiver, field, env, ctx)
             {
                 return enum_variant;
+            }
+            if field == "length"
+                && let Some(length) =
+                    lower_java_array_length_access(receiver, env, ctx, refinements)
+            {
+                return length;
             }
             if field == "length" && static_final_const_array_field_type(receiver, ctx).is_some() {
                 return len_i32_projection(lower_expr_with_refinements(
@@ -7911,6 +7924,16 @@ fn lower_expr_with_refinements(
             if let Some(expr) =
                 lower_functional_interface_local_call(receiver.as_deref(), name, args, env, ctx)
             {
+                return expr;
+            }
+            if let Some(expr) = lower_source_java_enum_type_api_call(
+                receiver.as_deref(),
+                name,
+                args,
+                env,
+                ctx,
+                refinements,
+            ) {
                 return expr;
             }
             if let Some(expr) = lower_map_get_collection_mutation_call(
@@ -8846,6 +8869,102 @@ fn lower_source_associated_const_field_access(
     ))
 }
 
+fn lower_source_nested_type_access(
+    receiver: &Expr,
+    field: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let owner = source_type_name_from_expr(receiver, env, ctx)?;
+    let owner_ty = find_context_type_by_key(ctx.program, &owner)
+        .or_else(|| find_context_type_by_key(ctx.support_local_type_program, &owner))
+        .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))?;
+    let nested = nested_type_decl_by_receiver_alias(owner_ty, field)?;
+    Some(RustExpr::Var(
+        crate::slot_render::rust_name_for_java_named_type(&nested.name),
+    ))
+}
+
+fn lower_java_array_length_access(
+    receiver: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    if source_java_enum_values_call_owner(receiver, env, ctx)
+        .is_some_and(|owner| matches_source_java_enum_type(&owner, ctx))
+    {
+        return Some(len_i32_projection(lower_expr_with_refinements(
+            receiver,
+            env,
+            ctx,
+            refinements,
+        )));
+    }
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
+    if !matches!(shape.java_ty, JavaType::Array(_)) {
+        return None;
+    }
+    Some(len_i32_projection(lower_expr_with_refinements(
+        receiver,
+        env,
+        ctx,
+        refinements,
+    )))
+}
+
+fn lower_source_java_enum_type_api_call(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let receiver = receiver?;
+    let owner = source_type_name_from_expr(receiver, env, ctx)?;
+    if !matches_source_java_enum_type(&owner, ctx) {
+        return None;
+    }
+    let rust_owner = crate::slot_render::rust_name_for_java_named_type(&owner);
+    match (name, args) {
+        ("values", []) => Some(RustExpr::Raw(format!("{rust_owner}::values()"))),
+        ("valueOf" | "value_of", [arg]) => {
+            let arg = lower_expr_with_refinements(arg, env, ctx, refinements);
+            Some(RustExpr::Raw(format!(
+                "{rust_owner}::value_of({})",
+                emit::emit_expr(&arg)
+            )))
+        }
+        _ => None,
+    }
+}
+
+fn source_java_enum_values_call_owner(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<String> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if name != "values" || !args.is_empty() {
+        return None;
+    }
+    source_type_name_from_expr(receiver, env, ctx)
+}
+
 fn lower_static_storage_field_access(
     receiver: &Expr,
     field: &str,
@@ -9125,6 +9244,39 @@ fn static_storage_owner_type_name(
                 })
                 .map(|ty| ty.name.clone())
         })
+}
+
+fn source_type_name_from_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<String> {
+    match expr {
+        Expr::Var(_) => static_storage_owner_type_name(expr, env, ctx),
+        Expr::FieldAccess(receiver, field) => {
+            let owner = source_type_name_from_expr(receiver, env, ctx)?;
+            let owner_ty = find_context_type_by_key(ctx.program, &owner)
+                .or_else(|| find_context_type_by_key(ctx.support_local_type_program, &owner))
+                .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))?;
+            nested_type_decl_by_receiver_alias(owner_ty, field).map(|nested| nested.name.clone())
+        }
+        _ => None,
+    }
+}
+
+fn nested_type_decl_by_receiver_alias<'a>(
+    owner_ty: &'a TypeDecl,
+    receiver_name: &str,
+) -> Option<&'a TypeDecl> {
+    owner_ty.members.iter().find_map(|member| {
+        let Member::Type(nested) = member else {
+            return None;
+        };
+        type_simple_name_matches_receiver_alias(&nested.name, receiver_name).then_some(nested)
+    })
+}
+
+fn matches_source_java_enum_type(type_name: &str, ctx: LowerCtx) -> bool {
+    find_context_type_by_key(ctx.program, type_name)
+        .or_else(|| find_context_type_by_key(ctx.support_local_type_program, type_name))
+        .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, type_name))
+        .is_some_and(|ty| ty.kind == TypeKind::Enum)
 }
 
 fn static_storage_field_shape(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> Option<RustSlotShape> {
