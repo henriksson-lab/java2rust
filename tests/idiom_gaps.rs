@@ -2619,7 +2619,7 @@ class Interval {
             && translation.rust.contains(".fold(self.empty")
             && translation.rust.contains("|result, rdd| result.union(rdd)")
             && translation.rust.contains("self.one(name")
-            && translation.rust.contains("intervals.clone()")
+            && translation.rust.contains("intervals.as_slice()")
             && !translation.rust.contains("parallel_stream")
             && !translation.rust.contains("map(|name| one("),
         "{}",
@@ -5375,7 +5375,7 @@ mod generated_tests {
     #[test]
     fn typechecks_simple_try_finally() {
         let fixture = SimpleTryFinallyCleanup {};
-        fixture.copy(Resource {}).unwrap();
+        fixture.copy(&Resource {}).unwrap();
     }
 }
 "#,
@@ -8521,10 +8521,13 @@ fn documents_method_reference_flat_map_gap() {
             .contains("pub fn flatten(&self, groups: Vec<Vec<String>>) -> std::collections::HashSet<String>")
             || translation
                 .rust
-                .contains("pub fn flatten(&self, groups: &Vec<Vec<String>>) -> std::collections::HashSet<String>"))
+                .contains("pub fn flatten(&self, groups: &Vec<Vec<String>>) -> std::collections::HashSet<String>")
+            || translation
+                .rust
+                .contains("pub fn flatten(&self, groups: &[Vec<String>]) -> std::collections::HashSet<String>"))
             && translation
                 .rust
-                .contains("groups.iter().flat_map(|item| item.iter()).collect::<std::collections::HashSet<_>>().into_iter().cloned().collect::<std::collections::HashSet<_>>()")
+                .contains("groups.iter().flat_map(|item| item.iter()).cloned().collect::<std::collections::HashSet<_>>()")
             && !translation
                 .rust
                 .contains("unsupported Java expression: method reference")

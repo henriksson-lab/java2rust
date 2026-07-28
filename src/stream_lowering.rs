@@ -975,10 +975,18 @@ fn render_stream_terminal(
             out.push_str(&format!(".fold({identity}, |{left}, {right}| {body})"));
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::List) => {
-            out.push_str(".collect::<Vec<_>>()");
+            if item_is_borrowed {
+                out.push_str(".cloned().collect::<Vec<_>>()");
+            } else {
+                out.push_str(".collect::<Vec<_>>()");
+            }
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Set) => {
-            out.push_str(".collect::<std::collections::HashSet<_>>()");
+            if item_is_borrowed {
+                out.push_str(".cloned().collect::<std::collections::HashSet<_>>()");
+            } else {
+                out.push_str(".collect::<std::collections::HashSet<_>>()");
+            }
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Map) => return None,
         StreamTerminal::CollectToMap { key, value } => {

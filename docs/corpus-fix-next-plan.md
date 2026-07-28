@@ -5038,6 +5038,21 @@ representation to `Box<dyn Any>`. Verified with
 `resolved_constructor_interface_flow_keeps_dyn_trait_storage`,
 `cargo fmt --check`, `cargo check --quiet`, and `git diff --check`.
 
+Stream terminal collection cleanup: stream terminal `collect(toList())` and
+`collect(toSet())` now clone borrowed stream items before collecting, so the
+stream plan can produce the owned result directly instead of collecting
+borrowed items and relying on a later owned-slot recovery pass. The borrowed
+collection clone adapters are idempotent for already-cloned terminal collects,
+which prevents duplicate `.into_iter().cloned()` chains after method-reference
+`flatMap(Collection::stream)`. Stale stream expectations were aligned with
+borrowed source-call slice slots, including `parallelStream().map(...).reduce`
+forwarding shared list arguments as slices instead of cloning them. Verified
+with `documents_method_reference_flat_map_gap`,
+`method_reference_flat_map_generated_rust_preserves_behavior`,
+`parallel_stream_reduce_uses_shared_stream_lowering`,
+`neutral_idiom_fixtures_generated_crate_cargo_checks`, `cargo fmt --check`,
+`cargo check --quiet`, and `git diff --check`.
+
 ## Rerun Protocol
 
 After each fix:

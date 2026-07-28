@@ -3684,17 +3684,23 @@ fn apply_borrowed_option_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPol
 }
 
 fn apply_borrowed_vec_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
+    let rendered = emit::emit_expr(&expr);
+    if rendered.ends_with(".cloned().collect::<Vec<_>>()") {
+        return expr;
+    }
     RustExpr::Raw(format!(
-        "{}.into_iter().cloned(){}.collect::<Vec<_>>()",
-        emit::emit_expr(&expr),
+        "{rendered}.into_iter().cloned(){}.collect::<Vec<_>>()",
         render_clone_recovery_policy(policy)
     ))
 }
 
 fn apply_borrowed_set_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
+    let rendered = emit::emit_expr(&expr);
+    if rendered.ends_with(".cloned().collect::<std::collections::HashSet<_>>()") {
+        return expr;
+    }
     RustExpr::Raw(format!(
-        "{}.into_iter().cloned(){}.collect::<std::collections::HashSet<_>>()",
-        emit::emit_expr(&expr),
+        "{rendered}.into_iter().cloned(){}.collect::<std::collections::HashSet<_>>()",
         render_clone_recovery_policy(policy)
     ))
 }
