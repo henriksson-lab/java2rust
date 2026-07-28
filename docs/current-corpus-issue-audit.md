@@ -973,6 +973,19 @@ operands under bitwise operators fixes that shared emitter gap. Rerun
 `.tmp/corpus-fastqc-math-util-after-comparison-xor-parens-r1` translates 10/10
 files, reports 0 invalid-pattern files, and has `cargo_check=ok`.
 
+Focused VCF syntax cleanup update: fresh HTSJDK VCF evidence at
+`.tmp/corpus-rerun-htsjdk-vcf-current-after-math-base64-r1` shows 32/32 files
+translated, 20 invalid-pattern files, and 805 generated-Rust errors. Shared
+coercion rendering now parenthesizes cast expressions before method-call
+projections, and dispatch coercion now renders nominal runtime targets as Rust
+type names. The latest rerun,
+`.tmp/corpus-rerun-htsjdk-vcf-after-rust-nominal-target-r1`, is still failing
+but moves to 794 generated-Rust errors; the `cast cannot be followed by a
+method call` rows and nested
+`downcast::<VCFCompoundHeaderLine.SupportedHeaderLineType>()` syntax are gone.
+The leading remaining VCF family is representation/enum coercion, especially
+erased-object-to-closed-enum and closed-enum-to-erased-object boundaries.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

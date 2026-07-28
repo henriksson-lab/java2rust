@@ -4614,6 +4614,22 @@ comparison operands under bitwise operators, preserving shapes such as
 rerun `.tmp/corpus-fastqc-math-util-after-comparison-xor-parens-r1`. That
 rerun translates 10/10 files with 0 invalid-pattern files and `cargo_check=ok`.
 
+HTSJDK VCF current rerun: fresh focused evidence in
+`.tmp/corpus-rerun-htsjdk-vcf-current-after-math-base64-r1` translates 32/32
+files, reports 20 invalid-pattern files, and fails generated Rust with 805
+reported errors. The first syntax cleanup parenthesizes cast expressions before
+method-call projections such as `.downcast()` and `.clone_box()`, removing the
+`cast cannot be followed by a method call` rows and moving the rerun to 798
+reported errors in `.tmp/corpus-rerun-htsjdk-vcf-after-cast-receiver-parens-r1`.
+The adjacent nominal-target cleanup renders dispatch downcast targets through
+the Rust nominal type policy, so nested Java types such as
+`VCFCompoundHeaderLine.SupportedHeaderLineType` become
+`VCFCompoundHeaderLineSupportedHeaderLineType` in turbofish syntax. Follow-up
+rerun `.tmp/corpus-rerun-htsjdk-vcf-after-rust-nominal-target-r1` reports 794
+generated-Rust errors. The next VCF batch should target representation facts
+for erased-object-to-closed-enum recovery and closed-enum erasure rather than
+more syntax cleanup.
+
 ## Rerun Protocol
 
 After each fix:

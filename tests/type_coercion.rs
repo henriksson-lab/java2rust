@@ -125,6 +125,16 @@ fn runtime_type_target_policy_names_nominal_runtime_targets() {
             target_type: "Dog".to_string(),
         }
     );
+    let nested = JavaType::Named {
+        name: "VCFCompoundHeaderLine.SupportedHeaderLineType".to_string(),
+        args: Vec::new(),
+    };
+    assert_eq!(
+        runtime_type_target_policy(&nested),
+        RuntimeTypeTargetPolicy::Nominal {
+            target_type: "VCFCompoundHeaderLineSupportedHeaderLineType".to_string(),
+        }
+    );
     assert_eq!(
         runtime_type_target_policy(&JavaType::String),
         RuntimeTypeTargetPolicy::Nominal {

@@ -852,6 +852,71 @@ pub fn parenthesize_borrowed_method_receiver(receiver: RustExpr) -> RustExpr {
     }
 }
 
+fn parenthesize_cast_method_receiver(rendered: &str) -> String {
+    let trimmed = rendered.trim();
+    if balanced_outer_parentheses_wrap_all(trimmed) {
+        return trimmed.to_string();
+    }
+    if raw_contains_top_level_as_cast(trimmed) {
+        format!("({trimmed})")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn raw_contains_top_level_as_cast(raw: &str) -> bool {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut angle_depth = 0usize;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    let mut chars = raw.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if in_string || in_char {
+            if ch == '\\' {
+                escaped = true;
+            } else if in_string && ch == '"' {
+                in_string = false;
+            } else if in_char && ch == '\'' {
+                in_char = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '\'' => in_char = true,
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '<' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => angle_depth += 1,
+            '>' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                angle_depth = angle_depth.saturating_sub(1)
+            }
+            'a' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && angle_depth == 0
+                && raw[idx..].starts_with("as")
+                && raw[..idx].ends_with(char::is_whitespace)
+                && raw[idx + 2..].starts_with(char::is_whitespace) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub fn force_shared_borrow_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("&{}", emit::emit_expr(&expr)))
 }
@@ -3472,6 +3537,7 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             if rendered.starts_with("<dyn ") && rendered.contains(">::anonymous()") {
                 RustExpr::Raw(rendered)
             } else {
+                let rendered = parenthesize_cast_method_receiver(&rendered);
                 RustExpr::Raw(format!("{rendered}.clone_box()"))
             }
         }
@@ -3666,10 +3732,10 @@ fn apply_dyn_trait_downcast(
     target_type: &str,
     invalid_cast: &InvalidCastPolicy,
 ) -> RustExpr {
+    let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
     match invalid_cast {
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
-            "{}.as_any().downcast_ref::<{target_type}>().expect(\"invalid Java cast\")",
-            emit::emit_expr(&expr)
+            "{rendered}.as_any().downcast_ref::<{target_type}>().expect(\"invalid Java cast\")"
         )),
     }
 }
@@ -3679,10 +3745,10 @@ fn apply_boxed_dyn_trait_downcast(
     target_type: &str,
     invalid_cast: &InvalidCastPolicy,
 ) -> RustExpr {
+    let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
     match invalid_cast {
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
-            "{}.as_ref().as_any().downcast_ref::<{target_type}>().expect(\"invalid Java cast\")",
-            emit::emit_expr(&expr)
+            "{rendered}.as_ref().as_any().downcast_ref::<{target_type}>().expect(\"invalid Java cast\")"
         )),
     }
 }
@@ -3698,6 +3764,7 @@ pub fn erased_object_borrowed_downcast_ref_projection(
             "{rendered}.as_ref().and_then(|value| value.downcast_ref::<{target_type}>()).expect(\"invalid Java cast\")"
         ))
     } else {
+        let rendered = parenthesize_cast_method_receiver(&rendered);
         RustExpr::Raw(format!(
             "{rendered}.downcast_ref::<{target_type}>().expect(\"invalid Java cast\")"
         ))
@@ -3712,10 +3779,10 @@ fn apply_erased_object_downcast(
     if !plausible_rust_nominal_type_name(target_type) {
         return expr;
     }
+    let rendered = parenthesize_cast_method_receiver(&emit::emit_expr(&expr));
     match invalid_cast {
         InvalidCastPolicy::Panic => RustExpr::Raw(format!(
-            "*{}.downcast::<{target_type}>().expect(\"invalid Java cast\")",
-            emit::emit_expr(&expr)
+            "*{rendered}.downcast::<{target_type}>().expect(\"invalid Java cast\")"
         )),
     }
 }
@@ -4784,6 +4851,35 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&expr),
             "source.expect(\"Java null receiver\")"
+        );
+    }
+
+    #[test]
+    fn erased_object_downcast_parenthesizes_cast_receiver() {
+        let expr = apply_erased_object_downcast(
+            RustExpr::Raw("Box::new(value) as Box<dyn std::any::Any>".to_string()),
+            "Target",
+            &InvalidCastPolicy::Panic,
+        );
+
+        assert_eq!(
+            emit::emit_expr(&expr),
+            "*(Box::new(value) as Box<dyn std::any::Any>).downcast::<Target>().expect(\"invalid Java cast\")"
+        );
+    }
+
+    #[test]
+    fn clone_box_parenthesizes_dyn_trait_cast_receiver() {
+        let expr = apply_one(
+            RustExpr::Raw("&line as &dyn VCFIDHeaderLine".to_string()),
+            &Coercion::CloneBoxDynTrait {
+                trait_name: "VCFIDHeaderLine".to_string(),
+            },
+        );
+
+        assert_eq!(
+            emit::emit_expr(&expr),
+            "(&line as &dyn VCFIDHeaderLine).clone_box()"
         );
     }
 

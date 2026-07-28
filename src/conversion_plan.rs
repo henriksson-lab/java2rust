@@ -1040,7 +1040,9 @@ pub struct CoercionShapeContentPolicy {
 
 pub fn rust_nominal_type_name_policy(java_ty: &JavaType) -> RustNominalTypeNamePolicy {
     let target_type = match java_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name.clone()),
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            Some(crate::slot_render::rust_name_for_java_named_type(name))
+        }
         JavaType::String => Some("String".to_string()),
         _ => None,
     };
