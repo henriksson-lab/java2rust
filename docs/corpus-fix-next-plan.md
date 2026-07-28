@@ -5075,6 +5075,22 @@ with `source_interface_trait_uses_fallible_implementation_signature`,
 `swing_panel_converts_to_component_facade_slots`, `cargo fmt --check`,
 `cargo check --quiet`, and `git diff --check`.
 
+String helper direct-borrow cleanup: `String.join` arguments now get an explicit
+shared string slot plan before native-call rendering. The delimiter projection
+therefore trusts the already-planned borrowed expression instead of appending a
+second `.as_str()` string-view guess, fixing the generated `str_as_str` compile
+failure when Java `String` parameters render as `&str`. Stale map-get, string
+pattern, regex helper, and nullable string hash-code expectations were refreshed
+to the same direct-`&str` policy while preserving negative checks against the
+old redundant `.as_str()` spellings. Verified with
+`java_string_join_varargs_lowers_to_vec_join`,
+`java_string_regex_helpers_use_runtime_surfaces`,
+`string_pattern_methods_borrow_owned_string_arguments`,
+`string_pattern_chained_receiver_keeps_borrowed_pattern_argument`,
+`map_get_in_ternary_primitive_slot_unwraps_and_copies_value`,
+`same_class_nullable_string_field_hash_code_method_uses_runtime_helper`, and
+`cargo test string_join --quiet`.
+
 ## Rerun Protocol
 
 After each fix:

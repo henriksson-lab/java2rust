@@ -11506,6 +11506,9 @@ fn lower_args_for_call_target(
         CallTargetPlan::NativeJavaStatic {
             method: crate::call_plan::NativeJavaStaticMethod::StringFormat,
         } => lower_string_format_args(args, env, ctx),
+        CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::StringJoin,
+        } => lower_string_join_args(args, env, ctx),
         CallTargetPlan::NativeJavaInstance {
             method: crate::call_plan::NativeJavaInstanceMethod::DecimalFormatFormat,
             ..
@@ -14166,6 +14169,28 @@ fn lower_string_format_args(args: &[Expr], env: &ShapeEnv, ctx: LowerCtx) -> Vec
             .iter()
             .map(|arg| lower_expr_for_slot(arg, env, Slot::DisplaySegment, ctx)),
     );
+    lowered
+}
+
+fn lower_string_join_args(args: &[Expr], env: &ShapeEnv, ctx: LowerCtx) -> Vec<RustExpr> {
+    let Some((delimiter, values)) = args.split_first() else {
+        return Vec::new();
+    };
+    let mut lowered = Vec::with_capacity(args.len());
+    lowered.push(lower_expr_for_slot(
+        delimiter,
+        env,
+        argument_slot(borrowed_string_content_shape()),
+        ctx,
+    ));
+    lowered.extend(values.iter().map(|arg| {
+        lower_expr_for_slot(
+            arg,
+            env,
+            argument_slot(borrowed_string_content_shape()),
+            ctx,
+        )
+    }));
     lowered
 }
 

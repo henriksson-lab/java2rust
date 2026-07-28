@@ -543,7 +543,7 @@ class JavaStringJoinVarargs {
 
     assert!(
         translation.rust.contains(
-            "return vec![\"bin\".to_string(), \".\".to_string(), (extra).to_string(), \"htsjdk.jar\".to_string()].join(sep.as_str());"
+            "return vec![\"bin\".to_string(), \".\".to_string(), (extra).to_string(), \"htsjdk.jar\".to_string()].join(sep);"
         ) && !translation
             .rust
             .contains("String.join varargs are not supported yet"),
@@ -1276,15 +1276,15 @@ class JavaStringRegexHelpers {
         translation.rust.contains("pub fn java_string_matches")
             && translation
                 .rust
-                .contains("java_string_matches(value.as_str(), \"[0-9]\")")
+                .contains("java_string_matches(&value, \"[0-9]\")")
             && translation
                 .rust
-                .contains("java_string_replace_first(value.as_str(), \"-\", \"\")")
+                .contains("java_string_replace_first(&value, \"-\", \"\")")
             && translation
                 .rust
-                .contains("java_string_replace_all(value.as_str(), \"[^0-9]\", \"\")")
+                .contains("java_string_replace_all(&value, \"[^0-9]\", \"\")")
             && translation.rust.contains(
-                "java_string_split(java_string_replace_all(value.as_str(), \".fast5$\", \"\").as_str(), \"_\", 0)"
+                "java_string_split(&java_string_replace_all(&value, \".fast5$\", \"\"), \"_\", 0)"
             )
             && !translation.rust.contains(".replace_first(")
             && !translation.rust.contains(".replace_all(")
@@ -1309,8 +1309,8 @@ mod generated_tests {
         let fixture = JavaStringRegexHelpers {};
         assert!(fixture.digit("7".to_string()));
         assert!(!fixture.digit("77".to_string()));
-        assert_eq!(fixture.strip_prefix("-abc".to_string()), "abc".to_string());
-        assert_eq!(fixture.digits("a1-b2".to_string()), "12".to_string());
+        assert_eq!(fixture.strip_prefix("-abc"), "abc".to_string());
+        assert_eq!(fixture.digits("a1-b2"), "12".to_string());
     }
 }
 "#,
@@ -1781,7 +1781,7 @@ class SameClassNullableStringFieldHashCodeMethod {
             .contains("java_string_hash_code(self.quality_header.as_ref().unwrap().as_str())")
             && translation
                 .rust
-                .contains("java_string_hash_code(self.bases.as_str())")
+                .contains("java_string_hash_code(&self.bases)")
             && !translation.rust.contains(".quality_header.hash_code()")
             && !translation.rust.contains(".bases.hash_code()"),
         "{}",
@@ -2310,12 +2310,10 @@ fn string_pattern_methods_borrow_owned_string_arguments() {
     let translation = translate_source(&idiom_gap("StringPatternBorrowing.java"));
 
     assert!(
-        translation.rust.contains("value.contains(needle.as_str())")
-            && translation
-                .rust
-                .contains("value.ends_with(suffix.as_str())")
-            && !translation.rust.contains("contains(needle)")
-            && !translation.rust.contains("ends_with(suffix)"),
+        translation.rust.contains("value.contains(needle)")
+            && translation.rust.contains("value.ends_with(suffix)")
+            && !translation.rust.contains("contains(needle.as_str())")
+            && !translation.rust.contains("ends_with(suffix.as_str())"),
         "{}",
         translation.rust
     );
@@ -2335,8 +2333,8 @@ fn string_pattern_chained_receiver_keeps_borrowed_pattern_argument() {
     assert!(
         translation
             .rust
-            .contains("path.to_string().to_lowercase().ends_with(suffix.as_str())")
-            && !translation.rust.contains("ends_with(suffix)"),
+            .contains("path.to_string().to_lowercase().ends_with(suffix)")
+            && !translation.rust.contains("ends_with(suffix.as_str())"),
         "{}",
         translation.rust
     );
@@ -6038,10 +6036,8 @@ fn map_get_in_ternary_primitive_slot_unwraps_and_copies_value() {
     assert!(
         translation
             .rust
-            .contains("indexes.get(name.as_str()).copied().expect(\"Java null receiver\")")
-            && !translation
-                .rust
-                .contains("indexes.get(name.as_str()) } else"),
+            .contains("indexes.get(name).copied().expect(\"Java null receiver\")")
+            && !translation.rust.contains("indexes.get(name) } else"),
         "{}",
         translation.rust
     );

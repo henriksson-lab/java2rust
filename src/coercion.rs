@@ -1566,7 +1566,7 @@ pub fn string_join_delimiter_projection(delimiter: RustExpr) -> RustExpr {
     if let Some(literal) = string_literal_source(&delimiter) {
         RustExpr::Literal(format!("{literal:?}"))
     } else {
-        RustExpr::Raw(format!("{}.as_str()", emit::emit_expr(&delimiter)))
+        delimiter
     }
 }
 
@@ -4958,7 +4958,7 @@ mod tests {
             emit::emit_expr(&string_join_delimiter_projection(RustExpr::Var(
                 "sep".to_string()
             ))),
-            "sep.as_str()"
+            "sep"
         );
         assert_eq!(
             emit::emit_expr(&string_join_varargs_projection(
@@ -4969,7 +4969,7 @@ mod tests {
                     RustExpr::Raw("suffix.to_string()".to_string()),
                 ],
             )),
-            "vec![\"bin\".to_string(), (extra).to_string(), suffix.to_string()].join(sep.as_str())"
+            "vec![\"bin\".to_string(), (extra).to_string(), suffix.to_string()].join(sep)"
         );
     }
 
