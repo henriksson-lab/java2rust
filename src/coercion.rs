@@ -3304,11 +3304,18 @@ fn apply_borrowed_element_target_view(
         DispatchShape::Concrete if policy.target.java_ty != policy.element_shape.java_ty => {
             match &policy.target.java_ty {
                 crate::java_ir::JavaType::Named { name, .. }
-                | crate::java_ir::JavaType::Unknown(name) => RustExpr::Raw(format!(
-                    "{{ let _java_value = {}; &{} }}",
-                    emit::emit_expr(&expr),
-                    crate::slot_render::rust_name_for_java_named_type(name),
-                )),
+                | crate::java_ir::JavaType::Unknown(name) => {
+                    let target_type = crate::slot_render::rust_name_for_java_named_type(name);
+                    if is_native_collection_facade_target(&target_type) {
+                        expr
+                    } else {
+                        RustExpr::Raw(format!(
+                            "{{ let _java_value = {}; &{} }}",
+                            emit::emit_expr(&expr),
+                            target_type,
+                        ))
+                    }
+                }
                 _ => expr,
             }
         }
@@ -3549,10 +3556,16 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             "{}.as_ref() as &dyn {trait_name}",
             emit::emit_expr(&expr)
         )),
-        Coercion::BorrowConcreteFacade { target_type } => RustExpr::Raw(format!(
-            "{{ let _java_value = {}; &{target_type} }}",
-            emit::emit_expr(&expr)
-        )),
+        Coercion::BorrowConcreteFacade { target_type } => {
+            if is_native_collection_facade_target(target_type) {
+                ensure_borrow_projection(expr, None, None, BorrowProjectionUse::Argument)
+            } else {
+                RustExpr::Raw(format!(
+                    "{{ let _java_value = {}; &{target_type} }}",
+                    emit::emit_expr(&expr)
+                ))
+            }
+        }
         Coercion::ExternalInto { .. } => {
             RustExpr::Raw(format!("{}.into()", emit::emit_expr(&expr)))
         }
@@ -3627,8 +3640,12 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             "{}.as_mut().expect(\"Java null receiver\")",
             emit::emit_expr(&expr)
         )),
-        Coercion::Borrow => RustExpr::Raw(format!("&{}", emit::emit_expr(&expr))),
-        Coercion::BorrowMut => RustExpr::Raw(format!("&mut {}", emit::emit_expr(&expr))),
+        Coercion::Borrow => {
+            ensure_borrow_projection(expr, None, None, BorrowProjectionUse::Argument)
+        }
+        Coercion::BorrowMut => {
+            ensure_borrow_projection(expr, None, None, BorrowProjectionUse::MutableSliceView)
+        }
         Coercion::CopyBorrowedValue => {
             let rendered = emit::emit_expr(&expr);
             if rendered_expr_is_already_string_view(&rendered) {
@@ -3737,6 +3754,20 @@ fn balanced_outer_parentheses_wrap_all(raw: &str) -> bool {
         }
     }
     depth == 0
+}
+
+fn is_native_collection_facade_target(target_type: &str) -> bool {
+    matches!(
+        target_type,
+        "Collection"
+            | "List"
+            | "ArrayList"
+            | "Set"
+            | "HashSet"
+            | "Map"
+            | "HashMap"
+            | "LinkedHashMap"
+    )
 }
 
 fn apply_unsupported_dispatch_coercion(

@@ -14032,6 +14032,53 @@ class SourceEnumHashCodeJavaApi {
 }
 
 #[test]
+fn raw_map_extends_object_argument_borrows_local_not_map_type() {
+    let translation = translate_source(
+        r#"
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+class RawMapEncodingTarget {
+    static String encode(Map<String, ? extends Object> values) {
+        if (values.isEmpty()) {
+            return "empty";
+        }
+        return "encoded";
+    }
+}
+
+class RawMapExtendsObjectArgument {
+    String run(String name) {
+        Map<String, Object> map = new LinkedHashMap<String, Object>();
+        map.put("ID", name);
+        return RawMapEncodingTarget.encode(map);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("RawMapEncodingTarget::encode(&map)")
+            && !translation.rust.contains("&&map")
+            && !translation.rust.contains("&Map")
+            && !translation.rust.contains("let _java_value = map"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "raw_map_extends_object_argument",
+        vec![GeneratedCrateModule {
+            name: "raw_map_extends_object_argument",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn final_sorted_map_receiver_mutation_declares_rust_local_mutable() {
     let translation = translate_source(&idiom_gap("FinalSortedMapReceiverMutation.java"));
 

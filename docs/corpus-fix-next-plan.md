@@ -4734,6 +4734,23 @@ The next high-count VCF work should move away from hash lowering and target
 raw `Map` owner/value support, source hierarchy/`instanceof`, VCF
 constants/static fields, or duplicate `to_string` emission.
 
+Follow-up native collection facade borrow cleanup: raw/wildcard Java collection
+arguments that resolve to borrowed native Rust collection slots now avoid both
+the concrete facade placeholder (`&Map`) and duplicate borrow spelling
+(`&&map`). Native collection facade target-view adaptation preserves the real
+collection value and lets the outer slot planner insert the single borrow, while
+plain `Coercion::Borrow`/`BorrowMut` now pass through the idempotent borrow
+projection helper. The focused fixture
+`raw_map_extends_object_argument_borrows_local_not_map_type` passes, and VCF
+rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-idempotent-native-collection-borrow-r1`
+translates 32/32 files, keeps 20 invalid-pattern files, and stays at 670
+generated-Rust errors. The VCF `to_string_encoding_map(...)` call sites now
+render `&map`; remaining top families are broad mismatched types, type
+annotations, duplicate `to_string`, VCF constants/static support,
+concrete/concrete `instanceof`, erased-object clone/comparison, inherited
+`super(...)`, and map-entry iterator shape drift.
+
 ## Rerun Protocol
 
 After each fix:
