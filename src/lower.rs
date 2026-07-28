@@ -3281,6 +3281,7 @@ fn lower_block_with_refinements(
     let mut block_refinements = ExprRefinements {
         non_null_locals: refinements.non_null_locals.clone(),
         exact_erased_object_locals: refinements.exact_erased_object_locals.clone(),
+        map_entry_locals: refinements.map_entry_locals.clone(),
     };
     for (index, stmt) in block.statements.iter().enumerate() {
         let mut later_read_names = statement_suffix_read_names(&block.statements[index + 1..]);
@@ -3732,6 +3733,7 @@ fn lower_stmt(
             env,
             wrap_returns_in_ok,
             ctx,
+            refinements,
         )),
         Stmt::Switch { selector, cases } => {
             if let Some(plan) = plan_simple_return_switch(selector, cases) {
@@ -4099,6 +4101,7 @@ fn update_expr_refinements_after_stmt(
     for name in assigned {
         refinements.non_null_locals.remove(&name);
         refinements.exact_erased_object_locals.remove(&name);
+        refinements.map_entry_locals.remove(&name);
     }
     if let Some((local_name, exact_ty)) = exact_type_refinement_from_early_return_guard(stmt, ctx) {
         refinements
@@ -7207,6 +7210,7 @@ fn lower_enhanced_for_stmt(
     env: &ShapeEnv,
     wrap_returns_in_ok: bool,
     ctx: LowerCtx,
+    refinements: &ExprRefinements,
 ) -> RustStmt {
     let mut loop_env = env.clone();
     let var_is_assigned = enhanced_for_var_is_assigned(var_name, body);
@@ -7258,6 +7262,29 @@ fn lower_enhanced_for_stmt(
             var_name,
             &iterator,
             &lower_block(body, &mut loop_env, wrap_returns_in_ok, ctx),
+        );
+    }
+    if let Some((iterator, key_ty, value_ty)) =
+        lower_map_entry_set_expr(iterable, env, ctx, refinements)
+    {
+        loop_env.insert_local_shape(
+            var_name.to_string(),
+            borrowed_sequence_element_shape(JavaType::Named {
+                name: "java.util.Map.Entry".to_string(),
+                args: vec![key_ty.clone(), value_ty.clone()],
+            }),
+        );
+        let loop_refinements = refinements.with_map_entry_local(var_name, key_ty, value_ty);
+        return render_enhanced_for_iterator(
+            var_name,
+            &iterator,
+            &lower_block_with_refinements(
+                body,
+                &mut loop_env,
+                wrap_returns_in_ok,
+                ctx,
+                &loop_refinements,
+            ),
         );
     }
     if let Some(element_ty) = enhanced_for_iterable_element_type(iterable, env, ctx) {
@@ -7446,6 +7473,7 @@ fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
 struct ExprRefinements {
     non_null_locals: HashSet<String>,
     exact_erased_object_locals: HashMap<String, JavaType>,
+    map_entry_locals: HashMap<String, (JavaType, JavaType)>,
 }
 
 impl ExprRefinements {
@@ -7453,8 +7481,21 @@ impl ExprRefinements {
         let mut refinements = Self {
             non_null_locals: self.non_null_locals.clone(),
             exact_erased_object_locals: self.exact_erased_object_locals.clone(),
+            map_entry_locals: self.map_entry_locals.clone(),
         };
         refinements.non_null_locals.insert(name.to_string());
+        refinements
+    }
+
+    fn with_map_entry_local(&self, name: &str, key_ty: JavaType, value_ty: JavaType) -> Self {
+        let mut refinements = Self {
+            non_null_locals: self.non_null_locals.clone(),
+            exact_erased_object_locals: self.exact_erased_object_locals.clone(),
+            map_entry_locals: self.map_entry_locals.clone(),
+        };
+        refinements
+            .map_entry_locals
+            .insert(name.to_string(), (key_ty, value_ty));
         refinements
     }
 }
@@ -8307,6 +8348,7 @@ fn branch_refinements(
                 ExprRefinements {
                     non_null_locals: refinements.non_null_locals.clone(),
                     exact_erased_object_locals: refinements.exact_erased_object_locals.clone(),
+                    map_entry_locals: refinements.map_entry_locals.clone(),
                 }
             };
             let else_refinements = if else_non_null {
@@ -8315,6 +8357,7 @@ fn branch_refinements(
                 ExprRefinements {
                     non_null_locals: refinements.non_null_locals.clone(),
                     exact_erased_object_locals: refinements.exact_erased_object_locals.clone(),
+                    map_entry_locals: refinements.map_entry_locals.clone(),
                 }
             };
             (then_refinements, else_refinements)
@@ -8323,10 +8366,12 @@ fn branch_refinements(
             ExprRefinements {
                 non_null_locals: refinements.non_null_locals.clone(),
                 exact_erased_object_locals: refinements.exact_erased_object_locals.clone(),
+                map_entry_locals: refinements.map_entry_locals.clone(),
             },
             ExprRefinements {
                 non_null_locals: refinements.non_null_locals.clone(),
                 exact_erased_object_locals: refinements.exact_erased_object_locals.clone(),
+                map_entry_locals: refinements.map_entry_locals.clone(),
             },
         ),
     }
@@ -17203,8 +17248,34 @@ fn lower_map_entry_accessor_expr_for_slot(
         return None;
     }
     let receiver = receiver.as_deref()?;
-    let (next_expr, key_ty, value_ty) = lower_map_entry_next_expr(receiver, env, ctx, refinements)?;
     const MAP_ENTRY_VALUE_ACCESSOR: &str = concat!("get", "Value");
+    if let Expr::Var(local_name) = receiver
+        && let Some((key_ty, value_ty)) = refinements
+            .map_entry_locals
+            .get(local_name)
+            .cloned()
+            .or_else(|| map_entry_local_types_from_env(local_name, env))
+    {
+        let (field_index, actual_ty) = match name.as_str() {
+            "getKey" | "get_key" => (
+                0,
+                map_entry_accessor_type_or_slot_target(&key_ty, slot).unwrap_or(key_ty),
+            ),
+            accessor if accessor == MAP_ENTRY_VALUE_ACCESSOR || accessor == "get_value" => {
+                (1, value_ty)
+            }
+            _ => return None,
+        };
+        let entry_access = tuple_field_projection(RustExpr::Var(local_name.clone()), field_index);
+        let actual = crate::shape_projection::borrowed_sequence_element_shape(actual_ty);
+        return Some(apply_expr_to_slot_via_plan(
+            entry_access,
+            actual,
+            slot,
+            ctx.facts,
+        ));
+    }
+    let (next_expr, key_ty, value_ty) = lower_map_entry_next_expr(receiver, env, ctx, refinements)?;
     let (field_index, actual_ty) = match name.as_str() {
         "getKey" | "get_key" => (
             0,
@@ -17239,6 +17310,40 @@ fn map_entry_accessor_type_or_slot_target(actual_ty: &JavaType, slot: &Slot) -> 
         | Slot::StringConcatSegment
         | Slot::DisplaySegment => None,
     }
+}
+
+fn map_entry_local_types_from_env(
+    local_name: &str,
+    env: &ShapeEnv,
+) -> Option<(JavaType, JavaType)> {
+    let shape = env.local_shape(local_name)?;
+    let ty = crate::types::optional_element_type(&shape.java_ty)
+        .unwrap_or_else(|| shape.java_ty.clone());
+    map_entry_type_args_from_java_type(&ty)
+}
+
+fn map_entry_type_args_from_java_type(ty: &JavaType) -> Option<(JavaType, JavaType)> {
+    let JavaType::Named { name, args } = ty else {
+        return None;
+    };
+    if !matches!(
+        name.rsplit('.')
+            .next()
+            .unwrap_or(name)
+            .rsplit('$')
+            .next()
+            .unwrap_or(name),
+        "Entry"
+    ) {
+        return None;
+    }
+    let key_ty = args.first()?.clone();
+    let value_ty = args
+        .get(1)
+        .filter(|ty| !matches!(ty, JavaType::Wildcard(_)))
+        .cloned()
+        .unwrap_or(JavaType::Unknown("map_entry_value".to_string()));
+    Some((key_ty, value_ty))
 }
 
 fn lower_map_entry_next_expr(

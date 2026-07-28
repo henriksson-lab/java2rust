@@ -4751,6 +4751,25 @@ annotations, duplicate `to_string`, VCF constants/static support,
 concrete/concrete `instanceof`, erased-object clone/comparison, inherited
 `super(...)`, and map-entry iterator shape drift.
 
+Follow-up map-entry enhanced-for cleanup: enhanced-for over
+`Map.entrySet()` now uses the already-planned native map iterator directly
+instead of passing that iterator back through the generic enhanced-for renderer
+and producing `.iter().iter()`. The loop body records `Map.Entry<K,V>` locals in
+both the local shape environment and expression refinements, so
+`entry.getKey()`/`entry.getValue()` project tuple fields through the slot
+planner rather than falling back to fake methods. Focused fixtures
+`map_entry_enhanced_for_uses_planned_iterator_and_tuple_fields`,
+`map_entry_set_iterator_next_get_key_uses_native_iterator_shape`, and
+`map_entry_set_iterator_next_get_key_uses_receiver_signature_shape` pass. VCF
+rerun `.tmp/corpus-rerun-htsjdk-vcf-after-map-entry-loop-r1` translates 32/32
+files, keeps 20 invalid-pattern files, and reduces generated-Rust errors from
+670 to 664. `VCFHeaderLine.toStringEncoding(Map<...>)` now renders
+`for entry in key_values.iter()` with `entry.0`/`entry.1`; remaining top
+families are broad mismatched types, type annotations, duplicate `to_string`,
+VCF constants/static support, concrete/concrete `instanceof`, erased-object
+clone/comparison, inherited `super(...)`, and unresolved external/source facade
+methods.
+
 ## Rerun Protocol
 
 After each fix:

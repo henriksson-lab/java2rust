@@ -14079,6 +14079,51 @@ class RawMapExtendsObjectArgument {
 }
 
 #[test]
+fn map_entry_enhanced_for_uses_planned_iterator_and_tuple_fields() {
+    let translation = translate_source(
+        r#"
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+class MapEntryEnhancedFor {
+    String join(Map<String, ? extends Object> values) {
+        StringBuilder builder = new StringBuilder();
+        for (Map.Entry<String, ?> entry : values.entrySet()) {
+            builder.append(entry.getKey());
+        }
+        return builder.toString();
+    }
+
+    String run(String name) {
+        Map<String, Object> map = new LinkedHashMap<String, Object>();
+        map.put("ID", name);
+        return join(map);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("for entry in values.iter()")
+            && translation.rust.contains("entry.0")
+            && !translation.rust.contains("values.iter().iter()")
+            && !translation.rust.contains(".entry_set()")
+            && !translation.rust.contains(".get_key()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_entry_enhanced_for",
+        vec![GeneratedCrateModule {
+            name: "map_entry_enhanced_for",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn final_sorted_map_receiver_mutation_declares_rust_local_mutable() {
     let translation = translate_source(&idiom_gap("FinalSortedMapReceiverMutation.java"));
 
