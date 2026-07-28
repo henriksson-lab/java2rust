@@ -676,6 +676,9 @@ fn infer_field_access_shape(
     env: &ShapeEnv,
     ctx: ExprShapeContext<'_>,
 ) -> Option<RustSlotShape> {
+    if let Some(shape) = source_java_enum_static_field_shape(receiver, field, env, ctx) {
+        return Some(shape);
+    }
     if let Some(signatures) = ctx.signatures
         && let Some(crate::member_access_plan::MemberAccessPlan {
             op: crate::member_access_plan::MemberAccessOp::StaticConstant { owner },
@@ -708,6 +711,72 @@ fn infer_field_access_shape(
             .or_else(|| signatures.field_shape(&name, &crate::parser::to_snake_case(field)))
             .map(field_access_shape_from_signature_shape)
     })
+}
+
+fn source_java_enum_static_field_shape(
+    receiver: &Expr,
+    field: &str,
+    env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<RustSlotShape> {
+    let Expr::Var(receiver_name) = receiver else {
+        return None;
+    };
+    if env.local_type(receiver_name).is_some() || env.field_type(receiver_name).is_some() {
+        return None;
+    }
+    let representations = ctx.representations?;
+    source_java_enum_static_field_owner_candidates(receiver_name, env)
+        .into_iter()
+        .find_map(|owner| {
+            representations
+                .java_enum_variant_for_label(&owner, field)
+                .map(|_| {
+                    project_java_value_shape_with_representations(
+                        Some(representations),
+                        JavaType::Named {
+                            name: owner,
+                            args: Vec::new(),
+                        },
+                    )
+                })
+        })
+}
+
+fn source_java_enum_static_field_owner_candidates(
+    receiver_name: &str,
+    env: &ShapeEnv,
+) -> Vec<String> {
+    let mut candidates = Vec::new();
+    if let Some(alias) = env.type_env().static_type_alias(receiver_name) {
+        push_unique_type_name(&mut candidates, alias.to_string());
+    }
+    push_unique_type_name(&mut candidates, receiver_name.to_string());
+    push_unique_type_name(
+        &mut candidates,
+        upper_camel_type_name_from_static_receiver(receiver_name),
+    );
+    candidates
+}
+
+fn push_unique_type_name(out: &mut Vec<String>, candidate: String) {
+    if !candidate.is_empty() && !out.iter().any(|existing| existing == &candidate) {
+        out.push(candidate);
+    }
+}
+
+fn upper_camel_type_name_from_static_receiver(receiver_name: &str) -> String {
+    receiver_name
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<String>()
 }
 
 fn field_access_shape_from_signature_shape(shape: &RustSlotShape) -> RustSlotShape {

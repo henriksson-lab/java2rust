@@ -4659,6 +4659,27 @@ generated-Rust errors. The next VCF batch should target representation facts
 for erased-object-to-closed-enum recovery and closed-enum erasure rather than
 more syntax cleanup.
 
+Java enum constant slot/shape follow-up: source enum constants now lower as
+definitely non-null concrete enum-owner values before optional slot conversion
+or equality planning. `lower_java_enum_static_field_access_for_slot` hands
+concrete and optional enum targets to the shared slot-conversion plan, and
+`expr_shape` reports the same concrete owner shape for source enum constants so
+binary comparisons do not invent optional `.as_ref()` projections. Focused
+verification:
+`source_java_enum_constant_uses_slot_plan_not_optional_projection`,
+`closed_enum_variant_constructor_delegation_supplies_empty_varargs_without_optional_as_ref`,
+`cargo fmt --check`, `cargo check --quiet`,
+`cargo build --release --quiet --bin new-java2rust`, and VCF reruns
+`.tmp/corpus-rerun-htsjdk-vcf-after-enum-constant-slot-plan-r1` then
+`.tmp/corpus-rerun-htsjdk-vcf-after-enum-constant-shape-r1`. The final rerun
+translates 32/32 files, keeps 20 invalid-pattern files, and reduces
+generated-Rust errors from 722 to 698. The tracked enum projection family
+(`VCFHeaderVersion::VCF4_3.unwrap()`, enum constant `.as_ref()`, and
+`VCFHeaderLineCount::INTEGER.map(...)`) is gone; remaining top families are
+mismatched types, type annotations, duplicate `to_string`, VCF constants/static
+support, concrete/concrete `instanceof`, map API gaps, erased-object
+clone/comparison, and inherited `super(...)` lowering.
+
 ## Rerun Protocol
 
 After each fix:

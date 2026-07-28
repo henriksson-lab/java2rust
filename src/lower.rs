@@ -5367,6 +5367,13 @@ fn lower_java_enum_static_field_access_for_slot(
     let target = slot_target_shape(slot)?;
     let (owner, lowered) =
         lower_java_enum_static_field_access_with_owner(receiver, field, env, ctx)?;
+    let actual = crate::shape_projection::value_shape_for_java_type(
+        ctx.representations,
+        JavaType::Named {
+            name: owner.clone(),
+            args: Vec::new(),
+        },
+    );
     let rendered = emit::emit_expr(&lowered);
     let source_interface_trait_name =
         source_enum_directly_implements_target_interface(&owner, &target.java_ty, ctx);
@@ -5374,6 +5381,15 @@ fn lower_java_enum_static_field_access_for_slot(
         DispatchShape::ClosedEnum { enum_name } => rendered
             .starts_with(&format!("{enum_name}::"))
             .then_some(lowered),
+        _ if target
+            .optional_element_type()
+            .is_some_and(|element_ty| same_concrete_java_type(&element_ty, &actual.java_ty))
+            || same_concrete_java_type(&target.java_ty, &actual.java_ty) =>
+        {
+            Some(apply_expr_to_slot_via_plan(
+                lowered, actual, slot, ctx.facts,
+            ))
+        }
         DispatchShape::DynTrait { trait_name }
             if ctx
                 .facts

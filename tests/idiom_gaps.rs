@@ -4242,6 +4242,61 @@ class LocalizedException {
 }
 
 #[test]
+fn source_java_enum_constant_uses_slot_plan_not_optional_projection() {
+    let translation = translate_source(
+        r#"
+class EnumConstantOptionalUse {
+    enum HeaderVersion {
+        V1;
+
+        boolean isAtLeast(HeaderVersion other) {
+            return true;
+        }
+    }
+
+    private HeaderVersion version;
+
+    EnumConstantOptionalUse() {
+        version = null;
+    }
+
+    void set() {
+        version = HeaderVersion.V1;
+    }
+
+    boolean check(HeaderVersion from) {
+        HeaderVersion target = HeaderVersion.V1;
+        if (from != null && from.isAtLeast(HeaderVersion.V1)) {
+            return version == HeaderVersion.V1;
+        }
+        return target == HeaderVersion.V1;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.version = Some(EnumConstantOptionalUseHeaderVersion::V1)")
+            && translation
+                .rust
+                .contains(".is_at_least(EnumConstantOptionalUseHeaderVersion::V1)")
+            && !translation
+                .rust
+                .contains("EnumConstantOptionalUseHeaderVersion::V1.unwrap()")
+            && !translation
+                .rust
+                .contains("EnumConstantOptionalUseHeaderVersion::V1.as_ref()")
+            && !translation
+                .rust
+                .contains("EnumConstantOptionalUseHeaderVersion::V1.map("),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn source_interface_collection_elements_use_boxed_dyn_trait() {
     let translation = translate_source(
         r#"
