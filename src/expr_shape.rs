@@ -679,6 +679,9 @@ fn infer_field_access_shape(
     if let Some(shape) = source_java_enum_static_field_shape(receiver, field, env, ctx) {
         return Some(shape);
     }
+    if let Some(shape) = static_storage_field_access_shape(receiver, field, env, ctx) {
+        return Some(shape);
+    }
     if let Some(signatures) = ctx.signatures
         && let Some(crate::member_access_plan::MemberAccessPlan {
             op: crate::member_access_plan::MemberAccessOp::StaticConstant { owner },
@@ -711,6 +714,30 @@ fn infer_field_access_shape(
             .or_else(|| signatures.field_shape(&name, &crate::parser::to_snake_case(field)))
             .map(field_access_shape_from_signature_shape)
     })
+}
+
+fn static_storage_field_access_shape(
+    receiver: &Expr,
+    field: &str,
+    env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<RustSlotShape> {
+    let Expr::Var(receiver_name) = receiver else {
+        return None;
+    };
+    if env.local_type(receiver_name).is_some() || env.field_type(receiver_name).is_some() {
+        return None;
+    }
+    let signatures = ctx.signatures?;
+    source_java_enum_static_field_owner_candidates(receiver_name, env)
+        .into_iter()
+        .find_map(|owner| {
+            env.type_static_storage_field_access_name(&owner, field)?;
+            signatures
+                .field_shape(&owner, field)
+                .or_else(|| signatures.field_shape(&owner, &crate::parser::to_snake_case(field)))
+                .cloned()
+        })
 }
 
 fn source_java_enum_static_field_shape(

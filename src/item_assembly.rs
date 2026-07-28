@@ -830,20 +830,37 @@ struct StaticFinalConstInfo {
     normalized: String,
     original: String,
     array_len: Option<usize>,
+    has_associated_const: bool,
+    string_value: Option<String>,
 }
 
 fn static_final_const_infos(ty: &TypeDecl) -> Vec<StaticFinalConstInfo> {
-    ty.members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Field(field) if is_static_final_field(field) => Some(StaticFinalConstInfo {
+    let mut infos = Vec::new();
+    for member in &ty.members {
+        let Member::Field(field) = member else {
+            continue;
+        };
+        if is_static_final_field(field) {
+            let string_value = field.initializer.as_ref().and_then(|initializer| {
+                const_string_expr_value(initializer, &infos, Some(&field.ty))
+            });
+            let has_associated_const = field
+                .initializer
+                .as_ref()
+                .and_then(|initializer| const_type_and_value(&field.ty, initializer, &infos))
+                .or_else(|| non_literal_static_final_const_type_and_value(field))
+                .or_else(|| static_final_default_const_type_and_value(field))
+                .is_some();
+            infos.push(StaticFinalConstInfo {
                 normalized: crate::parser::to_snake_case(&field.name),
                 original: field.name.clone(),
                 array_len: static_final_array_initializer_len(field),
-            }),
-            _ => None,
-        })
-        .collect()
+                has_associated_const,
+                string_value,
+            });
+        }
+    }
+    infos
 }
 
 fn static_final_array_initializer_len(field: &FieldDecl) -> Option<usize> {
@@ -940,14 +957,29 @@ fn const_expr_value(
     expected_ty: Option<&JavaType>,
 ) -> Option<RustExpr> {
     match expr {
+        Expr::Binary {
+            op: crate::java_ir::BinaryOp::Add,
+            ..
+        } if matches!(expected_ty, Some(JavaType::String)) => {
+            const_string_expr_value(expr, const_infos, expected_ty)
+                .map(|value| RustExpr::Literal(format!("{value:?}")))
+        }
         Expr::Literal(literal) => const_literal_expr_value(literal, expected_ty),
         Expr::Var(name) => {
-            let member = const_reference_name(name, const_infos);
-            Some(self_associated_path_projection(&member))
+            let reference = static_const_reference_info(name, const_infos)?;
+            if reference.has_associated_const {
+                Some(self_associated_path_projection(&reference.original))
+            } else {
+                None
+            }
         }
         Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
-            let member = const_reference_name(field, const_infos);
-            Some(self_associated_path_projection(&member))
+            let reference = static_const_reference_info(field, const_infos)?;
+            if reference.has_associated_const {
+                Some(self_associated_path_projection(&reference.original))
+            } else {
+                None
+            }
         }
         Expr::FieldAccess(receiver, field)
             if field == "length" && matches!(expected_ty, Some(JavaType::Primitive(_))) =>
@@ -1003,6 +1035,41 @@ fn const_expr_value(
         }
         _ => None,
     }
+}
+
+fn const_string_expr_value(
+    expr: &Expr,
+    const_infos: &[StaticFinalConstInfo],
+    expected_ty: Option<&JavaType>,
+) -> Option<String> {
+    if !matches!(expected_ty, Some(JavaType::String)) {
+        return None;
+    }
+    match expr {
+        Expr::Literal(Literal::String(value)) => Some(value.clone()),
+        Expr::Var(name) => static_const_string_value(name, const_infos),
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            static_const_string_value(field, const_infos)
+        }
+        Expr::Binary {
+            op: crate::java_ir::BinaryOp::Add,
+            left,
+            right,
+        } => {
+            let left = const_string_expr_value(left, const_infos, expected_ty)?;
+            let right = const_string_expr_value(right, const_infos, expected_ty)?;
+            Some(format!("{left}{right}"))
+        }
+        _ => None,
+    }
+}
+
+fn static_const_string_value(name: &str, const_infos: &[StaticFinalConstInfo]) -> Option<String> {
+    let normalized = crate::parser::to_snake_case(name);
+    const_infos
+        .iter()
+        .find(|info| info.original == name || info.normalized == normalized)
+        .and_then(|info| info.string_value.clone())
 }
 
 fn const_array_expr_value(
@@ -1063,11 +1130,18 @@ fn const_literal_expr_value(literal: &Literal, expected_ty: Option<&JavaType>) -
 }
 
 fn const_reference_name<'a>(name: &'a str, const_infos: &'a [StaticFinalConstInfo]) -> &'a str {
+    static_const_reference_info(name, const_infos)
+        .map(|info| info.original.as_str())
+        .unwrap_or(name)
+}
+
+fn static_const_reference_info<'a>(
+    name: &str,
+    const_infos: &'a [StaticFinalConstInfo],
+) -> Option<&'a StaticFinalConstInfo> {
     const_infos
         .iter()
         .find(|info| name == info.normalized || name == info.original)
-        .map(|info| info.original.as_str())
-        .unwrap_or(name)
 }
 
 fn static_const_array_len(name: &str, const_infos: &[StaticFinalConstInfo]) -> Option<usize> {

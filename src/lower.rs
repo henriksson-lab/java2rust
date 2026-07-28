@@ -851,6 +851,16 @@ fn static_storage_initial_value_expr(
     let Some(initializer) = field.initializer.as_ref() else {
         return static_storage_initial_fallback_value(shape, ctx.facts);
     };
+    if matches!(shape.java_ty, JavaType::String)
+        && let Some(value) = static_string_storage_initial_value_expr(ty, initializer, ctx)
+    {
+        return value;
+    }
+    if matches!(shape.java_ty, JavaType::Primitive(_))
+        && let Some(value) = static_primitive_storage_initial_value_expr(ty, initializer, ctx)
+    {
+        return value;
+    }
     let value = match initializer {
         Expr::Literal(Literal::Null) if shape.optional_element_type().is_some() => {
             return typed_none_for_slot(&Slot::Return(shape.clone()))
@@ -895,6 +905,205 @@ fn static_storage_initial_value_expr(
     } else {
         value
     }
+}
+
+fn static_primitive_storage_initial_value_expr(
+    ty: &TypeDecl,
+    initializer: &Expr,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    match initializer {
+        Expr::Literal(literal) => Some(literal_expr(literal)),
+        Expr::Var(name) => static_storage_reference_expr(ty, name, None, ctx),
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            static_storage_reference_expr(ty, field, None, ctx)
+        }
+        Expr::FieldAccess(receiver, field) => {
+            let Expr::Var(owner) = receiver.as_ref() else {
+                return None;
+            };
+            static_storage_reference_expr(ty, field, Some(owner), ctx)
+        }
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if args.is_empty() && matches!(name.as_str(), "length" | "len") => {
+            let receiver = static_string_storage_initial_value_expr(ty, receiver, ctx)?;
+            Some(RustExpr::Raw(format!(
+                "{}.len() as i32",
+                emit::emit_expr(&receiver)
+            )))
+        }
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => Some(RustExpr::Unary {
+            op: "-".to_string(),
+            expr: Box::new(static_primitive_storage_initial_value_expr(ty, expr, ctx)?),
+        }),
+        Expr::Unary {
+            op: UnaryOp::Pos,
+            expr,
+        } => static_primitive_storage_initial_value_expr(ty, expr, ctx),
+        Expr::Cast { expr, ty: cast_ty } if primitive_rust_cast_type(cast_ty).is_some() => {
+            Some(RustExpr::Cast {
+                expr: Box::new(static_primitive_storage_initial_value_expr(ty, expr, ctx)?),
+                ty: primitive_rust_cast_type(cast_ty)?.to_string(),
+            })
+        }
+        Expr::Binary { op, left, right } if static_storage_binary_op_is_allowed(*op) => {
+            Some(RustExpr::Binary {
+                op: crate::operator_lowering::binary_op_to_rust(*op).to_string(),
+                left: Box::new(static_primitive_storage_initial_value_expr(ty, left, ctx)?),
+                right: Box::new(static_primitive_storage_initial_value_expr(ty, right, ctx)?),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn static_storage_reference_expr(
+    current_ty: &TypeDecl,
+    field_name: &str,
+    owner_name: Option<&str>,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let owner_ty = owner_name
+        .and_then(|owner| {
+            find_type_decl_by_name(ctx.program, owner)
+                .or_else(|| find_type_decl_by_name(ctx.support_local_type_program, owner))
+                .or_else(|| find_type_decl_by_name(ctx.source_summary_type_program, owner))
+        })
+        .unwrap_or(current_ty);
+    let field = static_field_decl_by_name(owner_ty, field_name)?;
+    let member = static_const_reference_name_for_type(owner_ty, field_name);
+    let owner = owner_name.map(crate::slot_render::rust_name_for_java_named_type);
+    if crate::item_assembly::static_final_field_has_associated_const(owner_ty, field) {
+        return Some(match owner {
+            Some(owner) => owner_associated_path_projection(&owner, member),
+            None => self_associated_path_projection(member),
+        });
+    }
+    Some(match owner {
+        Some(owner) => qualified_static_storage_accessor_projection(&owner, member),
+        None => static_storage_accessor_projection(member),
+    })
+}
+
+fn primitive_rust_cast_type(ty: &JavaType) -> Option<&'static str> {
+    match ty {
+        JavaType::Primitive(PrimitiveType::Byte) => Some("i8"),
+        JavaType::Primitive(PrimitiveType::Short) => Some("i16"),
+        JavaType::Primitive(PrimitiveType::Int) => Some("i32"),
+        JavaType::Primitive(PrimitiveType::Long) => Some("i64"),
+        JavaType::Primitive(PrimitiveType::Float) => Some("f32"),
+        JavaType::Primitive(PrimitiveType::Double) => Some("f64"),
+        JavaType::Primitive(PrimitiveType::Char) => Some("char"),
+        JavaType::Primitive(PrimitiveType::Boolean) => Some("bool"),
+        _ => None,
+    }
+}
+
+fn static_storage_binary_op_is_allowed(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+    )
+}
+
+fn static_string_storage_initial_value_expr(
+    ty: &TypeDecl,
+    initializer: &Expr,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    match initializer {
+        Expr::Literal(Literal::String(value)) => {
+            Some(RustExpr::Literal(format!("{value:?}.to_string()")))
+        }
+        Expr::Var(name) => static_string_storage_reference_expr(ty, name, None, ctx),
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            static_string_storage_reference_expr(ty, field, None, ctx)
+        }
+        Expr::FieldAccess(receiver, field) => {
+            let Expr::Var(owner) = receiver.as_ref() else {
+                return None;
+            };
+            static_string_storage_reference_expr(ty, field, Some(owner), ctx)
+        }
+        Expr::Binary {
+            op: BinaryOp::Add,
+            left,
+            right,
+        } => {
+            let left = static_string_storage_initial_value_expr(ty, left, ctx)?;
+            let right = static_string_storage_initial_value_expr(ty, right, ctx)?;
+            Some(RustExpr::Raw(format!(
+                "format!(\"{{}}{{}}\", {}, {})",
+                emit::emit_expr(&left),
+                emit::emit_expr(&right)
+            )))
+        }
+        _ => None,
+    }
+}
+
+fn static_string_storage_reference_expr(
+    current_ty: &TypeDecl,
+    field_name: &str,
+    owner_name: Option<&str>,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let owner_ty = owner_name
+        .and_then(|owner| {
+            find_type_decl_by_name(ctx.program, owner)
+                .or_else(|| find_type_decl_by_name(ctx.support_local_type_program, owner))
+                .or_else(|| find_type_decl_by_name(ctx.source_summary_type_program, owner))
+        })
+        .unwrap_or(current_ty);
+    let field = static_field_decl_by_name(owner_ty, field_name)?;
+    if !matches!(field.ty, JavaType::String) {
+        return None;
+    }
+    let member = static_const_reference_name_for_type(owner_ty, field_name);
+    let owner = owner_name.map(crate::slot_render::rust_name_for_java_named_type);
+    if crate::item_assembly::static_final_field_has_associated_const(owner_ty, field) {
+        let path = if let Some(owner) = owner {
+            owner_associated_path_projection(&owner, member)
+        } else {
+            self_associated_path_projection(member)
+        };
+        return Some(RustExpr::Raw(format!(
+            "{}.to_string()",
+            emit::emit_expr(&path)
+        )));
+    }
+    Some(match owner {
+        Some(owner) => qualified_static_storage_accessor_projection(&owner, member),
+        None => static_storage_accessor_projection(member),
+    })
+}
+
+fn static_field_decl_by_name<'a>(ty: &'a TypeDecl, name: &str) -> Option<&'a FieldDecl> {
+    let normalized = crate::parser::to_snake_case(name);
+    ty.members.iter().find_map(|member| {
+        let Member::Field(field) = member else {
+            return None;
+        };
+        (field.modifiers.contains(&Modifier::Static)
+            && (field.name == name || crate::parser::to_snake_case(&field.name) == normalized))
+            .then_some(field)
+    })
 }
 
 fn static_const_reference_name_for_type<'a>(ty: &'a TypeDecl, name: &'a str) -> &'a str {
@@ -7548,6 +7757,9 @@ fn lower_expr_with_refinements(
         Expr::This => this_expr(),
         Expr::Super => super_expr(),
         Expr::FieldAccess(receiver, field) => {
+            if let Some(storage) = lower_static_storage_field_access(receiver, field, env, ctx) {
+                return storage;
+            }
             if let Some(enum_variant) =
                 lower_java_enum_static_field_access(receiver, field, env, ctx)
             {
@@ -8606,6 +8818,21 @@ fn lower_write_sequence_receiver(
         return lowered;
     }
     project_optional_sequence_receiver(lowered, OptionalSequenceReceiverProjection::Mutable)
+}
+
+fn lower_static_storage_field_access(
+    receiver: &Expr,
+    field: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let owner = static_storage_owner_type_name(receiver, env, ctx)?;
+    let field_name = env.type_static_storage_field_access_name(&owner, field)?;
+    let rust_owner = crate::slot_render::rust_name_for_java_named_type(&owner);
+    Some(qualified_static_storage_accessor_projection(
+        &rust_owner,
+        field_name,
+    ))
 }
 
 fn lower_local_assignment_value_expr(

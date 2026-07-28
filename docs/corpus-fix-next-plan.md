@@ -4794,6 +4794,24 @@ constants/static support, concrete/concrete `instanceof`, erased-object
 clone/comparison, inherited `super(...)`, unresolved external/source facade
 methods, and `String: Borrow<&str>` map/set lookup drift.
 
+Follow-up static-final string storage cleanup: source `static final String`
+fields now keep using Rust associated consts only when the initializer can be
+represented as a real const. Same-owner literal concatenations fold, while
+cross-owner/runtime string concatenations demote to static storage. Dependent
+primitive static fields that reference demoted string constants also demote, and
+simple static initializer expressions preserve string `.length()` and numeric
+binary operations instead of falling back to `0`. Qualified reads of runtime
+static string storage keep their owned `String` actual shape so borrowed string
+slots, including `startsWith`, render through `.as_str()`. Focused fixture
+`source_static_final_string_concat_constants_use_fold_or_storage` passes. VCF
+rerun `.tmp/corpus-rerun-htsjdk-vcf-after-static-string-storage-r3`
+translates 32/32 files, keeps 20 invalid-pattern files, and reduces
+generated-Rust errors from 652 to 645. The intermediate missing
+`ALT_HEADER_START`/`PEDIGREE_HEADER_START` associated items and
+`String: Pattern` rows are gone. Next static work should address stable static field
+identity/name drift such as `MISSING_VALUE_v4`/`PASSES_FILTERS_v4` rather than
+adding more string-concat special cases.
+
 ## Rerun Protocol
 
 After each fix:

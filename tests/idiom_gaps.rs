@@ -18166,6 +18166,95 @@ public class UsesExpressionConstants {
 }
 
 #[test]
+fn source_static_final_string_concat_constants_use_fold_or_storage() {
+    let target = r###"
+public class StringConcatConstantUser {
+    public static final String SAME_OWNER_KEY = "INFO";
+    public static final String SAME_OWNER_START = "##" + SAME_OWNER_KEY;
+    public static final String CROSS_OWNER_START = PrefixOwner.PREFIX + SAME_OWNER_KEY;
+    public static final int CROSS_OWNER_OFFSET = CROSS_OWNER_START.length() + 1;
+
+    public static boolean check(String line) {
+        return line.startsWith(SAME_OWNER_START) || line.startsWith(CROSS_OWNER_START) || line.startsWith(QualifiedRuntime.START);
+    }
+
+    public static int offset() {
+        return CROSS_OWNER_OFFSET;
+    }
+}
+
+class PrefixOwner {
+    public static final String PREFIX = "##";
+}
+
+class QualifiedRuntime {
+    public static final String START = PrefixOwner.PREFIX + "QUAL";
+}
+"###;
+
+    let translation = translate_source(target);
+
+    let has_cross_owner_storage = translation
+        .rust
+        .contains("static STRING_CONCAT_CONSTANT_USER_CROSS_OWNER_START")
+        || translation
+            .rust
+            .contains("static STRING_CONCAT_CONSTANT_USER_C_R_O_S_S_O_W_N_E_R_S_T_A_R_T");
+    let has_cross_owner_getter = translation
+        .rust
+        .contains("pub fn __static_cross_owner_start() -> String")
+        || translation
+            .rust
+            .contains("pub fn __static_c_r_o_s_s_o_w_n_e_r_s_t_a_r_t() -> String");
+    let has_cross_owner_offset_storage = translation
+        .rust
+        .contains("static STRING_CONCAT_CONSTANT_USER_CROSS_OWNER_OFFSET")
+        || translation
+            .rust
+            .contains("static STRING_CONCAT_CONSTANT_USER_C_R_O_S_S_O_W_N_E_R_O_F_F_S_E_T");
+    assert!(
+        translation
+            .rust
+            .contains("pub const SAME_OWNER_START: &'static str = \"##INFO\";")
+            && has_cross_owner_storage
+            && has_cross_owner_getter
+            && has_cross_owner_offset_storage
+            && translation
+                .rust
+                .contains("format!(\"{}{}\", PrefixOwner::PREFIX.to_string(), Self::SAME_OWNER_KEY.to_string())")
+            && translation
+                .rust
+                .contains("line.starts_with(Self::SAME_OWNER_START)")
+            && translation
+                .rust
+                .contains("line.starts_with(Self::__static_c_r_o_s_s_o_w_n_e_r_s_t_a_r_t().as_str())")
+            && translation
+                .rust
+                .contains("line.starts_with(QualifiedRuntime::__static_s_t_a_r_t().as_str())")
+            && translation
+                .rust
+                .contains("return Self::__static_c_r_o_s_s_o_w_n_e_r_o_f_f_s_e_t();")
+            && translation.rust.contains(
+                "unwrap_or_else(|| (Self::__static_c_r_o_s_s_o_w_n_e_r_s_t_a_r_t().len() as i32) + 1)"
+            )
+            && !translation.rust.contains("unwrap_or_else(|| 0)")
+            && !translation.rust.contains("PREFIX + Self::SAME_OWNER_KEY")
+            && !translation.rust.contains("&str + &str"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_static_final_string_concat_constants",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_static_final_byte_constants_preserve_declared_slot_type() {
     let translation = translate_source(
         r#"
