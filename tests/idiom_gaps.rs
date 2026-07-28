@@ -4570,6 +4570,41 @@ class Incrementor {
 }
 
 #[test]
+fn nested_interface_implementor_forwarding_uses_flattened_rust_type_name() {
+    let translation = translate_source(
+        r#"
+interface Headered {
+    Header getHeader();
+}
+
+class Header {
+}
+
+class Builder {
+    private static class Reader implements Headered {
+        private Header header;
+
+        public Header getHeader() {
+            return this.header;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("impl Headered for BuilderReader")
+            && translation
+                .rust
+                .contains("fn get_header(&self) -> &Header { BuilderReader::get_header(self) }")
+            && !translation.rust.contains("Builder.Reader::get_header")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn anonymous_nested_interface_constructor_lowers_to_boxed_dyn_handoff() {
     let translation = translate_source(
         r#"

@@ -4836,7 +4836,7 @@ class Source implements IdSource {
             &facts,
         ),
         vec![
-            "impl IdSource for Source {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { Source::ids(self, values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> Box<dyn IdSource> { panic!(\"java2rust: clone_box for IdSource requires a cloneable Java object carrier\") }\n}"
+            "impl IdSource for Source {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId> { Source::ids(self, values.to_vec()) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> Box<dyn IdSource> { panic!(\"java2rust: clone_box for IdSource requires a cloneable Java object carrier\") }\n}"
                 .to_string()
         ]
     );
@@ -4971,7 +4971,7 @@ class OverloadedNamed implements Named {
     assert!(!impls[0].contains("compile_error!"), "{}", impls[0]);
     assert!(
         impls[0].contains(
-            "fn score(&self, prefix: String) -> i32 { OverloadedNamed::score_string(self, prefix) }"
+            "fn score(&self, prefix: &str) -> i32 { OverloadedNamed::score_string(self, prefix.to_string()) }"
         ),
         "{}",
         impls[0]

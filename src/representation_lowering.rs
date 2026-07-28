@@ -527,10 +527,8 @@ fn trait_impl_method(
             trait_impl_forwarding_receiver_arg(ty, implementing_owner, trait_receiver)
         )
     };
-    let call = format!(
-        "{}::{}({})",
-        implementing_owner.name, rust_name, receiver_arg
-    );
+    let implementing_owner_name = rust_name_for_java_named_type(&implementing_owner.name);
+    let call = format!("{implementing_owner_name}::{rust_name}({receiver_arg})");
     let body = if interface_exceptions.wrap_returns_in_result
         || signatures
             .required_method_signature(interface, interface_method)

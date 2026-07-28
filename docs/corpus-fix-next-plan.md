@@ -5187,6 +5187,26 @@ interface call spelling in `VCFIteratorBuilder`
 should choose one of those generated-Rust families and fixture it before
 patching.
 
+2026-07-28 VCF nested implementor forwarding follow-up: trait implementation
+forwarding now renders calls through the flattened Rust owner name for nested
+Java implementors. The minimized fixture
+`nested_interface_implementor_forwarding_uses_flattened_rust_type_name` covers
+`Outer.Inner implements Interface` lowering and rejects
+`Outer.Inner::method(self)` syntax drift. Stale slot-shape expectations were
+refreshed for the already-landed borrowed trait parameter forwarding policy.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260728-htsjdk-vcf-after-nested-forwarding-release`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `544` to `540`. The old malformed
+`VCFIteratorBuilder.VCFReaderIterator::get_header(self)` and
+`VCFIteratorBuilder.BCFInputStreamIterator::get_header(self)` strings are gone;
+the generated impl now calls `VCFIteratorBuilderVCFReaderIterator::get_header`
+and `VCFIteratorBuilderBCFInputStreamIterator::get_header`. The adjacent
+remaining `get_header` failures are now real return-slot precision problems:
+the concrete nested implementations return `Option<Box<dyn Any>>` while the
+`VCFIterator` trait expects `&VCFHeader`.
+
 ## Rerun Protocol
 
 After each fix:
