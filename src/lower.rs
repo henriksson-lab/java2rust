@@ -18784,6 +18784,9 @@ fn retarget_receiverless_current_static_call<'a>(
     let Some(signature) = fallback_signature else {
         return target;
     };
+    if signature.receiver != ReceiverPlan::None {
+        return target;
+    }
     match target {
         CallTargetPlan::FallbackFree { .. } | CallTargetPlan::FallbackSelf { .. } => {
             CallTargetPlan::StaticOwner {
@@ -18853,8 +18856,9 @@ fn source_context_receiver_method_fallback_signature(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<ContextFallbackMethodSignature> {
-    let receiver = receiver?;
-    if fallback_receiver_is_static_owner_expr(receiver, env, ctx) {
+    if let Some(receiver) = receiver
+        && fallback_receiver_is_static_owner_expr(receiver, env, ctx)
+    {
         return None;
     }
     let shape_ctx = ExprShapeContext {
@@ -18862,17 +18866,24 @@ fn source_context_receiver_method_fallback_signature(
         representations: Some(ctx.representations),
         facts: Some(ctx.facts),
     };
-    let receiver_uses_dyn_trait_slots = receiver_expr_uses_dyn_trait_slots(receiver, env, ctx);
+    let receiver_uses_dyn_trait_slots = receiver
+        .map(|receiver| receiver_expr_uses_dyn_trait_slots(receiver, env, ctx))
+        .unwrap_or(false);
     let arg_types = args
         .iter()
         .map(|arg| infer_expr_shape_with_context(arg, env, shape_ctx).java_ty)
         .collect::<Vec<_>>();
     let snake_name = crate::parser::to_snake_case(name);
-    for owner in fallback_receiver_type_name_candidates(Some(receiver), name, args.len(), env, ctx)
-    {
-        let Some(ty) = find_context_type_by_key(ctx.support_local_type_program, &owner)
-            .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))
-        else {
+    for owner in fallback_receiver_type_name_candidates(receiver, name, args.len(), env, ctx) {
+        let ty = if receiver.is_none() {
+            find_context_type_by_key(ctx.program, &owner)
+                .or_else(|| find_context_type_by_key(ctx.support_local_type_program, &owner))
+                .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))
+        } else {
+            find_context_type_by_key(ctx.support_local_type_program, &owner)
+                .or_else(|| find_context_type_by_key(ctx.source_summary_type_program, &owner))
+        };
+        let Some(ty) = ty else {
             continue;
         };
         let matching_methods = ty

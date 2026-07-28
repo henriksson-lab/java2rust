@@ -1040,6 +1040,19 @@ actual-shape optional construction cleanup rather than constructor-local
 guessing. The top compile-error family remains broad mismatched types, now 168
 rows instead of 173.
 
+Focused VCF inherited method-name update: rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-current-override-name-r2` translates 32/32
+files, keeps 20 invalid-pattern files, and stays at 546 generated-Rust errors.
+Receiverless instance calls lowered inside inherited bodies now prefer the
+current concrete owner's compatible source signature name before falling back to
+the declaring owner's resolved Rust name. This removes the VCF subclass
+`no method named to_string_encoding_` family where subclasses emitted
+`to_string_encoding` but inherited `toString()` bodies called the base-class
+suffixed overload name. The remaining `to_string_encoding_()` diagnostic is a
+different base-class fallibility shell issue: `VCFHeaderLine::to_string()`
+returns `String` while calling a `Result<String, JavaException>` helper with
+`?`. The top compile-error family remains broad mismatched types, now 176 rows.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

@@ -1523,6 +1523,9 @@ pub fn apply_fallback_self_rust_name<'a>(
     fallback_rust_name: Option<String>,
 ) -> CallExprPlan<'a> {
     match (plan, fallback_rust_name) {
+        (CallExprPlan::Target(CallTargetPlan::InstanceSelf { .. }), Some(rust_name)) => {
+            CallExprPlan::Target(CallTargetPlan::FallbackSelf { rust_name })
+        }
         (CallExprPlan::Target(CallTargetPlan::StaticSelf { .. }), Some(rust_name)) => {
             CallExprPlan::Target(CallTargetPlan::StaticOwner {
                 owner: "Self".to_string(),

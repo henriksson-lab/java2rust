@@ -6422,6 +6422,53 @@ class Holder {
 }
 
 #[test]
+fn inherited_receiverless_instance_call_uses_current_override_signature_name() {
+    let source = r#"
+import java.util.Map;
+
+class HeaderBase {
+    public String toString() {
+        return toStringEncoding();
+    }
+
+    protected String toStringEncoding() {
+        return "base";
+    }
+
+    static String toStringEncoding(Map<String, Object> values) {
+        return "map";
+    }
+}
+
+class HeaderChild extends HeaderBase {
+    protected String toStringEncoding() {
+        return "child";
+    }
+}
+"#;
+    let translation = translate_source(source);
+    let child_impl = translation
+        .rust
+        .split("impl HeaderChild {")
+        .nth(1)
+        .and_then(|tail| tail.split("impl From<HeaderChild>").next())
+        .unwrap_or(&translation.rust);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn to_string(&self) -> String")
+            && child_impl.contains("return self.to_string_encoding();")
+            && translation
+                .rust
+                .contains("pub fn to_string_encoding(&self) -> String")
+            && !child_impl.contains("self.to_string_encoding_()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn context_translation_uses_sibling_static_string_constant_shape() {
     let caller = r#"
 class ContextConstantCaller {
