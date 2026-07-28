@@ -10242,21 +10242,49 @@ fn apply_fallback_signature_arg_shapes(
     plan: ArgumentLoweringPlan,
     fallback_signature: Option<&(String, &crate::signature::MethodSignaturePlan)>,
 ) -> ArgumentLoweringPlan {
-    let ArgumentLoweringPlan::Unshaped { arg_count } = plan else {
+    let Some((_, signature)) = fallback_signature else {
         return plan;
     };
-    if let Some((_, signature)) = fallback_signature
-        && signature.params.len() == arg_count
-    {
-        return ArgumentLoweringPlan::Shaped(
-            signature
-                .params
-                .iter()
-                .map(|param| param.shape.clone())
-                .collect(),
-        );
+    match plan {
+        ArgumentLoweringPlan::Unshaped { arg_count } if signature.params.len() == arg_count => {
+            ArgumentLoweringPlan::Shaped(
+                signature
+                    .params
+                    .iter()
+                    .map(|param| param.shape.clone())
+                    .collect(),
+            )
+        }
+        ArgumentLoweringPlan::Shaped(shapes) if signature.params.len() == shapes.len() => {
+            ArgumentLoweringPlan::Shaped(
+                shapes
+                    .into_iter()
+                    .zip(signature.params.iter())
+                    .map(|(shape, param)| {
+                        refine_shaped_arg_with_fallback_owned_signature(shape, &param.shape)
+                    })
+                    .collect(),
+            )
+        }
+        plan => plan,
     }
-    plan
+}
+
+fn refine_shaped_arg_with_fallback_owned_signature(
+    mut shape: RustSlotShape,
+    fallback: &RustSlotShape,
+) -> RustSlotShape {
+    if matches!(
+        shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) && matches!(fallback.ownership, OwnershipShape::Owned)
+        && java_types_have_same_erased_identity(&shape.java_ty, &fallback.java_ty)
+    {
+        shape.ownership = OwnershipShape::Owned;
+        shape.view = fallback.view.clone();
+        shape.dispatch = fallback.dispatch.clone();
+    }
+    shape
 }
 
 fn static_owner_receiver_is_emitted_context(
@@ -11417,6 +11445,10 @@ fn lower_args_for_call_target(
     {
         plan = facade_plan;
     }
+    if let Some(source_plan) = emitted_source_resolved_call_argument_plan(resolved, args.len(), ctx)
+    {
+        plan = source_plan;
+    }
     if matches!(plan, ArgumentLoweringPlan::Unshaped { .. })
         && args.len() == 1
         && let Some(lowered) = lower_unshaped_argument_for_call_target(&args[0], target, env, ctx)
@@ -11529,6 +11561,41 @@ fn lower_args_for_call_target(
             .collect(),
         _ => lower_args_with_plan(args, env, plan, ctx),
     }
+}
+
+fn emitted_source_resolved_call_argument_plan(
+    resolved: Option<&ResolvedCall>,
+    arg_count: usize,
+    ctx: LowerCtx,
+) -> Option<ArgumentLoweringPlan> {
+    let resolved = resolved?;
+    let owner = find_context_type_by_key(ctx.program, &resolved.declaring_type)?;
+    let method = owner.members.iter().find_map(|member| match member {
+        Member::Method(method)
+            if method.params.len() == arg_count
+                && method.modifiers.contains(&Modifier::Static)
+                && method_rust_name_matches_resolved(method, &resolved.rust_name) =>
+        {
+            Some(method)
+        }
+        _ => None,
+    })?;
+    let signature = ctx.signatures.required_method_signature(owner, method);
+    Some(ArgumentLoweringPlan::Shaped(
+        signature
+            .params
+            .iter()
+            .map(|param| param.shape.clone())
+            .collect(),
+    ))
+}
+
+fn method_rust_name_matches_resolved(method: &MethodDecl, resolved_rust_name: &str) -> bool {
+    let base = crate::parser::to_snake_case(&method.name);
+    resolved_rust_name == base
+        || resolved_rust_name
+            .strip_prefix(&base)
+            .is_some_and(|suffix| suffix.starts_with('_'))
 }
 
 fn call_target_uses_display_arguments(

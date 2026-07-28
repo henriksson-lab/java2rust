@@ -288,6 +288,17 @@ Constructor self-field projection follow-up: deferred constructor field
 assignments and delegated-constructor trailing field assignments now use a
 shared `__java_self.field` projection helper. Constructor lowering still owns
 sequencing, default seeding, and self-dependent expression recovery.
+Emitted source-call signature consistency follow-up: resolved static calls into
+types emitted from the current source program now rebuild their argument plan
+from the exact `required_method_signature(TypeDecl, MethodDecl)` used by item
+assembly. This prevents the alias/base-name lookup path from weakening a
+source method parameter to a borrowed slot while the emitted Rust function still
+takes the owned slot. The first focused proof is
+`current_self_concrete_static_argument_clones_without_downcast`, while
+`resolved_static_helper_call_uses_fallback_signature_arg_shapes` and
+`local_passed_to_resolved_static_mutable_source_param_is_declared_mutable`
+remain green, preserving the separate non-emitted source-summary borrow
+fallback.
 Unsupported/abstract fallback projection follow-up: abstract method stubs,
 abstract interface stubs, unsupported inner-class outer capture placeholders,
 and unsupported constructor-call handoffs now use named coercion projections for
