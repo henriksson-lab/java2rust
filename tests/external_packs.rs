@@ -15999,6 +15999,10 @@ class VariantPackUse {
         return GenotypeLikelihoods.fromPLs(values);
     }
 
+    Object likelihoodsFromGlField(String value) {
+        return GenotypeLikelihoods.fromGLField(value);
+    }
+
     int likelihoodIndex(int first, int second) {
         return GenotypeLikelihoods.calculatePLindex(first, second);
     }
@@ -16430,6 +16434,22 @@ class VariantPackUse {
             name: "GenotypeLikelihoods".to_string(),
             args: Vec::new(),
         })
+    );
+
+    let likelihoods_from_gl_field = semantic
+        .facts
+        .external_api_effect_for_receiver(Some("GenotypeLikelihoods"), "fromGLField")
+        .expect("GL likelihood factory should be modeled by the pack");
+    assert_eq!(
+        likelihoods_from_gl_field.return_type,
+        Some(JavaType::Named {
+            name: "GenotypeLikelihoods".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        likelihoods_from_gl_field.return_nullability,
+        NullabilityState::DefinitelyNonNull
     );
 
     let likelihood_index = semantic

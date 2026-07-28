@@ -17716,6 +17716,22 @@ const VARIANTCONTEXT_API_EFFECTS: &[ExternalPackApiEffect] = &[
     ),
     semantic_typed_effect(
         "htsjdk.variant.variantcontext.GenotypeLikelihoods",
+        "fromGLField",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenotypeLikelihoods",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenotypeLikelihoods",
+        "fromGLField",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "GenotypeLikelihoods",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.variant.variantcontext.GenotypeLikelihoods",
         "calculatePLindex",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
@@ -25892,6 +25908,11 @@ const VARIANTCONTEXT_MODELED_APIS: &[ExternalPackModeledApi] = &[
         "fromPLs",
     ),
     modeled_semantic("GenotypeLikelihoods", "fromPLs"),
+    modeled_semantic(
+        "htsjdk.variant.variantcontext.GenotypeLikelihoods",
+        "fromGLField",
+    ),
+    modeled_semantic("GenotypeLikelihoods", "fromGLField"),
     modeled_semantic(
         "htsjdk.variant.variantcontext.GenotypeLikelihoods",
         "calculatePLindex",
