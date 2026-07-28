@@ -1109,6 +1109,14 @@ The ragged object case also exposed a shared map-key projection drift: indexed
 `HashMap::get`, while borrowed local keys and `&'static str` constants still
 avoid double-borrowing.
 
+Focused optional-resource assertion update:
+`optional_resource_facade_upcast_clones_wrapper_before_consuming_unwrap` now
+passes with the same contained-value optional recovery spelling as the broader
+optional-reuse batch:
+`.as_ref().cloned()/* TODO(translation): validate added clone */.expect(...)`.
+The fixture now rejects wrapper-level `baos.clone().unwrap()` and keeps the
+finally cleanup read as `baos.as_ref().unwrap().close()?`.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

@@ -15487,10 +15487,13 @@ class OptionalResourceFacadeUpcastMoveUse {
     );
 
     assert!(
-        translation.rust.contains("baos.clone().unwrap()")
+        translation.rust.contains(
+            "baos.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\").into()"
+        )
             && !translation
                 .rust
                 .contains("GZIPOutputStream::new(baos.unwrap()")
+            && !translation.rust.contains("baos.clone().unwrap()")
             && translation.rust.contains("baos.as_ref().unwrap().close()?"),
         "{}",
         translation.rust
