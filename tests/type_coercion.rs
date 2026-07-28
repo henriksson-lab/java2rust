@@ -10,7 +10,8 @@ use new_java2rust::coercion::{
     java_integral_literal_char, literal_slot_plan, normalize_map_key_borrow_projection,
     ownership_coercion_fallback_message_policy, plan_coercion, plan_coercion_with_facts,
     plan_shape_coercion, plan_shape_coercion_with_facts, render_index_to_usize_projection,
-    render_instanceof_check, rust_primitive_type_name_policy,
+    render_instanceof_check, rust_expr_is_constructed_optional_value,
+    rust_primitive_type_name_policy,
 };
 use new_java2rust::conversion_lowering::{
     apply_lowered_slot_expr_conversion, apply_slot_expr_conversion,
@@ -103,6 +104,27 @@ fn simple_interval_locatable_facts() -> FactSet {
             provenance: FactProvenance::UserOverride,
         });
     facts
+}
+
+#[test]
+fn rust_get_projection_counts_as_existing_optional_carrier() {
+    assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "fields.get(&\"ID\".to_string()).cloned()".to_string()
+    )));
+    assert!(rust_expr_is_constructed_optional_value(&RustExpr::Raw(
+        "values.get(index).copied()".to_string()
+    )));
+    assert!(rust_expr_is_constructed_optional_value(
+        &RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("fields".to_string())),
+                method: "get".to_string(),
+                args: vec![RustExpr::Literal("\"ID\"".to_string())],
+            }),
+            method: "cloned".to_string(),
+            args: Vec::new(),
+        }
+    ));
 }
 
 #[test]

@@ -833,14 +833,30 @@ pub fn rust_expr_is_constructed_optional_value(expr: &RustExpr) -> bool {
             rust_expr_is_constructed_optional_value(then_expr)
                 || rust_expr_is_constructed_optional_value(else_expr)
         }
+        RustExpr::MethodCall {
+            receiver, method, ..
+        } if matches!(method.as_str(), "cloned" | "copied") => {
+            rust_expr_is_get_projection(receiver)
+        }
         RustExpr::Raw(raw) => rendered_expr_is_constructed_optional_value(raw),
         _ => false,
     }
 }
 
+fn rust_expr_is_get_projection(expr: &RustExpr) -> bool {
+    matches!(expr, RustExpr::MethodCall { method, .. } if method == "get")
+}
+
 fn rendered_expr_is_constructed_optional_value(rendered: &str) -> bool {
     let trimmed = rendered.trim_start();
-    trimmed.starts_with("Some(") || (trimmed.starts_with("if ") && trimmed.contains("{ Some("))
+    trimmed.starts_with("Some(")
+        || (trimmed.starts_with("if ") && trimmed.contains("{ Some("))
+        || rendered_expr_is_get_option_projection(trimmed)
+}
+
+fn rendered_expr_is_get_option_projection(rendered: &str) -> bool {
+    (rendered.ends_with(".cloned()") || rendered.ends_with(".copied()"))
+        && rendered.contains(".get(")
 }
 
 pub fn parenthesize_borrowed_method_receiver(receiver: RustExpr) -> RustExpr {

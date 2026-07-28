@@ -2651,12 +2651,18 @@ fn source_super_constructor_fields_and_trailing<'a>(
                 }
             }
         };
-        super_field_values.insert(field_name.clone(), value);
+        super_field_values.insert(field_name.clone(), (value, shape.clone()));
     }
 
     for plan in child_plans {
-        let (field_name, _) = constructor_field_name_and_shape(&plan);
-        if let Some(value) = super_field_values.remove(field_name) {
+        let (field_name, child_shape) = constructor_field_name_and_shape(&plan);
+        if let Some((value, super_shape)) = super_field_values.remove(field_name) {
+            let value = adapt_inherited_super_field_value_for_child_shape(
+                value,
+                super_shape,
+                child_shape,
+                ctx,
+            );
             fields.push((field_name.clone(), value));
         } else if let Some(value) = match &plan {
             ConstructorFieldValuePlan::Assigned { value, .. }
@@ -2711,6 +2717,53 @@ fn source_super_constructor_fields_and_trailing<'a>(
     let returns_result =
         delegated_constructor_trailing_can_throw(&trailing_instance_calls, env, ctx);
     Some((fields, trailing_instance_calls, returns_result))
+}
+
+fn adapt_inherited_super_field_value_for_child_shape(
+    value: RustExpr,
+    super_shape: RustSlotShape,
+    child_shape: &RustSlotShape,
+    ctx: LowerCtx,
+) -> RustExpr {
+    let Some(element_ty) = child_shape.optional_element_type() else {
+        return value;
+    };
+    if !optional_element_is_source_java_enum(&element_ty, ctx) {
+        return value;
+    }
+    let rendered = emit::emit_expr(&value);
+    if rendered == "None"
+        || rendered == "Default::default()"
+        || rust_expr_is_constructed_optional_value(&value)
+    {
+        return value;
+    }
+    if super_shape.optional_element_type().is_none() {
+        return planned_optional_assignment_value_for_target(
+            value,
+            super_shape,
+            Slot::Assignment(child_shape.clone()),
+            child_shape,
+            false,
+            ctx.facts,
+        );
+    }
+    let mut element_shape = child_shape.clone();
+    element_shape.java_ty = element_ty;
+    let construction = OptionalSlotConstructionPlan {
+        target: child_shape.clone(),
+        element_shape: element_shape.clone(),
+        element_plan: shape_coercion_plan_with_facts(&element_shape, &element_shape, ctx.facts),
+        wrapper_ownership: OwnershipShape::Owned,
+    };
+    construct_optional_value_for_target(value, construction)
+}
+
+fn optional_element_is_source_java_enum(java_ty: &JavaType, ctx: LowerCtx) -> bool {
+    match java_ty {
+        JavaType::Named { name, .. } => matches_source_java_enum_type(name, ctx),
+        _ => false,
+    }
 }
 
 fn lower_constructor_field_value_plan_with_future_reads(

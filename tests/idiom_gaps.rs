@@ -13902,6 +13902,13 @@ public class NullableEnumSwitchOwner {
     private CountType countType;
     private int count;
 
+    public NullableEnumSwitchOwner() {
+    }
+
+    public NullableEnumSwitchOwner(CountType countType) {
+        this.countType = countType;
+    }
+
     public void setFixed() {
         countType = CountType.INTEGER;
     }
@@ -13921,6 +13928,12 @@ public class NullableEnumSwitchOwner {
         }
     }
 }
+
+class NullableEnumSwitchChild extends NullableEnumSwitchOwner {
+    public NullableEnumSwitchChild() {
+        super(NullableEnumSwitchOwner.CountType.INTEGER);
+    }
+}
 "#,
     );
 
@@ -13937,6 +13950,9 @@ public class NullableEnumSwitchOwner {
             && translation
                 .rust
                 .contains("self.count_type = Some(NullableEnumSwitchOwnerCountType::INTEGER)")
+            && translation
+                .rust
+                .contains("count_type: Some(NullableEnumSwitchOwnerCountType::INTEGER)")
             && !translation.rust.contains("count_type: Option<Box<dyn")
             && !translation.rust.contains("__static_i_n_t_e_g_e_r"),
         "{}",

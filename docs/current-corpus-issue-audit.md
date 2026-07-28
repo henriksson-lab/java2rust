@@ -1027,6 +1027,19 @@ constructor/subclass field-initialization mismatches where optional enum fields
 still receive a bare enum in some struct literals; treat that as an optional
 construction/field-plan follow-up, not as a switch-label issue.
 
+Focused VCF inherited source-enum constructor update: rerun
+`.tmp/corpus-rerun-htsjdk-vcf-after-inherited-enum-option-r5` translates 32/32
+files, keeps 20 invalid-pattern files, and reduces generated-Rust errors from
+551 to 546. Inherited source `super(...)` field values now retain the
+superclass field shape and re-adapt concrete source-enum values when the child
+field slot is `Option<Enum>`, so VCF subclass constructors emit
+`Some(VCFHeaderLineCount::INTEGER)` instead of bare enum values. The adapter is
+intentionally limited to source-enum optional elements; nullable strings, map
+lookups, and other optional carriers still need the broader shared
+actual-shape optional construction cleanup rather than constructor-local
+guessing. The top compile-error family remains broad mismatched types, now 168
+rows instead of 173.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
