@@ -321,6 +321,7 @@ fn dispatch_requirements_for_binding_use(use_fact: &BindingUse) -> Vec<DispatchR
         BindingUse::StoredInField { .. } | BindingUse::Returned => {
             vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
         }
+        BindingUse::InstanceOfTarget { .. } => vec![DispatchRequirementKind::NeedsInstanceof],
         BindingUse::PassedToCall { boundary, .. }
         | BindingUse::AssignedFromCall { boundary, .. } => match boundary {
             CallArgumentBoundary::InternalSameType | CallArgumentBoundary::KnownContentRead => {

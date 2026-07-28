@@ -4341,6 +4341,24 @@ Focused VCF evidence:
 32/32 files and reduced generated Rust errors from 794 to 747; the prior
 `unsupported Java dispatch coercion: actual=ErasedObject, target=ClosedEnum`
 and `ClosedEnum -> ErasedObject` rows for VCF enum types are gone.
+Instanceof usage tracking follow-up: source `instanceof` expressions now record
+`BindingUse::InstanceOfTarget` for local operands, `object_model` maps that to
+`NeedsInstanceof`, and normal representation planning passes usage facts into
+the object model. This makes runtime subtype-test pressure visible before
+lowering. The current VCF concrete-class hierarchy still keeps concrete
+`VCFHeaderLine` storage because converting source classes with fields/methods to
+runtime enum or erased-object representations requires a larger forwarding/API
+strategy; do not paper over this by rendering all concrete/concrete
+`instanceof` as true or false.
+Hash/equality derive follow-up: source structs that declare Java `equals` and
+`hashCode` now derive `Eq` and `Hash` when all emitted fields support structural
+`Eq + Hash`. This keeps ordinary value structs unchanged while allowing
+HashSet-backed source values such as `VCFHeaderLine { Option<String>, ... }` to
+compile. Focused VCF evidence:
+`.tmp/corpus-rerun-htsjdk-vcf-after-hash-eq-derive-r1` translated 32/32 files
+and reduced generated Rust errors from 747 to 722; the previous
+`HashSet<VCFHeaderLine>` trait-bound family is gone, and generated
+`VCFHeaderLine` derives `Clone, PartialEq, Eq, Hash`.
 External/recovery cleanup: unresolved normalized singular utility receivers such
 as `ExternalUtil.consume(...)` now recover to a static owner after parser
 normalization (`external_util -> ExternalUtil`) when no local or field shadows

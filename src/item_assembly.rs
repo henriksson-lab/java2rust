@@ -46,7 +46,7 @@ pub fn struct_item_for_type_with_facts_and_support_context(
     let fields = struct_fields_for_type(ty, signatures, facts, support_program);
     RustItem::Struct(RustStruct {
         name: rust_name_for_java_named_type(&ty.name),
-        derives: struct_derives_for_fields(&fields, signatures, facts, support_program),
+        derives: struct_derives_for_type(ty, &fields, signatures, facts, support_program),
         fields,
     })
 }
@@ -524,7 +524,8 @@ fn source_type_extends(candidate: &TypeDecl, super_name: &str, support_program: 
         .is_some_and(|parent| source_type_extends(parent, super_name, support_program))
 }
 
-fn struct_derives_for_fields(
+fn struct_derives_for_type(
+    ty: &TypeDecl,
     fields: &[RustField],
     signatures: &SignaturePlan,
     facts: &FactSet,
@@ -548,7 +549,34 @@ fn struct_derives_for_fields(
     {
         derives.push("PartialEq".to_string());
     }
+    if source_type_declares_java_hash_equality(ty)
+        && fields
+            .iter()
+            .all(|field| rust_type_supports_struct_derive_eq_hash(&field.ty))
+    {
+        if !derives.iter().any(|derive| derive == "PartialEq") {
+            derives.push("PartialEq".to_string());
+        }
+        derives.push("Eq".to_string());
+        derives.push("Hash".to_string());
+    }
     derives
+}
+
+fn source_type_declares_java_hash_equality(ty: &TypeDecl) -> bool {
+    let mut has_equals = false;
+    let mut has_hash_code = false;
+    for member in &ty.members {
+        let Member::Method(method) = member else {
+            continue;
+        };
+        match method.name.as_str() {
+            "equals" if method.params.len() == 1 => has_equals = true,
+            "hashCode" | "hash_code" if method.params.is_empty() => has_hash_code = true,
+            _ => {}
+        }
+    }
+    has_equals && has_hash_code
 }
 
 fn rust_type_supports_struct_derive_clone(
@@ -733,6 +761,28 @@ fn rust_type_supports_struct_derive_partial_eq(ty: &RustType) -> bool {
         }
         RustType::Named(_) => false,
         RustType::Slice(_) | RustType::Ref { .. } | RustType::Raw(_) => false,
+    }
+}
+
+fn rust_type_supports_struct_derive_eq_hash(ty: &RustType) -> bool {
+    match ty {
+        RustType::Unit
+        | RustType::Bool
+        | RustType::I8
+        | RustType::I16
+        | RustType::I32
+        | RustType::I64
+        | RustType::Char
+        | RustType::String => true,
+        RustType::Vec(inner) | RustType::Array2(inner) | RustType::Option(inner) => {
+            rust_type_supports_struct_derive_eq_hash(inner)
+        }
+        RustType::F32
+        | RustType::F64
+        | RustType::Named(_)
+        | RustType::Slice(_)
+        | RustType::Ref { .. }
+        | RustType::Raw(_) => false,
     }
 }
 

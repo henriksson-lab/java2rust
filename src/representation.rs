@@ -77,11 +77,12 @@ pub struct SourceSummarySuperclassBoundaryPolicy {
 pub fn plan_representations(program: &Program, facts: &FactSet) -> RepresentationPlan {
     let mut plan = RepresentationPlan::default();
     let effective_facts = EffectiveFacts::new(facts);
+    let usage = crate::usage::analyze_usage_with_facts(program, facts);
     let object_plan = plan_object_model_from_input(ObjectModelInput {
         program,
         facts,
         effective_facts: &effective_facts,
-        usage: None,
+        usage: Some(&usage),
     });
     plan.diagnostics.extend(object_plan.diagnostics);
     for strategy in object_plan.strategies.into_values() {

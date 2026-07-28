@@ -1695,7 +1695,9 @@ fn add_method_binding_dependency_edges(
                         SignatureDependencyEdgeKind::MethodReturn,
                     );
                 }
-                BindingUse::ContentRead | BindingUse::Mutated => {}
+                BindingUse::ContentRead
+                | BindingUse::InstanceOfTarget { .. }
+                | BindingUse::Mutated => {}
             }
         }
     }
@@ -1797,6 +1799,7 @@ fn add_constructor_binding_dependency_edges(
                     );
                 }
                 BindingUse::ContentRead
+                | BindingUse::InstanceOfTarget { .. }
                 | BindingUse::ReceiverForCall { .. }
                 | BindingUse::Returned
                 | BindingUse::Mutated => {}
@@ -9690,7 +9693,8 @@ fn internal_object_binding_is_shared_borrow_safe(
                 boundary: CallArgumentBoundary::InternalSameType,
                 ..
             } => {}
-            BindingUse::AssignedFromCall { .. }
+            BindingUse::InstanceOfTarget { .. }
+            | BindingUse::AssignedFromCall { .. }
             | BindingUse::StoredInField { .. }
             | BindingUse::Mutated => return false,
         }

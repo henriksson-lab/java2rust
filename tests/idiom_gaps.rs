@@ -2116,6 +2116,49 @@ class SourceValueStructDerives {
 }
 
 #[test]
+fn source_value_struct_with_java_hash_equality_derives_eq_and_hash() {
+    let translation = translate_source(
+        r#"
+import java.util.HashSet;
+
+class SourceHashValue {
+    private String name;
+    private String label;
+
+    SourceHashValue(String name, String label) {
+        this.name = name;
+        this.label = label;
+    }
+
+    public boolean equals(Object other) {
+        if (!(other instanceof SourceHashValue)) {
+            return false;
+        }
+        SourceHashValue that = (SourceHashValue) other;
+        return name.equals(that.name) && label.equals(that.label);
+    }
+
+    public int hashCode() {
+        return name.hashCode() + label.hashCode();
+    }
+
+    boolean add(HashSet<SourceHashValue> values) {
+        return values.add(this);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("#[derive(Clone, PartialEq, Eq, Hash)]\npub struct SourceHashValue"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn source_struct_with_dyn_trait_vec_field_derives_clone_when_adapter_exists() {
     let translation = translate_source(
         r#"

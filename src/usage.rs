@@ -124,6 +124,9 @@ pub enum BindingUse {
         field_name: String,
     },
     Returned,
+    InstanceOfTarget {
+        target_ty: JavaType,
+    },
     Mutated,
 }
 
@@ -1524,7 +1527,7 @@ fn analyze_expr_with_context(
             semantic_facts,
             result_returned,
         ),
-        Expr::Unary { expr, .. } | Expr::InstanceOf { expr, .. } => analyze_expr(
+        Expr::Unary { expr, .. } => analyze_expr(
             expr,
             facts,
             current_type,
@@ -1532,6 +1535,25 @@ fn analyze_expr_with_context(
             field_names,
             semantic_facts,
         ),
+        Expr::InstanceOf { expr, ty } => {
+            if let Expr::Var(binding) = expr.as_ref() {
+                record_use(
+                    facts,
+                    binding,
+                    BindingUse::InstanceOfTarget {
+                        target_ty: ty.clone(),
+                    },
+                );
+            }
+            analyze_expr(
+                expr,
+                facts,
+                current_type,
+                internal_methods,
+                field_names,
+                semantic_facts,
+            );
+        }
         Expr::ArrayAccess(array, index) => {
             analyze_expr(
                 array,
