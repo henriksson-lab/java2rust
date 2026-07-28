@@ -15897,6 +15897,34 @@ class ObjectInputStreamReadShapes {
 }
 
 #[test]
+fn optional_output_stream_write_byte_array_uses_slice_overload() {
+    let translation = translate_source(
+        r#"
+import java.io.OutputStream;
+
+class OptionalOutputStreamWriteBytes {
+    void writeDecoded(byte[] decoded) throws java.io.IOException {
+        OutputStream out = null;
+        out.write(decoded);
+    }
+}
+"#,
+    );
+
+    assert!(
+        (translation
+            .rust
+            .contains("out.as_ref().expect(\"Java null receiver\").write_1(decoded)?")
+            || translation
+                .rust
+                .contains("out.as_ref().unwrap().write_1(decoded.as_ref().expect(\"Java null receiver\").as_slice())?"))
+            && !translation.rust.contains(".write(decoded.as_ref()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn object_stream_object_methods_have_typed_handoff_facades() {
     let translation = translate_source(
         r#"

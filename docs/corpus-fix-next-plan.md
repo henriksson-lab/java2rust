@@ -4553,9 +4553,14 @@ Next FastQC batch candidates from that rerun:
    nested types, and prevents shared-support promotion from duplicating the
    real `Base64OutputStream` export. The focused generated-Rust count remains
    6, but the `Base64OutputStream -> JavaIoOutputStream` trait-bound row is
-   gone. The next Base64 slice should focus on
-   `OutputStream.write(byte[])` exact-slot selection, `baos.unwrap()` moving an
-   optional resource before cleanup, and byte-array move recovery for
+   gone. The follow-up
+   `.tmp/corpus-fastqc-base64-single-after-optional-outputstream-write-r1`
+   lets typed callable/facade ABI facts match nullable `Optional<T>` arguments
+   by their present element type and adds exact `JavaIo*OutputStream` receiver
+   keys to the shared JDK byte-slice write facts. The focused generated-Rust
+   count is now 5 and the `OutputStream.write(byte[])` exact-slot mismatch is
+   gone. The next Base64 slice should focus on `baos.unwrap()` moving an
+   optional resource before cleanup and byte-array move recovery for
    `buffer`/`out_buff`.
 
 Inherited exception-owner follow-up: inherited source method bodies now lower

@@ -2832,6 +2832,11 @@ fn callable_key_param_specificity(params: &[TypePattern]) -> usize {
 }
 
 fn type_pattern_matches_java_type(pattern: &TypePattern, java_ty: &JavaType) -> bool {
+    if let Some(element_ty) = crate::types::optional_element_type(java_ty)
+        && type_pattern_matches_java_type(pattern, &element_ty)
+    {
+        return true;
+    }
     match pattern {
         TypePattern::Any | TypePattern::TypeParam(_) => true,
         TypePattern::Exact(type_key) => type_key_matches_java_type(&type_key.type_name, java_ty),

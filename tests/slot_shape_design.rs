@@ -30905,6 +30905,13 @@ fn stdlib_signature_facts_drive_jdk_io_byte_buffer_slice_shapes() {
         },
     );
     types.insert_local(
+        "exact_output",
+        JavaType::Named {
+            name: "JavaIoOutputStream".to_string(),
+            args: Vec::new(),
+        },
+    );
+    types.insert_local(
         "buffer",
         JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
     );
@@ -31021,6 +31028,18 @@ fn stdlib_signature_facts_drive_jdk_io_byte_buffer_slice_shapes() {
     assert!(matches!(
         plan_call_expr(
             Some(&Expr::Var("output".to_string())),
+            "write",
+            &write_one_bytes,
+            None,
+            &facts,
+            &types
+        ),
+        CallExprPlan::Target(CallTargetPlan::ExternalFacadeReceiver { ref rust_path, .. })
+            if rust_path == "OutputStream::write_1"
+    ));
+    assert!(matches!(
+        plan_call_expr(
+            Some(&Expr::Var("exact_output".to_string())),
             "write",
             &write_one_bytes,
             None,
