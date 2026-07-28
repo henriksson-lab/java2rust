@@ -44,6 +44,67 @@ unrelated user or generated files out of the commit.
 prefer committing each verified shared-policy slice before taking the next
 larger batched risk.
 
+## 2026-07-28 Batch Status: Borrow Drift Narrowing
+
+Latest full boundary before this slice:
+`cargo test --test idiom_gaps --quiet` ran 537 tests and finished with
+`485 passed / 52 failed` in 1165.49s. The dominant failure cluster was semantic
+drift from over-broad shared-borrow inference: arbitrary internal object
+parameters, context fallback signatures, and JDK string pattern calls disagreed
+about whether an argument slot should be owned or borrowed.
+
+Landed in this slice:
+
+- `internal_object_binding_is_shared_borrow_safe` no longer treats every unused
+  internal object parameter as borrow-safe. Unused parameters borrow only when
+  the Java type has an explicit borrowed-content policy, preserving `String ->
+  &str` without converting arbitrary domain/source objects into references.
+- Context fallback argument refinement no longer overwrites an owned solved
+  source signature with a borrowed fallback for arbitrary `Named` types. It can
+  still refine borrowed-content types such as `String`, but source value structs
+  now keep owned argument slots and clone recovery can run at the call boundary.
+- JDK string pattern methods (`contains`, `startsWith`, `endsWith`, `replace`,
+  `replaceFirst`, `replaceAll`, `split`) now participate in content-read
+  receiver and argument usage facts. This moves their borrowed `&str` behavior
+  through shared signature/slot planning rather than local rendered-call
+  compatibility.
+- Stale string idiom expectations were updated for direct `&str` parameters:
+  once a signature renders `value: &str`, the correct Rust body is
+  `value.parse()`/`value.contains(needle)`, not `value.as_str()...`.
+
+Focused verification passed:
+
+- `current_self_concrete_static_argument_clones_without_downcast`
+- `source_value_struct_derives_clone_and_partial_eq_when_fields_support_it`
+- `numeric_parse_static_calls_use_signature_borrowed_string_args`
+- `string_pattern_methods_use_signature_borrowed_argument_slots`
+- `context_translation_uses_sibling_overload_signature_for_call_target`
+- `optional_field_mutating_overload_call_uses_signature_name_and_mut_receiver`
+- `resource_input_stream_read_and_close_have_typed_facade_support`
+- `cargo fmt --check`
+- `cargo check --quiet`
+- `git diff --check`
+
+Known remaining clusters from the same full boundary run:
+
+- Optional carrier construction/adaptation: map-get, nullable string display,
+  nullable equals, optional source/facade arguments, and redundant typed-map
+  casts still need to be routed through the shared optional construction and
+  slot conversion path.
+- Owned recovery at source/facade boundaries: reused map arguments and boxed dyn
+  clone recovery still need call planning and clone recovery to agree on the
+  actual owned target slot.
+- Source/interface compatibility: fallible trait implementation signatures,
+  async template super/interface satisfaction, source enum constant slot
+  projection, and swing/component facade upcasts remain separate clusters.
+- Stream shared-plan gaps: `parallel_stream_reduce`,
+  method-reference/flat-map fixtures, and executor-submit closure lowering still
+  need the stream path to consume the same call/member/slot plans as ordinary
+  calls.
+- Numeric/array/facade precision: two-dimensional ndarray lowering,
+  nested-static-table overload selection, numeric/decimal facade return shapes,
+  and zip/output stream conversion remain independent precision gaps.
+
 ## Top Design Priority: Infer Rust Facade ABI Slots
 
 Repeated corpus failures around missing `&`, `&mut`, clones, slices, optional

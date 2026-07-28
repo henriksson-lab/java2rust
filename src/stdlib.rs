@@ -30,7 +30,24 @@ pub fn is_known_jdk_shadow_sensitive_owner(name: &str) -> bool {
 }
 
 pub fn is_content_read_method(name: &str) -> bool {
-    matches!(name, "length" | "isEmpty" | "is_empty" | "trim")
+    matches!(
+        name,
+        "length"
+            | "isEmpty"
+            | "is_empty"
+            | "trim"
+            | "contains"
+            | "startsWith"
+            | "starts_with"
+            | "endsWith"
+            | "ends_with"
+            | "replace"
+            | "replaceFirst"
+            | "replace_first"
+            | "replaceAll"
+            | "replace_all"
+            | "split"
+    )
 }
 
 pub fn is_borrowed_string_view_method(name: &str, arg_count: usize) -> bool {
@@ -15468,6 +15485,22 @@ pub fn is_content_read_argument_method(name: &str, arg_index: usize) -> bool {
         (name, arg_index),
         ("addAll", 0)
             | ("containsAll", 0)
+            | ("contains", 0)
+            | ("startsWith", 0)
+            | ("starts_with", 0)
+            | ("endsWith", 0)
+            | ("ends_with", 0)
+            | ("replace", 0)
+            | ("replace", 1)
+            | ("replaceFirst", 0)
+            | ("replaceFirst", 1)
+            | ("replace_first", 0)
+            | ("replace_first", 1)
+            | ("replaceAll", 0)
+            | ("replaceAll", 1)
+            | ("replace_all", 0)
+            | ("replace_all", 1)
+            | ("split", 0)
             | ("getResource", 0)
             | ("get_resource", 0)
             | ("getResourceAsStream", 0)

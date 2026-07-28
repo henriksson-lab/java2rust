@@ -1464,18 +1464,14 @@ class StringPatternSignatureArgs {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("return value.contains(needle.as_str());")
+        translation.rust.contains("return value.contains(needle);")
             && translation
                 .rust
                 .contains("return value.starts_with(\"chr\");")
+            && translation.rust.contains("return value.ends_with(suffix);")
             && translation
                 .rust
-                .contains("return value.ends_with(suffix.as_str());")
-            && translation
-                .rust
-                .contains("return value.replace(\"x\", replacement.as_str());")
+                .contains("return value.replace(\"x\", replacement);")
             && !translation.rust.contains("\"chr\".to_string().as_str()")
             && !translation.rust.contains("\"x\".to_string().as_str()"),
         "{}",
@@ -1511,12 +1507,12 @@ class NumericParseStaticCalls {
     assert!(
         translation
             .rust
-            .contains("return value.as_str().parse::<i32>().unwrap();")
+            .contains("return value.parse::<i32>().unwrap();")
             && translation
                 .rust
-                .contains("return value.as_str().parse::<f64>().unwrap();")
-            && !translation.rust.contains("value.parse::<i32>()")
-            && !translation.rust.contains("value.parse::<f64>()"),
+                .contains("return value.parse::<f64>().unwrap();")
+            && !translation.rust.contains("value.as_str().parse::<i32>()")
+            && !translation.rust.contains("value.as_str().parse::<f64>()"),
         "{}",
         translation.rust
     );

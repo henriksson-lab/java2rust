@@ -9678,6 +9678,11 @@ fn internal_object_binding_is_shared_borrow_safe(
     if matches!(binding.java_ty, JavaType::Primitive(_) | JavaType::Void) {
         return false;
     }
+    if binding.uses.is_empty() {
+        return borrowed_content_type_policy(&binding.java_ty, facts)
+            .policy
+            .is_some();
+    }
     let mut saw_read = false;
     for usage in &binding.uses {
         match usage {
@@ -9730,7 +9735,7 @@ fn internal_object_binding_is_shared_borrow_safe(
             | BindingUse::Mutated => return false,
         }
     }
-    saw_read || binding.uses.is_empty()
+    saw_read
 }
 
 fn external_receiver_call_is_readonly(java_ty: &JavaType, name: &str, facts: &FactSet) -> bool {

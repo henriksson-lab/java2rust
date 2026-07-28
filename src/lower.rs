@@ -156,6 +156,7 @@ use crate::signature::{
     LocalPlan, ReceiverPlan, SignatureConstraint, SignaturePlan, SolvedSlotShape,
     apply_signature_constraints,
 };
+use crate::slot_policy::borrowed_content_type_policy;
 use crate::slot_render::{
     erased_object_rust_type, rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
 };
@@ -8247,6 +8248,7 @@ fn lower_expr_with_refinements(
             let arg_plan = apply_context_fallback_signature_arg_shapes(
                 arg_plan,
                 context_fallback_signature.as_ref(),
+                ctx.facts,
             );
             let arg_plan = apply_dyn_trait_borrowed_return_arg_shapes(
                 arg_plan,
@@ -10434,6 +10436,7 @@ fn source_context_borrowed_param_shape(
 fn apply_context_fallback_signature_arg_shapes(
     plan: ArgumentLoweringPlan,
     fallback_signature: Option<&ContextFallbackMethodSignature>,
+    facts: &FactSet,
 ) -> ArgumentLoweringPlan {
     let Some(signature) = fallback_signature else {
         return plan;
@@ -10448,7 +10451,7 @@ fn apply_context_fallback_signature_arg_shapes(
                     .into_iter()
                     .zip(signature.arg_shapes.iter())
                     .map(|(shape, fallback)| {
-                        refine_shaped_arg_with_context_fallback_borrow(shape, fallback)
+                        refine_shaped_arg_with_context_fallback_borrow(shape, fallback, facts)
                     })
                     .collect(),
             )
@@ -10460,6 +10463,7 @@ fn apply_context_fallback_signature_arg_shapes(
 fn refine_shaped_arg_with_context_fallback_borrow(
     mut shape: RustSlotShape,
     fallback: &RustSlotShape,
+    facts: &FactSet,
 ) -> RustSlotShape {
     if matches!(shape.ownership, OwnershipShape::Owned)
         && matches!(
@@ -10467,6 +10471,9 @@ fn refine_shaped_arg_with_context_fallback_borrow(
             OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
         )
         && java_types_have_same_erased_identity(&shape.java_ty, &fallback.java_ty)
+        && borrowed_content_type_policy(&shape.java_ty, facts)
+            .policy
+            .is_some()
     {
         shape.ownership = fallback.ownership;
         shape.view = fallback.view.clone();
@@ -20578,8 +20585,11 @@ fn lower_external_call_expr_for_slot(
         ctx.facts,
         env.type_env(),
     );
-    let arg_plan =
-        apply_context_fallback_signature_arg_shapes(arg_plan, context_fallback_signature.as_ref());
+    let arg_plan = apply_context_fallback_signature_arg_shapes(
+        arg_plan,
+        context_fallback_signature.as_ref(),
+        ctx.facts,
+    );
     let lowered_args = lower_args_for_call_target_with_temporaries(
         &target,
         receiver.as_deref(),
