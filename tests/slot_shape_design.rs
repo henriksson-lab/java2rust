@@ -2108,6 +2108,14 @@ class Dog implements Animal {
         }
     );
     assert_eq!(
+        representation_dispatch_policy(ObjectRepresentation::JavaEnum {
+            enum_name: "HeaderVersion".to_string(),
+            variants: vec!["VCF4_3".to_string()],
+        })
+        .dispatch,
+        DispatchShape::Concrete
+    );
+    assert_eq!(
         representation_dispatch_policy(ObjectRepresentation::ErasedObject).dispatch,
         DispatchShape::ErasedObject
     );

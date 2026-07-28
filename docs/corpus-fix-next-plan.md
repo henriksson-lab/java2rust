@@ -4330,6 +4330,17 @@ method parameters such as `&Dog` flowing into `(Animal) dog`, producing
 `AnimalValue::Dog(dog.clone()...)` instead of the invalid
 `AnimalValue::Dog(dog)`. Downcasts from borrowed closed-enum values continue to
 clone after extracting the variant payload.
+Java enum dispatch follow-up: Java source enums no longer project to payload
+`ClosedEnum` dispatch. They now keep concrete Rust enum dispatch, while
+closed-world hierarchy enums continue to use `ClosedEnum { enum_name }` and
+payload variant wrapping/downcasting. This keeps erased-object conversions for
+Java enums on the ordinary `Box<dyn Any>`/downcast path and prevents bogus
+constructor-like variants such as `VCFHeaderVersion::VCFHeaderVersion(...)`.
+Focused VCF evidence:
+`.tmp/corpus-rerun-htsjdk-vcf-after-java-enum-concrete-dispatch-r1` translated
+32/32 files and reduced generated Rust errors from 794 to 747; the prior
+`unsupported Java dispatch coercion: actual=ErasedObject, target=ClosedEnum`
+and `ClosedEnum -> ErasedObject` rows for VCF enum types are gone.
 External/recovery cleanup: unresolved normalized singular utility receivers such
 as `ExternalUtil.consume(...)` now recover to a static owner after parser
 normalization (`external_util -> ExternalUtil`) when no local or field shadows

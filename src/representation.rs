@@ -294,8 +294,8 @@ pub fn representation_dispatch_policy(
         ObjectRepresentation::DynTrait { trait_name } => DispatchShape::DynTrait {
             trait_name: trait_name.clone(),
         },
-        ObjectRepresentation::JavaEnum { enum_name, .. }
-        | ObjectRepresentation::ClosedEnum { enum_name, .. } => DispatchShape::ClosedEnum {
+        ObjectRepresentation::JavaEnum { .. } => DispatchShape::Concrete,
+        ObjectRepresentation::ClosedEnum { enum_name, .. } => DispatchShape::ClosedEnum {
             enum_name: crate::slot_render::rust_name_for_java_named_type(enum_name),
         },
         ObjectRepresentation::ErasedObject => DispatchShape::ErasedObject,
