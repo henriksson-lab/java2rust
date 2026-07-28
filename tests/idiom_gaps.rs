@@ -12215,8 +12215,10 @@ fn source_nullable_field_getter_returns_optional_string() {
         r#"
 class SourceNullableFieldGetter {
     private final String qualityHeader;
+    private final String mKey;
 
     SourceNullableFieldGetter(String qualityHeader) {
+        this.mKey = qualityHeader;
         if (qualityHeader != null && !qualityHeader.isEmpty()) {
             this.qualityHeader = qualityHeader;
         } else {
@@ -12228,13 +12230,35 @@ class SourceNullableFieldGetter {
         return qualityHeader;
     }
 
+    String getKey() {
+        return mKey;
+    }
+
     String describe() {
         return "quality " + getQualityHeader();
+    }
+
+    String keyDescribe() {
+        return "key " + getKey();
     }
 
     String forwarded() {
         String value = getQualityHeader();
         return value;
+    }
+}
+
+class SourceNullableFieldGetterChild extends SourceNullableFieldGetter {
+    SourceNullableFieldGetterChild(String qualityHeader) {
+        super(qualityHeader);
+    }
+
+    String childDescribe() {
+        return "quality " + getQualityHeader();
+    }
+
+    String explicitChildDescribe() {
+        return "quality " + this.getQualityHeader();
     }
 }
 "#,
@@ -12246,6 +12270,20 @@ class SourceNullableFieldGetter {
             .contains("pub fn get_quality_header(&self) -> Option<String>")
             && (translation.rust.contains("return self.quality_header.as_ref().cloned()")
                 || translation.rust.contains("return self.quality_header.clone()"))
+            && (translation.rust.contains(
+                "format!(\"quality {}\", self.get_quality_header().as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string()))"
+            ) || translation
+                .rust
+                .contains("format!(\"quality {}\", self.quality_header.as_deref().unwrap_or(\"null\"))"))
+            && (translation.rust.contains(
+                "format!(\"key {}\", self.get_key().as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string()))"
+            ) || translation
+                .rust
+                .contains("format!(\"key {}\", self.m_key.as_deref().unwrap_or(\"null\"))"))
+            && !translation.rust.contains("format!(\"key {}\", self.get_key())")
+            && translation
+                .rust
+                .contains("pub fn child_describe(&self) -> String")
             && (translation.rust.contains(
                 "format!(\"quality {}\", self.get_quality_header().as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string()))"
             ) || translation

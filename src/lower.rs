@@ -5228,6 +5228,18 @@ fn receiverless_current_type_call_return_shape(
     ) {
         return Some(shape);
     }
+    if args.is_empty()
+        && let Some(shape) =
+            getter_field_return_shape_from_receiver(current_type, name, ctx.signatures)
+    {
+        return Some(shape);
+    }
+    if let Some(field_name) = source_method_returned_field_name(current_type, name, args.len(), ctx)
+        && let Some(field_shape) =
+            signature_field_shape_for_type_aliases(ctx.signatures, current_type, &field_name)
+    {
+        return Some(field_shape.clone());
+    }
     ctx.signatures
         .method_return_shape_by_rust_name(current_type, name)
         .or_else(|| {
@@ -18086,20 +18098,24 @@ fn method_call_return_shape_from_receiver(
     else {
         return None;
     };
-    let shape_ctx = ExprShapeContext {
-        signatures: Some(ctx.signatures),
-        representations: Some(ctx.representations),
-        facts: Some(ctx.facts),
-    };
-    let receiver_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
-    if stream_like_call_preserves_receiver_shape(name, args.len(), &receiver_shape) {
-        return Some(receiver_shape);
-    }
-    let receiver_ty = crate::types::optional_element_type(&receiver_shape.java_ty)
-        .unwrap_or(receiver_shape.java_ty);
-    let receiver_name = match receiver_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
-        _ => return None,
+    let receiver_name = if is_this_receiver_expr(receiver) {
+        ctx.current_type?.to_string()
+    } else {
+        let shape_ctx = ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        };
+        let receiver_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
+        if stream_like_call_preserves_receiver_shape(name, args.len(), &receiver_shape) {
+            return Some(receiver_shape);
+        }
+        let receiver_ty = crate::types::optional_element_type(&receiver_shape.java_ty)
+            .unwrap_or(receiver_shape.java_ty);
+        match receiver_ty {
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+            _ => return None,
+        }
     };
     let snake_name = crate::parser::to_snake_case(name);
     if crate::stdlib::is_java_platform_facade_type_name(&receiver_name)
