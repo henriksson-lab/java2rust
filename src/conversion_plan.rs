@@ -3255,14 +3255,10 @@ fn erased_object_clone_recovery_sequence(
     ) {
         return None;
     }
-    if java_type_is_erased_object_sequence_like(&actual.java_ty)
-        || java_type_is_erased_object_sequence_like(&target.java_ty)
-    {
+    if java_type_is_erased_object_sequence_like(&actual.java_ty) {
         return Some(true);
     }
-    if java_type_is_erased_object_like(&actual.java_ty)
-        || java_type_is_erased_object_like(&target.java_ty)
-    {
+    if java_type_is_erased_object_like(&actual.java_ty) {
         return Some(false);
     }
     None

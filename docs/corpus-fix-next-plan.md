@@ -4886,6 +4886,17 @@ arguments. Verified with
 `resolved_static_helper_call_uses_fallback_signature_arg_shapes` and
 `constructed_external_argument_is_borrowed_for_borrowed_source_slot`.
 
+Follow-up erased-object varargs carrier cleanup: source `Object...` parameters
+that are stored or forwarded now keep owned/native vector carrier constraints
+instead of being normalized into borrowed slices. The erased-object clone
+recovery helper is only selected when the actual value is already erased; typed
+borrowed values such as `Number` recover through normal clone policy before
+being boxed as `dyn Any`. Verified with
+`source_object_varargs_storage_carrier_uses_owned_native_param_shape`,
+`source_object_varargs_forward_and_append_erased_arguments`,
+`inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan`,
+and `cargo test erased_object --test idiom_gaps --quiet`.
+
 ## Rerun Protocol
 
 After each fix:

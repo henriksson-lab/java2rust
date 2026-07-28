@@ -1164,6 +1164,17 @@ same erased Java type. The adjacent
 `constructed_external_argument_is_borrowed_for_borrowed_source_slot` guard also
 passes.
 
+Focused erased-object varargs update:
+`source_object_varargs_forward_and_append_erased_arguments` and
+`inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan` now
+pass. Source `Object...` carriers keep owned/native vector slots despite
+borrowed-slice normalization, so explicit varargs arrays clone when reused and
+spread tails extend owned vectors instead of `args.as_slice()`. Typed borrowed
+values passed as erased varargs now clone normally and then box as
+`Box<dyn Any>`, while already-erased values keep the erased-object clone helper.
+Slot guard `source_object_varargs_storage_carrier_uses_owned_native_param_shape`
+and `cargo test erased_object --test idiom_gaps --quiet` also pass.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

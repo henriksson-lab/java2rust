@@ -4395,6 +4395,16 @@ fn normalize_borrowed_slice_param_constraints(constraints: &mut Vec<SignatureCon
         .retain(|constraint| !borrowed_slice_param_rejects_constraint(&projected, constraint));
 }
 
+fn normalize_param_borrowed_slice_constraints(
+    param: &Param,
+    constraints: &mut Vec<SignatureConstraint>,
+) {
+    if param.is_varargs && java_varargs_erased_object_carrier_type(&param.ty) {
+        return;
+    }
+    normalize_borrowed_slice_param_constraints(constraints);
+}
+
 fn borrowed_slice_param_rejects_constraint(
     constraints: &[SignatureConstraint],
     constraint: &SignatureConstraint,
@@ -6246,7 +6256,7 @@ pub fn method_param_shape_constraints(
                 .unwrap_or_default(),
         );
     }
-    normalize_borrowed_slice_param_constraints(&mut constraints);
+    normalize_param_borrowed_slice_constraints(param, &mut constraints);
     constraints
 }
 
@@ -6994,7 +7004,7 @@ fn constrained_param_plan(
     facts: &FactSet,
 ) -> ParamPlan {
     let mut constraints = constraints.to_vec();
-    normalize_borrowed_slice_param_constraints(&mut constraints);
+    normalize_param_borrowed_slice_constraints(param, &mut constraints);
     let shape = solve_signature_shape_with_facts(
         representations,
         SignatureShapeRequest {
@@ -12471,11 +12481,14 @@ fn collect_returned_var_types_from_stmt<'a>(
 }
 
 fn java_type_is_erased_object_boundary(java_ty: &JavaType) -> bool {
-    matches!(
-        java_ty,
-        JavaType::Named { name, .. } | JavaType::Unknown(name)
-            if name == "Object" || name == "java.lang.Object"
-    ) || matches!(java_ty, JavaType::Wildcard(_))
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => matches!(
+            crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+            "Object" | "java.lang.Object"
+        ),
+        JavaType::Wildcard(_) => true,
+        _ => false,
+    }
 }
 
 fn java_type_is_rust_crate_mapped_external(java_ty: &JavaType, facts: &FactSet) -> bool {
