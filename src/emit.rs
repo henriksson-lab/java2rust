@@ -355,12 +355,16 @@ fn expr_needs_parentheses(
     own_prec < parent_prec
         || match (expr, parent_op, child_side) {
             (RustExpr::Binary { op: child_op, .. }, Some(parent_op), ExprChildSide::Left) => {
-                arithmetic_binary_op(parent_op) && arithmetic_binary_op(child_op)
+                (arithmetic_binary_op(parent_op) && arithmetic_binary_op(child_op))
+                    || (bitwise_binary_op(parent_op) && comparison_binary_op(child_op))
             }
             (RustExpr::Binary { op: child_op, .. }, Some(parent_op), ExprChildSide::Right)
                 if own_prec == parent_prec =>
             {
                 !is_associative_binary_op(parent_op) || child_op != parent_op
+            }
+            (RustExpr::Binary { op: child_op, .. }, Some(parent_op), ExprChildSide::Right) => {
+                bitwise_binary_op(parent_op) && comparison_binary_op(child_op)
             }
             _ => false,
         }
@@ -517,6 +521,14 @@ fn is_associative_binary_op(op: &str) -> bool {
     matches!(op, "&&" | "||" | "&" | "|" | "^")
 }
 
+fn comparison_binary_op(op: &str) -> bool {
+    matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=")
+}
+
+fn bitwise_binary_op(op: &str) -> bool {
+    matches!(op, "&" | "|" | "^")
+}
+
 fn arithmetic_binary_op(op: &str) -> bool {
     matches!(op, "+" | "-" | "*" | "/" | "%")
 }
@@ -565,6 +577,17 @@ mod tests {
         let expr = binary("&&", binary("&&", var("ready"), var("valid")), var("done"));
 
         assert_eq!(emit_expr(&expr), "ready && valid && done");
+    }
+
+    #[test]
+    fn bitwise_boolean_operands_parenthesize_comparisons() {
+        let expr = binary(
+            "^",
+            binary("<", var("direction"), var("d")),
+            binary("==", var("sign"), RustExpr::Literal("0i64".to_string())),
+        );
+
+        assert_eq!(emit_expr(&expr), "(direction < d) ^ (sign == 0i64)");
     }
 
     #[test]

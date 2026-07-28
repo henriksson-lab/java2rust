@@ -4599,6 +4599,21 @@ verification:
 That rerun translates 8/8 files with 0 invalid-pattern files and
 `cargo_check=ok`.
 
+FastQC math-util current cleanup: a fresh focused rerun after the Base64
+checkpoint,
+`.tmp/corpus-fastqc-math-util-after-base64-checkpoint-r1`, translated 10/10
+files with 0 invalid-pattern files and only two real generated-Rust errors:
+Java boolean XOR of comparisons rendered as chained Rust comparisons in
+`FastMath.nextAfter(...)`. Rust expression emission now parenthesizes
+comparison operands under bitwise operators, preserving shapes such as
+`(direction < d) ^ (sign == 0i64)`. Focused verification:
+`bitwise_boolean_operands_parenthesize_comparisons`,
+`boolean_xor_of_comparisons_parenthesizes_operands`, `cargo fmt --check`,
+`cargo check --quiet`, `git diff --check`,
+`cargo build --release --quiet --bin new-java2rust`, and focused math-util
+rerun `.tmp/corpus-fastqc-math-util-after-comparison-xor-parens-r1`. That
+rerun translates 10/10 files with 0 invalid-pattern files and `cargo_check=ok`.
+
 ## Rerun Protocol
 
 After each fix:

@@ -965,6 +965,14 @@ recovering owned `Vec<T>` from returned mutable slices, and making
 `Option<&[T]> -> &[T]` unwrap projection idempotent so redundant
 `source.expect("Java null receiver").as_slice()` rows are gone.
 
+Focused math-util cleanup update: the fresh FastQC math-util rerun
+`.tmp/corpus-fastqc-math-util-after-base64-checkpoint-r1` reduced the focused
+package to two real generated-Rust errors, both from Java boolean XOR of
+comparisons rendering as chained Rust comparisons. Parenthesizing comparison
+operands under bitwise operators fixes that shared emitter gap. Rerun
+`.tmp/corpus-fastqc-math-util-after-comparison-xor-parens-r1` translates 10/10
+files, reports 0 invalid-pattern files, and has `cargo_check=ok`.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

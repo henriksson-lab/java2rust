@@ -4702,6 +4702,37 @@ class CastComparison {
 }
 
 #[test]
+fn boolean_xor_of_comparisons_parenthesizes_operands() {
+    let translation = translate_source(
+        r#"
+class BooleanXorComparison {
+    boolean check(double direction, double d, long sign) {
+        return (direction < d) ^ (sign == 0L);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return (direction < d) ^ (sign == 0i64);")
+            && !translation.rust.contains("return direction < d ^ sign"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "boolean_xor_comparison",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn java_numeric_literal_suffixes_are_removed_or_rust_typed() {
     let translation = translate_source(
         r#"
