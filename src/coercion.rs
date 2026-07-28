@@ -1590,7 +1590,14 @@ pub fn optional_string_view_projection(expr: RustExpr) -> RustExpr {
 }
 
 pub fn string_helper_receiver_projection(receiver: RustExpr) -> RustExpr {
-    RustExpr::Raw(format!("{}.as_str()", emit::emit_expr(&receiver)))
+    let rendered = emit::emit_expr(&receiver);
+    if rendered_expr_is_already_string_view(&rendered) {
+        receiver
+    } else if rendered.ends_with(".as_ref().unwrap()") {
+        RustExpr::Raw(format!("{rendered}.as_str()"))
+    } else {
+        RustExpr::Raw(format!("&{rendered}"))
+    }
 }
 
 pub fn string_hash_code_projection(receiver: RustExpr) -> RustExpr {
@@ -4408,7 +4415,7 @@ mod tests {
             emit::emit_expr(&string_hash_code_projection(RustExpr::Var(
                 "value".to_string()
             ))),
-            "java_string_hash_code(value.as_str())"
+            "java_string_hash_code(&value)"
         );
         assert_eq!(
             emit::emit_expr(&string_replace_first_projection(
@@ -4416,14 +4423,14 @@ mod tests {
                 RustExpr::Literal("\"-\"".to_string()),
                 RustExpr::Literal("\"\"".to_string()),
             )),
-            "java_string_replace_first(value.as_str(), \"-\", \"\")"
+            "java_string_replace_first(&value, \"-\", \"\")"
         );
         assert_eq!(
             emit::emit_expr(&string_matches_projection(
                 RustExpr::Var("value".to_string()),
                 RustExpr::Literal("\"[0-9]\"".to_string()),
             )),
-            "java_string_matches(value.as_str(), \"[0-9]\")"
+            "java_string_matches(&value, \"[0-9]\")"
         );
         assert_eq!(
             emit::emit_expr(&string_split_projection(
@@ -4431,7 +4438,7 @@ mod tests {
                 RustExpr::Literal("\"_\"".to_string()),
                 RustExpr::Literal("0".to_string()),
             )),
-            "java_string_split(value.as_str(), \"_\", 0)"
+            "java_string_split(&value, \"_\", 0)"
         );
         assert_eq!(
             emit::emit_expr(&string_compare_to_projection(

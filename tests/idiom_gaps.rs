@@ -1409,7 +1409,7 @@ class JavaStringComparisonMethods {
     assert!(
         translation
             .rust
-            .contains("java_string_compare_to(&left, right.as_str())")
+            .contains("java_string_compare_to(&left, right)")
             && translation
                 .rust
                 .contains("java_string_compare_to_ignore_case(&left, right.as_str())")
@@ -2368,7 +2368,7 @@ fn java_string_split_with_limit_uses_runtime_helper() {
         translation.rust.contains("pub fn java_string_split")
             && translation
                 .rust
-                .contains("java_string_split(line.as_str(), \"\\\\\\\\t\", -1)")
+                .contains("java_string_split(&line, \"\\\\\\\\t\", -1)")
             && !translation
                 .rust
                 .contains(".split(\"\\\\t\".to_string(), (-1))"),
@@ -2428,12 +2428,21 @@ class IndexedStringArrayOptionalBorrowedStringArg {
     assert!(
         translation
             .rust
-            .contains("self.legal(Some(&parts[0 as usize]))")
+            .contains("self.legal(Some(parts[0 as usize].as_str()))")
             && !translation
                 .rust
                 .contains("self.legal(Some(parts[0 as usize]))"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "indexed-string-array-optional-borrowed",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -8166,12 +8175,10 @@ class Reader {
         translation
             .rust
             .contains("let mut path: Option<Path> = self.maybe_path(")
-            && translation.rust.contains(
-                "self.maybe_path(name.clone()/* TODO(translation): validate added clone */)"
-            )
+            && translation.rust.contains("self.maybe_path(name.as_str())")
             && translation
                 .rust
-                .contains("self.open_with_index(name, path.as_ref())")
+                .contains("self.open_with_index(name.as_str(), path.as_ref())")
             && !translation
                 .rust
                 .contains("let mut path: Path = self.maybe_path")
@@ -8179,6 +8186,15 @@ class Reader {
             && !translation.rust.contains("Some(path"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable-callback-local-slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -12042,10 +12058,12 @@ fn reused_optional_borrowed_source_argument_wraps_by_reference() {
     let facts = parse_external_pack_manifest(
         r#"
 external-pack dep GATKPath semantic
+external-pack dep Path semantic
 external-pack dep JavaRDD semantic
 external-pack dep WriteOption semantic
 external-pack dep ConcreteWriteOption semantic
 external-pack-capability dep GATKPath clone=true final=true
+external-pack-capability dep Path clone=true final=true
 external-pack-capability dep JavaRDD clone=true final=true
 external-pack-capability dep ConcreteWriteOption clone=true final=true implements=WriteOption
 external-pack-conversion dep ConcreteWriteOption WriteOption into
@@ -12070,19 +12088,31 @@ class ReusedOptionalBorrowedSourceArgument {
     assert!(
         translation
             .rust
-            .contains("pub fn run(output: String, reference: Option<&GATKPath>, reads: JavaRDD")
-            && translation.rust.contains("Self::write(output.clone()/* TODO(translation): validate added clone */, None, reads.clone()/* TODO(translation): validate added clone */, &vec![option.clone()/* TODO(translation): validate added clone */.into()]);")
+            .contains("pub fn run(output: &str, reference: Option<&GATKPath>, reads: JavaRDD")
+            && translation.rust.contains("Self::write(output, None, reads.clone()/* TODO(translation): validate added clone */, &vec![option.clone()/* TODO(translation): validate added clone */.into()]);")
             && translation
                 .rust
-                .contains("Self::write(output, reference, reads, &vec![option.into()]);")
+                .contains("Self::write(output, reference, reads, &vec![option.clone()/* TODO(translation): validate added clone */.into()]);")
             && !translation
                 .rust
-                .contains("Self::write(output, reference, reads, &vec![option.clone()/* TODO(translation): validate added clone */.into()]);")
+                .contains("output.clone()/* TODO(translation): validate added clone */")
             && !translation
                 .rust
                 .contains("Some(reference.clone()/* TODO(translation): validate added clone */)"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "reused-optional-borrowed-source-argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[derive(Clone, PartialEq, Default)]
+pub struct Path;
+"#,
+        }],
     );
 }
 
@@ -16397,9 +16427,7 @@ fn documents_equals_and_objects_gap() {
     let translation = translate_source(&idiom_gap("EqualsAndObjects.java"));
 
     assert!(
-        translation
-            .rust
-            .contains("return left.as_str() == right.as_str();")
+        translation.rust.contains("return left == right;")
             && !translation.rust.contains(".equals(")
             && !translation.rust.contains("objects.equals("),
         "{}",

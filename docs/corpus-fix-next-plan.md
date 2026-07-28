@@ -243,6 +243,16 @@ stay as the existing optional carrier. This removes the unstable
 arguments and borrowed nullable trim/equality idioms, and records the behavior
 in `operator_lowering_owns_binary_and_unary_rust_spelling`.
 
+Borrowed string helper cleanup: runtime string helper receiver projection now
+avoids forcing `.as_str()` on receivers whose local signatures have already
+narrowed to `&str`. Helper calls borrow simple receivers (`&value`, `&line`)
+and keep explicit `.as_str()` only for optional unwraps or already-owned string
+views that need it. The affected indexed-array optional argument,
+callback-local optional result, reused optional source argument, split,
+comparison, and Objects/equals fixtures now have expectations aligned with the
+borrowed signatures, with generated-crate checks added where the lowered body
+could otherwise pass string assertions while still failing Rust compilation.
+
 Optional borrowed facade return cleanup: `Option<&T>` returns from Rust facade
 ABI facts now convert to optional erased-object slots through a shared slot
 conversion plan, rendering `.map(|value| Box::new(value.clone()) as
