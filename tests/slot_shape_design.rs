@@ -24415,6 +24415,46 @@ class BuiltinBooleanConstant {
 }
 
 #[test]
+fn erased_external_static_facade_method_support_is_generated_from_api_facts() {
+    let translation = translate_source(
+        r#"
+import htsjdk.variant.variantcontext.GenotypeLikelihoods;
+
+class BuiltinErasedStaticFacadeMethod {
+    GenotypeLikelihoods likelihoods(String value) {
+        return GenotypeLikelihoods.fromGLField(value);
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub struct HtsjdkVariantVariantcontextGenotypeLikelihoods")
+            || translation.rust.contains(
+                "pub type HtsjdkVariantVariantcontextGenotypeLikelihoods = GenotypeLikelihoods;"
+            ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub fn from_g_l_field"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("::from_g_l_field"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_static_named_constant_support_is_generated_from_field_facts() {
     let source = r#"
 class UseExternalNamedConstant {

@@ -171,6 +171,12 @@ pub fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usi
             | ("JavaxImageioImageIO", "write", 3)
             | ("ImageIO", "write", 3)
             | ("javax.imageio.ImageIO", "write", 3)
+            | (
+                "htsjdk.variant.variantcontext.GenotypeLikelihoods",
+                "fromGLField" | "from_g_l_field",
+                1,
+            )
+            | ("GenotypeLikelihoods", "fromGLField" | "from_g_l_field", 1)
     )
 }
 
@@ -209,6 +215,12 @@ pub fn preferred_static_owner_alias(
             "spark_variant_adapter" | "sparkVariantAdapter",
             1,
         ) => Some("VariantContextVariantAdapter"),
+        (
+            "htsjdk.variant.variantcontext.GenotypeLikelihoods"
+            | "HtsjdkVariantVariantcontextGenotypeLikelihoods",
+            "from_g_l_field" | "fromGLField",
+            1,
+        ) => Some("GenotypeLikelihoods"),
         _ => None,
     }
 }

@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::FactSet;
 use crate::facts::{
-    CallableKey, ExternalApiRole, ExternalArgumentAliasPolicy, ExternalConversionAdapterKind,
-    ExternalFieldFact, ExternalFieldKind, FacadeAbiFact, FacadeSlot, FactProvenance, FieldKey,
-    HierarchyStrategy, NullabilityState, ReceiverAbi, ReceiverMutabilityFact, ResultAbi,
-    Staticness, TypeKey, TypePattern,
+    CallableKey, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
+    ExternalConversionAdapterKind, ExternalFieldFact, ExternalFieldKind, FacadeAbiFact, FacadeSlot,
+    FactProvenance, FieldKey, HierarchyStrategy, NullabilityState, ReceiverAbi,
+    ReceiverMutabilityFact, ResultAbi, Staticness, TypeKey, TypePattern,
 };
 use crate::java_ir::{
     BinaryOp, Block, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
@@ -5265,6 +5265,7 @@ pub fn external_api_facade_support_items_with_local_type_program(
     support.add_builder_surface_from_used_calls(facts, &used_calls);
     support.add_display_context_return_hint_surfaces(facts, &display_return_hints);
     support.add_external_field_surfaces(facts, &local_types);
+    support.add_static_external_api_facts_for_surface_types(facts);
     support.add_external_dyn_trait_surfaces(facts);
     support.add_external_conversion_surfaces(facts, &local_types);
     support.suppress_rust_crate_mapped_external_types(facts);
@@ -6638,13 +6639,20 @@ impl ExternalApiFacadeSupport {
             ) {
                 continue;
             }
-            if external_facade_receiver_is_dyn_trait(facts, &receiver_key) {
+            let arg_count = fact
+                .arg_count
+                .unwrap_or_else(|| arities.iter().next().copied().unwrap_or_default());
+            let is_static_facade_method = crate::javalibs::is_static_facade_method(
+                &receiver_key,
+                &fact.method_name,
+                arg_count,
+            );
+            if external_facade_receiver_is_dyn_trait(facts, &receiver_key)
+                && !is_static_facade_method
+            {
                 if let Some(return_type) = &fact.return_type {
                     self.add_java_type(return_type);
                 }
-                let arg_count = fact
-                    .arg_count
-                    .unwrap_or_else(|| arities.iter().next().copied().unwrap_or_default());
                 self.add_external_argument_types(
                     facts,
                     &receiver_key,
@@ -6671,9 +6679,6 @@ impl ExternalApiFacadeSupport {
             } else if receiver_rust.ends_with("Builder") {
                 continue;
             } else {
-                let arg_count = fact
-                    .arg_count
-                    .unwrap_or_else(|| arities.iter().next().copied().unwrap_or_default());
                 let rust_method = crate::call_plan::external_method_rust_name(
                     &receiver_key,
                     &fact.method_name,
@@ -6717,6 +6722,7 @@ impl ExternalApiFacadeSupport {
                         &fact.method_name,
                         arg_count,
                     )
+                    && !is_static_facade_method
                 {
                     self.add_erased_object_method(
                         facts,
@@ -6726,11 +6732,7 @@ impl ExternalApiFacadeSupport {
                         return_rust.clone(),
                     );
                 }
-                let method_body = if crate::javalibs::is_static_facade_method(
-                    &receiver_key,
-                    &fact.method_name,
-                    arg_count,
-                ) {
+                let method_body = if is_static_facade_method {
                     external_facade_static_method_with_facts(
                         facts,
                         &receiver_key,
@@ -6897,6 +6899,109 @@ impl ExternalApiFacadeSupport {
                 }
             }
         }
+    }
+
+    fn add_static_external_api_facts_for_surface_types(&mut self, facts: &FactSet) {
+        let surface_types = self.opaque_types.iter().cloned().collect::<BTreeSet<_>>();
+        let mut merged_facts = facts.clone();
+        merged_facts.extend_from(crate::external_packs::builtin_external_library_packs());
+        for fact in &merged_facts.external_api_effect_facts {
+            let Some(receiver_type) = fact.receiver_type.as_deref() else {
+                continue;
+            };
+            let receiver_key = canonical_external_receiver_type_key(receiver_type);
+            let receiver_rust = rust_name_for_java_named_type(&receiver_key);
+            if !surface_types.contains(&receiver_rust) {
+                continue;
+            }
+            for arg_count in Self::static_external_api_fact_arities_for_surface(
+                &merged_facts,
+                fact,
+                &receiver_key,
+            ) {
+                if !crate::javalibs::is_static_facade_method(
+                    &receiver_key,
+                    &fact.method_name,
+                    arg_count,
+                ) {
+                    continue;
+                }
+                let rust_method = crate::call_plan::external_method_rust_name(
+                    &receiver_key,
+                    &fact.method_name,
+                    arg_count,
+                    &merged_facts,
+                );
+                if !valid_rust_method_ident(&rust_method) {
+                    continue;
+                }
+                if let Some(return_type) = &fact.return_type {
+                    self.add_java_type(return_type);
+                }
+                self.add_external_argument_types(
+                    &merged_facts,
+                    &receiver_key,
+                    &fact.method_name,
+                    arg_count,
+                );
+                let return_rust = fact
+                    .return_type
+                    .as_ref()
+                    .map(|return_type| {
+                        external_facade_method_return_type_with_facts(
+                            &merged_facts,
+                            Some(&receiver_key),
+                            &fact.method_name,
+                            Some(arg_count),
+                            return_type,
+                            fact.return_nullability,
+                        )
+                    })
+                    .unwrap_or_else(|| "()".to_string());
+                let method_body = external_facade_static_method_with_facts(
+                    &merged_facts,
+                    &receiver_key,
+                    &fact.method_name,
+                    &rust_method,
+                    arg_count,
+                    &return_rust,
+                );
+                self.add_method(receiver_rust.clone(), method_body);
+            }
+        }
+    }
+
+    fn static_external_api_fact_arities_for_surface(
+        facts: &FactSet,
+        fact: &ExternalApiEffectFact,
+        receiver_key: &str,
+    ) -> Vec<usize> {
+        if let Some(arg_count) = fact.arg_count {
+            return vec![arg_count];
+        }
+        let mut arities = Vec::new();
+        for arg_count in 0..16 {
+            if crate::javalibs::is_static_facade_method(receiver_key, &fact.method_name, arg_count)
+            {
+                arities.push(arg_count);
+            }
+        }
+        if !arities.is_empty() {
+            return arities;
+        }
+        let mut inferred = None;
+        for index in 0..16 {
+            if external_facade_argument_effect(facts, receiver_key, &fact.method_name, index)
+                .is_some()
+            {
+                inferred = Some(index + 1);
+                continue;
+            }
+            if inferred.is_some() {
+                break;
+            }
+        }
+        inferred.into_iter().collect()
     }
 
     fn add_external_argument_types(
