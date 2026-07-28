@@ -739,10 +739,18 @@ def method_call_receiver_preferences(
     for alias, target in alias_targets.items():
         names_by_target[target].add(alias)
     path_texts = [path.read_text() for path in rust_paths]
+    parsed_items = []
+    for path in rust_paths:
+        parsed_items.extend(parse_items(path, selected))
+    method_names_by_target = defaultdict(set)
+    for item in parsed_items:
+        if item["kind"] == "inherent_impl":
+            for method_name, _ in extract_methods(item["text"]):
+                method_names_by_target[item["name"]].add(method_name)
     for target, names in names_by_target.items():
         for type_name in names:
             type_pattern = re.escape(type_name)
-            for method_name in method_names_for_target(type_name, rust_paths, selected):
+            for method_name in method_names_by_target.get(type_name, set()):
                 method_pattern = re.escape(method_name)
                 static_re = re.compile(
                     STATIC_METHOD_CALL_RE_TEMPLATE.format(type_pattern, method_pattern)
@@ -758,16 +766,6 @@ def method_call_receiver_preferences(
                             {"self", "mut_self", "owned_self"}
                         )
     return preferences
-
-
-def method_names_for_target(type_name: str, rust_paths: list[Path], selected: set[str]) -> set[str]:
-    names = set()
-    for path in rust_paths:
-        for item in parse_items(path, selected):
-            if item["kind"] == "inherent_impl" and item["name"] == type_name:
-                for method_name, _ in extract_methods(item["text"]):
-                    names.add(method_name)
-    return names
 
 
 def remove_items(
@@ -1108,7 +1106,6 @@ def main() -> int:
     remove_protected_names_from_shared_types(
         Path(args.shared_types), protected_source_owned_nested_names
     )
-    remove_protected_aliases_from_shared_support(shared_support_path, protected_shared_aliases)
     receiver_preferences = method_call_receiver_preferences(rust_paths, selected, alias_targets)
     for name in sorted(selected):
         if name in removal_only_names:

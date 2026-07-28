@@ -5162,6 +5162,31 @@ failed to advance past `batch_parse_global_emit_start` for several minutes.
 Treat this as an assembly/reporting stall to investigate before using that
 output as failure evidence.
 
+2026-07-28 VCF shared-support assembly follow-up: the shared-support merger now
+parses generated items once when computing method receiver preferences, instead
+of reparsing every file for every selected type. Protected aliases that already
+live in shared support are also retained while module-local duplicate
+declarations are removed. The focused merger tests cover the alias case and the
+JDK facade upcast cases.
+
+Latest HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260728-htsjdk-vcf-after-merger-cache` translates all
+`32/32` files and reaches ordinary generated-crate typechecking. This satisfies
+the VCF shared-support assembly acceptance condition: parsing/assembly no
+longer stalls or fails before `cargo check`. Timings were
+`translation_elapsed_ms=693851`, `crate_assembly_elapsed_ms=48507`,
+`cargo_check_elapsed_ms=6675`, and `total_elapsed_ms=749935`.
+
+Remaining VCF top families from that run are generated Rust issues rather than
+assembly failure: `158` mismatched-type errors, duplicate `to_string`/ambiguous
+method rows, unsupported concrete `instanceof` shapes, nullable string display,
+boxed dyn-clone recovery, missing source/support facades such as
+`GeneralUtils`, source-super constructor lowering, and the malformed nested
+interface call spelling in `VCFIteratorBuilder`
+(`VCFIteratorBuilder.VCFReaderIterator::get_header(self)`). The next VCF batch
+should choose one of those generated-Rust families and fixture it before
+patching.
+
 ## Rerun Protocol
 
 After each fix:
