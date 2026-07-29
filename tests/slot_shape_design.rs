@@ -28035,6 +28035,58 @@ class ExternalDynTraitSourceSignatures {
 }
 
 #[test]
+fn source_getter_for_erased_object_representation_does_not_borrow_erased_carrier() {
+    let facts = parse_external_pack_manifest(
+        r#"
+external-pack dep Header semantic
+external-pack-object dep Header erased-object
+external-pack-capability dep Header clone=true final=true
+"#,
+    )
+    .facts;
+    let parsed = parse_java_source(
+        r#"
+public class SourceGetterForErasedObjectRepresentation {
+    Header header;
+
+    public Header getHeader() {
+        return header;
+    }
+}
+"#,
+    );
+    let resolved = resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics,
+        &parsed.program,
+        &facts,
+    );
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "SourceGetterForErasedObjectRepresentation")
+        .expect("test type is present");
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "getHeader" => Some(method),
+            _ => None,
+        })
+        .expect("test method is present");
+    let constraints = method_return_shape_constraints(ty, method, &semantic.usage, &semantic.facts);
+
+    assert!(
+        !constraints.contains(&SignatureConstraint::RequiredOwnership(
+            OwnershipShape::SharedBorrow
+        )),
+        "{constraints:?}"
+    );
+}
+
+#[test]
 fn nullable_external_dyn_trait_return_constraints_use_erased_owned_carrier() {
     let facts = parse_external_pack_manifest(
         r#"

@@ -5244,6 +5244,24 @@ string display, arity mismatches, boxed dyn-clone recovery, incompatible `?`
 usage, source-super constructor lowering, and missing genotype/VCF facade
 precision.
 
+2026-07-29 VCF erased-return borrow follow-up: direct source-field return
+constraints now treat `external-pack-object ... erased-object` representations
+as owned erased carrier boundaries, not borrow-safe object aliases. This removes
+the impossible `Option<&Box<dyn Any>>` getter signatures when the body must
+clone and box the field value into an erased return.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-erased-return-borrow-guard`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from the latest local `459` baseline to `449`. Generated
+VCF getters such as `getType`, `getCountType`, `getHeader`, and `getVersion`
+now render owned `Option<Box<dyn std::any::Any>>` returns with
+`as_ref().map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>)`.
+Remaining top families are broad mismatched types, type annotations,
+unsupported concrete/concrete `instanceof`, boxed dyn-clone recovery,
+incompatible `?` usage, source-super constructor lowering, missing VCF facade
+methods, and residual moves out of shared receivers.
+
 ## Rerun Protocol
 
 After each fix:

@@ -11704,6 +11704,13 @@ fn direct_self_field_return_type(ty: &TypeDecl, method: &MethodDecl) -> Option<J
 }
 
 fn java_return_type_can_borrow_as_object(java_ty: &JavaType, facts: &FactSet) -> bool {
+    let effective_facts = EffectiveFacts::new(facts);
+    if matches!(
+        effective_facts.object_representation_override_strategy_for(java_ty),
+        Some(HierarchyStrategy::ErasedObject)
+    ) {
+        return false;
+    }
     match java_ty {
         JavaType::Primitive(_) | JavaType::String | JavaType::Void | JavaType::Array(_) => {
             return false;
