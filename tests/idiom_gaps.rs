@@ -2293,6 +2293,41 @@ class ReusedOptionalErasedObjectCastClone {
 }
 
 #[test]
+fn source_struct_with_hash_set_of_source_values_derives_clone() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.HashSet;
+
+class HashSetBackedCloneCarrier {
+    private HashSet<HashSetBackedCloneLine> lines;
+    private HashMap<String, HashSetBackedCloneLine> byId;
+}
+
+class HashSetBackedCloneLine {
+    private String id;
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("#[derive(Clone)]\npub struct HashSetBackedCloneCarrier"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "hash_set_source_value_clone_derive",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn concrete_self_cast_flows_through_current_type_slot_without_downcast() {
     let translation = translate_source(
         r#"

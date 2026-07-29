@@ -647,6 +647,17 @@ fn raw_rust_type_supports_derive_clone(
             raw_type_arg_supports_derive_clone(arg, signatures, facts, support_program, visiting)
         });
     }
+    if let Some(args) = raw_rust_generic_args(raw, "std::collections::HashSet")
+        && args.len() == 1
+    {
+        return raw_type_arg_supports_derive_clone(
+            args[0],
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        );
+    }
     false
 }
 

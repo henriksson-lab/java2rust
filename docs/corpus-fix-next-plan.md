@@ -5297,6 +5297,22 @@ type annotations, unsupported concrete/concrete `instanceof`, incompatible `?`
 usage, source-super constructor lowering, and missing/uncertain VCF facade
 methods.
 
+2026-07-29 raw `HashSet` clone-derive support: source struct derive
+eligibility now treats `std::collections::HashSet<T>` like `HashMap<K, V>` and
+recursively checks contained source/facade types for `Clone` support. This keeps
+the policy structural instead of adding VCF-specific derive overrides.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-hashset-clone-derive`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `445` to `430`. `VCFHeader` now emits
+`#[derive(Clone)]`, and the `VCFHeader: Clone` / `Box<VCFHeader>.clone()`
+family is gone. Remaining clone-shaped rows are direct
+`Option<Box<dyn Any>>.clone()` or `Option::<&Box<dyn Any>>::cloned()` sites;
+top families remain broad mismatched types, type annotations, unsupported
+concrete/concrete `instanceof`, incompatible `?` usage, source-super
+constructor lowering, and unresolved VCF/genotype facade precision.
+
 ## Rerun Protocol
 
 After each fix:
