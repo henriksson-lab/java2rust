@@ -5377,7 +5377,7 @@ pub fn external_api_facade_support_items_with_local_type_program(
     support.add_display_context_return_hint_surfaces(facts, &display_return_hints);
     support.add_external_field_surfaces(facts, &local_types);
     support.add_static_external_api_facts_for_surface_types(facts);
-    support.add_external_dyn_trait_surfaces(facts);
+    support.add_external_dyn_trait_surfaces(facts, &declared_external_type_exclusions);
     support.add_external_conversion_surfaces(facts, &local_types);
     support.suppress_rust_crate_mapped_external_types(facts);
     support.suppress_emitted_java_enum_types(program);
@@ -8557,12 +8557,15 @@ impl ExternalApiFacadeSupport {
         }
     }
 
-    fn add_external_dyn_trait_surfaces(&mut self, facts: &FactSet) {
+    fn add_external_dyn_trait_surfaces(&mut self, facts: &FactSet, local_types: &BTreeSet<String>) {
         let mut merged_facts = facts.clone();
         merged_facts.extend_from(crate::external_packs::builtin_external_library_packs());
         let mut trait_type_to_name = BTreeMap::new();
         for capability in &merged_facts.type_capability_overrides {
             if capability.object_safe_trait != Some(true) {
+                continue;
+            }
+            if local_type_set_matches_external_name(local_types, &capability.type_name) {
                 continue;
             }
             let type_key = canonical_external_receiver_type_key(&capability.type_name);
@@ -8653,6 +8656,9 @@ impl ExternalApiFacadeSupport {
                     continue;
                 };
                 if merged_facts.object_safe_trait_fact_for_name(implemented_name) != Some(true) {
+                    continue;
+                }
+                if local_type_set_matches_external_name(local_types, implemented_name) {
                     continue;
                 }
                 let trait_names = external_trait_impl_trait_name_candidates(
@@ -12635,6 +12641,12 @@ fn java_type_name_for_external_facade(java_ty: &JavaType) -> Option<&str> {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
         _ => None,
     }
+}
+
+fn local_type_set_matches_external_name(local_types: &BTreeSet<String>, type_name: &str) -> bool {
+    local_types
+        .iter()
+        .any(|local| crate::facts::external_type_name_matches(local, type_name))
 }
 
 fn external_trait_impl_rust_type_candidates(type_name: &str) -> BTreeSet<String> {

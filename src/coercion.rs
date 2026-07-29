@@ -3727,11 +3727,31 @@ fn apply_required_borrowed_element_target_view(
         (OwnershipShape::SharedBorrow, ViewShape::Str)
             if policy.target.java_ty == crate::java_ir::JavaType::String =>
         {
+            if let Some(borrowed_erased_view) =
+                optional_erased_string_downcast_ref_view_projection(&rendered)
+            {
+                return Some(RustExpr::Raw(borrowed_erased_view));
+            }
             (!rendered.ends_with(".as_str()"))
                 .then(|| RustExpr::Raw(format!("{rendered}.as_str()")))
         }
         _ => None,
     }
+}
+
+fn optional_erased_string_downcast_ref_view_projection(rendered: &str) -> Option<String> {
+    let local_name =
+        rendered.strip_suffix(".unwrap().downcast::<String>().expect(\"invalid Java cast\")")?;
+    if local_name.is_empty()
+        || !local_name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(format!(
+        "{local_name}.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
+    ))
 }
 
 fn required_borrowed_element_already_matches_target(

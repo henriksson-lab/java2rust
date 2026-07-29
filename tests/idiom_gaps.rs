@@ -2551,8 +2551,9 @@ class ReusedOptionalErasedObjectCastClone {
 
     assert!(
         translation.rust.contains(
-            "maybe.as_ref().map(|value| java_clone_erased_object_ref(value))/* TODO(translation): validate added clone */.expect(\"Java null receiver\").downcast::<String>()"
-        ) && !translation.rust.contains("maybe.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\").downcast::<String>()"),
+            "maybe.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
+        ) && !translation.rust.contains("maybe.unwrap().downcast::<String>()")
+            && !translation.rust.contains("maybe.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\").downcast::<String>()"),
         "{}",
         translation.rust
     );

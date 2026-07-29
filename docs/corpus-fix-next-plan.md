@@ -5711,6 +5711,39 @@ Focused coverage passed:
 Full `cargo test --test idiom_gaps --quiet` was not rerun at this checkpoint;
 use the next batch boundary for a fresh global baseline.
 
+2026-07-29 source-local facade guard and erased-string borrow cleanup:
+A full `cargo test --test idiom_gaps --quiet` boundary was started after the
+previous checkpoint and reached the tail with five observed regressions before
+being interrupted during a long silent finish. Four were duplicate-trait
+regressions caused by external dyn-trait facade support promoting source-local
+types; external facade support now excludes source/local declared type names
+when creating object-safe trait surfaces and when promoting external trait impls.
+
+The remaining focused failure was an optional erased-object cast used as a
+borrowed Java `String` argument:
+`maybe.unwrap().downcast::<String>().expect(...).as_str()` moved the optional
+carrier before a later `maybe.as_ref()` read. Borrowed string-view slot
+adaptation now rewrites that optional-erased projection to
+`maybe.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(...).as_str()`,
+so borrowed `String` ABI slots no longer force an erased-box clone or consume
+the optional carrier.
+
+Focused coverage passed:
+`reused_optional_erased_object_cast_clones_with_erased_helper`,
+`abstract_class_gets_inherent_stubs_for_unimplemented_interface_methods`,
+`source_struct_with_dyn_trait_vec_field_derives_clone_when_adapter_exists`,
+`trait_impl_forwarding_recovers_owned_array_from_slice_trait_slot`,
+`this_argument_can_borrow_inherited_interface_as_dyn_trait`,
+`commons_math_localized_formats_constants_are_pack_enum_fields`,
+`commons_math_localized_formats_constants_borrow_as_localizable_pack_trait`,
+`commons_math_localizable_pack_trait_can_be_formatted`,
+`cargo fmt --check`,
+`cargo check --quiet`, and `git diff --check`.
+
+Full `cargo test --test idiom_gaps --quiet` was not completed for this
+checkpoint; rerun it at the next batch boundary before claiming a new global
+baseline.
+
 ## Rerun Protocol
 
 After each fix:

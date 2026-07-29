@@ -8653,6 +8653,7 @@ fn lower_expr_with_refinements(
                 ctx,
             );
             lowered = wrap_call_expr_with_argument_temporaries(lowered, lowered_args.temporaries);
+            lowered = rewrite_optional_erased_borrowed_string_view_call_args(lowered, args);
             if slot_expr_needs_result_propagation(expr, env, ctx) {
                 lowered = propagate_result_projection(lowered);
             }
@@ -11556,6 +11557,88 @@ fn lower_unshaped_argument(arg: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExp
     lowered
 }
 
+fn rewrite_optional_erased_borrowed_string_view_call_args(
+    lowered: RustExpr,
+    args: &[Expr],
+) -> RustExpr {
+    let mut rendered = emit::emit_expr(&lowered);
+    let mut changed = false;
+    for arg in args {
+        let Expr::Cast { ty, expr } = arg else {
+            continue;
+        };
+        if !same_concrete_java_type_name(ty, "String") {
+            continue;
+        }
+        let Expr::Var(name) = expr.as_ref() else {
+            continue;
+        };
+        let consuming_view =
+            format!("{name}.unwrap().downcast::<String>().expect(\"invalid Java cast\").as_str()");
+        if rendered.contains(&consuming_view) {
+            rendered = rendered.replace(
+                &consuming_view,
+                &format!(
+                    "{name}.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
+                ),
+            );
+            changed = true;
+        }
+    }
+    if let Some(rewritten) = rewrite_rendered_optional_erased_string_views(&rendered) {
+        rendered = rewritten;
+        changed = true;
+    }
+    if changed {
+        RustExpr::Raw(rendered)
+    } else {
+        lowered
+    }
+}
+
+fn rewrite_rendered_optional_erased_string_views(rendered: &str) -> Option<String> {
+    const SUFFIX: &str = ".unwrap().downcast::<String>().expect(\"invalid Java cast\").as_str()";
+    let mut out = String::with_capacity(rendered.len());
+    let mut rest = rendered;
+    let mut changed = false;
+    while let Some(pos) = rest.find(SUFFIX) {
+        let prefix = &rest[..pos];
+        let local_start = prefix
+            .char_indices()
+            .rev()
+            .find_map(|(index, ch)| (!is_rust_ident_char(ch)).then_some(index + ch.len_utf8()))
+            .unwrap_or(0);
+        let local_name = &prefix[local_start..];
+        if local_name.is_empty()
+            || !local_name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        {
+            out.push_str(prefix);
+            out.push_str(SUFFIX);
+            rest = &rest[pos + SUFFIX.len()..];
+            continue;
+        }
+        out.push_str(&prefix[..local_start]);
+        out.push_str(&format!(
+            "{local_name}.as_ref().and_then(|value| value.downcast_ref::<String>()).expect(\"invalid Java cast\").as_str()"
+        ));
+        rest = &rest[pos + SUFFIX.len()..];
+        changed = true;
+    }
+    if changed {
+        out.push_str(rest);
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn is_rust_ident_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
 fn lower_current_self_cast_unshaped_argument(arg: &Expr, ctx: LowerCtx) -> Option<RustExpr> {
     let Expr::Cast { ty, expr } = arg else {
         return None;
@@ -11806,7 +11889,7 @@ fn lower_exact_erased_object_cast_for_slot(
     }
     let target = slot_target_shape(slot)?;
     if target.ownership != OwnershipShape::SharedBorrow
-        || !same_concrete_java_type(cast_ty, &target.java_ty)
+        || !cast_type_matches_borrowed_erased_object_target(cast_ty, &target.java_ty)
     {
         return None;
     }
@@ -11817,6 +11900,15 @@ fn lower_exact_erased_object_cast_for_slot(
         &rust_type,
         exact_erased_object_local_is_optional(local_name, env, ctx),
     ))
+}
+
+fn cast_type_matches_borrowed_erased_object_target(
+    cast_ty: &JavaType,
+    target_ty: &JavaType,
+) -> bool {
+    same_concrete_java_type(cast_ty, target_ty)
+        || (matches!(target_ty, JavaType::String)
+            && same_concrete_java_type_name(cast_ty, "String"))
 }
 
 fn exact_erased_object_cast_parts(expr: &Expr) -> Option<(&JavaType, &str)> {
