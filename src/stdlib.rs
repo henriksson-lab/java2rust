@@ -7965,8 +7965,10 @@ impl ExternalApiFacadeSupport {
     }
 
     fn add_external_field_surfaces(&mut self, facts: &FactSet, local_types: &BTreeSet<String>) {
+        let mut merged_facts = facts.clone();
+        merged_facts.extend_from(crate::external_packs::builtin_external_library_packs());
         for fact in &facts.external_field_facts {
-            self.add_external_field_surface_fact(facts, fact, local_types);
+            self.add_external_field_surface_fact(&merged_facts, fact, local_types);
         }
         for fact in &crate::external_packs::builtin_external_library_packs().external_field_facts {
             let receiver_key = canonical_external_receiver_type_key(&fact.field.type_name);
@@ -7985,7 +7987,7 @@ impl ExternalApiFacadeSupport {
                         .as_ref()
                         .is_some_and(auto_external_static_constant_surface_type_supported))
             {
-                self.add_external_field_surface_fact(facts, fact, local_types);
+                self.add_external_field_surface_fact(&merged_facts, fact, local_types);
             }
         }
     }
@@ -8016,6 +8018,8 @@ impl ExternalApiFacadeSupport {
             field_type,
         );
         if fact.field_kind == ExternalFieldKind::EnumVariant {
+            self.add_java_type(field_type);
+            self.add_external_trait_impl_surfaces_for_type(facts, field_type);
             return;
         }
         if fact.field_kind == ExternalFieldKind::StaticFinal
@@ -8026,6 +8030,7 @@ impl ExternalApiFacadeSupport {
         }
         if self_typed_enum_constant || fact.field_kind == ExternalFieldKind::EnumVariant {
             self.add_java_type(field_type);
+            self.add_external_trait_impl_surfaces_for_type(facts, field_type);
             let rust_type = if fact.field_kind == ExternalFieldKind::EnumVariant
                 || external_enum_constant_field_type_matches_owner(&receiver_key, field_type)
             {
@@ -8058,6 +8063,38 @@ impl ExternalApiFacadeSupport {
             .entry(owner)
             .or_default()
             .insert(rust_name, rust_type);
+    }
+
+    fn add_external_trait_impl_surfaces_for_type(&mut self, facts: &FactSet, java_type: &JavaType) {
+        let Some(type_name) = java_type_name_for_external_facade(java_type) else {
+            return;
+        };
+        let implementors = external_trait_impl_rust_type_candidates(type_name);
+        if implementors.is_empty() {
+            return;
+        }
+        for capability in facts.type_capability_overrides.iter().filter(|capability| {
+            crate::facts::external_type_name_matches(&capability.type_name, type_name)
+        }) {
+            for implemented in &capability.implements {
+                let Some(implemented_name) = java_type_name_for_external_facade(implemented) else {
+                    continue;
+                };
+                if facts.object_safe_trait_fact_for_name(implemented_name) != Some(true) {
+                    continue;
+                }
+                for trait_name in
+                    external_trait_impl_trait_name_candidates(implemented_name, &BTreeMap::new())
+                {
+                    for implementor in &implementors {
+                        self.trait_impls
+                            .entry(trait_name.clone())
+                            .or_default()
+                            .insert(implementor.clone());
+                    }
+                }
+            }
+        }
     }
 
     fn add_builder_surface_from_used_calls(
@@ -8521,8 +8558,31 @@ impl ExternalApiFacadeSupport {
     }
 
     fn add_external_dyn_trait_surfaces(&mut self, facts: &FactSet) {
+        let mut merged_facts = facts.clone();
+        merged_facts.extend_from(crate::external_packs::builtin_external_library_packs());
         let mut trait_type_to_name = BTreeMap::new();
-        for override_fact in &facts.hierarchy_overrides {
+        for capability in &merged_facts.type_capability_overrides {
+            if capability.object_safe_trait != Some(true) {
+                continue;
+            }
+            let type_key = canonical_external_receiver_type_key(&capability.type_name);
+            let trait_name = rust_name_for_java_named_type(&type_key);
+            if !valid_external_facade_type_ident(&type_key)
+                || is_builtin_external_facade_type(&type_key)
+                || !valid_external_facade_type_ident(&trait_name)
+            {
+                continue;
+            }
+            self.trait_type_names.insert(type_key.clone());
+            self.traits
+                .entry(type_key.clone())
+                .or_insert_with(|| ExternalFacadeTrait {
+                    trait_name: trait_name.clone(),
+                    methods: BTreeSet::new(),
+                });
+            trait_type_to_name.insert(type_key, trait_name);
+        }
+        for override_fact in &merged_facts.hierarchy_overrides {
             let HierarchyStrategy::DynTrait { trait_name } = &override_fact.strategy else {
                 continue;
             };
@@ -8547,7 +8607,7 @@ impl ExternalApiFacadeSupport {
             return;
         }
 
-        for effect in &facts.external_api_effect_facts {
+        for effect in &merged_facts.external_api_effect_facts {
             let Some(receiver) = effect.receiver_type.as_deref() else {
                 continue;
             };
@@ -8560,7 +8620,7 @@ impl ExternalApiFacadeSupport {
                 receiver,
                 &effect.method_name,
                 arg_count,
-                facts,
+                &merged_facts,
             );
             if !valid_rust_method_ident(&rust_method) {
                 continue;
@@ -8570,7 +8630,7 @@ impl ExternalApiFacadeSupport {
                 .as_ref()
                 .map(|return_type| {
                     external_facade_method_return_type_with_facts(
-                        facts,
+                        &merged_facts,
                         Some(receiver),
                         &effect.method_name,
                         Some(arg_count),
@@ -8586,25 +8646,27 @@ impl ExternalApiFacadeSupport {
             ));
         }
 
-        for capability in &facts.type_capability_overrides {
-            let implementor = canonical_external_receiver_type_key(&capability.type_name);
-            if !valid_external_facade_type_ident(&implementor)
-                || is_builtin_external_facade_type(&implementor)
-            {
-                continue;
-            }
+        for capability in &merged_facts.type_capability_overrides {
+            let implementors = external_trait_impl_rust_type_candidates(&capability.type_name);
             for implemented in &capability.implements {
                 let Some(implemented_name) = java_type_name_for_external_facade(implemented) else {
                     continue;
                 };
-                let implemented_key = canonical_external_receiver_type_key(implemented_name);
-                let Some(trait_name) = trait_type_to_name.get(&implemented_key) else {
+                if merged_facts.object_safe_trait_fact_for_name(implemented_name) != Some(true) {
                     continue;
-                };
-                self.trait_impls
-                    .entry(trait_name.clone())
-                    .or_default()
-                    .insert(implementor.clone());
+                }
+                let trait_names = external_trait_impl_trait_name_candidates(
+                    implemented_name,
+                    &trait_type_to_name,
+                );
+                for implementor in &implementors {
+                    for trait_name in &trait_names {
+                        self.trait_impls
+                            .entry(trait_name.clone())
+                            .or_default()
+                            .insert(implementor.clone());
+                    }
+                }
             }
         }
     }
@@ -12575,6 +12637,67 @@ fn java_type_name_for_external_facade(java_ty: &JavaType) -> Option<&str> {
     }
 }
 
+fn external_trait_impl_rust_type_candidates(type_name: &str) -> BTreeSet<String> {
+    let mut candidates = BTreeSet::new();
+    let canonical = canonical_external_receiver_type_key(type_name);
+    for candidate in [
+        rust_name_for_java_named_type(type_name),
+        rust_name_for_java_named_type(&canonical),
+    ] {
+        if valid_external_facade_type_ident(&candidate)
+            && !is_builtin_external_facade_type(&candidate)
+        {
+            candidates.insert(candidate);
+        }
+    }
+    if let Some(simple) = type_name.rsplit(['.', '$']).next() {
+        for candidate in [
+            rust_name_for_java_named_type(simple),
+            rust_name_for_java_named_type(&canonical_external_receiver_type_key(simple)),
+        ] {
+            if valid_external_facade_type_ident(&candidate)
+                && !is_builtin_external_facade_type(&candidate)
+            {
+                candidates.insert(candidate);
+            }
+        }
+    }
+    candidates
+}
+
+fn external_trait_impl_trait_name_candidates(
+    implemented_name: &str,
+    trait_type_to_name: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut candidates = BTreeSet::new();
+    let canonical = canonical_external_receiver_type_key(implemented_name);
+    for key in [
+        implemented_name.to_string(),
+        canonical.clone(),
+        implemented_name
+            .rsplit(['.', '$'])
+            .next()
+            .unwrap_or(implemented_name)
+            .to_string(),
+    ] {
+        let key = canonical_external_receiver_type_key(&key);
+        if let Some(trait_name) = trait_type_to_name.get(&key)
+            && valid_external_facade_type_ident(trait_name)
+        {
+            candidates.insert(trait_name.clone());
+        }
+    }
+    for candidate in [
+        rust_name_for_java_named_type(implemented_name),
+        rust_name_for_java_named_type(&canonical),
+    ] {
+        if valid_external_facade_type_ident(&candidate) {
+            candidates.insert(candidate);
+        }
+    }
+    candidates
+}
+
 pub fn external_static_string_constant_support_items(
     program: &Program,
     facts: &FactSet,
@@ -12646,6 +12769,7 @@ pub fn external_static_string_constant_support_items_with_context_programs_and_d
             &mut support_type_names,
         );
         if let Some(item) = external_static_string_constant_support_item(
+            facts,
             &owner,
             fields,
             &local_static_string_values,
@@ -13476,6 +13600,7 @@ fn external_static_constant_rust_owner(owner_name: &str) -> Option<String> {
 }
 
 fn external_static_string_constant_support_item(
+    facts: &FactSet,
     owner: &str,
     fields: BTreeMap<String, StaticConstantFact>,
     local_static_string_values: &BTreeMap<(String, String), String>,
@@ -13511,21 +13636,70 @@ fn external_static_string_constant_support_item(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
+    let external_trait_impls =
+        external_static_enum_constant_trait_impls(facts, owner, &fields, declared_owners);
     let raw = if declared_owners.contains(owner) {
-        [aliases, impl_block, alias_impls]
+        [aliases, impl_block, alias_impls, external_trait_impls]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")
     } else {
         let owner_block = format!("pub struct {owner};\n\n{impl_block}");
-        [owner_block, aliases, alias_impls]
+        [owner_block, aliases, alias_impls, external_trait_impls]
             .into_iter()
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")
     };
     Some(crate::rust_ir::RustItem::Raw(raw))
+}
+
+fn external_static_enum_constant_trait_impls(
+    facts: &FactSet,
+    owner: &str,
+    fields: &BTreeMap<String, StaticConstantFact>,
+    declared_owners: &BTreeSet<String>,
+) -> String {
+    if declared_owners.contains(owner)
+        || !valid_external_facade_type_ident(owner)
+        || !fields
+            .values()
+            .any(|constant| constant.field_kind == ExternalFieldKind::EnumVariant)
+    {
+        return String::new();
+    }
+
+    let mut lines = Vec::new();
+    let mut trait_impls = BTreeSet::new();
+    for capability in facts
+        .type_capability_overrides
+        .iter()
+        .filter(|capability| crate::facts::external_type_name_matches(&capability.type_name, owner))
+    {
+        for implemented in &capability.implements {
+            let Some(implemented_name) = java_type_name_for_external_facade(implemented) else {
+                continue;
+            };
+            if facts.object_safe_trait_fact_for_name(implemented_name) != Some(true) {
+                continue;
+            }
+            for trait_name in
+                external_trait_impl_trait_name_candidates(implemented_name, &BTreeMap::new())
+            {
+                trait_impls.insert(trait_name);
+            }
+        }
+    }
+    if !trait_impls.is_empty() {
+        lines.push(format!(
+            "impl std::fmt::Display for {owner} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"\") }}\n}}"
+        ));
+        for trait_name in trait_impls {
+            lines.push(format!("impl {trait_name} for {owner} {{}}"));
+        }
+    }
+    lines.join("\n\n")
 }
 
 fn static_constant_impl_lines(

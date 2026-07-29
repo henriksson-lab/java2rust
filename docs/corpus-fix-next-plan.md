@@ -5678,6 +5678,39 @@ preserves qualified nested type identities.
 Verification:
 `cargo test --test external_packs --quiet` passes with 166 tests.
 
+2026-07-29 optional projection and Commons Math trait-impl cleanup:
+Focused reruns of the prior failure cluster showed three stale idiom
+expectations after earlier shared lowering improvements: `Map.get` now returns
+`Option<String>` through `.cloned()`, constructor deferred-field recovery now
+uses `java_clone_erased_object_ref`, and inherited JDK stream buffer access now
+uses `to_vec()` for the borrowed field-to-owned return. The tests were updated
+to assert those current shared-plan spellings instead of the older clone/expect
+forms.
+
+Commons Math `LocalizedFormats` constants now get their `Localizable`
+implementation from external-pack type-capability facts rather than a local
+method-name rule. External facade support merges builtin pack facts when
+building dyn-trait surfaces, filters implementor promotion to object-safe trait
+facts, and static enum-constant support emits the needed `Display` plus
+object-safe trait impls for fact-proven enum owners. This covers
+`&LocalizedFormats::OVERFLOW as &dyn Localizable` and keeps non-trait facade
+types such as comparators/data sources/write options out of invalid trait impls.
+
+Focused coverage passed:
+`documents_map_put_get_java_api_gap`,
+`constructor_deferred_field_recovers_casted_fallible_helper_without_question_mark`,
+`jdk_stream_wrapper_inherits_typed_protected_stream_fields`,
+`do_while_preserves_body_and_trailing_condition`,
+`commons_math_localized_formats_constants_are_pack_enum_fields`,
+`commons_math_localized_formats_constants_borrow_as_localizable_pack_trait`,
+`commons_math_localizable_pack_trait_can_be_formatted`,
+`commons_math_localized_formats_implements_localizable_pack_trait`,
+`cargo fmt --check`,
+`cargo check --quiet`, and `git diff --check`.
+
+Full `cargo test --test idiom_gaps --quiet` was not rerun at this checkpoint;
+use the next batch boundary for a fresh global baseline.
+
 ## Rerun Protocol
 
 After each fix:

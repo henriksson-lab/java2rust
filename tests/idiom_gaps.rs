@@ -6368,7 +6368,10 @@ fn documents_map_put_get_java_api_gap() {
             )
             && translation
                 .rust
-                .contains("values.get(key.as_str()).expect(\"Java null receiver\").clone()")
+                .contains("pub fn replace(&self, values: &mut std::collections::HashMap<String, String>, key: String, value: String) -> Option<String>")
+            && translation
+                .rust
+                .contains("return values.get(key.as_str()).cloned();")
             && !translation.rust.contains(".put(")
             && !translation.rust.contains("&mut Map"),
         "{}",
@@ -7384,8 +7387,8 @@ class ConstructorFallibleCast {
 
     assert!(
         translation.rust.contains(
-            "Self::read(__java_self.source.clone()/* TODO(translation): validate added clone */).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
-        ) && !translation.rust.contains("Self::read(__java_self.source.clone()/* TODO(translation): validate added clone */)?"),
+            "Self::read(java_clone_erased_object_ref(&__java_self.source)).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+        ) && !translation.rust.contains("Self::read(java_clone_erased_object_ref(&__java_self.source))?"),
         "{}",
         translation.rust
     );
@@ -10329,7 +10332,7 @@ class MiniGzipState extends GZIPInputStream {
             && translation.rust.contains("return self.len;")
             && translation
                 .rust
-                .contains("return self.buf.clone()/* TODO(translation): validate added clone */;")
+                .contains("return self.buf.to_vec()/* TODO(translation): validate added clone */;")
             && translation
                 .rust
                 .contains("return self.inf.get_remaining();")
