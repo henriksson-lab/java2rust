@@ -733,6 +733,18 @@ fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
             abi.receiver = ReceiverAbi::MutBorrowedSelf;
             facts.facade_abi_facts.push(abi);
         }
+        for method in ["forEachRemaining", "for_each_remaining"] {
+            let mut abi = rust_stdlib_method_abi(
+                owner,
+                method,
+                1,
+                "JavaIterator::for_each_remaining",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            );
+            abi.receiver = ReceiverAbi::MutBorrowedSelf;
+            facts.facade_abi_facts.push(abi);
+        }
     }
 }
 
@@ -1158,6 +1170,18 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
                 method,
                 0,
                 "File::delete_on_exit",
+                Vec::new(),
+                FacadeSlot::Owned,
+            ));
+        }
+    }
+    for owner in ["URI", "java.net.URI"] {
+        for method in ["getRawPath", "get_raw_path"] {
+            facts.facade_abi_facts.push(rust_stdlib_method_abi(
+                owner,
+                method,
+                0,
+                "URI::get_raw_path",
                 Vec::new(),
                 FacadeSlot::Owned,
             ));
@@ -4542,6 +4566,15 @@ impl<T: Clone> JavaIterator<T> {
         self.index += 1;
         value
     }
+
+    pub fn for_each_remaining<F>(&mut self, mut f: F)
+    where
+        F: FnMut(T),
+    {
+        while self.has_next() {
+            f(self.next());
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -4760,6 +4793,10 @@ impl URI {
     }
 
     pub fn to_string(&self) -> String {
+        self.value.clone()
+    }
+
+    pub fn get_raw_path(&self) -> String {
         self.value.clone()
     }
 }

@@ -341,6 +341,15 @@ class JavaIteratorCursorOverList {
         }
         return out;
     }
+
+    static List<String> copyRemaining(List<String> input) {
+        List<String> out = new ArrayList<String>();
+        Iterator<String> i = input.iterator();
+        i.forEachRemaining(value -> {
+            out.add(value);
+        });
+        return out;
+    }
 }
 "#,
     );
@@ -350,6 +359,8 @@ class JavaIteratorCursorOverList {
             "let mut i: JavaIterator<String> = JavaIterator::new(input.iter().cloned());"
         ) && translation.rust.contains("while i.has_next()")
             && translation.rust.contains("out.push(i.next());")
+            && translation.rust.contains("i.for_each_remaining(|value|")
+            && translation.rust.contains("out.push(value);")
             && !translation.rust.contains("let mut i: Iterator")
             && !translation.rust.contains(".iterator()"),
         "{}",

@@ -4112,6 +4112,10 @@ class PlatformBoundaryUse {
         return path.toAbsolutePath().toUri();
     }
 
+    String rawPath(Path path) {
+        return path.toUri().getRawPath();
+    }
+
     Path fromFile(File file) {
         return file.toPath();
     }
@@ -4138,6 +4142,7 @@ class PlatformBoundaryUse {
     );
     assert!(support.contains("pub mod logger"));
     assert!(support.contains("pub fn to_uri(&self) -> URI"));
+    assert!(support.contains("pub fn get_raw_path(&self) -> String"));
     assert!(support.contains("pub fn to_path(&self) -> Path"));
     assert!(support.contains("pub fn resolve_sibling<P: JavaPathArg>(&self, sibling: P) -> Path"));
     assert!(support.contains("impl JavaPathArg for Option<Path>"));
@@ -4162,6 +4167,7 @@ class PlatformBoundaryUse {
             .rust
             .contains("path.to_absolute_path().to_uri()")
     );
+    assert!(translation.rust.contains("path.to_uri().get_raw_path()"));
     assert!(translation.rust.contains("file.to_path()"));
     assert!(translation.rust.contains("IOUtils::get_path(value)"));
 }
@@ -30282,6 +30288,8 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     let file_can_read_key = CallableKey::method("java.io.File", "canRead", Staticness::Unknown, 0);
     let file_delete_on_exit_key =
         CallableKey::method("java.io.File", "deleteOnExit", Staticness::Unknown, 0);
+    let uri_get_raw_path_key =
+        CallableKey::method("java.net.URI", "getRawPath", Staticness::Unknown, 0);
     let files_exists_key =
         CallableKey::method("java.nio.file.Files", "exists", Staticness::Unknown, 1);
     let files_new_input_stream_key = CallableKey::method(
@@ -30326,6 +30334,12 @@ fn stdlib_owns_known_jdk_content_method_facts() {
         CallableKey::method("StringTokenizer", "nextToken", Staticness::Unknown, 0);
     let string_tokenizer_count_tokens_key =
         CallableKey::method("StringTokenizer", "countTokens", Staticness::Unknown, 0);
+    let iterator_for_each_remaining_key = CallableKey::method(
+        "java.util.Iterator",
+        "forEachRemaining",
+        Staticness::Unknown,
+        1,
+    );
 
     assert!(is_content_read_method("length"));
     assert!(is_content_read_method("isEmpty"));
@@ -30546,6 +30560,7 @@ fn stdlib_owns_known_jdk_content_method_facts() {
         (&file_is_file_key, "java.io.File.isFile"),
         (&file_can_read_key, "java.io.File.canRead"),
         (&file_delete_on_exit_key, "java.io.File.deleteOnExit"),
+        (&uri_get_raw_path_key, "java.net.URI.getRawPath"),
     ] {
         let abi = stdlib_signature_facts
             .facade_abi_for_key(key)
@@ -30554,6 +30569,24 @@ fn stdlib_owns_known_jdk_content_method_facts() {
         assert_eq!(abi.args, Vec::<FacadeSlot>::new());
         assert_eq!(abi.return_slot, FacadeSlot::Owned);
     }
+
+    let iterator_for_each_remaining_abi = stdlib_signature_facts
+        .facade_abi_for_key(&iterator_for_each_remaining_key)
+        .expect(
+            "java.util.Iterator.forEachRemaining ABI should come from selected JDK facade facts",
+        );
+    assert_eq!(
+        iterator_for_each_remaining_abi.receiver,
+        ReceiverAbi::MutBorrowedSelf
+    );
+    assert_eq!(
+        iterator_for_each_remaining_abi.args,
+        vec![FacadeSlot::Owned]
+    );
+    assert_eq!(
+        iterator_for_each_remaining_abi.return_slot,
+        FacadeSlot::Owned
+    );
 
     let files_exists_abi = stdlib_signature_facts
         .facade_abi_for_key(&files_exists_key)

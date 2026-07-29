@@ -332,6 +332,20 @@ translated 32/32 files with 20 invalid-pattern files and reduced generated Rust
 errors from `349` to `347`; the two generated `delete_on_exit` calls remain in
 `VCFUtils.rs`, but no longer appear in `top-compile-errors.tsv`.
 
+2026-07-30 URI/Iterator platform support: `java.net.URI.getRawPath()` now has a
+borrowed-self stdlib ABI fact plus shared `URI::get_raw_path` support, and
+`java.util.Iterator.forEachRemaining(...)` now has a mutable-receiver callable
+fact plus shared `JavaIterator::for_each_remaining` support. Focused coverage:
+`java_platform_facade_support_covers_path_uri_and_file_boundaries`,
+`stdlib_owns_known_jdk_content_method_facts`,
+`java_list_iterator_cursor_uses_platform_facade`, `cargo fmt --check`,
+`cargo check --quiet`, and `git diff --check`. HTSJDK VCF rerun
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-uri-iterator-support` translated
+32/32 files with 20 invalid-pattern files and reduced generated Rust errors
+from `347` to `345`. The old missing `get_raw_path` and
+`for_each_remaining` rows are gone; the iterator site now exposes the adjacent
+method-reference owner issue as unresolved `intervalList::add`.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still

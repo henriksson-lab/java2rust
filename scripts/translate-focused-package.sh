@@ -1619,6 +1619,10 @@ impl URI {
         self.value.clone()
     }
 
+    pub fn get_raw_path(&self) -> String {
+        self.value.clone()
+    }
+
     pub fn to_string(&self) -> String {
         self.value.clone()
     }
@@ -1748,6 +1752,15 @@ impl<T: Clone> JavaIterator<T> {
         let value = self.items.get(self.index).expect("Java iterator exhausted").clone();
         self.index += 1;
         value
+    }
+
+    pub fn for_each_remaining<F>(&mut self, mut f: F)
+    where
+        F: FnMut(T),
+    {
+        while self.has_next() {
+            f(self.next());
+        }
     }
 }
 
