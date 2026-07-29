@@ -30280,6 +30280,8 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     let file_list_key = CallableKey::method("java.io.File", "list", Staticness::Unknown, 0);
     let file_is_file_key = CallableKey::method("java.io.File", "isFile", Staticness::Unknown, 0);
     let file_can_read_key = CallableKey::method("java.io.File", "canRead", Staticness::Unknown, 0);
+    let file_delete_on_exit_key =
+        CallableKey::method("java.io.File", "deleteOnExit", Staticness::Unknown, 0);
     let files_exists_key =
         CallableKey::method("java.nio.file.Files", "exists", Staticness::Unknown, 1);
     let files_new_input_stream_key = CallableKey::method(
@@ -30543,6 +30545,7 @@ fn stdlib_owns_known_jdk_content_method_facts() {
         (&file_list_key, "java.io.File.list"),
         (&file_is_file_key, "java.io.File.isFile"),
         (&file_can_read_key, "java.io.File.canRead"),
+        (&file_delete_on_exit_key, "java.io.File.deleteOnExit"),
     ] {
         let abi = stdlib_signature_facts
             .facade_abi_for_key(key)

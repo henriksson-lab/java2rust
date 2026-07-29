@@ -317,6 +317,21 @@ the other erased-object trait methods are emitted in both the trait and the
 raw merge input must not repromote existing shared concrete/trait support and
 why module-local `From<_> for InputStream` impls need removal-only handling.
 
+2026-07-30 JDK `File.deleteOnExit` support: `java.io.File.deleteOnExit()` now
+has a zero-argument borrowed-self stdlib ABI fact and shared Rust support method
+`File::delete_on_exit`. This is intentionally a no-op facade because Rust has no
+portable standard-library equivalent for JVM process-exit deletion scheduling,
+but it preserves ordinary control-flow lowering and removes the generated
+missing-method rows. Focused coverage:
+`jdk_file_reader_and_system_facades_keep_control_flow_shapes`,
+`stdlib_owns_known_jdk_content_method_facts`,
+`java_platform_facade_support_covers_path_uri_and_file_boundaries`,
+`cargo fmt --check`, `cargo check --quiet`, and `git diff --check`. HTSJDK VCF
+rerun `.tmp/corpus-rerun-20260730-htsjdk-vcf-after-file-delete-on-exit`
+translated 32/32 files with 20 invalid-pattern files and reduced generated Rust
+errors from `349` to `347`; the two generated `delete_on_exit` calls remain in
+`VCFUtils.rs`, but no longer appear in `top-compile-errors.tsv`.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still

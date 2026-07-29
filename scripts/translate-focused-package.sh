@@ -1859,6 +1859,8 @@ impl File {
         self.clone()
     }
 
+    pub fn delete_on_exit(&self) {}
+
     pub fn is_directory(&self) -> bool {
         std::path::Path::new(&self.value).is_dir()
     }

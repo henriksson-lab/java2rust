@@ -1152,6 +1152,16 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
                 FacadeSlot::Owned,
             ));
         }
+        for method in ["deleteOnExit", "delete_on_exit"] {
+            facts.facade_abi_facts.push(rust_stdlib_method_abi(
+                owner,
+                method,
+                0,
+                "File::delete_on_exit",
+                Vec::new(),
+                FacadeSlot::Owned,
+            ));
+        }
     }
     for owner in ["URL", "java.net.URL"] {
         facts.facade_abi_facts.push(rust_stdlib_method_abi(
@@ -4816,6 +4826,8 @@ impl File {
     pub fn get_absolute_file(&self) -> File {
         self.clone()
     }
+
+    pub fn delete_on_exit(&self) {}
 
     pub fn is_directory(&self) -> bool {
         std::path::Path::new(&self.value).is_dir()

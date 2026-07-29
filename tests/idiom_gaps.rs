@@ -1047,6 +1047,11 @@ class JdkFileReaderAndSystemFacades {
         return file.exists();
     }
 
+    static void cleanupOnExit(String path) {
+        File file = new File(path);
+        file.deleteOnExit();
+    }
+
     static boolean readerReady(BufferedReader reader) throws IOException {
         return reader.ready();
     }
@@ -1064,9 +1069,11 @@ class JdkFileReaderAndSystemFacades {
         translation
             .rust
             .contains("std::path::Path::new(file.get_path().as_str()).exists()")
+            && translation.rust.contains("file.delete_on_exit();")
             && translation.rust.contains("return Ok(true);")
             && translation.rust.contains("std::process::exit(10 as i32)")
             && !translation.rust.contains("file.exists()")
+            && !translation.rust.contains("file.deleteOnExit()")
             && !translation.rust.contains("reader.ready()")
             && !translation.rust.contains("System::exit(10"),
         "{}",
