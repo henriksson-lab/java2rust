@@ -8412,7 +8412,7 @@ fn lower_expr_with_refinements(
         return lower_callback_lambda_expr(params, body, env, ctx);
     }
     if let Expr::MethodReference { target, method } = expr {
-        return render_method_reference(&plan_method_reference(target, method));
+        return render_method_reference(&plan_method_reference_with_shape_env(target, method, env));
     }
     if let Some(kind) = plan_unsupported_expression(expr) {
         return unsupported_expression_expr(kind);
@@ -9187,7 +9187,7 @@ fn lower_sequence_callback_call_expr(
         }
         Expr::MethodReference { target, method } => {
             let element_shape = stream_like_receiver_element_shape(receiver_expr, env, ctx)?;
-            render_typed_method_reference_callback(target, method, &element_shape, ctx)
+            render_typed_method_reference_callback(target, method, &element_shape, env, ctx)
         }
         _ => return None,
     };
@@ -9211,15 +9211,42 @@ fn render_typed_method_reference_callback(
     target: &str,
     method: &str,
     element_shape: &RustSlotShape,
+    env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> RustExpr {
     let param_type = render_callback_param_type(element_shape, ctx);
     render_typed_single_input_method_reference_callback_with_facts(
-        &plan_method_reference(target, method),
+        &plan_method_reference_with_shape_env(target, method, env),
         &param_type,
         element_shape,
         ctx.facts,
     )
+}
+
+fn plan_method_reference_with_shape_env(
+    target: &str,
+    method: &str,
+    env: &ShapeEnv,
+) -> MethodReferencePlan {
+    if method != "new"
+        && !matches!(target, "this" | "self")
+        && method_reference_target_is_bound_receiver(target, env)
+    {
+        return MethodReferencePlan::BoundReceiver {
+            receiver: emit::emit_expr(&lower_bare_name(target, env)),
+            method: crate::parser::to_snake_case(method),
+        };
+    }
+    plan_method_reference(target, method)
+}
+
+fn method_reference_target_is_bound_receiver(target: &str, env: &ShapeEnv) -> bool {
+    if env.local_type(target).is_some() || env.field_type(target).is_some() {
+        return true;
+    }
+    let normalized = crate::parser::to_snake_case(target);
+    normalized != target
+        && (env.local_type(&normalized).is_some() || env.field_type(&normalized).is_some())
 }
 
 fn render_callback_param_type(shape: &RustSlotShape, ctx: LowerCtx) -> String {
@@ -12129,7 +12156,7 @@ fn lower_functional_cast_callback_unshaped(
     match inner.as_ref() {
         Expr::Lambda { params, body } => Some(lower_callback_lambda_expr(params, body, env, ctx)),
         Expr::MethodReference { target, method } => {
-            let plan = plan_method_reference(target, method);
+            let plan = plan_method_reference_with_shape_env(target, method, env);
             Some(render_method_reference(&plan))
         }
         _ => None,

@@ -363,6 +363,23 @@ errors from `345` to `344`; the stale-binary probe
 `.tmp/corpus-rerun-20260730-htsjdk-vcf-after-htsjdk-log-warn` stayed at `345`
 and should not be used as evidence for this slice.
 
+2026-07-30 bound receiver method-reference support: method references whose
+target is a visible local or field now lower as bound receiver closures instead
+of associated function paths. Semantic API fact collection records expression
+targets as one-argument receiver calls, while the support-use collector records
+method-reference method names conservatively so external-pack facade support is
+still emitted. Focused coverage:
+`bound_receiver_method_reference_uses_local_receiver_closure`,
+`iterator_foreachremaining_bound_receiver_method_reference_compiles`,
+`method_reference_expression_targets_use_local_receiver_type_facts`,
+`cargo fmt --check`, `cargo check --quiet`, and `git diff --check`.
+Release-backed HTSJDK VCF rerun
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-bound-methodref` translated 32/32
+files with 20 invalid-pattern files and reduced generated Rust errors from
+`344` to `343`. The previous unresolved `intervalList::add` method-reference
+owner row is gone; `VCFFileReader::to_interval_list...` now renders
+`for_each_remaining(|value| interval_list.add(value))`.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still

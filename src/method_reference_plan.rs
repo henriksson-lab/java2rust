@@ -7,6 +7,10 @@ pub enum MethodReferencePlan {
         owner: String,
         method: String,
     },
+    BoundReceiver {
+        receiver: String,
+        method: String,
+    },
     UnboundAccessor {
         method: String,
     },

@@ -1519,6 +1519,7 @@ fn collect_external_api_effects_from_expr_with_env(
         if let Expr::MethodReference { target, method } = expr {
             if !is_non_external_method_reference(target, method) {
                 let receiver = method_reference_receiver(target, env);
+                let arg_count = usize::from(receiver.bound_receiver);
                 push_external_api_effect_guess(
                     facts,
                     seen,
@@ -1529,7 +1530,7 @@ fn collect_external_api_effects_from_expr_with_env(
                     diagnostics,
                     receiver.type_key,
                     method,
-                    0,
+                    arg_count,
                 );
             }
         }
@@ -1683,12 +1684,14 @@ fn is_array_constructor_method_reference(target: &str, method: &str) -> bool {
 
 struct MethodReferenceReceiver {
     type_key: Option<String>,
+    bound_receiver: bool,
 }
 
 fn method_reference_receiver(target: &str, env: &TypeEnv) -> MethodReferenceReceiver {
     if let Some(java_ty) = env.local_type(target).or_else(|| env.field_type(target)) {
         return MethodReferenceReceiver {
             type_key: external_api_receiver_type_key_with_env(java_ty, env),
+            bound_receiver: true,
         };
     }
     let normalized = crate::parser::to_snake_case(target);
@@ -1699,13 +1702,17 @@ fn method_reference_receiver(target: &str, env: &TypeEnv) -> MethodReferenceRece
     {
         return MethodReferenceReceiver {
             type_key: external_api_receiver_type_key_with_env(java_ty, env),
+            bound_receiver: true,
         };
     }
     let parsed = crate::parser::parse_type(target);
     let type_key = java_type_name(&parsed)
         .map(crate::stdlib::canonical_external_receiver_type_key)
         .or_else(|| Some(crate::stdlib::canonical_external_receiver_type_key(target)));
-    MethodReferenceReceiver { type_key }
+    MethodReferenceReceiver {
+        type_key,
+        bound_receiver: false,
+    }
 }
 
 fn push_external_api_effect_guess(

@@ -68,6 +68,9 @@ pub fn render_method_reference(plan: &MethodReferencePlan) -> RustExpr {
             }
             owner_associated_path_projection(owner, method)
         }
+        MethodReferencePlan::BoundReceiver { receiver, method } => {
+            RustExpr::Raw(format!("|value| {receiver}.{method}(value)"))
+        }
         MethodReferencePlan::UnboundAccessor { method } => {
             unbound_method_reference_projection(method)
         }
@@ -86,7 +89,8 @@ pub fn render_typed_single_input_method_reference_callback(
             let body = render_single_input_method_reference_body(plan, "value", "value");
             typed_single_input_callback_projection(param_type, &body)
         }
-        MethodReferencePlan::UnboundAccessor { .. }
+        MethodReferencePlan::BoundReceiver { .. }
+        | MethodReferencePlan::UnboundAccessor { .. }
         | MethodReferencePlan::CurrentReceiverMethod { .. }
         | MethodReferencePlan::Constructor { .. } => {
             let body = render_single_input_method_reference_body(plan, "value", "value");
@@ -126,6 +130,14 @@ pub fn render_single_input_method_reference_body(
         MethodReferencePlan::AssociatedFunction { owner, method } => {
             render_associated_function_method_reference_body(owner, method, receiver, value_expr)
         }
+        MethodReferencePlan::BoundReceiver {
+            receiver: bound_receiver,
+            method,
+        } => emit::emit_expr(&receiver_method_call_projection(
+            RustExpr::Raw(bound_receiver.to_string()),
+            method,
+            vec![RustExpr::Raw(value_expr.to_string())],
+        )),
         MethodReferencePlan::UnboundAccessor { method } => emit::emit_expr(
             &unbound_method_call_projection(RustExpr::Raw(receiver.to_string()), method),
         ),

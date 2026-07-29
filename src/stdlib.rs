@@ -10904,11 +10904,16 @@ fn collect_expr_call_arities(expr: &Expr, calls: &mut BTreeMap<String, BTreeSet<
             crate::java_ir::LambdaBody::Expr(expr) => collect_expr_call_arities(expr, calls),
             crate::java_ir::LambdaBody::Block(block) => collect_block_call_arities(block, calls),
         },
+        Expr::MethodReference { method, .. } => {
+            let method = crate::parser::to_snake_case(method);
+            let arities = calls.entry(method).or_default();
+            arities.insert(0);
+            arities.insert(1);
+        }
         Expr::Literal(_)
         | Expr::Var(_)
         | Expr::This
         | Expr::Super
-        | Expr::MethodReference { .. }
         | Expr::ClassLiteral(_)
         | Expr::Raw(_) => {}
     }

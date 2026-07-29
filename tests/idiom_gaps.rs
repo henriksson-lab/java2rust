@@ -377,6 +377,41 @@ class JavaIteratorCursorOverList {
 }
 
 #[test]
+fn iterator_foreachremaining_bound_receiver_method_reference_compiles() {
+    let translation = translate_source(
+        r#"
+import htsjdk.samtools.util.Interval;
+import htsjdk.samtools.util.IntervalList;
+import java.util.Iterator;
+
+class BoundReceiverMethodReferenceCaller {
+    void copyRemaining(Iterator<Interval> intervals, IntervalList intervalList) {
+        intervals.forEachRemaining(intervalList::add);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("intervals.for_each_remaining(|value| interval_list.add(value))")
+            && !translation.rust.contains("intervalList::add")
+            && !translation.rust.contains("interval_list::add"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "iterator_foreachremaining_bound_receiver_method_reference",
+        vec![GeneratedCrateModule {
+            name: "iterator_foreachremaining_bound_receiver_method_reference",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn documents_java_string_method_spelling_gap() {
     let translation = translate_source(&idiom_gap("JavaStringMethods.java"));
 

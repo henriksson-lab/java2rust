@@ -11227,6 +11227,42 @@ class BuiltinHtsjdkIntervalCaller {
 }
 
 #[test]
+fn bound_receiver_method_reference_uses_local_receiver_closure() {
+    let translation = translate_source(
+        r#"
+import htsjdk.samtools.util.Interval;
+import htsjdk.samtools.util.IntervalList;
+import java.util.Iterator;
+
+class BoundReceiverMethodReferenceCaller {
+    void copyRemaining(Iterator<Interval> intervals, IntervalList intervalList) {
+        intervals.forEachRemaining(intervalList::add);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("intervals.for_each_remaining(|value| interval_list.add(value))"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("intervalList::add")
+            && !translation.rust.contains("interval_list::add"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_inherited_instance_fields_lower_as_self_fields() {
     let translation = translate_source(
         r#"
