@@ -2385,6 +2385,102 @@ class HeaderChild extends HeaderBase {
 }
 
 #[test]
+fn inherited_context_nullable_getter_display_uses_declaring_field_shape() {
+    let base = r#"
+class ContextNullableGetterBase {
+    private String key = null;
+
+    String getKey() {
+        return key;
+    }
+
+}
+"#;
+    let child = r#"
+class ContextNullableGetterChild extends ContextNullableGetterBase {
+    String encode() {
+        return getKey() + "=" + "value";
+    }
+}
+"#;
+    let translation =
+        translate_source_with_context_sources(child, &[base.to_string()], &FactSet::default());
+
+    assert!(
+        translation.rust.contains(
+            ".as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
+        ) || translation.rust.contains(".as_deref().unwrap_or(\"null\")"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("format!(\"{}={}\", self.get_key(), \"value\")"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "inherited_context_nullable_getter_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn receiverless_nullable_method_display_uses_current_signature_shape() {
+    let translation = translate_source(
+        r#"
+class ReceiverlessNullableMethodDisplay {
+    private String key = null;
+
+    String getKey() {
+        if (key == null) {
+            return null;
+        }
+        return key;
+    }
+
+    String encode() {
+        return getKey() + "=" + "value";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.get_key().as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())")
+            || translation
+                .rust
+                .contains("self.get_key().as_deref().unwrap_or(\"null\")"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("format!(\"{}={}\", self.get_key(), \"value\")"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "receiverless_nullable_method_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn string_pattern_methods_borrow_owned_string_arguments() {
     let translation = translate_source(&idiom_gap("StringPatternBorrowing.java"));
 

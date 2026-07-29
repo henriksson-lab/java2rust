@@ -15651,6 +15651,9 @@ fn lower_expr_for_slot_with_refinements(
     if let Some(getter_actual) = optional_getter_actual_shape_for_slot(expr, &slot) {
         actual = getter_actual;
     }
+    if let Some(display_actual) = optional_current_method_display_actual_shape(expr, &slot, ctx) {
+        actual = display_actual;
+    }
     if let Some(optional_field) =
         lower_optional_receiver_field_access_for_slot(expr, env, &slot, &actual, ctx, refinements)
     {
@@ -15898,6 +15901,57 @@ fn optional_getter_actual_shape_for_slot(expr: &Expr, slot: &Slot) -> Option<Rus
         return None;
     }
     Some(target.clone())
+}
+
+fn optional_current_method_display_actual_shape(
+    expr: &Expr,
+    slot: &Slot,
+    ctx: LowerCtx,
+) -> Option<RustSlotShape> {
+    if !matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment) {
+        return None;
+    }
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = expr
+    else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    if receiver
+        .as_ref()
+        .is_some_and(|receiver| !is_this_receiver_expr(receiver))
+    {
+        return None;
+    }
+    let rust_name = resolved
+        .as_ref()
+        .map(|resolved| resolved.rust_name.as_str())
+        .unwrap_or(name);
+    let snake_name = crate::parser::to_snake_case(name);
+    let mut owners = Vec::new();
+    if let Some(current_type) = ctx.current_type {
+        owners.push(current_type);
+    }
+    if let Some(resolved) = resolved {
+        owners.push(resolved.declaring_type.as_str());
+    }
+    owners.sort_unstable();
+    owners.dedup();
+    owners.into_iter().find_map(|owner| {
+        ctx.signatures
+            .method_return_shape_by_rust_name(owner, rust_name)
+            .or_else(|| {
+                ctx.signatures
+                    .method_return_shape_by_rust_name(owner, &snake_name)
+            })
+            .filter(|shape| shape.optional_element_type().is_some())
+    })
 }
 
 fn lower_optional_array_expr_for_slice_slot(
@@ -20618,6 +20672,22 @@ fn source_trivial_accessor_getter_lowered_type(
         .as_ref()
         .map(|resolved| resolved.rust_name.clone())
         .unwrap_or_else(|| crate::parser::to_snake_case(name));
+    let mut declaring_names = Vec::new();
+    if let Some(resolved) = resolved {
+        declaring_names.push(resolved.declaring_type.as_str());
+    }
+    declaring_names.push(receiver_name.as_str());
+    declaring_names.sort_unstable();
+    declaring_names.dedup();
+    for declaring_name in declaring_names {
+        if let Some(field_name) =
+            source_method_returned_field_name(declaring_name, name, args.len(), ctx)
+            && let Some(field_shape) =
+                signature_field_shape_for_type_aliases(ctx.signatures, declaring_name, &field_name)
+        {
+            return Some(source_field_getter_lowered_type(field_shape));
+        }
+    }
     if let Some(shape) = ctx
         .signatures
         .method_return_shape_by_rust_name(&receiver_name, &rust_name)
@@ -20625,13 +20695,6 @@ fn source_trivial_accessor_getter_lowered_type(
         return Some(optional_borrow_slot_lowered_type(LoweredType::Slot(
             Box::new(shape.clone()),
         )));
-    }
-    if let Some(field_name) =
-        source_method_returned_field_name(&receiver_name, name, args.len(), ctx)
-        && let Some(field_shape) =
-            signature_field_shape_for_type_aliases(ctx.signatures, &receiver_name, &field_name)
-    {
-        return Some(source_field_getter_lowered_type(field_shape));
     }
     let CallExprPlan::TrivialAccessorGetter {
         receiver,
