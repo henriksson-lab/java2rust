@@ -2305,6 +2305,86 @@ mod generated_tests {
 }
 
 #[test]
+fn inherited_receiverless_nullable_getter_uses_java_display_policy() {
+    let translation = translate_source(
+        r#"
+class HeaderBase {
+    private String key = null;
+
+    String getKey() {
+        return key;
+    }
+
+    static String encodeMap() throws Exception {
+        return "value";
+    }
+}
+
+class HeaderChild extends HeaderBase {
+    String ownKey = null;
+
+    String getOwnKey() {
+        return ownKey;
+    }
+
+    String encodeFormat() {
+        return String.format("key=%s", getKey());
+    }
+
+    String encodeConcat() {
+        return getKey() + "=" + "value";
+    }
+
+    String encodeOwnConcat() {
+        return getOwnKey() + "=" + "value";
+    }
+
+    String encodeFallibleConcat() throws Exception {
+        return getKey() + "=" + HeaderBase.encodeMap();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".as_deref().unwrap_or(\"null\")")
+            && !translation
+                .rust
+                .contains("format!(\"key={}\", self.get_key())")
+            && !translation.rust.contains("format!(\"key={}\", self.key)")
+            && !translation
+                .rust
+                .contains("format!(\"{}={}\", self.get_key(), \"value\")")
+            && !translation
+                .rust
+                .contains("format!(\"{}={}\", self.key, \"value\")")
+            && !translation
+                .rust
+                .contains("format!(\"{}={}\", self.get_own_key(), \"value\")")
+            && !translation
+                .rust
+                .contains("format!(\"{}={}\", self.own_key, \"value\")")
+            && !translation
+                .rust
+                .contains("format!(\"{}={}\", self.get_key(), HeaderBase::encode_map()?)")
+            && !translation
+                .rust
+                .contains("format!(\"{}={}\", self.key, HeaderBase::encode_map()?)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "inherited_receiverless_nullable_getter_display",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn string_pattern_methods_borrow_owned_string_arguments() {
     let translation = translate_source(&idiom_gap("StringPatternBorrowing.java"));
 

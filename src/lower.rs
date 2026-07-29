@@ -5367,6 +5367,12 @@ fn source_summary_declared_inherited_method<'a>(
         if !visited.insert(type_key.clone()) {
             break;
         }
+        if let Some(local_ty) = find_context_type_by_key(ctx.program, &type_key)
+            && let Some(method) =
+                find_declared_method_by_name_and_arity(local_ty, method_name, arg_count)
+        {
+            return Some((local_ty, method));
+        }
         if let Some(summary_ty) =
             find_context_type_by_key(ctx.source_summary_type_program, &type_key)
                 .or_else(|| find_context_type_by_key(ctx.support_local_type_program, &type_key))
