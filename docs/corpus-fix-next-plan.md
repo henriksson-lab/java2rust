@@ -5910,6 +5910,38 @@ emit `line_type: Some(*line_type)`. Remaining top families are still broad
 concrete/concrete `instanceof`, unlowered `super(...)`, generic header-line
 dispatch, and optional/erased-object recovery.
 
+2026-07-29 source-super delegated constructor substitution:
+Source-super constructor lowering now composes parameter bindings through a
+one-hop superclass `this(...)` delegation before flattening inherited fields
+into the subclass struct literal. This fixes cases like a subclass calling
+`super(..., NestedEnum.FORMAT)` where the chosen superclass constructor delegates
+to another superclass constructor with `this(..., lineType, ...)`; the final
+field value now remains the original enum constant instead of leaking as
+`self.line_type` in a static constructor. Trailing constructor instance-call
+arguments now also rewrite `self` through `__java_self`, preserving a clone-safe
+field receiver for calls that pass values seeded earlier in the constructor.
+
+Focused coverage passed:
+`source_super_constructor_composes_delegated_parameter_bindings`,
+`constructor_trailing_instance_call_rewrites_self_arguments`,
+`source_super_constructor_with_args_initializes_flattened_inherited_fields`,
+`source_super_constructor_preserves_trailing_method_result_call`,
+`generic_source_super_constructor_initializes_flattened_inherited_fields`,
+`source_super_constructor_matches_varargs_super_arity`, `cargo fmt --check`,
+`cargo check --quiet`, `git diff --check`, and release rebuild.
+
+HTSJDK VCF reruns:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-super-delegated-param-substitution`
+translated 32/32 files with 20 invalid-pattern files and 444 generated-Rust
+errors; the `VCFFormatHeaderLine`/`VCFInfoHeaderLine` static constructors now
+emit `Some(VCFCompoundHeaderLineSupportedHeaderLineType::FORMAT/INFO)` instead
+of `Some(self.line_type)`. Follow-up
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-trailing-constructor-self-args`
+translated 32/32 files with 20 invalid-pattern files and 443 generated-Rust
+errors; the remaining `expected value, found module self` constructor error in
+`VCFSimpleHeaderLine::new_string_map` is gone and the call now uses
+`__java_self.initialize(__java_self.clone().name, ...)`.
+
 ## Rerun Protocol
 
 After each fix:

@@ -2395,31 +2395,71 @@ fn constructor_self_value_expr(
 }
 
 fn replace_self_receiver(expr: RustExpr, replacement: &str) -> RustExpr {
+    replace_self_receiver_with_policy(expr, replacement, false)
+}
+
+fn replace_self_receiver_preserving_field_clone(expr: RustExpr, replacement: &str) -> RustExpr {
+    replace_self_receiver_with_policy(expr, replacement, true)
+}
+
+fn replace_self_receiver_with_policy(
+    expr: RustExpr,
+    replacement: &str,
+    preserve_field_clone: bool,
+) -> RustExpr {
     match expr {
         RustExpr::Var(name) if name == "self" => self_replacement_expr(replacement),
         RustExpr::Field(receiver, field) => {
             let receiver = if matches!(receiver.as_ref(), RustExpr::Var(name) if name == "self") {
-                constructor_self_field_replacement_expr(replacement)
+                if preserve_field_clone {
+                    self_replacement_expr(replacement)
+                } else {
+                    constructor_self_field_replacement_expr(replacement)
+                }
             } else {
-                replace_self_receiver(*receiver, replacement)
+                replace_self_receiver_with_policy(*receiver, replacement, preserve_field_clone)
             };
             RustExpr::Field(Box::new(receiver), field)
         }
         RustExpr::Index(target, index) => RustExpr::Index(
-            Box::new(replace_self_receiver(*target, replacement)),
-            Box::new(replace_self_receiver(*index, replacement)),
+            Box::new(replace_self_receiver_with_policy(
+                *target,
+                replacement,
+                preserve_field_clone,
+            )),
+            Box::new(replace_self_receiver_with_policy(
+                *index,
+                replacement,
+                preserve_field_clone,
+            )),
         ),
         RustExpr::Binary { op, left, right } => RustExpr::Binary {
             op,
-            left: Box::new(replace_self_receiver(*left, replacement)),
-            right: Box::new(replace_self_receiver(*right, replacement)),
+            left: Box::new(replace_self_receiver_with_policy(
+                *left,
+                replacement,
+                preserve_field_clone,
+            )),
+            right: Box::new(replace_self_receiver_with_policy(
+                *right,
+                replacement,
+                preserve_field_clone,
+            )),
         },
         RustExpr::Unary { op, expr } => RustExpr::Unary {
             op,
-            expr: Box::new(replace_self_receiver(*expr, replacement)),
+            expr: Box::new(replace_self_receiver_with_policy(
+                *expr,
+                replacement,
+                preserve_field_clone,
+            )),
         },
         RustExpr::Cast { expr, ty } => RustExpr::Cast {
-            expr: Box::new(replace_self_receiver(*expr, replacement)),
+            expr: Box::new(replace_self_receiver_with_policy(
+                *expr,
+                replacement,
+                preserve_field_clone,
+            )),
             ty,
         },
         RustExpr::If {
@@ -2427,15 +2467,33 @@ fn replace_self_receiver(expr: RustExpr, replacement: &str) -> RustExpr {
             then_expr,
             else_expr,
         } => RustExpr::If {
-            condition: Box::new(replace_self_receiver(*condition, replacement)),
-            then_expr: Box::new(replace_self_receiver(*then_expr, replacement)),
-            else_expr: Box::new(replace_self_receiver(*else_expr, replacement)),
+            condition: Box::new(replace_self_receiver_with_policy(
+                *condition,
+                replacement,
+                preserve_field_clone,
+            )),
+            then_expr: Box::new(replace_self_receiver_with_policy(
+                *then_expr,
+                replacement,
+                preserve_field_clone,
+            )),
+            else_expr: Box::new(replace_self_receiver_with_policy(
+                *else_expr,
+                replacement,
+                preserve_field_clone,
+            )),
         },
         RustExpr::Call { function, args } => RustExpr::Call {
-            function: Box::new(replace_self_receiver(*function, replacement)),
+            function: Box::new(replace_self_receiver_with_policy(
+                *function,
+                replacement,
+                preserve_field_clone,
+            )),
             args: args
                 .into_iter()
-                .map(|arg| replace_self_receiver(arg, replacement))
+                .map(|arg| {
+                    replace_self_receiver_with_policy(arg, replacement, preserve_field_clone)
+                })
                 .collect(),
         },
         RustExpr::MethodCall {
@@ -2443,24 +2501,39 @@ fn replace_self_receiver(expr: RustExpr, replacement: &str) -> RustExpr {
             method,
             args,
         } => RustExpr::MethodCall {
-            receiver: Box::new(replace_self_receiver(*receiver, replacement)),
+            receiver: Box::new(replace_self_receiver_with_policy(
+                *receiver,
+                replacement,
+                preserve_field_clone,
+            )),
             method,
             args: args
                 .into_iter()
-                .map(|arg| replace_self_receiver(arg, replacement))
+                .map(|arg| {
+                    replace_self_receiver_with_policy(arg, replacement, preserve_field_clone)
+                })
                 .collect(),
         },
         RustExpr::StructLit { name, fields } => RustExpr::StructLit {
             name,
             fields: fields
                 .into_iter()
-                .map(|(field, value)| (field, replace_self_receiver(value, replacement)))
+                .map(|(field, value)| {
+                    (
+                        field,
+                        replace_self_receiver_with_policy(value, replacement, preserve_field_clone),
+                    )
+                })
                 .collect(),
         },
-        RustExpr::Raw(text) => RustExpr::Raw(text.replace(
-            "self.",
-            &format!("{}.", constructor_self_field_replacement(replacement)),
-        )),
+        RustExpr::Raw(text) => {
+            let replacement = if preserve_field_clone {
+                replacement.to_string()
+            } else {
+                constructor_self_field_replacement(replacement)
+            };
+            RustExpr::Raw(text.replace("self.", &format!("{replacement}.")))
+        }
         other => other,
     }
 }
@@ -3011,6 +3084,12 @@ fn delegated_source_constructor_body<'a>(
         ));
     };
     let resolved = resolved.as_ref()?;
+    let outer_bindings = ctor
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .zip(args.iter())
+        .collect::<Vec<_>>();
     let target = ty.members.iter().find_map(|member| match member {
         Member::Constructor(candidate)
             if candidate
@@ -3029,7 +3108,11 @@ fn delegated_source_constructor_body<'a>(
             .params
             .iter()
             .map(|param| param.name.clone())
-            .zip(delegated_args.iter().cloned())
+            .zip(
+                delegated_args
+                    .iter()
+                    .map(|arg| substitute_expr_vars(arg, &outer_bindings)),
+            )
             .collect(),
     ))
 }
@@ -3331,15 +3414,19 @@ fn lower_delegated_constructor_trailing_stmt(
         }
         DelegatedConstructorTrailingStmt::InstanceCall { resolved, args } => {
             let receiver = Expr::This;
+            let lowered_args = lower_args_with_plan(
+                args,
+                env,
+                plan_call_arguments(Some(resolved), args.len(), ctx.signatures),
+                ctx,
+            )
+            .into_iter()
+            .map(|arg| replace_self_receiver_preserving_field_clone(arg, "__java_self.clone()"))
+            .collect();
             let mut lowered = receiver_method_call_projection_exact(
                 RustExpr::Var("__java_self".to_string()),
                 &resolved.rust_name,
-                lower_args_with_plan(
-                    args,
-                    env,
-                    plan_call_arguments(Some(resolved), args.len(), ctx.signatures),
-                    ctx,
-                ),
+                lowered_args,
             );
             if returns_result
                 && matches!(

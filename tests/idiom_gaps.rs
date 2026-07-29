@@ -9737,6 +9737,41 @@ class ParentWriter {
 }
 
 #[test]
+fn source_super_constructor_composes_delegated_parameter_bindings() {
+    let translation = translate_source(&idiom_gap("SourceSuperDelegatedParamSubstitution.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("kind: Some(SourceSuperDelegatedParamSubstitutionBaseKind::FORMAT)")
+            && !translation.rust.contains("self.kind")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "source super constructor delegation should substitute original super args:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn constructor_trailing_instance_call_rewrites_self_arguments() {
+    let translation = translate_source(&idiom_gap("ConstructorTrailingCallReadsSeededField.java"));
+
+    assert!(
+        translation.rust.contains("__java_self.initialize(")
+            && !translation.rust.contains("initialize(self.name")
+            && !translation.rust.contains("self.name,")
+            && !translation
+                .rust
+                .contains("expected value, found module `self`")
+            && !translation.rust.contains("compile_error!"),
+        "trailing constructor calls should rewrite self-field arguments through __java_self:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn generic_source_super_constructor_initializes_flattened_inherited_fields() {
     let subclass = r#"
 interface Function {}

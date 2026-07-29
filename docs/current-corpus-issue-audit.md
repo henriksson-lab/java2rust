@@ -1403,6 +1403,15 @@ generated Rust errors in the current broader VCF baseline. The targeted
 `count_type` enum constants are wrapped into `Some(...)`, and borrowed
 line-type enum params now store as `Some(*line_type)`.
 
+Release-backed HTSJDK VCF source-super constructor rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-trailing-constructor-self-args`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and has `443`
+generated Rust errors. The `VCFFormatHeaderLine`/`VCFInfoHeaderLine`
+constructor literals now keep delegated superclass enum constants instead of
+emitting `Some(self.line_type)`, and the `VCFSimpleHeaderLine::new_string_map`
+trailing initializer call no longer leaks bare `self.name` into a static
+constructor.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
