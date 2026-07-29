@@ -9034,8 +9034,24 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             NativeCollectionStaticMethod::CollectionsEmptyList,
         ),
         (
+            "emptySet",
+            NativeCollectionStaticMethod::CollectionsEmptySet,
+        ),
+        (
+            "empty_map",
+            NativeCollectionStaticMethod::CollectionsEmptyMap,
+        ),
+        (
             "emptySortedSet",
             NativeCollectionStaticMethod::CollectionsEmptySortedSet,
+        ),
+        (
+            "unmodifiableSet",
+            NativeCollectionStaticMethod::CollectionsUnmodifiableSet,
+        ),
+        (
+            "unmodifiable_map",
+            NativeCollectionStaticMethod::CollectionsUnmodifiableMap,
         ),
         (
             "singleton",
@@ -9073,6 +9089,36 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
             Vec::new(),
         ),
         RustExpr::Raw("Vec::new()".to_string())
+    );
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::NativeCollectionStatic {
+                method: NativeCollectionStaticMethod::CollectionsEmptySet,
+            },
+            None,
+            Vec::new(),
+        ),
+        RustExpr::Raw("std::collections::HashSet::new()".to_string())
+    );
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::NativeCollectionStatic {
+                method: NativeCollectionStaticMethod::CollectionsEmptyMap,
+            },
+            None,
+            Vec::new(),
+        ),
+        RustExpr::Raw("std::collections::HashMap::new()".to_string())
+    );
+    assert_eq!(
+        apply_call_target(
+            &CallTargetPlan::NativeCollectionStatic {
+                method: NativeCollectionStaticMethod::CollectionsUnmodifiableSet,
+            },
+            None,
+            vec![RustExpr::Var("lines".to_string())],
+        ),
+        RustExpr::Var("lines".to_string())
     );
     assert_eq!(
         apply_call_target(

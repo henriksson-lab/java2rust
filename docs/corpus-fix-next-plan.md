@@ -5800,6 +5800,32 @@ source dependencies (`IntervalList`, `SAMSequenceDictionary`, `FileExtensions`,
 super-constructor lowering, generic header-line dispatch, collection/set
 compatibility, and optional/erased-object recovery.
 
+2026-07-29 JDK Collections set static cleanup:
+The VCF rerun still had generated support calls to
+`JavaUtilCollections::empty_set()` and `JavaUtilCollections::unmodifiable_set()`
+because the native static collection planner only covered `emptyList`,
+`emptySortedSet`, singleton helpers, and `nCopies`. The shared planner now
+recognizes `Collections.emptySet`, `Collections.emptyMap`,
+`Collections.unmodifiableList`, `Collections.unmodifiableSet`, and
+`Collections.unmodifiableMap`, with Rust projections to `HashSet::new`,
+`HashMap::new`, or the input collection for unmodifiable wrappers.
+
+Focused coverage passed:
+`collections_empty_set_and_unmodifiable_set_lower_to_native_sets`,
+`cargo test native_collection --test slot_shape_design --quiet`,
+`cargo check --quiet`, `cargo fmt --check`, and
+`cargo build --release --quiet --bin new-java2rust`.
+
+HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-collections-set-static`
+translated 32/32 files with 20 invalid-pattern files and 461 generated-Rust
+errors. The targeted missing
+`JavaUtilCollections::empty_set/unmodifiable_set` rows are gone. The total
+error count increased from 457 to 461 because those calls now lower to native
+sets and expose downstream type mismatches in `VCFHeader` set construction and
+header-line insertion; treat those as representation/collection element slot
+work, not as missing JDK collection facade methods.
+
 ## Rerun Protocol
 
 After each fix:

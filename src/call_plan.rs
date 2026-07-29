@@ -364,7 +364,12 @@ pub enum NativeCollectionStaticMethod {
     ArraysAsList,
     ArraysEquals,
     CollectionsEmptyList,
+    CollectionsEmptySet,
+    CollectionsEmptyMap,
     CollectionsEmptySortedSet,
+    CollectionsUnmodifiableList,
+    CollectionsUnmodifiableSet,
+    CollectionsUnmodifiableMap,
     CollectionsSingleton,
     CollectionsSingletonList,
     CollectionsSingletonMap,
@@ -2816,8 +2821,19 @@ fn plan_native_collection_static_call<'a>(
     if crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Collections" {
         let method = match name {
             "emptyList" | "empty_list" => NativeCollectionStaticMethod::CollectionsEmptyList,
+            "emptySet" | "empty_set" => NativeCollectionStaticMethod::CollectionsEmptySet,
+            "emptyMap" | "empty_map" => NativeCollectionStaticMethod::CollectionsEmptyMap,
             "emptySortedSet" | "empty_sorted_set" => {
                 NativeCollectionStaticMethod::CollectionsEmptySortedSet
+            }
+            "unmodifiableList" | "unmodifiable_list" => {
+                NativeCollectionStaticMethod::CollectionsUnmodifiableList
+            }
+            "unmodifiableSet" | "unmodifiable_set" => {
+                NativeCollectionStaticMethod::CollectionsUnmodifiableSet
+            }
+            "unmodifiableMap" | "unmodifiable_map" => {
+                NativeCollectionStaticMethod::CollectionsUnmodifiableMap
             }
             "singleton" => NativeCollectionStaticMethod::CollectionsSingleton,
             "singletonList" | "singleton_list" => {

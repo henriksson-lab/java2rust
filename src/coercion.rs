@@ -2099,8 +2099,20 @@ pub fn collections_empty_list_projection() -> RustExpr {
     RustExpr::Raw("Vec::new()".to_string())
 }
 
+pub fn collections_empty_set_projection() -> RustExpr {
+    RustExpr::Raw("std::collections::HashSet::new()".to_string())
+}
+
+pub fn collections_empty_map_projection() -> RustExpr {
+    RustExpr::Raw("std::collections::HashMap::new()".to_string())
+}
+
 pub fn collections_empty_sorted_set_projection() -> RustExpr {
     RustExpr::Raw("std::collections::BTreeSet::new()".to_string())
+}
+
+pub fn collections_unmodifiable_projection(value: RustExpr) -> RustExpr {
+    value
 }
 
 pub fn collections_singleton_projection(value: RustExpr) -> RustExpr {

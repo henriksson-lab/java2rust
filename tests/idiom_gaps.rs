@@ -4535,6 +4535,56 @@ fn documents_java_collection_api_gap() {
 }
 
 #[test]
+fn collections_empty_set_and_unmodifiable_set_lower_to_native_sets() {
+    let translation = translate_source(
+        r#"
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+
+public class CollectionSetStatics {
+    public Set<String> empty() {
+        return Collections.<String>emptySet();
+    }
+
+    public Set<String> freeze(Set<String> input) {
+        return Collections.unmodifiableSet(input);
+    }
+
+    public Set<String> copy() {
+        Set<String> values = new HashSet<String>();
+        values.add("a");
+        return Collections.unmodifiableSet(values);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return std::collections::HashSet::new();")
+            && translation.rust.contains("return input;")
+            && translation.rust.contains("return values;")
+            && !translation.rust.contains("JavaUtilCollections::empty_set")
+            && !translation
+                .rust
+                .contains("JavaUtilCollections::unmodifiable_set"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collections_empty_set_and_unmodifiable_set",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn arrays_as_list_single_string_array_spreads_for_add_all() {
     let translation = translate_source(&idiom_gap("ArraysAsListSplitAddAll.java"));
 
