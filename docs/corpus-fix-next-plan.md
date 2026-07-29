@@ -5481,6 +5481,20 @@ generated Rust errors from `385` to `382`. The previous
 `Self::__static_string().value_of(...)` rows in `VCFEncoder` and `VCFUtils` are
 gone, replaced by ordinary `.to_string()` display projection.
 
+2026-07-29 negated Java `equals` cleanup:
+Unary `!` over ordinary planned Java `equals` now lowers through the shared
+equality comparison planner with `BinaryOp::Ne`. This keeps string/list/native
+equality slots fact-aware and avoids rendering invalid Rust such as
+`!left == right`. Focused coverage:
+`negated_java_equals_uses_inequality_projection`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-negated-equals` translates all
+`32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `382` to `380`. The ordinary VCFHeaderLineTranslator negated list
+equality rows are gone. The remaining `!hv == VCFHeaderVersion::VCF4_3` row is
+inside stream lambda lowering and belongs to the stream shared-plan backlog.
+
 ## Rerun Protocol
 
 After each fix:

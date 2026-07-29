@@ -1239,6 +1239,20 @@ annotations, unsupported concrete/concrete `instanceof`, incompatible `?`
 usage, source-super constructor lowering, generic/interface facade precision,
 optional/static support gaps, and unresolved facade/source-boundary methods.
 
+Focused negated Java `equals` update:
+`negated_java_equals_uses_inequality_projection` now passes. Unary `!` over a
+planned Java `equals` call reuses the shared equality comparison planner with
+`!=`, rather than prefixing `!` to a rendered `==` expression.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-negated-equals` translates all
+`32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `382` to `380`. The two `VCFHeaderLineTranslator` list-get
+comparisons now render as `expected_tag_order...get(...).as_ref() != Some(&str)`.
+The remaining `cannot apply unary operator ! to type &&VCFHeaderVersion` row is
+the stream lambda `filter(hv -> !hv.equals(...))` path and should be fixed
+through shared stream call/slot planning, not another ordinary-call rule.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

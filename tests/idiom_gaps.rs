@@ -17432,6 +17432,47 @@ fn documents_equals_and_objects_gap() {
 }
 
 #[test]
+fn negated_java_equals_uses_inequality_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class NegatedJavaEqualsProjection {
+    enum Version {
+        V1, V2
+    }
+
+    boolean tagDifferent(List<String> expected, int index, String value) {
+        return !expected.get(index).equals(value);
+    }
+
+    boolean versionDifferent(Version hv) {
+        return !hv.equals(Version.V1);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("!=")
+            && !translation.rust.contains("!expected")
+            && !translation.rust.contains("!hv ==")
+            && !translation.rust.contains("!hv !="),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "negated_java_equals_projection",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn nullable_equals_comparisons_use_option_reference_policy() {
     let translation = translate_source(&idiom_gap("NullableEqualsComparison.java"));
 

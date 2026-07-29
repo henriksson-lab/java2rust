@@ -139,11 +139,11 @@ use crate::method_reference_plan::{
 };
 use crate::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
 use crate::operator_lowering::lower_equality_comparison_expr_for_op;
-use crate::operator_lowering::{
-    lower_equality_comparison_expr, lower_numeric_binary_expr, plan_equality_comparison,
-    plan_equality_comparison_with_facts, plan_numeric_binary_promotion,
-};
 use crate::operator_lowering::{lower_null_comparison_expr, lower_unary_expr};
+use crate::operator_lowering::{
+    lower_numeric_binary_expr, plan_equality_comparison, plan_equality_comparison_with_facts,
+    plan_numeric_binary_promotion,
+};
 use crate::rewrite::{MethodControlFlowPlan, method_has_tail_recursive_loop_rewrite};
 use crate::rust_ir::*;
 use crate::shape_projection::{
@@ -9991,6 +9991,12 @@ fn lower_unary_expr_with_refinements(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> RustExpr {
+    if op == UnaryOp::Not
+        && let Some(negated_equality) =
+            lower_negated_java_equality_call_expr(expr, env, ctx, refinements)
+    {
+        return negated_equality;
+    }
     if let Some(update) = lower_local_update_value_expr(op, expr, env, ctx) {
         return update;
     }
@@ -15513,6 +15519,55 @@ fn lower_java_equality_call_expr(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> Option<RustExpr> {
+    lower_java_equality_call_expr_for_op(
+        BinaryOp::Eq,
+        receiver,
+        name,
+        args,
+        resolved,
+        env,
+        ctx,
+        refinements,
+    )
+}
+
+fn lower_negated_java_equality_call_expr(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = expr
+    else {
+        return None;
+    };
+    lower_java_equality_call_expr_for_op(
+        BinaryOp::Ne,
+        receiver.as_deref(),
+        name,
+        args,
+        resolved.as_ref(),
+        env,
+        ctx,
+        refinements,
+    )
+}
+
+fn lower_java_equality_call_expr_for_op(
+    op: BinaryOp,
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&ResolvedCall>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
     if resolved.is_some() {
         return None;
     }
@@ -15544,7 +15599,8 @@ fn lower_java_equality_call_expr(
     } else {
         plan_equality_comparison(&left_shape, &right_shape)
     };
-    Some(lower_equality_comparison_expr(
+    Some(lower_equality_comparison_expr_for_op(
+        op,
         plan,
         lower_expr_with_refinements(left, env, ctx, refinements),
         lower_expr_with_refinements(right, env, ctx, refinements),
