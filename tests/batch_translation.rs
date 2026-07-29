@@ -527,3 +527,86 @@ public class MatrixSource {
     assert!(summary.contains("cargo_check\tok"), "{summary}");
     assert!(summary.contains("cargo_failure_kind\tnone"), "{summary}");
 }
+
+#[test]
+fn focused_package_wrapper_preserves_primary_source_types_covered_by_external_pack() {
+    let dir = unique_temp_dir("focused_primary_pack_overlap");
+    let primary = dir.join("java");
+    let out = dir.join("out");
+    fs::create_dir_all(&primary).unwrap();
+    fs::write(
+        primary.join("ModeledPrimary.java"),
+        r#"
+package modeled;
+
+public class ModeledPrimary {
+    public int value() {
+        return 1;
+    }
+
+    public ModeledPeer peer() {
+        return new ModeledPeer();
+    }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        primary.join("ModeledPeer.java"),
+        r#"
+package modeled;
+
+public class ModeledPeer {
+    public int two() {
+        return 2;
+    }
+}
+"#,
+    )
+    .unwrap();
+    let manifest = dir.join("pack.txt");
+    fs::write(
+        &manifest,
+        "external-pack modeled ModeledPrimary semantic\n\
+         external-pack modeled ModeledPeer semantic\n\
+         external-pack-object modeled ModeledPrimary erased-object\n\
+         external-pack-object modeled ModeledPeer erased-object\n",
+    )
+    .unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let mut command = Command::new(&script);
+    command
+        .arg("--skip-resolver-bench")
+        .arg("--jobs")
+        .arg("2")
+        .arg("--primary")
+        .arg(&primary)
+        .arg("--out")
+        .arg(&out)
+        .arg("--external-pack-manifest")
+        .arg(&manifest);
+    if let Ok(binary) = std::env::var("CARGO_BIN_EXE_new-java2rust") {
+        command.env("NEW_JAVA2RUST_BIN", binary);
+    }
+    let output = command.output().expect("run focused package wrapper");
+    assert!(
+        output.status.success(),
+        "focused wrapper failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut generated = String::new();
+    for entry in fs::read_dir(out.join("generated-crate/src/generated")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            generated.push_str(&fs::read_to_string(entry.path()).unwrap());
+        }
+    }
+    assert!(
+        generated.contains("pub struct ModeledPrimary"),
+        "{generated}"
+    );
+    assert!(generated.contains("pub struct ModeledPeer"), "{generated}");
+}

@@ -933,6 +933,55 @@ rust_path.write_text("".join(line for index, line in enumerate(lines) if not rem
 PY
 }
 
+restore_missing_source_type_items() {
+  local rust_path="$1"
+  local raw_path="$2"
+  python3 - "$rust_path" "$raw_path" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+rust_path = Path(sys.argv[1])
+raw_path = Path(sys.argv[2])
+
+if not raw_path.exists():
+    raise SystemExit(0)
+
+stem = rust_path.stem
+current_source = re.sub(r"^\d+_", "", stem)
+decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
+derive_re = re.compile(r"^#\[derive")
+
+
+def has_source_decl(text: str) -> bool:
+    return any(
+        (match := decl_re.match(line)) and match.group(2) == current_source
+        for line in text.splitlines()
+    )
+
+
+def attached_start(lines: list[str], start: int) -> int:
+    index = start
+    while index > 0 and derive_re.match(lines[index - 1]):
+        index -= 1
+    return index
+
+
+current = rust_path.read_text()
+if has_source_decl(current):
+    raise SystemExit(0)
+
+raw_lines = raw_path.read_text().splitlines(keepends=True)
+for index, line in enumerate(raw_lines):
+    match = decl_re.match(line)
+    if match and match.group(2) == current_source:
+        restored = "".join(raw_lines[attached_start(raw_lines, index):])
+        separator = "" if current.endswith("\n") or not current else "\n"
+        rust_path.write_text(current + separator + restored)
+        raise SystemExit(0)
+PY
+}
+
 if grep -R -q '^pub struct JavaException' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -1943,6 +1992,13 @@ RUST
   printf "OrgBroadinstituteHellbenderUtilsReadReadUtils\nOrgBroadinstituteHellbenderUtilsReadSAMRecordToGATKReadAdapter\n" >> "$shared_support_types_path"
 fi
 
+raw_generated_backup_dir="$out_dir/generated-raw-before-support-strip"
+rm -rf "$raw_generated_backup_dir"
+mkdir -p "$raw_generated_backup_dir"
+for rust_path in "$generated_dir"/*.rs; do
+  cp "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")"
+done
+
 if [[ -s "$shared_support_path" ]]; then
   for rust_path in "$generated_dir"/*.rs; do
     strip_shared_support_items "$rust_path" "$shared_support_types_path"
@@ -1957,6 +2013,10 @@ python3 "$repo_root/scripts/merge-shared-support-facades.py" \
   --shared-support "$shared_support_path" \
   --shared-types "$shared_support_types_path" \
   --conflicts "$shared_support_conflicts_path"
+
+for rust_path in "$generated_dir"/*.rs; do
+  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")"
+done
 
 if grep -R -q 'ndarray::' "$generated_dir" "$shared_support_path"; then
   if ! grep -q '^ndarray[[:space:]]*=' "$crate_dir/Cargo.toml"; then

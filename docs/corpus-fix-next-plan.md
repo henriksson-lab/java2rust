@@ -5744,6 +5744,33 @@ Full `cargo test --test idiom_gaps --quiet` was not completed for this
 checkpoint; rerun it at the next batch boundary before claiming a new global
 baseline.
 
+2026-07-29 focused wrapper source-type restoration:
+The focused-package wrapper was stripping primary source declarations when the
+same type was also present in an enabled external pack, leaving files such as
+`VCFHeader.rs` and `VCFHeaderLine.rs` as import-only modules. The wrapper now
+keeps a raw generated backup before shared-support stripping and restores the
+current source type item when merge/strip phases remove it. This is a wrapper
+assembly fix, not a new corpus-specific lowering rule.
+
+Focused coverage passed:
+`focused_package_wrapper_preserves_primary_source_types_covered_by_external_pack`,
+`cargo test --test batch_translation --quiet`, `cargo check --quiet`,
+`cargo fmt --check`, and `bash -n scripts/translate-focused-package.sh`.
+
+HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-source-type-restore` translated
+32/32 files with 20 invalid-pattern files and 460 generated-Rust errors. The
+previous high-count missing `VCFHeader`/`VCFHeaderLine` family is gone because
+those source modules are now present. The exposed remaining clusters are real
+semantic gaps: enum helper generation (`values`/`value_of`), missing HTSJDK/SAM
+facade/source dependencies such as `IntervalList` and
+`SAMSequenceDictionary`, downcast/erased-object representation recovery,
+generic header-line trait dispatch, collection/set API compatibility, and
+inherited/super-constructor lowering.
+
+This checkpoint should be committed before attacking those VCF semantic gaps,
+because it separates wrapper assembly correctness from Java/Rust idiom work.
+
 ## Rerun Protocol
 
 After each fix:
