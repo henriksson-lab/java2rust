@@ -11893,6 +11893,7 @@ fn lower_args_for_call_target(
     }
     if matches!(plan, ArgumentLoweringPlan::Unshaped { .. })
         && args.len() == 1
+        && !call_target_uses_display_arguments(target, call_receiver, args, env, ctx)
         && let Some(lowered) = lower_unshaped_argument_for_call_target(&args[0], target, env, ctx)
             .or_else(|| {
                 call_receiver.and_then(|receiver| {
@@ -11927,6 +11928,12 @@ fn lower_args_for_call_target(
         CallTargetPlan::NativeJavaStatic {
             method: crate::call_plan::NativeJavaStaticMethod::StringJoin,
         } => lower_string_join_args(args, env, ctx),
+        CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::StringValueOf,
+        } => args
+            .iter()
+            .map(|arg| lower_expr_for_slot(arg, env, Slot::DisplaySegment, ctx))
+            .collect(),
         CallTargetPlan::NativeJavaInstance {
             method: crate::call_plan::NativeJavaInstanceMethod::DecimalFormatFormat,
             ..
@@ -12137,6 +12144,9 @@ fn call_target_uses_display_arguments(
             matches!(rust_name.as_str(), "valueOf" | "value_of")
                 && owner.rsplit("::").next().unwrap_or(owner) == "String"
         }
+        CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::StringValueOf,
+        } => true,
         _ => false,
     }
 }
@@ -12189,12 +12199,9 @@ fn lower_string_value_of_display_call(
     if owner != "String" {
         return None;
     }
-    Some(lower_expr_for_slot_with_refinements(
-        &args[0],
-        env,
-        Slot::DisplaySegment,
-        ctx,
-        refinements,
+    Some(apply_java_display_plan(
+        lower_expr_for_slot_with_refinements(&args[0], env, Slot::DisplaySegment, ctx, refinements),
+        JavaDisplayPlan::FormatValue,
     ))
 }
 

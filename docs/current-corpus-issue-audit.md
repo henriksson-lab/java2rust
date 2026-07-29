@@ -1220,6 +1220,25 @@ generated Rust errors from `387` to `385`. `VCFEncoder::format_v_c_f_field`
 now emits both optional erased-object checks as `val.as_ref().is_some_and(...)`;
 the previous two `no method named is found for enum Option<T>` rows are gone.
 
+Focused `String.valueOf` static-owner update:
+`string_value_of_static_owner_uses_native_jdk_projection` now passes, along
+with the existing `platform_gui_facade_getters_have_precise_return_shapes`
+erased-object display fixture. `String.valueOf` is represented in the shared
+native JDK static-call plan with an owned `String` return shape, and both the
+plan path and direct display helper finalize Java display operands to owned
+strings instead of exposing source static storage such as `Self::__static_string`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-string-value-of-native`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `385` to `382`. The three VCF `String.valueOf(...)`
+sites now render as `context.get_start().to_string()`, `i.to_string()`, and
+`contig.get_sequence_length().to_string()`. The previous `__static_string`
+associated-item rows are gone. Top families remain broad mismatched types, type
+annotations, unsupported concrete/concrete `instanceof`, incompatible `?`
+usage, source-super constructor lowering, generic/interface facade precision,
+optional/static support gaps, and unresolved facade/source-boundary methods.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

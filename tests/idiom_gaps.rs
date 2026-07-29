@@ -17307,6 +17307,45 @@ class ExactClassGuardCastsErasedObject {
 }
 
 #[test]
+fn string_value_of_static_owner_uses_native_jdk_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class StringValueOfStaticOwner {
+    String start(int value) {
+        return String.valueOf(value);
+    }
+
+    Map<String, String> labels(int value) {
+        Map<String, String> map = new HashMap<>();
+        map.put("length", String.valueOf(value));
+        return map;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("value.to_string()")
+            && !translation.rust.contains("__static_string")
+            && !translation.rust.contains(".value_of("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_value_of_static_owner",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn rejected_instanceof_guard_casts_erased_object_to_borrowed_view() {
     let translation = translate_source(
         r#"

@@ -5466,6 +5466,21 @@ translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
 generated Rust errors from `387` to `385`. The two `Option<T>.is::<...>()`
 rows in `VCFEncoder::format_v_c_f_field` are gone.
 
+2026-07-29 `String.valueOf` native JDK static cleanup:
+`String.valueOf` now participates in `NativeJavaStaticMethod` planning with an
+owned `String` lowered type. Display-style argument lowering is guarded from the
+generic unshaped-argument shortcut, and the direct `String.valueOf` helper
+finalizes display operands through `JavaDisplayPlan::FormatValue`. Focused
+coverage: `string_value_of_static_owner_uses_native_jdk_projection` and
+`platform_gui_facade_getters_have_precise_return_shapes`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-string-value-of-native`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `385` to `382`. The previous
+`Self::__static_string().value_of(...)` rows in `VCFEncoder` and `VCFUtils` are
+gone, replaced by ordinary `.to_string()` display projection.
+
 ## Rerun Protocol
 
 After each fix:

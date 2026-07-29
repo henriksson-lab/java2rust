@@ -435,6 +435,7 @@ pub enum NativeJavaStaticMethod {
     ThreadSleep,
     StringFormat,
     StringJoin,
+    StringValueOf,
     ObjectsEquals,
     ObjectsNonNull,
     ObjectsIsNull,
@@ -564,7 +565,10 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             ..
         }
         | CallTargetPlan::NativeJavaStatic {
-            method: NativeJavaStaticMethod::StringFormat | NativeJavaStaticMethod::StringJoin,
+            method:
+                NativeJavaStaticMethod::StringFormat
+                | NativeJavaStaticMethod::StringJoin
+                | NativeJavaStaticMethod::StringValueOf,
         } => Some(LoweredType::Slot(Box::new(
             crate::shape_projection::owned_string_value_shape(),
         ))),
@@ -3146,6 +3150,7 @@ fn plan_native_java_static_call<'a>(
         ("Thread", "sleep") => NativeJavaStaticMethod::ThreadSleep,
         ("String", "format") => NativeJavaStaticMethod::StringFormat,
         ("String", "join") => NativeJavaStaticMethod::StringJoin,
+        ("String", "valueOf" | "value_of") => NativeJavaStaticMethod::StringValueOf,
         ("Objects", "equals") => NativeJavaStaticMethod::ObjectsEquals,
         ("Objects", "nonNull" | "non_null") => NativeJavaStaticMethod::ObjectsNonNull,
         ("Objects", "isNull" | "is_null") => NativeJavaStaticMethod::ObjectsIsNull,

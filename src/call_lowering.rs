@@ -527,6 +527,14 @@ fn apply_native_java_static_method(
         }
         NativeJavaStaticMethod::StringFormat => string_format_projection(args),
         NativeJavaStaticMethod::StringJoin => apply_string_join(args),
+        NativeJavaStaticMethod::StringValueOf => {
+            let Some(value) = args.into_iter().next() else {
+                return RustExpr::Raw(
+                    "compile_error!(\"String.valueOf requires one argument\")".to_string(),
+                );
+            };
+            apply_java_display_plan(value, JavaDisplayPlan::FormatValue)
+        }
         NativeJavaStaticMethod::ObjectsEquals => {
             let mut args = args.into_iter();
             let Some(left) = args.next() else {
