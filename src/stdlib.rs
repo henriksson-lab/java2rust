@@ -5327,6 +5327,9 @@ fn collect_emitted_java_enum_rust_type_names(
         .unwrap_or_else(|| ty.name.clone());
     if ty.kind == TypeKind::Enum {
         names.insert(rust_name_for_java_named_type(&ty.name));
+        names.insert(rust_name_for_java_named_type(
+            ty.name.rsplit(['.', '$']).next().unwrap_or(&ty.name),
+        ));
         names.insert(rust_name_for_java_named_type(&qualified));
     }
     for member in &ty.members {
@@ -8636,6 +8639,8 @@ impl ExternalApiFacadeSupport {
             implementors.retain(|implementor| !enum_types.contains(implementor));
             !implementors.is_empty()
         });
+        self.aliases
+            .retain(|alias, target| !enum_types.contains(alias) && !enum_types.contains(target));
         self.from_impls
             .retain(|(from, to)| !enum_types.contains(from) && !enum_types.contains(to));
     }

@@ -14603,6 +14603,112 @@ class EnumConstantWithConstructorArgs {
 }
 
 #[test]
+fn source_enum_constructor_payload_fields_emit_match_backed_accessors() {
+    let translation = translate_source(
+        r#"
+class EnumPayloadMethodUse {
+    enum PayloadVersion {
+        V1("VCFv4.1", "fileformat"),
+        V2("VCFv4.2", "fileformat");
+
+        private final String versionString;
+        private final String formatString;
+
+        PayloadVersion(String versionString, String formatString) {
+            this.versionString = versionString;
+            this.formatString = formatString;
+        }
+
+        boolean isAtLeastAsRecentAs(PayloadVersion target) {
+            return this.ordinal() >= target.ordinal();
+        }
+
+        String getVersionString() {
+            return versionString;
+        }
+
+        String getFormatString() {
+            return this.formatString;
+        }
+    }
+
+    String latest() {
+        PayloadVersion version = PayloadVersion.V2;
+        return version.getVersionString();
+    }
+
+    boolean recent() {
+        return PayloadVersion.V2.isAtLeastAsRecentAs(PayloadVersion.V1);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn ordinal(&self) -> i32")
+            && translation
+                .rust
+                .contains("pub fn version_string(&self) -> String")
+            && translation
+                .rust
+                .contains("Self::V2 => \"VCFv4.2\".to_string()")
+            && translation
+                .rust
+                .contains("return Some(self.version_string());")
+            && translation
+                .rust
+                .contains("return Some(self.format_string());")
+            && !translation.rust.contains("self.version_string.clone()")
+            && !translation.rust.contains("self.format_string.clone()"),
+        "{}",
+        translation.rust
+    );
+
+    let test_source = format!(
+        "{}\n{}",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn enum_payload_methods_match_java_values() {
+        let fixture = EnumPayloadMethodUse {};
+        assert_eq!(fixture.latest(), Some("VCFv4.2".to_string()));
+        assert!(fixture.recent());
+        assert!(EnumPayloadMethodUsePayloadVersion::V2.is_at_least_as_recent_as(&EnumPayloadMethodUsePayloadVersion::V1));
+        assert_eq!(EnumPayloadMethodUsePayloadVersion::V1.get_format_string(), Some("fileformat".to_string()));
+    }
+}
+"#
+    );
+    let rust_path = std::env::temp_dir().join("new_java2rust_enum_payload_method_test.rs");
+    let bin_path = std::env::temp_dir().join("new_java2rust_enum_payload_method_test");
+    fs::write(&rust_path, test_source).unwrap();
+    let output = Command::new("rustc")
+        .arg("--test")
+        .arg(&rust_path)
+        .arg("-o")
+        .arg(&bin_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "enum payload method test did not compile\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(&bin_path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "enum payload method behavior test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn emitted_java_enum_does_not_get_opaque_facade_equality_impls() {
     let translation = translate_source(
         r#"

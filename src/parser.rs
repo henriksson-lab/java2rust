@@ -867,6 +867,24 @@ fn parse_enum_constant_decl(
 ) -> Option<FieldDecl> {
     let name = field_text(*node, "name", source)
         .or_else(|| first_named_child(*node).map(|child| text(child, source).to_string()))?;
+    let args = node
+        .child_by_field_name("arguments")
+        .or_else(|| {
+            named_children(*node)
+                .into_iter()
+                .find(|child| child.kind() == "argument_list")
+        })
+        .map(|args| parse_arg_list(args, source))
+        .unwrap_or_default();
+    let initializer = (!args.is_empty()).then(|| Expr::New {
+        ty: JavaType::Named {
+            name: enum_name.to_string(),
+            args: Vec::new(),
+        },
+        args,
+        body: None,
+        resolved: None,
+    });
     Some(FieldDecl {
         name,
         ty: JavaType::Named {
@@ -874,7 +892,7 @@ fn parse_enum_constant_decl(
             args: Vec::new(),
         },
         modifiers: vec![Modifier::Public, Modifier::Static, Modifier::Final],
-        initializer: None,
+        initializer,
         span: span(*node),
     })
 }

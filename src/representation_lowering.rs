@@ -1,10 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::emit::emit_type;
 use crate::exception_lowering::exception_result_type;
 use crate::exception_plan::{MethodExceptionPlan, ProgramExceptionPlan};
 use crate::facts::FactSet;
-use crate::java_ir::{Member, MethodDecl, Modifier, Program, TypeDecl, TypeKind};
+use crate::java_ir::{
+    ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
+    PrimitiveType, Program, Stmt, TypeDecl, TypeKind,
+};
 use crate::representation::{ObjectRepresentation, RepresentationPlan};
 use crate::rust_ir::RustType;
 use crate::signature::{ReceiverPlan, SignaturePlan};
@@ -110,8 +113,15 @@ pub fn type_emission_for_with_facts_and_exceptions(
                 .map(|variant| format!("            Self::{variant} => {variant:?},"))
                 .collect::<Vec<_>>()
                 .join("\n");
+            let ordinal_arms = variants
+                .iter()
+                .enumerate()
+                .map(|(index, variant)| format!("            Self::{variant} => {index},"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let payload_accessors = java_enum_payload_accessor_methods(ty, variants);
             RepresentationTypeEmission::RawRustItem(format!(
-                "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {{}}.{{}}\", {enum_name:?}, other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {{}}.{{}}\", {enum_name:?}, other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n{payload_accessors}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
             ))
         }
         ObjectRepresentation::ClosedEnum {
@@ -131,6 +141,162 @@ pub fn type_emission_for_with_facts_and_exceptions(
             "pub type {} = Box<dyn std::any::Any>;",
             ty.name
         )),
+    }
+}
+
+fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> String {
+    let Some(constructor) = ty.members.iter().find_map(|member| match member {
+        Member::Constructor(constructor) => Some(constructor),
+        _ => None,
+    }) else {
+        return String::new();
+    };
+    let field_arg_indices = java_enum_constructor_field_arg_indices(constructor);
+    if field_arg_indices.is_empty() {
+        return String::new();
+    }
+    let field_types = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => {
+                Some((field.name.clone(), field.ty.clone()))
+            }
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let constants = java_enum_constant_args(ty);
+    field_arg_indices
+        .into_iter()
+        .filter_map(|(field_name, arg_index)| {
+            let field_ty = field_types.get(&field_name)?;
+            let rust_return_ty = java_enum_payload_accessor_return_type(field_ty)?;
+            let arms = variants
+                .iter()
+                .map(|variant| {
+                    let value = constants
+                        .get(variant)
+                        .and_then(|args| args.get(arg_index))
+                        .and_then(|arg| java_enum_payload_arg_value(arg, field_ty))
+                        .unwrap_or_else(|| java_enum_payload_default_value(field_ty));
+                    format!("            Self::{variant} => {value},")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(format!(
+                "\n\n    pub fn {field_name}(&self) -> {rust_return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn java_enum_constructor_field_arg_indices(constructor: &ConstructorDecl) -> Vec<(String, usize)> {
+    let Some(body) = constructor.body.as_ref() else {
+        return Vec::new();
+    };
+    let param_indices = constructor
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| (param.name.clone(), index))
+        .collect::<HashMap<_, _>>();
+    body.statements
+        .iter()
+        .filter_map(|stmt| {
+            let Stmt::Assign { target, value } = stmt else {
+                return None;
+            };
+            let field_name = match target {
+                Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+                    crate::parser::to_snake_case(field)
+                }
+                Expr::Var(name) => crate::parser::to_snake_case(name.strip_prefix("this.")?),
+                _ => return None,
+            };
+            let Expr::Var(param_name) = value else {
+                return None;
+            };
+            param_indices
+                .get(param_name)
+                .copied()
+                .map(|arg_index| (field_name, arg_index))
+        })
+        .collect()
+}
+
+fn java_enum_constant_args(ty: &TypeDecl) -> HashMap<String, Vec<Expr>> {
+    ty.members
+        .iter()
+        .filter_map(|member| {
+            let Member::Field(field) = member else {
+                return None;
+            };
+            if !java_enum_constant_field_matches_type(field, &ty.name) {
+                return None;
+            }
+            let Expr::New { args, .. } = field.initializer.as_ref()? else {
+                return None;
+            };
+            Some((field.name.clone(), args.clone()))
+        })
+        .collect()
+}
+
+fn java_enum_constant_field_matches_type(field: &FieldDecl, enum_name: &str) -> bool {
+    field.modifiers.contains(&Modifier::Static)
+        && field.modifiers.contains(&Modifier::Final)
+        && matches!(&field.ty, JavaType::Named { name, .. } if name == enum_name)
+}
+
+fn java_enum_payload_accessor_return_type(field_ty: &JavaType) -> Option<String> {
+    match field_ty {
+        JavaType::String => Some("String".to_string()),
+        JavaType::Primitive(primitive) => Some(emit_type(&rust_type_for_primitive(*primitive))),
+        _ => None,
+    }
+}
+
+fn rust_type_for_primitive(primitive: PrimitiveType) -> RustType {
+    match primitive {
+        PrimitiveType::Boolean => RustType::Bool,
+        PrimitiveType::Byte => RustType::I8,
+        PrimitiveType::Short => RustType::I16,
+        PrimitiveType::Char => RustType::Char,
+        PrimitiveType::Int => RustType::I32,
+        PrimitiveType::Long => RustType::I64,
+        PrimitiveType::Float => RustType::F32,
+        PrimitiveType::Double => RustType::F64,
+    }
+}
+
+fn java_enum_payload_arg_value(arg: &Expr, field_ty: &JavaType) -> Option<String> {
+    match (field_ty, arg) {
+        (JavaType::String, Expr::Literal(Literal::String(value))) => {
+            Some(format!("{value:?}.to_string()"))
+        }
+        (_, Expr::Literal(Literal::Bool(value))) => Some(value.to_string()),
+        (_, Expr::Literal(Literal::Int(value))) => Some(value.to_string()),
+        (_, Expr::Literal(Literal::Long(value))) => Some(format!("{value}i64")),
+        (_, Expr::Literal(Literal::Float(value))) => Some(format!("{value}f32")),
+        (_, Expr::Literal(Literal::Double(value))) => Some(format!("{value}f64")),
+        (_, Expr::Literal(Literal::Char(value))) => Some(format!("{value:?}")),
+        _ => None,
+    }
+}
+
+fn java_enum_payload_default_value(field_ty: &JavaType) -> String {
+    match field_ty {
+        JavaType::String => "String::new()".to_string(),
+        JavaType::Primitive(crate::java_ir::PrimitiveType::Boolean) => "false".to_string(),
+        JavaType::Primitive(crate::java_ir::PrimitiveType::Byte)
+        | JavaType::Primitive(crate::java_ir::PrimitiveType::Short)
+        | JavaType::Primitive(crate::java_ir::PrimitiveType::Int)
+        | JavaType::Primitive(crate::java_ir::PrimitiveType::Long) => "0".to_string(),
+        JavaType::Primitive(crate::java_ir::PrimitiveType::Float) => "0.0f32".to_string(),
+        JavaType::Primitive(crate::java_ir::PrimitiveType::Double) => "0.0f64".to_string(),
+        JavaType::Primitive(crate::java_ir::PrimitiveType::Char) => "'\\0'".to_string(),
+        _ => "Default::default()".to_string(),
     }
 }
 

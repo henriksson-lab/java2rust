@@ -5313,6 +5313,31 @@ top families remain broad mismatched types, type annotations, unsupported
 concrete/concrete `instanceof`, incompatible `?` usage, source-super
 constructor lowering, and unresolved VCF/genotype facade precision.
 
+2026-07-29 source Java enum payload/method support: enum constants now preserve
+constructor arguments, raw Java enum emission derives `ordinal()` plus
+match-backed payload accessors for constructor-assigned fields, and source enum
+methods are emitted in a methods-only impl without reintroducing enum constants
+as associated consts. Bare `this`/implicit enum payload field reads lower
+through those accessors and then use the shared slot conversion path, so
+nullable Java `String` getters render `Some(self.version_string())` instead of
+optional-field clone syntax. Shared support suppression now removes opaque
+facade aliases for emitted source enum simple names as well as flattened enum
+names.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-source-enum-payload-methods`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `430` to `413`. Generated `VCFHeaderVersion` now
+contains `ordinal`, `version_string`, `format_string`,
+`is_at_least_as_recent_as`, `get_version_string`, `get_format_string`,
+`is_format_string`, `is_version_string`, and `to_header_version`. The previous
+plain `&VCFHeaderVersion`/`VCFHeaderVersion` missing-method rows are gone; the
+remaining related rows are erased-object/cast precision such as
+`Box<dyn Any>.is_at_least_as_recent_as`. Top families are now broad mismatched
+types, type annotations, unsupported concrete/concrete `instanceof`,
+incompatible `?` usage, source-super constructor lowering, generic header-line
+getter precision, and remaining facade/source-boundary gaps.
+
 ## Rerun Protocol
 
 After each fix:
