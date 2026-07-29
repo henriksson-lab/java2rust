@@ -1041,7 +1041,10 @@ pub struct CoercionShapeContentPolicy {
 pub fn rust_nominal_type_name_policy(java_ty: &JavaType) -> RustNominalTypeNamePolicy {
     let target_type = match java_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            Some(crate::slot_render::rust_name_for_java_named_type(name))
+            let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+            crate::stdlib::boxed_primitive_type(&canonical)
+                .map(boxed_primitive_runtime_rust_type)
+                .or_else(|| Some(crate::slot_render::rust_name_for_java_named_type(name)))
         }
         JavaType::String => Some("String".to_string()),
         _ => None,
@@ -1050,6 +1053,20 @@ pub fn rust_nominal_type_name_policy(java_ty: &JavaType) -> RustNominalTypeNameP
         java_ty: java_ty.clone(),
         target_type,
     }
+}
+
+fn boxed_primitive_runtime_rust_type(primitive: PrimitiveType) -> String {
+    match primitive {
+        PrimitiveType::Boolean => "bool",
+        PrimitiveType::Byte => "i8",
+        PrimitiveType::Short => "i16",
+        PrimitiveType::Char => "char",
+        PrimitiveType::Int => "i32",
+        PrimitiveType::Long => "i64",
+        PrimitiveType::Float => "f32",
+        PrimitiveType::Double => "f64",
+    }
+    .to_string()
 }
 
 pub fn runtime_type_target_policy(java_ty: &JavaType) -> RuntimeTypeTargetPolicy {

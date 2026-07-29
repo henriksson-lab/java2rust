@@ -4159,7 +4159,10 @@ fn apply_erased_object_downcast(
 }
 
 fn plausible_rust_nominal_type_name(target_type: &str) -> bool {
-    target_type
+    matches!(
+        target_type,
+        "bool" | "i8" | "i16" | "char" | "i32" | "i64" | "f32" | "f64"
+    ) || target_type
         .chars()
         .next()
         .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())

@@ -163,6 +163,23 @@ fn runtime_type_target_policy_names_nominal_runtime_targets() {
             target_type: "String".to_string(),
         }
     );
+    let boxed_boolean = JavaType::Named {
+        name: "java.lang.Boolean".to_string(),
+        args: Vec::new(),
+    };
+    assert_eq!(
+        rust_nominal_type_name_policy(&boxed_boolean),
+        RustNominalTypeNamePolicy {
+            java_ty: boxed_boolean.clone(),
+            target_type: Some("bool".to_string()),
+        }
+    );
+    assert_eq!(
+        runtime_type_target_policy(&boxed_boolean),
+        RuntimeTypeTargetPolicy::Nominal {
+            target_type: "bool".to_string(),
+        }
+    );
     assert_eq!(
         rust_nominal_type_name_policy(&JavaType::Primitive(PrimitiveType::Int)),
         RustNominalTypeNamePolicy {

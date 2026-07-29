@@ -5413,6 +5413,24 @@ remain broad mismatched types, type annotations, unsupported concrete/concrete
 generic/interface facade precision, nested enum/static support, and unresolved
 facade/source-boundary methods.
 
+2026-07-29 boxed primitive runtime target cleanup: fully qualified Java boxed
+primitive wrappers such as `java.lang.Boolean` now canonicalize to the same JDK
+wrapper identities as imported/simple names. Runtime target planning maps those
+boxed wrappers to the Rust primitive carriers used by storage and call slots
+(`bool`, `i32`, `f64`, etc.), and erased-object downcast rendering accepts those
+primitive Rust target names. This keeps `instanceof Boolean` and `(Boolean)`
+casts aligned with the existing boxed-primitive slot policy instead of
+requiring generated `Boolean` support types.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-boxed-primitive-runtime-targets`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `390` to `388`. VCF erased-object checks now render
+`val.is::<bool>()` and `downcast::<bool>()`; the previous missing `Boolean`
+rows are gone. A newly visible nearby row is optional cast construction
+(`Option<T>.downcast`) and should stay with the optional-construction/cast
+cluster rather than becoming a Boolean-specific rule.
+
 ## Rerun Protocol
 
 After each fix:
