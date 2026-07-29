@@ -4190,6 +4190,7 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "level" => "Level",
         "java.util.logging.Level" | "JavaUtilLoggingLevel" | "java_util_logging_level" => "Level",
         "locale" => "Locale",
+        "java.util.Locale" | "JavaUtilLocale" | "java_util_locale" => "Locale",
         "fastq_constants" => "FastqConstants",
         "element_kind" => "ElementKind",
         "export_configuration" => "ExportConfiguration",
@@ -12390,6 +12391,7 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "AttributesName"
             | "Enumeration"
             | "ClassLoader"
+            | "Locale"
             | "BufferedImage"
             | "Graphics"
             | "Graphics2D"

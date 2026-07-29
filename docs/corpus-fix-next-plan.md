@@ -5394,6 +5394,25 @@ concrete/concrete `instanceof`, incompatible `?` usage, source-super
 constructor lowering, generic/interface facade precision, optional enum/static
 support, and unresolved facade/source-boundary methods.
 
+2026-07-29 JDK Locale/String.format overload cleanup: fully qualified
+`java.util.Locale`, `JavaUtilLocale`, and snake-case aliases now project to the
+same builtin `Locale` identity as imported/simple names, and `Locale` is
+excluded from generic static-constant support stubs. The shared
+`String.format` projection now recognizes the Java locale overload and removes
+the leading locale argument before selecting the template, so both literal
+`format!(...)` and dynamic `java_string_format(template, vec![...])` paths use
+the actual template argument rather than `Locale::US`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-locale-format-overload`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `396` to `390`. The previous `JavaUtilLocale`
+owner/type drift and `Locale: AsRef<str>` formatter rows are gone. Top families
+remain broad mismatched types, type annotations, unsupported concrete/concrete
+`instanceof`, incompatible `?` usage, source-super constructor lowering,
+generic/interface facade precision, nested enum/static support, and unresolved
+facade/source-boundary methods.
+
 ## Rerun Protocol
 
 After each fix:

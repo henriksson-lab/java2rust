@@ -2244,6 +2244,9 @@ pub fn string_format_projection(mut args: Vec<RustExpr>) -> RustExpr {
     if args.is_empty() {
         return RustExpr::Raw("String::new()".to_string());
     }
+    if args.len() >= 2 && is_java_locale_format_arg(&args[0]) {
+        args.remove(0);
+    }
     let format_arg = args.remove(0);
     let Some(java_format) = string_literal_source(&format_arg) else {
         return RustExpr::Call {
@@ -2271,6 +2274,14 @@ pub fn string_format_projection(mut args: Vec<RustExpr>) -> RustExpr {
             .collect::<Vec<_>>()
             .join(", ")
     ))
+}
+
+fn is_java_locale_format_arg(arg: &RustExpr) -> bool {
+    let raw = emit::emit_expr(arg);
+    raw == "Locale"
+        || raw.starts_with("Locale::")
+        || raw == "JavaUtilLocale"
+        || raw.starts_with("JavaUtilLocale::")
 }
 
 fn java_format_to_rust_format(format: &str) -> String {

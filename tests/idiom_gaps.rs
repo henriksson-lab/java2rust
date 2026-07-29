@@ -2081,6 +2081,46 @@ mod generated_tests {
 }
 
 #[test]
+fn string_format_locale_overload_uses_template_argument() {
+    let translation = translate_source(
+        r#"
+import java.util.Locale;
+
+class StringFormatLocaleOverload {
+    String literal(String name, int count) {
+        return String.format(Locale.US, "%s:%d", name, count);
+    }
+
+    String dynamic(String template, int count) {
+        return String.format(Locale.US, template, count);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return format!(\"{}:{}\", name, count);")
+            && translation
+                .rust
+                .contains("java_string_format(template, vec![count.to_string()])")
+            && !translation.rust.contains("java_string_format(Locale::US"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "string_format_locale_overload",
+        vec![GeneratedCrateModule {
+            name: "string_format_locale_overload",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_value_struct_derives_clone_and_partial_eq_when_fields_support_it() {
     let translation = translate_source(
         r#"
@@ -19796,6 +19836,15 @@ class UsesLocaleUs {
             && translation.rust.contains("return Locale::US;"),
         "{}",
         translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "jdk_locale_us_static_constant",
+        vec![GeneratedCrateModule {
+            name: "uses_locale_us",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
