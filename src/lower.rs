@@ -150,7 +150,7 @@ use crate::shape_projection::{
     borrowed_sequence_element_shape, borrowed_string_content_shape,
     indexed_read_shape_for_access_with_facts, project_java_value_shape, shape_is_concrete_native,
     shape_is_erased_object_boundary, shape_is_owned, shape_is_owned_non_erased, storage_shape,
-    value_shape,
+    value_shape, value_shape_for_java_type,
 };
 use crate::signature::{
     LocalPlan, ReceiverPlan, SignatureConstraint, SignaturePlan, SolvedSlotShape,
@@ -12130,6 +12130,11 @@ fn lower_args_for_call_target(
     {
         plan = source_plan;
     }
+    if let Some(collection_plan) =
+        native_collection_argument_plan_for_target(target, call_receiver, args.len(), env, ctx)
+    {
+        plan = collection_plan;
+    }
     if let Some(parse_plan) = native_numeric_parse_argument_plan(target, args, env, ctx) {
         plan = parse_plan;
     }
@@ -12254,6 +12259,48 @@ fn lower_args_for_call_target(
             })
             .collect(),
         _ => lower_args_with_plan(args, env, plan, ctx),
+    }
+}
+
+fn native_collection_argument_plan_for_target(
+    target: &CallTargetPlan<'_>,
+    call_receiver: Option<&Expr>,
+    arg_count: usize,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<ArgumentLoweringPlan> {
+    let CallTargetPlan::NativeCollectionMethod {
+        receiver_ty,
+        method,
+        ..
+    } = target
+    else {
+        return None;
+    };
+    let receiver_ty = receiver_ty.clone().or_else(|| {
+        call_receiver.map(|receiver| {
+            crate::types::optional_element_type(&crate::types::infer_expr_type(
+                receiver,
+                env.type_env(),
+            ))
+            .unwrap_or_else(|| crate::types::infer_expr_type(receiver, env.type_env()))
+        })
+    })?;
+    match method {
+        NativeCollectionMethod::ListPush | NativeCollectionMethod::SetInsert if arg_count == 1 => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            Some(ArgumentLoweringPlan::Shaped(vec![
+                project_java_value_shape(Some(ctx.representations), element_ty),
+            ]))
+        }
+        NativeCollectionMethod::MapInsert if arg_count == 2 => {
+            let (key_ty, value_ty, _) = map_type_args_from_java_type(&receiver_ty)?;
+            Some(ArgumentLoweringPlan::Shaped(vec![
+                project_java_value_shape(Some(ctx.representations), key_ty),
+                project_java_value_shape(Some(ctx.representations), value_ty),
+            ]))
+        }
+        _ => None,
     }
 }
 
@@ -16338,6 +16385,11 @@ fn lower_expr_for_slot_with_refinements(
         };
     }
     if let Some(constructor_expr) =
+        lower_source_constructor_expr_for_concrete_slot(expr, env, &slot, ctx)
+    {
+        return constructor_expr;
+    }
+    if let Some(constructor_expr) =
         lower_external_crate_constructor_expr_for_slot(expr, env, &slot, ctx, refinements)
     {
         return constructor_expr;
@@ -16507,6 +16559,78 @@ fn lower_expr_for_slot_with_refinements(
     }
     let plan = plan_slot_conversion(actual, slot, ctx.facts);
     apply_slot_expr_conversion(lowered_expr, &plan)
+}
+
+fn lower_source_constructor_expr_for_concrete_slot(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    if slot_targets_erased_object(slot) {
+        return None;
+    }
+    let Expr::New {
+        ty,
+        args,
+        body,
+        resolved,
+    } = expr
+    else {
+        return None;
+    };
+    if body.is_some() {
+        return None;
+    }
+    let constructed_ty = resolved
+        .as_ref()
+        .map(|resolved| resolved.constructed_type.clone())
+        .unwrap_or_else(|| ty.clone());
+    let type_name = concrete_java_type_name(&constructed_ty)?;
+    find_context_type_by_key(ctx.program, type_name)?;
+    let target_shape = slot_target_shape(slot)?;
+    if !same_concrete_java_type_name(&target_shape.java_ty, type_name)
+        && !source_subtype_conversion_available(
+            type_name,
+            concrete_java_type_name(&target_shape.java_ty)?,
+            ctx,
+        )
+    {
+        return None;
+    }
+
+    let target = plan_new_target_for_args_with_facts(
+        ty,
+        resolved.as_ref(),
+        ctx.representations,
+        ctx.facts,
+        args,
+        env.type_env(),
+    );
+    if target.native_collection.is_some() || target.external_crate.is_some() {
+        return None;
+    }
+    let constructor_arg_plan = plan_constructor_arguments_with_signature_fallback(
+        resolved.as_ref(),
+        args,
+        env,
+        ctx.signatures,
+        ty,
+        &target.rust_name,
+        ctx.facts,
+    );
+    let rust_args = lower_constructor_args_with_plan(args, env, constructor_arg_plan, ctx);
+    let owner_type = crate::slot_render::rust_name_for_java_named_type(type_name);
+    let lowered = function_call_projection(
+        owner_associated_path_projection(&owner_type, &target.rust_name),
+        rust_args,
+    );
+    let actual = value_shape_for_java_type(ctx.representations, constructed_ty);
+    if let Some(upcast) = lower_source_subtype_to_supertype_slot(&lowered, &actual, slot, ctx) {
+        return Some(upcast);
+    }
+    let plan = plan_slot_conversion(actual, slot.clone(), ctx.facts);
+    Some(apply_slot_expr_conversion(lowered, &plan))
 }
 
 fn lower_external_crate_constructor_expr_for_slot(

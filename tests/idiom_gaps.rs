@@ -6514,6 +6514,66 @@ fn documents_map_put_get_java_api_gap() {
 }
 
 #[test]
+fn typed_set_add_source_constructor_keeps_concrete_element_slot() {
+    let translation = translate_source(
+        r#"
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+class VCFHeaderLine {
+    private String key;
+    private String value;
+
+    VCFHeaderLine(String key, String value) {
+        this.key = key;
+        this.value = value;
+    }
+
+    public boolean equals(Object other) {
+        if (!(other instanceof VCFHeaderLine)) {
+            return false;
+        }
+        VCFHeaderLine that = (VCFHeaderLine) other;
+        return key.equals(that.key) && value.equals(that.value);
+    }
+
+    public int hashCode() {
+        return key.hashCode() + value.hashCode();
+    }
+}
+
+class TypedSetAddSourceConstructor {
+    Set<VCFHeaderLine> make() {
+        Set<VCFHeaderLine> metaData = new LinkedHashSet<VCFHeaderLine>();
+        metaData.add(new VCFHeaderLine("source", "tool"));
+        return metaData;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("meta_data.insert(VCFHeaderLine::new(")
+            && !translation
+                .rust
+                .contains("meta_data.insert(Box::new(VCFHeaderLine::new"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "typed_set_add_source_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn object_map_put_keeps_erased_object_value_without_downcast() {
     let translation = translate_source(
         r#"

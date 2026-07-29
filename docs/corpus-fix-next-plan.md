@@ -241,6 +241,19 @@ reads use the resolved facade aliases instead of falling back to phantom
 `htsjdk_util_locatable_pack_strategy_preserves_typed_facade_boundary`, and
 `htsjdk_static_integer_constants_emit_typed_facade_surfaces`.
 
+2026-07-29 typed collection source-constructor slots: native collection
+argument planning now lets `List.add`, `Set.add`, and `Map.put` use the
+receiver's generic element/key/value slots even when resolver metadata points
+at an erased Java library signature such as `Set.add(Object)`. Parsed source
+constructors feeding concrete slots now bypass external erased-object
+constructor projection and enter the normal source constructor/slot conversion
+path. This fixes VCF-style `Set<VCFHeaderLine>.add(new VCFHeaderLine(...))`
+emitting `Box<dyn Any>` for a concrete `HashSet<VCFHeaderLine>`. Focused
+coverage: `typed_set_add_source_constructor_keeps_concrete_element_slot`,
+`source_subclass_constructor_flows_to_flattened_superclass_slot`,
+`source_value_struct_with_java_hash_equality_derives_eq_and_hash`, plus
+`cargo fmt --check`, `cargo check --quiet`, and `git diff --check`.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still

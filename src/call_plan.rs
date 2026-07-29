@@ -3840,6 +3840,11 @@ pub fn plan_call_arguments_with_facts(
         if let Some(shapes) = external_call_arg_shapes(receiver, name, arg_count, facts, types) {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
+        if let Some(shapes) =
+            native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
+        {
+            return ArgumentLoweringPlan::Shaped(shapes);
+        }
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
     }
 
@@ -3873,6 +3878,11 @@ pub fn plan_call_arguments_with_facts_and_args(
             return ArgumentLoweringPlan::Shaped(shapes);
         }
         if let Some(shapes) = external_call_arg_shapes(receiver, name, arg_count, facts, types) {
+            return ArgumentLoweringPlan::Shaped(shapes);
+        }
+        if let Some(shapes) =
+            native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
+        {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
