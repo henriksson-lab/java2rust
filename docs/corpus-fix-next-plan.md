@@ -274,6 +274,12 @@ coverage: `set_to_borrowed_slice_collects_temporary_vec_view`,
 `typed_set_add_source_constructor_keeps_concrete_element_slot`,
 `cargo fmt --check`, `cargo check --quiet`, and `git diff --check`.
 
+HTSJDK VCF rerun after the set-to-slice checkpoint:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-set-slice-view` translated 32/32
+files with 20 invalid-pattern files and reduced generated Rust errors from
+`354` to `352`. The previous `HashSet<T>::as_slice` method-not-found rows are
+gone; remaining `.as_slice()` occurrences are on vector/array-shaped values.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still
