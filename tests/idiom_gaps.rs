@@ -14630,6 +14630,24 @@ class EnumPayloadMethodUse {
         String getFormatString() {
             return this.formatString;
         }
+
+        static PayloadVersion toPayloadVersion(String version) {
+            for (PayloadVersion hv : PayloadVersion.values()) {
+                if (hv.versionString.equals(version)) {
+                    return hv;
+                }
+            }
+            return null;
+        }
+
+        static boolean isFormatString(String format) {
+            for (PayloadVersion hv : PayloadVersion.values()) {
+                if (hv.formatString.equals(format)) {
+                    return true;
+                }
+            }
+            return false;
+        }
     }
 
     String latest() {
@@ -14639,6 +14657,11 @@ class EnumPayloadMethodUse {
 
     boolean recent() {
         return PayloadVersion.V2.isAtLeastAsRecentAs(PayloadVersion.V1);
+    }
+
+    boolean fromPayloadFieldLoop() {
+        return PayloadVersion.toPayloadVersion("VCFv4.2") == PayloadVersion.V2
+            && PayloadVersion.isFormatString("fileformat");
     }
 }
 "#,
@@ -14658,6 +14681,10 @@ class EnumPayloadMethodUse {
             && translation
                 .rust
                 .contains("return Some(self.format_string());")
+            && translation.rust.contains("if hv.version_string()")
+            && translation.rust.contains("if hv.format_string()")
+            && !translation.rust.contains("hv.version_string.as_ref()")
+            && !translation.rust.contains("hv.format_string.as_ref()")
             && !translation.rust.contains("self.version_string.clone()")
             && !translation.rust.contains("self.format_string.clone()"),
         "{}",
@@ -14677,6 +14704,7 @@ mod generated_tests {
         let fixture = EnumPayloadMethodUse {};
         assert_eq!(fixture.latest(), Some("VCFv4.2".to_string()));
         assert!(fixture.recent());
+        assert!(fixture.from_payload_field_loop());
         assert!(EnumPayloadMethodUsePayloadVersion::V2.is_at_least_as_recent_as(&EnumPayloadMethodUsePayloadVersion::V1));
         assert_eq!(EnumPayloadMethodUsePayloadVersion::V1.get_format_string(), Some("fileformat".to_string()));
     }

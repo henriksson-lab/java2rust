@@ -5338,6 +5338,25 @@ types, type annotations, unsupported concrete/concrete `instanceof`,
 incompatible `?` usage, source-super constructor lowering, generic header-line
 getter precision, and remaining facade/source-boundary gaps.
 
+2026-07-29 source enum receiver payload-field cleanup: source enum payload
+field access now uses the receiver's inferred source enum type, not only the
+current `this` enum, before lowering to the generated payload accessor. This
+routes loop-variable reads such as `hv.versionString` and `hv.formatString`
+through `hv.version_string()`/`hv.format_string()` and gives Java `.equals(...)`
+/ equality planning the same concrete accessor shape.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-enum-receiver-payload-fields`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `413` to `411`. Generated `VCFHeaderVersion` now
+renders `hv.version_string().as_str() == version.as_str()` and
+`hv.format_string().as_str() == format.as_str()`. The previous
+`attempted to take value of method version_string/format_string` rows are gone.
+Top families remain broad mismatched types, type annotations, unsupported
+concrete/concrete `instanceof`, incompatible `?` usage, source-super
+constructor lowering, generic header-line getter precision, and facade/source
+boundary gaps.
+
 ## Rerun Protocol
 
 After each fix:

@@ -4433,6 +4433,26 @@ fn source_java_enum_instance_field_accessor_name(name: &str, ctx: LowerCtx) -> O
     })
 }
 
+fn source_java_enum_field_accessor_name_for_receiver(
+    receiver: &Expr,
+    field: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<String> {
+    if is_this_receiver_expr(receiver) {
+        return source_java_enum_instance_field_accessor_name(field, ctx);
+    }
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let receiver_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
+    let ty = find_source_enum_type_decl_for_java_type(&receiver_shape.java_ty, ctx)?;
+    let field_name = crate::parser::to_snake_case(field);
+    source_java_enum_payload_field_shape(ty, &field_name).map(|_| field_name)
+}
+
 fn source_java_enum_instance_field_accessor_shape(
     expr: &Expr,
     ctx: LowerCtx,
@@ -4446,6 +4466,49 @@ fn source_java_enum_instance_field_accessor_shape(
     };
     let current_type = ctx.current_type?;
     let ty = find_source_enum_type_decl_for_current_type(current_type, ctx)?;
+    if ty.kind != TypeKind::Enum {
+        return None;
+    }
+    source_java_enum_payload_field_shape(ty, &field_name)
+}
+
+fn source_java_enum_field_accessor_shape_for_receiver(
+    receiver: &Expr,
+    field: &str,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustSlotShape> {
+    if is_this_receiver_expr(receiver) {
+        return source_java_enum_instance_field_accessor_shape(
+            &Expr::FieldAccess(Box::new(Expr::This), field.to_string()),
+            ctx,
+        );
+    }
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let receiver_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
+    let ty = find_source_enum_type_decl_for_java_type(&receiver_shape.java_ty, ctx)?;
+    let field_name = crate::parser::to_snake_case(field);
+    source_java_enum_payload_field_shape(ty, &field_name)
+}
+
+fn source_java_enum_field_accessor_shape_for_expr(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustSlotShape> {
+    match expr {
+        Expr::FieldAccess(receiver, field) => {
+            source_java_enum_field_accessor_shape_for_receiver(receiver, field, env, ctx)
+        }
+        _ => source_java_enum_instance_field_accessor_shape(expr, ctx),
+    }
+}
+
+fn source_java_enum_payload_field_shape(ty: &TypeDecl, field_name: &str) -> Option<RustSlotShape> {
     if ty.kind != TypeKind::Enum {
         return None;
     }
@@ -4475,6 +4538,28 @@ fn lower_source_java_enum_instance_field_accessor_for_slot(
     Some(apply_slot_expr_conversion(lowered, &plan))
 }
 
+fn lower_source_java_enum_field_accessor_for_slot(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::FieldAccess(receiver, field) = expr else {
+        return lower_source_java_enum_instance_field_accessor_for_slot(
+            expr,
+            env,
+            slot,
+            ctx,
+            refinements,
+        );
+    };
+    let actual = source_java_enum_field_accessor_shape_for_receiver(receiver, field, env, ctx)?;
+    let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+    let plan = plan_slot_conversion(actual, slot.clone(), ctx.facts);
+    Some(apply_slot_expr_conversion(lowered, &plan))
+}
+
 fn find_source_enum_type_decl_for_current_type<'a>(
     current_type: &str,
     ctx: LowerCtx<'a>,
@@ -4493,6 +4578,36 @@ fn find_source_enum_type_decl_for_current_type<'a>(
         find_type_decl_by_name(program, current_type)
             .or_else(|| find_unique_type_decl_by_simple_name(program, simple))
             .or_else(|| find_type_decl_by_rust_name(program, current_type))
+            .filter(|ty| ty.kind == TypeKind::Enum)
+    })
+}
+
+fn find_source_enum_type_decl_for_java_type<'a>(
+    java_ty: &JavaType,
+    ctx: LowerCtx<'a>,
+) -> Option<&'a TypeDecl> {
+    let JavaType::Named { name, .. } = java_ty else {
+        return None;
+    };
+    let simple = name
+        .rsplit(['.', '$'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(name);
+    [
+        ctx.program,
+        ctx.support_local_type_program,
+        ctx.source_summary_type_program,
+    ]
+    .into_iter()
+    .find_map(|program| {
+        find_type_decl_by_name(program, name)
+            .or_else(|| find_unique_type_decl_by_simple_name(program, simple))
+            .or_else(|| {
+                find_type_decl_by_rust_name(
+                    program,
+                    &crate::slot_render::rust_name_for_java_named_type(name),
+                )
+            })
             .filter(|ty| ty.kind == TypeKind::Enum)
     })
 }
@@ -8135,10 +8250,14 @@ fn lower_expr_with_refinements(
             if let Some(storage) = lower_static_storage_field_access(receiver, field, env, ctx) {
                 return storage;
             }
-            if is_this_receiver_expr(receiver)
-                && let Some(field_name) = source_java_enum_instance_field_accessor_name(field, ctx)
+            if let Some(field_name) =
+                source_java_enum_field_accessor_name_for_receiver(receiver, field, env, ctx)
             {
-                return receiver_method_call_projection_exact(this_expr(), &field_name, Vec::new());
+                return receiver_method_call_projection_exact(
+                    lower_expr_with_refinements(receiver, env, ctx, refinements),
+                    &field_name,
+                    Vec::new(),
+                );
             }
             if field == "length"
                 && let Some(length) =
@@ -9076,8 +9195,14 @@ fn lower_binary_expr(
             representations: Some(ctx.representations),
             facts: Some(ctx.facts),
         };
-        let left_shape = crate::expr_shape::infer_expr_shape_with_context(left, env, shape_ctx);
-        let right_shape = crate::expr_shape::infer_expr_shape_with_context(right, env, shape_ctx);
+        let left_shape = source_java_enum_field_accessor_shape_for_expr(left, env, ctx)
+            .unwrap_or_else(|| {
+                crate::expr_shape::infer_expr_shape_with_context(left, env, shape_ctx)
+            });
+        let right_shape = source_java_enum_field_accessor_shape_for_expr(right, env, ctx)
+            .unwrap_or_else(|| {
+                crate::expr_shape::infer_expr_shape_with_context(right, env, shape_ctx)
+            });
         if let Some(expr) =
             lower_current_type_get_class_comparison(op, left, right, env, ctx, refinements)
         {
@@ -15385,8 +15510,10 @@ fn lower_java_equality_call_expr(
         representations: Some(ctx.representations),
         facts: Some(ctx.facts),
     };
-    let left_shape = crate::expr_shape::infer_expr_shape_with_context(left, env, shape_ctx);
-    let right_shape = crate::expr_shape::infer_expr_shape_with_context(right, env, shape_ctx);
+    let left_shape = source_java_enum_field_accessor_shape_for_expr(left, env, ctx)
+        .unwrap_or_else(|| crate::expr_shape::infer_expr_shape_with_context(left, env, shape_ctx));
+    let right_shape = source_java_enum_field_accessor_shape_for_expr(right, env, ctx)
+        .unwrap_or_else(|| crate::expr_shape::infer_expr_shape_with_context(right, env, shape_ctx));
     let plan = if use_fact_aware_plan {
         plan_equality_comparison_with_facts(&left_shape, &right_shape, ctx.facts)
     } else {
@@ -15636,7 +15763,7 @@ fn lower_expr_for_slot_with_refinements(
         return expr;
     }
     if let Some(expr) =
-        lower_source_java_enum_instance_field_accessor_for_slot(expr, env, &slot, ctx, refinements)
+        lower_source_java_enum_field_accessor_for_slot(expr, env, &slot, ctx, refinements)
     {
         return expr;
     }
@@ -15870,7 +15997,15 @@ fn lower_expr_for_slot_with_refinements(
     if let Some(display_actual) = optional_current_method_display_actual_shape(expr, &slot, ctx) {
         actual = display_actual;
     }
-    if let Some(enum_field_actual) = source_java_enum_instance_field_accessor_shape(expr, ctx) {
+    if let Expr::FieldAccess(receiver, field) = expr {
+        if let Some(enum_field_actual) =
+            source_java_enum_field_accessor_shape_for_receiver(receiver, field, env, ctx)
+        {
+            actual = enum_field_actual;
+        }
+    } else if let Some(enum_field_actual) =
+        source_java_enum_instance_field_accessor_shape(expr, ctx)
+    {
         actual = enum_field_actual;
     }
     if let Some(optional_field) =
