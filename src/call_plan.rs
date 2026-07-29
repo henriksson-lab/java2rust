@@ -338,6 +338,7 @@ pub enum NativeCollectionMethod {
     ListHashCode,
     ListPush,
     ListGet,
+    ListIndexOf,
     SetHashCode,
     SetInsert,
     Extend,
@@ -456,6 +457,9 @@ pub fn native_collection_lowered_type(
                 borrowed_sequence_element_shape(element_ty.clone()),
             ))
         }
+        NativeCollectionMethod::ListIndexOf => Some(LoweredType::from_java(JavaType::Primitive(
+            PrimitiveType::Int,
+        ))),
         NativeCollectionMethod::MapGet => {
             let (_, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
             Some(LoweredType::optional_element_borrow_shape(
@@ -2788,6 +2792,9 @@ fn plan_native_collection_receiver_call<'a>(
             NativeCollectionMethod::ListPush
         }
         (crate::stdlib::JavaCollectionKind::List, "get") => NativeCollectionMethod::ListGet,
+        (crate::stdlib::JavaCollectionKind::List, "indexOf" | "index_of") => {
+            NativeCollectionMethod::ListIndexOf
+        }
         (crate::stdlib::JavaCollectionKind::Set, "hashCode" | "hash_code") => {
             NativeCollectionMethod::SetHashCode
         }
@@ -3838,6 +3845,10 @@ pub fn native_collection_arg_shapes_with_facts(
                 PrimitiveType::Int,
             ))]
         }
+        NativeCollectionMethod::ListIndexOf if arg_count == 1 => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            vec![borrowed_sequence_element_shape(element_ty.clone())]
+        }
         NativeCollectionMethod::MapGet | NativeCollectionMethod::MapContainsKey
             if arg_count == 1 =>
         {
@@ -4294,6 +4305,9 @@ fn facade_abi_native_collection_arg_java_types(
         }
         NativeCollectionMethod::ListGet if arg_count == 1 => {
             Some(vec![JavaType::Primitive(PrimitiveType::Int)])
+        }
+        NativeCollectionMethod::ListIndexOf if arg_count == 1 => {
+            crate::types::sequence_element_type(&receiver_ty).map(|element_ty| vec![element_ty])
         }
         NativeCollectionMethod::MapGet | NativeCollectionMethod::MapContainsKey
             if arg_count == 1 =>

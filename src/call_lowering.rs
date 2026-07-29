@@ -24,8 +24,9 @@ use crate::coercion::{
     primitive_hash_code_projection, primitive_is_nan_projection, primitive_number_value_projection,
     primitive_parse_projection, receiver_method_call_projection,
     receiver_method_call_projection_exact, self_associated_path_projection,
-    string_char_at_projection, string_compare_to_ignore_case_projection,
-    string_compare_to_projection, string_equals_ignore_case_projection, string_format_projection,
+    sequence_index_of_projection, string_char_at_projection,
+    string_compare_to_ignore_case_projection, string_compare_to_projection,
+    string_equals_ignore_case_projection, string_format_projection,
     string_from_byte_range_projection, string_from_bytes_projection, string_get_bytes_projection,
     string_hash_code_projection, string_index_of_projection, string_join_delimiter_projection,
     string_join_varargs_projection, string_last_index_of_projection, string_matches_projection,
@@ -703,6 +704,9 @@ fn apply_native_collection_method(
         }
         NativeCollectionMethod::ListPush => "push",
         NativeCollectionMethod::ListGet => "get",
+        NativeCollectionMethod::ListIndexOf => {
+            return apply_list_index_of(receiver, args);
+        }
         NativeCollectionMethod::SetHashCode => {
             return java_set_hash_code_projection(receiver);
         }
@@ -723,6 +727,15 @@ fn apply_native_collection_method(
         NativeCollectionMethod::ToArray => unreachable!("ToArray is rendered as an owned Vec"),
     };
     receiver_method_call_projection_exact(receiver, rust_name, args)
+}
+
+fn apply_list_index_of(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
+    let Some(needle) = args.into_iter().next() else {
+        return RustExpr::Raw(
+            "compile_error!(\"Java List.indexOf requires one argument\")".to_string(),
+        );
+    };
+    sequence_index_of_projection(receiver, needle)
 }
 
 pub fn apply_native_collection_extend(receiver: RustExpr, arg: RustExpr) -> RustExpr {

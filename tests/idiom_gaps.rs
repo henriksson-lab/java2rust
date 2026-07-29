@@ -1393,6 +1393,47 @@ class JavaStringBytesAndIndex {
 }
 
 #[test]
+fn java_list_index_of_uses_position_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+import java.util.List;
+
+class JavaListIndexOf {
+    int find(List<String> values, String value) {
+        return values.indexOf(value);
+    }
+
+    int findLiteral(String value) {
+        return Arrays.asList("ID", "Number", "Type").indexOf(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "values.iter().position(|item| item == &value).map(|index| index as i32).unwrap_or(-1)"
+        ) && translation
+            .rust
+            .contains(".iter().position(|item| item == &value)")
+            && !translation.rust.contains(".index_of(")
+            && !translation.rust.contains(".indexOf("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_list_index_of",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn java_string_comparison_methods_use_signature_helpers() {
     let translation = translate_source(
         r#"

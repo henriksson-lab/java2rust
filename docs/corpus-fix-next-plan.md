@@ -5525,6 +5525,19 @@ errors from `379` to `378`. `VCFUtils`
 `java_string_last_index_of(...)`, and the previous missing string helper row is
 gone.
 
+2026-07-29 Java `List.indexOf` native collection cleanup:
+`List.indexOf` is now represented in native collection planning, with an `i32`
+return shape, borrowed element argument shape, and inline Rust
+`iter().position(...)` lowering that preserves Java's `-1` not-found result.
+Focused coverage: `java_list_index_of_uses_position_projection`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-list-index-of` translates all
+`32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `378` to `377`. `VCFHeaderLineTranslator`
+`expectedTagOrder.indexOf(str)` now renders as a borrowed iterator position
+search, and the previous `&Vec<String>.index_of(...)` row is gone.
+
 ## Rerun Protocol
 
 After each fix:

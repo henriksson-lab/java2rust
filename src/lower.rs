@@ -15503,6 +15503,7 @@ fn adapt_native_collection_receiver(
         | NativeCollectionMethod::IsEmpty
         | NativeCollectionMethod::ListHashCode
         | NativeCollectionMethod::ListGet
+        | NativeCollectionMethod::ListIndexOf
         | NativeCollectionMethod::SetHashCode
         | NativeCollectionMethod::MapHashCode
         | NativeCollectionMethod::MapGet

@@ -1281,6 +1281,20 @@ errors from `379` to `378`. `VCFUtils` now renders
 `referenceFile.getName().lastIndexOf('.')` as `java_string_last_index_of(...)`;
 the earlier missing `String.last_index_of`/missing helper row is gone.
 
+Focused Java `List.indexOf` update:
+`java_list_index_of_uses_position_projection` now passes. `List.indexOf` is
+planned as a native collection method with an `i32` return and a borrowed
+element argument, then lowered to a Rust iterator `position(...)` search with
+Java's `-1` miss value.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-list-index-of` translates all
+`32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `378` to `377`. `VCFHeaderLineTranslator`
+`expectedTagOrder.indexOf(str)` now renders as
+`expected_tag_order...iter().position(|item| item == str).map(...).unwrap_or(-1)`;
+the previous `no method named index_of for &Vec<String>` row is gone.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

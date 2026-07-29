@@ -1748,6 +1748,14 @@ pub fn string_to_char_array_projection(receiver: RustExpr) -> RustExpr {
     ))
 }
 
+pub fn sequence_index_of_projection(receiver: RustExpr, needle: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{}.iter().position(|item| item == {}).map(|index| index as i32).unwrap_or(-1)",
+        emit::emit_expr(&receiver),
+        emit::emit_expr(&needle)
+    ))
+}
+
 pub fn string_char_at_projection(receiver: RustExpr, index: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
         "{}.chars().nth({}).expect(\"Java string index out of bounds\")",
