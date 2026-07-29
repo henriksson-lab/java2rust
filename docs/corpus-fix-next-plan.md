@@ -5877,6 +5877,39 @@ shape before struct assembly. Next work should make constructor field-value
 lowering verify/adapt against the final signature field shape used by struct
 emission, especially for inherited/super-constructor assembly.
 
+2026-07-29 constructor optional-field slot consistency:
+Constructor field initialization now re-reads the final signature field shape
+for the owning type before lowering assigned/default field values, including
+self-temporary and source-super constructor paths. Optional assignment rendering
+no longer unwraps a rendered `Some(...)` just because inferred actual shape is
+optional; it only unwraps the explicit known optional-result prewrap case.
+Ownership coercion also treats borrowed values flowing into `CopyValue` slots as
+recoverable by copy, which lets borrowed source enum params store into owned
+optional enum fields as `Some(*value)`.
+
+Focused coverage passed:
+`stale_constructor_optional_enum_field_shape_uses_final_storage_slot`,
+`borrowed_enum_constructor_param_stores_owned_optional_field_element`,
+`source_java_enum_constant_uses_slot_plan_not_optional_projection`,
+`borrowed_primitive_enhanced_for_element_copies_into_value_argument_slot`,
+`cargo fmt --check`, `cargo check --quiet`, `git diff --check`, and release
+rebuild. A full `cargo test --test idiom_gaps --quiet` run was started and made
+green progress through 522/568 tests, but the tail stopped producing output for
+several minutes and was interrupted; do not count that as a passing full-suite
+gate.
+
+HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-borrowed-copy-optional-field`
+translated 32/32 files with 20 invalid-pattern files and 449 generated-Rust
+errors. The targeted `VCFCompoundHeaderLine` optional enum failures are gone:
+`set_number_to_unbounded` emits `self.count_type =
+Some(VCFHeaderLineCount::UNBOUNDED)`, constructor literals emit
+`count_type: Some(VCFHeaderLineCount::INTEGER)`, and borrowed line-type params
+emit `line_type: Some(*line_type)`. Remaining top families are still broad
+`E0308` mismatches, inference holes, unresolved HTSJDK/SAM support types,
+concrete/concrete `instanceof`, unlowered `super(...)`, generic header-line
+dispatch, and optional/erased-object recovery.
+
 ## Rerun Protocol
 
 After each fix:

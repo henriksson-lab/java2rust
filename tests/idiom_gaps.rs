@@ -7530,6 +7530,33 @@ class BorrowedEnumConstructorParamStore extends BorrowedEnumConstructorParamStor
 }
 
 #[test]
+fn stale_constructor_optional_enum_field_shape_uses_final_storage_slot() {
+    let translation = translate_source(&idiom_gap("StaleConstructorOptionalEnumFieldShape.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("count_type: Some(StaleConstructorOptionalEnumFieldShapeCountType::INTEGER)")
+            && translation.rust.contains(
+                "self.count_type = Some(StaleConstructorOptionalEnumFieldShapeCountType::UNBOUNDED)"
+            )
+            && !translation
+                .rust
+                .contains("count_type: StaleConstructorOptionalEnumFieldShapeCountType::INTEGER")
+            && !translation.rust.contains(
+                "self.count_type = StaleConstructorOptionalEnumFieldShapeCountType::UNBOUNDED"
+            )
+            && !translation.rust.contains("line_type: Some(line_type)")
+            && (translation.rust.contains("line_type: Some(*line_type)")
+                || translation
+                    .rust
+                    .contains("line_type: Some(line_type.clone()")),
+        "constructor field lowering should use final optional enum field storage shape:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn context_translation_uses_sibling_static_string_constant_shape() {
     let caller = r#"
 class ContextConstantCaller {

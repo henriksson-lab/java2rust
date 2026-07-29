@@ -90,7 +90,7 @@ pub fn adapt_optional_assignment_value_for_target(
     preconverted_some_plan: OptionalSlotConstructionPlan,
     already_optional_result: bool,
 ) -> RustExpr {
-    if actual.optional_element_type().is_some() || already_optional_result {
+    if already_optional_result {
         if let Some(inner) = crate::coercion::unwrap_rendered_some_expr(&lowered_value) {
             return inner;
         }

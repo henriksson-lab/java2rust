@@ -1706,7 +1706,7 @@ fn lower_implicit_default_constructor(
             ctx.facts,
         )
         .into_iter()
-        .map(|plan| lower_constructor_field_value_plan(plan, &env, constructor_ctx))
+        .map(|plan| lower_constructor_field_value_plan(&ty.name, plan, &env, constructor_ctx))
         .collect(),
         ctx,
     );
@@ -1834,7 +1834,9 @@ fn lower_constructor(
                 ty,
                 field_plans
                     .into_iter()
-                    .map(|plan| lower_constructor_field_value_plan(plan, &env, constructor_ctx))
+                    .map(|plan| {
+                        lower_constructor_field_value_plan(&ty.name, plan, &env, constructor_ctx)
+                    })
                     .collect(),
                 constructor_ctx,
             ),
@@ -1845,6 +1847,7 @@ fn lower_constructor(
 }
 
 fn lower_constructor_field_value_plan(
+    owner: &str,
     plan: ConstructorFieldValuePlan<'_>,
     env: &ShapeEnv,
     ctx: LowerCtx,
@@ -1860,6 +1863,7 @@ fn lower_constructor_field_value_plan(
             value,
             shape,
         } => {
+            let shape = final_constructor_field_shape(owner, &field_name, &shape, ctx);
             let slot = assignment_value_plan_for_shape(&shape).slot;
             let lowered = lower_expr_for_slot(value, env, slot.clone(), ctx);
             let lowered =
@@ -1870,9 +1874,24 @@ fn lower_constructor_field_value_plan(
             )
         }
         ConstructorFieldValuePlan::Default { field_name, shape } => {
+            let shape = final_constructor_field_shape(owner, &field_name, &shape, ctx);
             constructor_default_field_value_with_facts(field_name, shape, ctx.facts)
         }
     }
+}
+
+fn final_constructor_field_shape(
+    owner: &str,
+    field_name: &str,
+    planned: &RustSlotShape,
+    ctx: LowerCtx,
+) -> RustSlotShape {
+    let rust_name = crate::parser::to_snake_case(field_name);
+    ctx.signatures
+        .field_shape(owner, field_name)
+        .or_else(|| ctx.signatures.field_shape(owner, &rust_name))
+        .cloned()
+        .unwrap_or_else(|| planned.clone())
 }
 
 fn lower_constructor_field_value_expr_for_shape(
@@ -1881,7 +1900,7 @@ fn lower_constructor_field_value_expr_for_shape(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> RustExpr {
-    let slot = assignment_value_plan_for_shape(shape).slot;
+    let slot = assignment_value_plan_for_shape(&shape).slot;
     let lowered = lower_expr_for_slot(value, env, slot.clone(), ctx);
     let lowered = wrap_optional_assignment_value_if_needed(value, env, slot.clone(), lowered, ctx);
     adapt_reused_owned_value_for_slot(lowered, value, &slot, env, ctx)
@@ -2062,18 +2081,25 @@ fn constructor_field_plans_with_body_local_decls(
                     ctx.facts,
                 )
             } else {
-                constructor_self_temporary_seed_field_value(plan, env, ctx).unwrap_or_else(|| {
-                    constructor_default_field_value_with_facts(
-                        field_name.clone(),
-                        shape.clone(),
-                        ctx.facts,
-                    )
-                })
+                constructor_self_temporary_seed_field_value(&ty.name, plan, env, ctx)
+                    .unwrap_or_else(|| {
+                        let shape = final_constructor_field_shape(&ty.name, field_name, shape, ctx);
+                        constructor_default_field_value_with_facts(
+                            field_name.clone(),
+                            shape,
+                            ctx.facts,
+                        )
+                    })
             };
             fields.push(seed);
             deferred.push(plan);
         } else {
-            fields.push(lower_constructor_field_value_plan(plan.clone(), env, ctx));
+            fields.push(lower_constructor_field_value_plan(
+                &ty.name,
+                plan.clone(),
+                env,
+                ctx,
+            ));
         }
     }
 
@@ -2135,17 +2161,24 @@ fn constructor_field_plans_with_trailing_body_ordered(
         if self_dependent {
             let (field_name, shape) = constructor_field_name_and_shape(plan);
             fields.push(
-                constructor_self_temporary_seed_field_value(plan, env, ctx).unwrap_or_else(|| {
-                    constructor_default_field_value_with_facts(
-                        field_name.clone(),
-                        shape.clone(),
-                        ctx.facts,
-                    )
-                }),
+                constructor_self_temporary_seed_field_value(&ty.name, plan, env, ctx)
+                    .unwrap_or_else(|| {
+                        let shape = final_constructor_field_shape(&ty.name, field_name, shape, ctx);
+                        constructor_default_field_value_with_facts(
+                            field_name.clone(),
+                            shape,
+                            ctx.facts,
+                        )
+                    }),
             );
             deferred.push((plan_index, plan));
         } else {
-            fields.push(lower_constructor_field_value_plan(plan.clone(), env, ctx));
+            fields.push(lower_constructor_field_value_plan(
+                &ty.name,
+                plan.clone(),
+                env,
+                ctx,
+            ));
         }
     }
 
@@ -2275,12 +2308,14 @@ fn modeled_external_super_constructor_state_field_assignments<'a>(
 }
 
 fn constructor_self_temporary_seed_field_value(
+    owner: &str,
     plan: &ConstructorFieldValuePlan<'_>,
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<(String, RustExpr)> {
     let (field_name, value, shape) = constructor_assigned_field_parts(plan);
-    let slot = assignment_value_plan_for_shape(shape).slot;
+    let shape = final_constructor_field_shape(owner, field_name, shape, ctx);
+    let slot = assignment_value_plan_for_shape(&shape).slot;
     let lowered = lower_expr_for_slot(value, env, slot.clone(), ctx);
     let lowered = wrap_optional_assignment_value_if_needed(value, env, slot, lowered, ctx);
     let lowered = constructor_self_value_expr(lowered, value, env, ctx);
@@ -2756,11 +2791,12 @@ fn source_super_constructor_fields_and_trailing<'a>(
 
     for plan in child_plans {
         let (field_name, child_shape) = constructor_field_name_and_shape(&plan);
+        let child_shape = final_constructor_field_shape(&ty.name, field_name, child_shape, ctx);
         if let Some((value, super_shape)) = super_field_values.remove(field_name) {
             let value = adapt_inherited_super_field_value_for_child_shape(
                 value,
                 super_shape,
-                child_shape,
+                &child_shape,
                 ctx,
             );
             fields.push((field_name.clone(), value));
@@ -2775,13 +2811,15 @@ fn source_super_constructor_fields_and_trailing<'a>(
         } {
             let (field_name, shape) = constructor_field_name_and_shape(&plan);
             fields.push(
-                constructor_self_temporary_seed_field_value(&plan, env, ctx).unwrap_or_else(|| {
-                    constructor_default_field_value_with_facts(
-                        field_name.clone(),
-                        shape.clone(),
-                        ctx.facts,
-                    )
-                }),
+                constructor_self_temporary_seed_field_value(&ty.name, &plan, env, ctx)
+                    .unwrap_or_else(|| {
+                        let shape = final_constructor_field_shape(&ty.name, field_name, shape, ctx);
+                        constructor_default_field_value_with_facts(
+                            field_name.clone(),
+                            shape,
+                            ctx.facts,
+                        )
+                    }),
             );
             deferred_child_field_assignments.push(
                 DelegatedConstructorTrailingStmt::FieldAssignment {
@@ -2791,6 +2829,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
             );
         } else {
             fields.push(lower_constructor_field_value_plan_with_future_reads(
+                &ty.name,
                 plan,
                 env,
                 ctx,
@@ -2867,6 +2906,7 @@ fn optional_element_is_source_java_enum(java_ty: &JavaType, ctx: LowerCtx) -> bo
 }
 
 fn lower_constructor_field_value_plan_with_future_reads(
+    owner: &str,
     plan: ConstructorFieldValuePlan<'_>,
     env: &ShapeEnv,
     ctx: LowerCtx,
@@ -2883,6 +2923,7 @@ fn lower_constructor_field_value_plan_with_future_reads(
             value,
             shape,
         } => {
+            let shape = final_constructor_field_shape(owner, &field_name, &shape, ctx);
             let slot = assignment_value_plan_for_shape(&shape).slot;
             let lowered = lower_expr_for_slot(value, env, slot.clone(), ctx);
             let lowered =
@@ -2904,6 +2945,7 @@ fn lower_constructor_field_value_plan_with_future_reads(
             (field_name, lowered)
         }
         ConstructorFieldValuePlan::Default { field_name, shape } => {
+            let shape = final_constructor_field_shape(owner, &field_name, &shape, ctx);
             constructor_default_field_value_with_facts(field_name, shape, ctx.facts)
         }
     }

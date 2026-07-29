@@ -1361,6 +1361,17 @@ pub fn ownership_coercion_policy_with_effective_facts(
             actual.ownership,
             OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
         )
+        && actual.view == target.view
+        && target.ownership == OwnershipShape::CopyValue
+    {
+        return OwnershipCoercionPolicy::RecoverOwnedCopyValue;
+    }
+    if actual.java_ty == target.java_ty
+        && actual.dispatch == target.dispatch
+        && matches!(
+            actual.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
         && actual.view == ViewShape::Slice
         && target.ownership == OwnershipShape::Owned
         && target.view == ViewShape::Native

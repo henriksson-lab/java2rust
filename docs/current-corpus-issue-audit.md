@@ -1395,6 +1395,14 @@ optional-field receiver problem:
 `self.vcf_encoder.as_ref().unwrap().encode(context)?` cannot call a mutating
 `encode` method through `as_ref()`.
 
+Release-backed HTSJDK VCF constructor optional-field rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-borrowed-copy-optional-field`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and has `449`
+generated Rust errors in the current broader VCF baseline. The targeted
+`VCFCompoundHeaderLine` constructor/assignment mismatches are fixed:
+`count_type` enum constants are wrapped into `Some(...)`, and borrowed
+line-type enum params now store as `Some(*line_type)`.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
