@@ -87,6 +87,14 @@ fn focused_package_source_type_stub_stripping_is_separate_from_shared_support() 
         !script.contains("strip_shared_support_items \"$rust_path\" \"$source_types_path\""),
         "{script}"
     );
+    assert!(
+        script.contains("restore_missing_prelude_support_items()"),
+        "{script}"
+    );
+    assert!(
+        script.contains("restore_missing_prelude_support_items \"$rust_path\" \"$raw_generated_backup_dir/$(basename \"$rust_path\")\" \"$source_types_path\" \"$shared_support_types_path\""),
+        "{script}"
+    );
 }
 
 #[test]

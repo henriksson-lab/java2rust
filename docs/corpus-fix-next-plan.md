@@ -5967,6 +5967,36 @@ errors; the remaining `expected value, found module self` constructor error in
 `VCFSimpleHeaderLine::new_string_map` is gone and the call now uses
 `__java_self.initialize(__java_self.clone().name, ...)`.
 
+2026-07-29 focused-package prelude support restore:
+The focused-package wrapper now restores missing non-source prelude support
+declarations from the raw generated backup after source-type stub stripping and
+before shared-support merging. This is intentionally declaration-led: it
+restores declarations/aliases first, then only impls for those restored support
+types, so shared helper impls such as `JavaPathArg for String` stay stripped
+and do not create duplicate trait impls. Duplicate restored support identities
+can then be promoted by the existing shared-support merger, while single-owner
+support identities remain available to the crate-root unique-type export path.
+
+Focused coverage passed:
+`focused_package_source_type_stub_stripping_is_separate_from_shared_support`,
+`bash -n scripts/translate-focused-package.sh`, and `cargo fmt --check`.
+
+HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-prelude-support-restore-narrow`
+translated 32/32 files with 20 invalid-pattern files and reduced generated
+Rust errors from the previous raw-list baseline of `441` to `371`. The previous
+undeclared support rows for `IntervalList`, `SAMSequenceDictionary`,
+`FileExtensions`, `TabixFormat`, and `Feature` are gone, as are the broad
+restore probe's duplicate `JavaPathArg` impl conflicts. Shared support now
+promotes repeated support identities such as `BCF2Codec`, `FeatureReader`,
+`HtsjdkUtilsValidationUtils`, and `SAMSequenceDictionary`; single-owner support
+identities such as `Feature`, `IntervalList`, `LazyGenotypesContextLazyData`,
+and `TabixFormat` are exported through `generated-unique-types.tsv`. Remaining
+top families are broad mismatched types, type annotations, concrete
+`instanceof`, unlowered `super(...)`, generic header-line dispatch, boxed dyn
+clone/optional comparisons, and facade/source method precision such as
+`BCF2Codec::SIZEOF_BCF_HEADER`.
+
 ## Rerun Protocol
 
 After each fix:

@@ -933,6 +933,226 @@ rust_path.write_text("".join(line for index, line in enumerate(lines) if not rem
 PY
 }
 
+restore_missing_prelude_support_items() {
+  local rust_path="$1"
+  local raw_path="$2"
+  local source_types_path="$3"
+  local shared_types_path="$4"
+  python3 - "$rust_path" "$raw_path" "$source_types_path" "$shared_types_path" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+rust_path = Path(sys.argv[1])
+raw_path = Path(sys.argv[2])
+source_types_path = Path(sys.argv[3])
+shared_types_path = Path(sys.argv[4])
+
+if not raw_path.exists():
+    raise SystemExit(0)
+
+stem = rust_path.stem
+current_source = re.sub(r"^\d+_", "", stem)
+source_types = {
+    line.strip()
+    for line in source_types_path.read_text().splitlines()
+    if line.strip()
+}
+shared_types = {
+    line.strip()
+    for line in shared_types_path.read_text().splitlines()
+    if line.strip()
+}
+
+decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
+alias_re = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
+derive_re = re.compile(r"^#\[derive")
+inherent_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)")
+trait_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)")
+
+
+def source_owned_nested_type_name(name: str) -> bool:
+    if name == current_source or not name.startswith(current_source):
+        return False
+    suffix = name[len(current_source):]
+    return bool(suffix) and suffix[0].isupper()
+
+
+def is_char_literal_start(line: str, index: int) -> bool:
+    next_index = index + 1
+    if next_index >= len(line):
+        return False
+    if line[next_index] == "\\":
+        return index + 3 < len(line) and line[index + 3] == "'"
+    return index + 2 < len(line) and line[index + 2] == "'"
+
+
+def brace_delta(line: str) -> int:
+    delta = 0
+    index = 0
+    state = "code"
+    while index < len(line):
+        ch = line[index]
+        nxt = line[index + 1] if index + 1 < len(line) else ""
+        if state == "code":
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "/" and nxt == "*":
+                state = "block_comment"
+                index += 2
+                continue
+            if ch == '"':
+                state = "string"
+                index += 1
+                continue
+            if ch == "'" and is_char_literal_start(line, index):
+                state = "char"
+                index += 1
+                continue
+            if ch == "{":
+                delta += 1
+            elif ch == "}":
+                delta -= 1
+            index += 1
+            continue
+        if state == "string":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == '"':
+                state = "code"
+            index += 1
+            continue
+        if state == "char":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == "'":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                state = "code"
+                index += 2
+                continue
+            index += 1
+    return delta
+
+
+def item_end(lines: list[str], start: int) -> int:
+    if "{" not in lines[start]:
+        return start + 1
+    depth = 0
+    for index in range(start, len(lines)):
+        depth += brace_delta(lines[index])
+        if depth <= 0:
+            return index + 1
+    return len(lines)
+
+
+def attached_start(lines: list[str], start: int) -> int:
+    index = start
+    while index > 0 and derive_re.match(lines[index - 1]):
+        index -= 1
+    return index
+
+
+def declared_names(text: str) -> set[str]:
+    names = set()
+    for line in text.splitlines():
+        if match := decl_re.match(line):
+            names.add(match.group(2))
+        elif match := alias_re.match(line):
+            names.add(match.group(1))
+    return names
+
+
+def support_item_name(line: str):
+    if match := decl_re.match(line):
+        return match.group(2)
+    if match := alias_re.match(line):
+        return match.group(1)
+    if match := inherent_impl_re.match(line):
+        return match.group(1)
+    if match := trait_impl_re.match(line):
+        return match.group(2)
+    return None
+
+
+def restorable_support_name(name: str) -> bool:
+    return (
+        name
+        and name != current_source
+        and name not in source_types
+        and name not in shared_types
+        and not source_owned_nested_type_name(name)
+    )
+
+
+current = rust_path.read_text()
+present = declared_names(current)
+raw_lines = raw_path.read_text().splitlines(keepends=True)
+candidate_names = set()
+depth = 0
+index = 0
+while index < len(raw_lines):
+    line = raw_lines[index]
+    if depth == 0:
+        if (match := decl_re.match(line)) and match.group(2) == current_source:
+            break
+        if match := decl_re.match(line):
+            name = match.group(2)
+            if restorable_support_name(name) and name not in present:
+                candidate_names.add(name)
+        elif match := alias_re.match(line):
+            name = match.group(1)
+            if restorable_support_name(name) and name not in present:
+                candidate_names.add(name)
+    depth += brace_delta(line)
+    index += 1
+
+if not candidate_names:
+    raise SystemExit(0)
+
+chunks = []
+depth = 0
+index = 0
+while index < len(raw_lines):
+    line = raw_lines[index]
+    if depth == 0:
+        if (match := decl_re.match(line)) and match.group(2) == current_source:
+            break
+        name = support_item_name(line)
+        if name and name in candidate_names:
+            start = attached_start(raw_lines, index) if decl_re.match(line) else index
+            end = item_end(raw_lines, index)
+            chunks.append("".join(raw_lines[start:end]).rstrip())
+            index = end
+            depth = 0
+            continue
+    depth += brace_delta(line)
+    index += 1
+
+if not chunks:
+    raise SystemExit(0)
+
+current_lines = current.splitlines(keepends=True)
+insert_at = None
+for line_index, line in enumerate(current_lines):
+    if (match := decl_re.match(line)) and match.group(2) == current_source:
+        insert_at = attached_start(current_lines, line_index)
+        break
+restored = "\n".join(chunks) + "\n"
+if insert_at is None:
+    separator = "" if current.endswith("\n") or not current else "\n"
+    rust_path.write_text(current + separator + restored)
+else:
+    current_lines[insert_at:insert_at] = [restored]
+    rust_path.write_text("".join(current_lines))
+PY
+}
+
 restore_missing_source_type_items() {
   local rust_path="$1"
   local raw_path="$2"
@@ -2160,6 +2380,7 @@ if [[ -s "$shared_support_path" ]]; then
   for rust_path in "$generated_dir"/*.rs; do
     strip_shared_support_items "$rust_path" "$shared_support_types_path"
     strip_source_type_facade_stubs "$rust_path" "$source_types_path"
+    restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path"
     restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")"
   done
 else
