@@ -1187,6 +1187,25 @@ values passed as erased varargs now clone normally and then box as
 Slot guard `source_object_varargs_storage_carrier_uses_owned_native_param_shape`
 and `cargo test erased_object --test idiom_gaps --quiet` also pass.
 
+Focused nullable ternary optional-carrier update:
+`nullable_boolean_ternary_assignment_preserves_optional_string_slot` now passes.
+Assignment lowering recognizes null-branch ternaries that were already lowered
+through an optional target slot as optional carriers, so `result = (Boolean)
+value ? "" : null` stays `if ... { Some("".to_string()) } else { None }`
+instead of being reinterpreted as a present `String` and wrapped with an invalid
+`.downcast::<String>()`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-nullable-boolean-ternary-assignment-full`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `388` to `387`. `VCFEncoder::format_v_c_f_field`
+now emits the Boolean branch as a direct optional ternary assignment, and the
+previous `Option<T>.downcast` row is gone. Top families remain broad mismatched
+types, type annotations, unsupported concrete/concrete `instanceof`,
+incompatible `?` usage, source-super constructor lowering, generic/interface
+facade precision, optional/static support gaps, and unresolved
+facade/source-boundary methods.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
@@ -1209,8 +1228,3 @@ and `cargo test erased_object --test idiom_gaps --quiet` also pass.
    closed it were shared JDK stream upcast support, shared-support export
    filtering/deduplication, and authoritative emitted cross-file source
    signatures.
-7. Before ranking new HTSJDK VCF compile errors, investigate the focused script
-   assembly/reporting stall seen in
-   `.tmp/corpus-rerun-20260728-htsjdk-vcf-after-jaligner-clean`. Worker events
-   showed all 32 files emitted, but the run was interrupted before crate
-   assembly/cargo-check results were produced.

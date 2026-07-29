@@ -5431,6 +5431,26 @@ rows are gone. A newly visible nearby row is optional cast construction
 (`Option<T>.downcast`) and should stay with the optional-construction/cast
 cluster rather than becoming a Boolean-specific rule.
 
+2026-07-29 nullable ternary optional-carrier cleanup: assignment lowering now
+treats null-branch ternaries lowered through an optional target slot as
+already-built optional carriers. The focused regression
+`nullable_boolean_ternary_assignment_preserves_optional_string_slot` and parser
+precedence guard `parses_casted_condition_as_ternary_condition` pass, along
+with the nearby `nullable_ternary` and `optional_ternary` idiom subsets. This
+keeps `result = (Boolean) value ? "" : null` aligned with the shared optional
+slot plan instead of re-planning the lowered `Option<String>` as a present
+`String` element.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-nullable-boolean-ternary-assignment-full`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `388` to `387`. The previous `Option<T>.downcast`
+row in `VCFEncoder::format_v_c_f_field` is gone. Top families remain broad
+mismatched types, type annotations, unsupported concrete/concrete `instanceof`,
+incompatible `?` usage, source-super constructor lowering, generic/interface
+facade precision, optional/static support, and unresolved facade/source
+boundary methods.
+
 ## Rerun Protocol
 
 After each fix:

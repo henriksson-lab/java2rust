@@ -4199,6 +4199,9 @@ fn wrap_optional_assignment_value_if_needed(
     if target.optional_element_type().is_none() || matches!(value, Expr::Literal(Literal::Null)) {
         return lowered_value;
     }
+    if expr_lowers_to_optional_carrier_for_slot(value, &target) {
+        return lowered_value;
+    }
     let shape_ctx = ExprShapeContext {
         signatures: Some(ctx.signatures),
         representations: Some(ctx.representations),
@@ -4218,6 +4221,21 @@ fn wrap_optional_assignment_value_if_needed(
         already_optional_result,
         ctx.facts,
     )
+}
+
+fn expr_lowers_to_optional_carrier_for_slot(value: &Expr, target: &RustSlotShape) -> bool {
+    target.optional_element_type().is_some()
+        && matches!(
+            value,
+            Expr::Ternary {
+                then_expr,
+                else_expr,
+                ..
+            } if matches!(
+                (then_expr.as_ref(), else_expr.as_ref()),
+                (Expr::Literal(Literal::Null), _) | (_, Expr::Literal(Literal::Null))
+            )
+        )
 }
 
 fn optional_field_access_actual_shape_for_slot(

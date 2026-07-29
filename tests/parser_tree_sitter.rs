@@ -222,6 +222,52 @@ class Tree<T> {
 }
 
 #[test]
+fn parses_casted_condition_as_ternary_condition() {
+    let parsed = parse_java_source(
+        r#"
+class CastedConditionTernary {
+    String show(Object value) {
+        return (Boolean) value ? "" : null;
+    }
+}
+"#,
+    );
+    let ty = &parsed.program.types[0];
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "show" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let body = method.body.as_ref().unwrap();
+    let Stmt::Return(Some(Expr::Ternary {
+        condition,
+        then_expr,
+        else_expr,
+    })) = &body.statements[0]
+    else {
+        panic!("expected casted condition ternary");
+    };
+    let Expr::Cast { ty, expr } = condition.as_ref() else {
+        panic!("expected casted condition");
+    };
+    assert_eq!(
+        ty,
+        &JavaType::Named {
+            name: "Boolean".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert!(matches!(expr.as_ref(), Expr::Var(name) if name == "value"));
+    assert!(
+        matches!(then_expr.as_ref(), Expr::Literal(Literal::String(value)) if value.is_empty())
+    );
+    assert!(matches!(else_expr.as_ref(), Expr::Literal(Literal::Null)));
+}
+
+#[test]
 fn parses_varargs_parameters_as_array_params() {
     let parsed = parse_java_source(
         r#"

@@ -2155,6 +2155,47 @@ class ErasedObjectBooleanInstanceof {
 }
 
 #[test]
+fn nullable_boolean_ternary_assignment_preserves_optional_string_slot() {
+    let translation = translate_source(
+        r#"
+class NullableBooleanTernaryAssignment {
+    String show(Object value) {
+        String result;
+        if (value instanceof Boolean) {
+            result = (Boolean) value ? "" : null;
+        } else {
+            result = "other";
+        }
+        return result;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("if *value.downcast::<bool>().expect(\"invalid Java cast\")")
+            && translation
+                .rust
+                .contains("{ Some(\"\".to_string()) } else { None }")
+            && !translation.rust.contains(".downcast::<String>()")
+            && !translation.rust.contains("Some(if"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_boolean_ternary_assignment",
+        vec![GeneratedCrateModule {
+            name: "nullable_boolean_ternary_assignment",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_value_struct_derives_clone_and_partial_eq_when_fields_support_it() {
     let translation = translate_source(
         r#"
