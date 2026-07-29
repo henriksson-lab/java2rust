@@ -4042,6 +4042,9 @@ fn lower_stmt(
         Stmt::Expr(expr) => {
             if source_null_assertion_call_expr_stmt_is_noop(expr, env, ctx) {
                 return;
+            } else if let Some(stmt) = lower_native_collection_remove_all_expr_stmt(expr, env, ctx)
+            {
+                out.push(stmt);
             } else if let Some(stmt) = lower_native_collection_extend_expr_stmt(expr, env, ctx) {
                 out.push(stmt);
             } else if let Some(stmt) = lower_planned_call_expr_stmt(expr, env, ctx) {
@@ -7425,6 +7428,55 @@ fn collect_expr_read_names(expr: &Expr, names: &mut std::collections::HashSet<St
         | Expr::ClassLiteral(_)
         | Expr::Raw(_) => {}
     }
+}
+
+fn lower_native_collection_remove_all_expr_stmt(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustStmt> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if !matches!(name.as_str(), "removeAll" | "remove_all") || args.len() != 1 {
+        return None;
+    }
+    let receiver_ty = crate::types::optional_element_type(&crate::types::infer_expr_type(
+        receiver,
+        env.type_env(),
+    ))
+    .unwrap_or_else(|| crate::types::infer_expr_type(receiver, env.type_env()));
+    if !matches!(
+        crate::stdlib::java_collection_kind_for_type(&receiver_ty),
+        Some(crate::stdlib::JavaCollectionKind::List | crate::stdlib::JavaCollectionKind::Set)
+    ) {
+        return None;
+    }
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let arg_shape = infer_expr_shape_with_context(&args[0], env, shape_ctx);
+    if crate::stdlib::java_collection_kind_for_type(&arg_shape.java_ty).is_none()
+        && crate::types::sequence_element_type(&arg_shape.java_ty).is_none()
+    {
+        return None;
+    }
+    let lowered_receiver = lower_expr(receiver, env, ctx);
+    let lowered_arg = lower_expr_for_slot(&args[0], env, argument_slot(arg_shape), ctx);
+    let temp_name = "__java_remove_all_values";
+    Some(raw_stmt(format!(
+        "let {temp_name} = {};\n{}.retain(|item| !{temp_name}.contains(item));\n",
+        emit::emit_expr(&lowered_arg),
+        emit::emit_expr(&lowered_receiver)
+    )))
 }
 
 fn lower_native_collection_extend_expr_stmt(

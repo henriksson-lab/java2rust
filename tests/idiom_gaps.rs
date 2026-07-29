@@ -5926,6 +5926,41 @@ fn documents_collection_remove_if_lambda_gap() {
 }
 
 #[test]
+fn collection_remove_all_statement_uses_retain_with_contains() {
+    let translation = translate_source(
+        r#"
+import java.util.HashSet;
+import java.util.Set;
+
+class CollectionRemoveAllStatement {
+    void remove(Set<String> lines, HashSet<String> toRemove) {
+        lines.removeAll(toRemove);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("lines.retain(|item| !__java_remove_all_values.contains(item));")
+            && !translation.rust.contains(".remove_all(")
+            && !translation.rust.contains(".removeAll("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "collection_remove_all_statement",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn documents_for_each_lambda_side_effect_gap() {
     let translation = translate_source(&idiom_gap("ForEachLambdaSideEffect.java"));
 

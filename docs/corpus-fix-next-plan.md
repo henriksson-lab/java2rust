@@ -280,6 +280,15 @@ files with 20 invalid-pattern files and reduced generated Rust errors from
 `354` to `352`. The previous `HashSet<T>::as_slice` method-not-found rows are
 gone; remaining `.as_slice()` occurrences are on vector/array-shaped values.
 
+2026-07-29 collection `removeAll` statement lowering: ignored-return
+`List/Set.removeAll(collection)` calls now lower to a temporary plus
+`retain(|item| !values.contains(item))`, covering the VCF
+`HashSet<VCFHeaderLine>.removeAll(Vec<VCFHeaderLine>)` residuals without adding
+a facade method to `HashSet`. Focused coverage:
+`collection_remove_all_statement_uses_retain_with_contains`,
+`documents_collection_remove_if_lambda_gap`, `cargo fmt --check`,
+`cargo check --quiet`, and `git diff --check`.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still
