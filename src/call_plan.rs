@@ -3473,6 +3473,9 @@ pub fn external_method_rust_name(
 ) -> String {
     let base = crate::parser::to_snake_case(method_name);
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
+    if boxed_primitive_static_to_string_uses_unsuffixed_name(&receiver_key, &base, arg_count) {
+        return base;
+    }
     if receiver_key == "PrintStream"
         && matches!(base.as_str(), "print" | "println")
         && arg_count > 0
@@ -3489,6 +3492,20 @@ pub fn external_method_rust_name(
     } else {
         base
     }
+}
+
+fn boxed_primitive_static_to_string_uses_unsuffixed_name(
+    receiver_key: &str,
+    method_name: &str,
+    arg_count: usize,
+) -> bool {
+    method_name == "to_string"
+        && arg_count == 1
+        && receiver_key
+            .rsplit('.')
+            .next()
+            .and_then(crate::stdlib::boxed_primitive_type)
+            .is_some()
 }
 
 fn java_platform_method_uses_suffix_only_for_multi_arg_overloads(

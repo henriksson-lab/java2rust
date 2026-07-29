@@ -218,6 +218,36 @@ plus the adjacent PrintStream overload tests. A VCF batch rerun was started at
 interrupted before crate assembly/compile summaries completed, so do not treat
 that directory as a corpus-quality baseline.
 
+2026-07-29 optional clone recovery and parse projection cleanup: clone recovery
+now checks borrowed target slots, including optional targets whose element slot
+borrows, before applying reused-owned optional clone recovery. This prevents
+borrowed optional arguments and mutable optional slice handoffs from gaining
+spurious `.clone()` TODOs. Boxed primitive static `toString(value)` calls now
+project to the unsuffixed generated facade support name (`to_string`) instead
+of a non-existent arity name (`to_string_1`). Numeric parse argument planning
+now preserves actual non-optional Java `String` expression shapes, so owned
+temporaries such as `tokenizer.next_token()` parse directly while nullable
+collection/map accesses still use the explicit unwrap/string-view path.
+Focused coverage:
+`optional_argument_wrap_reused_value_clones_before_some`,
+`reused_owned_optional_source_argument_clones_before_later_read`,
+`optional_map_put_reused_value_borrows_before_clone_unwrap`,
+`nullable_mutable_array_helper_return_count_keeps_caller_storage_owned`,
+`reused_optional_borrowed_source_argument_wraps_by_reference`,
+`map_get_into_optional_borrowed_arg_uses_optional_carrier_plan`,
+`system_arraycopy_mutable_optional_local_dest_does_not_clone_slice`,
+`numeric_wrapper_static_to_string_keeps_primitive_argument_signature`,
+`borrowed_primitive_enhanced_for_element_copies_into_value_argument_slot`,
+`jdk_decimal_and_integer_constants_are_typed_facade_facts`,
+`numeric_parse_static_calls_use_signature_borrowed_string_args`,
+`integer_parse_int_unwraps_sequence_get_argument`,
+`two_dimensional_numeric_arrays_lower_to_ndarray_array2`, and
+`stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map`.
+The broad `idiom_gaps` run before this slice was interrupted after reporting
+several older failures, so the next batch boundary should run the full suite or
+rerun the corpus audit instead of treating this checkpoint as a new global
+baseline.
+
 ## 2026-07-28 Batch Status: Trait Return Slot Widening
 
 Latest full boundary after this slice:

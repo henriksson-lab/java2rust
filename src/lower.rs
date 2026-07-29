@@ -11907,7 +11907,7 @@ fn lower_args_for_call_target(
     {
         plan = source_plan;
     }
-    if let Some(parse_plan) = native_numeric_parse_argument_plan(target, args.len()) {
+    if let Some(parse_plan) = native_numeric_parse_argument_plan(target, args, env, ctx) {
         plan = parse_plan;
     }
     if matches!(plan, ArgumentLoweringPlan::Unshaped { .. })
@@ -12036,14 +12036,17 @@ fn lower_args_for_call_target(
 
 fn native_numeric_parse_argument_plan(
     target: &CallTargetPlan<'_>,
-    arg_count: usize,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
 ) -> Option<ArgumentLoweringPlan> {
     let CallTargetPlan::NativeJavaStatic { method } = target else {
         return None;
     };
+    let arg_count = args.len();
     match method {
         crate::call_plan::NativeJavaStaticMethod::IntegerParseInt if matches!(arg_count, 1 | 2) => {
-            let mut shapes = vec![borrowed_string_content_shape()];
+            let mut shapes = vec![numeric_parse_string_argument_shape(&args[0], env, ctx)];
             if arg_count == 2 {
                 shapes.push(value_shape(JavaType::Primitive(PrimitiveType::Int)));
             }
@@ -12054,10 +12057,24 @@ fn native_numeric_parse_argument_plan(
             if arg_count == 1 =>
         {
             Some(ArgumentLoweringPlan::Shaped(vec![
-                borrowed_string_content_shape(),
+                numeric_parse_string_argument_shape(&args[0], env, ctx),
             ]))
         }
         _ => None,
+    }
+}
+
+fn numeric_parse_string_argument_shape(arg: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustSlotShape {
+    let shape_ctx = ExprShapeContext {
+        signatures: Some(ctx.signatures),
+        representations: Some(ctx.representations),
+        facts: Some(ctx.facts),
+    };
+    let actual_shape = infer_expr_shape_with_context(arg, env, shape_ctx);
+    if actual_shape.java_ty == JavaType::String && actual_shape.optional_element_type().is_none() {
+        actual_shape
+    } else {
+        borrowed_string_content_shape()
     }
 }
 
@@ -14344,6 +14361,15 @@ fn clone_recovery_decision_for_argument(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> CloneRecoveryDecision {
+    if optional_target_borrows_element(target_shape, ctx.facts) {
+        return CloneRecoveryDecision::NoRecovery;
+    }
+    if matches!(
+        target_shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) {
+        return CloneRecoveryDecision::NoRecovery;
+    }
     if let Some(optional_actual) =
         reused_actual_optional_owned_argument_needs_clone(source, actual_shape, env, ctx)
     {
@@ -14353,12 +14379,6 @@ fn clone_recovery_decision_for_argument(
                 erased_object: optional_shape_contains_erased_object(&optional_actual),
             };
         }
-    }
-    if matches!(
-        target_shape.ownership,
-        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
-    ) {
-        return CloneRecoveryDecision::NoRecovery;
     }
     if shared_borrow_argument_needs_owned_clone(target_shape, actual_shape, ctx) {
         return CloneRecoveryDecision::ApplyRecoveryCoercion {
@@ -14377,6 +14397,18 @@ fn clone_recovery_decision_for_argument(
         };
     }
     CloneRecoveryDecision::NoRecovery
+}
+
+fn optional_target_borrows_element(target_shape: &RustSlotShape, facts: &FactSet) -> bool {
+    target_shape
+        .optional_element_type()
+        .map(|element_ty| optional_element_slot_shape_with_facts(target_shape, element_ty, facts))
+        .is_some_and(|element_shape| {
+            matches!(
+                element_shape.ownership,
+                OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+            )
+        })
 }
 
 fn reused_actual_optional_owned_argument_needs_clone(

@@ -34712,7 +34712,7 @@ fn stream_lambda_lowers_split_length_and_integer_parse_in_nullable_map() {
     assert_eq!(
         lowered.expr,
         RustExpr::Raw(
-            "values.iter().map(|value| { let pieces = java_string_split(value.as_str(), \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
+            "values.iter().map(|value| { let pieces = java_string_split(&value, \",\".to_string(), 0); if (pieces.len() as i32) != 3 { None } else { Some(pieces[1 as usize].parse::<i32>().unwrap()) } }).filter_map(|item| item).collect::<Vec<_>>()"
                 .to_string()
         )
     );
