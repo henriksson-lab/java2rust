@@ -12379,6 +12379,48 @@ class Encoder {
 }
 
 #[test]
+fn optional_print_stream_field_println_with_mutating_optional_arg_uses_mut_receiver() {
+    let translation = translate_source(
+        r#"
+import java.io.IOException;
+import java.io.PrintStream;
+
+class OptionalPrintStreamMutatingArg {
+    private PrintStream outputStream = null;
+    private Encoder encoder = null;
+
+    void emit(String value) throws IOException {
+        outputStream.println(encoder.encode(value));
+    }
+}
+
+class Encoder {
+    private int count = 0;
+
+    String encode(String value) throws IOException {
+        count++;
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn emit(&mut self, value: &str) -> Result<(), JavaException>")
+            && translation
+                .rust
+                .contains("self.output_stream.as_ref().unwrap().println_1(")
+            && translation
+                .rust
+                .contains("self.encoder.as_mut().unwrap().encode(value.to_string())?"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn file_output_stream_constructor_selects_file_and_string_overload_slots() {
     let translation = translate_source(
         r#"

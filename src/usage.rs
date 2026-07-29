@@ -163,6 +163,7 @@ pub struct CallSiteUse {
     pub arg_count: usize,
     pub result_returned: bool,
     pub receiver_is_self: bool,
+    pub receiver_targets_self_field: bool,
     pub null_arg_indices: Vec<usize>,
     pub boundary: CallArgumentBoundary,
     pub resolved: Option<ResolvedCall>,
@@ -247,7 +248,7 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                 continue;
             }
             if usage.call_sites.iter().any(|call_site| {
-                call_site.receiver_is_self
+                (call_site.receiver_is_self || call_site.receiver_targets_self_field)
                     && call_site.resolved.as_ref().is_some_and(|resolved| {
                         mutating_methods.contains(&(
                             resolved.declaring_type.clone(),
@@ -1581,6 +1582,9 @@ fn analyze_expr_with_context(
                 arg_count: args.len(),
                 result_returned,
                 receiver_is_self: call_receiver_is_self(receiver.as_deref()),
+                receiver_targets_self_field: receiver
+                    .as_deref()
+                    .is_some_and(|receiver| expr_targets_self_field(receiver, facts, field_names)),
                 null_arg_indices: null_argument_indices(args),
                 boundary: call_boundary,
                 resolved: resolved.clone(),

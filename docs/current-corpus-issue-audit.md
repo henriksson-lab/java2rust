@@ -218,6 +218,12 @@ Current FastQC top families after the latest full rerun:
   the same receiver, argument, return, borrow, optional, result, or index shape
   as a tailored rule, the fact-backed ABI plan is preferred and the special
   case becomes migration debt unless it preserves Java-specific semantics.
+- Resolved source-call mutability now propagates through calls made on current
+  object fields, not only through direct `this`/receiverless self-calls. This
+  covers nested optional field receivers such as
+  `outputStream.println(encoder.encode(value))`: if `Encoder.encode` mutates
+  its receiver, the enclosing method is planned as `&mut self` and the optional
+  field receiver lowers through `as_mut().unwrap()`.
 - Helper-backed Java string regex/split APIs now have stdlib signature facts
   for their mechanical Rust ABI: `matches`, `replaceFirst`, `replaceAll`,
   `split`, and `indexOf` request borrowed regex/pattern/needle slots through

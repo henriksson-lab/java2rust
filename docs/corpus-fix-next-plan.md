@@ -206,6 +206,18 @@ exposes `cannot borrow data in a & reference as mutable` from the nested
 `self.vcf_encoder.as_ref().unwrap().encode(context)?` argument. Treat that as
 the next receiver-mutability/optional-field gap if continuing this line.
 
+2026-07-29 self-field mutability propagation: usage call sites now distinguish
+calls whose receiver is one of the current object's fields. The existing
+resolved source-call mutability fixpoint treats a mutating call on `self.field`
+the same way it treats a mutating call on `self`, so enclosing methods become
+`&mut self` when they call mutable source methods through field receivers,
+including nested calls inside another call's arguments. Focused coverage:
+`optional_print_stream_field_println_with_mutating_optional_arg_uses_mut_receiver`
+plus the adjacent PrintStream overload tests. A VCF batch rerun was started at
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-self-field-mutability` but was
+interrupted before crate assembly/compile summaries completed, so do not treat
+that directory as a corpus-quality baseline.
+
 ## 2026-07-28 Batch Status: Trait Return Slot Widening
 
 Latest full boundary after this slice:
