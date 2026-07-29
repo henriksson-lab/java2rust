@@ -8422,6 +8422,11 @@ fn lower_expr_with_refinements(
             {
                 return lowered;
             }
+            if let Some(lowered) =
+                lower_native_collection_constructor_from_map_view(ty, args, env, ctx, refinements)
+            {
+                return lowered;
+            }
             if concrete_java_type_name(ty)
                 .map(crate::stdlib::canonical_external_receiver_type_key)
                 .as_deref()
@@ -15130,6 +15135,7 @@ fn adapt_native_collection_receiver(
         | NativeCollectionMethod::MapGet
         | NativeCollectionMethod::MapContainsKey
         | NativeCollectionMethod::MapKeys
+        | NativeCollectionMethod::MapValues
         | NativeCollectionMethod::MapIter
         | NativeCollectionMethod::Iterator
         | NativeCollectionMethod::ToArray => false,
@@ -15491,6 +15497,11 @@ fn lower_expr_for_slot_with_refinements(
         lower_map_key_set_expr_for_set_slot(expr, env, &slot, ctx, refinements)
     {
         return map_keys_expr;
+    }
+    if let Some(map_values_expr) =
+        lower_map_values_expr_for_set_slot(expr, env, &slot, ctx, refinements)
+    {
+        return map_values_expr;
     }
     if let Some(array_expr) = lower_array_expr_for_slot(expr, env, &slot, ctx, refinements) {
         return array_expr;
@@ -20362,12 +20373,97 @@ fn lower_map_key_set_expr_for_set_slot(
     }
     let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
     if crate::stdlib::java_collection_kind_for_type(&receiver_ty)
-        != Some(crate::stdlib::JavaCollectionKind::Map)
+        .is_some_and(|kind| kind != crate::stdlib::JavaCollectionKind::Map)
     {
         return None;
     }
     let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
     Some(owned_map_keys_set_projection(lowered_receiver))
+}
+
+fn lower_map_values_expr_for_set_slot(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if !args.is_empty() || name != "values" {
+        return None;
+    }
+    let target = slot_target_shape(slot)?;
+    let target_ty = crate::types::optional_element_type(&target.java_ty)
+        .unwrap_or_else(|| target.java_ty.clone());
+    if crate::stdlib::java_collection_kind_for_type(&target_ty)
+        != Some(crate::stdlib::JavaCollectionKind::Set)
+    {
+        return None;
+    }
+    let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
+    if crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind != crate::stdlib::JavaCollectionKind::Map)
+    {
+        return None;
+    }
+    let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
+    Some(crate::coercion::owned_map_values_set_projection(
+        lowered_receiver,
+    ))
+}
+
+fn lower_native_collection_constructor_from_map_view(
+    ty: &JavaType,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let target_kind = crate::stdlib::native_collection_constructor_kind_for_type(ty)?;
+    let [
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args: call_args,
+            ..
+        },
+    ] = args
+    else {
+        return None;
+    };
+    if !call_args.is_empty() {
+        return None;
+    }
+    let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
+    if crate::stdlib::java_collection_kind_for_type(&receiver_ty)
+        .is_some_and(|kind| kind != crate::stdlib::JavaCollectionKind::Map)
+    {
+        return None;
+    }
+    let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
+    match (name.as_str(), target_kind) {
+        ("keySet" | "key_set", crate::stdlib::JavaCollectionKind::List) => Some(
+            crate::coercion::owned_map_keys_vec_projection(lowered_receiver),
+        ),
+        ("keySet" | "key_set", crate::stdlib::JavaCollectionKind::Set) => Some(
+            crate::coercion::owned_map_keys_set_projection(lowered_receiver),
+        ),
+        ("values", crate::stdlib::JavaCollectionKind::List) => Some(
+            crate::coercion::owned_map_values_vec_projection(lowered_receiver),
+        ),
+        ("values", crate::stdlib::JavaCollectionKind::Set) => Some(
+            crate::coercion::owned_map_values_set_projection(lowered_receiver),
+        ),
+        _ => None,
+    }
 }
 
 fn lower_native_collection_call_expr_for_slot(

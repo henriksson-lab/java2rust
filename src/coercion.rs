@@ -1895,6 +1895,20 @@ pub fn owned_map_keys_set_projection(receiver: RustExpr) -> RustExpr {
     ))
 }
 
+pub fn owned_map_values_vec_projection(receiver: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{}.values().cloned().collect::<Vec<_>>()",
+        emit::emit_expr(&receiver)
+    ))
+}
+
+pub fn owned_map_values_set_projection(receiver: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{}.values().cloned().collect::<std::collections::HashSet<_>>()",
+        emit::emit_expr(&receiver)
+    ))
+}
+
 pub fn owned_collection_to_vec_projection(receiver: RustExpr) -> RustExpr {
     RustExpr::Raw(format!(
         "{}.iter().cloned().collect::<Vec<_>>()",

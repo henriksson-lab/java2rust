@@ -19,9 +19,10 @@ use crate::coercion::{
     objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
     optional_get_owned_value_projection, optional_or_else_owned_value_projection,
     owned_collection_to_vec_projection, owned_map_keys_vec_projection,
-    owner_associated_path_projection, primitive_compare_to_projection,
-    primitive_f64_method_projection, primitive_hash_code_projection, primitive_is_nan_projection,
-    primitive_number_value_projection, primitive_parse_projection, receiver_method_call_projection,
+    owned_map_values_vec_projection, owner_associated_path_projection,
+    primitive_compare_to_projection, primitive_f64_method_projection,
+    primitive_hash_code_projection, primitive_is_nan_projection, primitive_number_value_projection,
+    primitive_parse_projection, receiver_method_call_projection,
     receiver_method_call_projection_exact, self_associated_path_projection,
     string_char_at_projection, string_compare_to_ignore_case_projection,
     string_compare_to_projection, string_equals_ignore_case_projection, string_format_projection,
@@ -664,6 +665,9 @@ fn apply_native_collection_method(
     if matches!(method, NativeCollectionMethod::MapKeys) {
         return owned_map_keys_vec_projection(receiver);
     }
+    if matches!(method, NativeCollectionMethod::MapValues) {
+        return owned_map_values_vec_projection(receiver);
+    }
     if matches!(method, NativeCollectionMethod::ToArray) {
         return owned_collection_to_vec_projection(receiver);
     }
@@ -690,6 +694,9 @@ fn apply_native_collection_method(
         NativeCollectionMethod::MapGet => "get",
         NativeCollectionMethod::MapContainsKey => "contains_key",
         NativeCollectionMethod::MapKeys => unreachable!("MapKeys is rendered as an owned key view"),
+        NativeCollectionMethod::MapValues => {
+            unreachable!("MapValues is rendered as an owned value view")
+        }
         NativeCollectionMethod::MapIter => "iter",
         NativeCollectionMethod::Iterator => unreachable!("Iterator is rendered as JavaIterator"),
         NativeCollectionMethod::ToArray => unreachable!("ToArray is rendered as an owned Vec"),

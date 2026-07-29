@@ -346,6 +346,7 @@ pub enum NativeCollectionMethod {
     MapGet,
     MapContainsKey,
     MapKeys,
+    MapValues,
     MapIter,
     Iterator,
     ToArray,
@@ -458,6 +459,12 @@ pub fn native_collection_lowered_type(
             Some(LoweredType::optional_element_borrow_shape(
                 borrowed_sequence_element_shape(value_ty.clone()),
             ))
+        }
+        NativeCollectionMethod::MapValues => {
+            let (_, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
+            Some(LoweredType::from_java(JavaType::Array(Box::new(
+                value_ty.clone(),
+            ))))
         }
         NativeCollectionMethod::MapInsert => {
             let (_, value_ty) = crate::stdlib::java_map_type_args(&receiver_ty)?;
@@ -2796,6 +2803,7 @@ fn plan_native_collection_receiver_call<'a>(
         (crate::stdlib::JavaCollectionKind::Map, "keySet" | "key_set") => {
             NativeCollectionMethod::MapKeys
         }
+        (crate::stdlib::JavaCollectionKind::Map, "values") => NativeCollectionMethod::MapValues,
         (crate::stdlib::JavaCollectionKind::Map, "entrySet" | "entry_set") => {
             NativeCollectionMethod::MapIter
         }
@@ -3827,6 +3835,7 @@ pub fn native_collection_arg_shapes_with_facts(
             let (key_ty, _) = crate::stdlib::java_map_type_args(&receiver_ty)?;
             vec![borrowed_sequence_element_shape(key_ty.clone())]
         }
+        NativeCollectionMethod::MapValues if arg_count == 0 => Vec::new(),
         NativeCollectionMethod::ToArray if matches!(arg_count, 0 | 1) => Vec::new(),
         NativeCollectionMethod::Iterator if arg_count == 0 => Vec::new(),
         _ => return None,
@@ -4283,6 +4292,7 @@ fn facade_abi_native_collection_arg_java_types(
             let (key_ty, _) = crate::stdlib::java_map_type_args(&receiver_ty)?;
             Some(vec![key_ty.clone()])
         }
+        NativeCollectionMethod::MapValues if arg_count == 0 => Some(Vec::new()),
         NativeCollectionMethod::ToArray if matches!(arg_count, 0 | 1) => Some(if arg_count == 0 {
             Vec::new()
         } else {

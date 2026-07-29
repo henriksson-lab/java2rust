@@ -4120,6 +4120,132 @@ class MapKeySetReturnSet {
 }
 
 #[test]
+fn map_values_returning_collection_collects_vec() {
+    let translation = translate_source(
+        r#"
+import java.util.Collection;
+import java.util.HashMap;
+
+class MapValuesReturnCollection {
+    Collection<String> values(HashMap<String, String> values) {
+        return values.values();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(") -> Vec<String>")
+            && translation
+                .rust
+                .contains("return values.values().cloned().collect::<Vec<_>>();")
+            && !translation.rust.contains("return values.values();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_values_return_collection",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn map_values_returning_set_collects_hashset_for_set_slot() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Set;
+
+class MapValuesReturnSet {
+    Set<String> values(HashMap<String, String> values) {
+        return values.values();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains(") -> std::collections::HashSet<String>")
+            && translation.rust.contains(
+                "return values.values().cloned().collect::<std::collections::HashSet<_>>();"
+            )
+            && !translation
+                .rust
+                .contains("return values.values().cloned().collect::<Vec<_>>();")
+            && !translation.rust.contains("return values.values();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_values_return_set",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn map_values_returning_hashset_collects_hashset_for_concrete_set_slot() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+
+class MapValuesReturnHashSet {
+    HashSet<String> values(HashMap<String, String> values) {
+        return values.values();
+    }
+
+    HashSet<String> localValues(String key, String value) {
+        HashMap<String, String> values = new HashMap<String, String>();
+        values.put(key, value);
+        return values.values();
+    }
+
+    HashSet<String> linkedValues(HashMap<String, String> values) {
+        return new LinkedHashSet<String>(values.values());
+    }
+}
+"#,
+    );
+
+    let hashset_collect =
+        "return values.values().cloned().collect::<std::collections::HashSet<_>>();";
+    assert!(
+        translation
+            .rust
+            .contains(") -> std::collections::HashSet<String>")
+            && translation.rust.matches(hashset_collect).count() == 3
+            && !translation
+                .rust
+                .contains("return values.values().cloned().collect::<Vec<_>>();")
+            && !translation.rust.contains("return values.values();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_values_return_hashset",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn map_put_all_lowers_to_hash_map_extend() {
     let translation = translate_source(
         r#"
