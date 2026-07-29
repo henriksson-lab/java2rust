@@ -59,10 +59,9 @@ fn focused_package_support_emits_uri_parse_and_path_helpers() {
         script.contains("pub fn get_path(&self) -> String"),
         "{script}"
     );
-    assert!(
-        script.contains("Path\\nURI\\nFile\\nJavaPathArg\\nIOUtils"),
-        "{script}"
-    );
+    for shared_type in ["Path", "URI", "File", "JavaPathArg", "IOUtils"] {
+        assert!(script.contains(shared_type), "{script}");
+    }
     assert!(script.contains("shared[impl_trait]"), "{script}");
 }
 
@@ -428,6 +427,109 @@ pub struct UseColorTarget;
             .unwrap()
             .contains("impl VCFConstants"),
         "merged support impl should be removed from source module"
+    );
+}
+
+#[test]
+fn shared_support_merger_prefers_source_enum_over_opaque_stub() {
+    let dir = unique_temp_dir("shared_support_prefers_enum");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_UsesHeader.rs"),
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct HeaderFIELDS;
+
+impl std::fmt::Display for HeaderFIELDS {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "") }
+}
+
+pub struct UsesHeader;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_UsesHeaderAgain.rs"),
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct HeaderFIELDS;
+
+impl std::fmt::Display for HeaderFIELDS {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "") }
+}
+
+pub struct UsesHeaderAgain;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00003_Header.rs"),
+        r#"
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HeaderFIELDS {
+    CHROM,
+    POS,
+}
+
+impl HeaderFIELDS {
+    pub fn values() -> Vec<Self> { vec![Self::CHROM, Self::POS] }
+    pub fn value_of<T: AsRef<str>>(name: T) -> Self {
+        match name.as_ref() {
+            "CHROM" => Self::CHROM,
+            "POS" => Self::POS,
+            other => panic!("unknown Java enum constant Header.FIELDS.{}", other),
+        }
+    }
+}
+
+impl std::fmt::Display for HeaderFIELDS {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", match self { Self::CHROM => "CHROM", Self::POS => "POS" })
+    }
+}
+
+pub struct Header;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(shared.contains("pub enum HeaderFIELDS"), "{shared}");
+    assert!(shared.contains("pub fn values() -> Vec<Self>"), "{shared}");
+    assert!(shared.contains("Self::CHROM"), "{shared}");
+    assert!(
+        !shared.contains("pub struct HeaderFIELDS;") && !shared.contains("write!(f, \"\")"),
+        "{shared}"
+    );
+    let conflicts = fs::read_to_string(conflicts).unwrap();
+    assert!(
+        conflicts.contains("HeaderFIELDS\tdeclaration\tkept enum"),
+        "{conflicts}"
     );
 }
 

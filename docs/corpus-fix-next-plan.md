@@ -5771,6 +5771,35 @@ inherited/super-constructor lowering.
 This checkpoint should be committed before attacking those VCF semantic gaps,
 because it separates wrapper assembly correctness from Java/Rust idiom work.
 
+2026-07-29 source-owned nested enum merge cleanup:
+The follow-up VCF investigation showed the wrapper was restoring the real
+`VCFHeaderHEADERFIELDS` enum into `VCFHeader.rs`, but the shared-support merger
+still promoted an earlier opaque dependency stub with the same name into
+`lib.rs`. The assembly path now restores source-owned nested items before the
+source declaration so merge can reason about them, removes restored local names
+from crate imports, and resolves declaration conflicts by preferring real enum
+declarations over opaque default structs. Duplicate trait impl conflicts also
+prefer non-empty implementations over placeholder `Display`/default bodies.
+
+Focused coverage passed:
+`shared_support_merger_prefers_source_enum_over_opaque_stub`,
+`focused_package_wrapper_preserves_primary_source_types_covered_by_external_pack`,
+`cargo test --test idiom_sweep_script --quiet`,
+`cargo test --test batch_translation --quiet`, `cargo check --quiet`,
+`cargo fmt --check`, and `bash -n scripts/translate-focused-package.sh`.
+
+HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-enum-merge-preference`
+translated 32/32 files with 20 invalid-pattern files and 457 generated-Rust
+errors. The shared-support conflict log records
+`VCFHeaderHEADERFIELDS	declaration	kept enum of 2 variants`, and the old
+`VCFHeaderHEADERFIELDS::values()/value_of()` missing-helper rows are gone. The
+remaining top clusters are mismatched types, unresolved HTSJDK/SAM facade or
+source dependencies (`IntervalList`, `SAMSequenceDictionary`, `FileExtensions`,
+`HtsjdkUtilsValidationUtils`), concrete/trait `instanceof` lowering,
+super-constructor lowering, generic header-line dispatch, collection/set
+compatibility, and optional/erased-object recovery.
+
 ## Rerun Protocol
 
 After each fix:

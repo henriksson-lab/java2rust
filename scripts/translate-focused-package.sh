@@ -951,13 +951,24 @@ stem = rust_path.stem
 current_source = re.sub(r"^\d+_", "", stem)
 decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
 derive_re = re.compile(r"^#\[derive")
+inherent_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)")
+trait_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)")
+alias_re = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
 
 
-def has_source_decl(text: str) -> bool:
-    return any(
-        (match := decl_re.match(line)) and match.group(2) == current_source
+def source_owned_nested_type_name(name: str) -> bool:
+    if name == current_source or not name.startswith(current_source):
+        return False
+    suffix = name[len(current_source):]
+    return bool(suffix) and suffix[0].isupper()
+
+
+def declared_names(text: str) -> set[str]:
+    return {
+        match.group(2)
         for line in text.splitlines()
-    )
+        if (match := decl_re.match(line))
+    }
 
 
 def attached_start(lines: list[str], start: int) -> int:
@@ -967,18 +978,150 @@ def attached_start(lines: list[str], start: int) -> int:
     return index
 
 
+def is_char_literal_start(line: str, index: int) -> bool:
+    next_index = index + 1
+    if next_index >= len(line):
+        return False
+    if line[next_index] == "\\":
+        return index + 3 < len(line) and line[index + 3] == "'"
+    return index + 2 < len(line) and line[index + 2] == "'"
+
+
+def brace_delta(line: str) -> int:
+    delta = 0
+    index = 0
+    state = "code"
+    while index < len(line):
+        ch = line[index]
+        nxt = line[index + 1] if index + 1 < len(line) else ""
+        if state == "code":
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "/" and nxt == "*":
+                state = "block_comment"
+                index += 2
+                continue
+            if ch == '"':
+                state = "string"
+                index += 1
+                continue
+            if ch == "'" and is_char_literal_start(line, index):
+                state = "char"
+                index += 1
+                continue
+            if ch == "{":
+                delta += 1
+            elif ch == "}":
+                delta -= 1
+            index += 1
+            continue
+        if state == "string":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == '"':
+                state = "code"
+            index += 1
+            continue
+        if state == "char":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == "'":
+                state = "code"
+            index += 1
+            continue
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                state = "code"
+                index += 2
+                continue
+            index += 1
+    return delta
+
+
+def item_end(lines: list[str], start: int) -> int:
+    if "{" not in lines[start]:
+        return start + 1
+    depth = 0
+    for index in range(start, len(lines)):
+        depth += brace_delta(lines[index])
+        if depth <= 0:
+            return index + 1
+    return len(lines)
+
+
+def remove_names_from_crate_import(text: str, names: set[str]) -> str:
+    if not names:
+        return text
+    lines = text.splitlines(keepends=True)
+    out = []
+    for line in lines:
+        if line.startswith("use crate::{") and line.rstrip().endswith("};"):
+            prefix = "use crate::{"
+            suffix = "};"
+            body = line[len(prefix):line.rfind(suffix)]
+            entries = [entry for entry in body.split(",") if entry and entry not in names]
+            if entries:
+                out.append(prefix + ",".join(entries) + suffix + ("\n" if line.endswith("\n") else ""))
+            continue
+        out.append(line)
+    return "".join(out)
+
+
 current = rust_path.read_text()
-if has_source_decl(current):
+present = declared_names(current)
+raw_lines = raw_path.read_text().splitlines(keepends=True)
+source_owned_names = {
+    match.group(2)
+    for line in raw_lines
+    if (match := decl_re.match(line))
+    and (match.group(2) == current_source or source_owned_nested_type_name(match.group(2)))
+}
+missing_names = source_owned_names - present
+if not missing_names:
     raise SystemExit(0)
 
-raw_lines = raw_path.read_text().splitlines(keepends=True)
-for index, line in enumerate(raw_lines):
-    match = decl_re.match(line)
-    if match and match.group(2) == current_source:
-        restored = "".join(raw_lines[attached_start(raw_lines, index):])
+chunks = []
+index = 0
+while index < len(raw_lines):
+    line = raw_lines[index]
+    target = None
+    start = index
+    alias = None
+    if match := decl_re.match(line):
+        target = match.group(2)
+        start = attached_start(raw_lines, index)
+    elif match := inherent_impl_re.match(line):
+        target = match.group(1)
+    elif match := trait_impl_re.match(line):
+        target = match.group(2)
+    elif match := alias_re.match(line):
+        alias = (match.group(1), match.group(2))
+        target = match.group(2)
+    if target in missing_names or (alias and alias[1] in missing_names):
+        end = item_end(raw_lines, index)
+        chunks.append("".join(raw_lines[start:end]))
+        index = end
+        continue
+    index += 1
+
+if chunks:
+    restored_names = set(missing_names)
+    current = remove_names_from_crate_import(current, restored_names)
+    restored = "\n".join(chunk.rstrip() for chunk in chunks) + "\n"
+    current_lines = current.splitlines(keepends=True)
+    insert_at = None
+    for line_index, line in enumerate(current_lines):
+        if (match := decl_re.match(line)) and match.group(2) == current_source:
+            insert_at = attached_start(current_lines, line_index)
+            break
+    if insert_at is None:
         separator = "" if current.endswith("\n") or not current else "\n"
         rust_path.write_text(current + separator + restored)
-        raise SystemExit(0)
+    else:
+        current_lines[insert_at:insert_at] = [restored]
+        rust_path.write_text("".join(current_lines))
 PY
 }
 
@@ -2003,6 +2146,7 @@ if [[ -s "$shared_support_path" ]]; then
   for rust_path in "$generated_dir"/*.rs; do
     strip_shared_support_items "$rust_path" "$shared_support_types_path"
     strip_source_type_facade_stubs "$rust_path" "$source_types_path"
+    restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")"
   done
 else
   touch "$shared_support_path" "$shared_support_types_path"

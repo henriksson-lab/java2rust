@@ -824,6 +824,20 @@ def trait_is_derived_by_decl(trait_name: str, derived_traits: set[str]) -> bool:
     return trait_name in derived_traits or short_name in derived_traits
 
 
+def preferred_decl_variant(variants: list[str]) -> tuple[str, str]:
+    for text in variants:
+        if re.search(r"(?m)^pub\s+enum\s+", text):
+            return text, "enum"
+    return variants[0], "first"
+
+
+def preferred_trait_impl_variant(variants: list[str]) -> tuple[str, str]:
+    for text in variants:
+        if 'write!(f, "")' not in text and "Default::default()" not in text:
+            return text, "non-empty"
+    return variants[0], "first"
+
+
 def simple_rust_type_name(name: str) -> bool:
     return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name))
 
@@ -1119,13 +1133,16 @@ def main() -> int:
                 seen_decls.add(text)
         if not unique_decls:
             continue
-        selected_decl_is_trait = bool(re.match(r"^pub\s+trait\b", unique_decls[0]))
+        selected_decl, selected_decl_reason = preferred_decl_variant(unique_decls)
+        selected_decl_is_trait = bool(re.match(r"^pub\s+trait\b", selected_decl))
         if len(unique_decls) > 1:
-            conflict_lines.append(f"{name}\tdeclaration\tkept first of {len(unique_decls)} variants\n")
+            conflict_lines.append(
+                f"{name}\tdeclaration\tkept {selected_decl_reason} of {len(unique_decls)} variants\n"
+            )
         selected_decl = (
             merge_trait_declarations(name, unique_decls)
             if selected_decl_is_trait
-            else unique_decls[0]
+            else selected_decl
         )
         derived_traits = derived_traits_for_decl(selected_decl)
         shared_chunks.append(box_self_recursive_fields(name, selected_decl).rstrip() + "\n")
@@ -1196,13 +1213,15 @@ def main() -> int:
                 if text not in seen_traits:
                     unique_variants.append(text)
                     seen_traits.add(text)
+            selected_trait_impl, selected_trait_reason = preferred_trait_impl_variant(
+                unique_variants
+            )
             if len(unique_variants) > 1:
                 conflict_lines.append(
-                    f"{name}\ttrait_impl\t{trait_name}: kept first of {len(unique_variants)} variants\n"
+                    f"{name}\ttrait_impl\t{trait_name}: kept {selected_trait_reason} of {len(unique_variants)} variants\n"
                 )
             if trait_is_derived_by_decl(trait_name, derived_traits):
                 continue
-            selected_trait_impl = unique_variants[0]
             from_match = FROM_TRAIT_RE.match(trait_name)
             if from_match:
                 emitted_from_impl_keys.add((from_match.group(1), type_name))

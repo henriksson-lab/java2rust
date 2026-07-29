@@ -540,6 +540,11 @@ fn focused_package_wrapper_preserves_primary_source_types_covered_by_external_pa
 package modeled;
 
 public class ModeledPrimary {
+    public enum Kind {
+        ONE,
+        TWO
+    }
+
     public int value() {
         return 1;
     }
@@ -559,6 +564,10 @@ package modeled;
 public class ModeledPeer {
     public int two() {
         return 2;
+    }
+
+    public int kinds() {
+        return ModeledPrimary.Kind.values().length;
     }
 }
 "#,
@@ -606,6 +615,18 @@ public class ModeledPeer {
     }
     assert!(
         generated.contains("pub struct ModeledPrimary"),
+        "{generated}"
+    );
+    assert!(
+        generated.contains("pub enum ModeledPrimaryKind"),
+        "{generated}"
+    );
+    assert!(
+        generated.contains("ModeledPrimaryKind::values()"),
+        "{generated}"
+    );
+    assert!(
+        !generated.contains("pub struct ModeledPrimaryKind;"),
         "{generated}"
     );
     assert!(generated.contains("pub struct ModeledPeer"), "{generated}");
