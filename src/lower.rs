@@ -17762,13 +17762,10 @@ fn lower_shared_self_field_owned_recovery_for_slot(
     }
     shared_self_field_read_name_with_ctx(expr, env, ctx)?;
     let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
-    let recovered = apply_audited_clone_recovery(lowered);
-    Some(apply_expr_to_slot_via_plan(
-        recovered,
-        target.clone(),
-        slot,
-        ctx.facts,
-    ))
+    let mut borrowed_actual = actual.clone();
+    borrowed_actual.ownership = OwnershipShape::SharedBorrow;
+    let plan = plan_slot_conversion(borrowed_actual, slot.clone(), ctx.facts);
+    Some(apply_slot_expr_conversion(lowered, &plan))
 }
 
 fn lower_borrowed_receiver_field_owned_recovery_for_slot(

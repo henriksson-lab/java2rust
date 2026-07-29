@@ -2216,6 +2216,49 @@ class DynTraitVecCloneHolder {
 }
 
 #[test]
+fn source_struct_with_erased_object_field_does_not_derive_clone() {
+    let translation = translate_source(
+        r#"
+class ErasedObjectFieldNoCloneDerive {
+    private Object value;
+
+    ErasedObjectFieldNoCloneDerive(Object value) {
+        this.value = value;
+    }
+
+    Object getValue() {
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub struct ErasedObjectFieldNoCloneDerive"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("#[derive(Clone)]\npub struct ErasedObjectFieldNoCloneDerive"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_object_field_no_clone_derive",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn concrete_self_cast_flows_through_current_type_slot_without_downcast() {
     let translation = translate_source(
         r#"

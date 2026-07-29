@@ -5262,6 +5262,20 @@ unsupported concrete/concrete `instanceof`, boxed dyn-clone recovery,
 incompatible `?` usage, source-super constructor lowering, missing VCF facade
 methods, and residual moves out of shared receivers.
 
+2026-07-29 VCF erased-clone derive follow-up: source struct derive eligibility
+now distinguishes clone-adapted dyn-trait boxes from erased
+`Box<dyn std::any::Any>` carriers, and direct self-field erased-object owned
+recovery goes through the shared slot conversion planner so plain `Object`
+getters use `java_clone_erased_object_ref` instead of `.clone()`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-erased-clone-derive-guard`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `449` to `448`. The direct `dyn Any: Clone` derive
+failure on `AbstractVCFCodec` is gone. Remaining boxed-clone errors are now
+call-boundary `Option<Box<dyn Any>>`/map clone recovery and typed `VCFHeader`
+clone capability gaps, not unconditional source-struct derive eligibility.
+
 ## Rerun Protocol
 
 After each fix:

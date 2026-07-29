@@ -637,7 +637,7 @@ fn raw_rust_type_supports_derive_clone(
     visiting: &mut HashSet<String>,
 ) -> bool {
     let raw = raw.trim();
-    if raw_rust_box_dyn_trait(raw).is_some() {
+    if raw_rust_box_dyn_trait(raw).is_some_and(raw_dyn_trait_supports_box_clone_adapter) {
         return true;
     }
     if let Some(args) = raw_rust_generic_args(raw, "std::collections::HashMap")
@@ -682,7 +682,7 @@ fn raw_type_arg_supports_derive_clone(
             visiting,
         );
     }
-    if raw_rust_box_dyn_trait(raw).is_some() {
+    if raw_rust_box_dyn_trait(raw).is_some_and(raw_dyn_trait_supports_box_clone_adapter) {
         return true;
     }
     if raw.contains('<') {
@@ -695,6 +695,10 @@ fn raw_type_arg_supports_derive_clone(
         );
     }
     rust_named_type_supports_struct_derive_clone(raw, signatures, facts, support_program, visiting)
+}
+
+fn raw_dyn_trait_supports_box_clone_adapter(trait_name: &str) -> bool {
+    !matches!(trait_name.trim(), "Any" | "std::any::Any")
 }
 
 fn rust_named_type_supports_struct_derive_clone(
