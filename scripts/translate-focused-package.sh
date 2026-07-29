@@ -2389,6 +2389,7 @@ fi
 
 python3 "$repo_root/scripts/merge-shared-support-facades.py" \
   --generated-dir "$generated_dir" \
+  --merge-input-dir "$raw_generated_backup_dir" \
   --shared-support "$shared_support_path" \
   --shared-types "$shared_support_types_path" \
   --conflicts "$shared_support_conflicts_path"

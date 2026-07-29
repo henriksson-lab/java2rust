@@ -80,6 +80,10 @@ fn focused_package_source_type_stub_stripping_is_separate_from_shared_support() 
         "{script}"
     );
     assert!(
+        script.contains("--merge-input-dir \"$raw_generated_backup_dir\""),
+        "{script}"
+    );
+    assert!(
         script.contains("strip_source_type_facade_stubs \"$rust_path\" \"$source_types_path\""),
         "{script}"
     );
@@ -730,6 +734,80 @@ pub struct FileInputStream;
 }
 
 #[test]
+fn shared_support_merger_removes_repeated_module_from_impls_to_existing_shared_type() {
+    let dir = unique_temp_dir("shared_support_existing_target_from_impl_dedupe");
+    let generated_dir = dir.join("generated");
+    let raw_generated_dir = dir.join("raw-generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::create_dir_all(&raw_generated_dir).unwrap();
+    for (file, primary) in [("00001_UseA.rs", "UseA"), ("00002_UseB.rs", "UseB")] {
+        let text = format!(
+            r#"
+#[derive(Clone, Debug, Default)]
+pub struct BufferedInputStream;
+
+impl From<BufferedInputStream> for InputStream {{
+    fn from(_value: BufferedInputStream) -> Self {{ Default::default() }}
+}}
+
+pub struct {primary};
+"#
+        );
+        fs::write(generated_dir.join(file), &text).unwrap();
+        fs::write(raw_generated_dir.join(file), text).unwrap();
+    }
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(
+        &shared_support,
+        "#[derive(Clone, Debug, Default)]\npub struct InputStream;\n",
+    )
+    .unwrap();
+    fs::write(&shared_types, "InputStream\n").unwrap();
+
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--merge-input-dir")
+        .arg(&raw_generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(&shared_support).unwrap();
+    assert_eq!(
+        shared
+            .matches("impl From<BufferedInputStream> for InputStream")
+            .count(),
+        1,
+        "{shared}"
+    );
+    for file in ["00001_UseA.rs", "00002_UseB.rs"] {
+        let module = fs::read_to_string(generated_dir.join(file)).unwrap();
+        assert!(
+            !module.contains("impl From<BufferedInputStream> for InputStream"),
+            "{module}"
+        );
+    }
+}
+
+#[test]
 fn shared_support_merger_does_not_let_local_alias_override_existing_shared_type() {
     let dir = unique_temp_dir("shared_support_alias_collision");
     let generated_dir = dir.join("generated");
@@ -1232,6 +1310,136 @@ pub struct UseB;
         assert!(
             !source.contains("pub trait JavaErasedObjectFacade"),
             "{source}"
+        );
+    }
+}
+
+#[test]
+fn shared_support_merger_uses_raw_input_for_erased_object_facade_impl() {
+    let dir = unique_temp_dir("shared_support_existing_erased_object_facade_impl");
+    let generated_dir = dir.join("generated");
+    let raw_generated_dir = dir.join("raw-generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::create_dir_all(&raw_generated_dir).unwrap();
+    fs::write(
+        raw_generated_dir.join("00001_UseA.rs"),
+        r#"
+pub trait JavaErasedObjectFacade {
+    fn clear(&self) -> ();
+    fn read_3<T0, T1, T2>(&self, _arg0: T0, _arg1: T1, _arg2: T2) -> Result<i32, JavaException>;
+}
+
+impl JavaErasedObjectFacade for Box<dyn std::any::Any> {
+    fn clear(&self) -> () { () }
+    fn read_3<T0, T1, T2>(&self, _arg0: T0, _arg1: T1, _arg2: T2) -> Result<i32, JavaException> { Ok(Default::default()) }
+}
+
+pub struct UseA;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        raw_generated_dir.join("00002_UseB.rs"),
+        r#"
+pub trait JavaErasedObjectFacade {
+    fn remove_all<T0>(&self, _arg0: T0) -> ();
+    fn write_header<T0>(&self, _arg0: T0) -> ();
+}
+
+impl JavaErasedObjectFacade for Box<dyn std::any::Any> {
+    fn remove_all<T0>(&self, _arg0: T0) -> () { () }
+    fn write_header<T0>(&self, _arg0: T0) -> () { () }
+}
+
+pub struct UseB;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00001_UseA.rs"),
+        r#"
+pub trait JavaErasedObjectFacade {
+    fn clear(&self) -> ();
+}
+
+pub struct UseA;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_UseB.rs"),
+        r#"
+pub trait JavaErasedObjectFacade {
+    fn remove_all<T0>(&self, _arg0: T0) -> ();
+}
+
+pub struct UseB;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(
+        &shared_support,
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct ExistingSharedSupport;
+"#,
+    )
+    .unwrap();
+    fs::write(&shared_types, "ExistingSharedSupport\n").unwrap();
+
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--merge-input-dir")
+        .arg(&raw_generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(&shared_support).unwrap();
+    assert_eq!(
+        shared.matches("pub trait JavaErasedObjectFacade").count(),
+        1,
+        "{shared}"
+    );
+    assert_eq!(
+        shared
+            .matches("impl JavaErasedObjectFacade for Box<dyn std::any::Any>")
+            .count(),
+        1,
+        "{shared}"
+    );
+    for required in [
+        "fn clear(&self) -> ();",
+        "fn read_3<T0, T1, T2>(&self, _arg0: T0, _arg1: T1, _arg2: T2) -> Result<i32, JavaException>;",
+        "fn remove_all<T0>(&self, _arg0: T0) -> ();",
+        "fn write_header<T0>(&self, _arg0: T0) -> ();",
+        "fn clear(&self) -> () { () }",
+        "fn read_3<T0, T1, T2>(&self, _arg0: T0, _arg1: T1, _arg2: T2) -> Result<i32, JavaException> { Ok(Default::default()) }",
+        "fn remove_all<T0>(&self, _arg0: T0) -> () { () }",
+        "fn write_header<T0>(&self, _arg0: T0) -> () { () }",
+    ] {
+        assert!(
+            shared.contains(required),
+            "missing {required} in:\n{shared}"
         );
     }
 }

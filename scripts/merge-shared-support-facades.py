@@ -400,6 +400,118 @@ def parse_items(path: Path, selected: set[str]) -> list[dict]:
     return items
 
 
+def parse_shared_items_from_text(text: str, selected: set[str]) -> list[dict]:
+    lines = text.splitlines(keepends=True)
+    items = []
+    depth = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if depth == 0:
+            type_match = TYPE_RE.match(line)
+            trait_decl_match = TRAIT_DECL_RE.match(line)
+            if type_match and type_match.group(2) in selected:
+                name = type_match.group(2)
+                start = attached_start(lines, index)
+                end = item_end(lines, index)
+                items.append(
+                    {
+                        "kind": "decl",
+                        "name": name,
+                        "start": start,
+                        "end": end,
+                        "text": "".join(lines[start:end]),
+                        "prelude": True,
+                    }
+                )
+                index = end
+                continue
+            if trait_decl_match and trait_decl_match.group(1) in selected:
+                start = attached_start(lines, index)
+                end = item_end(lines, index)
+                items.append(
+                    {
+                        "kind": "decl",
+                        "name": trait_decl_match.group(1),
+                        "start": start,
+                        "end": end,
+                        "text": "".join(lines[start:end]),
+                        "prelude": True,
+                    }
+                )
+                index = end
+                continue
+
+            alias_match = ALIAS_RE.match(line)
+            if alias_match and (
+                alias_match.group(1) in selected or alias_match.group(2) in selected
+            ):
+                items.append(
+                    {
+                        "kind": "alias",
+                        "name": alias_match.group(1),
+                        "target": alias_match.group(2),
+                        "start": index,
+                        "end": index + 1,
+                        "text": line,
+                        "prelude": True,
+                    }
+                )
+                index += 1
+                continue
+
+            trait_match = TRAIT_IMPL_RE.match(line)
+            if trait_match and (
+                trait_match.group(2) in selected or trait_match.group(1).strip() in selected
+            ):
+                end = item_end(lines, index)
+                items.append(
+                    {
+                        "kind": "trait_impl",
+                        "name": trait_match.group(2),
+                        "trait": trait_match.group(1).strip(),
+                        "start": index,
+                        "end": end,
+                        "text": "".join(lines[index:end]),
+                        "prelude": True,
+                    }
+                )
+                index = end
+                continue
+
+            inherent_match = INHERENT_IMPL_RE.match(line)
+            if inherent_match and inherent_match.group(1) in selected:
+                name = inherent_match.group(1)
+                end = item_end(lines, index)
+                items.append(
+                    {
+                        "kind": "inherent_impl",
+                        "name": name,
+                        "start": index,
+                        "end": end,
+                        "text": "".join(lines[index:end]),
+                        "prelude": True,
+                    }
+                )
+                index = end
+                continue
+
+        depth += brace_delta(line)
+        index += 1
+    return items
+
+
+def remove_shared_items(path: Path, items: list[dict]) -> None:
+    if not items or not path.exists():
+        return
+    lines = path.read_text().splitlines(keepends=True)
+    remove = [False] * len(lines)
+    for item in items:
+        for index in range(item["start"], item["end"]):
+            remove[index] = True
+    path.write_text("".join(line for index, line in enumerate(lines) if not remove[index]))
+
+
 def remove_duplicate_source_owned_nested_stubs(path: Path) -> None:
     last_decl_start_by_name = duplicate_source_owned_nested_last_decl_starts(path)
     if not last_decl_start_by_name:
@@ -965,6 +1077,7 @@ def append_missing_builtin_from_impls(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--generated-dir", required=True)
+    parser.add_argument("--merge-input-dir")
     parser.add_argument("--shared-support", required=True)
     parser.add_argument("--shared-types", required=True)
     parser.add_argument("--conflicts", required=True)
@@ -972,6 +1085,8 @@ def main() -> int:
 
     generated_dir = Path(args.generated_dir)
     rust_paths = sorted(generated_dir.glob("*.rs"))
+    merge_input_dir = Path(args.merge_input_dir) if args.merge_input_dir else generated_dir
+    merge_input_paths = sorted(merge_input_dir.glob("*.rs"))
     shared_support_path = Path(args.shared_support)
     existing_shared_text = (
         shared_support_path.read_text() if shared_support_path.exists() else ""
@@ -985,10 +1100,13 @@ def main() -> int:
         for line in existing_shared_text.splitlines()
         if (match := ALIAS_RE.match(line))
     }
+    def promotable_shared_name(name: str) -> bool:
+        return name not in existing_shared_types
+
     removal_only_names = set(existing_shared_alias_names)
     primary_output_types = {source_type_for(path) for path in rust_paths}
     candidates_by_type = defaultdict(list)
-    for path in rust_paths:
+    for path in merge_input_paths:
         for name in prelude_support_types(path):
             candidates_by_type[name].append(path)
 
@@ -997,11 +1115,12 @@ def main() -> int:
         for name, paths in candidates_by_type.items()
         if len(paths) > 1
         and name not in primary_output_types
+        and promotable_shared_name(name)
         and name not in {"Box", "String", "Vec", "Option", "Result"}
     }
     keep_last_prelude_names = set()
     protected_source_owned_nested_names = set()
-    for path in rust_paths:
+    for path in merge_input_paths:
         removal_only_names.update(prelude_types_redeclared_after_primary(path))
         keep_last_prelude_names.update(duplicate_prelude_types_before_primary(path))
         protected_source_owned_nested_names.update(
@@ -1018,7 +1137,7 @@ def main() -> int:
         for alias in existing_shared_alias_names
         if alias in existing_shared_types and alias not in primary_output_types
     }
-    for path in rust_paths:
+    for path in merge_input_paths:
         for alias, target in prelude_aliases(path):
             if (
                 alias in existing_shared_types
@@ -1034,10 +1153,14 @@ def main() -> int:
     removal_only_names.update(protected_shared_aliases)
 
     from_impls = []
-    for path in rust_paths:
+    for path in merge_input_paths:
         from_impls.extend(prelude_from_impls(path))
+    for _, to_name in from_impls:
+        if to_name in existing_shared_types and to_name not in primary_output_types:
+            removal_only_names.add(to_name)
+            selected.add(to_name)
     trait_impls_for_dependency = []
-    for path in rust_paths:
+    for path in merge_input_paths:
         trait_impls_for_dependency.extend(prelude_trait_impls(path))
     changed = True
     while changed:
@@ -1045,10 +1168,10 @@ def main() -> int:
         for from_name, to_name in from_impls:
             if from_name in primary_output_types or to_name in primary_output_types:
                 continue
-            if from_name in selected and to_name not in selected:
+            if from_name in selected and to_name not in selected and promotable_shared_name(to_name):
                 selected.add(to_name)
                 changed = True
-            if to_name in selected and from_name not in selected:
+            if to_name in selected and from_name not in selected and promotable_shared_name(from_name):
                 selected.add(from_name)
                 changed = True
         for trait_name, target_name in trait_impls_for_dependency:
@@ -1057,6 +1180,8 @@ def main() -> int:
             if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", trait_name):
                 continue
             if trait_name in primary_output_types:
+                continue
+            if not promotable_shared_name(trait_name):
                 continue
             if trait_name not in selected:
                 selected.add(trait_name)
@@ -1083,9 +1208,8 @@ def main() -> int:
     inherent_methods = defaultdict(list)
     inherent_consts = defaultdict(list)
 
-    for path in rust_paths:
+    for path in merge_input_paths:
         items = parse_items(path, selected)
-        items_by_path[path] = items
         for item in items:
             if (
                 item.get("source_owned_nested")
@@ -1103,6 +1227,32 @@ def main() -> int:
                     inherent_methods[(item["name"], method_name)].append((path, method_text))
                 for const_name, const_text in extract_consts(item["text"]):
                     inherent_consts[(item["name"], const_name)].append((path, const_text))
+    for path in rust_paths:
+        items_by_path[path] = parse_items(path, selected)
+
+    existing_shared_items = parse_shared_items_from_text(existing_shared_text, selected)
+    generated_trait_decls = {
+        name
+        for name, variants in declarations.items()
+        if any(
+            path != shared_support_path and re.match(r"^pub\s+trait\b", text)
+            for path, text in variants
+        )
+    }
+    existing_shared_items_to_replace = []
+    for item in existing_shared_items:
+        if item["kind"] == "decl":
+            if item["name"] not in generated_trait_decls:
+                continue
+            if not re.match(r"^pub\s+trait\b", item["text"]):
+                continue
+            declarations[item["name"]].append((shared_support_path, item["text"]))
+            existing_shared_items_to_replace.append(item)
+        elif item["kind"] == "trait_impl" and item["trait"] in generated_trait_decls:
+            trait_impls[(item["name"], item["trait"])].append(
+                (shared_support_path, item["text"])
+            )
+            existing_shared_items_to_replace.append(item)
 
     shared_chunks = []
     shared_aliases = set()
@@ -1115,13 +1265,16 @@ def main() -> int:
             if target in selected:
                 alias_targets[alias_name] = target
                 break
+    remove_shared_items(shared_support_path, existing_shared_items_to_replace)
     remove_protected_names_from_shared_support(
         shared_support_path, protected_source_owned_nested_names
     )
     remove_protected_names_from_shared_types(
         Path(args.shared_types), protected_source_owned_nested_names
     )
-    receiver_preferences = method_call_receiver_preferences(rust_paths, selected, alias_targets)
+    receiver_preferences = method_call_receiver_preferences(
+        merge_input_paths, selected, alias_targets
+    )
     for name in sorted(selected):
         if name in removal_only_names:
             continue

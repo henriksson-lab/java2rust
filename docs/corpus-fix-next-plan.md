@@ -289,6 +289,34 @@ a facade method to `HashSet`. Focused coverage:
 `documents_collection_remove_if_lambda_gap`, `cargo fmt --check`,
 `cargo check --quiet`, and `git diff --check`.
 
+HTSJDK VCF rerun after the `removeAll` checkpoint:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-remove-all` translated 32/32
+files with 20 invalid-pattern files and reduced generated Rust errors from
+`352` to `350`. The concrete `VCFHeader` `HashSet.remove_all` rows now render
+as `retain`; the remaining `remove_all` mention belongs to the broad
+`JavaErasedObjectFacade` trait implementation error.
+
+2026-07-30 shared-support raw merge checkpoint: focused package assembly now
+lets `merge-shared-support-facades.py` read merge candidates from the raw
+pre-strip generated files while still removing duplicate support from the
+stripped generated modules. Existing shared concrete support remains
+authoritative, and repeated module-local `From<_> for InputStream` impls are
+removed as module support so the shared builtin upcast impl is emitted once.
+Focused coverage:
+`shared_support_merger_uses_raw_input_for_erased_object_facade_impl`,
+`shared_support_merger_removes_repeated_module_from_impls_to_existing_shared_type`,
+`shared_support_merger`, `cargo fmt --check`, `cargo check --quiet`, and
+`git diff --check`. HTSJDK VCF rerun
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-raw-merge-support-from-dedupe`
+translated 32/32 files with 20 invalid-pattern files and reduced generated
+Rust errors from `350` to `349`. The previous `JavaErasedObjectFacade` `E0046`
+trait-implementation mismatch is gone; `clear`, `read_3`, `remove_all`, and
+the other erased-object trait methods are emitted in both the trait and the
+`Box<dyn Any>` impl. Failed intermediate raw-merge probes at
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-raw-merge-support*` exposed why
+raw merge input must not repromote existing shared concrete/trait support and
+why module-local `From<_> for InputStream` impls need removal-only handling.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still
