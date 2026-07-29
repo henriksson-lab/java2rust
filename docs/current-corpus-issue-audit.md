@@ -1295,6 +1295,26 @@ errors from `378` to `377`. `VCFHeaderLineTranslator`
 `expected_tag_order...iter().position(|item| item == str).map(...).unwrap_or(-1)`;
 the previous `no method named index_of for &Vec<String>` row is gone.
 
+Focused `AtomicInteger` platform facade update:
+`java_atomic_integer_uses_platform_facade_methods` now passes. `AtomicInteger`
+is treated as a Java platform facade with local `Cell<i32>` state for the
+currently exercised single-threaded idiom, and supports `new`, `get`, `set`,
+`incrementAndGet`, and `getAndIncrement`. The external facade support builder
+now suppresses generic opaque placeholders for this built-in platform facade,
+and platform facade usage detection includes local declaration types and
+constructor target types.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-atomic-integer` translates all
+`32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `377` to `320`. `VCFFileReader` imports the shared
+`AtomicInteger` facade and `intervalCount.incrementAndGet()` now compiles
+against `generated-shared-support.rs`; the previous missing
+`increment_and_get` row is gone. The remaining top families are broad type
+mismatches, inference holes, missing VCF source-boundary types such as
+`VCFHeader`/`VCFHeaderLine`/`AbstractVCFCodec`, and generic `T` method surface
+gaps.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

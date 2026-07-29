@@ -5538,6 +5538,25 @@ errors from `378` to `377`. `VCFHeaderLineTranslator`
 `expectedTagOrder.indexOf(str)` now renders as a borrowed iterator position
 search, and the previous `&Vec<String>.index_of(...)` row is gone.
 
+2026-07-29 `AtomicInteger` platform facade cleanup:
+`AtomicInteger` is now handled as a built-in Java platform facade rather than
+an opaque external placeholder. The facade has local `Cell<i32>` state and
+supports the exercised `new`, `get`, `set`, `incrementAndGet`, and
+`getAndIncrement` methods. Platform facade usage detection now sees local
+declaration types and constructor target types, and external facade support
+suppresses generic placeholder structs and unknown-return methods for this
+built-in facade. Focused coverage:
+`java_atomic_integer_uses_platform_facade_methods`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-atomic-integer` translates all
+`32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `377` to `320`. `VCFFileReader`
+`intervalCount.incrementAndGet()` now compiles against shared support, and the
+previous missing `increment_and_get` row is gone. The next VCF work should use
+the new baseline's top families: type mismatches, inference holes, missing
+VCF source-boundary types, and generic `T` method surfaces.
+
 ## Rerun Protocol
 
 After each fix:

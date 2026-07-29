@@ -1434,6 +1434,62 @@ class JavaListIndexOf {
 }
 
 #[test]
+fn java_atomic_integer_uses_platform_facade_methods() {
+    let translation = translate_source(
+        r#"
+import java.util.concurrent.atomic.AtomicInteger;
+
+class JavaAtomicIntegerUse {
+    int next() {
+        AtomicInteger count = new AtomicInteger(0);
+        return count.incrementAndGet();
+    }
+
+    int afterGetAndIncrement() {
+        AtomicInteger count = new AtomicInteger(4);
+        count.getAndIncrement();
+        return count.get();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub struct AtomicInteger")
+            && translation.rust.contains("std::cell::Cell<i32>")
+            && translation.rust.contains("AtomicInteger::new(0)")
+            && translation.rust.contains("count.increment_and_get()")
+            && translation.rust.contains("count.get_and_increment();")
+            && translation.rust.contains("return count.get();")
+            && !translation.rust.contains("pub struct AtomicInteger;")
+            && !translation.rust.contains("increment_and_get<T0>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "java_atomic_integer_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn covers_atomic_integer_state() {
+        let fixture = JavaAtomicIntegerUse {};
+        assert_eq!(fixture.next(), 1);
+        assert_eq!(fixture.after_get_and_increment(), 5);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn java_string_comparison_methods_use_signature_helpers() {
     let translation = translate_source(
         r#"

@@ -4534,6 +4534,57 @@ impl<T: Clone> JavaIterator<T> {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct AtomicInteger {
+    value: std::cell::Cell<i32>,
+}
+
+impl AtomicInteger {
+    pub fn new(value: i32) -> AtomicInteger {
+        AtomicInteger { value: std::cell::Cell::new(value) }
+    }
+
+    pub fn get(&self) -> i32 {
+        self.value.get()
+    }
+
+    pub fn set(&self, value: i32) {
+        self.value.set(value);
+    }
+
+    pub fn increment_and_get(&self) -> i32 {
+        let value = self.value.get().wrapping_add(1);
+        self.value.set(value);
+        value
+    }
+
+    pub fn get_and_increment(&self) -> i32 {
+        let value = self.value.get();
+        self.value.set(value.wrapping_add(1));
+        value
+    }
+}
+
+impl Clone for AtomicInteger {
+    fn clone(&self) -> Self {
+        AtomicInteger::new(self.value.get())
+    }
+}
+
+impl PartialEq for AtomicInteger {
+    fn eq(&self, other: &Self) -> bool {
+        self.value.get() == other.value.get()
+    }
+}
+
+impl Eq for AtomicInteger {}
+
+impl std::hash::Hash for AtomicInteger {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.value.get(), state);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ClassLoader;
 
@@ -12442,6 +12493,7 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "Attributes"
             | "AttributesName"
             | "Enumeration"
+            | "AtomicInteger"
             | "ClassLoader"
             | "Locale"
             | "BufferedImage"
@@ -13776,6 +13828,7 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "AttributesName"
                 | "Enumeration"
                 | "Iterator"
+                | "AtomicInteger"
                 | "ClassLoader"
                 | "BufferedImage"
                 | "Graphics"
@@ -13800,6 +13853,7 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "java.util.jar.Attributes.Name"
                 | "java.util.Enumeration"
                 | "java.util.Iterator"
+                | "java.util.concurrent.atomic.AtomicInteger"
                 | "java.lang.ClassLoader"
                 | "java.awt.image.BufferedImage"
                 | "java.awt.Graphics"
@@ -13883,7 +13937,15 @@ fn block_uses_java_platform_facades(block: &crate::java_ir::Block) -> bool {
 
 fn stmt_uses_java_platform_facades(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => initializer
+        Stmt::VarDecl {
+            ty, initializer, ..
+        } => {
+            java_type_uses_java_platform_facade(ty)
+                || initializer
+                    .as_ref()
+                    .is_some_and(expr_uses_java_platform_facades)
+        }
+        Stmt::Return(initializer) => initializer
             .as_ref()
             .is_some_and(expr_uses_java_platform_facades),
         Stmt::Expr(expr) | Stmt::Throw(expr) => expr_uses_java_platform_facades(expr),
@@ -14006,8 +14068,9 @@ fn expr_uses_java_platform_facades(expr: &Expr) -> bool {
             crate::java_ir::LambdaBody::Expr(expr) => expr_uses_java_platform_facades(expr),
             crate::java_ir::LambdaBody::Block(block) => block_uses_java_platform_facades(block),
         },
-        Expr::New { args, body, .. } => {
-            args.iter().any(expr_uses_java_platform_facades)
+        Expr::New { ty, args, body, .. } => {
+            java_type_uses_java_platform_facade(ty)
+                || args.iter().any(expr_uses_java_platform_facades)
                 || body.iter().flatten().any(member_uses_java_platform_facades)
         }
         Expr::ClassLiteral(_)
@@ -14090,6 +14153,7 @@ pub fn is_java_platform_facade_type_name(name: &str) -> bool {
             | "AttributesName"
             | "Enumeration"
             | "Iterator"
+            | "AtomicInteger"
             | "ClassLoader"
             | "Serializable"
             | "BufferedImage"

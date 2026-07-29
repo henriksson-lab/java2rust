@@ -1067,7 +1067,7 @@ RUST
   printf "JavaClass\n" >> "$shared_support_types_path"
 fi
 
-if grep -R -q '^pub struct Path' "$generated_dir" || grep -R -q '^pub struct URI' "$generated_dir" || grep -R -q '^pub struct File' "$generated_dir" || grep -R -q '^pub struct URL' "$generated_dir" || grep -R -q '^pub struct JarURLConnection' "$generated_dir" || grep -R -q '^pub struct JarFile' "$generated_dir" || grep -R -q '^pub struct JarEntry' "$generated_dir" || grep -R -q '^pub struct Manifest' "$generated_dir" || grep -R -q '^pub struct Attributes' "$generated_dir" || grep -R -q '^pub struct AttributesName' "$generated_dir" || grep -R -q '^pub struct Enumeration' "$generated_dir" || grep -R -q 'JavaIterator' "$generated_dir" || grep -R -q '^pub struct IOUtils' "$generated_dir" || grep -R -q '^pub struct BufferedImage' "$generated_dir" || grep -R -q '^pub struct Graphics' "$generated_dir"; then
+if grep -R -q '^pub struct Path' "$generated_dir" || grep -R -q '^pub struct URI' "$generated_dir" || grep -R -q '^pub struct File' "$generated_dir" || grep -R -q '^pub struct URL' "$generated_dir" || grep -R -q '^pub struct JarURLConnection' "$generated_dir" || grep -R -q '^pub struct JarFile' "$generated_dir" || grep -R -q '^pub struct JarEntry' "$generated_dir" || grep -R -q '^pub struct Manifest' "$generated_dir" || grep -R -q '^pub struct Attributes' "$generated_dir" || grep -R -q '^pub struct AttributesName' "$generated_dir" || grep -R -q '^pub struct Enumeration' "$generated_dir" || grep -R -q 'JavaIterator' "$generated_dir" || grep -R -q '^pub struct AtomicInteger' "$generated_dir" || grep -R -q '^pub struct IOUtils' "$generated_dir" || grep -R -q '^pub struct BufferedImage' "$generated_dir" || grep -R -q '^pub struct Graphics' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct FileSystem {}
@@ -1325,6 +1325,57 @@ impl<T: Clone> JavaIterator<T> {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct AtomicInteger {
+    value: std::cell::Cell<i32>,
+}
+
+impl AtomicInteger {
+    pub fn new(value: i32) -> AtomicInteger {
+        AtomicInteger { value: std::cell::Cell::new(value) }
+    }
+
+    pub fn get(&self) -> i32 {
+        self.value.get()
+    }
+
+    pub fn set(&self, value: i32) {
+        self.value.set(value);
+    }
+
+    pub fn increment_and_get(&self) -> i32 {
+        let value = self.value.get().wrapping_add(1);
+        self.value.set(value);
+        value
+    }
+
+    pub fn get_and_increment(&self) -> i32 {
+        let value = self.value.get();
+        self.value.set(value.wrapping_add(1));
+        value
+    }
+}
+
+impl Clone for AtomicInteger {
+    fn clone(&self) -> Self {
+        AtomicInteger::new(self.value.get())
+    }
+}
+
+impl PartialEq for AtomicInteger {
+    fn eq(&self, other: &Self) -> bool {
+        self.value.get() == other.value.get()
+    }
+}
+
+impl Eq for AtomicInteger {}
+
+impl std::hash::Hash for AtomicInteger {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.value.get(), state);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct File {
     value: String,
@@ -1562,7 +1613,7 @@ pub mod logger {
 }
 
 RUST
-  printf "FileSystem\nGraphics\nBufferedImage\nPath\nURI\nFile\nURL\nURLConnection\nJarURLConnection\nJarFile\nJarEntry\nManifest\nAttributes\nAttributesName\nEnumeration\nJavaIterator\nJavaPathArg\nIOUtils\nlogger\n" >> "$shared_support_types_path"
+  printf "FileSystem\nGraphics\nBufferedImage\nPath\nURI\nFile\nURL\nURLConnection\nJarURLConnection\nJarFile\nJarEntry\nManifest\nAttributes\nAttributesName\nEnumeration\nJavaIterator\nAtomicInteger\nJavaPathArg\nIOUtils\nlogger\n" >> "$shared_support_types_path"
 fi
 
 if grep -R -q -E 'java_string_(split|substring|hash_code|index_of|index_of_from|from_byte_range|matches|replace_first|replace_all|compare_to|compare_to_ignore_case|equals_ignore_case)|java_(list|set|map|value)_hash_code|java_primitive_compare_to|java_parse_(i8|i16|i32|i64|f32|f64)' "$generated_dir"; then
