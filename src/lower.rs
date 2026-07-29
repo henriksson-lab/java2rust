@@ -18074,6 +18074,16 @@ fn lower_shared_self_field_owned_recovery_for_slot(
     ) {
         return Some(expr);
     }
+    if let Some(expr) = lower_shared_self_field_erased_object_owned_recovery(
+        expr,
+        env,
+        slot,
+        actual,
+        ctx,
+        refinements,
+    ) {
+        return Some(expr);
+    }
     if !shape_is_owned(target) || target.java_ty != actual.java_ty {
         if matches!(
             target.ownership,
@@ -18120,6 +18130,101 @@ fn lower_shared_self_field_owned_recovery_for_slot(
     borrowed_actual.ownership = OwnershipShape::SharedBorrow;
     let plan = plan_slot_conversion(borrowed_actual, slot.clone(), ctx.facts);
     Some(apply_slot_expr_conversion(lowered, &plan))
+}
+
+fn lower_shared_self_field_erased_object_owned_recovery(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    actual: &RustSlotShape,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let target = slot_target_shape(slot)?;
+    if !shape_is_owned(target) || !shape_is_erased_object_boundary(target) {
+        return None;
+    }
+    if let Some(recovered) =
+        lower_optional_self_field_unwrap_erased_object_recovery(expr, env, slot, ctx, refinements)
+    {
+        return Some(recovered);
+    }
+    shared_self_field_read_name_with_ctx(expr, env, ctx)?;
+    if let Some(element_ty) = actual.optional_element_type() {
+        if matches!(element_ty, JavaType::Primitive(_)) {
+            return None;
+        }
+        let element_shape = optional_element_slot_shape_with_facts(actual, element_ty, ctx.facts);
+        if !known_owned_argument_clone_recovery_with_facts(&element_shape, ctx.facts)
+            && !known_named_clone_recovery(&element_shape)
+        {
+            return None;
+        }
+        let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+        return apply_optional_field_borrowed_carrier_to_slot(lowered, actual, slot.clone(), ctx);
+    }
+    if matches!(actual.java_ty, JavaType::Primitive(_)) {
+        return None;
+    }
+    if !known_owned_argument_clone_recovery_with_facts(actual, ctx.facts)
+        && !known_named_clone_recovery(actual)
+    {
+        return None;
+    }
+    let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+    let mut borrowed_actual = actual.clone();
+    borrowed_actual.ownership = OwnershipShape::SharedBorrow;
+    let plan = plan_slot_conversion(borrowed_actual, slot.clone(), ctx.facts);
+    Some(apply_slot_expr_conversion(lowered, &plan))
+}
+
+fn lower_optional_self_field_unwrap_erased_object_recovery(
+    expr: &Expr,
+    env: &ShapeEnv,
+    slot: &Slot,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if name != "unwrap" || !args.is_empty() {
+        return None;
+    }
+    shared_self_field_read_name_with_ctx(receiver, env, ctx)?;
+    let receiver_shape = infer_expr_shape_with_context(
+        receiver,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    let element_ty = receiver_shape.optional_element_type()?;
+    if matches!(element_ty, JavaType::Primitive(_)) {
+        return None;
+    }
+    let element_shape =
+        optional_element_slot_shape_with_facts(&receiver_shape, element_ty, ctx.facts);
+    if !known_owned_argument_clone_recovery_with_facts(&element_shape, ctx.facts)
+        && !known_named_clone_recovery(&element_shape)
+    {
+        return None;
+    }
+    let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
+    apply_optional_field_borrowed_carrier_to_slot(
+        lowered_receiver,
+        &receiver_shape,
+        slot.clone(),
+        ctx,
+    )
 }
 
 fn lower_borrowed_receiver_field_owned_recovery_for_slot(

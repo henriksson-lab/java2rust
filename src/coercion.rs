@@ -2884,9 +2884,12 @@ fn apply_optional_rust_borrowed_facade_return(
         RustBorrowedFacadeReturnRecovery::ToPathBuf => "value.to_path_buf()",
         RustBorrowedFacadeReturnRecovery::Clone => "value.clone()",
     };
-    RustExpr::Raw(format!(
-        "{rendered}.map(|value| Box::new({recovered}) as Box<dyn std::any::Any>)"
-    ))
+    let mapped = format!("{rendered}.map(|value| Box::new({recovered}) as Box<dyn std::any::Any>)");
+    if policy.target.optional_element_type().is_some() {
+        RustExpr::Raw(mapped)
+    } else {
+        RustExpr::Raw(format!("{mapped}.expect(\"Java null receiver\")"))
+    }
 }
 
 fn apply_rust_scalar_slot_cast(expr: RustExpr, policy: &RustScalarSlotCastPolicy) -> RustExpr {

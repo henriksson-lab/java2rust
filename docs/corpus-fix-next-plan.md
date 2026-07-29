@@ -5373,6 +5373,27 @@ annotations, unsupported concrete/concrete `instanceof`, incompatible `?`
 usage, source-super constructor lowering, generic/interface facade precision,
 and static/source-boundary gaps.
 
+2026-07-29 shared self-field erased-object slot recovery: shared `&self` field
+reads that feed owned erased-object slots now go through the same slot
+conversion policy as other owned boundaries. Non-optional fields are presented
+as borrowed actuals before clone/erase planning, and optional field carriers
+borrow the `Option` then clone the contained value before boxing. The
+non-optional erased target path now unwraps after `map(...)`, while optional
+erased targets still keep the optional wrapper.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-optional-self-erased-map-value-release`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `408` to `396`. VCF `toStringEncoding` map inserts
+now render `self.name.as_ref().map(|value| Box::new(value.clone()) as Box<dyn
+Any>).expect("Java null receiver")` and `Box::new(self.source.clone()) as
+Box<dyn Any>` instead of moving out of `&self`; the
+`cannot move out of self.name/source/version/description` family is gone. Top
+families remain broad mismatched types, type annotations, unsupported
+concrete/concrete `instanceof`, incompatible `?` usage, source-super
+constructor lowering, generic/interface facade precision, optional enum/static
+support, and unresolved facade/source-boundary methods.
+
 ## Rerun Protocol
 
 After each fix:

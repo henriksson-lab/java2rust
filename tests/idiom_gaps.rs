@@ -4568,19 +4568,35 @@ fn shared_self_field_reads_recover_owned_values_without_moves() {
     assert!(
         translation
             .rust
-            .contains("return self.name.clone()/* TODO(translation): validate added clone */;")
-            && translation.rust.contains(
-                "return self.workspace.clone()/* TODO(translation): validate added clone */;"
-            )
+            .contains("return self.name.clone();")
+            && translation.rust.contains("return self.workspace.clone();")
             && translation.rust.contains(
                 "return self.paths.clone()/* TODO(translation): validate added clone */;"
             )
             && translation
                 .rust
                 .contains("self.length(self.workspace.as_str())")
+            && translation.rust.contains(
+                "map.insert(\"ID\".to_string(), Box::new(self.name.clone()) as Box<dyn std::any::Any>);"
+            )
+            && translation.rust.contains(
+                "map.insert(\"Workspace\".to_string(), Box::new(self.workspace.clone()) as Box<dyn std::any::Any>);"
+            )
+            && translation.rust.contains(
+                "map.insert(\"Tag\".to_string(), self.tag.as_ref().map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>).expect(\"Java null receiver\"));"
+            )
+            && translation.rust.contains(
+                "map.insert(\"Paths\".to_string(), Box::new(self.paths.clone()/* TODO(translation): validate added clone */) as Box<dyn std::any::Any>);"
+            )
             && !translation.rust.contains("return self.name;")
             && !translation.rust.contains("return self.workspace;")
             && !translation.rust.contains("return self.paths;")
+            && !translation.rust.contains("Box::new(self.name) as Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("Box::new(self.workspace) as Box<dyn std::any::Any>")
+            && !translation.rust.contains("Box::new(self.tag.unwrap())")
+            && !translation.rust.contains("Box::new(self.paths) as Box<dyn std::any::Any>")
             && !translation.rust.contains("self.length(self.workspace)"),
         "{}",
         translation.rust
