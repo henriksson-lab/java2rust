@@ -5826,6 +5826,37 @@ sets and expose downstream type mismatches in `VCFHeader` set construction and
 header-line insertion; treat those as representation/collection element slot
 work, not as missing JDK collection facade methods.
 
+2026-07-29 promoted nested enum identity cleanup:
+Focused shared-support assembly now strips source-owned nested declarations
+from their original generated module when that nested type is selected as a
+shared identity. The post-merge source restore step still restores the primary
+source type, but skips nested names already present in
+`generated-shared-support-types.tsv`, preventing the wrapper from resurrecting
+a second local copy after merge. Unselected source-owned nested types remain
+local, preserving the previous guard against losing real source declarations to
+opaque prelude stubs.
+
+Focused coverage passed:
+`shared_support_merger_prefers_source_enum_over_opaque_stub`,
+`shared_support_merger_keeps_source_owned_nested_types_before_primary`,
+`cargo test shared_support_merger --test idiom_sweep_script --quiet`,
+`cargo check --quiet`, `cargo fmt --check`, `git diff --check`, and
+`bash -n scripts/translate-focused-package.sh`.
+
+HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-shared-nested-enum-identity`
+translated 32/32 files with 20 invalid-pattern files and 455 generated-Rust
+errors. The previous duplicate-type mismatch for
+`VCFCompoundHeaderLineSupportedHeaderLineType` is gone: the enum now appears
+only in crate-root shared support, and `VCFCompoundHeaderLine.rs` imports that
+shared identity instead of defining a local copy. The exposed remaining local
+errors in that constructor are slot-conversion issues (`Some(line_type)` from a
+borrowed enum argument and an unwrapped `VCFHeaderLineCount`), not duplicate
+type identity. Top remaining families are broad mismatched types, type
+annotations, unresolved HTSJDK/SAM support types, concrete `instanceof`,
+super-constructor lowering, generic header-line dispatch, optional/erased-object
+recovery, and collection representation compatibility.
+
 ## Rerun Protocol
 
 After each fix:

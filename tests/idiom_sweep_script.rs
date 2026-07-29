@@ -531,6 +531,13 @@ pub struct Header;
         conflicts.contains("HeaderFIELDS\tdeclaration\tkept enum"),
         "{conflicts}"
     );
+
+    let source_module = fs::read_to_string(generated_dir.join("00003_Header.rs")).unwrap();
+    assert!(
+        !source_module.contains("pub enum HeaderFIELDS")
+            && !source_module.contains("impl HeaderFIELDS"),
+        "{source_module}"
+    );
 }
 
 #[test]

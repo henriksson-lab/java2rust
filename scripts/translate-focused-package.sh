@@ -936,13 +936,15 @@ PY
 restore_missing_source_type_items() {
   local rust_path="$1"
   local raw_path="$2"
-  python3 - "$rust_path" "$raw_path" <<'PY'
+  local shared_types_path="${3:-}"
+  python3 - "$rust_path" "$raw_path" "$shared_types_path" <<'PY'
 import re
 import sys
 from pathlib import Path
 
 rust_path = Path(sys.argv[1])
 raw_path = Path(sys.argv[2])
+shared_types_path = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
 
 if not raw_path.exists():
     raise SystemExit(0)
@@ -1077,6 +1079,18 @@ source_owned_names = {
     for line in raw_lines
     if (match := decl_re.match(line))
     and (match.group(2) == current_source or source_owned_nested_type_name(match.group(2)))
+}
+shared_names = set()
+if shared_types_path and shared_types_path.exists():
+    shared_names = {
+        line.strip()
+        for line in shared_types_path.read_text().splitlines()
+        if line.strip()
+    }
+source_owned_names = {
+    name
+    for name in source_owned_names
+    if name == current_source or name not in shared_names
 }
 missing_names = source_owned_names - present
 if not missing_names:
@@ -2159,7 +2173,7 @@ python3 "$repo_root/scripts/merge-shared-support-facades.py" \
   --conflicts "$shared_support_conflicts_path"
 
 for rust_path in "$generated_dir"/*.rs; do
-  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")"
+  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path"
 done
 
 if grep -R -q 'ndarray::' "$generated_dir" "$shared_support_path"; then

@@ -773,6 +773,7 @@ def remove_items(
     items: list[dict],
     removal_only_names: set[str],
     keep_last_prelude_names: set[str],
+    shared_identity_names: set[str],
 ) -> None:
     lines = path.read_text().splitlines(keepends=True)
     remove = [False] * len(lines)
@@ -782,7 +783,7 @@ def remove_items(
         if item["name"] in keep_last_prelude_names and item.get("prelude", False)
     }
     for item in items:
-        if item.get("source_owned_nested"):
+        if item.get("source_owned_nested") and item["name"] not in shared_identity_names:
             continue
         if item["name"] in removal_only_names and not item.get("prelude", False):
             continue
@@ -1296,7 +1297,13 @@ def main() -> int:
             shared_types.write(f"{name}\n")
 
     for path, items in items_by_path.items():
-        remove_items(path, items, removal_only_names, keep_last_prelude_names)
+        remove_items(
+            path,
+            items,
+            removal_only_names,
+            keep_last_prelude_names,
+            selected - removal_only_names,
+        )
         remove_duplicate_source_owned_nested_stubs(path)
         remove_duplicate_inherent_methods(path)
 
