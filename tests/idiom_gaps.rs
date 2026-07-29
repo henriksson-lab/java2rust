@@ -2196,6 +2196,46 @@ class NullableBooleanTernaryAssignment {
 }
 
 #[test]
+fn nullable_erased_object_instanceof_projects_optional_carrier() {
+    let translation = translate_source(
+        r#"
+class NullableErasedObjectInstanceof {
+    String show(Object value) {
+        if (value == null) {
+            return "null";
+        }
+        if (value instanceof Boolean) {
+            return ((Boolean)value) ? "true" : "false";
+        }
+        return "other";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("value.as_ref().is_some_and(|value| value.is::<bool>())")
+            && !translation.rust.contains("if value.is::<bool>()")
+            && translation.rust.contains("downcast::<bool>()")
+            && !translation.rust.contains("is::<Boolean>")
+            && !translation.rust.contains("downcast::<Boolean>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_erased_object_instanceof",
+        vec![GeneratedCrateModule {
+            name: "nullable_erased_object_instanceof",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_value_struct_derives_clone_and_partial_eq_when_fields_support_it() {
     let translation = translate_source(
         r#"

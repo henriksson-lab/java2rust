@@ -5451,6 +5451,21 @@ incompatible `?` usage, source-super constructor lowering, generic/interface
 facade precision, optional/static support, and unresolved facade/source
 boundary methods.
 
+2026-07-29 optional erased-object `instanceof` cleanup:
+`InstanceOfCheck::OptionalErasedObjectType` now represents runtime checks on
+nullable erased-object carriers explicitly. Rendering uses
+`option.as_ref().is_some_and(|value| value.is::<T>())`, keeping the optional
+carrier borrow-only for the condition while branch bodies can still consume or
+downcast the owned value. Focused coverage:
+`coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates` and
+`nullable_erased_object_instanceof_projects_optional_carrier`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-optional-erased-instanceof`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `387` to `385`. The two `Option<T>.is::<...>()`
+rows in `VCFEncoder::format_v_c_f_field` are gone.
+
 ## Rerun Protocol
 
 After each fix:

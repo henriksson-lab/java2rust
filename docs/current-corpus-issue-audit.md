@@ -1206,6 +1206,20 @@ incompatible `?` usage, source-super constructor lowering, generic/interface
 facade precision, optional/static support gaps, and unresolved
 facade/source-boundary methods.
 
+Focused optional erased-object `instanceof` update:
+`nullable_erased_object_instanceof_projects_optional_carrier` now passes. The
+cast/instanceof plan owns an `OptionalErasedObjectType` runtime check, rendered
+as `option.as_ref().is_some_and(|value| value.is::<T>())`, so nullable Java
+`Object` carriers can be tested without pretending `Option<Box<dyn Any>>`
+itself has Rust `Any::is`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-optional-erased-instanceof`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `387` to `385`. `VCFEncoder::format_v_c_f_field`
+now emits both optional erased-object checks as `val.as_ref().is_some_and(...)`;
+the previous two `no method named is found for enum Option<T>` rows are gone.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

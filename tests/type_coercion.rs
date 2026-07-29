@@ -2779,10 +2779,17 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
         args: Vec::new(),
     });
     erased_actual.dispatch = DispatchShape::ErasedObject;
+    let mut optional_erased_actual =
+        RustSlotShape::conservative(optional_java_type(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        }));
+    optional_erased_actual.dispatch = DispatchShape::ErasedObject;
 
     let dyn_check = plan_instanceof_check(&dyn_actual, &target);
     let boxed_check = plan_instanceof_check(&boxed_actual, &target);
     let erased_check = plan_instanceof_check(&erased_actual, &target);
+    let optional_erased_check = plan_instanceof_check(&optional_erased_actual, &target);
 
     assert_eq!(
         dyn_check,
@@ -2813,6 +2820,16 @@ fn coercion_owns_dyn_boxed_dyn_and_erased_instanceof_predicates() {
     assert_eq!(
         render_instanceof_check(RustExpr::Var("object".to_string()), &erased_check),
         RustExpr::Raw("object.is::<Dog>()".to_string())
+    );
+    assert_eq!(
+        optional_erased_check,
+        InstanceOfCheck::OptionalErasedObjectType {
+            target_type: "Dog".to_string(),
+        }
+    );
+    assert_eq!(
+        render_instanceof_check(RustExpr::Var("object".to_string()), &optional_erased_check),
+        RustExpr::Raw("object.as_ref().is_some_and(|value| value.is::<Dog>())".to_string())
     );
 }
 

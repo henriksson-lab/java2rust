@@ -2438,6 +2438,9 @@ pub enum InstanceOfCheck {
     ErasedObjectType {
         target_type: String,
     },
+    OptionalErasedObjectType {
+        target_type: String,
+    },
     AlwaysTrue,
     Unsupported {
         actual_dispatch: DispatchShape,
@@ -2587,6 +2590,25 @@ pub fn plan_instanceof_check_with_facts(
     }
     if hierarchy_instanceof_policy(actual, target, facts).always_true {
         return InstanceOfCheck::AlwaysTrue;
+    }
+    if let Some(element_ty) = actual.optional_element_type() {
+        let element_shape = optional_element_slot_shape(actual, element_ty);
+        if matches!(element_shape.dispatch, DispatchShape::ErasedObject)
+            && matches!(target.dispatch, DispatchShape::Concrete)
+        {
+            match runtime_type_target_policy(&target.java_ty) {
+                RuntimeTypeTargetPolicy::Nominal { target_type } => {
+                    return InstanceOfCheck::OptionalErasedObjectType { target_type };
+                }
+                RuntimeTypeTargetPolicy::MissingNominalTarget { java_ty } => {
+                    return unsupported_instanceof_check(
+                        actual,
+                        target,
+                        InstanceOfFallbackPolicy::MissingRuntimeTarget { java_ty },
+                    );
+                }
+            }
+        }
     }
     match (&actual.dispatch, &target.dispatch) {
         (DispatchShape::ClosedEnum { .. }, DispatchShape::Concrete) => {

@@ -3361,6 +3361,10 @@ pub fn render_instanceof_check(expr: RustExpr, check: &InstanceOfCheck) -> RustE
         InstanceOfCheck::ErasedObjectType { target_type } => {
             RustExpr::Raw(format!("{}.is::<{target_type}>()", emit::emit_expr(&expr)))
         }
+        InstanceOfCheck::OptionalErasedObjectType { target_type } => RustExpr::Raw(format!(
+            "{}.as_ref().is_some_and(|value| value.is::<{target_type}>())",
+            emit::emit_expr(&expr)
+        )),
         InstanceOfCheck::AlwaysTrue => RustExpr::Literal("true".to_string()),
         InstanceOfCheck::Unsupported {
             actual_dispatch,
