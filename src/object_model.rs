@@ -1059,7 +1059,7 @@ fn external_pack_override_should_not_replace_parsed_source(
     strategy: &ObjectStrategyPlan,
 ) -> bool {
     override_fact.provenance == FactProvenance::ExternalLibraryPack
-        && strategy.primary_provenance() == FactProvenance::ParsedSource
+        && strategy.has_provenance(FactProvenance::ParsedSource)
 }
 
 fn object_hierarchy_context_for_strategy_plan(plan: &ObjectModelPlan) -> ObjectHierarchyContext {

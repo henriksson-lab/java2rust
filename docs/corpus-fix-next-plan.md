@@ -5597,6 +5597,23 @@ errors from `320` to `318`. The VCF genotype-quality calls now render as
 `(VCFUtils::parse_vcf_double(...) as f64).round() as i64`, and the previous
 missing `Math::round` row is gone.
 
+2026-07-29 source-owned external-pack override guard:
+External-library hierarchy/object facts no longer replace a representation
+strategy that still has parsed-source provenance, even after corpus/source
+analysis appends additional provenance. Focused coverage:
+`external_pack_override_does_not_replace_source_strategy_after_analysis_provenance`
+and `external_pack_object_facts_do_not_erase_primary_source_type_emission`.
+
+Verification notes:
+`target/release/new-java2rust translate-batch` on a one-file
+`VCFHeaderLine.java` smoke with `--builtin-external-pack htsjdk.variant.vcf`
+completed in `.tmp/vcf-headerline-batch-smoke-out` and emitted a real
+`pub struct VCFHeaderLine` in a 3105-line generated file. Full HTSJDK VCF and a
+three-file `VCFHeader`/`VCFHeaderLine`/`AbstractVCFCodec` smoke were interrupted
+while still in `batch_parse_global_emit_start`; do not treat
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-source-owned-external-pack` or
+`.tmp/vcf-source-boundary-smoke-out` as baselines.
+
 ## Rerun Protocol
 
 After each fix:

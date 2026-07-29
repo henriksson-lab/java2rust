@@ -1335,6 +1335,22 @@ errors from `320` to `318`. The two genotype-quality call sites in
 `VCFUtils::parse_vcf_double(...)`; the previous missing `Math::round` row is
 gone.
 
+Focused source-owned external-pack override update:
+Object-model external-pack overrides now skip any strategy that retains
+parsed-source provenance, rather than checking only the current primary
+provenance marker. This keeps co-translated source declarations from being
+erased after analysis has appended corpus/source-derived provenance. Focused
+coverage: `external_pack_override_does_not_replace_source_strategy_after_analysis_provenance`
+and `external_pack_object_facts_do_not_erase_primary_source_type_emission`.
+
+VCF verification:
+`.tmp/vcf-headerline-batch-smoke-out` translates a one-file `VCFHeaderLine.java`
+batch with `--builtin-external-pack htsjdk.variant.vcf` and emits a real
+3105-line generated file containing `pub struct VCFHeaderLine`. The full VCF
+rerun at `.tmp/corpus-rerun-20260729-htsjdk-vcf-after-source-owned-external-pack`
+and the three-file smoke at `.tmp/vcf-source-boundary-smoke-out` were
+interrupted in global batch analysis and are not baselines.
+
 Focused `PrintStream.print/println` arity-1 support update:
 JDK platform API facts now model one-argument `PrintStream.print/println`, the
 resolved external instance-call planner preserves arity-safe facade names, and

@@ -185,6 +185,52 @@ public class DuplicateOwner {
 }
 
 #[test]
+fn external_pack_object_facts_do_not_erase_primary_source_type_emission() {
+    let primary_sources = vec![new_java2rust::BatchSource {
+        path: "modeled/ModeledPrimary.java".to_string(),
+        source: r#"
+package modeled;
+
+public class ModeledPrimary {
+    private int value;
+
+    public int getValue() {
+        return value;
+    }
+}
+"#
+        .to_string(),
+    }];
+    let facts = new_java2rust::external_packs::parse_external_pack_manifest(
+        r#"
+        external-pack modeled modeled external-fact-model semantic
+        external-pack-object modeled modeled.ModeledPrimary erased-object
+        external-pack-object modeled ModeledPrimary erased-object
+        "#,
+    )
+    .facts;
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &facts,
+            &new_java2rust::BatchTranslationOptions::default(),
+        );
+
+    assert_eq!(report.translations.len(), 1);
+    let rust = &report.translations[0].rust;
+    assert!(rust.contains("pub struct ModeledPrimary"), "{rust}");
+    assert!(rust.contains("pub fn get_value(&self) -> i32"), "{rust}");
+    assert!(
+        !rust.contains("pub type ModeledPrimary = Box<dyn std::any::Any>;"),
+        "{rust}"
+    );
+}
+
+#[test]
 fn translate_batch_cli_writes_phase_and_worker_events() {
     let dir = unique_temp_dir("translate_batch_events");
     let source_dir = dir.join("java");

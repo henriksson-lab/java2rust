@@ -900,6 +900,36 @@ abstract class OpenBase {
 }
 
 #[test]
+fn external_pack_override_does_not_replace_source_strategy_after_analysis_provenance() {
+    let parsed = parse_java_source(
+        r#"
+sealed interface Token permits Word, NumberToken {}
+final class Word implements Token {}
+final class NumberToken implements Token {}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "Token".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let object_plan = plan_object_model(&resolved.program, &facts);
+    let token = object_plan.strategy_for("Token").unwrap();
+
+    assert_eq!(
+        token.strategy,
+        ObjectRepresentation::ClosedEnum {
+            enum_name: "TokenValue".to_string(),
+            variants: vec!["NumberToken".to_string(), "Word".to_string()],
+        }
+    );
+    assert!(token.has_provenance(FactProvenance::ParsedSource));
+}
+
+#[test]
 fn object_model_records_rejected_closed_enum_when_runtime_case_split_lacks_proof() {
     let parsed = parse_java_source(
         r#"
