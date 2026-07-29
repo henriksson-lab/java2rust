@@ -5510,6 +5510,21 @@ errors from `380` to `379`. The VCFCodec and VCF3Codec
 `fFields.addAll(Arrays.asList(filterString.split(...)))` sites now render as
 `extend(java_string_split(...))` instead of `extend(vec![java_string_split(...)])`.
 
+2026-07-29 `String.lastIndexOf` native JDK cleanup:
+`lastIndexOf` is now represented in the same native Java string-call path as
+`indexOf`, including one-argument and from-index forms, char-needle
+normalization, `i32` return shape, and shared runtime support assembly. Focused
+coverage extends `java_string_get_bytes_and_index_of_use_native_helpers` with
+`lastIndexOf(char)` and `lastIndexOf(char, from)`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-last-index-of-full-r3` translates
+all `32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `379` to `378`. `VCFUtils`
+`referenceFile.getName().lastIndexOf('.')` now renders as
+`java_string_last_index_of(...)`, and the previous missing string helper row is
+gone.
+
 ## Rerun Protocol
 
 After each fix:

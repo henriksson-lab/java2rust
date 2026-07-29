@@ -1778,6 +1778,25 @@ pub fn string_index_of_projection(
     }
 }
 
+pub fn string_last_index_of_projection(
+    receiver: RustExpr,
+    needle: RustExpr,
+    from_index: Option<RustExpr>,
+) -> RustExpr {
+    let receiver = render_string_view_argument(receiver);
+    let needle = render_string_view_argument(string_search_needle_projection(needle));
+    if let Some(from_index) = from_index {
+        return RustExpr::Call {
+            function: Box::new(RustExpr::Raw("java_string_last_index_of_from".to_string())),
+            args: vec![RustExpr::Raw(receiver), RustExpr::Raw(needle), from_index],
+        };
+    }
+    RustExpr::Call {
+        function: Box::new(RustExpr::Raw("java_string_last_index_of".to_string())),
+        args: vec![RustExpr::Raw(receiver), RustExpr::Raw(needle)],
+    }
+}
+
 fn string_search_needle_projection(needle: RustExpr) -> RustExpr {
     let rendered = emit::emit_expr(&needle);
     if let Some(literal) = string_literal_from_rust_char_literal(&rendered) {

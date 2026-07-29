@@ -1340,6 +1340,14 @@ class JavaStringBytesAndIndex {
     static int nextTab(String value, int from) {
         return value.indexOf('\t', from);
     }
+
+    static int lastDot(String value) {
+        return value.lastIndexOf('.');
+    }
+
+    static int lastSlashBefore(String value, int from) {
+        return value.lastIndexOf('/', from);
+    }
 }
 "#,
     );
@@ -1357,8 +1365,16 @@ class JavaStringBytesAndIndex {
             && translation
                 .rust
                 .contains("java_string_index_of_from(&value, \"\\t\", from)")
+            && translation
+                .rust
+                .contains("java_string_last_index_of(&value, \".\")")
+            && translation
+                .rust
+                .contains("java_string_last_index_of_from(&value, \"/\", from)")
             && !translation.rust.contains("&'='")
             && !translation.rust.contains("&'\\t'")
+            && !translation.rust.contains("&'.'")
+            && !translation.rust.contains("&'/'")
             && !translation.rust.contains(".get_bytes_1(")
             && !translation.rust.contains(".get_bytes()")
             && !translation.rust.contains(".index_of("),

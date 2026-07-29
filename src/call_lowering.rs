@@ -28,9 +28,10 @@ use crate::coercion::{
     string_compare_to_projection, string_equals_ignore_case_projection, string_format_projection,
     string_from_byte_range_projection, string_from_bytes_projection, string_get_bytes_projection,
     string_hash_code_projection, string_index_of_projection, string_join_delimiter_projection,
-    string_join_varargs_projection, string_matches_projection, string_replace_all_projection,
-    string_replace_first_projection, string_split_projection, string_substring_projection,
-    string_to_char_array_projection, system_exit_projection, thread_sleep_millis_projection,
+    string_join_varargs_projection, string_last_index_of_projection, string_matches_projection,
+    string_replace_all_projection, string_replace_first_projection, string_split_projection,
+    string_substring_projection, string_to_char_array_projection, system_exit_projection,
+    thread_sleep_millis_projection,
 };
 use crate::facts::FactSet;
 use crate::facts::ReceiverAbi;
@@ -226,6 +227,7 @@ fn apply_native_java_instance_method(
         NativeJavaInstanceMethod::StringHashCode => string_hash_code_projection(receiver),
         NativeJavaInstanceMethod::StringGetBytes => string_get_bytes_projection(receiver),
         NativeJavaInstanceMethod::StringIndexOf => apply_string_index_of(receiver, args),
+        NativeJavaInstanceMethod::StringLastIndexOf => apply_string_last_index_of(receiver, args),
         NativeJavaInstanceMethod::StringCharAt => apply_string_char_at(receiver, args),
         NativeJavaInstanceMethod::StringCompareTo => apply_string_compare_to(receiver, args),
         NativeJavaInstanceMethod::StringCompareToIgnoreCase => {
@@ -329,6 +331,17 @@ fn apply_string_index_of(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
         );
     };
     string_index_of_projection(receiver, needle, args.next())
+}
+
+fn apply_string_last_index_of(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
+    let mut args = args.into_iter();
+    let Some(needle) = args.next() else {
+        return RustExpr::Raw(
+            "compile_error!(\"Java String.lastIndexOf requires at least one argument\")"
+                .to_string(),
+        );
+    };
+    string_last_index_of_projection(receiver, needle, args.next())
 }
 
 fn apply_string_replace_first(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {

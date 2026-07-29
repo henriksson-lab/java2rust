@@ -527,6 +527,22 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
         ),
         rust_stdlib_method_abi(
             "String",
+            "lastIndexOf",
+            1,
+            "str::rfind",
+            vec![FacadeSlot::Borrowed],
+            FacadeSlot::Owned,
+        ),
+        rust_stdlib_method_abi(
+            "String",
+            "lastIndexOf",
+            2,
+            "java_string_last_index_of_from",
+            vec![FacadeSlot::Borrowed, FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ),
+        rust_stdlib_method_abi(
+            "String",
             "getBytes",
             1,
             "str::as_bytes",
@@ -4987,6 +5003,34 @@ pub fn java_string_index_of_from<V: AsRef<str>, N: AsRef<str>>(
     value[from_index..]
         .find(needle)
         .map(|index| (from_index + index) as i32)
+        .unwrap_or(-1)
+}
+
+pub fn java_string_last_index_of<V: AsRef<str>, N: AsRef<str>>(value: V, needle: N) -> i32 {
+    value
+        .as_ref()
+        .rfind(needle.as_ref())
+        .map(|index| index as i32)
+        .unwrap_or(-1)
+}
+
+pub fn java_string_last_index_of_from<V: AsRef<str>, N: AsRef<str>>(
+    value: V,
+    needle: N,
+    from_index: i32,
+) -> i32 {
+    let value = value.as_ref();
+    let needle = needle.as_ref();
+    if from_index < 0 {
+        return -1;
+    }
+    if needle.is_empty() {
+        return std::cmp::min(from_index as usize, value.len()) as i32;
+    }
+    let end = std::cmp::min((from_index as usize).saturating_add(needle.len()), value.len());
+    value[..end]
+        .rfind(needle)
+        .map(|index| index as i32)
         .unwrap_or(-1)
 }
 
@@ -14671,6 +14715,8 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
                     | ("substring", 1 | 2)
                     | ("hashCode", 0)
                     | ("indexOf", 1 | 2)
+                    | ("lastIndexOf", 1 | 2)
+                    | ("last_index_of", 1 | 2)
                     | ("replaceFirst", 2)
                     | ("replaceAll", 2)
                     | ("compareTo", 1)

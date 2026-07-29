@@ -13416,6 +13416,7 @@ fn retarget_native_java_string_call_from_shape<'a>(
         ("hashCode" | "hash_code", 0) => NativeJavaInstanceMethod::StringHashCode,
         ("getBytes" | "get_bytes", 0 | 1) => NativeJavaInstanceMethod::StringGetBytes,
         ("indexOf" | "index_of", 1 | 2) => NativeJavaInstanceMethod::StringIndexOf,
+        ("lastIndexOf" | "last_index_of", 1 | 2) => NativeJavaInstanceMethod::StringLastIndexOf,
         ("charAt" | "char_at", 1) => NativeJavaInstanceMethod::StringCharAt,
         ("compareTo" | "compare_to", 1) => NativeJavaInstanceMethod::StringCompareTo,
         ("compareToIgnoreCase" | "compare_to_ignore_case", 1) => {

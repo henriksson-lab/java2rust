@@ -1267,6 +1267,20 @@ errors from `380` to `379`. The two VCF filter split sites now render as
 `f_fields.extend(java_string_split(...))` rather than wrapping the split vector
 in `vec![...]`.
 
+Focused `String.lastIndexOf` update:
+`java_string_get_bytes_and_index_of_use_native_helpers` now also covers
+`lastIndexOf(char)` and `lastIndexOf(char, from)`. `lastIndexOf` reuses the
+shared native Java string-call path, normalizes char needles into string
+literals, and emits `java_string_last_index_of*` runtime helpers with `i32`
+Java index results.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-last-index-of-full-r3` translates
+all `32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `379` to `378`. `VCFUtils` now renders
+`referenceFile.getName().lastIndexOf('.')` as `java_string_last_index_of(...)`;
+the earlier missing `String.last_index_of`/missing helper row is gone.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

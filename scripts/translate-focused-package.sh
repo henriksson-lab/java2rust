@@ -1628,6 +1628,34 @@ pub fn java_string_index_of_from<V: AsRef<str>, N: AsRef<str>>(
         .unwrap_or(-1)
 }
 
+pub fn java_string_last_index_of<V: AsRef<str>, N: AsRef<str>>(value: V, needle: N) -> i32 {
+    value
+        .as_ref()
+        .rfind(needle.as_ref())
+        .map(|index| index as i32)
+        .unwrap_or(-1)
+}
+
+pub fn java_string_last_index_of_from<V: AsRef<str>, N: AsRef<str>>(
+    value: V,
+    needle: N,
+    from_index: i32,
+) -> i32 {
+    let value = value.as_ref();
+    let needle = needle.as_ref();
+    if from_index < 0 {
+        return -1;
+    }
+    if needle.is_empty() {
+        return std::cmp::min(from_index as usize, value.len()) as i32;
+    }
+    let end = std::cmp::min((from_index as usize).saturating_add(needle.len()), value.len());
+    value[..end]
+        .rfind(needle)
+        .map(|index| index as i32)
+        .unwrap_or(-1)
+}
+
 pub fn java_string_compare_to<L: AsRef<str>, R: AsRef<str>>(left: L, right: R) -> i32 {
     match left.as_ref().cmp(right.as_ref()) {
         std::cmp::Ordering::Less => -1,
@@ -1775,7 +1803,7 @@ fn java_simple_regex_literal(regex: &str) -> &str {
 }
 
 RUST
-  printf "java_string_substring\njava_string_hash_code\njava_list_hash_code\njava_set_hash_code\njava_map_hash_code\njava_value_hash_code\njava_string_index_of\njava_string_index_of_from\njava_string_compare_to\njava_string_compare_to_ignore_case\njava_string_equals_ignore_case\njava_primitive_compare_to\njava_parse_i8\njava_parse_i16\njava_parse_i32\njava_parse_i64\njava_parse_f32\njava_parse_f64\njava_string_from_byte_range\njava_string_from_bytes\njava_string_split\njava_string_matches\njava_string_replace_first\njava_string_replace_all\n" >> "$shared_support_types_path"
+  printf "java_string_substring\njava_string_hash_code\njava_list_hash_code\njava_set_hash_code\njava_map_hash_code\njava_value_hash_code\njava_string_index_of\njava_string_index_of_from\njava_string_last_index_of\njava_string_last_index_of_from\njava_string_compare_to\njava_string_compare_to_ignore_case\njava_string_equals_ignore_case\njava_primitive_compare_to\njava_parse_i8\njava_parse_i16\njava_parse_i32\njava_parse_i64\njava_parse_f32\njava_parse_f64\njava_string_from_byte_range\njava_string_from_bytes\njava_string_split\njava_string_matches\njava_string_replace_first\njava_string_replace_all\n" >> "$shared_support_types_path"
 fi
 
 if grep -R -q 'java_is_serializable' "$generated_dir"; then

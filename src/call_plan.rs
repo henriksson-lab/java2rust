@@ -397,6 +397,7 @@ pub enum NativeJavaInstanceMethod {
     StringHashCode,
     StringGetBytes,
     StringIndexOf,
+    StringLastIndexOf,
     StringCharAt,
     StringCompareTo,
     StringCompareToIgnoreCase,
@@ -507,6 +508,8 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             method:
                 NativeJavaInstanceMethod::StringLen
                 | NativeJavaInstanceMethod::SourceHashCode
+                | NativeJavaInstanceMethod::StringIndexOf
+                | NativeJavaInstanceMethod::StringLastIndexOf
                 | NativeJavaInstanceMethod::StringHashCode
                 | NativeJavaInstanceMethod::PrimitiveHashCode { .. },
             ..
@@ -3003,6 +3006,7 @@ pub fn native_java_string_instance_method(
         ("hashCode" | "hash_code", 0) => NativeJavaInstanceMethod::StringHashCode,
         ("getBytes" | "get_bytes", 0 | 1) => NativeJavaInstanceMethod::StringGetBytes,
         ("indexOf" | "index_of", 1 | 2) => NativeJavaInstanceMethod::StringIndexOf,
+        ("lastIndexOf" | "last_index_of", 1 | 2) => NativeJavaInstanceMethod::StringLastIndexOf,
         ("charAt" | "char_at", 1) => NativeJavaInstanceMethod::StringCharAt,
         ("compareTo" | "compare_to", 1) => NativeJavaInstanceMethod::StringCompareTo,
         ("compareToIgnoreCase" | "compare_to_ignore_case", 1) => {

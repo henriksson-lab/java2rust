@@ -30144,6 +30144,9 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     let char_at_key = CallableKey::method("String", "charAt", Staticness::Unknown, 1);
     let index_of_key = CallableKey::method("String", "indexOf", Staticness::Unknown, 1);
     let index_of_from_key = CallableKey::method("String", "indexOf", Staticness::Unknown, 2);
+    let last_index_of_key = CallableKey::method("String", "lastIndexOf", Staticness::Unknown, 1);
+    let last_index_of_from_key =
+        CallableKey::method("String", "lastIndexOf", Staticness::Unknown, 2);
     let get_bytes_key = CallableKey::method("String", "getBytes", Staticness::Unknown, 1);
     let split_key = CallableKey::method("String", "split", Staticness::Unknown, 2);
     let matches_key = CallableKey::method("String", "matches", Staticness::Unknown, 1);
@@ -30270,6 +30273,19 @@ fn stdlib_owns_known_jdk_content_method_facts() {
         .expect("String.indexOf(from) ABI should come from selected Rust stdlib facts");
     assert_eq!(
         index_of_from_abi.args,
+        vec![FacadeSlot::Borrowed, FacadeSlot::Owned]
+    );
+
+    let last_index_of_abi = stdlib_signature_facts
+        .facade_abi_for_key(&last_index_of_key)
+        .expect("String.lastIndexOf ABI should come from selected Rust stdlib facts");
+    assert_eq!(last_index_of_abi.args, vec![FacadeSlot::Borrowed]);
+
+    let last_index_of_from_abi = stdlib_signature_facts
+        .facade_abi_for_key(&last_index_of_from_key)
+        .expect("String.lastIndexOf(from) ABI should come from selected Rust stdlib facts");
+    assert_eq!(
+        last_index_of_from_abi.args,
         vec![FacadeSlot::Borrowed, FacadeSlot::Owned]
     );
 
