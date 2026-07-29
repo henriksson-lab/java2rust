@@ -5495,6 +5495,21 @@ errors from `382` to `380`. The ordinary VCFHeaderLineTranslator negated list
 equality rows are gone. The remaining `!hv == VCFHeaderVersion::VCF4_3` row is
 inside stream lambda lowering and belongs to the stream shared-plan backlog.
 
+2026-07-29 `Arrays.asList(single array)` cleanup:
+`Arrays.asList` now consults original Java expression type for its single
+argument before runtime lowered-shape fallback. If the argument is a
+non-primitive Java array, the call projects directly to the lowered collection
+value, preserving Java spread semantics for `String.split` and similar object
+arrays. Focused coverage:
+`arrays_as_list_single_string_array_spreads_for_add_all`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-arrays-as-list-split` translates
+all `32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `380` to `379`. The VCFCodec and VCF3Codec
+`fFields.addAll(Arrays.asList(filterString.split(...)))` sites now render as
+`extend(java_string_split(...))` instead of `extend(vec![java_string_split(...)])`.
+
 ## Rerun Protocol
 
 After each fix:

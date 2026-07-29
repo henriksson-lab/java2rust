@@ -4415,6 +4415,30 @@ fn documents_java_collection_api_gap() {
 }
 
 #[test]
+fn arrays_as_list_single_string_array_spreads_for_add_all() {
+    let translation = translate_source(&idiom_gap("ArraysAsListSplitAddAll.java"));
+
+    assert!(
+        translation
+            .rust
+            .contains("fields.extend(java_string_split(&filter_string, \",\", 0));")
+            && !translation.rust.contains("extend(vec![java_string_split")
+            && !translation.rust.contains(".add_all("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "arrays_as_list_split_add_all",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn map_size_return_int_uses_java_int_width() {
     let translation = translate_source(&idiom_gap("MapSizeReturnInt.java"));
 

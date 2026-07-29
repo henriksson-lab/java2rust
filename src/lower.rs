@@ -9536,6 +9536,11 @@ fn lower_arrays_as_list_single_object_array_call(
     {
         return Some(lower_expr(arg, env, ctx));
     }
+    let java_ty = crate::types::infer_expr_type(arg, env.type_env());
+    if matches!(java_ty, JavaType::Array(element) if !matches!(element.as_ref(), JavaType::Primitive(_)))
+    {
+        return Some(lower_expr(arg, env, ctx));
+    }
     let shape = infer_expr_shape_with_context(
         arg,
         env,

@@ -1253,6 +1253,20 @@ The remaining `cannot apply unary operator ! to type &&VCFHeaderVersion` row is
 the stream lambda `filter(hv -> !hv.equals(...))` path and should be fixed
 through shared stream call/slot planning, not another ordinary-call rule.
 
+Focused `Arrays.asList(single array)` update:
+`arrays_as_list_single_string_array_spreads_for_add_all` now passes. A single
+non-primitive Java array argument to `Arrays.asList` uses original Java type
+inference before lowered runtime shape inference, preserving Java spread
+semantics for calls such as `Arrays.asList(filterString.split(","))` while
+leaving primitive-array wrapping behavior conservative.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-arrays-as-list-split` translates
+all `32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `380` to `379`. The two VCF filter split sites now render as
+`f_fields.extend(java_string_split(...))` rather than wrapping the split vector
+in `vec![...]`.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from
