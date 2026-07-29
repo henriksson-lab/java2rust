@@ -1040,6 +1040,9 @@ pub struct CoercionShapeContentPolicy {
 
 pub fn rust_nominal_type_name_policy(java_ty: &JavaType) -> RustNominalTypeNamePolicy {
     let target_type = match java_ty {
+        java_ty if reifiable_raw_collection_runtime_target(java_ty).is_some() => {
+            reifiable_raw_collection_runtime_target(java_ty)
+        }
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
             let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
             crate::stdlib::boxed_primitive_type(&canonical)
@@ -1052,6 +1055,23 @@ pub fn rust_nominal_type_name_policy(java_ty: &JavaType) -> RustNominalTypeNameP
     RustNominalTypeNamePolicy {
         java_ty: java_ty.clone(),
         target_type,
+    }
+}
+
+fn reifiable_raw_collection_runtime_target(java_ty: &JavaType) -> Option<String> {
+    let JavaType::Named { args, .. } = java_ty else {
+        return None;
+    };
+    let reifiable_erasure = args.is_empty()
+        || args
+            .iter()
+            .all(|arg| matches!(arg, JavaType::Wildcard(None)));
+    if !reifiable_erasure {
+        return None;
+    }
+    match crate::stdlib::java_collection_kind_for_type(java_ty)? {
+        crate::stdlib::JavaCollectionKind::List => Some("Vec<Box<dyn std::any::Any>>".to_string()),
+        _ => None,
     }
 }
 
@@ -2580,13 +2600,16 @@ pub fn plan_instanceof_check_with_facts(
                 InstanceOfFallbackPolicy::PrimitiveTarget { java_ty },
             );
         }
-        InstanceOfTargetPolicy::RawOrWildcardTarget { java_ty } => {
+        InstanceOfTargetPolicy::RawOrWildcardTarget { java_ty }
+            if reifiable_raw_collection_runtime_target(&java_ty).is_none() =>
+        {
             return unsupported_instanceof_check(
                 actual,
                 target,
                 InstanceOfFallbackPolicy::RawOrWildcardTarget { java_ty },
             );
         }
+        InstanceOfTargetPolicy::RawOrWildcardTarget { .. } => {}
         InstanceOfTargetPolicy::MissingRuntimeTarget { java_ty } => {
             return unsupported_instanceof_check(
                 actual,

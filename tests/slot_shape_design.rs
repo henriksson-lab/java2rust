@@ -8964,6 +8964,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         apply_call_target(
             &CallTargetPlan::NativeCollectionMethod {
                 receiver: &counts,
+                receiver_ty: None,
                 method: NativeCollectionMethod::MapKeys,
             },
             Some(RustExpr::Var("counts".to_string())),

@@ -2274,6 +2274,89 @@ class ErasedObjectBooleanInstanceof {
 }
 
 #[test]
+fn erased_object_raw_list_instanceof_uses_vec_erasure_runtime_target() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class RawListInstanceofErasedObject {
+    Object show(Object value) {
+        if (value instanceof List) {
+            return (List) value;
+        }
+        return null;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("value.is::<Vec<Box<dyn std::any::Any>>>()")
+            && translation
+                .rust
+                .contains("downcast::<Vec<Box<dyn std::any::Any>>>()")
+            && !translation.rust.contains("unsupported Java instanceof")
+            && !translation.rust.contains("downcast::<List>()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "raw_list_instanceof_erased_object",
+        vec![GeneratedCrateModule {
+            name: "raw_list_instanceof_erased_object",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn raw_list_to_array_clones_erased_elements_with_runtime_helper() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class RawListToArrayErasedObject {
+    Object[] show(Object value) {
+        if (value instanceof List) {
+            return ((List) value).toArray();
+        }
+        return null;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("value.is::<Vec<Box<dyn std::any::Any>>>()")
+            && translation.rust.contains(
+                ".iter().map(|value| java_clone_erased_object_ref(value)).collect::<Vec<_>>()"
+            )
+            && !translation
+                .rust
+                .contains(".iter().cloned().collect::<Vec<_>>()")
+            && !translation.rust.contains("unsupported Java instanceof")
+            && !translation.rust.contains("downcast::<List>()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "raw_list_to_array_erased_object",
+        vec![GeneratedCrateModule {
+            name: "raw_list_to_array_erased_object",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn nullable_boolean_ternary_assignment_preserves_optional_string_slot() {
     let translation = translate_source(
         r#"

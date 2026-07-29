@@ -2907,23 +2907,23 @@ fn instanceof_rejects_primitive_raw_wildcard_and_missing_runtime_targets() {
         }]
     );
 
-    let raw_list = RustSlotShape::conservative(JavaType::Named {
-        name: "List".to_string(),
+    let raw_comparator = RustSlotShape::conservative(JavaType::Named {
+        name: "Comparator".to_string(),
         args: Vec::new(),
     });
-    let raw_check = plan_instanceof_check(&actual, &raw_list);
+    let raw_check = plan_instanceof_check(&actual, &raw_comparator);
     assert_eq!(
         raw_check.unsupported_diagnostics(),
         vec![ConversionDiagnostic {
             code: "unsupported_instanceof_raw_or_wildcard_target",
             message:
-                "unsupported Java instanceof check: raw or wildcard target type Named { name: \"List\", args: [] }"
+                "unsupported Java instanceof check: raw or wildcard target type Named { name: \"Comparator\", args: [] }"
                     .to_string(),
         }]
     );
 
     let wildcard = RustSlotShape::conservative(JavaType::Named {
-        name: "List".to_string(),
+        name: "Comparator".to_string(),
         args: vec![JavaType::Wildcard(None)],
     });
     let wildcard_check = plan_instanceof_check(&actual, &wildcard);
@@ -2932,7 +2932,7 @@ fn instanceof_rejects_primitive_raw_wildcard_and_missing_runtime_targets() {
         vec![ConversionDiagnostic {
             code: "unsupported_instanceof_raw_or_wildcard_target",
             message:
-                "unsupported Java instanceof check: raw or wildcard target type Named { name: \"List\", args: [Wildcard(None)] }"
+                "unsupported Java instanceof check: raw or wildcard target type Named { name: \"Comparator\", args: [Wildcard(None)] }"
                     .to_string(),
         }]
     );
@@ -2947,6 +2947,43 @@ fn instanceof_rejects_primitive_raw_wildcard_and_missing_runtime_targets() {
                 "unsupported Java instanceof check: target type Array(String) has no concrete runtime type"
                     .to_string(),
         }]
+    );
+}
+
+#[test]
+fn instanceof_allows_reifiable_raw_list_runtime_target() {
+    let mut actual = RustSlotShape::conservative(JavaType::Named {
+        name: "Object".to_string(),
+        args: Vec::new(),
+    });
+    actual.dispatch = DispatchShape::ErasedObject;
+    let raw_list = RustSlotShape::conservative(JavaType::Named {
+        name: "List".to_string(),
+        args: Vec::new(),
+    });
+    let wildcard_list = RustSlotShape::conservative(JavaType::Named {
+        name: "List".to_string(),
+        args: vec![JavaType::Wildcard(None)],
+    });
+
+    let raw_check = plan_instanceof_check(&actual, &raw_list);
+    assert_eq!(
+        raw_check,
+        InstanceOfCheck::ErasedObjectType {
+            target_type: "Vec<Box<dyn std::any::Any>>".to_string(),
+        }
+    );
+    assert_eq!(
+        render_instanceof_check(RustExpr::Var("value".to_string()), &raw_check),
+        RustExpr::Raw("value.is::<Vec<Box<dyn std::any::Any>>>()".to_string())
+    );
+
+    let wildcard_check = plan_instanceof_check(&actual, &wildcard_list);
+    assert_eq!(
+        wildcard_check,
+        InstanceOfCheck::ErasedObjectType {
+            target_type: "Vec<Box<dyn std::any::Any>>".to_string(),
+        }
     );
 }
 

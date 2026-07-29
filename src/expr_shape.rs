@@ -488,7 +488,9 @@ fn native_java_call_expr_shape(
         facts,
         env.type_env(),
     );
-    if let crate::call_plan::CallTargetPlan::NativeCollectionMethod { receiver, method } = &target
+    if let crate::call_plan::CallTargetPlan::NativeCollectionMethod {
+        receiver, method, ..
+    } = &target
         && let Some(lowered) =
             crate::call_plan::native_collection_lowered_type(receiver, *method, env.type_env())
     {

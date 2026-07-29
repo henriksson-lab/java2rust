@@ -218,6 +218,31 @@ plus the adjacent PrintStream overload tests. A VCF batch rerun was started at
 interrupted before crate assembly/compile summaries completed, so do not treat
 that directory as a corpus-quality baseline.
 
+2026-07-29 raw collection runtime target slice: `Object instanceof List` now
+uses the same erased JDK collection carrier as raw `List` type rendering:
+`Vec<Box<dyn std::any::Any>>`. This removes the phantom `List` runtime target
+and `downcast::<List>()` spelling for erased-object raw-list checks/casts while
+leaving non-carrier raw generics as explicit unsupported raw/wildcard targets.
+Native collection method call plans now carry the receiver Java type where
+available, so `((List) value).toArray()` can clone erased elements with
+`java_clone_erased_object_ref` instead of assuming `Box<dyn Any>: Clone`.
+Focused coverage: `instanceof_allows_reifiable_raw_list_runtime_target`,
+`instanceof_rejects_primitive_raw_wildcard_and_missing_runtime_targets`, and
+`erased_object_raw_list_instanceof_uses_vec_erasure_runtime_target`,
+`raw_list_to_array_clones_erased_elements_with_runtime_helper`.
+
+The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
+failures are a different class of issue. The translator currently records
+`NeedsInstanceof` on the declared base binding, but parsed source classes still
+default to concrete structs, and external-pack erased-object strategies are not
+allowed to replace parsed source representations. Do not paper over these cases
+by rendering concrete-to-concrete `instanceof` as `false` or by blindly erasing
+parsed source classes; that would lose Java runtime subtype identity or base
+class methods. Treat them as source hierarchy representation work: closed enum,
+dyn trait, or erased-object source representation must be selected from
+whole-program/source-summary evidence before the `instanceof` planner can lower
+those checks.
+
 2026-07-29 optional clone recovery and parse projection cleanup: clone recovery
 now checks borrowed target slots, including optional targets whose element slot
 borrows, before applying reused-owned optional clone recovery. This prevents

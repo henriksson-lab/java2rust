@@ -53,6 +53,7 @@ pub enum CallTargetPlan<'a> {
     },
     NativeCollectionMethod {
         receiver: &'a Expr,
+        receiver_ty: Option<JavaType>,
         method: NativeCollectionMethod,
     },
     NativeCollectionStatic {
@@ -2907,7 +2908,11 @@ fn plan_native_collection_receiver_call<'a>(
         ) => NativeCollectionMethod::Iterator,
         _ => return None,
     };
-    Some(CallTargetPlan::NativeCollectionMethod { receiver, method })
+    Some(CallTargetPlan::NativeCollectionMethod {
+        receiver,
+        receiver_ty: Some(receiver_ty),
+        method,
+    })
 }
 
 fn plan_native_java_receiver_call<'a>(

@@ -13718,6 +13718,7 @@ fn retarget_native_collection_to_array_from_shape<'a>(
     if is_java_collection_view_call(receiver) {
         return CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
             receiver,
+            receiver_ty: None,
             method: NativeCollectionMethod::ToArray,
         });
     }
@@ -13731,16 +13732,17 @@ fn retarget_native_collection_to_array_from_shape<'a>(
         .into_iter()
         .chain(std::iter::once(receiver_shape))
         .collect::<Vec<_>>();
-    let receiver_is_collection_like = receiver_shapes.iter().any(|shape| {
+    let receiver_collection_ty = receiver_shapes.iter().find_map(|shape| {
         let receiver_ty = crate::types::optional_element_type(&shape.java_ty)
             .unwrap_or_else(|| shape.java_ty.clone());
-        crate::stdlib::java_collection_kind_for_type(&receiver_ty).is_some()
+        crate::stdlib::java_collection_kind_for_type(&receiver_ty).map(|_| receiver_ty)
     });
-    if !receiver_is_collection_like {
+    let Some(receiver_ty) = receiver_collection_ty else {
         return plan;
-    }
+    };
     CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
         receiver,
+        receiver_ty: Some(receiver_ty),
         method: NativeCollectionMethod::ToArray,
     })
 }
@@ -13768,6 +13770,7 @@ fn retarget_native_collection_size_from_shape<'a>(
     }
     CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
         receiver,
+        receiver_ty: None,
         method: NativeCollectionMethod::Len,
     })
 }
@@ -15601,7 +15604,9 @@ fn native_collection_optional_element_borrow_lowered_type(
         ctx,
         env,
     );
-    let CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod { receiver, method }) = plan
+    let CallExprPlan::Target(CallTargetPlan::NativeCollectionMethod {
+        receiver, method, ..
+    }) = plan
     else {
         return None;
     };
@@ -21203,6 +21208,7 @@ fn lower_map_get_collection_mutation_call(
     let value_args = lower_args_for_call_target(
         &CallTargetPlan::NativeCollectionMethod {
             receiver: map_get_expr,
+            receiver_ty: None,
             method,
         },
         Some(map_get_expr),
@@ -21224,6 +21230,7 @@ fn lower_map_get_collection_mutation_call(
     Some(apply_call_target_with_lower_context(
         &CallTargetPlan::NativeCollectionMethod {
             receiver: map_get_expr,
+            receiver_ty: None,
             method,
         },
         Some(lowered_value_receiver),
@@ -21417,8 +21424,11 @@ fn lower_native_collection_call_expr_for_slot(
         ctx,
         env,
     );
-    let CallExprPlan::Target(target @ CallTargetPlan::NativeCollectionMethod { receiver, method }) =
-        plan
+    let CallExprPlan::Target(
+        target @ CallTargetPlan::NativeCollectionMethod {
+            receiver, method, ..
+        },
+    ) = plan
     else {
         return None;
     };

@@ -1941,10 +1941,47 @@ pub fn owned_map_values_set_projection(receiver: RustExpr) -> RustExpr {
 }
 
 pub fn owned_collection_to_vec_projection(receiver: RustExpr) -> RustExpr {
+    let receiver = collection_iteration_receiver(receiver);
+    RustExpr::Raw(format!("{receiver}.iter().cloned().collect::<Vec<_>>()",))
+}
+
+pub fn owned_collection_to_vec_projection_for_receiver_type(
+    receiver: RustExpr,
+    receiver_ty: Option<&JavaType>,
+) -> RustExpr {
+    if receiver_ty.is_some_and(raw_erased_object_list_carrier_type) {
+        return erased_object_vec_clone_projection(receiver);
+    }
+    owned_collection_to_vec_projection(receiver)
+}
+
+fn raw_erased_object_list_carrier_type(java_ty: &JavaType) -> bool {
+    let JavaType::Named { args, .. } = java_ty else {
+        return false;
+    };
+    let reifiable_erasure = args.is_empty()
+        || args
+            .iter()
+            .all(|arg| matches!(arg, JavaType::Wildcard(None)));
+    reifiable_erasure
+        && crate::stdlib::java_collection_kind_for_type(java_ty)
+            == Some(crate::stdlib::JavaCollectionKind::List)
+}
+
+fn erased_object_vec_clone_projection(receiver: RustExpr) -> RustExpr {
+    let receiver = collection_iteration_receiver(receiver);
     RustExpr::Raw(format!(
-        "{}.iter().cloned().collect::<Vec<_>>()",
-        emit::emit_expr(&receiver)
+        "{receiver}.iter().map(|value| java_clone_erased_object_ref(value)).collect::<Vec<_>>()",
     ))
+}
+
+fn collection_iteration_receiver(receiver: RustExpr) -> String {
+    let rendered = emit::emit_expr(&receiver);
+    if rust_receiver_expr_needs_parentheses(&receiver, &rendered) {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
 }
 
 pub fn java_iterator_from_collection_projection(receiver: RustExpr) -> RustExpr {
@@ -4302,7 +4339,7 @@ fn rust_receiver_expr_needs_parentheses(expr: &RustExpr, rendered: &str) -> bool
 }
 
 fn rust_method_receiver_needs_parentheses(rendered: &str) -> bool {
-    rendered.contains(" as ")
+    rendered.contains(" as ") || rendered.trim_start().starts_with('*')
 }
 
 fn render_clone_recovery_policy(policy: &CloneRecoveryPolicy) -> &'static str {

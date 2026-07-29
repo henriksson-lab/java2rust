@@ -20,7 +20,7 @@ use crate::coercion::{
     native_collection_from_source_projection, native_collection_with_capacity_projection,
     objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
     optional_get_owned_value_projection, optional_or_else_owned_value_projection,
-    owned_collection_to_vec_projection, owned_map_keys_vec_projection,
+    owned_collection_to_vec_projection_for_receiver_type, owned_map_keys_vec_projection,
     owned_map_values_vec_projection, owner_associated_path_projection,
     primitive_compare_to_projection, primitive_f64_method_projection,
     primitive_hash_code_projection, primitive_is_nan_projection, primitive_number_value_projection,
@@ -95,8 +95,13 @@ pub fn apply_call_target(
         CallTargetPlan::JavaClassStatic { rust_name } => {
             function_call_projection(java_class_static_path_projection(rust_name), args)
         }
-        CallTargetPlan::NativeCollectionMethod { method, .. } => apply_native_collection_method(
+        CallTargetPlan::NativeCollectionMethod {
+            method,
+            receiver_ty,
+            ..
+        } => apply_native_collection_method(
             lowered_receiver.expect("native collection target must provide receiver"),
+            receiver_ty.as_ref(),
             *method,
             args,
         ),
@@ -697,6 +702,7 @@ pub fn apply_collection_remove_if(receiver: RustExpr, predicate: &Expr) -> Optio
 
 fn apply_native_collection_method(
     receiver: RustExpr,
+    receiver_ty: Option<&JavaType>,
     method: NativeCollectionMethod,
     args: Vec<RustExpr>,
 ) -> RustExpr {
@@ -710,7 +716,7 @@ fn apply_native_collection_method(
         return owned_map_values_vec_projection(receiver);
     }
     if matches!(method, NativeCollectionMethod::ToArray) {
-        return owned_collection_to_vec_projection(receiver);
+        return owned_collection_to_vec_projection_for_receiver_type(receiver, receiver_ty);
     }
     if matches!(method, NativeCollectionMethod::Iterator) {
         return java_iterator_from_collection_projection(receiver);
