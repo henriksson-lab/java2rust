@@ -13,16 +13,16 @@ use new_java2rust::call_plan::{
     ArgumentLoweringPlan, CallExceptionPropagationPlan, CallExprPlan, CallStatementPlan,
     CallTargetPlan, NativeCollectionMethod, NativeCollectionNewTarget,
     NativeCollectionStaticMethod, NativeJavaInstanceMethod, NativeJavaStaticMethod,
-    TrivialAccessorCallPlan, external_call_lowered_type, external_call_returns_rust_result,
-    external_constructor_arg_shapes, facade_receiver_slot_plan, native_collection_arg_shapes,
-    native_collection_arg_shapes_with_facts, native_collection_lowered_type,
-    native_java_instance_receiver_type_hint, optional_borrowed_receiver_slot_plan,
-    optional_receiver_slot_plan, plan_call_arguments, plan_call_arguments_with_facts,
-    plan_call_arguments_with_facts_and_args, plan_call_exception_propagation, plan_call_expr,
-    plan_call_statement, plan_call_target, plan_call_target_with_facts,
-    plan_call_target_with_facts_and_arity, plan_constructor_arguments, plan_new_target,
-    plan_new_target_with_facts, plan_trivial_accessor_call, resolved_call_arg_shapes,
-    resolved_constructor_arg_shapes,
+    TrivialAccessorCallPlan, apply_fallback_receiver_rust_name, external_call_lowered_type,
+    external_call_returns_rust_result, external_constructor_arg_shapes, facade_receiver_slot_plan,
+    native_collection_arg_shapes, native_collection_arg_shapes_with_facts,
+    native_collection_lowered_type, native_java_instance_receiver_type_hint,
+    optional_borrowed_receiver_slot_plan, optional_receiver_slot_plan, plan_call_arguments,
+    plan_call_arguments_with_facts, plan_call_arguments_with_facts_and_args,
+    plan_call_exception_propagation, plan_call_expr, plan_call_statement, plan_call_target,
+    plan_call_target_with_facts, plan_call_target_with_facts_and_arity, plan_constructor_arguments,
+    plan_new_target, plan_new_target_with_facts, plan_trivial_accessor_call,
+    resolved_call_arg_shapes, resolved_constructor_arg_shapes,
 };
 use new_java2rust::coercion::{
     Coercion, OptionalReceiverProjection, RenderedMutableAliasProjection,
@@ -91,8 +91,8 @@ use new_java2rust::item_assembly::{
     raw_item, struct_item_for_type,
 };
 use new_java2rust::java_ir::{
-    Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, LambdaParam, Literal, Member,
-    Modifier, PrimitiveType, Stmt, WildcardBound,
+    Block, CallKind, ConstructorInvocationKind, Expr, JavaType, LambdaBody, LambdaParam, Literal,
+    Member, Modifier, PrimitiveType, ResolvedCall, Stmt, WildcardBound,
 };
 use new_java2rust::javalibs::{broad_ioutils_support_item, program_uses_broad_ioutils_facade};
 use new_java2rust::literal_lowering::literal_to_rust;
@@ -8476,6 +8476,43 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         plan_call_target(None, "readName", None).receiver_expr(),
         None
     );
+
+    let overload_safe_target = apply_fallback_receiver_rust_name(
+        CallExprPlan::Target(CallTargetPlan::FallbackReceiver {
+            receiver: &receiver,
+            rust_name: "println_1".to_string(),
+        }),
+        Some("println".to_string()),
+    );
+    assert!(matches!(
+        overload_safe_target,
+        CallExprPlan::Target(CallTargetPlan::FallbackReceiver {
+            rust_name,
+            ..
+        }) if rust_name == "println_1"
+    ));
+    let resolved_println = ResolvedCall {
+        declaring_type: "PrintStream".to_string(),
+        rust_name: "println".to_string(),
+        kind: CallKind::Instance,
+        return_type: JavaType::Void,
+        arg_coercions: Vec::new(),
+    };
+    let resolved_println_target = plan_call_target_with_facts_and_arity(
+        Some(&receiver),
+        "println",
+        1,
+        Some(&resolved_println),
+        &FactSet::default(),
+        &new_java2rust::types::TypeEnv::default(),
+    );
+    assert!(matches!(
+        resolved_println_target,
+        CallTargetPlan::FallbackReceiver {
+            rust_name,
+            ..
+        } if rust_name == "println_1"
+    ));
 
     let super_target = plan_call_target_with_facts(
         Some(&Expr::Super),

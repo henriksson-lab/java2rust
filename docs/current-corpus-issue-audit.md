@@ -1329,6 +1329,24 @@ errors from `320` to `318`. The two genotype-quality call sites in
 `VCFUtils::parse_vcf_double(...)`; the previous missing `Math::round` row is
 gone.
 
+Focused `PrintStream.print/println` arity-1 support update:
+JDK platform API facts now model one-argument `PrintStream.print/println`, the
+resolved external instance-call planner preserves arity-safe facade names, and
+generated support emits a base `println(arg)` compatibility alias when no
+zero-arg overload would conflict. Focused coverage:
+`optional_print_stream_field_println_uses_arity_named_support`,
+`optional_print_stream_field_println_with_throwing_arg_keeps_arity_name`, and
+`apply_call_target_uses_shared_call_projection_helpers`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-printstream-support-alias`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and remains at
+`318` generated Rust errors. The previous missing `PrintStream.println` row is
+gone. The same `VCFRecordCodec.encode` line now exposes a separate mutable
+optional-field receiver problem:
+`self.vcf_encoder.as_ref().unwrap().encode(context)?` cannot call a mutating
+`encode` method through `as_ref()`.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

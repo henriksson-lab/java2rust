@@ -6994,6 +6994,23 @@ impl ExternalApiFacadeSupport {
                             self.add_method(receiver_rust.clone(), overload_body);
                         }
                     }
+                    if receiver_key == "PrintStream"
+                        && matches!(fact.method_name.as_str(), "print" | "println")
+                        && *arg_count == 1
+                    {
+                        let base_method = crate::parser::to_snake_case(&fact.method_name);
+                        if !self.has_method_named(&receiver_rust, &base_method) {
+                            let alias_body = external_facade_instance_method_with_facts(
+                                facts,
+                                &receiver_key,
+                                &fact.method_name,
+                                &base_method,
+                                *arg_count,
+                                &return_rust,
+                            );
+                            self.add_method(receiver_rust.clone(), alias_body);
+                        }
+                    }
                     if self.has_method_named(&receiver_rust, &rust_method)
                         && !self.has_method_signature(&receiver_rust, &rust_method, *arg_count)
                     {

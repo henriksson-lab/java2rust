@@ -20,7 +20,7 @@ use crate::call_plan::{
     external_call_lowered_type_with_external_index,
     external_call_returns_rust_result_with_external_index,
     external_constructor_arg_shapes_with_args, external_constructor_returns_rust_result,
-    external_receiver_call_return_type_with_external_index,
+    external_method_rust_name, external_receiver_call_return_type_with_external_index,
     facade_abi_argument_plan_for_rust_method_name, facade_abi_argument_plan_for_rust_path,
     facade_receiver_slot_plan, known_external_call_lowered_type, native_collection_lowered_type,
     non_self_trivial_accessor_target, optional_borrowed_receiver_slot_plan,
@@ -8560,6 +8560,14 @@ fn lower_expr_with_refinements(
                 ctx,
             );
             let target = retarget_java_logging_facade_call(target, receiver.as_deref(), name);
+            let target = retarget_external_receiver_overload_name(
+                target,
+                receiver.as_deref(),
+                name,
+                args.len(),
+                env,
+                ctx,
+            );
             let target = retarget_receiverless_current_static_call(
                 target,
                 context_fallback_signature.as_ref(),
@@ -15389,6 +15397,73 @@ fn retarget_java_logging_facade_call<'a>(
     }
 }
 
+fn retarget_external_receiver_overload_name<'a>(
+    target: CallTargetPlan<'a>,
+    receiver: Option<&'a Expr>,
+    name: &str,
+    arg_count: usize,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> CallTargetPlan<'a> {
+    let Some(receiver) = receiver else {
+        return target;
+    };
+    let current_name = match &target {
+        CallTargetPlan::FallbackReceiver { rust_name, .. } => rust_name.as_str(),
+        CallTargetPlan::InstanceReceiver { rust_name, .. } => rust_name,
+        _ => return target,
+    };
+    let base_name = crate::parser::to_snake_case(name);
+    if current_name != base_name {
+        return target;
+    }
+    let Some(receiver_key) = receiver_external_type_key(receiver, env, ctx) else {
+        return target;
+    };
+    if ctx
+        .external_index
+        .external_api_effect_for_receiver_with_arity(Some(&receiver_key), name, Some(arg_count))
+        .is_none()
+        && crate::external_packs::external_api_effect_for_receiver_with_arity(
+            Some(&receiver_key),
+            name,
+            Some(arg_count),
+        )
+        .is_none()
+    {
+        return target;
+    }
+    let external_name = external_method_rust_name(&receiver_key, name, arg_count, ctx.facts);
+    if external_name == current_name {
+        return target;
+    }
+    CallTargetPlan::FallbackReceiver {
+        receiver,
+        rust_name: external_name,
+    }
+}
+
+fn receiver_external_type_key(receiver: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<String> {
+    let shape = infer_expr_shape_with_context(
+        receiver,
+        env,
+        ExprShapeContext {
+            signatures: Some(ctx.signatures),
+            representations: Some(ctx.representations),
+            facts: Some(ctx.facts),
+        },
+    );
+    let java_ty = crate::types::optional_element_type(&shape.java_ty).unwrap_or(shape.java_ty);
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            Some(crate::stdlib::canonical_external_receiver_type_key(&name))
+        }
+        JavaType::String => Some("String".to_string()),
+        JavaType::Array(_) => Some("Array".to_string()),
+        JavaType::Void | JavaType::Primitive(_) | JavaType::Wildcard(_) => None,
+    }
+}
+
 fn java_logging_receiver_name(receiver: &Expr) -> Option<&str> {
     match receiver {
         Expr::Var(receiver_name) => Some(receiver_name),
@@ -21617,6 +21692,14 @@ fn lower_external_call_expr_for_slot(
         ctx,
     );
     let target = retarget_java_logging_facade_call(target, receiver.as_deref(), name);
+    let target = retarget_external_receiver_overload_name(
+        target,
+        receiver.as_deref(),
+        name,
+        args.len(),
+        env,
+        ctx,
+    );
     let target =
         retarget_receiverless_current_static_call(target, context_fallback_signature.as_ref());
     let target = retarget_receiverless_resolved_static_owner_call(

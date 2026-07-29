@@ -30355,6 +30355,9 @@ fn java_platform_io_api_effect(
             ExternalApiRole::BooleanGetter,
             JavaType::Primitive(PrimitiveType::Boolean),
         ),
+        ("PrintStream", "print" | "println") if matches_arg_count(1) => {
+            (1, ExternalApiRole::SideEffect, JavaType::Void)
+        }
         ("PrintStream", "println" | "flush" | "close") if matches_arg_count(0) => {
             (0, ExternalApiRole::SideEffect, JavaType::Void)
         }

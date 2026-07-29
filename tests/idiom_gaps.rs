@@ -12300,6 +12300,85 @@ class PrintStreamOutputStreamConstructorUse {
 }
 
 #[test]
+fn optional_print_stream_field_println_uses_arity_named_support() {
+    let effect = new_java2rust::external_packs::java_platform_api_effect_for_receiver_with_arity(
+        "PrintStream",
+        "println",
+        Some(1),
+    )
+    .expect("PrintStream.println(String) should have a platform ABI fact");
+    assert_eq!(effect.role, ExternalApiRole::SideEffect);
+    assert_eq!(effect.return_type, Some(JavaType::Void));
+
+    let translation = translate_source(
+        r#"
+import java.io.PrintStream;
+
+class OptionalPrintStreamFieldPrintln {
+    private PrintStream outputStream = null;
+
+    void emit(String value) {
+        outputStream.println(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.output_stream.as_ref().unwrap().println_1(value);")
+            && translation
+                .rust
+                .contains("pub fn println_1<T0>(&self, _arg0: T0) -> ()")
+            && translation
+                .rust
+                .contains("pub fn println<T0>(&self, _arg0: T0) -> ()")
+            && !translation
+                .rust
+                .contains("self.output_stream.as_ref().unwrap().println(value);"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn optional_print_stream_field_println_with_throwing_arg_keeps_arity_name() {
+    let translation = translate_source(
+        r#"
+import java.io.IOException;
+import java.io.PrintStream;
+
+class OptionalPrintStreamThrowingArg {
+    private PrintStream outputStream = null;
+    private Encoder encoder = null;
+
+    void emit(String value) throws IOException {
+        outputStream.println(encoder.encode(value));
+    }
+}
+
+class Encoder {
+    String encode(String value) throws IOException {
+        return value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.output_stream.as_ref().unwrap().println_1(")
+            && !translation
+                .rust
+                .contains("self.output_stream.as_ref().unwrap().println("),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn file_output_stream_constructor_selects_file_and_string_overload_slots() {
     let translation = translate_source(
         r#"

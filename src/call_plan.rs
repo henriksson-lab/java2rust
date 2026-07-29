@@ -1528,14 +1528,25 @@ pub fn apply_fallback_receiver_rust_name<'a>(
 ) -> CallExprPlan<'a> {
     match (plan, fallback_rust_name) {
         (
-            CallExprPlan::Target(CallTargetPlan::FallbackReceiver { receiver, .. }),
+            CallExprPlan::Target(CallTargetPlan::FallbackReceiver {
+                receiver,
+                rust_name: planned_name,
+            }),
             Some(rust_name),
-        ) => CallExprPlan::Target(CallTargetPlan::FallbackReceiver {
-            receiver,
-            rust_name,
-        }),
+        ) if !method_name_has_arity_suffix(&planned_name) => {
+            CallExprPlan::Target(CallTargetPlan::FallbackReceiver {
+                receiver,
+                rust_name,
+            })
+        }
         (plan, _) => plan,
     }
+}
+
+fn method_name_has_arity_suffix(name: &str) -> bool {
+    name.rsplit_once('_').is_some_and(|(_, suffix)| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 pub fn apply_fallback_self_rust_name<'a>(
@@ -2112,6 +2123,20 @@ pub fn plan_call_target_with_external_index_and_arity<'a>(
     }
 
     if let Some(call) = resolved {
+        if let Some(external_rust_name) =
+            resolved_external_instance_call_rust_name(call, name, arg_count, facts)
+        {
+            return match (&call.kind, receiver) {
+                (CallKind::Instance, Some(receiver)) => CallTargetPlan::FallbackReceiver {
+                    receiver,
+                    rust_name: external_rust_name,
+                },
+                (CallKind::Instance, None) => CallTargetPlan::FallbackSelf {
+                    rust_name: external_rust_name,
+                },
+                (CallKind::Static, Some(_)) | (CallKind::Static, None) => unreachable!(),
+            };
+        }
         return match (&call.kind, receiver) {
             (CallKind::Instance, Some(receiver)) => CallTargetPlan::InstanceReceiver {
                 receiver,
@@ -2177,6 +2202,43 @@ pub fn plan_call_target_with_external_index_and_arity<'a>(
             rust_name: crate::parser::to_snake_case(name),
         }
     }
+}
+
+fn resolved_external_instance_call_rust_name(
+    call: &ResolvedCall,
+    java_name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> Option<String> {
+    if call.kind != CallKind::Instance {
+        return None;
+    }
+    let effect = facts
+        .external_lookup_index()
+        .external_api_effect_for_receiver_with_arity(
+            Some(&call.declaring_type),
+            java_name,
+            Some(arg_count),
+        )
+        .cloned()
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                Some(&call.declaring_type),
+                java_name,
+                Some(arg_count),
+            )
+        })?;
+    if !matches!(
+        effect.provenance,
+        FactProvenance::BuiltinExternalModel
+            | FactProvenance::ExternalLibraryPack
+            | FactProvenance::UserOverride
+    ) {
+        return None;
+    }
+    let external_name =
+        external_method_rust_name(&call.declaring_type, java_name, arg_count, facts);
+    (external_name != call.rust_name).then_some(external_name)
 }
 
 fn plan_java_object_to_string_fallback<'a>(

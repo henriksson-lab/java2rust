@@ -191,6 +191,21 @@ same actual-shape construction path to map lookups, field getters, facade
 optional returns, and any remaining nullable helper that still manually chooses
 between `Some(value)`, `Some(&value)`, `.as_ref()`, or `.as_deref()`.
 
+2026-07-29 PrintStream overload cleanup: JDK `PrintStream.print/println`
+arity-1 calls now have explicit platform API facts, resolved external instance
+calls can preserve overload-safe arity names, and generated support emits a
+base `println(arg)` compatibility alias only when no zero-arg `println` support
+would conflict. Focused coverage:
+`optional_print_stream_field_println_uses_arity_named_support`,
+`optional_print_stream_field_println_with_throwing_arg_keeps_arity_name`, and
+`apply_call_target_uses_shared_call_projection_helpers`. VCF rerun
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-printstream-support-alias` stayed
+at 32/32 translated, 20 invalid-pattern files, and 318 generated-Rust errors:
+the previous missing `PrintStream.println` row is gone, but the same call now
+exposes `cannot borrow data in a & reference as mutable` from the nested
+`self.vcf_encoder.as_ref().unwrap().encode(context)?` argument. Treat that as
+the next receiver-mutability/optional-field gap if continuing this line.
+
 ## 2026-07-28 Batch Status: Trait Return Slot Widening
 
 Latest full boundary after this slice:
