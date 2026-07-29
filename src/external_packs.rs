@@ -19951,6 +19951,21 @@ const BCF_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
     modeled_semantic_constructor("BCF2Codec", 0),
 ];
 
+const BCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
+    modeled_semantic_field_typed(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "SIZEOF_BCF_HEADER",
+        "int",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "BCF2Codec",
+        "SIZEOF_BCF_HEADER",
+        "int",
+        ExternalFieldKind::StaticFinal,
+    ),
+];
+
 const VCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field_typed(
         "htsjdk.variant.utils.GeneralUtils",
@@ -20653,6 +20668,18 @@ const SAMTOOLS_UTIL_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("FastqConstants", "SECOND_OF_PAIR"),
     modeled_semantic_field("htsjdk.samtools.util.SequenceUtil", "VALID_BASES_UPPER"),
     modeled_semantic_field("SequenceUtil", "VALID_BASES_UPPER"),
+    modeled_semantic_field_typed(
+        "htsjdk.samtools.util.IOUtil",
+        "GZIP_HEADER_READ_LENGTH",
+        "int",
+        ExternalFieldKind::StaticFinal,
+    ),
+    modeled_semantic_field_typed(
+        "IOUtil",
+        "GZIP_HEADER_READ_LENGTH",
+        "int",
+        ExternalFieldKind::StaticFinal,
+    ),
     modeled_semantic_field_typed(
         "htsjdk.samtools.util.FileExtensions",
         "FASTA",
@@ -27450,7 +27477,7 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             api_effects: &[],
             modeled_apis: &[],
             modeled_constructors: BCF_MODELED_CONSTRUCTORS,
-            modeled_fields: NO_MODELED_FIELDS,
+            modeled_fields: BCF_MODELED_FIELDS,
             unsupported_apis: &[],
         },
         ExternalPackManifest {

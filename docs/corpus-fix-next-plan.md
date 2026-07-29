@@ -231,6 +231,16 @@ Focused coverage: `instanceof_allows_reifiable_raw_list_runtime_target`,
 `erased_object_raw_list_instanceof_uses_vec_erasure_runtime_target`,
 `raw_list_to_array_clones_erased_elements_with_runtime_helper`.
 
+2026-07-29 HTSJDK typed static integer fields: the BCF and samtools-util
+external packs now type `BCF2Codec.SIZEOF_BCF_HEADER` and
+`IOUtil.GZIP_HEADER_READ_LENGTH` as `static final int` field facts. Generated
+support emits associated `i32` constants for those facades, and static field
+reads use the resolved facade aliases instead of falling back to phantom
+`downcast::<FIELD_NAME>` forms. Focused coverage:
+`htsjdk_bcf_pack_declares_codec_boundary`,
+`htsjdk_util_locatable_pack_strategy_preserves_typed_facade_boundary`, and
+`htsjdk_static_integer_constants_emit_typed_facade_surfaces`.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still

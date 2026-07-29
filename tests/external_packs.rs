@@ -1177,6 +1177,22 @@ fn htsjdk_util_locatable_pack_strategy_preserves_typed_facade_boundary() {
     assert_eq!(simple.strategy, HierarchyStrategy::ConcreteStruct);
     assert_eq!(qualified.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(simple.provenance, FactProvenance::ExternalLibraryPack);
+
+    let gzip_header_read_length = facts
+        .external_field_for("IOUtil", "GZIP_HEADER_READ_LENGTH")
+        .expect("IOUtil.GZIP_HEADER_READ_LENGTH should be typed by the samtools util pack");
+    assert_eq!(
+        gzip_header_read_length.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+    assert_eq!(
+        gzip_header_read_length.field_kind,
+        ExternalFieldKind::StaticFinal
+    );
+    assert_eq!(
+        gzip_header_read_length.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
 }
 
 #[test]
@@ -4436,6 +4452,26 @@ fn htsjdk_bcf_pack_declares_codec_boundary() {
         new_java2rust::stdlib::external_constructor_provenance("BCF2Codec", &[]),
         FactProvenance::ExternalLibraryPack,
         "BCF2Codec/0 precision should come from the BCF pack, not stdlib"
+    );
+
+    let header_size = facts
+        .external_field_for("BCF2Codec", "SIZEOF_BCF_HEADER")
+        .expect("BCF2Codec.SIZEOF_BCF_HEADER should be typed by the BCF pack");
+    assert_eq!(
+        header_size.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+    assert_eq!(header_size.field_kind, ExternalFieldKind::StaticFinal);
+    assert_eq!(header_size.provenance, FactProvenance::ExternalLibraryPack);
+
+    let dispatched = new_java2rust::external_packs::external_field_for(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "SIZEOF_BCF_HEADER",
+    )
+    .expect("BCF2Codec.SIZEOF_BCF_HEADER should be pack-dispatched");
+    assert_eq!(
+        dispatched.field_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
     );
 }
 

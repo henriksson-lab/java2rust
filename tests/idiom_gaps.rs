@@ -19148,6 +19148,58 @@ class SamRecordStaticByteArrayConstants {
 }
 
 #[test]
+fn htsjdk_static_integer_constants_emit_typed_facade_surfaces() {
+    let translation = translate_source(
+        r#"
+import htsjdk.samtools.util.IOUtil;
+import htsjdk.variant.bcf2.BCF2Codec;
+
+class HtsjdkStaticIntegerConstants {
+    int combined() {
+        return BCF2Codec.SIZEOF_BCF_HEADER + IOUtil.GZIP_HEADER_READ_LENGTH;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "external_pack_missing_field"),
+        "{:?}\n{}",
+        translation.diagnostics.iter().collect::<Vec<_>>(),
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub const SIZEOF_BCF_HEADER: i32 = 0;")
+            && translation
+                .rust
+                .contains("pub const GZIP_HEADER_READ_LENGTH: i32 = 0;")
+            && translation
+                .rust
+                .contains("return BCF2Codec::SIZEOF_BCF_HEADER + IOUtil::GZIP_HEADER_READ_LENGTH;")
+            && !translation.rust.contains("downcast::<SIZEOF_BCF_HEADER>")
+            && !translation
+                .rust
+                .contains("downcast::<GZIP_HEADER_READ_LENGTH>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "htsjdk_static_integer_constants",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn sam_tag_enum_variant_constants_emit_typed_facade_surfaces() {
     let translation = translate_source(
         r#"
