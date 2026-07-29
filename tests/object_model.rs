@@ -845,11 +845,11 @@ abstract class ReadKey {
         Some(true)
     );
     assert!(resolved.facts.is_final_type(&JavaType::Named {
-        name: "FragmentKey".to_string(),
+        name: "ReadKey.FragmentKey".to_string(),
         args: Vec::new(),
     }));
     assert!(resolved.facts.is_final_type(&JavaType::Named {
-        name: "PairKey".to_string(),
+        name: "ReadKey.PairKey".to_string(),
         args: Vec::new(),
     }));
 
@@ -858,13 +858,19 @@ abstract class ReadKey {
 
     assert_eq!(
         read_key.direct_subtypes,
-        vec!["FragmentKey".to_string(), "PairKey".to_string()]
+        vec![
+            "ReadKey.FragmentKey".to_string(),
+            "ReadKey.PairKey".to_string()
+        ]
     );
     assert_eq!(
         read_key.strategy,
         ObjectRepresentation::ClosedEnum {
             enum_name: "ReadKeyValue".to_string(),
-            variants: vec!["FragmentKey".to_string(), "PairKey".to_string()],
+            variants: vec![
+                "ReadKeyFragmentKey".to_string(),
+                "ReadKeyPairKey".to_string()
+            ],
         }
     );
     assert!(read_key.rejected.is_empty());
@@ -888,14 +894,17 @@ abstract class OpenBase {
         None
     );
     assert!(!resolved.facts.is_final_type(&JavaType::Named {
-        name: "OpenChild".to_string(),
+        name: "OpenBase.OpenChild".to_string(),
         args: Vec::new(),
     }));
 
     let object_plan = plan_object_model(&resolved.program, &resolved.facts);
     let open_base = object_plan.strategy_for("OpenBase").unwrap();
 
-    assert_eq!(open_base.direct_subtypes, vec!["OpenChild".to_string()]);
+    assert_eq!(
+        open_base.direct_subtypes,
+        vec!["OpenBase.OpenChild".to_string()]
+    );
     assert_eq!(open_base.strategy, ObjectRepresentation::ConcreteStruct);
 }
 

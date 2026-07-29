@@ -5614,6 +5614,14 @@ while still in `batch_parse_global_emit_start`; do not treat
 `.tmp/corpus-rerun-20260729-htsjdk-vcf-after-source-owned-external-pack` or
 `.tmp/vcf-source-boundary-smoke-out` as baselines.
 
+2026-07-29 nested closed-enum identity cleanup:
+Nested subtype identities remain qualified in hierarchy/source facts, e.g.
+`ReadKey.FragmentKey`, but closed-enum representation variants now project
+those subtype keys through Rust type naming before emission, e.g.
+`ReadKeyFragmentKey(ReadKeyFragmentKey)`. This restores `cargo test --test
+object_model --quiet` and avoids carrying dotted Java keys into Rust enum
+variant positions.
+
 ## Rerun Protocol
 
 After each fix:

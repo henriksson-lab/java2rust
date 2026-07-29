@@ -912,7 +912,7 @@ fn apply_closed_enum_strategy_selection(facts: &EffectiveFacts<'_>, plan: &mut O
             strategy.rejected.push(RejectedObjectStrategy {
                 strategy: ObjectRepresentation::ClosedEnum {
                     enum_name: format!("{}Value", strategy.root),
-                    variants: strategy.direct_subtypes.clone(),
+                    variants: closed_enum_variant_names_for_subtypes(&strategy.direct_subtypes),
                 },
                 reason: closed_enum_rejection_reason(
                     &strategy.root,
@@ -1344,7 +1344,9 @@ pub fn closed_enum_inference_policy_with_effective_facts(
     let proof_policy =
         closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, facts);
     let variants = match &proof_policy.proof {
-        ClosedEnumProof::Proven { variants, .. } => Some(variants.clone()),
+        ClosedEnumProof::Proven { variants, .. } => {
+            Some(closed_enum_variant_names_for_subtypes(variants))
+        }
         _ => None,
     };
     let representation = variants.and_then(|variants| match current_representation {
@@ -1366,6 +1368,13 @@ pub fn closed_enum_inference_policy_with_effective_facts(
         representation,
         provenance,
     }
+}
+
+fn closed_enum_variant_names_for_subtypes(subtypes: &[String]) -> Vec<String> {
+    subtypes
+        .iter()
+        .map(|subtype| crate::slot_render::rust_name_for_java_named_type(subtype))
+        .collect()
 }
 
 pub fn closed_enum_fact_policy(

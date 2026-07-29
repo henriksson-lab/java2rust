@@ -1351,6 +1351,11 @@ rerun at `.tmp/corpus-rerun-20260729-htsjdk-vcf-after-source-owned-external-pack
 and the three-file smoke at `.tmp/vcf-source-boundary-smoke-out` were
 interrupted in global batch analysis and are not baselines.
 
+Focused nested closed-enum identity update:
+Hierarchy facts keep nested subtype keys qualified, while inferred closed-enum
+representation variants now use Rust-safe type names for payload variants.
+`cargo test --test object_model --quiet` is back to green.
+
 Focused `PrintStream.print/println` arity-1 support update:
 JDK platform API facts now model one-argument `PrintStream.print/println`, the
 resolved external instance-call planner preserves arity-safe facade names, and
