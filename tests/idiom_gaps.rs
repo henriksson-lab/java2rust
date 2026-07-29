@@ -2259,6 +2259,40 @@ class ErasedObjectFieldNoCloneDerive {
 }
 
 #[test]
+fn reused_optional_erased_object_cast_clones_with_erased_helper() {
+    let translation = translate_source(
+        r#"
+class ReusedOptionalErasedObjectCastClone {
+    void accept(String value) {}
+
+    void run(Object maybe) {
+        if (maybe != null) {
+            accept((String) maybe);
+            maybe.toString();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "maybe.as_ref().map(|value| java_clone_erased_object_ref(value))/* TODO(translation): validate added clone */.expect(\"Java null receiver\").downcast::<String>()"
+        ) && !translation.rust.contains("maybe.as_ref().cloned()/* TODO(translation): validate added clone */.expect(\"Java null receiver\").downcast::<String>()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "reused_optional_erased_object_cast_clone",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn concrete_self_cast_flows_through_current_type_slot_without_downcast() {
     let translation = translate_source(
         r#"

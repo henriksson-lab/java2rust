@@ -5276,6 +5276,27 @@ failure on `AbstractVCFCodec` is gone. Remaining boxed-clone errors are now
 call-boundary `Option<Box<dyn Any>>`/map clone recovery and typed `VCFHeader`
 clone capability gaps, not unconditional source-struct derive eligibility.
 
+2026-07-29 optional erased call-boundary clone recovery: reused nullable
+`Object` arguments now use the same optional carrier clone-recovery decision
+when they are hidden behind casts or unshaped argument lowering. The recovery
+looks through transparent casts to find the moved source binding and source
+shape, admits optional erased-object carriers into the clone-recovery path, and
+renders `java_clone_erased_object_ref` instead of `.cloned()`/consuming
+`unwrap()`. String-view coercion also strips complex leading deref projections
+before appending `.as_str()`, so cloned erased `String` downcasts can feed
+borrowed `&str` slots.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-optional-erased-clone-recovery`
+translates all `32/32` files, keeps `invalid_pattern_files=20`, and reduces
+generated Rust errors from `448` to `445`. The previous call-boundary
+`Option<&Box<dyn Any>>::cloned()` style failure is gone. Remaining clone-shaped
+rows are direct `Option<Box<dyn Any>>.clone()`/map clone recovery and typed
+`VCFHeader` clone capability gaps; top families remain broad mismatched types,
+type annotations, unsupported concrete/concrete `instanceof`, incompatible `?`
+usage, source-super constructor lowering, and missing/uncertain VCF facade
+methods.
+
 ## Rerun Protocol
 
 After each fix:

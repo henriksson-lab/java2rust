@@ -3819,6 +3819,8 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             let rendered = emit::emit_expr(&expr);
             if let Some(borrowed_item) = simple_deref_projection_source(&rendered) {
                 RustExpr::Raw(format!("{borrowed_item}.as_str()"))
+            } else if let Some(borrowed_item) = rendered.trim().strip_prefix('*') {
+                RustExpr::Raw(format!("{borrowed_item}.as_str()"))
             } else {
                 RustExpr::Raw(format!("{rendered}.as_str()"))
             }
