@@ -11620,6 +11620,9 @@ fn lower_args_for_call_target(
     {
         plan = source_plan;
     }
+    if let Some(parse_plan) = native_numeric_parse_argument_plan(target, args.len()) {
+        plan = parse_plan;
+    }
     if matches!(plan, ArgumentLoweringPlan::Unshaped { .. })
         && args.len() == 1
         && let Some(lowered) = lower_unshaped_argument_for_call_target(&args[0], target, env, ctx)
@@ -11734,6 +11737,33 @@ fn lower_args_for_call_target(
             })
             .collect(),
         _ => lower_args_with_plan(args, env, plan, ctx),
+    }
+}
+
+fn native_numeric_parse_argument_plan(
+    target: &CallTargetPlan<'_>,
+    arg_count: usize,
+) -> Option<ArgumentLoweringPlan> {
+    let CallTargetPlan::NativeJavaStatic { method } = target else {
+        return None;
+    };
+    match method {
+        crate::call_plan::NativeJavaStaticMethod::IntegerParseInt if matches!(arg_count, 1 | 2) => {
+            let mut shapes = vec![borrowed_string_content_shape()];
+            if arg_count == 2 {
+                shapes.push(value_shape(JavaType::Primitive(PrimitiveType::Int)));
+            }
+            Some(ArgumentLoweringPlan::Shaped(shapes))
+        }
+        crate::call_plan::NativeJavaStaticMethod::FloatParseFloat
+        | crate::call_plan::NativeJavaStaticMethod::DoubleParseDouble
+            if arg_count == 1 =>
+        {
+            Some(ArgumentLoweringPlan::Shaped(vec![
+                borrowed_string_content_shape(),
+            ]))
+        }
+        _ => None,
     }
 }
 

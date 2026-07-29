@@ -2732,6 +2732,48 @@ class OptionalSequenceGetConcreteSlot {
 }
 
 #[test]
+fn integer_parse_int_unwraps_sequence_get_argument() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class IntegerParseSequenceGet {
+    private List<String> nullableValues;
+
+    int parseAt(List<String> values, int index) {
+        return Integer.parseInt(values.get(index));
+    }
+
+    int parseNullableAt(int index) {
+        return Integer.parseInt(nullableValues.get(index));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("values.get(index as usize).as_ref().expect(\"Java null receiver\").as_str().parse::<i32>().unwrap()")
+            && translation
+                .rust
+                .contains("self.nullable_values.as_ref().unwrap().get(index as usize).as_ref().expect(\"Java null receiver\").as_str().parse::<i32>().unwrap()")
+            && !translation.rust.contains(".get(index as usize).parse::<i32>()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "integer_parse_sequence_get",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn collection_get_result_unwraps_before_array_indexing() {
     let translation = translate_source(
         r#"
