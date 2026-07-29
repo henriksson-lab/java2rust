@@ -710,7 +710,28 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
         }
         OptionalShapeCoercionPolicy::NoChange => {}
     }
+    if let Some(projected) = apply_borrowed_set_slice_view(expr.clone(), plan) {
+        return projected;
+    }
     apply_coercions(expr, &plan.coercions())
+}
+
+fn apply_borrowed_set_slice_view(expr: RustExpr, plan: &ShapeCoercionPlan) -> Option<RustExpr> {
+    if !matches!(plan.view, ViewCoercionPolicy::BorrowSequenceSliceView)
+        || !matches!(plan.target.ownership, OwnershipShape::SharedBorrow)
+        || !matches!(plan.target.view, ViewShape::Slice)
+        || crate::stdlib::java_collection_kind_for_type(&plan.actual.java_ty)
+            != Some(crate::stdlib::JavaCollectionKind::Set)
+    {
+        return None;
+    }
+    let rendered = emit::emit_expr(&expr);
+    if rendered.ends_with(".as_slice()") {
+        return Some(expr);
+    }
+    Some(RustExpr::Raw(format!(
+        "&({rendered}).iter().cloned().collect::<Vec<_>>()"
+    )))
 }
 
 fn render_optional_element_projection(expr: RustExpr, mapped_value: RustExpr) -> RustExpr {

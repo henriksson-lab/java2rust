@@ -254,6 +254,26 @@ coverage: `typed_set_add_source_constructor_keeps_concrete_element_slot`,
 `source_value_struct_with_java_hash_equality_derives_eq_and_hash`, plus
 `cargo fmt --check`, `cargo check --quiet`, and `git diff --check`.
 
+HTSJDK VCF rerun after that checkpoint:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-typed-collection-source-ctors`
+translated 32/32 files with 20 invalid-pattern files and reduced generated
+Rust errors from the prior verified `371` to `354`. The idiom sweep now reports
+zero `java_collection_api` occurrences. Remaining top buckets are mismatched
+types, type annotations, concrete `instanceof`, inherited `super(...)`
+constructors, generic header-line dispatch, and residual source/facade method
+precision.
+
+2026-07-29 set-to-slice view coercion: a Java `Set<T>` flowing into a
+slice-shaped borrowed `Collection<T>` slot now renders a borrowed temporary
+`Vec` collected from iteration rather than `.as_slice()` on `HashSet`. This
+targets the VCF `makeGetMetaDataSet(Set<VCFHeaderLine>)` residual without
+changing the existing `Vec`/array-backed borrowed-slice projection. Focused
+coverage: `set_to_borrowed_slice_collects_temporary_vec_view`,
+`view_coercion_policy_owns_sequence_slice_adapters`,
+`optional_sequence_to_slice_uses_borrowed_unwrap_then_slice_view`,
+`typed_set_add_source_constructor_keeps_concrete_element_slot`,
+`cargo fmt --check`, `cargo check --quiet`, and `git diff --check`.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still

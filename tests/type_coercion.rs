@@ -2592,6 +2592,35 @@ fn view_coercion_policy_owns_sequence_slice_adapters() {
 }
 
 #[test]
+fn set_to_borrowed_slice_collects_temporary_vec_view() {
+    let element_ty = JavaType::Named {
+        name: "SimpleInterval".to_string(),
+        args: Vec::new(),
+    };
+    let set_ty = JavaType::Named {
+        name: "Set".to_string(),
+        args: vec![element_ty.clone()],
+    };
+    let array_ty = JavaType::Array(Box::new(element_ty));
+    let actual = RustSlotShape::conservative(set_ty);
+    let mut target = RustSlotShape::conservative(array_ty);
+    target.ownership = OwnershipShape::SharedBorrow;
+    target.view = ViewShape::Slice;
+
+    let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
+
+    assert_eq!(plan.view, ViewCoercionPolicy::BorrowSequenceSliceView);
+    assert_eq!(
+        apply_expr_to_slot(
+            RustExpr::Raw("self.lines".to_string()),
+            actual,
+            &Slot::Argument(target)
+        ),
+        RustExpr::Raw("&(self.lines).iter().cloned().collect::<Vec<_>>()".to_string())
+    );
+}
+
+#[test]
 fn optional_sequence_to_slice_uses_borrowed_unwrap_then_slice_view() {
     let element_ty = JavaType::Named {
         name: "SimpleInterval".to_string(),
