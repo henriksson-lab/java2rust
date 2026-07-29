@@ -346,6 +346,23 @@ from `347` to `345`. The old missing `get_raw_path` and
 `for_each_remaining` rows are gone; the iterator site now exposes the adjacent
 method-reference owner issue as unresolved `intervalList::add`.
 
+2026-07-30 HTSJDK Log warning support: the samtools-util external pack now
+declares `htsjdk.samtools.util.Log.warn(String)` / `Log.warn(String)` as a
+read-only side-effect API with a borrowed string argument, plus modeled API
+coverage. This keeps the package-specific logger behavior in the external-pack
+layer and lets generated facade support add `impl Log { warn(&self, &str) }`
+when static `Log log` fields are used. Focused coverage:
+`builtin_external_pack_manifests_declare_boundaries_and_crate_hooks`,
+`htsjdk_samtools_util_pack_models_locatable_interval_and_iterator_effects`,
+`htsjdk_log_static_field_warn_uses_pack_support`, `cargo fmt --check`,
+`cargo check --quiet`, and `git diff --check`. After rebuilding the release
+translator with `cargo build --release`, HTSJDK VCF rerun
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-htsjdk-log-warn-release`
+translated 32/32 files with 20 invalid-pattern files and reduced generated Rust
+errors from `345` to `344`; the stale-binary probe
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-htsjdk-log-warn` stayed at `345`
+and should not be used as evidence for this slice.
+
 The adjacent VCF `VCFHeaderLine instanceof VCFInfoHeaderLine`/`VCFIDHeaderLine`
 failures are a different class of issue. The translator currently records
 `NeedsInstanceof` on the declared base binding, but parsed source classes still

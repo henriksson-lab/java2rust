@@ -597,6 +597,15 @@ fn builtin_external_pack_manifests_declare_boundaries_and_crate_hooks() {
         }),
         "SAM tools iterator peek behavior should be declared in the pack manifest"
     );
+    assert!(
+        samtools_util.api_effects.iter().any(|effect| {
+            effect.receiver_type == "Log"
+                && effect.method_name == "warn"
+                && effect.arg_count == Some(1)
+                && effect.role == ExternalApiRole::SideEffect
+        }),
+        "SAM tools Log.warn behavior should be declared in the pack manifest"
+    );
 }
 
 #[test]
@@ -14844,6 +14853,30 @@ fn htsjdk_samtools_util_pack_models_locatable_interval_and_iterator_effects() {
     assert_eq!(
         interval_tree_put.receiver_mutability,
         ReceiverMutabilityFact::MutatesReceiver
+    );
+
+    let log_warn = facts
+        .external_api_effect_for_receiver_with_arity(Some("Log"), "warn", Some(1))
+        .expect("Log.warn should be modeled by the samtools-util pack");
+    assert_eq!(log_warn.role, ExternalApiRole::SideEffect);
+    assert_eq!(
+        log_warn.receiver_mutability,
+        ReceiverMutabilityFact::ReadOnly
+    );
+    assert_eq!(log_warn.return_type, None);
+    assert_eq!(log_warn.provenance, FactProvenance::ExternalLibraryPack);
+
+    let log_warn_message = facts
+        .external_api_argument_effect_for_receiver_with_arity(Some("Log"), "warn", Some(1), 0)
+        .expect("Log.warn message argument should be modeled by the samtools-util pack");
+    assert_eq!(log_warn_message.parameter_type, Some(JavaType::String));
+    assert_eq!(
+        log_warn_message.alias_policy,
+        ExternalArgumentAliasPolicy::Borrowed
+    );
+    assert_eq!(
+        log_warn_message.provenance,
+        FactProvenance::ExternalLibraryPack
     );
 
     let peek = facts

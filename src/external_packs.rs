@@ -6203,6 +6203,8 @@ const SAMTOOLS_UTIL_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
 const SAMTOOLS_UTIL_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     samtools_util_interval_list_add_argument("htsjdk.samtools.util.IntervalList"),
     samtools_util_interval_list_add_argument("IntervalList"),
+    samtools_util_log_string_argument("htsjdk.samtools.util.Log", "warn"),
+    samtools_util_log_string_argument("Log", "warn"),
 ];
 
 const fn samtools_util_interval_list_add_argument(
@@ -6217,6 +6219,22 @@ const fn samtools_util_interval_list_add_argument(
         parameter_nullability: NullabilityState::DefinitelyNonNull,
         argument_mutability: ReceiverMutabilityFact::ReadOnly,
         alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+    }
+}
+
+const fn samtools_util_log_string_argument(
+    receiver_type: &'static str,
+    method_name: &'static str,
+) -> ExternalPackArgumentEffect {
+    ExternalPackArgumentEffect {
+        receiver_type,
+        method_name,
+        arg_count: Some(1),
+        parameter_index: 0,
+        parameter_type: Some("String"),
+        parameter_nullability: NullabilityState::DefinitelyNonNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::Borrowed,
     }
 }
 
@@ -14332,6 +14350,13 @@ const SAMTOOLS_UTIL_API_EFFECTS: &[ExternalPackApiEffect] = &[
         0,
         NullabilityState::DefinitelyNonNull,
     ),
+    semantic_side_effect_with_arity(
+        "htsjdk.samtools.util.Log",
+        "warn",
+        1,
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_side_effect_with_arity("Log", "warn", 1, NullabilityState::DefinitelyNonNull),
     semantic_typed_effect_with_arity(
         "htsjdk.samtools.seekablestream.SeekableStreamFactory",
         "getInstance",
@@ -27017,6 +27042,8 @@ const SAMTOOLS_UTIL_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("AbstractAsyncWriter", "write"),
     modeled_semantic("htsjdk.samtools.util.AbstractAsyncWriter", "close"),
     modeled_semantic("AbstractAsyncWriter", "close"),
+    modeled_semantic("htsjdk.samtools.util.Log", "warn"),
+    modeled_semantic("Log", "warn"),
     modeled_semantic(
         "htsjdk.samtools.seekablestream.SeekableStreamFactory",
         "getInstance",

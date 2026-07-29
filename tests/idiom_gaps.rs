@@ -9820,6 +9820,41 @@ fn documents_class_literal_logger_gap() {
 }
 
 #[test]
+fn htsjdk_log_static_field_warn_uses_pack_support() {
+    let translation = translate_source(
+        r#"
+import htsjdk.samtools.util.Log;
+
+class HtsjdkLogStaticFieldWarnUse {
+    private static final Log log = Log.getInstance(HtsjdkLogStaticFieldWarnUse.class);
+
+    void run(String sample) {
+        log.warn("slow " + sample);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub struct Log")
+            && translation.rust.contains("pub fn warn")
+            && translation.rust.contains("Self::log.warn(")
+            && !translation.rust.contains("no method named `warn`"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "htsjdk_log_static_field_warn",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn documents_class_literal_registration_gap() {
     let translation = translate_source(&idiom_gap("ClassLiteralRegistration.java"));
 
