@@ -6169,6 +6169,53 @@ class MapGetOptionalBorrowedArg {
 }
 
 #[test]
+fn map_get_return_uses_nullable_signature_and_optional_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapGetNullableReturn {
+    private HashMap<String, String> fields = new HashMap<String, String>();
+
+    String fromParam(HashMap<String, String> values, String key) {
+        return values.get(key);
+    }
+
+    String fromField(String key) {
+        return fields.get(key);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn from_param(&self, values: &std::collections::HashMap<String, String>, key: &str) -> Option<String>")
+            && translation.rust.contains("return values.get(key).cloned();")
+            && translation
+                .rust
+                .contains("pub fn from_field(&self, key: &str) -> Option<String>")
+            && translation
+                .rust
+                .contains("return self.fields.get(key).cloned();")
+            && !translation.rust.contains("-> String {\n        return values.get(key);")
+            && !translation.rust.contains("-> String {\n        return self.fields.get(key);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "map_get_nullable_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn map_get_optional_receiver_to_string_uses_java_null_receiver_policy() {
     let translation = translate_source(&idiom_gap("MapGetOptionalReceiverToString.java"));
 

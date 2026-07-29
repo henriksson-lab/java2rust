@@ -8141,15 +8141,23 @@ struct SourceReturnNullabilityContext<'a> {
     facts: &'a FactSet,
     field_names: HashSet<String>,
     shadowed_names: HashSet<String>,
+    binding_types: HashMap<String, JavaType>,
 }
 
 impl<'a> SourceReturnNullabilityContext<'a> {
     fn for_method(ty: &'a TypeDecl, method: &MethodDecl, body: &Block, facts: &'a FactSet) -> Self {
         let mut field_names = HashSet::new();
+        let mut binding_types = method
+            .params
+            .iter()
+            .map(|param| (param.name.clone(), param.ty.clone()))
+            .collect::<HashMap<_, _>>();
         for member in &ty.members {
             if let crate::java_ir::Member::Field(field) = member {
                 field_names.insert(field.name.clone());
                 field_names.insert(crate::parser::to_snake_case(&field.name));
+                binding_types.insert(field.name.clone(), field.ty.clone());
+                binding_types.insert(crate::parser::to_snake_case(&field.name), field.ty.clone());
             }
         }
         let mut shadowed_names = method
@@ -8168,6 +8176,7 @@ impl<'a> SourceReturnNullabilityContext<'a> {
             facts,
             field_names,
             shadowed_names,
+            binding_types,
         }
     }
 
@@ -8182,6 +8191,13 @@ impl<'a> SourceReturnNullabilityContext<'a> {
             _ => return None,
         };
         self.facts.field_nullability_for(self.type_name, field_name)
+    }
+
+    fn expr_nullability_state(&self, expr: &Expr) -> Option<NullabilityState> {
+        if expr_is_java_map_get_call(expr, &self.binding_types) {
+            return Some(NullabilityState::MaybeNull);
+        }
+        source_expr_nullability_state(expr)
     }
 }
 
@@ -8451,7 +8467,8 @@ fn source_return_expr_nullability_state(
         Expr::FieldAccess(_, _) => ctx
             .and_then(|ctx| ctx.field_nullability_for_expr(expr))
             .unwrap_or_else(|| {
-                source_expr_nullability_state(expr).unwrap_or(NullabilityState::Unknown)
+                ctx.and_then(|ctx| ctx.expr_nullability_state(expr))
+                    .unwrap_or(NullabilityState::Unknown)
             }),
         Expr::Ternary {
             then_expr,
@@ -8461,7 +8478,41 @@ fn source_return_expr_nullability_state(
             source_return_expr_nullability_state(then_expr, binding_states, ctx, refinements),
             source_return_expr_nullability_state(else_expr, binding_states, ctx, refinements),
         ]),
-        _ => source_expr_nullability_state(expr).unwrap_or(NullabilityState::Unknown),
+        _ => ctx
+            .and_then(|ctx| ctx.expr_nullability_state(expr))
+            .or_else(|| source_expr_nullability_state(expr))
+            .unwrap_or(NullabilityState::Unknown),
+    }
+}
+
+fn expr_is_java_map_get_call(expr: &Expr, binding_types: &HashMap<String, JavaType>) -> bool {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return false;
+    };
+    if name != "get" || args.len() != 1 {
+        return false;
+    }
+    receiver_expr_java_type(receiver, binding_types)
+        .and_then(|ty| crate::stdlib::java_map_type_args(&ty).map(|_| ()))
+        .is_some()
+}
+
+fn receiver_expr_java_type(
+    expr: &Expr,
+    binding_types: &HashMap<String, JavaType>,
+) -> Option<JavaType> {
+    match expr {
+        Expr::Var(name) => binding_types.get(name).cloned(),
+        Expr::FieldAccess(receiver, field) if is_this_receiver_expr(receiver) => {
+            binding_types.get(field).cloned()
+        }
+        _ => None,
     }
 }
 
