@@ -5857,6 +5857,26 @@ annotations, unresolved HTSJDK/SAM support types, concrete `instanceof`,
 super-constructor lowering, generic header-line dispatch, optional/erased-object
 recovery, and collection representation compatibility.
 
+2026-07-29 optional enum-constant slot guard:
+Source Java enum static-field lowering no longer short-circuits the shared slot
+conversion path when the target is `Option<Enum>`. Closed-enum direct projection
+is still used for non-optional enum targets, while optional enum targets can
+wrap through `SlotConversionPlan`. Focused coverage:
+`nullable_source_enum_field_switch_keeps_concrete_enum_storage`,
+`borrowed_enum_constructor_param_stores_owned_optional_field_element`,
+`cargo check --quiet`, `cargo fmt --check`, and release rebuild.
+
+HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-optional-enum-constant-slot`
+translated 32/32 files with 20 invalid-pattern files and 455 generated-Rust
+errors. The total did not move, and `VCFCompoundHeaderLine` still emits
+`count_type: VCFHeaderLineCount::INTEGER` and `line_type: Some(line_type)` in
+the generated struct literal. That means the VCF path is not the enum-constant
+projection helper; it is using a stale or inconsistent constructor field-value
+shape before struct assembly. Next work should make constructor field-value
+lowering verify/adapt against the final signature field shape used by struct
+emission, especially for inherited/super-constructor assembly.
+
 ## Rerun Protocol
 
 After each fix:

@@ -7490,6 +7490,46 @@ class Token {
 }
 
 #[test]
+fn borrowed_enum_constructor_param_stores_owned_optional_field_element() {
+    let translation = translate_source(
+        r#"
+class BorrowedEnumConstructorParamStoreBase {
+    String key;
+
+    BorrowedEnumConstructorParamStoreBase(String key, String value) {
+        this.key = key;
+    }
+}
+
+class BorrowedEnumConstructorParamStore extends BorrowedEnumConstructorParamStoreBase {
+    enum Mode { FORMAT, INFO }
+    Mode mode = null;
+
+    BorrowedEnumConstructorParamStore(Object mode) {
+        this((Mode) mode, "");
+    }
+
+    BorrowedEnumConstructorParamStore(Mode mode, String ignored) {
+        super(mode.toString(), "");
+        this.mode = mode;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("mode: Some(mode)")
+            && !translation.rust.contains("self.mode = Some(mode)")
+            && (translation.rust.contains("mode: Some(*mode)")
+                || translation.rust.contains("mode: Some(mode.clone()")
+                || translation.rust.contains("self.mode = Some(*mode)")
+                || translation.rust.contains("self.mode = Some(mode.clone()")),
+        "borrowed enum constructor parameter should be recovered before optional field storage:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn context_translation_uses_sibling_static_string_constant_shape() {
     let caller = r#"
 class ContextConstantCaller {

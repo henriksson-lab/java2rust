@@ -6052,9 +6052,11 @@ fn lower_java_enum_static_field_access_for_slot(
     let source_interface_trait_name =
         source_enum_directly_implements_target_interface(&owner, &target.java_ty, ctx);
     match &target.dispatch {
-        DispatchShape::ClosedEnum { enum_name } => rendered
-            .starts_with(&format!("{enum_name}::"))
-            .then_some(lowered),
+        DispatchShape::ClosedEnum { enum_name } if target.optional_element_type().is_none() => {
+            rendered
+                .starts_with(&format!("{enum_name}::"))
+                .then_some(lowered)
+        }
         _ if target
             .optional_element_type()
             .is_some_and(|element_ty| same_concrete_java_type(&element_ty, &actual.java_ty))
