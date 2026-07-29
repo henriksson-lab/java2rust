@@ -424,9 +424,12 @@ impl ExternalPackManifest {
                     type_name: field.type_name.to_string(),
                     field_name: field.field_name.to_string(),
                 },
-                field_type: field.field_type.map(parse_type).or_else(|| {
-                    external_pack_modeled_field_type(field.type_name, field.field_name)
-                }),
+                field_type: field
+                    .field_type
+                    .map(|field_type| parse_external_pack_field_type(field_type, field.field_kind))
+                    .or_else(|| {
+                        external_pack_modeled_field_type(field.type_name, field.field_name)
+                    }),
                 field_kind: field.field_kind,
                 provenance: FactProvenance::ExternalLibraryPack,
             });
@@ -2318,6 +2321,9 @@ fn push_external_pack_field_fact(
         },
         field_type: parsed_metadata
             .field_type
+            .map(|field_type| {
+                parse_external_pack_field_type_text(&field_type, parsed_metadata.field_kind)
+            })
             .or_else(|| external_pack_modeled_field_type(type_name, field_name)),
         field_kind: parsed_metadata.field_kind,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -2326,7 +2332,7 @@ fn push_external_pack_field_fact(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExternalPackFieldMetadata {
-    field_type: Option<JavaType>,
+    field_type: Option<String>,
     field_kind: ExternalFieldKind,
 }
 
@@ -2355,7 +2361,7 @@ fn parse_external_pack_field_metadata(
                 );
                 return None;
             }
-            parsed.field_type = Some(parse_type(type_name));
+            parsed.field_type = Some(type_name.to_string());
         } else if let Some(kind) = token.strip_prefix("const-kind=") {
             let Some(field_kind) = parse_external_field_kind(kind) else {
                 push_external_pack_parse_error(
@@ -27279,6 +27285,32 @@ const fn modeled_semantic_field_typed(
         field_kind,
         coverage: ExternalApiCoverage::Semantic,
     }
+}
+
+fn parse_external_pack_field_type(
+    field_type: &'static str,
+    field_kind: ExternalFieldKind,
+) -> JavaType {
+    parse_external_pack_field_type_text(field_type, field_kind)
+}
+
+fn parse_external_pack_field_type_text(
+    field_type: &str,
+    field_kind: ExternalFieldKind,
+) -> JavaType {
+    let trimmed = field_type.trim();
+    if field_kind == ExternalFieldKind::NestedType
+        && !trimmed.contains('<')
+        && !trimmed.ends_with("[]")
+        && trimmed.contains('.')
+        && !matches!(trimmed, "java.lang.String" | "String")
+    {
+        return JavaType::Named {
+            name: trimmed.to_string(),
+            args: Vec::new(),
+        };
+    }
+    parse_type(trimmed)
 }
 
 const fn commons_math_localized_format_simple(

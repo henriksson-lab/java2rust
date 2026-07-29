@@ -5635,13 +5635,18 @@ Focused coverage:
 `semantic_analysis_uses_variantutils_observed_utils_and_enum_pack_entries`, and
 `external_enum_variant_fields_do_not_emit_nested_type_aliases`.
 
-Residual external-pack test failures observed while running the full suite:
-`java_sql_pack_does_not_claim_project_connection_or_reflection_class_names`
-still lacks the `Class.forName` argument effect fact in semantic output, and
-`builtin_external_pack_facts_are_generated_from_manifest_boundaries` still
-misses generated argument effect coverage for
-`htsjdk.tribble.AbstractFeatureReader.getFeatureReader` argument 1. These
-failures reproduce individually and are not part of the VCF alias fix.
+2026-07-29 external-pack lookup cleanup:
+The residual external-pack failures are resolved. Plain no-arity argument-effect
+lookup now explicitly accepts arity-specific facts only when the matching
+overloads agree on the argument effect, so manifest verification and semantic
+queries can see facts such as `Class.forName(String)` and
+`AbstractFeatureReader.getFeatureReader(..., indexPath, ...)` without leaking
+those facts into strict arity-specific call planning. Field lookup now prefers
+exact owner names before aliases, and explicit `nested-type` field metadata
+preserves qualified nested type identities.
+
+Verification:
+`cargo test --test external_packs --quiet` passes with 166 tests.
 
 ## Rerun Protocol
 

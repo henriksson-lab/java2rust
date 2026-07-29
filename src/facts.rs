@@ -163,7 +163,8 @@ impl<'a> ExternalFactLookupIndex<'a> {
         type_name: &str,
         field_name: &str,
     ) -> Option<&'a ExternalFieldFact> {
-        self.find_external_field_for(type_name, field_name, true)
+        self.find_exact_external_field_for(type_name, field_name)
+            .or_else(|| self.find_external_field_for(type_name, field_name, true))
             .or_else(|| self.find_external_field_for(type_name, field_name, false))
     }
 
@@ -324,6 +325,22 @@ impl<'a> ExternalFactLookupIndex<'a> {
                 external_type_name_matches(&fact.field.type_name, type_name)
             };
             if type_matches && external_field_name_matches(&fact.field.field_name, field_name) {
+                return Some(fact);
+            }
+        }
+        None
+    }
+
+    fn find_exact_external_field_for(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<&'a ExternalFieldFact> {
+        for index in self.external_field_candidate_indices(field_name) {
+            let fact = &self.facts.external_field_facts[index];
+            if fact.field.type_name == type_name
+                && external_field_name_matches(&fact.field.field_name, field_name)
+            {
                 return Some(fact);
             }
         }
@@ -1804,6 +1821,74 @@ impl FactSet {
                             && fact.parameter_index == parameter_index
                     })
             })
+            .or_else(|| {
+                if arg_count.is_some() {
+                    return None;
+                }
+                self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && external_optional_type_name_matches(
+                            fact.receiver_type.as_deref(),
+                            receiver_type,
+                        )
+                        && fact.parameter_index == parameter_index
+                        && fact.provenance == FactProvenance::UserOverride
+                })
+            })
+            .or_else(|| {
+                if arg_count.is_some() {
+                    return None;
+                }
+                self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && fact.receiver_type.is_none()
+                        && fact.parameter_index == parameter_index
+                        && fact.provenance == FactProvenance::UserOverride
+                })
+            })
+            .or_else(|| {
+                if arg_count.is_some() {
+                    return None;
+                }
+                self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && external_optional_type_name_matches(
+                            fact.receiver_type.as_deref(),
+                            receiver_type,
+                        )
+                        && fact.parameter_index == parameter_index
+                })
+            })
+            .or_else(|| {
+                if arg_count.is_some() {
+                    return None;
+                }
+                self.unambiguous_explicit_arity_external_api_argument_effect(|fact| {
+                    external_method_name_matches(&fact.method_name, method_name)
+                        && fact.receiver_type.is_none()
+                        && fact.parameter_index == parameter_index
+                })
+            })
+    }
+
+    fn unambiguous_explicit_arity_external_api_argument_effect(
+        &self,
+        matches: impl Fn(&ExternalApiArgumentEffectFact) -> bool,
+    ) -> Option<&ExternalApiArgumentEffectFact> {
+        let mut selected = None;
+        for fact in self.external_api_argument_effect_facts.iter().rev() {
+            if fact.arg_count.is_none() || !matches(fact) {
+                continue;
+            }
+            let Some(current) = selected else {
+                selected = Some(fact);
+                continue;
+            };
+            if !external_api_argument_effects_agree(current, fact) {
+                return None;
+            }
+        }
+        selected
     }
 
     pub fn external_api_argument_effect_for_key(
@@ -2296,7 +2381,8 @@ impl FactSet {
         type_name: &str,
         field_name: &str,
     ) -> Option<&ExternalFieldFact> {
-        self.find_external_field_for(type_name, field_name, true)
+        self.find_exact_external_field_for(type_name, field_name)
+            .or_else(|| self.find_external_field_for(type_name, field_name, true))
             .or_else(|| self.find_external_field_for(type_name, field_name, false))
     }
 
@@ -2350,6 +2436,17 @@ impl FactSet {
                 external_type_name_matches(&fact.field.type_name, type_name)
             };
             type_matches && external_field_name_matches(&fact.field.field_name, field_name)
+        })
+    }
+
+    fn find_exact_external_field_for(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<&ExternalFieldFact> {
+        self.external_field_facts.iter().rev().find(|fact| {
+            fact.field.type_name == type_name
+                && external_field_name_matches(&fact.field.field_name, field_name)
         })
     }
 
@@ -2996,6 +3093,17 @@ fn external_method_name_matches(fact_method_name: &str, query_method_name: &str)
                 .iter()
                 .any(|fact_alias| fact_alias == query_alias)
         })
+}
+
+fn external_api_argument_effects_agree(
+    first: &ExternalApiArgumentEffectFact,
+    second: &ExternalApiArgumentEffectFact,
+) -> bool {
+    first.parameter_type == second.parameter_type
+        && first.parameter_nullability == second.parameter_nullability
+        && first.argument_mutability == second.argument_mutability
+        && first.alias_policy == second.alias_policy
+        && first.provenance == second.provenance
 }
 
 fn external_type_name_aliases(type_name: &str) -> Vec<String> {

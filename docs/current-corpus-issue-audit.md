@@ -1366,13 +1366,16 @@ fields. This targets the old generated aliases
 `semantic_analysis_uses_variantutils_observed_utils_and_enum_pack_entries`, and
 `external_enum_variant_fields_do_not_emit_nested_type_aliases`.
 
-External-pack residuals:
-`cargo test --test external_packs --quiet` currently has two unrelated
-standalone failures: missing `Class.forName` argument facts in
-`java_sql_pack_does_not_claim_project_connection_or_reflection_class_names`,
-and missing generated argument effect coverage for
-`htsjdk.tribble.AbstractFeatureReader.getFeatureReader` argument 1 in
-`builtin_external_pack_facts_are_generated_from_manifest_boundaries`.
+External-pack lookup cleanup:
+`cargo test --test external_packs --quiet` is back to green. No-arity
+argument-effect lookup now falls back to explicit-arity facts only when the
+matching overload facts agree on type, nullability, mutability, alias policy,
+and provenance. This restores the `Class.forName` platform boundary fact and
+manifest-boundary verification for
+`htsjdk.tribble.AbstractFeatureReader.getFeatureReader` without weakening
+arity-specific call planning. Field lookup now prefers exact owner spelling
+before direct aliases, and explicit `nested-type` field metadata preserves
+qualified nested type identities.
 
 Focused `PrintStream.print/println` arity-1 support update:
 JDK platform API facts now model one-argument `PrintStream.print/println`, the
