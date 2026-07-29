@@ -427,6 +427,7 @@ pub enum NativeJavaStaticMethod {
     MathMin,
     MathLog,
     MathExp,
+    MathRound,
     MathToIntExact,
     IntegerParseInt,
     FloatParseFloat,
@@ -506,6 +507,7 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             method:
                 NativeJavaStaticMethod::IntegerParseInt
                 | NativeJavaStaticMethod::MathMin
+                | NativeJavaStaticMethod::MathRound
                 | NativeJavaStaticMethod::MathToIntExact,
         }
         | CallTargetPlan::NativeJavaInstance {
@@ -3151,6 +3153,7 @@ fn plan_native_java_static_call<'a>(
         ("Math", "min") => NativeJavaStaticMethod::MathMin,
         ("Math", "log") => NativeJavaStaticMethod::MathLog,
         ("Math", "exp") => NativeJavaStaticMethod::MathExp,
+        ("Math", "round") => NativeJavaStaticMethod::MathRound,
         ("Math", "toIntExact" | "to_int_exact") => NativeJavaStaticMethod::MathToIntExact,
         ("Integer", "parseInt" | "parse_int") => NativeJavaStaticMethod::IntegerParseInt,
         ("Float", "parseFloat" | "parse_float") => NativeJavaStaticMethod::FloatParseFloat,

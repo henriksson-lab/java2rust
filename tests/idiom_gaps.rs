@@ -591,6 +591,10 @@ class JdkNumericAndFormatFacades {
         return Math.exp(value);
     }
 
+    static long rounded(double value) {
+        return Math.round(value);
+    }
+
     static boolean missing(double value) {
         return Double.isNaN(value);
     }
@@ -623,6 +627,7 @@ class JdkNumericAndFormatFacades {
         translation.rust.contains("(value as f64).ln()")
             && translation.rust.contains("(2 as f64).ln()")
             && translation.rust.contains("(value as f64).exp()")
+            && translation.rust.contains("(value as f64).round() as i64")
             && translation.rust.contains("value.is_nan()")
             && translation.rust.contains("value.parse::<f32>().unwrap()")
             && translation.rust.contains("return value as i32;")
@@ -630,6 +635,7 @@ class JdkNumericAndFormatFacades {
             && translation.rust.contains("value.to_string()")
             && !translation.rust.contains("Math::log")
             && !translation.rust.contains("Math::exp")
+            && !translation.rust.contains("Math::round")
             && !translation.rust.contains("Math::to_int_exact")
             && !translation.rust.contains("Double::is_na_n")
             && !translation.rust.contains("Float::is_na_n")

@@ -1315,6 +1315,20 @@ mismatches, inference holes, missing VCF source-boundary types such as
 `VCFHeader`/`VCFHeaderLine`/`AbstractVCFCodec`, and generic `T` method surface
 gaps.
 
+Focused `Math.round` native static update:
+`jdk_numeric_and_decimal_format_facades_keep_precise_return_shapes` now covers
+`Math.round(double)`. `Math.round` is planned through the shared native Java
+static-call path, lowers to `(value as f64).round() as i64`, and no longer
+requires an emitted `Math::round` facade method for ordinary calls.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-math-round` translates all
+`32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `320` to `318`. The two genotype-quality call sites in
+`VCF3Codec` and `VCFCodec` now inline Rust rounding over
+`VCFUtils::parse_vcf_double(...)`; the previous missing `Math::round` row is
+gone.
+
 ## Next Batch
 
 1. Convert the exposed full FastQC families from

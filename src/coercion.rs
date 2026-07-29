@@ -1896,6 +1896,10 @@ pub fn primitive_f64_method_projection(arg: RustExpr, method: &str) -> RustExpr 
     RustExpr::Raw(format!("({} as f64).{method}()", emit::emit_expr(&arg)))
 }
 
+pub fn math_round_projection(arg: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!("({} as f64).round() as i64", emit::emit_expr(&arg)))
+}
+
 pub fn len_i32_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Raw(format!("{}.len() as i32", emit::emit_expr(&expr)))
 }

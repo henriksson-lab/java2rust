@@ -5557,6 +5557,19 @@ previous missing `increment_and_get` row is gone. The next VCF work should use
 the new baseline's top families: type mismatches, inference holes, missing
 VCF source-boundary types, and generic `T` method surfaces.
 
+2026-07-29 `Math.round` native static cleanup:
+`Math.round` now uses the same native Java static-call planning path as
+`Math.log`, `Math.exp`, and `Math.toIntExact`, with an explicit Java long/i64
+result shape and a shared `math_round_projection`. Focused coverage:
+`jdk_numeric_and_decimal_format_facades_keep_precise_return_shapes`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-math-round` translates all
+`32/32` files, keeps `invalid_pattern_files=20`, and reduces generated Rust
+errors from `320` to `318`. The VCF genotype-quality calls now render as
+`(VCFUtils::parse_vcf_double(...) as f64).round() as i64`, and the previous
+missing `Math::round` row is gone.
+
 ## Rerun Protocol
 
 After each fix:
