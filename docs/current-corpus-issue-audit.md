@@ -1356,6 +1356,24 @@ Hierarchy facts keep nested subtype keys qualified, while inferred closed-enum
 representation variants now use Rust-safe type names for payload variants.
 `cargo test --test object_model --quiet` is back to green.
 
+Focused VCF nested field fact update:
+VCF nested type fields and enum variants now carry explicit `ExternalFieldKind`
+facts, and shared support only emits nested type aliases from `NestedType`
+fields. This targets the old generated aliases
+`SupportedHeaderLineTypeFORMAT = SupportedHeaderLineType` and
+`SupportedHeaderLineTypeINFO = SupportedHeaderLineType`. Focused tests pass:
+`htsjdk_vcf_pack_declares_header_metadata_boundary`,
+`semantic_analysis_uses_variantutils_observed_utils_and_enum_pack_entries`, and
+`external_enum_variant_fields_do_not_emit_nested_type_aliases`.
+
+External-pack residuals:
+`cargo test --test external_packs --quiet` currently has two unrelated
+standalone failures: missing `Class.forName` argument facts in
+`java_sql_pack_does_not_claim_project_connection_or_reflection_class_names`,
+and missing generated argument effect coverage for
+`htsjdk.tribble.AbstractFeatureReader.getFeatureReader` argument 1 in
+`builtin_external_pack_facts_are_generated_from_manifest_boundaries`.
+
 Focused `PrintStream.print/println` arity-1 support update:
 JDK platform API facts now model one-argument `PrintStream.print/println`, the
 resolved external instance-call planner preserves arity-safe facade names, and

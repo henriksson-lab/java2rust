@@ -5622,6 +5622,27 @@ those subtype keys through Rust type naming before emission, e.g.
 object_model --quiet` and avoids carrying dotted Java keys into Rust enum
 variant positions.
 
+2026-07-29 VCF nested field fact cleanup:
+The HTSJDK VCF pack now gives `VCFHeader.HEADER_FIELDS` and
+`VCFCompoundHeaderLine.SupportedHeaderLineType` explicit `NestedType` field
+facts, and `SupportedHeaderLineType.FORMAT/INFO` explicit `EnumVariant` facts.
+Shared facade support now emits nested type aliases only for fields marked
+`NestedType`, so enum variants no longer produce bogus aliases such as
+`SupportedHeaderLineTypeFORMAT = SupportedHeaderLineType`.
+
+Focused coverage:
+`htsjdk_vcf_pack_declares_header_metadata_boundary`,
+`semantic_analysis_uses_variantutils_observed_utils_and_enum_pack_entries`, and
+`external_enum_variant_fields_do_not_emit_nested_type_aliases`.
+
+Residual external-pack test failures observed while running the full suite:
+`java_sql_pack_does_not_claim_project_connection_or_reflection_class_names`
+still lacks the `Class.forName` argument effect fact in semantic output, and
+`builtin_external_pack_facts_are_generated_from_manifest_boundaries` still
+misses generated argument effect coverage for
+`htsjdk.tribble.AbstractFeatureReader.getFeatureReader` argument 1. These
+failures reproduce individually and are not part of the VCF alias fix.
+
 ## Rerun Protocol
 
 After each fix:

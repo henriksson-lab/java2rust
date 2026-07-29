@@ -4687,27 +4687,43 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         );
     }
 
-    for (field_name, expected_ty) in [
+    for (field_name, expected_ty, expected_kind) in [
         (
             "HEADER_FIELDS",
             JavaType::Named {
-                name: "HEADER_FIELDS".to_string(),
+                name: "VCFHeader.HEADER_FIELDS".to_string(),
                 args: Vec::new(),
             },
+            ExternalFieldKind::NestedType,
         ),
-        ("REFERENCE_KEY", JavaType::String),
+        (
+            "REFERENCE_KEY",
+            JavaType::String,
+            ExternalFieldKind::StaticFinal,
+        ),
     ] {
         let field = facts
             .external_field_for("VCFHeader", field_name)
             .unwrap_or_else(|| panic!("VCFHeader.{field_name} should be pack-owned"));
         assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
         assert_eq!(field.field_type, Some(expected_ty));
+        assert_eq!(field.field_kind, expected_kind);
         assert_eq!(
             new_java2rust::stdlib::external_field_provenance("VCFHeader", field_name),
             FactProvenance::ExternalLibraryPack,
             "VCFHeader.{field_name} precision should come from the VCF pack, not stdlib"
         );
     }
+    let qualified_header_fields = facts
+        .external_field_for("htsjdk.variant.vcf.VCFHeader", "HEADER_FIELDS")
+        .expect("qualified VCFHeader.HEADER_FIELDS should be pack-owned");
+    assert_eq!(
+        qualified_header_fields.field_type,
+        Some(JavaType::Named {
+            name: "htsjdk.variant.vcf.VCFHeader.HEADER_FIELDS".to_string(),
+            args: Vec::new(),
+        })
+    );
 
     let supported_header_line_type = facts
         .external_field_for("VCFCompoundHeaderLine", "SupportedHeaderLineType")
@@ -4719,9 +4735,13 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
     assert_eq!(
         supported_header_line_type.field_type,
         Some(JavaType::Named {
-            name: "SupportedHeaderLineType".to_string(),
+            name: "VCFCompoundHeaderLine.SupportedHeaderLineType".to_string(),
             args: Vec::new(),
         })
+    );
+    assert_eq!(
+        supported_header_line_type.field_kind,
+        ExternalFieldKind::NestedType
     );
     assert_eq!(
         new_java2rust::stdlib::external_field_provenance(
@@ -4730,6 +4750,19 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         ),
         FactProvenance::ExternalLibraryPack,
         "VCFCompoundHeaderLine.SupportedHeaderLineType precision should come from the VCF pack, not stdlib"
+    );
+    let qualified_supported_header_line_type = facts
+        .external_field_for(
+            "htsjdk.variant.vcf.VCFCompoundHeaderLine",
+            "SupportedHeaderLineType",
+        )
+        .expect("qualified VCFCompoundHeaderLine.SupportedHeaderLineType should be pack-owned");
+    assert_eq!(
+        qualified_supported_header_line_type.field_type,
+        Some(JavaType::Named {
+            name: "htsjdk.variant.vcf.VCFCompoundHeaderLine.SupportedHeaderLineType".to_string(),
+            args: Vec::new(),
+        })
     );
 
     for field_name in ["FORMAT", "INFO"] {
@@ -4740,10 +4773,11 @@ fn htsjdk_vcf_pack_models_header_getters_and_mutators() {
         assert_eq!(
             field.field_type,
             Some(JavaType::Named {
-                name: "SupportedHeaderLineType".to_string(),
+                name: "VCFCompoundHeaderLine.SupportedHeaderLineType".to_string(),
                 args: Vec::new(),
             })
         );
+        assert_eq!(field.field_kind, ExternalFieldKind::EnumVariant);
         let dispatched = new_java2rust::external_packs::external_field_for(
             "VCFCompoundHeaderLine.SupportedHeaderLineType",
             field_name,
@@ -17193,6 +17227,7 @@ fn semantic_analysis_uses_variantutils_observed_utils_and_enum_pack_entries() {
     let semantic = analyze(
         r#"
 import htsjdk.variant.variantcontext.GenotypeType;
+import htsjdk.variant.vcf.VCFCompoundHeaderLine;
 import htsjdk.variant.vcf.VCFHeaderLineCount;
 import htsjdk.variant.vcf.VCFHeaderLineType;
 import org.broadinstitute.hellbender.utils.Utils;
@@ -17231,6 +17266,10 @@ class VariantUtilsObservedPackUse {
     Object lineType() {
         return VCFHeaderLineType.Integer;
     }
+
+    Object supportedHeaderLineType() {
+        return VCFCompoundHeaderLine.SupportedHeaderLineType.FORMAT;
+    }
 }
 "#,
     );
@@ -17244,6 +17283,7 @@ class VariantUtilsObservedPackUse {
         "GenotypeType.HET",
         "VCFHeaderLineCount.A",
         "VCFHeaderLineType.Integer",
+        "VCFCompoundHeaderLine.SupportedHeaderLineType.FORMAT",
     ] {
         assert!(
             !semantic

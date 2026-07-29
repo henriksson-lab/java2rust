@@ -6572,6 +6572,9 @@ impl ExternalApiFacadeSupport {
         local_types: &BTreeSet<String>,
     ) {
         for field in &facts.external_field_facts {
+            if field.field_kind != ExternalFieldKind::NestedType {
+                continue;
+            }
             if local_types.contains(&canonical_external_receiver_type_key(
                 &field.field.type_name,
             )) {

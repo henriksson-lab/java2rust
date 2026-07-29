@@ -25122,6 +25122,29 @@ class Base64 {
 }
 
 #[test]
+fn external_enum_variant_fields_do_not_emit_nested_type_aliases() {
+    let facts = new_java2rust::external_packs::htsjdk_vcf_pack_facts();
+    let items = new_java2rust::stdlib::external_api_facade_support_items(
+        &new_java2rust::java_ir::Program::default(),
+        &facts,
+    );
+    let rendered = new_java2rust::emit::emit_file(&new_java2rust::rust_ir::RustFile { items });
+
+    assert!(
+        !rendered.contains("pub type SupportedHeaderLineTypeFORMAT"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("pub type SupportedHeaderLineTypeINFO"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("pub type VCFHeaderLineCountA"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn emitted_source_method_suppresses_matching_external_facade_stub() {
     let local = parse_java_source(
         r#"

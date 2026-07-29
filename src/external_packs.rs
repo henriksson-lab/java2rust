@@ -20010,8 +20010,18 @@ const VCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
         "INFO_FIELD_ARRAY_SEPARATOR",
     ),
     modeled_semantic_field("VCFConstants", "INFO_FIELD_ARRAY_SEPARATOR"),
-    modeled_semantic_field("htsjdk.variant.vcf.VCFHeader", "HEADER_FIELDS"),
-    modeled_semantic_field("VCFHeader", "HEADER_FIELDS"),
+    modeled_semantic_field_typed(
+        "htsjdk.variant.vcf.VCFHeader",
+        "HEADER_FIELDS",
+        "htsjdk.variant.vcf.VCFHeader.HEADER_FIELDS",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
+        "VCFHeader",
+        "HEADER_FIELDS",
+        "VCFHeader.HEADER_FIELDS",
+        ExternalFieldKind::NestedType,
+    ),
     modeled_semantic_field("htsjdk.variant.vcf.VCFHeader", "REFERENCE_KEY"),
     modeled_semantic_field("VCFHeader", "REFERENCE_KEY"),
     modeled_semantic_field("htsjdk.variant.vcf.VCFHeaderLineCount", "A"),
@@ -20022,23 +20032,54 @@ const VCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("VCFHeaderLineCount", "G"),
     modeled_semantic_field("htsjdk.variant.vcf.VCFHeaderLineType", "Integer"),
     modeled_semantic_field("VCFHeaderLineType", "Integer"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
         "htsjdk.variant.vcf.VCFCompoundHeaderLine",
         "SupportedHeaderLineType",
+        "htsjdk.variant.vcf.VCFCompoundHeaderLine.SupportedHeaderLineType",
+        ExternalFieldKind::NestedType,
     ),
-    modeled_semantic_field("VCFCompoundHeaderLine", "SupportedHeaderLineType"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "VCFCompoundHeaderLine",
+        "SupportedHeaderLineType",
+        "VCFCompoundHeaderLine.SupportedHeaderLineType",
+        ExternalFieldKind::NestedType,
+    ),
+    modeled_semantic_field_typed(
         "htsjdk.variant.vcf.VCFCompoundHeaderLine.SupportedHeaderLineType",
         "FORMAT",
+        "htsjdk.variant.vcf.VCFCompoundHeaderLine.SupportedHeaderLineType",
+        ExternalFieldKind::EnumVariant,
     ),
-    modeled_semantic_field("VCFCompoundHeaderLine.SupportedHeaderLineType", "FORMAT"),
-    modeled_semantic_field("SupportedHeaderLineType", "FORMAT"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "VCFCompoundHeaderLine.SupportedHeaderLineType",
+        "FORMAT",
+        "VCFCompoundHeaderLine.SupportedHeaderLineType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "SupportedHeaderLineType",
+        "FORMAT",
+        "VCFCompoundHeaderLine.SupportedHeaderLineType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
         "htsjdk.variant.vcf.VCFCompoundHeaderLine.SupportedHeaderLineType",
         "INFO",
+        "htsjdk.variant.vcf.VCFCompoundHeaderLine.SupportedHeaderLineType",
+        ExternalFieldKind::EnumVariant,
     ),
-    modeled_semantic_field("VCFCompoundHeaderLine.SupportedHeaderLineType", "INFO"),
-    modeled_semantic_field("SupportedHeaderLineType", "INFO"),
+    modeled_semantic_field_typed(
+        "VCFCompoundHeaderLine.SupportedHeaderLineType",
+        "INFO",
+        "VCFCompoundHeaderLine.SupportedHeaderLineType",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "SupportedHeaderLineType",
+        "INFO",
+        "VCFCompoundHeaderLine.SupportedHeaderLineType",
+        ExternalFieldKind::EnumVariant,
+    ),
     modeled_semantic_field(
         "htsjdk.variant.variantcontext.writer.VariantContextWriterBuilder",
         "OutputType",
