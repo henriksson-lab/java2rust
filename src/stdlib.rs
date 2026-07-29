@@ -2409,6 +2409,9 @@ pub fn known_external_method_return_type(
                 args: Vec::new(),
             })
         }
+        (Some("Class" | "JavaClass"), "isArray" | "is_array", 0) => {
+            Some(JavaType::Primitive(PrimitiveType::Boolean))
+        }
         (Some("Class" | "JavaClass"), "getResourceAsStream" | "get_resource_as_stream", 1) => {
             Some(JavaType::Named {
                 name: "InputStream".to_string(),
@@ -4360,6 +4363,10 @@ impl<T> JavaClass<T> {
 
     pub fn get_simple_name(&self) -> String {
         self.name.rsplit('.').next().unwrap_or(&self.name).to_string()
+    }
+
+    pub fn is_array(&self) -> bool {
+        false
     }
 
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
@@ -15589,6 +15596,9 @@ pub fn external_api_return_nullability(
             NullabilityState::MaybeNull
         }
         (Some("Class" | "JavaClass"), "getClassLoader" | "get_class_loader", 0) => {
+            NullabilityState::DefinitelyNonNull
+        }
+        (Some("Class" | "JavaClass"), "isArray" | "is_array", 0) => {
             NullabilityState::DefinitelyNonNull
         }
         (Some("ClassLoader"), "getResource" | "get_resource", 1) => NullabilityState::MaybeNull,

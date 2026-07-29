@@ -1046,6 +1046,10 @@ impl<T> JavaClass<T> {
         self.name.rsplit('.').next().unwrap_or(&self.name).to_string()
     }
 
+    pub fn is_array(&self) -> bool {
+        false
+    }
+
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
         Some(InputStream)
     }

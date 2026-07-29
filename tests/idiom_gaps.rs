@@ -15100,6 +15100,39 @@ class ErasedObjectGetClassName {
 }
 
 #[test]
+fn erased_object_get_class_is_array_has_class_facade_support() {
+    let translation = translate_source(
+        r#"
+class ErasedObjectGetClassIsArray {
+    boolean array(Object obj) {
+        if (obj == null) {
+            return false;
+        }
+        return obj.getClass().isArray();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn is_array(&self) -> bool")
+            && translation.rust.contains(".get_class().is_array()")
+            && !translation.rust.contains("method `is_array` not found"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "erased_object_get_class_is_array",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_object_get_class_name_uses_inherent_java_class_fallback() {
     let translation = translate_source(
         r#"
