@@ -7663,6 +7663,7 @@ class ExternalArgumentShapeUse {
         .push(ExternalApiArgumentEffectFact {
             method_name: "borrowString".to_string(),
             receiver_type: None,
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -7675,6 +7676,7 @@ class ExternalArgumentShapeUse {
         .push(ExternalApiArgumentEffectFact {
             method_name: "store".to_string(),
             receiver_type: None,
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::Named {
                 name: "ExternalPayload".to_string(),
@@ -7690,6 +7692,7 @@ class ExternalArgumentShapeUse {
         .push(ExternalApiArgumentEffectFact {
             method_name: "fill".to_string(),
             receiver_type: None,
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::Named {
                 name: "ExternalBuffer".to_string(),
@@ -7753,6 +7756,7 @@ fn external_constructor_arguments_default_to_non_null_unless_fact_widens_them() 
         .push(ExternalApiArgumentEffectFact {
             method_name: "new".to_string(),
             receiver_type: Some("ImportConfig".to_string()),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::Unknown,
@@ -7765,6 +7769,7 @@ fn external_constructor_arguments_default_to_non_null_unless_fact_widens_them() 
         .push(ExternalApiArgumentEffectFact {
             method_name: "new".to_string(),
             receiver_type: Some("ImportConfig".to_string()),
+            arg_count: None,
             parameter_index: 1,
             parameter_type: Some(callback_ty.clone()),
             parameter_nullability: NullabilityState::MaybeNull,

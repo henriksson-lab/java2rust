@@ -771,6 +771,7 @@ pub enum ExternalArgumentAliasPolicy {
 pub struct ExternalApiArgumentEffectFact {
     pub method_name: String,
     pub receiver_type: Option<String>,
+    pub arg_count: Option<usize>,
     pub parameter_index: usize,
     pub parameter_type: Option<JavaType>,
     pub parameter_nullability: NullabilityState,
@@ -800,7 +801,7 @@ impl ExternalApiArgumentEffectFact {
             self.receiver_type.clone()?,
             self.method_name.clone(),
             Staticness::Unknown,
-            self.parameter_index + 1,
+            self.arg_count.unwrap_or(self.parameter_index + 1),
         ))
     }
 }
@@ -1680,11 +1681,33 @@ impl FactSet {
         method_name: &str,
         parameter_index: usize,
     ) -> Option<&ExternalApiArgumentEffectFact> {
+        self.external_api_argument_effect_for_receiver_with_arity(
+            receiver_type,
+            method_name,
+            None,
+            parameter_index,
+        )
+    }
+
+    pub fn external_api_argument_effect_for_receiver_with_arity(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        arg_count: Option<usize>,
+        parameter_index: usize,
+    ) -> Option<&ExternalApiArgumentEffectFact> {
+        let arity_matches = |fact: &ExternalApiArgumentEffectFact| match arg_count {
+            Some(arg_count) => fact.arg_count == Some(arg_count),
+            None => fact.arg_count.is_none(),
+        };
+        let generic_arity_matches =
+            |fact: &ExternalApiArgumentEffectFact| arg_count.is_some() && fact.arg_count.is_none();
         self.external_api_argument_effect_facts
             .iter()
             .rev()
             .find(|fact| {
                 external_method_name_matches(&fact.method_name, method_name)
+                    && arity_matches(fact)
                     && external_optional_type_name_matches(
                         fact.receiver_type.as_deref(),
                         receiver_type,
@@ -1698,6 +1721,7 @@ impl FactSet {
                     .rev()
                     .find(|fact| {
                         external_method_name_matches(&fact.method_name, method_name)
+                            && arity_matches(fact)
                             && fact.receiver_type.is_none()
                             && fact.parameter_index == parameter_index
                             && fact.provenance == FactProvenance::UserOverride
@@ -1709,6 +1733,7 @@ impl FactSet {
                     .rev()
                     .find(|fact| {
                         external_method_name_matches(&fact.method_name, method_name)
+                            && arity_matches(fact)
                             && external_optional_type_name_matches(
                                 fact.receiver_type.as_deref(),
                                 receiver_type,
@@ -1722,6 +1747,59 @@ impl FactSet {
                     .rev()
                     .find(|fact| {
                         external_method_name_matches(&fact.method_name, method_name)
+                            && arity_matches(fact)
+                            && fact.receiver_type.is_none()
+                            && fact.parameter_index == parameter_index
+                    })
+            })
+            .or_else(|| {
+                self.external_api_argument_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_method_name_matches(&fact.method_name, method_name)
+                            && generic_arity_matches(fact)
+                            && external_optional_type_name_matches(
+                                fact.receiver_type.as_deref(),
+                                receiver_type,
+                            )
+                            && fact.parameter_index == parameter_index
+                            && fact.provenance == FactProvenance::UserOverride
+                    })
+            })
+            .or_else(|| {
+                self.external_api_argument_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_method_name_matches(&fact.method_name, method_name)
+                            && generic_arity_matches(fact)
+                            && fact.receiver_type.is_none()
+                            && fact.parameter_index == parameter_index
+                            && fact.provenance == FactProvenance::UserOverride
+                    })
+            })
+            .or_else(|| {
+                self.external_api_argument_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_method_name_matches(&fact.method_name, method_name)
+                            && generic_arity_matches(fact)
+                            && external_optional_type_name_matches(
+                                fact.receiver_type.as_deref(),
+                                receiver_type,
+                            )
+                            && fact.parameter_index == parameter_index
+                    })
+            })
+            .or_else(|| {
+                self.external_api_argument_effect_facts
+                    .iter()
+                    .rev()
+                    .find(|fact| {
+                        external_method_name_matches(&fact.method_name, method_name)
+                            && generic_arity_matches(fact)
                             && fact.receiver_type.is_none()
                             && fact.parameter_index == parameter_index
                     })
@@ -1748,9 +1826,10 @@ impl FactSet {
                 })
             })
             .or_else(|| {
-                self.external_api_argument_effect_for_receiver(
+                self.external_api_argument_effect_for_receiver_with_arity(
                     Some(&key.owner.type_name),
                     &key.member.0,
+                    Some(key.arity),
                     parameter_index,
                 )
             })

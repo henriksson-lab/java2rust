@@ -9336,6 +9336,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         .push(ExternalApiArgumentEffectFact {
             receiver_type: Some("ExternalConfig".to_string()),
             method_name: "new".to_string(),
+            arg_count: None,
             parameter_index: 1,
             parameter_type: Some(JavaType::Named {
                 name: "Function".to_string(),
@@ -10488,6 +10489,7 @@ fn static_external_owner_argument_shapes_use_external_effect_facts() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "readValue".to_string(),
             receiver_type: Some("external.lib.StaticUtility".to_string()),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -10564,6 +10566,7 @@ fn static_import_lowering_borrows_arguments_from_external_effect_facts() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "readValue".to_string(),
             receiver_type: Some("external.lib.StaticUtility".to_string()),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -10617,6 +10620,7 @@ fn static_import_support_uses_external_return_facts_without_instance_duplicate()
         .push(ExternalApiArgumentEffectFact {
             method_name: "readValue".to_string(),
             receiver_type: Some("external.lib.StaticUtility".to_string()),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -10688,6 +10692,7 @@ fn static_external_facade_uses_nullable_argument_fact_without_call_site_type_hac
         .push(ExternalApiArgumentEffectFact {
             method_name: "read".to_string(),
             receiver_type: Some("external.lib.ReaderFactory".to_string()),
+            arg_count: None,
             parameter_index: 1,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::MaybeNull,
@@ -10715,7 +10720,7 @@ class NullableExternalArgument {
         translation.rust
     );
     assert!(
-        translation.rust.contains(", None, codec, false"),
+        translation.rust.contains(", None,") && translation.rust.contains(", false,"),
         "{}",
         translation.rust
     );
@@ -10752,6 +10757,7 @@ fn external_static_validation_facade_uses_side_effect_fact_return() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "validate".to_string(),
             receiver_type: Some("org.example.validation.Utils".to_string()),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::Primitive(PrimitiveType::Boolean)),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -10903,6 +10909,7 @@ fn static_import_support_reuses_fqn_return_facts_for_simple_owner_facade() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "isGenomicsDBArray".to_string(),
             receiver_type: Some("org.genomicsdb.GenomicsDBUtils".to_string()),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -10915,6 +10922,7 @@ fn static_import_support_reuses_fqn_return_facts_for_simple_owner_facade() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "isGenomicsDBArray".to_string(),
             receiver_type: Some("org.genomicsdb.GenomicsDBUtils".to_string()),
+            arg_count: None,
             parameter_index: 1,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -22264,6 +22272,7 @@ fn external_argument_unknown_nullability_fact_keeps_non_null_default() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "new".to_string(),
             receiver_type: None,
+            arg_count: None,
             parameter_index: 6,
             parameter_type: Some(JavaType::Named {
                 name: "Function".to_string(),
@@ -22305,6 +22314,7 @@ fn external_argument_nullable_fact_overrides_non_null_default() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "new".to_string(),
             receiver_type: None,
+            arg_count: None,
             parameter_index: 6,
             parameter_type: Some(JavaType::Named {
                 name: "Function".to_string(),
@@ -24499,6 +24509,112 @@ class BuiltinExternalStaticOverloads {
         translation.rust.contains("ParsingUtils::split_2")
             && translation.rust.contains("ParsingUtils::split_3")
             && translation.rust.contains("ParsingUtils::split_4"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn external_static_facade_factory_overloads_use_arity_specific_support_methods() {
+    let arg_plan = plan_call_arguments_with_facts_and_args(
+        Some(&Expr::Var("AbstractFeatureReader".to_string())),
+        "getFeatureReader",
+        None,
+        &[
+            Expr::Var("uri".to_string()),
+            Expr::Var("indexUri".to_string()),
+            Expr::Var("codec".to_string()),
+            Expr::Var("requireIndex".to_string()),
+        ],
+        &SignaturePlan::default(),
+        &FactSet::default(),
+        &TypeEnv::default(),
+    );
+    let ArgumentLoweringPlan::Shaped(shapes) = arg_plan else {
+        panic!("getFeatureReader/4 should use builtin external argument facts");
+    };
+    assert_eq!(
+        shapes[1].java_ty,
+        JavaType::Named {
+            name: "Optional".to_string(),
+            args: vec![JavaType::String],
+        }
+    );
+
+    let translation = translate_source(
+        r#"
+import htsjdk.tribble.AbstractFeatureReader;
+import htsjdk.tribble.FeatureCodec;
+import htsjdk.tribble.FeatureReader;
+
+class BuiltinExternalStaticFactoryOverloads {
+    FeatureReader withoutIndex(String uri, FeatureCodec codec, boolean requireIndex) {
+        return AbstractFeatureReader.getFeatureReader(uri, codec, requireIndex);
+    }
+
+    FeatureReader withIndex(String uri, String indexUri, FeatureCodec codec, boolean requireIndex) {
+        return AbstractFeatureReader.getFeatureReader(uri, indexUri, codec, requireIndex);
+    }
+
+    FeatureReader withComputedIndex(String uri, String indexUri, FeatureCodec codec, boolean requireIndex) {
+        return AbstractFeatureReader.getFeatureReader(uri, indexUri.toString(), codec, requireIndex);
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("pub fn get_feature_reader_3"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("pub fn get_feature_reader_4"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn get_feature_reader_3<T0, T1, T2>(_arg0: T0, _arg1: T1, _arg2: T2) -> FeatureReader"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn get_feature_reader_4<T0, T2, T3>(_arg0: T0, _arg1: Option<String>, _arg2: T2, _arg3: T3) -> FeatureReader"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("AbstractFeatureReader::get_feature_reader_3")
+            && translation
+                .rust
+                .contains("AbstractFeatureReader::get_feature_reader_4"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "AbstractFeatureReader::get_feature_reader_4(uri, Some(index_uri.to_string()), codec, require_index)"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("Some(index_uri.to_string())"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains(".to_string().as_str())"),
         "{}",
         translation.rust
     );
@@ -32901,6 +33017,7 @@ fn nullable_external_constructor_callback_slot_wraps_method_reference_branch() {
         .push(ExternalApiArgumentEffectFact {
             receiver_type: Some("ExternalConfig".to_string()),
             method_name: "new".to_string(),
+            arg_count: None,
             parameter_index: 1,
             parameter_type: Some(JavaType::Named {
                 name: "Function".to_string(),
@@ -32966,6 +33083,7 @@ fn unknown_external_constructor_callback_nullability_stays_non_optional() {
         .push(ExternalApiArgumentEffectFact {
             receiver_type: Some("ExternalConfig".to_string()),
             method_name: "new".to_string(),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::Named {
                 name: "Function".to_string(),
@@ -33017,6 +33135,7 @@ fn external_constructor_owned_set_param_clones_optional_self_field_element() {
         .push(ExternalApiArgumentEffectFact {
             receiver_type: Some("ExternalConfig".to_string()),
             method_name: "new".to_string(),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::Named {
                 name: "Set".to_string(),

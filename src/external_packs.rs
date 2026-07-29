@@ -191,6 +191,7 @@ pub struct ExternalPackFieldNullability {
 pub struct ExternalPackArgumentEffect {
     pub receiver_type: &'static str,
     pub method_name: &'static str,
+    pub arg_count: Option<usize>,
     pub parameter_index: usize,
     pub parameter_type: Option<&'static str>,
     pub parameter_nullability: NullabilityState,
@@ -1506,6 +1507,7 @@ impl ExternalPackArgumentEffect {
         ExternalApiArgumentEffectFact {
             method_name: self.method_name.to_string(),
             receiver_type: Some(self.receiver_type.to_string()),
+            arg_count: self.arg_count,
             parameter_index: self.parameter_index,
             parameter_type: self.parameter_type.map(parse_type),
             parameter_nullability: self.parameter_nullability,
@@ -3344,6 +3346,7 @@ fn push_external_pack_argument_effect_fact(
         .push(ExternalApiArgumentEffectFact {
             method_name: method_name.to_string(),
             receiver_type: Some(receiver_type.to_string()),
+            arg_count: None,
             parameter_index,
             parameter_type,
             parameter_nullability,
@@ -4401,6 +4404,7 @@ const TRIBBLE_FEATURE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     ExternalPackArgumentEffect {
         receiver_type: "htsjdk.tribble.AbstractFeatureReader",
         method_name: "getFeatureReader",
+        arg_count: Some(4),
         parameter_index: 1,
         parameter_type: Some("String"),
         parameter_nullability: NullabilityState::MaybeNull,
@@ -4410,6 +4414,7 @@ const TRIBBLE_FEATURE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     ExternalPackArgumentEffect {
         receiver_type: "AbstractFeatureReader",
         method_name: "getFeatureReader",
+        arg_count: Some(4),
         parameter_index: 1,
         parameter_type: Some("String"),
         parameter_nullability: NullabilityState::MaybeNull,
@@ -5199,6 +5204,7 @@ const fn readonly_borrowed_argument(
     ExternalPackArgumentEffect {
         receiver_type,
         method_name,
+        arg_count: None,
         parameter_index,
         parameter_type: Some(parameter_type),
         parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -6199,6 +6205,7 @@ const fn samtools_util_interval_list_add_argument(
     ExternalPackArgumentEffect {
         receiver_type,
         method_name: "add",
+        arg_count: None,
         parameter_index: 0,
         parameter_type: Some("Interval"),
         parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -10784,7 +10791,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
     semantic_typed_effect_with_arity(
         "htsjdk.tribble.AbstractFeatureReader",
         "getFeatureReader",
-        6,
+        3,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "FeatureReader",
@@ -10793,7 +10800,25 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
     semantic_typed_effect_with_arity(
         "AbstractFeatureReader",
         "getFeatureReader",
-        6,
+        3,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "FeatureReader",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.AbstractFeatureReader",
+        "getFeatureReader",
+        4,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "FeatureReader",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "AbstractFeatureReader",
+        "getFeatureReader",
+        4,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "FeatureReader",
@@ -14072,6 +14097,7 @@ const SAM_READER_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     ExternalPackArgumentEffect {
         receiver_type: "htsjdk.samtools.SamReaderFactory",
         method_name: "referenceSequence",
+        arg_count: None,
         parameter_index: 0,
         parameter_type: Some("Path"),
         parameter_nullability: NullabilityState::MaybeNull,
@@ -14081,6 +14107,7 @@ const SAM_READER_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     ExternalPackArgumentEffect {
         receiver_type: "SamReaderFactory",
         method_name: "referenceSequence",
+        arg_count: None,
         parameter_index: 0,
         parameter_type: Some("Path"),
         parameter_nullability: NullabilityState::MaybeNull,
@@ -21381,6 +21408,7 @@ const GENOMICSDB_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     ExternalPackArgumentEffect {
         receiver_type: "com.intel.genomicsdb.importer.model.ImportConfig",
         method_name: "new",
+        arg_count: None,
         parameter_index: 4,
         parameter_type: Some("Set<VCFHeaderLine>"),
         parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -21390,6 +21418,7 @@ const GENOMICSDB_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     ExternalPackArgumentEffect {
         receiver_type: "ImportConfig",
         method_name: "new",
+        arg_count: None,
         parameter_index: 4,
         parameter_type: Some("Set<VCFHeaderLine>"),
         parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -21399,6 +21428,7 @@ const GENOMICSDB_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     ExternalPackArgumentEffect {
         receiver_type: "com.intel.genomicsdb.importer.model.ImportConfig",
         method_name: "new",
+        arg_count: None,
         parameter_index: 6,
         parameter_type: Some("Function"),
         parameter_nullability: NullabilityState::MaybeNull,
@@ -21408,6 +21438,7 @@ const GENOMICSDB_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     ExternalPackArgumentEffect {
         receiver_type: "ImportConfig",
         method_name: "new",
+        arg_count: None,
         parameter_index: 6,
         parameter_type: Some("Function"),
         parameter_nullability: NullabilityState::MaybeNull,
@@ -23559,6 +23590,7 @@ const DISQ_WRITE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     ExternalPackArgumentEffect {
         receiver_type: "org.disq_bio.disq.HtsjdkReadsRddStorage",
         method_name: "referenceSourcePath",
+        arg_count: None,
         parameter_index: 0,
         parameter_type: Some("String"),
         parameter_nullability: NullabilityState::MaybeNull,
@@ -23568,6 +23600,7 @@ const DISQ_WRITE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     ExternalPackArgumentEffect {
         receiver_type: "HtsjdkReadsRddStorage",
         method_name: "referenceSourcePath",
+        arg_count: None,
         parameter_index: 0,
         parameter_type: Some("String"),
         parameter_nullability: NullabilityState::MaybeNull,
@@ -23901,6 +23934,7 @@ const BROAD_HELLBENDER_UTILS_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &
     ExternalPackArgumentEffect {
         receiver_type: "org.broadinstitute.hellbender.utils.read.GATKRead",
         method_name: "convertToSAMRecord",
+        arg_count: None,
         parameter_index: 0,
         parameter_type: Some("SAMFileHeader"),
         parameter_nullability: NullabilityState::MaybeNull,
@@ -23910,6 +23944,7 @@ const BROAD_HELLBENDER_UTILS_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &
     ExternalPackArgumentEffect {
         receiver_type: "GATKRead",
         method_name: "convertToSAMRecord",
+        arg_count: None,
         parameter_index: 0,
         parameter_type: Some("SAMFileHeader"),
         parameter_nullability: NullabilityState::MaybeNull,
@@ -28587,6 +28622,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
         .map(|receiver_type| ExternalApiArgumentEffectFact {
             method_name: "forName".to_string(),
             receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
             parameter_index: 0,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -28600,6 +28636,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             facts.push(ExternalApiArgumentEffectFact {
                 method_name: method_name.to_string(),
                 receiver_type: Some(receiver_type.to_string()),
+                arg_count: Some(1),
                 parameter_index: 0,
                 parameter_type: Some(JavaType::Named {
                     name: "Object".to_string(),
@@ -28622,6 +28659,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             facts.push(ExternalApiArgumentEffectFact {
                 method_name: method_name.to_string(),
                 receiver_type: Some(receiver_type.to_string()),
+                arg_count: Some(1),
                 parameter_index: 0,
                 parameter_type: Some(JavaType::String),
                 parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -28635,6 +28673,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
         facts.push(ExternalApiArgumentEffectFact {
             method_name: "sort".to_string(),
             receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
             parameter_index: 0,
             parameter_type: None,
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -28652,6 +28691,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
         facts.push(ExternalApiArgumentEffectFact {
             method_name: "print".to_string(),
             receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
             parameter_index: 0,
             parameter_type: Some(JavaType::Named {
                 name: "Graphics".to_string(),
@@ -28684,6 +28724,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
         facts.push(ExternalApiArgumentEffectFact {
             method_name: "read".to_string(),
             receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
             parameter_index: 0,
             parameter_type: Some(JavaType::Array(Box::new(JavaType::Primitive(
                 PrimitiveType::Byte,
@@ -28697,6 +28738,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             facts.push(ExternalApiArgumentEffectFact {
                 method_name: "read".to_string(),
                 receiver_type: Some(receiver_type.to_string()),
+                arg_count: Some(3),
                 parameter_index,
                 parameter_type: Some(JavaType::Primitive(PrimitiveType::Int)),
                 parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -28730,6 +28772,11 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             facts.push(ExternalApiArgumentEffectFact {
                 method_name: method_name.to_string(),
                 receiver_type: Some(receiver_type.to_string()),
+                arg_count: if method_name == "write_3" {
+                    Some(3)
+                } else {
+                    Some(1)
+                },
                 parameter_index: 0,
                 parameter_type: Some(JavaType::Array(Box::new(JavaType::Primitive(
                     PrimitiveType::Byte,
@@ -28743,6 +28790,7 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
                 facts.push(ExternalApiArgumentEffectFact {
                     method_name: method_name.to_string(),
                     receiver_type: Some(receiver_type.to_string()),
+                    arg_count: Some(3),
                     parameter_index,
                     parameter_type: Some(JavaType::Primitive(PrimitiveType::Int)),
                     parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -28951,6 +28999,8 @@ pub fn builtin_external_final_erased_object_type(name: &str) -> bool {
 struct BuiltinExternalPackLookupIndex {
     api_effects_by_key: HashMap<CallableKey, ExternalApiEffectFact>,
     api_effects: HashMap<(String, String, Option<usize>), ExternalApiEffectFact>,
+    api_argument_effects:
+        HashMap<(String, String, Option<usize>, usize), ExternalApiArgumentEffectFact>,
     unsupported_apis: HashMap<(String, String), UnsupportedExternalApiFact>,
     constructors_by_key: HashMap<CallableKey, ExternalConstructorFact>,
     constructors: HashMap<(String, usize), ExternalConstructorFact>,
@@ -28986,6 +29036,23 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                             index
                                 .api_effects
                                 .entry((receiver_alias.clone(), method_alias, fact.arg_count))
+                                .or_insert_with(|| fact.clone());
+                        }
+                    }
+                }
+            }
+            for fact in facts.external_api_argument_effect_facts.iter().rev() {
+                if let Some(receiver_type) = &fact.receiver_type {
+                    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+                        for method_alias in external_method_name_lookup_aliases(&fact.method_name) {
+                            index
+                                .api_argument_effects
+                                .entry((
+                                    receiver_alias.clone(),
+                                    method_alias,
+                                    fact.arg_count,
+                                    fact.parameter_index,
+                                ))
                                 .or_insert_with(|| fact.clone());
                         }
                     }
@@ -29269,6 +29336,39 @@ pub fn external_api_effect_for_receiver_with_arity(
                     .api_effects
                     .get(&(receiver_alias.clone(), method_alias.clone(), None))
             {
+                return Some(effect.clone());
+            }
+        }
+    }
+    None
+}
+
+pub fn external_api_argument_effect_for_receiver_with_arity(
+    receiver_type: Option<&str>,
+    method_name: &str,
+    arg_count: Option<usize>,
+    parameter_index: usize,
+) -> Option<ExternalApiArgumentEffectFact> {
+    let receiver_type = receiver_type?;
+    let index = builtin_external_pack_lookup_index();
+    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+        for method_alias in external_method_name_lookup_aliases(method_name) {
+            if let Some(effect) = arg_count.and_then(|arg_count| {
+                index.api_argument_effects.get(&(
+                    receiver_alias.clone(),
+                    method_alias.clone(),
+                    Some(arg_count),
+                    parameter_index,
+                ))
+            }) {
+                return Some(effect.clone());
+            }
+            if let Some(effect) = index.api_argument_effects.get(&(
+                receiver_alias.clone(),
+                method_alias,
+                None,
+                parameter_index,
+            )) {
                 return Some(effect.clone());
             }
         }

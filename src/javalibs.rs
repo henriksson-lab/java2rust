@@ -178,6 +178,11 @@ pub fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usi
             )
             | ("GenotypeLikelihoods", "fromGLField" | "from_g_l_field", 1)
             | (
+                "htsjdk.tribble.AbstractFeatureReader" | "AbstractFeatureReader",
+                "getFeatureReader" | "get_feature_reader",
+                3..=4
+            )
+            | (
                 "htsjdk.tribble.util.ParsingUtils" | "ParsingUtils",
                 "split",
                 2..=4

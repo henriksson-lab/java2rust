@@ -1559,6 +1559,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "missing".to_string(),
             receiver_type: Some("dep.audit.Record".to_string()),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -1571,6 +1572,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "unsupported".to_string(),
             receiver_type: Some("dep.audit.Record".to_string()),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -1915,6 +1917,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "read".to_string(),
             receiver_type: Some("other.Reader".to_string()),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::String),
             parameter_nullability: NullabilityState::DefinitelyNonNull,
@@ -11672,9 +11675,9 @@ fn htsjdk_tribble_feature_pack_models_coordinate_getters() {
         .external_api_effect_for_receiver_with_arity(
             Some("AbstractFeatureReader"),
             "getFeatureReader",
-            Some(6),
+            Some(3),
         )
-        .expect("AbstractFeatureReader.getFeatureReader/6 should be modeled by the pack");
+        .expect("AbstractFeatureReader.getFeatureReader/3 should be modeled by the pack");
     assert_eq!(factory.role, ExternalApiRole::Getter);
     assert_eq!(
         factory.return_type,
@@ -11687,13 +11690,28 @@ fn htsjdk_tribble_feature_pack_models_coordinate_getters() {
         factory.return_nullability,
         NullabilityState::DefinitelyNonNull
     );
-    let factory_index_argument = facts
-        .external_api_argument_effect_for_receiver(
+    let indexed_factory = facts
+        .external_api_effect_for_receiver_with_arity(
             Some("AbstractFeatureReader"),
             "getFeatureReader",
+            Some(4),
+        )
+        .expect("AbstractFeatureReader.getFeatureReader/4 should be modeled by the pack");
+    assert_eq!(
+        indexed_factory.return_type,
+        Some(JavaType::Named {
+            name: "FeatureReader".to_string(),
+            args: Vec::new(),
+        })
+    );
+    let factory_index_argument = facts
+        .external_api_argument_effect_for_receiver_with_arity(
+            Some("AbstractFeatureReader"),
+            "getFeatureReader",
+            Some(4),
             1,
         )
-        .expect("AbstractFeatureReader.getFeatureReader/6 index argument should be modeled");
+        .expect("AbstractFeatureReader.getFeatureReader/4 index argument should be modeled");
     assert_eq!(
         factory_index_argument.parameter_type,
         Some(JavaType::String)
@@ -11701,6 +11719,17 @@ fn htsjdk_tribble_feature_pack_models_coordinate_getters() {
     assert_eq!(
         factory_index_argument.parameter_nullability,
         NullabilityState::MaybeNull
+    );
+    assert!(
+        facts
+            .external_api_argument_effect_for_receiver_with_arity(
+                Some("AbstractFeatureReader"),
+                "getFeatureReader",
+                Some(3),
+                1,
+            )
+            .is_none(),
+        "AbstractFeatureReader.getFeatureReader/3 codec argument must not inherit the /4 index path fact"
     );
 
     let query_one = facts

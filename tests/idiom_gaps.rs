@@ -1885,6 +1885,7 @@ fn fallback_static_call_uses_translated_signature_arg_shapes() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "fill".to_string(),
             receiver_type: None,
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::Named {
                 name: "MutableConfig".to_string(),
@@ -13108,6 +13109,7 @@ fn corpus_ffi_owned_handle_transfer_requires_explicit_handover() {
         .push(ExternalApiArgumentEffectFact {
             method_name: "consume".to_string(),
             receiver_type: Some("NativeConsumer".to_string()),
+            arg_count: None,
             parameter_index: 0,
             parameter_type: Some(JavaType::Named {
                 name: "NativeArray".to_string(),

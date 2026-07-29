@@ -1401,6 +1401,7 @@ fn push_external_api_argument_effect_fact(
         .push(ExternalApiArgumentEffectFact {
             method_name: method_name.to_string(),
             receiver_type: parse_receiver_type(receiver_type),
+            arg_count: None,
             parameter_index,
             parameter_type,
             parameter_nullability,

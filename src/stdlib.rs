@@ -6991,7 +6991,7 @@ impl ExternalApiFacadeSupport {
         }
         let mut inferred = None;
         for index in 0..16 {
-            if external_facade_argument_effect(facts, receiver_key, &fact.method_name, index)
+            if external_facade_argument_effect(facts, receiver_key, &fact.method_name, None, index)
                 .is_some()
             {
                 inferred = Some(index + 1);
@@ -7013,7 +7013,7 @@ impl ExternalApiFacadeSupport {
     ) {
         for index in 0..arg_count {
             if let Some(java_type) =
-                external_facade_argument_java_type(facts, receiver_key, method, index)
+                external_facade_argument_java_type(facts, receiver_key, method, arg_count, index)
             {
                 self.add_java_type(&java_type);
             }
@@ -11992,7 +11992,8 @@ fn external_facade_argument_rust_type(
     {
         return Some(ty);
     }
-    let effect = external_facade_argument_effect(facts, receiver_key, method, index)?;
+    let effect =
+        external_facade_argument_effect(facts, receiver_key, method, Some(arg_count), index)?;
     if let Some(ty) = external_facade_dyn_trait_argument_rust_type(facts, effect) {
         return Some(ty);
     }
@@ -12223,9 +12224,10 @@ fn external_facade_argument_java_type(
     facts: &FactSet,
     receiver_key: &str,
     method: &str,
+    arg_count: usize,
     index: usize,
 ) -> Option<JavaType> {
-    external_facade_argument_effect(facts, receiver_key, method, index)
+    external_facade_argument_effect(facts, receiver_key, method, Some(arg_count), index)
         .and_then(|effect| effect.parameter_type.clone())
 }
 
@@ -12300,13 +12302,24 @@ fn external_facade_argument_effect<'a>(
     facts: &'a FactSet,
     receiver_key: &str,
     method: &str,
+    arg_count: Option<usize>,
     index: usize,
 ) -> Option<&'a crate::facts::ExternalApiArgumentEffectFact> {
     facts
-        .external_api_argument_effect_for_receiver(Some(receiver_key), method, index)
+        .external_api_argument_effect_for_receiver_with_arity(
+            Some(receiver_key),
+            method,
+            arg_count,
+            index,
+        )
         .or_else(|| {
             let java_method = lower_camel_from_snake(method);
-            facts.external_api_argument_effect_for_receiver(Some(receiver_key), &java_method, index)
+            facts.external_api_argument_effect_for_receiver_with_arity(
+                Some(receiver_key),
+                &java_method,
+                arg_count,
+                index,
+            )
         })
 }
 

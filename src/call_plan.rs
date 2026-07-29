@@ -3751,11 +3751,9 @@ pub fn plan_call_arguments_with_facts_and_args(
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
     }
 
-    facade_abi_call_arg_plan(receiver, name, arg_count, Some(args), facts, types)
-        .or_else(|| {
-            external_call_arg_shapes(receiver, name, arg_count, facts, types)
-                .map(ArgumentLoweringPlan::Shaped)
-        })
+    external_call_arg_shapes_with_args(receiver, name, args, facts, types)
+        .map(ArgumentLoweringPlan::Shaped)
+        .or_else(|| facade_abi_call_arg_plan(receiver, name, arg_count, Some(args), facts, types))
         .or_else(|| {
             native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
                 .map(ArgumentLoweringPlan::Shaped)
@@ -3922,6 +3920,34 @@ pub fn external_call_arg_shapes(
     facts: &FactSet,
     types: &TypeEnv,
 ) -> Option<Vec<RustSlotShape>> {
+    external_call_arg_shapes_core(receiver, name, arg_count, None, facts, types)
+}
+
+fn external_call_arg_shapes_with_args(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<Vec<RustSlotShape>> {
+    external_call_arg_shapes_core(
+        receiver,
+        name,
+        args.len(),
+        Some(&inferred_argument_java_types(args, types)),
+        facts,
+        types,
+    )
+}
+
+fn external_call_arg_shapes_core(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    arg_types: Option<&[JavaType]>,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<Vec<RustSlotShape>> {
     let effective_facts = EffectiveFacts::new(facts);
     let receiver_name =
         external_call_argument_receiver_key(receiver, name, arg_count, facts, types);
@@ -3933,19 +3959,54 @@ pub fn external_call_arg_shapes(
         return None;
     }
     let receiver_ty = receiver.map(|receiver| infer_expr_type(receiver, types));
-    (0..arg_count)
+    let mut saw_fact = false;
+    let shapes = (0..arg_count)
         .map(|index| {
-            facts
-                .external_api_argument_effect_for_receiver(receiver_name.as_deref(), name, index)
-                .map(|effect| {
-                    argument_shape_from_external_effect(
-                        effect,
-                        receiver_ty.as_ref(),
-                        &effective_facts,
-                    )
-                })
+            if let Some(effect) = facts.external_api_argument_effect_for_receiver_with_arity(
+                receiver_name.as_deref(),
+                name,
+                Some(arg_count),
+                index,
+            ) {
+                saw_fact = true;
+                argument_shape_from_external_effect(effect, receiver_ty.as_ref(), &effective_facts)
+            } else if let Some(effect) =
+                crate::external_packs::external_api_argument_effect_for_receiver_with_arity(
+                    receiver_name.as_deref(),
+                    name,
+                    Some(arg_count),
+                    index,
+                )
+            {
+                saw_fact = true;
+                argument_shape_from_external_effect(&effect, receiver_ty.as_ref(), &effective_facts)
+            } else {
+                unspecified_external_argument_shape(
+                    name,
+                    index,
+                    arg_types.and_then(|arg_types| arg_types.get(index).cloned()),
+                )
+            }
         })
-        .collect()
+        .collect();
+    saw_fact.then_some(shapes)
+}
+
+fn unspecified_external_argument_shape(
+    name: &str,
+    index: usize,
+    java_ty: Option<JavaType>,
+) -> RustSlotShape {
+    let java_ty = java_ty.unwrap_or_else(|| JavaType::Unknown(format!("{name}:arg{index}")));
+    let mut shape = RustSlotShape::conservative(java_ty.clone());
+    if java_ty == JavaType::String {
+        apply_borrowed_string_content_projection(&mut shape);
+    } else if matches!(java_ty, JavaType::Array(_)) {
+        apply_borrowed_sequence_content_projection(&mut shape);
+    } else if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) {
+        shape.ownership = OwnershipShape::SharedBorrow;
+    }
+    shape
 }
 
 fn facade_abi_call_arg_plan(
@@ -4129,9 +4190,10 @@ fn facade_abi_argument_lowering_plan(
                     .rsplit("::")
                     .next()
                     .unwrap_or(&abi.key.owner.type_name);
-                facts.external_api_argument_effect_for_receiver(
+                facts.external_api_argument_effect_for_receiver_with_arity(
                     Some(owner_simple),
                     &abi.key.member.0,
+                    Some(abi.key.arity),
                     index,
                 )
             })
@@ -4334,33 +4396,36 @@ pub(crate) fn external_call_arg_shapes_for_resolved(
         name: call.declaring_type.clone(),
         args: Vec::new(),
     };
-    (0..arg_count)
+    let mut saw_fact = false;
+    let shapes = (0..arg_count)
         .map(|index| {
-            facts
+            if let Some(effect) = facts
                 .external_api_argument_effect_for_key(&key, index)
                 .or_else(|| {
-                    facts.external_api_argument_effect_for_receiver(
+                    facts.external_api_argument_effect_for_receiver_with_arity(
                         Some(&call.declaring_type),
                         source_name,
+                        Some(arg_count),
                         index,
                     )
                 })
                 .or_else(|| {
-                    facts.external_api_argument_effect_for_receiver(
+                    facts.external_api_argument_effect_for_receiver_with_arity(
                         Some(&call.declaring_type),
                         &call.rust_name,
+                        Some(arg_count),
                         index,
                     )
                 })
-                .map(|effect| {
-                    argument_shape_from_external_effect(
-                        effect,
-                        Some(&receiver_ty),
-                        &effective_facts,
-                    )
-                })
+            {
+                saw_fact = true;
+                argument_shape_from_external_effect(effect, Some(&receiver_ty), &effective_facts)
+            } else {
+                resolved_call_boundary_arg_shape(call, index)
+            }
         })
-        .collect()
+        .collect();
+    saw_fact.then_some(shapes)
 }
 
 fn is_string_formatting_receiver(receiver: &str) -> bool {
@@ -4395,9 +4460,10 @@ pub fn external_constructor_arg_shapes(
             {
                 saw_fact = true;
                 argument_shape_from_external_constructor_effect(effect, &effective_facts)
-            } else if let Some(effect) = facts.external_api_argument_effect_for_receiver(
+            } else if let Some(effect) = facts.external_api_argument_effect_for_receiver_with_arity(
                 Some(receiver_name),
                 rust_name,
+                Some(arg_count),
                 index,
             ) {
                 saw_fact = true;
@@ -4453,9 +4519,10 @@ pub fn external_constructor_arg_shapes_with_args(
             {
                 saw_fact = true;
                 argument_shape_from_external_constructor_effect(&effect, &effective_facts)
-            } else if let Some(effect) = facts.external_api_argument_effect_for_receiver(
+            } else if let Some(effect) = facts.external_api_argument_effect_for_receiver_with_arity(
                 Some(receiver_name),
                 rust_name,
+                Some(arg_count),
                 index,
             ) {
                 saw_fact = true;
@@ -4537,6 +4604,18 @@ fn static_utility_argument_owner_key(
         return None;
     }
     let query_owner = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    if facts
+        .external_api_effect_for_receiver_with_arity(Some(&query_owner), name, Some(arg_count))
+        .is_some()
+        || crate::external_packs::external_api_effect_for_receiver_with_arity(
+            Some(&query_owner),
+            name,
+            Some(arg_count),
+        )
+        .is_some()
+    {
+        return Some(query_owner);
+    }
     if crate::stdlib::external_api_method_role(Some(&query_owner), name, arg_count)
         != ExternalApiRole::Unknown
         && (unproven_simple_receiver_can_be_static_owner(receiver_name)
@@ -4726,14 +4805,6 @@ fn argument_shape_from_external_effect(
 fn external_argument_effect_allows_nullable_borrowed_slot(
     effect: &ExternalApiArgumentEffectFact,
 ) -> bool {
-    if matches!(effect.alias_policy, ExternalArgumentAliasPolicy::Borrowed)
-        && matches!(
-            effect.parameter_nullability,
-            NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
-        )
-    {
-        return true;
-    }
     effect.parameter_index == 0
         && matches!(effect.method_name.as_str(), "writeObject" | "write_object")
         && effect
