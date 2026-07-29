@@ -14260,6 +14260,26 @@ fn htsjdk_tribble_index_pack_declares_index_factory_nested_enums() {
                 "{type_name}.{field_name} precision should come from the tribble index pack, not stdlib"
             );
         }
+        let vcf = facts
+            .external_field_for(type_name, "VCF")
+            .unwrap_or_else(|| panic!("{type_name}.VCF should be pack-owned"));
+        assert_eq!(vcf.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(vcf.field_kind, ExternalFieldKind::EnumVariant);
+        assert_eq!(
+            vcf.field_type,
+            Some(JavaType::Named {
+                name: "TabixFormat".to_string(),
+                args: Vec::new(),
+            })
+        );
+        let dispatched = new_java2rust::external_packs::external_field_for(type_name, "VCF")
+            .unwrap_or_else(|| panic!("{type_name}.VCF should be globally pack-dispatched"));
+        assert_eq!(dispatched.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            new_java2rust::stdlib::external_field_provenance(type_name, "VCF"),
+            FactProvenance::ExternalLibraryPack,
+            "{type_name}.VCF precision should come from the tribble index pack, not stdlib"
+        );
     }
 }
 

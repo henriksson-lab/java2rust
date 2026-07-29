@@ -20757,6 +20757,18 @@ const TRIBBLE_INDEX_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("TabixFormat", "GENERIC_FLAGS"),
     modeled_semantic_field("htsjdk.tribble.index.tabix.TabixFormat", "ZERO_BASED"),
     modeled_semantic_field("TabixFormat", "ZERO_BASED"),
+    modeled_semantic_field_typed(
+        "htsjdk.tribble.index.tabix.TabixFormat",
+        "VCF",
+        "TabixFormat",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
+        "TabixFormat",
+        "VCF",
+        "TabixFormat",
+        ExternalFieldKind::EnumVariant,
+    ),
 ];
 
 const APACHE_COMMONS_MATH_OPTIM_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[

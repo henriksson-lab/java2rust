@@ -5357,6 +5357,22 @@ concrete/concrete `instanceof`, incompatible `?` usage, source-super
 constructor lowering, generic header-line getter precision, and facade/source
 boundary gaps.
 
+2026-07-29 TabixFormat VCF field fact: the HTSJDK tribble-index pack now
+declares `TabixFormat.VCF` as a typed enum-variant external field. This keeps
+the fix in pack-owned facts and generated support instead of adding a
+non-JDK rule to `stdlib.rs`.
+
+Release-backed HTSJDK VCF rerun:
+`.tmp/corpus-rerun-20260729-htsjdk-vcf-after-tabix-vcf-field-fact` translates
+all `32/32` files, keeps `invalid_pattern_files=20`, and reduces generated
+Rust errors from `411` to `408`. Generated codec methods now return
+`TabixFormat::VCF`, shared support emits `pub const VCF: TabixFormat =
+TabixFormat`, and the previous three missing associated-item rows for
+`TabixFormat::VCF` are gone. Top families remain broad mismatched types, type
+annotations, unsupported concrete/concrete `instanceof`, incompatible `?`
+usage, source-super constructor lowering, generic/interface facade precision,
+and static/source-boundary gaps.
+
 ## Rerun Protocol
 
 After each fix:

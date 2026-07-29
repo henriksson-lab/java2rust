@@ -4934,6 +4934,27 @@ fn external_field_provenance_uses_builtin_model_for_known_field_types() {
             FactProvenance::ExternalLibraryPack
         );
     }
+    for type_name in ["TabixFormat", "htsjdk.tribble.index.tabix.TabixFormat"] {
+        let field = tribble_index_facts
+            .external_field_for(type_name, "VCF")
+            .unwrap_or_else(|| panic!("{type_name}.VCF should be explained by tribble index pack"));
+        assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Named {
+                name: "TabixFormat".to_string(),
+                args: Vec::new(),
+            })
+        );
+        assert_eq!(
+            field.field_kind,
+            new_java2rust::facts::ExternalFieldKind::EnumVariant
+        );
+        assert_eq!(
+            external_field_provenance(type_name, "VCF"),
+            FactProvenance::ExternalLibraryPack
+        );
+    }
     let sam_bam_facts = new_java2rust::external_packs::htsjdk_sam_bam_pack_facts();
     let fixed_block_size = sam_bam_facts
         .external_field_for("BAMFileConstants", "FIXED_BLOCK_SIZE")
