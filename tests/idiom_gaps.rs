@@ -19798,6 +19798,62 @@ class JavaArraysEqualsUse {
 }
 
 #[test]
+fn java_arrays_copy_lowers_as_static_platform_copy_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.Arrays;
+
+class JavaArraysCopyUse {
+    byte[] prefix(byte[] values) {
+        return Arrays.copyOf(values, 2);
+    }
+
+    byte[] padded(byte[] values) {
+        return Arrays.copyOf(values, 5);
+    }
+
+    String[] names(String[] values) {
+        return Arrays.copyOfRange(values, 1, 4);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("__java_arrays_out.resize")
+            && !translation.rust.contains("Arrays::copy")
+            && !translation.rust.contains("JavaUtilArrays::copy"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_arrays_copy_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn copies_and_pads_arrays() {
+        let fixture = JavaArraysCopyUse {};
+        assert_eq!(fixture.prefix(&[1, 2, 3]), vec![1, 2]);
+        assert_eq!(fixture.padded(&[7, 8]), vec![7, 8, 0, 0, 0]);
+        assert_eq!(
+            fixture.names(&["a".to_string(), "b".to_string()]),
+            vec!["b".to_string(), String::new(), String::new()]
+        );
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn documents_equals_and_objects_gap() {
     let translation = translate_source(&idiom_gap("EqualsAndObjects.java"));
 

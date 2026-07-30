@@ -6785,12 +6785,14 @@ arity names for these overloaded constructors, so generated calls should use
 StringBuilder/StringBuffer/Appendable shape tests pass, including a generated
 runtime assertion for `"ok!"`.
 
-Audit `0016` remains partial, not fixed: `Arrays` and `FastMath` still need
-follow-up work. Literal `Pattern.compile(...)` static-final paths now preserve
-the pattern text and use lightweight stateful `Pattern`/`Matcher` facades for
-`matcher(...)`, `matches()`, and `group(...)`. The separate checked-exception
-fallibility leak around caught `Appendable.append` paths is fixed by
-catch-aware call-graph propagation and checked-only fallibility seeds.
+Audit `0016` remains partial, not fixed: remaining Arrays helpers and
+`FastMath` still need follow-up work. `Arrays.copyOf(...)` and
+`Arrays.copyOfRange(...)` now lower through native copy projections with
+Java-style default padding. Literal `Pattern.compile(...)` static-final paths
+now preserve the pattern text and use lightweight stateful `Pattern`/`Matcher`
+facades for `matcher(...)`, `matches()`, and `group(...)`. The separate
+checked-exception fallibility leak around caught `Appendable.append` paths is
+fixed by catch-aware call-graph propagation and checked-only fallibility seeds.
 
 ## Rerun Protocol
 

@@ -2204,6 +2204,23 @@ pub fn arrays_equals_projection(left: RustExpr, right: RustExpr) -> RustExpr {
     }
 }
 
+pub fn arrays_copy_of_projection(source: RustExpr, len: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ let __java_arrays_source = &{}; let __java_arrays_len = ({}).max(0) as usize; let mut __java_arrays_out = __java_arrays_source.iter().cloned().take(__java_arrays_len).collect::<Vec<_>>(); __java_arrays_out.resize(__java_arrays_len, Default::default()); __java_arrays_out }}",
+        emit::emit_expr(&source),
+        emit::emit_expr(&len),
+    ))
+}
+
+pub fn arrays_copy_of_range_projection(source: RustExpr, from: RustExpr, to: RustExpr) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ let __java_arrays_source = &{}; let __java_arrays_from = ({}).max(0) as usize; let __java_arrays_to = ({}).max(0) as usize; let __java_arrays_len = __java_arrays_to.saturating_sub(__java_arrays_from); let mut __java_arrays_out = if __java_arrays_from < __java_arrays_source.len() {{ __java_arrays_source[__java_arrays_from..__java_arrays_source.len().min(__java_arrays_to)].to_vec() }} else {{ Vec::new() }}; __java_arrays_out.resize(__java_arrays_len, Default::default()); __java_arrays_out }}",
+        emit::emit_expr(&source),
+        emit::emit_expr(&from),
+        emit::emit_expr(&to),
+    ))
+}
+
 pub fn collections_empty_list_projection() -> RustExpr {
     RustExpr::Raw("Vec::new()".to_string())
 }

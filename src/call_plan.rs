@@ -364,6 +364,8 @@ pub enum NativeCollectionExtendArgPlan {
 pub enum NativeCollectionStaticMethod {
     ArraysAsList,
     ArraysEquals,
+    ArraysCopyOf,
+    ArraysCopyOfRange,
     CollectionsEmptyList,
     CollectionsEmptySet,
     CollectionsEmptyMap,
@@ -2875,6 +2877,8 @@ fn plan_native_collection_static_call<'a>(
         let method = match name {
             "asList" | "as_list" => NativeCollectionStaticMethod::ArraysAsList,
             "equals" => NativeCollectionStaticMethod::ArraysEquals,
+            "copyOf" | "copy_of" => NativeCollectionStaticMethod::ArraysCopyOf,
+            "copyOfRange" | "copy_of_range" => NativeCollectionStaticMethod::ArraysCopyOfRange,
             _ => return None,
         };
         return Some(CallTargetPlan::NativeCollectionStatic { method });
