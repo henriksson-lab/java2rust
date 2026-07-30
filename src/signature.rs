@@ -8138,19 +8138,39 @@ fn same_type_source_call_nullability_state(
 
 struct SourceReturnNullabilityContext<'a> {
     type_name: &'a str,
+    declared_return_type: &'a JavaType,
     facts: &'a FactSet,
     field_names: HashSet<String>,
     shadowed_names: HashSet<String>,
     binding_types: HashMap<String, JavaType>,
+    type_param_bounds: HashMap<String, JavaType>,
 }
 
 impl<'a> SourceReturnNullabilityContext<'a> {
-    fn for_method(ty: &'a TypeDecl, method: &MethodDecl, body: &Block, facts: &'a FactSet) -> Self {
+    fn for_method(
+        ty: &'a TypeDecl,
+        method: &'a MethodDecl,
+        body: &Block,
+        facts: &'a FactSet,
+    ) -> Self {
         let mut field_names = HashSet::new();
         let mut binding_types = method
             .params
             .iter()
             .map(|param| (param.name.clone(), param.ty.clone()))
+            .collect::<HashMap<_, _>>();
+        let type_param_bounds = ty
+            .type_params
+            .iter()
+            .zip(ty.type_param_bounds.iter())
+            .filter_map(|(name, bound)| bound.clone().map(|bound| (name.clone(), bound)))
+            .chain(
+                method
+                    .type_params
+                    .iter()
+                    .zip(method.type_param_bounds.iter())
+                    .filter_map(|(name, bound)| bound.clone().map(|bound| (name.clone(), bound))),
+            )
             .collect::<HashMap<_, _>>();
         for member in &ty.members {
             if let crate::java_ir::Member::Field(field) = member {
@@ -8173,10 +8193,12 @@ impl<'a> SourceReturnNullabilityContext<'a> {
         collect_declared_local_names_from_stmts(&body.statements, &mut shadowed_names);
         Self {
             type_name: &ty.name,
+            declared_return_type: &method.return_type,
             facts,
             field_names,
             shadowed_names,
             binding_types,
+            type_param_bounds,
         }
     }
 
@@ -8194,10 +8216,49 @@ impl<'a> SourceReturnNullabilityContext<'a> {
     }
 
     fn expr_nullability_state(&self, expr: &Expr) -> Option<NullabilityState> {
+        if let Some(state) = self.type_param_bound_call_nullability_state(expr) {
+            return Some(state);
+        }
         if expr_is_java_map_get_call(expr, &self.binding_types) {
             return Some(NullabilityState::MaybeNull);
         }
         source_expr_nullability_state(expr)
+    }
+
+    fn type_param_bound_call_nullability_state(&self, expr: &Expr) -> Option<NullabilityState> {
+        let Expr::Call {
+            receiver: Some(receiver),
+            resolved,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        let bound = self.type_param_bound_for_receiver(receiver)?;
+        if let Some(resolved) = resolved {
+            return java_type_name_for_signature_dispatch(bound).and_then(|bound_name| {
+                crate::facts::external_type_name_matches(bound_name, &resolved.declaring_type).then(
+                    || {
+                        crate::stdlib::source_summary_method_return_nullability(
+                            &resolved.return_type,
+                        )
+                    },
+                )
+            });
+        }
+        Some(crate::stdlib::source_summary_method_return_nullability(
+            self.declared_return_type,
+        ))
+    }
+
+    fn type_param_bound_for_receiver(&self, receiver: &Expr) -> Option<&JavaType> {
+        let receiver_ty = receiver_expr_java_type(receiver, &self.binding_types)?;
+        let type_param = match receiver_ty {
+            JavaType::Unknown(type_param) => type_param,
+            JavaType::Named { name, args } if args.is_empty() => name,
+            _ => return None,
+        };
+        self.type_param_bounds.get(&type_param)
     }
 }
 

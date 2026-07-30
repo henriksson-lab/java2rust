@@ -7770,6 +7770,48 @@ class Box<T extends HeaderLine> {
 }
 
 #[test]
+fn source_generic_class_bound_overload_call_uses_bound_rust_name() {
+    let source = r#"
+class HeaderLine {
+    int getCount() {
+        return 1;
+    }
+
+    int getCount(String value) {
+        return 2;
+    }
+}
+
+class Box<T extends HeaderLine> {
+    private T value;
+
+    Box(T value) {
+        this.value = value;
+    }
+
+    int count() {
+        return value.getCount();
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("fn get_count_(&self) -> i32;")
+            && translation.rust.contains("impl<T: HeaderLineBound> Box<T>")
+            && translation.rust.contains("return self.value.get_count_();")
+            && !translation.rust.contains("return self.value.get_count();"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn nested_generic_source_alias_preserves_type_params() {
     let source = r#"
 class Outer {

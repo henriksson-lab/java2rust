@@ -244,6 +244,23 @@ work should rerun `VCFStandardHeaderLines`/full VCF to measure how many
 generic-to-supertype slot conversions such as inserting `T` where
 `VCFHeaderLine` is expected.
 
+2026-07-30 class-bound follow-up: bound trait declarations are now emitted
+from the same support-local/source-summary program used for forwarding impls,
+so cross-file corpus crates do not emit `impl SomeBound for Type` without the
+matching `pub trait SomeBound`. Source return/signature shaping and method-call
+return shaping now treat calls through `T extends SourceClass` as calls through
+the generated bound contract. This keeps overload-safe bound method names such
+as `get_count_` and avoids re-wrapping already-non-null bound trait returns.
+Focused coverage:
+`source_generic_class_bound_method_call_uses_bound_surface`,
+`source_generic_class_bound_overload_call_uses_bound_rust_name`, and
+`source_generic_class_preserves_type_params_and_interface_bounds`. Last complete
+VCF rerun before this follow-up was
+`.tmp/corpus-rerun-20260730-htsjdk-vcf-after-class-bound-traits-global` with
+32/32 translated, 20 invalid-pattern files, and 343 generated-Rust errors; the
+next full VCF rerun should check whether `VCFStandardHeaderLines` no longer
+emits unresolved `get_count` calls on `T`.
+
 Attempted VCF refresh:
 `.tmp/corpus-rerun-20260730-htsjdk-vcf-current-refresh` stalled during
 `batch_parse_global_emit_start` before per-file statuses or generated source

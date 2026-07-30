@@ -612,6 +612,11 @@ fn resolve_type_calls(
                     let mut env = fields.clone();
                     insert_scoped_type_param_bounds(
                         &mut env,
+                        &ty.type_params,
+                        &ty.type_param_bounds,
+                    );
+                    insert_scoped_type_param_bounds(
+                        &mut env,
                         &method.type_params,
                         &method.type_param_bounds,
                     );
@@ -635,6 +640,11 @@ fn resolve_type_calls(
             Member::Constructor(ctor) => {
                 if let Some(body) = &mut ctor.body {
                     let mut env = fields.clone();
+                    insert_scoped_type_param_bounds(
+                        &mut env,
+                        &ty.type_params,
+                        &ty.type_param_bounds,
+                    );
                     insert_scoped_type_param_bounds(
                         &mut env,
                         &ctor.type_params,
@@ -2721,8 +2731,7 @@ fn resolve_expr_calls(
                 }
             } else if let Some((receiver_ty, receiver_actual_ty)) = receiver
                 .as_deref()
-                .map(|receiver| infer_resolver_expr_type(receiver, current_type, symbols, env))
-                .and_then(|ty| source_receiver_type_from_actual(ty, symbols))
+                .and_then(|receiver| source_receiver_type(receiver, current_type, symbols, env))
             {
                 let receiver_methods = symbols.methods_for_hierarchy(&receiver_ty);
                 match resolve_same_class_call(

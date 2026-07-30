@@ -833,7 +833,7 @@ fn lower_type(
     }
 
     if let Some(item) = source_class_bound_trait_item_for_type(
-        program,
+        ctx.support_local_type_program,
         ty,
         ctx.signatures,
         ctx.facts,
@@ -19794,6 +19794,11 @@ fn method_call_return_shape_from_receiver(
     else {
         return None;
     };
+    if let Some(shape) =
+        type_param_bound_method_call_return_shape(receiver, resolved.as_ref(), env, ctx)
+    {
+        return Some(shape);
+    }
     let receiver_name = if is_this_receiver_expr(receiver) {
         ctx.current_type?.to_string()
     } else {
@@ -19899,6 +19904,46 @@ fn method_call_return_shape_from_receiver(
                 .method_signature_by_base_name_and_arity(&receiver_name, name, args.len())
         })
         .and_then(|(_, signature)| signature.return_shape.clone())
+}
+
+fn type_param_bound_method_call_return_shape(
+    receiver: &Expr,
+    resolved: Option<&ResolvedCall>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustSlotShape> {
+    let resolved = resolved?;
+    let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
+    let type_param = match receiver_ty {
+        JavaType::Unknown(type_param) => type_param,
+        JavaType::Named { name, args } if args.is_empty() => name,
+        _ => return None,
+    };
+    let bound = env.type_env().type_param_bound(&type_param)?;
+    let bound_name = java_type_name_for_bound_contract(bound)?;
+    if !crate::facts::external_type_name_matches(bound_name, &resolved.declaring_type) {
+        return None;
+    }
+    let mut shape = crate::shape_projection::return_shape_for_java_type(
+        ctx.representations,
+        &resolved.return_type,
+    )?;
+    shape = apply_signature_constraints(
+        shape,
+        &[
+            SignatureConstraint::RequiredStorageNullability(NullabilityState::DefinitelyNonNull),
+            SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+            SignatureConstraint::RequiredView(ViewShape::Native),
+        ],
+    );
+    Some(shape)
+}
+
+fn java_type_name_for_bound_contract(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        _ => None,
+    }
 }
 
 fn getter_field_return_shape_from_receiver(
