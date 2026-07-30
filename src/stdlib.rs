@@ -7829,6 +7829,12 @@ impl ExternalApiFacadeSupport {
         }
         if external_api_role_returns_value(fact.role) {
             let receiver_rust = rust_name_for_java_named_type(receiver_key);
+            if external_facade_type_is_generic_carrier(&receiver_rust)
+                && java_method == "get"
+                && arg_count == 0
+            {
+                return ("T".to_string(), false);
+            }
             let return_rust =
                 external_facade_unmodelled_result_type(&receiver_rust, rust_method, arg_count);
             (return_rust, true)
@@ -8047,18 +8053,11 @@ impl ExternalApiFacadeSupport {
                         &java_method,
                         *arg_count,
                     ) {
-                        let return_rust = external_facade_unmodelled_result_type(
-                            &owner,
-                            &java_method,
-                            *arg_count,
-                        );
-                        self.add_opaque_type(return_rust.clone());
-                        let method_body = external_facade_builder_unmodelled_getter(
+                        let method_body = external_facade_generic_carrier_method(
                             &owner,
                             &support_rust_method,
                             &java_method,
                             *arg_count,
-                            &return_rust,
                         );
                         if self.has_method_signature(&owner, &support_rust_method, *arg_count) {
                             self.replace_method_signature(
@@ -9713,6 +9712,8 @@ impl ExternalApiFacadeSupport {
                 lines.push(format!(
                     "#[derive(Clone, Debug)]\npub struct {ty} {{\n{field_lines}\n}}\n\nimpl Default for {ty} {{\n    fn default() -> Self {{ panic!(\"external facade placeholder {ty} has no default value\") }}\n}}"
                 ));
+            } else if external_facade_type_is_generic_carrier(&ty) {
+                lines.push(external_facade_generic_carrier_struct(&ty));
             } else {
                 lines.push(format!(
                     "#[derive(Clone, Debug, Default)]\npub struct {ty};"
@@ -9772,8 +9773,9 @@ impl ExternalApiFacadeSupport {
             {
                 continue;
             }
+            let impl_header = external_facade_impl_header(&owner);
             lines.push(format!(
-                "impl {owner} {{\n{}\n}}",
+                "{impl_header} {{\n{}\n}}",
                 methods.into_iter().collect::<Vec<_>>().join("\n")
             ));
         }
@@ -12362,21 +12364,54 @@ fn external_facade_constructor_argument_rust_type(
 }
 
 fn external_facade_eq_impl(ty: &str) -> String {
+    if external_facade_type_is_generic_carrier(ty) {
+        return format!(
+            "impl<T> PartialEq for {ty}<T> {{\n    fn eq(&self, _other: &Self) -> bool {{ true }}\n}}\n\nimpl<T> Eq for {ty}<T> {{}}"
+        );
+    }
     format!(
         "impl PartialEq for {ty} {{\n    fn eq(&self, _other: &Self) -> bool {{ true }}\n}}\n\nimpl Eq for {ty} {{}}"
     )
 }
 
 fn external_facade_hash_impl(ty: &str) -> String {
+    if external_facade_type_is_generic_carrier(ty) {
+        return format!(
+            "impl<T> std::hash::Hash for {ty}<T> {{\n    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {{}}\n}}"
+        );
+    }
     format!(
         "impl std::hash::Hash for {ty} {{\n    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {{}}\n}}"
     )
 }
 
 fn external_facade_display_impl(ty: &str) -> String {
+    if external_facade_type_is_generic_carrier(ty) {
+        return format!(
+            "impl<T> std::fmt::Display for {ty}<T> {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"\") }}\n}}"
+        );
+    }
     format!(
         "impl std::fmt::Display for {ty} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"\") }}\n}}"
     )
+}
+
+fn external_facade_type_is_generic_carrier(ty: &str) -> bool {
+    ty.ends_with("Future")
+}
+
+fn external_facade_generic_carrier_struct(ty: &str) -> String {
+    format!(
+        "pub struct {ty}<T = Box<dyn std::any::Any>> {{\n    _marker: std::marker::PhantomData<fn() -> T>,\n}}\n\nimpl<T> Clone for {ty}<T> {{\n    fn clone(&self) -> Self {{ Self {{ _marker: std::marker::PhantomData }} }}\n}}\n\nimpl<T> std::fmt::Debug for {ty}<T> {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ f.debug_struct(\"{ty}\").finish() }}\n}}\n\nimpl<T> Default for {ty}<T> {{\n    fn default() -> Self {{ Self {{ _marker: std::marker::PhantomData }} }}\n}}"
+    )
+}
+
+fn external_facade_impl_header(owner: &str) -> String {
+    if external_facade_type_is_generic_carrier(owner) {
+        format!("impl<T> {owner}<T>")
+    } else {
+        format!("impl {owner}")
+    }
 }
 
 fn external_facade_imported_static_method(name: &str, arg_count: usize) -> String {
@@ -12827,6 +12862,27 @@ fn external_facade_builder_unmodelled_getter(
     format!(
         "    pub fn {rust_name}{} -> {return_type} {{ unimplemented!(\"{owner}.{java_name} is not modelled\") }}",
         external_facade_self_args(arg_count)
+    )
+}
+
+fn external_facade_generic_carrier_method(
+    owner: &str,
+    rust_name: &str,
+    java_name: &str,
+    arg_count: usize,
+) -> String {
+    if external_facade_type_is_generic_carrier(owner) && java_name == "get" && arg_count == 0 {
+        let rust_name = rust_raw_ident_if_needed(rust_name);
+        return format!(
+            "    pub fn {rust_name}(&self) -> T {{ unimplemented!(\"{owner}.{java_name} is not modelled\") }}"
+        );
+    }
+    external_facade_builder_unmodelled_getter(
+        owner,
+        rust_name,
+        java_name,
+        arg_count,
+        &external_facade_unmodelled_result_type(owner, rust_name, arg_count),
     )
 }
 

@@ -10671,7 +10671,14 @@ class FutureGetUse {
     assert!(
         translation
             .rust
-            .contains("pub fn get<T: Default>(&self) -> T"),
+            .contains("pub struct Future<T = Box<dyn std::any::Any>>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("impl<T> Future<T> {\n    pub fn get(&self) -> T"),
         "{}",
         translation.rust
     );
@@ -10683,7 +10690,11 @@ class FutureGetUse {
         translation.rust
     );
     assert!(
-        !translation.rust.contains("pub fn get<R: Default>() -> R"),
+        !translation
+            .rust
+            .contains("pub fn get<T: Default>(&self) -> T")
+            && !translation.rust.contains("pub fn get<R: Default>() -> R")
+            && !translation.rust.contains("FutureGetResult"),
         "{}",
         translation.rust
     );

@@ -325,6 +325,12 @@ result shims; mutator/side-effect no-return facts remain `()`. The guard
 `external_api_support_passes_share_missing_return_surface_policy` rejects local
 `None -> ()` return fallback decisions in those passes.
 
+Generic carrier follow-up: `Future` support now emits a generic opaque carrier
+`Future<T = Box<dyn std::any::Any>>` and `Future<T>::get() -> T` with a loud
+unmodelled body, rather than a `T: Default` method or synthetic
+`FutureGetResult` placeholder. This lets source `Future<T>` fields and method
+calls agree on one generic support surface.
+
 2026-07-30 VCF source-hierarchy note: the ignored
 `source_hierarchy_instanceof_repair_keeps_supertype_slot_adapted` fixture still
 fails because source-super loop variables are represented as concrete
