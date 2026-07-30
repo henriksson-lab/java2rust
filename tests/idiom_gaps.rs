@@ -8724,6 +8724,53 @@ mod generated_tests {
 }
 
 #[test]
+fn source_class_bound_trait_generic_methods_preserve_type_params() {
+    let translation = translate_source(
+        r#"
+class Base {
+    <T> T id(T value) {
+        return value;
+    }
+}
+
+class Holder<N extends Base> {
+    private N base;
+
+    Holder(N base) {
+        this.base = base;
+    }
+
+    int use(int value) {
+        return base.id(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub trait BaseBound {\n    fn id<T>(&self, value: T) -> T where Self: Sized;")
+            && translation
+                .rust
+                .contains("impl BaseBound for Base {\n    fn id<T>(&self, value: T) -> T where Self: Sized { Base::id(self, value) }")
+            && translation.rust.contains("impl<N: BaseBound> Holder<N>")
+            && translation.rust.contains("return self.base.id(value);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_class_bound_trait_generic_methods",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn generic_source_map_storage_return_adds_clone_bound() {
     let source = r#"
 import java.util.HashMap;
@@ -14202,6 +14249,39 @@ mod generated_tests {
     }
 }
 "#,
+        }],
+    );
+}
+
+#[test]
+fn interface_default_generic_method_preserves_type_params() {
+    let translation = translate_source(
+        r#"
+interface DefaultMapper {
+    default <T> T id(T value) {
+        return value;
+    }
+}
+
+class DefaultMapperImpl implements DefaultMapper {
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "fn id<T>(&self, value: T) -> T where Self: Sized {\n        return value;\n    }"
+        ) && !translation.rust.contains("fn id(&self, value: T) -> T"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "interface_default_generic_method",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
         }],
     );
 }

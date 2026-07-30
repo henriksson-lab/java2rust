@@ -6285,8 +6285,51 @@ pub fn method_param_shape_constraints(
                 .unwrap_or_default(),
         );
     }
+    if method_return_type_param_name(method)
+        .is_some_and(|type_param| java_type_is_simple_type_param(&param.ty, type_param))
+    {
+        retain_non_ownership_view_constraints(&mut constraints);
+        push_unique_signature_constraints(&mut constraints, &owned_native_signature_constraints());
+    }
     normalize_param_borrowed_slice_constraints(param, &mut constraints);
     constraints
+}
+
+fn method_return_type_param_name(method: &MethodDecl) -> Option<&str> {
+    let type_name = simple_type_param_name(&method.return_type)?;
+    method
+        .type_params
+        .iter()
+        .any(|type_param| type_param == type_name)
+        .then_some(type_name)
+}
+
+fn simple_type_param_name(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, args } if args.is_empty() => Some(name.as_str()),
+        JavaType::Unknown(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn java_type_is_simple_type_param(java_ty: &JavaType, type_param: &str) -> bool {
+    simple_type_param_name(java_ty) == Some(type_param)
+}
+
+fn retain_non_ownership_view_constraints(constraints: &mut Vec<SignatureConstraint>) {
+    constraints.retain(|constraint| {
+        !matches!(
+            constraint,
+            SignatureConstraint::RequiredOwnership(_) | SignatureConstraint::RequiredView(_)
+        )
+    });
+}
+
+fn owned_native_signature_constraints() -> [SignatureConstraint; 2] {
+    [
+        SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+        SignatureConstraint::RequiredView(ViewShape::Native),
+    ]
 }
 
 fn source_object_varargs_carrier_constraints(param: &Param) -> Vec<SignatureConstraint> {
@@ -11817,6 +11860,7 @@ pub fn method_return_shape_constraints(
 ) -> Vec<SignatureConstraint> {
     if method.body.is_none()
         && !method.modifiers.contains(&Modifier::Abstract)
+        && method_return_type_param_name(method).is_none()
         && source_summary_bodyless_return_may_be_null(&method.return_type)
     {
         return vec![SignatureConstraint::RequiredStorageNullability(
@@ -11861,6 +11905,10 @@ pub fn method_return_shape_constraints(
                 return_nullability,
             )],
         );
+    }
+    if method_return_type_param_name(method).is_some() {
+        retain_non_ownership_view_constraints(&mut constraints);
+        push_unique_signature_constraints(&mut constraints, &owned_native_signature_constraints());
     }
     let method_usage = usage.source_method_usage(ty, method);
     let returns_call_result =
@@ -11996,6 +12044,9 @@ fn source_method_return_should_borrow_object(
     facts: &FactSet,
 ) -> bool {
     if source_static_initialized_singleton_getter(ty, method).is_some() {
+        return false;
+    }
+    if method_return_type_param_name(method).is_some() {
         return false;
     }
     if !java_return_type_can_borrow_as_object(&method.return_type, facts) {
@@ -12332,6 +12383,9 @@ fn internal_returned_object_alias_borrow_constraints(
         return Vec::new();
     }
     if matches!(method.return_type, JavaType::Primitive(_) | JavaType::Void) {
+        return Vec::new();
+    }
+    if method_return_type_param_name(method).is_some() {
         return Vec::new();
     }
     let param_names = method

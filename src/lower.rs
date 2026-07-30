@@ -965,6 +965,7 @@ fn raw_interface_trait_item_with_default_methods(
                 trait_method_exception_plan(ty, method, program, ctx.exceptions),
                 trait_method_receiver_plan(ty, method, program, ctx.signatures),
                 trait_method_return_shape_plan(ty, method, program, ctx.signatures),
+                program,
             )),
             _ => None,
         })
@@ -992,6 +993,7 @@ fn interface_default_trait_method_item(
         trait_method_exception_plan(ty, method, program, ctx.exceptions),
         trait_method_receiver_plan(ty, method, program, ctx.signatures),
         trait_method_return_shape_plan(ty, method, program, ctx.signatures),
+        program,
     );
     let method_signature = ctx.signatures.required_method_signature(ty, method);
     let method_ctx = LowerCtx {

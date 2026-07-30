@@ -477,6 +477,7 @@ pub fn source_class_bound_trait_item_for_type(
                 Some(source_class_bound_trait_method_signature(
                     ty,
                     method,
+                    program,
                     signatures,
                     facts,
                     exceptions.method_plan(ty, method),
@@ -535,6 +536,7 @@ pub fn source_class_bound_trait_impl_emissions_for_type(
 fn source_class_bound_trait_method_signature(
     ty: &TypeDecl,
     method: &MethodDecl,
+    program: &Program,
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
@@ -559,7 +561,12 @@ fn source_class_bound_trait_method_signature(
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
-    format!("    fn {rust_name}({}){return_type};", params.join(", "))
+    let type_params = rust_method_type_params(method, program);
+    let where_clause = rust_generic_trait_method_where_clause(method);
+    format!(
+        "    fn {rust_name}{type_params}({}){return_type}{where_clause};",
+        params.join(", ")
+    )
 }
 
 fn source_class_bound_trait_method_return_type(
@@ -593,6 +600,7 @@ fn source_class_bound_trait_impl_method(
     let signature = source_class_bound_trait_method_signature(
         bound,
         bound_method,
+        program,
         signatures,
         facts,
         exceptions,
@@ -787,6 +795,7 @@ fn trait_item_for_type_with_program(
                 trait_method_exception_plan(ty, method, program, exceptions),
                 trait_method_receiver_plan(ty, method, program, signatures),
                 trait_method_return_shape_plan(ty, method, program, signatures),
+                program,
             )),
             _ => None,
         })
@@ -885,6 +894,7 @@ fn trait_impl_method(
         interface_exceptions,
         trait_receiver,
         trait_return_shape,
+        program,
     );
     let candidates = implementing_method_candidates_in_hierarchy(ty, interface_method, program);
     if candidates.is_empty() {
@@ -1183,7 +1193,15 @@ fn trait_method_signature(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
 ) -> String {
-    trait_method_signature_with_receiver(ty, method, signatures, facts, exceptions, None)
+    trait_method_signature_with_receiver(
+        ty,
+        method,
+        signatures,
+        facts,
+        exceptions,
+        None,
+        &Program::default(),
+    )
 }
 
 fn trait_method_signature_with_receiver(
@@ -1193,6 +1211,7 @@ fn trait_method_signature_with_receiver(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
     receiver_override: Option<ReceiverPlan>,
+    program: &Program,
 ) -> String {
     trait_method_signature_with_receiver_and_return_shape(
         ty,
@@ -1202,6 +1221,7 @@ fn trait_method_signature_with_receiver(
         exceptions,
         receiver_override,
         None,
+        program,
     )
 }
 
@@ -1213,6 +1233,7 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
     exceptions: MethodExceptionPlan,
     receiver_override: Option<ReceiverPlan>,
     return_shape_override: Option<RustSlotShape>,
+    program: &Program,
 ) -> String {
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
@@ -1243,7 +1264,48 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
-    format!("    fn {rust_name}({}){return_type};", params.join(", "))
+    let type_params = rust_method_type_params(method, program);
+    let where_clause = rust_generic_trait_method_where_clause(method);
+    format!(
+        "    fn {rust_name}{type_params}({}){return_type}{where_clause};",
+        params.join(", ")
+    )
+}
+
+fn rust_method_type_params(method: &MethodDecl, program: &Program) -> String {
+    if method.type_params.is_empty() {
+        return String::new();
+    }
+    let params = method
+        .type_params
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let Some(Some(JavaType::Named { name: bound, .. })) =
+                method.type_param_bounds.get(index)
+            else {
+                return name.clone();
+            };
+            match find_type_decl(program, bound) {
+                Some(ty) if matches!(ty.kind, TypeKind::Interface) => {
+                    format!("{name}: {}", rust_name_for_java_named_type(&ty.name))
+                }
+                Some(ty) if matches!(ty.kind, TypeKind::Class) => {
+                    format!("{name}: {}", source_class_bound_trait_name(&ty.name))
+                }
+                _ => name.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    format!("<{}>", params.join(", "))
+}
+
+fn rust_generic_trait_method_where_clause(method: &MethodDecl) -> &'static str {
+    if method.type_params.is_empty() {
+        ""
+    } else {
+        " where Self: Sized"
+    }
 }
 
 pub(crate) fn trait_method_return_shape_plan(
@@ -1517,7 +1579,12 @@ fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeD
 }
 
 fn find_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
-    if ty.name == type_name {
+    let simple_name = ty.name.rsplit('.').next().unwrap_or(&ty.name);
+    if ty.name == type_name
+        || simple_name == type_name
+        || rust_name_for_java_named_type(&ty.name) == type_name
+        || rust_name_for_java_named_type(simple_name) == type_name
+    {
         return Some(ty);
     }
     ty.members.iter().find_map(|member| match member {

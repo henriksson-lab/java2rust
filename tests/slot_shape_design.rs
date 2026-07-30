@@ -53,10 +53,10 @@ use new_java2rust::exception_lowering::{
     try_finally_scope_stmt, try_with_resources_scope_stmt,
 };
 use new_java2rust::exception_plan::{
-    JavaExceptionSupportPlan, MethodExceptionPlan, ThrowExprPlan, TryBlockCompletion, TryStmtPlan,
-    catch_match_class_names, exception_class_name, plan_java_exception_support,
-    plan_method_exceptions, plan_program_exceptions, plan_program_fallibility, plan_throw_expr,
-    plan_try_stmt, try_resource_names,
+    JavaExceptionSupportPlan, MethodExceptionPlan, ProgramExceptionPlan, ThrowExprPlan,
+    TryBlockCompletion, TryStmtPlan, catch_match_class_names, exception_class_name,
+    plan_java_exception_support, plan_method_exceptions, plan_program_exceptions,
+    plan_program_fallibility, plan_throw_expr, plan_try_stmt, try_resource_names,
 };
 use new_java2rust::expr_render::{
     binary_expr, indexed_expr, literal_expr, named_constructor_expr, raw_expr, super_expr,
@@ -142,7 +142,7 @@ use new_java2rust::representation_lowering::{
     RepresentationTypeEmission, TraitImplMethodCompatibilityError, TraitImplMethodFallbackPolicy,
     TraitImplMethodMessagePolicy, raw_type_item_for_with_facts, trait_impl_emissions_for_type,
     trait_impl_emissions_for_type_with_facts, trait_impl_method_message_policy, type_emission_for,
-    type_emission_for_with_facts,
+    type_emission_for_program_with_facts_and_exceptions, type_emission_for_with_facts,
 };
 use new_java2rust::resolve::{resolve_program, resolve_program_with_source_program_and_facts};
 use new_java2rust::rewrite::{
@@ -4744,6 +4744,89 @@ interface Named {
             "pub trait Named {\n    fn name(&self) -> String;\n    fn score(&self, prefix: String) -> i32;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Named>;\n}\n\nimpl dyn Named {\n    pub fn anonymous() -> Box<dyn Named> { panic!(\"java2rust: anonymous class body for Named requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Named> {\n    fn clone(&self) -> Self { self.clone_box() }\n}"
                 .to_string()
         )
+    );
+}
+
+#[test]
+fn representation_lowering_renders_interface_method_type_params() {
+    let parsed = parse_java_source(
+        r#"
+interface Mapper {
+    <T> T id(T value);
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &semantic.facts);
+    let mapper_ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Mapper")
+        .unwrap();
+
+    assert_eq!(
+        type_emission_for_program_with_facts_and_exceptions(
+            &representations,
+            &resolved.program,
+            mapper_ty,
+            &signatures,
+            &semantic.facts,
+            &ProgramExceptionPlan::default(),
+        ),
+        RepresentationTypeEmission::RawRustItem(
+            "pub trait Mapper {\n    fn id<T>(&self, value: T) -> T where Self: Sized;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> Box<dyn Mapper>;\n}\n\nimpl dyn Mapper {\n    pub fn anonymous() -> Box<dyn Mapper> { panic!(\"java2rust: anonymous class body for Mapper requires object lowering\") }\n}\n\nimpl Clone for Box<dyn Mapper> {\n    fn clone(&self) -> Self { self.clone_box() }\n}"
+                .to_string()
+        )
+    );
+}
+
+#[test]
+fn representation_lowering_renders_interface_method_type_param_bounds() {
+    let parsed = parse_java_source(
+        r#"
+interface Base {
+    String name();
+}
+
+interface Mapper {
+    <T extends Base> String nameOf(T value);
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let representations = plan_representations(&resolved.program, &semantic.facts);
+    let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+    let signatures =
+        solve_signatures_with_facts(&resolved.program, &representations, &usage, &semantic.facts);
+    let mapper_ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Mapper")
+        .unwrap();
+
+    let emission = type_emission_for_program_with_facts_and_exceptions(
+        &representations,
+        &resolved.program,
+        mapper_ty,
+        &signatures,
+        &semantic.facts,
+        &ProgramExceptionPlan::default(),
+    );
+
+    assert!(
+        matches!(
+            emission,
+            RepresentationTypeEmission::RawRustItem(ref item)
+                if item.contains("fn name_of<T: Base>(&self, value: T) -> String where Self: Sized;")
+        ),
+        "{emission:?}"
     );
 }
 
