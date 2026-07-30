@@ -2126,6 +2126,13 @@ fn plan_call_target_with_external_index_impl<'a>(
         return target;
     }
 
+    if receiver.is_none()
+        && let Some(owner) = static_member_import_owner_for_call(name, types)
+        && let Some(target) = plan_native_java_static_owner_call(owner, name, args, types)
+    {
+        return target;
+    }
+
     if let Some(receiver) = receiver
         && let Some(target) = plan_native_collection_receiver_call(receiver, name, types)
     {
@@ -3334,10 +3341,20 @@ fn plan_native_java_static_call<'a>(
     let Some(Expr::Var(receiver_name)) = receiver else {
         return None;
     };
+    plan_native_java_static_owner_call(receiver_name, name, args, types)
+}
+
+fn plan_native_java_static_owner_call<'a>(
+    receiver_name: &str,
+    name: &str,
+    args: Option<&'a [Expr]>,
+    types: &TypeEnv,
+) -> Option<CallTargetPlan<'a>> {
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
     let receiver_key =
         crate::javalibs::native_java_static_owner_alias(&receiver_key).unwrap_or(&receiver_key);
-    let method = match (receiver_key, name) {
+    let receiver_simple = receiver_key.rsplit('.').next().unwrap_or(receiver_key);
+    let method = match (receiver_simple, name) {
         ("Math", "max") => NativeJavaStaticMethod::MathMax {
             primitive: math_binary_overload_primitive(args, types),
         },

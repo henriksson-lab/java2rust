@@ -7891,6 +7891,16 @@ impl ExternalApiFacadeSupport {
             if local_types.contains(&owner_key) {
                 continue;
             }
+            let arities = arities
+                .iter()
+                .copied()
+                .filter(|arg_count| {
+                    !is_native_lowered_math_static_method(&owner_key, method, *arg_count)
+                })
+                .collect::<Vec<_>>();
+            if arities.is_empty() {
+                continue;
+            }
             let mut owner_rust = rust_name_for_java_named_type(&owner_key);
             if !valid_external_facade_type_ident(&owner_rust) {
                 continue;
@@ -7916,7 +7926,7 @@ impl ExternalApiFacadeSupport {
             if simple_owner_rust != owner_rust && self.opaque_types.contains(&simple_owner_rust) {
                 method_owners.push(simple_owner_rust);
             }
-            for arg_count in arities {
+            for arg_count in &arities {
                 if let Some(effect) = facts.external_api_effect_for_receiver_with_arity(
                     Some(&owner_key),
                     method,
@@ -8387,42 +8397,6 @@ impl ExternalApiFacadeSupport {
         &mut self,
         used_calls: &BTreeMap<String, BTreeSet<usize>>,
     ) {
-        if used_calls
-            .get("pow")
-            .is_some_and(|arities| arities.contains(&2))
-        {
-            self.add_opaque_type("Math".to_string());
-            self.add_method(
-                "Math".to_string(),
-                "    pub fn pow<T0: Into<f64>, T1: Into<f64>>(base: T0, exponent: T1) -> f64 { base.into().powf(exponent.into()) }".to_string(),
-            );
-        }
-        for method in ["abs", "ceil", "floor", "log", "log10", "exp", "sqrt"] {
-            if used_calls
-                .get(method)
-                .is_some_and(|arities| arities.contains(&1))
-            {
-                self.add_opaque_type("Math".to_string());
-                let rust_method = if method == "log" { "ln" } else { method };
-                self.add_method(
-                    "Math".to_string(),
-                    format!(
-                        "    pub fn {method}<T0: Into<f64>>(value: T0) -> f64 {{ value.into().{rust_method}() }}"
-                    ),
-                );
-            }
-        }
-        if used_calls
-            .get("round")
-            .is_some_and(|arities| arities.contains(&1))
-        {
-            self.add_opaque_type("Math".to_string());
-            self.add_method(
-                "Math".to_string(),
-                "    pub fn round<T0: Into<f64>>(value: T0) -> i64 { value.into().round() as i64 }"
-                    .to_string(),
-            );
-        }
         if used_calls
             .get("random")
             .is_some_and(|arities| arities.contains(&0))
@@ -13593,6 +13567,28 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "char"
             | "()"
     ) || crate::javalibs::is_builtin_external_facade_type(name)
+}
+
+fn is_native_lowered_math_static_method(owner: &str, method: &str, arg_count: usize) -> bool {
+    let owner_key = canonical_external_receiver_type_key(owner);
+    let owner_key =
+        crate::javalibs::native_java_static_owner_alias(&owner_key).unwrap_or(&owner_key);
+    let owner_simple = owner_key.rsplit('.').next().unwrap_or(&owner_key);
+    if owner_simple != "Math" {
+        return false;
+    }
+    matches!(
+        (method, arg_count),
+        (
+            "abs" | "ceil" | "floor" | "log" | "log10" | "exp" | "sqrt" | "round",
+            1
+        ) | ("pow", 2)
+            | (
+                "max" | "min" | "floorDiv" | "floor_div" | "floorMod" | "floor_mod",
+                2
+            )
+            | ("toIntExact" | "to_int_exact", 1)
+    )
 }
 
 fn is_allowed_builtin_external_from_impl(from: &str, to: &str) -> bool {

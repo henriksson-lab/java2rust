@@ -138,9 +138,9 @@ Landed in this batch:
   behavior instead of Rust debug overflow.
 - Common floating `Math` methods `sqrt`, `pow`, `log10`, `ceil`, and `floor`
   now lower through the native static-call planner at call sites, alongside the
-  existing `log` and `exp` paths. The broad JDK support generator can still
-  emit fallback `Math` surfaces when it observes those names, so facade-support
-  pruning remains part of audit `0016`.
+  existing `log` and `exp` paths. Receiverless static imports for those native
+  Math methods use the same planner, and the broad JDK support generator no
+  longer emits fallback `Math` surfaces for native-handled methods.
 - Apache Commons `FastMath` ownership is modelled as a `javalibs` native static
   owner alias to the existing JDK `Math` planner, so package-specific knowledge
   stays out of `stdlib.rs` while call sites reuse the same math projections.
@@ -444,7 +444,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0013` nested downcast names | fixed locally | Moved to `claude_audits/done` |
 | `0014` labelled statements deleted | fixed locally | Moved to `claude_audits/done`; CFG liveness still needs labelled edges |
 | `0015` static initializer blocks dropped | partial | Loud diagnostic now; full class-init later |
-| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill/sort` lower natively; Apache `FastMath` uses a javalibs owner alias to the Math planner; remaining Arrays helpers and broader facade fallibility still open |
+| `0016` no-op JDK facades | partial | `StringBuilder`/`StringBuffer` and literal `Pattern`/`Matcher` paths are stateful; `Arrays.copyOf/copyOfRange/toString/fill/sort` and common `Math` calls lower natively without dead `Math` fallback support; Apache `FastMath` uses a javalibs owner alias to the Math planner; remaining Arrays helpers and broader facade fallibility still open |
 | `0017` generic bounds dropped | partial | Method/constructor type parameters now emit as structured Rust function generics; method-level bounds and full typed type parsing remain open |
 | `0018` compile metric blind spots | partial | Parse gate and coverage counters |
 | `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |
@@ -460,7 +460,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0029` static field mutation invalid Rust | fixed locally | Moved to `claude_audits/done`; static `++`/`--` now route through storage setters for current and qualified source statics |
 | `0030` Java statics are thread-local | open | Static storage model |
 | `0031` stubbed constant census | partial | JDK and selected HTSJDK domain constants are explicit; unknown primitive/named external constants now fail loudly and status/summary reports include `stubbed_constants`; corpus reruns still need to prove the remaining count |
-| `0032` java.lang.Math mistranslated | partial | Round edge semantics, i32/i64 floorDiv/floorMod, and common floating call-site projections (`sqrt`, `pow`, `log10`, `ceil`, `floor`) improved; broader overload/constant audit and facade-support pruning remain |
+| `0032` java.lang.Math mistranslated | partial | Round edge semantics, i32/i64 floorDiv/floorMod, common floating call-site projections (`sqrt`, `pow`, `log10`, `ceil`, `floor`), receiverless static imports, and native-method support pruning improved; broader overload/constant audit remains |
 
 ## Parallel Work Split
 

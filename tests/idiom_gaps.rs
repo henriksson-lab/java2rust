@@ -691,6 +691,7 @@ fn jdk_numeric_and_decimal_format_facades_keep_precise_return_shapes() {
     let translation = translate_source(
         r#"
 import java.text.DecimalFormat;
+import static java.lang.Math.sqrt;
 
 class JdkNumericAndFormatFacades {
     static double log2(double value) {
@@ -719,6 +720,10 @@ class JdkNumericAndFormatFacades {
 
     static double floor(double value) {
         return Math.floor(value);
+    }
+
+    static double importedSqrt(double value) {
+        return sqrt(value);
     }
 
     static long rounded(double value) {
@@ -802,6 +807,9 @@ class JdkNumericAndFormatFacades {
             && translation.rust.contains("(2 as f64).ln()")
             && translation.rust.contains("(value as f64).exp()")
             && translation.rust.contains("(value as f64).sqrt()")
+            && translation.rust.contains(
+                "pub fn imported_sqrt(value: f64) -> f64 {\n        return (value as f64).sqrt();"
+            )
             && translation
                 .rust
                 .contains("(value as f64).powf(2f64 as f64)")
@@ -840,6 +848,9 @@ class JdkNumericAndFormatFacades {
             && !translation.rust.contains("Math::floor")
             && !translation.rust.contains("Math::round")
             && !translation.rust.contains("Math::to_int_exact")
+            && !translation.rust.contains("pub struct Math")
+            && !translation.rust.contains("pub fn pow")
+            && !translation.rust.contains("pub fn sqrt")
             && !translation.rust.contains("math.floor_div")
             && !translation.rust.contains("math.floor_mod")
             && !translation.rust.contains("Double::is_na_n")
@@ -871,6 +882,7 @@ mod generated_tests {
         assert_eq!(JdkNumericAndFormatFacades::log10(1000.0), 3.0);
         assert_eq!(JdkNumericAndFormatFacades::ceil(1.25), 2.0);
         assert_eq!(JdkNumericAndFormatFacades::floor(1.75), 1.0);
+        assert_eq!(JdkNumericAndFormatFacades::imported_sqrt(16.0), 4.0);
         assert_eq!(JdkNumericAndFormatFacades::rounded(-2.5), -2);
         assert_eq!(JdkNumericAndFormatFacades::rounded(-0.5), 0);
         assert_eq!(JdkNumericAndFormatFacades::rounded_edge(), 0);
@@ -6551,6 +6563,8 @@ class LowercaseJdkStaticOwners {
             && translation.rust.contains("(x as f64).powf(2f64 as f64)")
             && translation.rust.contains("StrictMath::i_e_e_eremainder")
             && translation.rust.contains("System::arraycopy")
+            && !translation.rust.contains("pub struct Math")
+            && !translation.rust.contains("pub fn pow")
             && translation.rust.contains("pub struct StrictMath")
             && translation.rust.contains("pub fn i_e_e_eremainder")
             && translation.rust.contains("pub struct Double")
