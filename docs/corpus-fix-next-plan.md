@@ -245,6 +245,14 @@ emits named opaque result shims with loud unmodelled bodies instead of generic
 Remaining work in this cluster is inherited support surfaces and any non-builder
 generic fallback surfaces found by the next corpus rerun.
 
+Inherited external missing-return step: inherited external getter facts with no
+return type now emit named opaque result shims with loud unmodelled bodies
+instead of silently generating `()` support methods on the source subclass.
+Focused coverage:
+`inherited_external_getter_without_return_fact_uses_named_unmodelled_result_shim`.
+Remaining work in this cluster is any non-builder generic fallback surfaces
+found by the next corpus rerun.
+
 2026-07-29 PrintStream overload cleanup: JDK `PrintStream.print/println`
 arity-1 calls now have explicit platform API facts, resolved external instance
 calls can preserve overload-safe arity names, and generated support emits a

@@ -26208,6 +26208,58 @@ class UseExternalGetterMissingReturnFact {
 }
 
 #[test]
+fn inherited_external_getter_without_return_fact_uses_named_unmodelled_result_shim() {
+    let source = r#"
+class InheritsExternalGetter extends ExternalBase {
+    Object read() {
+        return fetchRecord("sample");
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "ExternalBase".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "fetchRecord".to_string(),
+        receiver_type: Some("ExternalBase".to_string()),
+        arg_count: Some(1),
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: None,
+        return_nullability: NullabilityState::Unknown,
+        thrown: Vec::new(),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("pub struct ExternalBaseFetchRecord1Result"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "pub fn fetch_record<T0>(&self, _arg0: T0) -> ExternalBaseFetchRecord1Result { unimplemented!(\"ExternalBase.fetchRecord is not modelled\") }"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub fn fetch_record<T0>(&self, _arg0: T0) -> ()"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn external_new_builder_without_return_fact_uses_named_builder_shim() {
     let source = r#"
 class UseExternalNewBuilderMissingReturnFact {

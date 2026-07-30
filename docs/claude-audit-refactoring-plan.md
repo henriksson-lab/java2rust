@@ -203,6 +203,9 @@ Landed in this batch:
   unmodelled result shim path instead of generic `R: Default` fallback methods.
 - Builder `get_*_builder` fallback support now uses named opaque result shims
   with loud unmodelled bodies instead of generic `T: Default` fallback methods.
+- Inherited external getter facts without return types now use the same named
+  unmodelled result shim policy instead of silently generating `()` inherited
+  support methods.
 
 1. Expand rust signature facts.
    - Prefer function signature facts over tailored call rules whenever the same

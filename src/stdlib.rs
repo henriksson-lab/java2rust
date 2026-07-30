@@ -6489,32 +6489,28 @@ impl ExternalApiFacadeSupport {
                 ) {
                     continue;
                 }
-                let return_rust = inherited
-                    .fact
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| {
-                        external_facade_method_return_type_with_facts(
-                            facts,
-                            Some(&inherited.declaring_type),
-                            &inherited.method_name,
-                            Some(inherited.arg_count),
-                            return_type,
-                            inherited.fact.return_nullability,
-                        )
-                    })
-                    .unwrap_or_else(|| "()".to_string());
-                if let Some(return_type) = &inherited.fact.return_type {
-                    self.add_java_type(return_type);
-                }
-                let method_body = external_facade_instance_method_with_facts(
-                    facts,
-                    &inherited.declaring_type,
-                    &inherited.method_name,
-                    &inherited.rust_name,
-                    inherited.arg_count,
-                    &return_rust,
-                );
+                let (return_rust, unmodelled_return) =
+                    self.external_inherited_method_return(facts, &inherited);
+                let method_body = if unmodelled_return {
+                    external_facade_unmodelled_method_with_facts(
+                        facts,
+                        &inherited.declaring_type,
+                        &inherited.method_name,
+                        &inherited.rust_name,
+                        inherited.arg_count,
+                        &return_rust,
+                        false,
+                    )
+                } else {
+                    external_facade_instance_method_with_facts(
+                        facts,
+                        &inherited.declaring_type,
+                        &inherited.method_name,
+                        &inherited.rust_name,
+                        inherited.arg_count,
+                        &return_rust,
+                    )
+                };
                 if self.has_method_signature(&owner, &inherited.rust_name, inherited.arg_count)
                     && !self.replace_weak_method_return(
                         &owner,
@@ -6542,32 +6538,28 @@ impl ExternalApiFacadeSupport {
                 ) {
                     continue;
                 }
-                let return_rust = inherited
-                    .fact
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| {
-                        external_facade_method_return_type_with_facts(
-                            facts,
-                            Some(&inherited.declaring_type),
-                            &inherited.method_name,
-                            Some(inherited.arg_count),
-                            return_type,
-                            inherited.fact.return_nullability,
-                        )
-                    })
-                    .unwrap_or_else(|| "()".to_string());
-                if let Some(return_type) = &inherited.fact.return_type {
-                    self.add_java_type(return_type);
-                }
-                let method_body = external_facade_instance_method_with_facts(
-                    facts,
-                    &inherited.declaring_type,
-                    &inherited.method_name,
-                    &inherited.rust_name,
-                    inherited.arg_count,
-                    &return_rust,
-                );
+                let (return_rust, unmodelled_return) =
+                    self.external_inherited_method_return(facts, &inherited);
+                let method_body = if unmodelled_return {
+                    external_facade_unmodelled_method_with_facts(
+                        facts,
+                        &inherited.declaring_type,
+                        &inherited.method_name,
+                        &inherited.rust_name,
+                        inherited.arg_count,
+                        &return_rust,
+                        false,
+                    )
+                } else {
+                    external_facade_instance_method_with_facts(
+                        facts,
+                        &inherited.declaring_type,
+                        &inherited.method_name,
+                        &inherited.rust_name,
+                        inherited.arg_count,
+                        &return_rust,
+                    )
+                };
                 if self.has_method_signature(&owner, &inherited.rust_name, inherited.arg_count)
                     && !self.replace_weak_method_return(
                         &owner,
@@ -6587,6 +6579,40 @@ impl ExternalApiFacadeSupport {
                     facts, nested, program, used_calls,
                 );
             }
+        }
+    }
+
+    fn external_inherited_method_return(
+        &mut self,
+        facts: &FactSet,
+        inherited: &crate::inherited_members::ExternalInheritedInstanceMethod,
+    ) -> (String, bool) {
+        if let Some(return_type) = &inherited.fact.return_type {
+            self.add_java_type(return_type);
+            return (
+                external_facade_method_return_type_with_facts(
+                    facts,
+                    Some(&inherited.declaring_type),
+                    &inherited.method_name,
+                    Some(inherited.arg_count),
+                    return_type,
+                    inherited.fact.return_nullability,
+                ),
+                false,
+            );
+        }
+        if external_api_role_returns_value(inherited.fact.role) {
+            let receiver_key = canonical_external_receiver_type_key(&inherited.declaring_type);
+            let receiver_rust = rust_name_for_java_named_type(&receiver_key);
+            let return_rust = external_facade_unmodelled_result_type(
+                &receiver_rust,
+                &inherited.rust_name,
+                inherited.arg_count,
+            );
+            self.add_opaque_type(return_rust.clone());
+            (return_rust, true)
+        } else {
+            ("()".to_string(), false)
         }
     }
 
