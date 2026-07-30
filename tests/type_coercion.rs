@@ -49,11 +49,11 @@ use new_java2rust::conversion_plan::{
     optional_slot_construction_plan_for_actual, ownership_coercion_policy,
     ownership_coercion_policy_with_effective_facts, plan_instanceof_check,
     plan_instanceof_check_with_facts, plan_lowered_slot_conversion, plan_slot_conversion,
-    primitive_rank_policy, primitive_widening_policy, return_slot, return_value_plan,
-    runtime_type_target_policy, rust_nominal_type_name_policy, shape_coercion_plan,
-    shape_coercion_plan_with_facts, slot_conversion_plan, slot_conversion_plan_with_facts,
-    syntax_coercion_plan, syntax_coercion_plan_with_facts, syntax_slot_coercion_policy,
-    vec_element_target_match_policy, view_coercion_policy,
+    preconverted_optional_slot_construction_plan, primitive_rank_policy, primitive_widening_policy,
+    return_slot, return_value_plan, runtime_type_target_policy, rust_nominal_type_name_policy,
+    shape_coercion_plan, shape_coercion_plan_with_facts, slot_conversion_plan,
+    slot_conversion_plan_with_facts, syntax_coercion_plan, syntax_coercion_plan_with_facts,
+    syntax_slot_coercion_policy, vec_element_target_match_policy, view_coercion_policy,
     view_coercion_policy_with_effective_facts,
 };
 use new_java2rust::diagnostics::Severity;
@@ -2191,6 +2191,30 @@ fn optional_shape_coercion_policy_records_structural_element_coercions() {
     let optional_construction = SlotConversionPlan::OptionalConstruction(construction);
     assert_eq!(
         apply_slot_conversion_plan(RustExpr::Var("name".to_string()), &optional_construction),
+        RustExpr::Call {
+            function: Box::new(RustExpr::Var("Some".to_string())),
+            args: vec![RustExpr::Unary {
+                op: "&".to_string(),
+                expr: Box::new(RustExpr::Var("name".to_string())),
+            }],
+        }
+    );
+    let preconverted =
+        preconverted_optional_slot_construction_plan(&target, JavaType::String, &facts);
+    assert_eq!(preconverted.wrapper_ownership, OwnershipShape::Owned);
+    assert_eq!(preconverted.target, target);
+    assert_eq!(preconverted.element_shape.java_ty, JavaType::String);
+    assert_eq!(
+        preconverted.element_shape.ownership,
+        OwnershipShape::SharedBorrow
+    );
+    assert_eq!(
+        preconverted.element_plan.coercions(),
+        vec![Coercion::Identity]
+    );
+    let optional_preconverted = SlotConversionPlan::OptionalConstruction(preconverted);
+    assert_eq!(
+        apply_slot_conversion_plan(RustExpr::Raw("&name".to_string()), &optional_preconverted),
         RustExpr::Call {
             function: Box::new(RustExpr::Var("Some".to_string())),
             args: vec![RustExpr::Raw("&name".to_string())],

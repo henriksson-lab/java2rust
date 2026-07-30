@@ -191,6 +191,27 @@ same actual-shape construction path to map lookups, field getters, facade
 optional returns, and any remaining nullable helper that still manually chooses
 between `Some(value)`, `Some(&value)`, `.as_ref()`, or `.as_deref()`.
 
+2026-07-30 preconverted optional construction cleanup: `lower.rs` no longer
+builds `OptionalSlotConstructionPlan` literals when rewrapping preconverted
+optional assignment values or optional source-enum field values. The plan module
+now owns `preconverted_optional_slot_construction_plan`, keeping the target
+element shape and identity element conversion in the shared conversion layer.
+Focused coverage:
+`optional_shape_coercion_policy_records_structural_element_coercions` and
+`optional_assignment_rewrap_uses_optional_construction_plan`. Next optional
+cleanup targets are reused optional unwrap decisions and ternary optional
+construction planning, which still contain local branch/nullability decisions in
+`lower.rs`.
+
+Next opaque-shim candidate from the parallel audit: replace weak external API
+fallback surfaces in `ExternalApiFacadeSupport::add_used_external_api_facts` and
+builder support generation with named opaque per-type shim methods. Missing
+return facts should no longer default to broad `Box<dyn std::any::Any>` or
+silent `Default::default()` bodies for known receiver types; use typed facts
+where available and loud `unimplemented!(...)` bodies for unmodelled shim
+methods. Keep true Java `Object`/raw-erasure behavior separate from these known
+external receiver shims.
+
 2026-07-29 PrintStream overload cleanup: JDK `PrintStream.print/println`
 arity-1 calls now have explicit platform API facts, resolved external instance
 calls can preserve overload-safe arity names, and generated support emits a

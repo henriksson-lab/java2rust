@@ -82,16 +82,15 @@ use crate::conversion_lowering::{
     apply_slot_expr_conversion, construct_optional_value_for_target,
 };
 use crate::conversion_plan::{
-    CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredType, OptionalSlotConstructionPlan,
-    ReturnValuePlan, Slot, SlotConversionPlan, actual_shape_for_slot_expr,
-    actual_shape_for_slot_expr_with_slot, argument_slot, assignment_statement_plan_for_target,
-    assignment_value_plan_for_shape, assignment_value_plan_for_target,
-    borrowed_element_target_matches_element, condition_slot, index_slot,
-    optional_element_slot_shape_with_facts, optional_slot_construction_plan_for_actual,
+    CloneRecoveryPolicy, DispatchCoercionPolicy, LoweredType, ReturnValuePlan, Slot,
+    SlotConversionPlan, actual_shape_for_slot_expr, actual_shape_for_slot_expr_with_slot,
+    argument_slot, assignment_statement_plan_for_target, assignment_value_plan_for_shape,
+    assignment_value_plan_for_target, borrowed_element_target_matches_element, condition_slot,
+    index_slot, optional_element_slot_shape_with_facts, optional_slot_construction_plan_for_actual,
     plan_cast_conversion_from_actual, plan_instanceof, plan_lowered_slot_conversion,
-    plan_slot_conversion, receiver_method_autoref_satisfies_facade_slot,
-    receiver_method_autoref_satisfies_optional_slot, return_value_plan,
-    shape_coercion_plan_with_facts,
+    plan_slot_conversion, preconverted_optional_slot_construction_plan,
+    receiver_method_autoref_satisfies_facade_slot, receiver_method_autoref_satisfies_optional_slot,
+    return_value_plan,
 };
 use crate::diagnostics::DiagnosticBag;
 use crate::emit;
@@ -3220,14 +3219,8 @@ fn adapt_inherited_super_field_value_for_child_shape(
             ctx.facts,
         );
     }
-    let mut element_shape = child_shape.clone();
-    element_shape.java_ty = element_ty;
-    let construction = OptionalSlotConstructionPlan {
-        target: child_shape.clone(),
-        element_shape: element_shape.clone(),
-        element_plan: shape_coercion_plan_with_facts(&element_shape, &element_shape, ctx.facts),
-        wrapper_ownership: OwnershipShape::Owned,
-    };
+    let construction =
+        preconverted_optional_slot_construction_plan(child_shape, element_ty, ctx.facts);
     construct_optional_value_for_target(value, construction)
 }
 
@@ -19794,14 +19787,8 @@ fn planned_optional_assignment_value_for_target(
     facts: &FactSet,
 ) -> RustExpr {
     let conversion_plan = plan_slot_conversion(actual.clone(), slot, facts);
-    let mut target_element = target.clone();
-    target_element.java_ty = actual.java_ty.clone();
-    let preconverted_some_plan = OptionalSlotConstructionPlan {
-        target: target.clone(),
-        element_shape: target_element.clone(),
-        element_plan: shape_coercion_plan_with_facts(&target_element, &target_element, facts),
-        wrapper_ownership: OwnershipShape::Owned,
-    };
+    let preconverted_some_plan =
+        preconverted_optional_slot_construction_plan(target, actual.java_ty.clone(), facts);
     render_adapt_optional_assignment_value_for_target(
         lowered_value,
         actual,

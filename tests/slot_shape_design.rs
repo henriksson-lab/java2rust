@@ -14560,6 +14560,7 @@ fn optional_assignment_rewrap_uses_optional_construction_plan() {
     assert!(
         conversion_lowering_source.contains("construct_preconverted_optional_value_for_target")
     );
+    assert!(!source.contains("OptionalSlotConstructionPlan"));
     assert!(conversion_lowering_source.contains("unwrap_rendered_some_expr"));
     assert!(!source.contains("SlotConversionPlan::OptionalConstruction"));
     assert!(conversion_lowering_source.contains("SlotConversionPlan::OptionalConstruction"));

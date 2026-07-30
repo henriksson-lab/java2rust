@@ -665,6 +665,20 @@ pub fn optional_slot_construction_plan_for_actual(
         .expect("target must be an optional slot")
 }
 
+pub fn preconverted_optional_slot_construction_plan(
+    target: &RustSlotShape,
+    element_ty: JavaType,
+    facts: &FactSet,
+) -> OptionalSlotConstructionPlan {
+    let element_shape = optional_element_slot_shape_with_facts(target, element_ty, facts);
+    OptionalSlotConstructionPlan {
+        target: target.clone(),
+        element_shape: element_shape.clone(),
+        element_plan: shape_coercion_plan_with_facts(&element_shape, &element_shape, facts),
+        wrapper_ownership: OwnershipShape::Owned,
+    }
+}
+
 impl OptionalShapeCoercionPolicy {
     pub fn unsupported_diagnostics(&self) -> Vec<ConversionDiagnostic> {
         match self {

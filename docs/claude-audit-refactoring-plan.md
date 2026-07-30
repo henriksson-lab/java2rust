@@ -186,6 +186,13 @@ Landed in this batch:
 Goal: reduce the rule count by giving shape/facade facts the authority that
 lowering currently re-derives from rendered Rust strings.
 
+Landed in this batch:
+
+- Preconverted optional wrapper construction is now planned by
+  `conversion_plan::preconverted_optional_slot_construction_plan`. `lower.rs`
+  no longer constructs `OptionalSlotConstructionPlan` directly for optional
+  assignment rewraps or optional source-enum field values.
+
 1. Expand rust signature facts.
    - Prefer function signature facts over tailored call rules whenever the same
      slot conversion follows from the signature.
