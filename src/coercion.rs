@@ -1546,9 +1546,8 @@ pub fn primitive_parse_projection(arg: RustExpr, target: PrimitiveType) -> RustE
         PrimitiveType::Long => "i64",
         PrimitiveType::Boolean => "bool",
         PrimitiveType::Char => {
-            return RustExpr::Raw(
-                "compile_error!(\"Java Character parsing is not a primitive parse projection\")"
-                    .to_string(),
+            return crate::unsupported::compile_error_expr(
+                "Java Character parsing is not a primitive parse projection",
             );
         }
     };

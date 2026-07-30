@@ -1,17 +1,17 @@
 use new_java2rust::coercion::{
     BorrowedStringViewProjection, Coercion, CoercionDiagnostic, IndexToUsizeProjection,
     JavaDisplayPlan, LiteralSlotPlan, LoweredExpr, RustPrimitiveTypeNamePolicy,
-    apply_borrowed_string_view_projection, apply_coercions, apply_expr_to_slot,
-    apply_expr_to_slot_with_facts, apply_instanceof_check, apply_java_display_plan,
-    apply_literal_slot_plan, apply_lowered_expr_to_slot, apply_lowered_expr_to_slot_with_facts,
-    apply_shape_coercion_plan, apply_slot_conversion_plan, apply_syntax_coercion_plan,
-    borrowed_element_recovery_fallback_message_policy, borrowed_string_view_projection,
-    dispatch_coercion_fallback_message_policy, instanceof_fallback_message_policy,
-    java_integral_literal_char, literal_slot_plan, normalize_map_key_borrow_projection,
-    ownership_coercion_fallback_message_policy, plan_coercion, plan_coercion_with_facts,
-    plan_shape_coercion, plan_shape_coercion_with_facts, render_index_to_usize_projection,
-    render_instanceof_check, rust_expr_is_constructed_optional_value,
-    rust_primitive_type_name_policy,
+    UnsupportedCoercionMessagePolicy, apply_borrowed_string_view_projection, apply_coercions,
+    apply_expr_to_slot, apply_expr_to_slot_with_facts, apply_instanceof_check,
+    apply_java_display_plan, apply_literal_slot_plan, apply_lowered_expr_to_slot,
+    apply_lowered_expr_to_slot_with_facts, apply_shape_coercion_plan, apply_slot_conversion_plan,
+    apply_syntax_coercion_plan, borrowed_element_recovery_fallback_message_policy,
+    borrowed_string_view_projection, dispatch_coercion_fallback_message_policy,
+    instanceof_fallback_message_policy, java_integral_literal_char, literal_slot_plan,
+    normalize_map_key_borrow_projection, ownership_coercion_fallback_message_policy, plan_coercion,
+    plan_coercion_with_facts, plan_shape_coercion, plan_shape_coercion_with_facts,
+    render_index_to_usize_projection, render_instanceof_check,
+    rust_expr_is_constructed_optional_value, rust_primitive_type_name_policy,
 };
 use new_java2rust::conversion_lowering::{
     apply_lowered_slot_expr_conversion, apply_slot_expr_conversion,
@@ -3226,7 +3226,17 @@ fn unsupported_coercion_message_policy_feeds_diagnostics_and_compile_errors() {
     );
     assert_eq!(
         instance_message.compile_error_expr(),
-        RustExpr::Raw(format!("compile_error!(\"{}\")", instance_message.message))
+        RustExpr::Raw(format!("compile_error!({:?})", instance_message.message))
+    );
+    let quoted_message = UnsupportedCoercionMessagePolicy {
+        code: "quoted_message",
+        message: "unsupported coercion for \"pkg\\Type\"".to_string(),
+    };
+    assert_eq!(
+        quoted_message.compile_error_expr(),
+        RustExpr::Raw(
+            "compile_error!(\"unsupported coercion for \\\"pkg\\\\Type\\\"\")".to_string()
+        )
     );
 
     let dispatch_message = dispatch_coercion_fallback_message_policy(
@@ -3245,7 +3255,7 @@ fn unsupported_coercion_message_policy_feeds_diagnostics_and_compile_errors() {
     assert_eq!(
         dispatch_message.compile_error_expr_consuming(&RustExpr::Var("object".to_string())),
         RustExpr::Raw(format!(
-            "{{ let _ = object; compile_error!(\"{}\") }}",
+            "{{ let _ = object; compile_error!({:?}) }}",
             dispatch_message.message
         ))
     );

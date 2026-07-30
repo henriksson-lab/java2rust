@@ -187,6 +187,10 @@ fn apply_super_boundary_call(return_type: &JavaType, propagates_result: bool) ->
     }
 }
 
+fn compile_error_call(message: &str) -> RustExpr {
+    crate::unsupported::compile_error_expr(message)
+}
+
 fn apply_native_java_instance_method(
     receiver: RustExpr,
     method: NativeJavaInstanceMethod,
@@ -258,9 +262,7 @@ fn apply_native_java_instance_method(
         NativeJavaInstanceMethod::OptionalGet => optional_get_owned_value_projection(receiver),
         NativeJavaInstanceMethod::OptionalOrElse => {
             let Some(fallback) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Java Optional.orElse requires one argument\")".to_string(),
-                );
+                return compile_error_call("Java Optional.orElse requires one argument");
             };
             optional_or_else_owned_value_projection(receiver, fallback)
         }
@@ -275,27 +277,19 @@ fn apply_native_java_instance_method(
         }
         NativeJavaInstanceMethod::DecimalFormatFormat => {
             let Some(value) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Java DecimalFormat.format requires one argument\")"
-                        .to_string(),
-                );
+                return compile_error_call("Java DecimalFormat.format requires one argument");
             };
             apply_java_display_plan(value, JavaDisplayPlan::FormatValue)
         }
         NativeJavaInstanceMethod::MessageFormatFormat => {
             let Some(value) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Java MessageFormat.format requires one argument\")"
-                        .to_string(),
-                );
+                return compile_error_call("Java MessageFormat.format requires one argument");
             };
             receiver_method_call_projection(receiver, "format", vec![value])
         }
         NativeJavaInstanceMethod::Equals => {
             let Some(other) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Java equals requires one argument\")".to_string(),
-                );
+                return compile_error_call("Java equals requires one argument");
             };
             RustExpr::Binary {
                 op: "==".to_string(),
@@ -323,18 +317,14 @@ fn apply_primitive_compare_to(
     _source: PrimitiveType,
 ) -> RustExpr {
     let Some(other) = args.into_iter().next() else {
-        return RustExpr::Raw(
-            "compile_error!(\"Java boxed primitive compareTo requires one argument\")".to_string(),
-        );
+        return compile_error_call("Java boxed primitive compareTo requires one argument");
     };
     primitive_compare_to_projection(receiver, other)
 }
 
 fn apply_string_char_at(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     let Some(index) = args.into_iter().next() else {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.charAt requires an index\")".to_string(),
-        );
+        return compile_error_call("Java String.charAt requires an index");
     };
     string_char_at_projection(receiver, index)
 }
@@ -342,9 +332,7 @@ fn apply_string_char_at(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
 fn apply_string_index_of(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     let mut args = args.into_iter();
     let Some(needle) = args.next() else {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.indexOf requires at least one argument\")".to_string(),
-        );
+        return compile_error_call("Java String.indexOf requires at least one argument");
     };
     string_index_of_projection(receiver, needle, args.next())
 }
@@ -352,19 +340,14 @@ fn apply_string_index_of(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
 fn apply_string_last_index_of(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     let mut args = args.into_iter();
     let Some(needle) = args.next() else {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.lastIndexOf requires at least one argument\")"
-                .to_string(),
-        );
+        return compile_error_call("Java String.lastIndexOf requires at least one argument");
     };
     string_last_index_of_projection(receiver, needle, args.next())
 }
 
 fn apply_string_replace_first(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     if args.len() != 2 {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.replaceFirst requires two arguments\")".to_string(),
-        );
+        return compile_error_call("Java String.replaceFirst requires two arguments");
     }
     let mut args = args.into_iter();
     let regex = args.next().unwrap();
@@ -374,9 +357,7 @@ fn apply_string_replace_first(receiver: RustExpr, args: Vec<RustExpr>) -> RustEx
 
 fn apply_string_replace_all(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     if args.len() != 2 {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.replaceAll requires two arguments\")".to_string(),
-        );
+        return compile_error_call("Java String.replaceAll requires two arguments");
     }
     let mut args = args.into_iter();
     let regex = args.next().unwrap();
@@ -386,18 +367,14 @@ fn apply_string_replace_all(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr
 
 fn apply_string_matches_helper(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     if args.len() != 1 {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.matches requires one argument\")".to_string(),
-        );
+        return compile_error_call("Java String.matches requires one argument");
     }
     string_matches_projection(receiver, args.into_iter().next().unwrap())
 }
 
 fn apply_string_substring(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     if args.is_empty() || args.len() > 2 {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.substring requires one or two arguments\")".to_string(),
-        );
+        return compile_error_call("Java String.substring requires one or two arguments");
     }
     let mut args = args.into_iter();
     let begin = args.next().unwrap();
@@ -408,36 +385,28 @@ fn apply_string_substring(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
 
 fn apply_string_compare_to(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     let Some(other) = args.into_iter().next() else {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.compareTo requires one argument\")".to_string(),
-        );
+        return compile_error_call("Java String.compareTo requires one argument");
     };
     string_compare_to_projection(receiver, other)
 }
 
 fn apply_string_compare_to_ignore_case(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     let Some(other) = args.into_iter().next() else {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.compareToIgnoreCase requires one argument\")".to_string(),
-        );
+        return compile_error_call("Java String.compareToIgnoreCase requires one argument");
     };
     string_compare_to_ignore_case_projection(receiver, other)
 }
 
 fn apply_string_equals_ignore_case(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     let Some(other) = args.into_iter().next() else {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.equalsIgnoreCase requires one argument\")".to_string(),
-        );
+        return compile_error_call("Java String.equalsIgnoreCase requires one argument");
     };
     string_equals_ignore_case_projection(receiver, other)
 }
 
 fn apply_string_split(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
     if args.is_empty() || args.len() > 2 {
-        return RustExpr::Raw(
-            "compile_error!(\"Java String.split requires one or two arguments\")".to_string(),
-        );
+        return compile_error_call("Java String.split requires one or two arguments");
     }
     let regex = args.remove(0);
     let limit = args
@@ -454,111 +423,81 @@ fn apply_native_java_static_method(
         NativeJavaStaticMethod::MathMax => {
             let mut args = args.into_iter();
             let Some(left) = args.next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Math.max requires two arguments\")".to_string(),
-                );
+                return compile_error_call("Math.max requires two arguments");
             };
             let Some(right) = args.next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Math.max requires two arguments\")".to_string(),
-                );
+                return compile_error_call("Math.max requires two arguments");
             };
             math_max_projection(left, right)
         }
         NativeJavaStaticMethod::MathMin => {
             let mut args = args.into_iter();
             let Some(left) = args.next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Math.min requires two arguments\")".to_string(),
-                );
+                return compile_error_call("Math.min requires two arguments");
             };
             let Some(right) = args.next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Math.min requires two arguments\")".to_string(),
-                );
+                return compile_error_call("Math.min requires two arguments");
             };
             math_min_projection(left, right)
         }
         NativeJavaStaticMethod::MathLog => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Math.log requires one argument\")".to_string(),
-                );
+                return compile_error_call("Math.log requires one argument");
             };
             primitive_f64_method_projection(arg, "ln")
         }
         NativeJavaStaticMethod::MathExp => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Math.exp requires one argument\")".to_string(),
-                );
+                return compile_error_call("Math.exp requires one argument");
             };
             primitive_f64_method_projection(arg, "exp")
         }
         NativeJavaStaticMethod::MathRound => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Math.round requires one argument\")".to_string(),
-                );
+                return compile_error_call("Math.round requires one argument");
             };
             math_round_projection(arg)
         }
         NativeJavaStaticMethod::MathToIntExact => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Math.toIntExact requires one argument\")".to_string(),
-                );
+                return compile_error_call("Math.toIntExact requires one argument");
             };
             primitive_number_value_projection(arg, PrimitiveType::Int)
         }
         NativeJavaStaticMethod::IntegerParseInt => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Integer.parseInt requires at least one argument\")"
-                        .to_string(),
-                );
+                return compile_error_call("Integer.parseInt requires at least one argument");
             };
             primitive_parse_projection(arg, PrimitiveType::Int)
         }
         NativeJavaStaticMethod::FloatParseFloat => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Float.parseFloat requires one argument\")".to_string(),
-                );
+                return compile_error_call("Float.parseFloat requires one argument");
             };
             primitive_parse_projection(arg, PrimitiveType::Float)
         }
         NativeJavaStaticMethod::DoubleParseDouble => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Double.parseDouble requires one argument\")".to_string(),
-                );
+                return compile_error_call("Double.parseDouble requires one argument");
             };
             primitive_parse_projection(arg, PrimitiveType::Double)
         }
         NativeJavaStaticMethod::FloatingIsNaN => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Float.isNaN/Double.isNaN requires one argument\")"
-                        .to_string(),
-                );
+                return compile_error_call("Float.isNaN/Double.isNaN requires one argument");
             };
             primitive_is_nan_projection(arg)
         }
         NativeJavaStaticMethod::SystemGc => RustExpr::Raw("()".to_string()),
         NativeJavaStaticMethod::SystemExit => {
             let Some(status) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"System.exit requires one argument\")".to_string(),
-                );
+                return compile_error_call("System.exit requires one argument");
             };
             system_exit_projection(status)
         }
         NativeJavaStaticMethod::ThreadSleep => {
             let Some(millis) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Thread.sleep requires one argument\")".to_string(),
-                );
+                return compile_error_call("Thread.sleep requires one argument");
             };
             thread_sleep_millis_projection(millis)
         }
@@ -566,39 +505,29 @@ fn apply_native_java_static_method(
         NativeJavaStaticMethod::StringJoin => apply_string_join(args),
         NativeJavaStaticMethod::StringValueOf => {
             let Some(value) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"String.valueOf requires one argument\")".to_string(),
-                );
+                return compile_error_call("String.valueOf requires one argument");
             };
             apply_java_display_plan(value, JavaDisplayPlan::FormatValue)
         }
         NativeJavaStaticMethod::ObjectsEquals => {
             let mut args = args.into_iter();
             let Some(left) = args.next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Objects.equals requires two arguments\")".to_string(),
-                );
+                return compile_error_call("Objects.equals requires two arguments");
             };
             let Some(right) = args.next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Objects.equals requires two arguments\")".to_string(),
-                );
+                return compile_error_call("Objects.equals requires two arguments");
             };
             objects_equals_projection(left, right)
         }
         NativeJavaStaticMethod::ObjectsNonNull => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Objects.nonNull requires one argument\")".to_string(),
-                );
+                return compile_error_call("Objects.nonNull requires one argument");
             };
             objects_non_null_projection(arg)
         }
         NativeJavaStaticMethod::ObjectsIsNull => {
             let Some(arg) = args.into_iter().next() else {
-                return RustExpr::Raw(
-                    "compile_error!(\"Objects.isNull requires one argument\")".to_string(),
-                );
+                return compile_error_call("Objects.isNull requires one argument");
             };
             objects_is_null_projection(arg)
         }
@@ -608,10 +537,10 @@ fn apply_native_java_static_method(
 fn apply_string_join(args: Vec<RustExpr>) -> RustExpr {
     let mut args = args.into_iter();
     let Some(delimiter) = args.next() else {
-        return RustExpr::Raw("compile_error!(\"String.join requires arguments\")".to_string());
+        return compile_error_call("String.join requires arguments");
     };
     let Some(values) = args.next() else {
-        return RustExpr::Raw("compile_error!(\"String.join requires values\")".to_string());
+        return compile_error_call("String.join requires values");
     };
     let rest = args.collect::<Vec<_>>();
     if !rest.is_empty() {
@@ -764,9 +693,7 @@ fn apply_native_collection_method(
 
 fn apply_list_index_of(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     let Some(needle) = args.into_iter().next() else {
-        return RustExpr::Raw(
-            "compile_error!(\"Java List.indexOf requires one argument\")".to_string(),
-        );
+        return compile_error_call("Java List.indexOf requires one argument");
     };
     sequence_index_of_projection(receiver, needle)
 }
