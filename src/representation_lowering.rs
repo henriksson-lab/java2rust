@@ -815,19 +815,16 @@ fn trait_impl_for_type(
         .members
         .iter()
         .filter_map(|member| match member {
-            Member::Method(interface_method) => {
-                let method = trait_impl_method(
-                    ty,
-                    interface,
-                    interface_method,
-                    program,
-                    trait_method_receiver_plan(interface, interface_method, program, signatures),
-                    signatures,
-                    facts,
-                    trait_method_exception_plan(interface, interface_method, program, exceptions),
-                );
-                (!method.is_empty()).then_some(method)
-            }
+            Member::Method(interface_method) => trait_impl_method(
+                ty,
+                interface,
+                interface_method,
+                program,
+                trait_method_receiver_plan(interface, interface_method, program, signatures),
+                signatures,
+                facts,
+                trait_method_exception_plan(interface, interface_method, program, exceptions),
+            ),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -876,7 +873,7 @@ fn trait_impl_method(
     signatures: &SignaturePlan,
     facts: &FactSet,
     interface_exceptions: MethodExceptionPlan,
-) -> String {
+) -> Option<String> {
     let trait_return_shape =
         trait_method_return_shape_plan(interface, interface_method, program, signatures);
     let trait_return_shape_for_body = trait_return_shape.clone();
@@ -892,17 +889,19 @@ fn trait_impl_method(
     let candidates = implementing_method_candidates_in_hierarchy(ty, interface_method, program);
     if candidates.is_empty() {
         if interface_method.body.is_some() {
-            return String::new();
+            return None;
         }
         if let Some(body) = external_template_method_trait_impl_body(ty, interface_method) {
-            return format!("{} {{ {body} }}", signature.trim_end_matches(';'));
+            return Some(format!("{} {{ {body} }}", signature.trim_end_matches(';')));
         }
-        return trait_impl_method_message_policy(
-            ty,
-            interface_method,
-            TraitImplMethodFallbackPolicy::MissingImplementation,
-        )
-        .compile_error_body(&signature);
+        return Some(
+            trait_impl_method_message_policy(
+                ty,
+                interface_method,
+                TraitImplMethodFallbackPolicy::MissingImplementation,
+            )
+            .compile_error_body(&signature),
+        );
     };
     let (implementing_owner, implementing_method) = candidates
         .iter()
@@ -914,15 +913,17 @@ fn trait_impl_method(
     if let Some(message) =
         trait_impl_method_compatibility_error(interface_method, implementing_method)
     {
-        return trait_impl_method_message_policy(
-            ty,
-            interface_method,
-            TraitImplMethodFallbackPolicy::IncompatibleImplementation { error: message },
-        )
-        .compile_error_body(&signature);
+        return Some(
+            trait_impl_method_message_policy(
+                ty,
+                interface_method,
+                TraitImplMethodFallbackPolicy::IncompatibleImplementation { error: message },
+            )
+            .compile_error_body(&signature),
+        );
     }
     if let Some(body) = enum_trait_impl_method_body(ty, interface_method) {
-        return format!("{} {{ {body} }}", signature.trim_end_matches(';'));
+        return Some(format!("{} {{ {body} }}", signature.trim_end_matches(';')));
     }
     let rust_name = implementing_method
         .rust_name
@@ -982,7 +983,7 @@ fn trait_impl_method(
     } else {
         format!("{call};")
     };
-    format!("{} {{ {body} }}", signature.trim_end_matches(';'))
+    Some(format!("{} {{ {body} }}", signature.trim_end_matches(';')))
 }
 
 fn adapt_trait_impl_forwarded_return(
