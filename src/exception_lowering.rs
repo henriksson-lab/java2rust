@@ -418,6 +418,7 @@ pub fn try_with_resources_scope_stmt(
     body: Vec<RustStmt>,
     resource_cleanup_stmts: Vec<RustStmt>,
     body_terminates_with_value: bool,
+    outer_returns_result: bool,
 ) -> RustStmt {
     let mut scope_body = resource_initializers;
     let mut body_with_ok = body;
@@ -433,9 +434,18 @@ pub fn try_with_resources_scope_stmt(
         scope_body.push(cleanup_stmt);
     }
     if body_terminates_with_value {
-        scope_body.push(RustStmt::Raw("return __java_twr_result;".to_string()));
-    } else {
+        if outer_returns_result {
+            scope_body.push(RustStmt::Raw("return __java_twr_result;".to_string()));
+        } else {
+            scope_body.push(RustStmt::Raw("return __java_twr_result.unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));".to_string()));
+        }
+    } else if outer_returns_result {
         scope_body.push(RustStmt::Raw("__java_twr_result?;".to_string()));
+    } else {
+        scope_body.push(RustStmt::Raw(
+            "if let Err(ex) = __java_twr_result { panic!(\"uncaught Java exception: {:?}\", ex); }"
+                .to_string(),
+        ));
     }
     RustStmt::Raw(format!(
         "{{\n{}\n}}",

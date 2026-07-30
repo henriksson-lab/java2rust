@@ -29,6 +29,11 @@ Keep the standing constraint: do not make algorithm changes that block future
 global semantic analysis. Prefer explicit keys, indices, compatibility shims,
 and divergence logs.
 
+When an audit item is genuinely done, move its `claude_audits/` issue file to
+`/home/mahogny/github/claude/new_java2rust/claude_audits/done` as part of the
+same checkpoint. Do this only after the implementation and focused verification
+for that audit item are complete.
+
 ## Next Batch: Measurement And Unsupported Safety
 
 Goal: unmodelled behavior must be visible as a diagnostic, parseable Rust, or a

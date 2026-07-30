@@ -21671,6 +21671,49 @@ class FallibleCalls {
 }
 
 #[test]
+fn cast_wrapped_fallible_source_call_uses_inner_result_propagation() {
+    let mut facts = FactSet::default();
+    facts.method_effect_facts.push(MethodEffectFact {
+        method: FactMethodKey {
+            type_name: "FallibleCastCalls".to_string(),
+            method_name: "leaf".to_string(),
+        },
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_nullability: NullabilityState::Unknown,
+        thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class FallibleCastCalls {
+    int entry(int x) { return (int) leaf(x); }
+    int leaf(int x) { return x; }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn entry(&self, x: i32) -> Result<i32, JavaException>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("self.leaf(x)?"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn call_graph_records_constructor_delegation_edges() {
     let parsed = parse_java_source(
         r#"
@@ -30146,6 +30189,7 @@ class TryFinallyUnit {
             vec![RustStmt::Raw("copy_chunk(&mut input)?;".to_string())],
             vec![RustStmt::Raw("input.close()?;".to_string())],
             false,
+            true,
         ),
         RustStmt::Raw(
             "{\n    let input = open_input();\n    let __java_twr_result = (|| -> Result<(), JavaException> {\n        copy_chunk(&mut input)?;\n        return Ok(());\n    })();\n    input.close()?;\n    __java_twr_result?;\n\n}".to_string()
@@ -30161,9 +30205,26 @@ class TryFinallyUnit {
             )],
             vec![RustStmt::Raw("reader.close()?;".to_string())],
             true,
+            true,
         ),
         RustStmt::Raw(
             "{\n    let reader = open_reader();\n    let __java_twr_result = (|| -> Result<String, JavaException> {\n        return Ok(reader.read_line());\n    })();\n    reader.close()?;\n    return __java_twr_result;\n\n}".to_string()
+        )
+    );
+    assert_eq!(
+        try_with_resources_scope_stmt(
+            RustType::Unit,
+            Vec::new(),
+            vec![RustStmt::Raw("copy_chunk()?;".to_string())],
+            vec![RustStmt::Raw(
+                "if let Err(ex) = input.close() { panic!(\"uncaught Java exception: {:?}\", ex); }"
+                    .to_string(),
+            )],
+            false,
+            false,
+        ),
+        RustStmt::Raw(
+            "{\n    let __java_twr_result = (|| -> Result<(), JavaException> {\n        copy_chunk()?;\n        return Ok(());\n    })();\n    if let Err(ex) = input.close() { panic!(\"uncaught Java exception: {:?}\", ex); }\n    if let Err(ex) = __java_twr_result { panic!(\"uncaught Java exception: {:?}\", ex); }\n\n}".to_string()
         )
     );
     assert_eq!(

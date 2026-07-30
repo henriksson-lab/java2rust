@@ -7427,7 +7427,7 @@ fn lower_try_stmt(
             }
             let body = lower_block(planned_body, &mut resource_env, true, try_ctx);
             let resource_cleanup_stmts =
-                try_resource_cleanup_stmts(resources, &resource_env, try_ctx);
+                try_resource_cleanup_stmts(resources, &resource_env, try_ctx, wrap_returns_in_ok);
             (
                 vec![try_with_resources_scope_stmt(
                     ok_type.clone(),
@@ -7435,6 +7435,7 @@ fn lower_try_stmt(
                     body,
                     resource_cleanup_stmts,
                     matches!(completion, TryBlockCompletion::Terminates),
+                    wrap_returns_in_ok,
                 )],
                 planned_catches,
                 completion,
@@ -7582,7 +7583,12 @@ fn lower_try_stmt(
     )
 }
 
-fn try_resource_cleanup_stmts(resources: &[Stmt], env: &ShapeEnv, ctx: LowerCtx) -> Vec<RustStmt> {
+fn try_resource_cleanup_stmts(
+    resources: &[Stmt],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    outer_returns_result: bool,
+) -> Vec<RustStmt> {
     try_resource_names(resources)
         .into_iter()
         .map(|name| {
@@ -7612,7 +7618,14 @@ fn try_resource_cleanup_stmts(resources: &[Stmt], env: &ShapeEnv, ctx: LowerCtx)
                     CallExceptionPropagationPlan::PropagateResult
                 )
             {
-                expr_stmt(propagate_result_projection(close_call))
+                if outer_returns_result {
+                    expr_stmt(propagate_result_projection(close_call))
+                } else {
+                    RustStmt::Raw(format!(
+                        "if let Err(ex) = {} {{ panic!(\"uncaught Java exception: {{:?}}\", ex); }}",
+                        crate::emit::emit_expr(&close_call)
+                    ))
+                }
             } else {
                 expr_stmt(close_call)
             }
@@ -20288,8 +20301,8 @@ fn shared_self_field_read_name_with_ctx<'a>(
 }
 
 fn slot_expr_needs_result_propagation(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
-    if let Expr::Cast { expr, .. } = expr {
-        return slot_expr_needs_result_propagation(expr, env, ctx);
+    if let Expr::Cast { expr: inner, .. } = expr {
+        return slot_expr_needs_result_propagation(inner, env, ctx);
     }
     let Expr::Call {
         receiver,
