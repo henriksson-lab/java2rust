@@ -21,7 +21,7 @@ pub struct SlotNoDefaultMessagePolicy {
 
 impl SlotNoDefaultMessagePolicy {
     pub fn compile_error_expr(&self) -> RustExpr {
-        RustExpr::Raw(format!("compile_error!({:?})", self.message))
+        crate::unsupported::compile_error_expr(&self.message)
     }
 }
 

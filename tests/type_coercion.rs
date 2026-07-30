@@ -83,6 +83,7 @@ use new_java2rust::string_concat_render::render_string_concat;
 use new_java2rust::types::{
     TypeEnv, infer_expr_type, list_java_type, optional_java_type, set_java_type,
 };
+use new_java2rust::unsupported;
 
 fn simple_interval_locatable_facts() -> FactSet {
     let mut facts = FactSet::default();
@@ -3299,6 +3300,23 @@ fn unsupported_coercion_message_policy_feeds_diagnostics_and_compile_errors() {
             "{{ let _ = item; compile_error!({:?}) }}",
             element_message.message
         ))
+    );
+}
+
+#[test]
+fn dynamic_compile_error_helpers_escape_diagnostic_text() {
+    let message = "unsupported \"quoted\" Java path \\pkg\\Type with {braces} and \"#";
+    assert_eq!(
+        unsupported::compile_error_expr(message),
+        RustExpr::Raw(format!("compile_error!({message:?})"))
+    );
+    assert_eq!(
+        unsupported::compile_error_stmt(message),
+        new_java2rust::rust_ir::RustStmt::Raw(format!("compile_error!({message:?});"))
+    );
+    assert_eq!(
+        unsupported::compile_error_expr_consuming(&RustExpr::Var("value".to_string()), message),
+        RustExpr::Raw(format!("{{ let _ = value; compile_error!({message:?}) }}"))
     );
 }
 

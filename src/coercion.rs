@@ -123,15 +123,11 @@ impl UnsupportedCoercionMessagePolicy {
     }
 
     pub fn compile_error_expr(&self) -> RustExpr {
-        RustExpr::Raw(format!("compile_error!({:?})", self.message))
+        crate::unsupported::compile_error_expr(&self.message)
     }
 
     pub fn compile_error_expr_consuming(&self, expr: &RustExpr) -> RustExpr {
-        RustExpr::Raw(format!(
-            "{{ let _ = {}; compile_error!({:?}) }}",
-            emit::emit_expr(expr),
-            self.message
-        ))
+        crate::unsupported::compile_error_expr_consuming(expr, &self.message)
     }
 }
 

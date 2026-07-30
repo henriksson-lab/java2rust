@@ -1,6 +1,21 @@
 use crate::java_ir::{Expr, Member, Stmt};
 use crate::rust_ir::{RustExpr, RustStmt};
 
+pub fn compile_error_stmt(message: &str) -> RustStmt {
+    RustStmt::Raw(format!("compile_error!({message:?});"))
+}
+
+pub fn compile_error_expr(message: &str) -> RustExpr {
+    RustExpr::Raw(format!("compile_error!({message:?})"))
+}
+
+pub fn compile_error_expr_consuming(expr: &RustExpr, message: &str) -> RustExpr {
+    RustExpr::Raw(format!(
+        "{{ let _ = {}; compile_error!({message:?}) }}",
+        crate::emit::emit_expr(expr),
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedConstructorLowering {
     ThisWithTrailingStatements,
@@ -42,11 +57,11 @@ pub struct UnsupportedDiagnosticPolicy {
 
 impl UnsupportedLoweringMessagePolicy {
     pub fn compile_error_stmt(&self) -> RustStmt {
-        RustStmt::Raw(format!("compile_error!({:?});", self.message))
+        compile_error_stmt(&self.message)
     }
 
     pub fn compile_error_expr(&self) -> RustExpr {
-        RustExpr::Raw(format!("compile_error!({:?})", self.message))
+        compile_error_expr(&self.message)
     }
 }
 
