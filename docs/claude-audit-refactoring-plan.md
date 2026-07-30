@@ -249,6 +249,12 @@ Landed in this batch:
   context when lowered, so type parameters with resolvable in-crate source
   interface/class bounds emit Rust bounds such as `fn new<N: Named>(...)`
   without introducing missing trait names from analysis-only context sources.
+- Source type parsing now dispatches common tree-sitter type node kinds
+  (`array_type`, `generic_type`, `annotated_type`, wildcard, primitive, and
+  scoped identifiers) into structured `JavaType` values before falling back to
+  the legacy text parser. Parser tests pin annotated generic arguments, scoped
+  generic names, generic type-parameter bounds, and the current primary-bound
+  behavior for Java multi-bounds.
 
 1. Add a `CallableAnalysis` shell.
    - Introduce `src/callable_analysis.rs`.
@@ -462,7 +468,7 @@ Completion checklist for any audit marked `fixed locally`:
 | `0019` raw Java expression fallback | fixed locally | Moved to `claude_audits/done`; simple switch expressions now lower to Rust `match` |
 | `0020` text block processing | fixed locally | Moved to `claude_audits/done` |
 | `0021` instanceof pattern binding | partial | Positive-block `if (o instanceof T v)` now parses the binding and lowers erased-object checks as `if let Some(v) = ...downcast_ref::<T>()`; negated definite-match scopes, `&&` chains, record patterns, and broader binding analysis remain open |
-| `0022` source-text type reparsing | open | Typed type parser |
+| `0022` source-text type reparsing | partial | Common source type nodes now parse structurally before legacy text fallback; type-parameter declarations still use the old parallel primary-bound IR, and external/text-sourced types intentionally still use `parse_type_text` |
 | `0023` inner-class outer capture | open | Object reference representation |
 | `0024` numeric limit constants stubbed to zero | fixed locally | Moved to `claude_audits/done`; JDK wrapper/Math/GZIP/Font values fixed and unknown primitive constants now fail loudly |
 | `0025` interface default methods discarded | partial | Ordinary interface methods with parsed bodies now emit Rust trait default bodies, and implementors without overrides inherit them instead of getting missing-implementation panics; `Iface.super`, conflicting defaults, and private/static interface members remain open |

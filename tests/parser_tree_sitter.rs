@@ -742,6 +742,65 @@ fn parses_wildcard_bounds_as_structured_types() {
 }
 
 #[test]
+fn parses_annotated_generic_type_arguments_as_structured_types() {
+    let parsed = parse_java_source(
+        r#"
+class AnnotatedTypes {
+    java.util.List<@NonNull String> names;
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let field = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Field(field) if field.name == "names" => Some(field),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(matches!(
+        &field.ty,
+        JavaType::Named { name, args }
+            if name == "List" && matches!(args.as_slice(), [JavaType::String])
+    ));
+}
+
+#[test]
+fn parses_scoped_generic_type_name_with_current_suffix_behavior() {
+    let parsed = parse_java_source(
+        r#"
+class ScopedTypes {
+    java.util.Map.Entry<String, Integer> entry;
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let field = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Field(field) if field.name == "entry" => Some(field),
+            _ => None,
+        })
+        .unwrap();
+
+    assert!(matches!(
+        &field.ty,
+        JavaType::Named { name, args }
+            if name == "Map.Entry"
+                && matches!(
+                    args.as_slice(),
+                    [JavaType::String, JavaType::Named { name, args }]
+                        if name == "Integer" && args.is_empty()
+                )
+    ));
+}
+
+#[test]
 fn parses_switch_statement_cases() {
     let parsed = parse_java_source(&fixture("02-control-flow/SwitchFallthrough.java"));
     let method = first_method(&parsed.program.types[0]);
@@ -866,6 +925,53 @@ class Holder {
     assert!(matches!(
         method.type_param_bounds.as_slice(),
         [Some(JavaType::Named { name, args })] if name == "Base" && args.is_empty()
+    ));
+}
+
+#[test]
+fn parses_generic_type_parameter_bound_arguments() {
+    let parsed = parse_java_source(
+        r#"
+class Holder {
+    <T extends Comparable<T>> T first(T value) {
+        return value;
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = first_method(&parsed.program.types[0]);
+    assert_eq!(method.type_params, vec!["T"]);
+    assert!(matches!(
+        method.type_param_bounds.as_slice(),
+        [Some(JavaType::Named { name, args })]
+            if name == "Comparable"
+                && matches!(
+                    args.as_slice(),
+                    [JavaType::Named { name, args }] if name == "T" && args.is_empty()
+                )
+    ));
+}
+
+#[test]
+fn parses_multi_bound_type_parameter_primary_bound_only_for_now() {
+    let parsed = parse_java_source(
+        r#"
+class Holder {
+    <T extends First & Second> T first(T value) {
+        return value;
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = first_method(&parsed.program.types[0]);
+    assert_eq!(method.type_params, vec!["T"]);
+    assert!(matches!(
+        method.type_param_bounds.as_slice(),
+        [Some(JavaType::Named { name, args })] if name == "First" && args.is_empty()
     ));
 }
 

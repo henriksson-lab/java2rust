@@ -2374,7 +2374,143 @@ pub fn parse_hierarchy_type(src: &str) -> JavaType {
 }
 
 fn parse_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
-    parse_type_text(text(node, source))
+    match node.kind() {
+        "void_type" => JavaType::Void,
+        "boolean_type" => JavaType::Primitive(PrimitiveType::Boolean),
+        "integral_type" | "floating_point_type" => parse_primitive_type_node(node, source)
+            .unwrap_or_else(|| parse_type_text(text(node, source))),
+        "type_identifier" | "identifier" | "scoped_type_identifier" | "scoped_identifier" => {
+            parse_named_type_node(node, source)
+        }
+        "array_type" => parse_array_type_node(node, source)
+            .unwrap_or_else(|| parse_type_text(text(node, source))),
+        "generic_type" => parse_generic_type_node(node, source)
+            .unwrap_or_else(|| parse_type_text(text(node, source))),
+        "wildcard" => parse_wildcard_type_node(node, source)
+            .unwrap_or_else(|| parse_type_text(text(node, source))),
+        "annotated_type" => parse_annotated_type_node(node, source)
+            .unwrap_or_else(|| parse_type_text(text(node, source))),
+        _ => parse_type_text(text(node, source)),
+    }
+}
+
+fn parse_primitive_type_node(node: tree_sitter::Node, source: &str) -> Option<JavaType> {
+    Some(JavaType::Primitive(match text(node, source).trim() {
+        "byte" => PrimitiveType::Byte,
+        "short" => PrimitiveType::Short,
+        "char" => PrimitiveType::Char,
+        "int" => PrimitiveType::Int,
+        "long" => PrimitiveType::Long,
+        "float" => PrimitiveType::Float,
+        "double" => PrimitiveType::Double,
+        _ => return None,
+    }))
+}
+
+fn parse_named_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
+    let raw = text(node, source);
+    if raw.contains('<') {
+        return parse_type_text(raw);
+    }
+    let name = java_type_name_suffix(raw);
+    if name == "String" {
+        JavaType::String
+    } else {
+        JavaType::Named {
+            name,
+            args: Vec::new(),
+        }
+    }
+}
+
+fn parse_array_type_node(node: tree_sitter::Node, source: &str) -> Option<JavaType> {
+    let element = node
+        .child_by_field_name("element")
+        .or_else(|| node.child_by_field_name("type"))
+        .or_else(|| {
+            named_children(node).into_iter().find(|child| {
+                !matches!(
+                    child.kind(),
+                    "dimensions" | "annotation" | "marker_annotation"
+                )
+            })
+        })?;
+    Some(JavaType::Array(Box::new(parse_type_node(element, source))))
+}
+
+fn parse_generic_type_node(node: tree_sitter::Node, source: &str) -> Option<JavaType> {
+    let base = node.child_by_field_name("type").or_else(|| {
+        named_children(node)
+            .into_iter()
+            .find(|child| child.kind() != "type_arguments")
+    })?;
+    let args_node = node.child_by_field_name("arguments").or_else(|| {
+        named_children(node)
+            .into_iter()
+            .find(|child| child.kind() == "type_arguments")
+    })?;
+    let JavaType::Named { name, .. } = parse_type_node(base, source) else {
+        return None;
+    };
+    Some(JavaType::Named {
+        name,
+        args: parse_type_arguments_node(args_node, source),
+    })
+}
+
+fn parse_type_arguments_node(node: tree_sitter::Node, source: &str) -> Vec<JavaType> {
+    let args: Vec<JavaType> = named_children(node)
+        .into_iter()
+        .filter(|child| {
+            !matches!(
+                child.kind(),
+                "line_comment" | "block_comment" | "annotation" | "marker_annotation"
+            )
+        })
+        .map(|child| parse_type_node(child, source))
+        .collect();
+    if !args.is_empty() {
+        return args;
+    }
+    let raw = text(node, source).trim();
+    let inner = raw
+        .strip_prefix('<')
+        .and_then(|raw| raw.strip_suffix('>'))
+        .unwrap_or(raw)
+        .trim();
+    split_top_level_commas(inner)
+        .into_iter()
+        .map(|part| parse_type_text(part.trim()))
+        .collect()
+}
+
+fn parse_wildcard_type_node(node: tree_sitter::Node, source: &str) -> Option<JavaType> {
+    let raw = text(node, source).trim();
+    if raw == "?" {
+        return Some(JavaType::Wildcard(None));
+    }
+    let bound = node
+        .child_by_field_name("bound")
+        .or_else(|| named_children(node).into_iter().last())?;
+    if raw.contains(" extends ") {
+        Some(JavaType::Wildcard(Some(WildcardBound::Extends(Box::new(
+            parse_type_node(bound, source),
+        )))))
+    } else if raw.contains(" super ") {
+        Some(JavaType::Wildcard(Some(WildcardBound::Super(Box::new(
+            parse_type_node(bound, source),
+        )))))
+    } else {
+        None
+    }
+}
+
+fn parse_annotated_type_node(node: tree_sitter::Node, source: &str) -> Option<JavaType> {
+    named_children(node)
+        .into_iter()
+        .rev()
+        .find(|child| !matches!(child.kind(), "annotation" | "marker_annotation"))
+        .map(|child| parse_type_node(child, source))
 }
 
 fn parse_instanceof_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
