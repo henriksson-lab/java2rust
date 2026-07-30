@@ -46,6 +46,47 @@ fn run_idiom_sweep(root: &Path) -> HashMap<String, usize> {
 }
 
 #[test]
+fn focused_parse_failure_helper_counts_parse_errors_and_invalidates_type_counts() {
+    let dir = unique_temp_dir("focused_parse_failures");
+    let compile_log = dir.join("compile.log");
+    let report = dir.join("parse-failures.tsv");
+    fs::write(
+        &compile_log,
+        r#"
+error: expected expression, found `}`
+error[E0308]: mismatched types
+error: unknown start of token: \
+error: aborting due to 3 previous errors
+"#,
+    )
+    .unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/focused-parse-failures.sh");
+    let output = Command::new("bash")
+        .arg(&script)
+        .arg("--compile-log")
+        .arg(&compile_log)
+        .arg("--out")
+        .arg(&report)
+        .output()
+        .expect("run parse failure helper");
+    assert!(
+        output.status.success(),
+        "parse helper failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("parse_failures\t2"), "{stdout}");
+    assert!(stdout.contains("cargo_type_errors_valid\t0"), "{stdout}");
+    let report = fs::read_to_string(report).unwrap();
+    assert!(report.contains("error: expected expression"), "{report}");
+    assert!(report.contains("error: unknown start of token"), "{report}");
+    assert!(!report.contains("mismatched types"), "{report}");
+}
+
+#[test]
 fn focused_package_support_emits_uri_parse_and_path_helpers() {
     let script_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");

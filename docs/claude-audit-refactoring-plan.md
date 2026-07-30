@@ -51,6 +51,10 @@ Landed in this batch:
   `src/slot_render.rs`, and `src/call_lowering.rs` route through the shared
   escaped `unsupported::compile_error_*` helpers. Focused regressions cover
   quoted and backslash-containing diagnostic text.
+- Generated-Rust parse-failure scanning now lives in
+  `scripts/focused-parse-failures.sh`, with fast helper coverage and an
+  end-to-end focused-package wrapper test proving parse failures increment
+  `parse_failures` and set `cargo_type_errors_valid=0`.
 
 1. Add a generated-Rust parse gate to focused corpus scripts.
    - Report parse failures separately from type-check errors.

@@ -2,6 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 fn unique_temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "new_java2rust_{name}_{}_{}",
@@ -537,6 +540,74 @@ public class MatrixSource {
     assert!(
         out.join("parse-failures.tsv").exists(),
         "missing parse failure report"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn focused_package_generated_rust_parse_error_invalidates_type_error_count() {
+    let dir = unique_temp_dir("focused_parse_gate");
+    let primary = dir.join("java");
+    let out = dir.join("out");
+    fs::create_dir_all(&primary).unwrap();
+    fs::write(
+        primary.join("Broken.java"),
+        r#"
+public class Broken {
+    public int value() {
+        return 1;
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let fake_translator = dir.join("fake-translator.sh");
+    fs::write(
+        &fake_translator,
+        r#"#!/usr/bin/env bash
+set -u
+set -o pipefail
+printf 'pub struct Broken {\n'
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&fake_translator).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&fake_translator, permissions).unwrap();
+
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let output = Command::new(&script)
+        .arg("--skip-resolver-bench")
+        .arg("--no-batch-translate")
+        .arg("--jobs")
+        .arg("1")
+        .arg("--primary")
+        .arg(&primary)
+        .arg("--out")
+        .arg(&out)
+        .env("NEW_JAVA2RUST_BIN", &fake_translator)
+        .output()
+        .expect("run focused package wrapper");
+    assert!(
+        !output.status.success(),
+        "focused wrapper should fail the gate when generated Rust does not parse\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let summary = fs::read_to_string(out.join("summary.tsv")).unwrap();
+    assert!(summary.contains("cargo_check\tfailed"), "{summary}");
+    assert!(
+        summary.contains("cargo_failure_kind\tgenerated_rust"),
+        "{summary}"
+    );
+    assert!(summary.contains("cargo_type_errors_valid\t0"), "{summary}");
+    assert!(!summary.contains("parse_failures\t0"), "{summary}");
+    let parse_failures = fs::read_to_string(out.join("parse-failures.tsv")).unwrap();
+    assert!(
+        parse_failures.contains("this file contains an unclosed delimiter"),
+        "{parse_failures}"
     );
 }
 

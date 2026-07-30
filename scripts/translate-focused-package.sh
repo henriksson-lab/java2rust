@@ -346,6 +346,7 @@ RUST
 }
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repo_root/scripts/focused-parse-failures.sh"
 if [[ -n "${NEW_JAVA2RUST_BIN:-}" ]]; then
   binary="$NEW_JAVA2RUST_BIN"
   build_profile_args=()
@@ -485,25 +486,6 @@ count_concrete_none_assignment_files() {
       done \
     | wc -l \
     | tr -d ' '
-}
-
-write_parse_failures() {
-  local compile_log="$1"
-  local out_path="$2"
-  {
-    printf "error\tcount\n"
-    grep -E '^error: (expected|unknown start of token|mismatched closing delimiter|unexpected closing delimiter|this file contains an unclosed delimiter|suffixes on string literals are invalid|unterminated|character literal may only contain one codepoint|invalid suffix)' "$compile_log" \
-      | sed 's/[[:space:]]\+/ /g' \
-      | sort \
-      | uniq -c \
-      | sort -nr \
-      | awk '{ count = $1; $1 = ""; sub(/^ /, ""); gsub(/\t/, " "); printf "%s\t%s\n", $0, count }'
-  } > "$out_path"
-}
-
-parse_failure_count_from_report() {
-  local path="$1"
-  awk -F '\t' 'NR > 1 { count += $2 } END { print count + 0 }' "$path"
 }
 
 idiom_signal_count() {
@@ -2582,10 +2564,7 @@ printf "cargo_check\t%s\t%s\t%s\n" "$compile_status" "$cargo_elapsed_ms" "$compi
 parse_failure_scan_start_ms="$(now_ms)"
 write_parse_failures "$compile_log" "$parse_failures_path"
 parse_failure_count="$(parse_failure_count_from_report "$parse_failures_path")"
-cargo_type_errors_valid=1
-if [[ "$parse_failure_count" -gt 0 ]]; then
-  cargo_type_errors_valid=0
-fi
+cargo_type_errors_valid="$(cargo_type_errors_valid_from_parse_failure_count "$parse_failure_count")"
 parse_failure_scan_elapsed_ms="$(elapsed_ms_since "$parse_failure_scan_start_ms")"
 printf "parse_failure_scan\tok\t%s\t%s\n" "$parse_failure_scan_elapsed_ms" "$parse_failures_path" >> "$phase_events_path"
 
